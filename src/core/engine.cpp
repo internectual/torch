@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <glob.h>
 
 struct Engine::Impl {};
 
@@ -19,10 +20,12 @@ bool Engine::init(int argc, char* argv[]) {
     Console::instance().printf(LogLevel::Info, "T2 Client v0.1.0");
 
     // Parse args
-    std::string dataDir = ".";
+    std::string dataDir = "/home/methodown/t2-linux";
+    bool noLogin = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-data") == 0 && i + 1 < argc) dataDir = argv[i + 1];
         if (strcmp(argv[i], "-online") == 0) Console::instance().setVariable("online", "1");
+        if (strcmp(argv[i], "-nologin") == 0) noLogin = true;
     }
 
     // Init subsystems
@@ -44,27 +47,60 @@ bool Engine::init(int argc, char* argv[]) {
     if (!plat->init(pconfig)) return false;
 
     // File System - add T2 data paths
-    std::vector<std::string> paths = {dataDir, dataDir + "/base", "./base", "./data"};
+    std::vector<std::string> paths = {
+        dataDir, dataDir + "/base", "./base", "./data",
+        "/home/methodown/t2-mapper/docs/base",  // extracted assets
+        "/home/methodown/t2client/glb"           // decompressed GLB files
+    };
     filesys->init(paths);
 
-    // Load VOL archives
+    // Mount all game archives
     auto& fs = *filesys;
-    auto addArchive = [&](const char* name) {
-        auto* vol = new VolArchive;
-        if (vol->open(name)) fs.addArchive(vol); else delete vol;
+    std::vector<std::string> archives;
+
+    // Scan base directory for .vl2 and .vol files
+    auto scanArchives = [&](const std::string& dir) {
+        std::vector<std::string> found;
+        glob_t globbuf;
+        std::string pattern = dir + "/*.vl2";
+        if (glob(pattern.c_str(), 0, nullptr, &globbuf) == 0) {
+            for (size_t i = 0; i < globbuf.gl_pathc; i++)
+                found.push_back(globbuf.gl_pathv[i]);
+            globfree(&globbuf);
+        }
+        pattern = dir + "/*.vol";
+        if (glob(pattern.c_str(), 0, nullptr, &globbuf) == 0) {
+            for (size_t i = 0; i < globbuf.gl_pathc; i++)
+                found.push_back(globbuf.gl_pathv[i]);
+            globfree(&globbuf);
+        }
+        return found;
     };
 
-    // Add all game archives if they exist
-    std::vector<std::string> archives;
-    fs.listFiles("*.vl2", archives);
+    // Scan data dir and its subdirs for archives
+    archives = scanArchives(dataDir);
+    auto baseArchives = scanArchives(dataDir + "/base");
+    archives.insert(archives.end(), baseArchives.begin(), baseArchives.end());
+
+    Console::instance().printf(LogLevel::Info, "Found %zu archives", archives.size());
     for (auto& a : archives) {
-        auto* vl2 = new Vl2Archive;
-        if (vl2->open(a.c_str())) fs.addArchive(vl2); else delete vl2;
-    }
-    fs.listFiles("*.vol", archives);
-    for (auto& a : archives) {
-        auto* vol = new VolArchive;
-        if (vol->open(a.c_str())) fs.addArchive(vol); else delete vol;
+        if (a.size() > 3 && a.substr(a.size()-3) == "vl2") {
+            auto* vl2 = new Vl2Archive;
+            if (vl2->open(a.c_str())) {
+                fs.addArchive(vl2);
+                Console::instance().printf(LogLevel::Debug, "Mounted VL2: %s", a.c_str());
+            } else {
+                delete vl2;
+            }
+        } else {
+            auto* vol = new VolArchive;
+            if (vol->open(a.c_str())) {
+                fs.addArchive(vol);
+                Console::instance().printf(LogLevel::Debug, "Mounted VOL: %s", a.c_str());
+            } else {
+                delete vol;
+            }
+        }
     }
 
     // Renderer
@@ -104,6 +140,13 @@ bool Engine::init(int argc, char* argv[]) {
     });
 
     Console::instance().printf(LogLevel::Info, "Engine initialized successfully");
+
+    // Auto-start local game in -nologin mode
+    if (noLogin) {
+        Console::instance().printf(LogLevel::Info, "-nologin: starting local game");
+        g->startLocalGame();
+    }
+
     return true;
 }
 

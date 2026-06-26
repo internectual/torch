@@ -28,6 +28,8 @@ struct MeshData {
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;
     uint32_t vao{}, vbo{}, ebo{};
+    int32_t materialIndex = -1; // index into DTSShape::materialTextures
+    int32_t materialIdx = -1;   // raw material index from GLB file
     bool uploaded = false;
     void upload();
     void render();
@@ -84,8 +86,10 @@ struct DTSShape {
         // Keyframe data would go here
     };
     std::vector<Animation> animations;
+    std::vector<Texture> materialTextures;
     bool loaded = false;
     bool load(const uint8_t* data, size_t size);
+    bool loadGLB(const uint8_t* data, size_t size);
     void render(int32_t detailLevel = 0);
     void renderAnimation(const char* animName, float time);
 };

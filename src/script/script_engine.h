@@ -6,38 +6,42 @@
 #include <string>
 #include <stack>
 #include <functional>
+#include <cstdint>
 
-class VMValue {
-public:
+class ScriptEngine;
+
+struct VMValue {
     enum Type { None, Int, Float, String };
-
     Type type = None;
     union { int32_t i = 0; float f; };
+    double dbl = 0; // for float table loading
     std::string str;
 
     VMValue() = default;
     VMValue(int32_t v) : type(Int), i(v) {}
-    VMValue(float v) : type(Float), f(v) {}
+    VMValue(float v) : type(Float), f(v), dbl(v) {}
+    VMValue(double v) : type(Float), f((float)v), dbl(v) {}
     VMValue(const char* v) : type(String), str(v ? v : "") {}
     VMValue(const std::string& v) : type(String), str(v) {}
 
     int32_t toInt() const;
     float toFloat() const;
+    double toDouble() const;
     std::string toString() const;
     bool toBool() const;
 };
 
-class ScriptObject {
-public:
+struct ScriptObject {
     std::string className;
     std::string name;
     std::unordered_map<std::string, VMValue> fields;
     std::unordered_map<std::string, VMValue> internals;
 };
 
-class ScriptEngine;
 class VirtualMachine {
 public:
+    using NativeFunc = std::function<VMValue(const std::vector<VMValue>&)>;
+
     VirtualMachine(ScriptEngine* engine);
     ~VirtualMachine();
 
@@ -50,12 +54,12 @@ public:
     void setVariable(const char* name, const VMValue& val);
     VMValue getVariable(const char* name);
 
-    void registerNativeFunction(const char* name, std::function<VMValue(const std::vector<VMValue>&)> fn);
+    ScriptObject* getObject(const char* name);
+    void addObject(ScriptObject* obj);
 
-    void run(uint32_t address);
-    VMValue execute(const std::vector<VMValue>& args);
+    void registerNativeFunction(const char* name, NativeFunc fn);
 
-    void dumpState();
+    void execute(DSOFile* dso, uint32_t startIp, const std::vector<VMValue>& args);
 
 private:
     struct Impl;
@@ -67,26 +71,26 @@ public:
     ScriptEngine();
     ~ScriptEngine();
 
+    static ScriptEngine& instance();
+
     bool init();
     void shutdown();
 
     void executeString(const char* script);
     void executeFile(const char* path);
 
-    // Compile .cs to .dso and execute
-    bool compileAndRun(const char* csPath);
+    using NativeFunc = VirtualMachine::NativeFunc;
+    void registerFunction(const char* name, NativeFunc fn);
 
     VirtualMachine* vm() { return vmInstance; }
-    Console& getConsole() { return *con; }
 
-    using NativeFunction = std::function<VMValue(const std::vector<VMValue>&)>;
-    void registerFunction(const char* name, NativeFunction fn);
-
-    void addObject(ScriptObject* obj);
     ScriptObject* findObject(const char* name);
 
+    // Global object registry
+    std::unordered_map<std::string, ScriptObject*> objects;
+
 private:
+    static ScriptEngine* instance_;
     VirtualMachine* vmInstance{};
     Console* con{};
-    std::unordered_map<std::string, ScriptObject*> objects;
 };

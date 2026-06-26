@@ -44,6 +44,15 @@ void MatrixF::setRotationZ(float a) {
     m[1][0] = s; m[1][1] = c;
 }
 
+void MatrixF::setRotationAxis(const Point3F& axis, float angle) {
+    identity();
+    float c = std::cos(angle), s = std::sin(angle), t = 1.0f - c;
+    float ax = axis.x, ay = axis.y, az = axis.z;
+    m[0][0] = t * ax * ax + c;     m[0][1] = t * ax * ay - s * az;  m[0][2] = t * ax * az + s * ay;
+    m[1][0] = t * ax * ay + s * az; m[1][1] = t * ay * ay + c;      m[1][2] = t * ay * az - s * ax;
+    m[2][0] = t * ax * az - s * ay; m[2][1] = t * ay * az + s * ax;  m[2][2] = t * az * az + c;
+}
+
 void MatrixF::setTranslation(const Point3F& t) {
     m[3][0] = t.x; m[3][1] = t.y; m[3][2] = t.z;
 }

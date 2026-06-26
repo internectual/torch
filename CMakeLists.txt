@@ -36,6 +36,7 @@ add_executable(t2client
     src/render/terrain.cpp
     src/render/font.cpp
     src/render/sky.cpp
+    src/render/glb_loader.cpp
     src/audio/audio_system.cpp
     src/net/network.cpp
     src/net/protocol.cpp

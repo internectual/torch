@@ -21,6 +21,7 @@ struct MatrixF {
     void setRotationX(float a);
     void setRotationY(float a);
     void setRotationZ(float a);
+    void setRotationAxis(const Point3F& axis, float angle);
     void setTranslation(const Point3F& t);
     void setScale(const Point3F& s);
     void perspective(float fov, float aspect, float near, float far);

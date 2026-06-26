@@ -3,125 +3,156 @@
 #include <cstring>
 #include <fstream>
 #include <vector>
+#include <algorithm>
 
 DSOReader::DSOReader() {}
 
-static const char* opcodeNames[] = {
-    "PushInt", "PushFloat", "PushString", "PushVar", "Dup", "Drop", "Swap",
-    "Add", "Sub", "Mul", "Div", "Mod", "Neg", "Inc", "Dec",
-    "CmpEq", "CmpNe", "CmpGt", "CmpGe", "CmpLt", "CmpLe",
-    "And", "Or", "Not",
-    "Jmp", "JmpZ", "JmpNZ", "Call", "CallMethod", "Return",
-    "SetVar", "GetVar", "SetField", "GetField", "SetInternal", "GetInternal",
-    "NewObject", "DeleteObject", "SetName", "GetName",
-    "StrCat", "StrCmp", "StrLen", "StrSub", "StrPos",
-    "Assert", "Breakpoint", "Nop", "Halt"
-};
-
-const char* DSOReader::opcodeName(DSOOpcode op) const {
-    uint8_t o = (uint8_t)op;
-    if (o >= 0x01 && o <= 0x06) return opcodeNames[o - 0x01];
-    if (o >= 0x10 && o <= 0x17) return opcodeNames[o - 0x10 + 7];
-    if (o >= 0x20 && o <= 0x25) return opcodeNames[o - 0x20 + 15];
-    if (o >= 0x30 && o <= 0x32) return opcodeNames[o - 0x30 + 21];
-    if (o >= 0x40 && o <= 0x45) return opcodeNames[o - 0x40 + 24];
-    if (o >= 0x50 && o <= 0x55) return opcodeNames[o - 0x50 + 30];
-    if (o >= 0x60 && o <= 0x63) return opcodeNames[o - 0x60 + 36];
-    if (o >= 0x70 && o <= 0x74) return opcodeNames[o - 0x70 + 40];
-    if (o >= 0x80 && o <= 0x82) return opcodeNames[o - 0x80 + 45];
-    if (o == 0xFF) return "Halt";
-    return "Unknown";
-}
-
 uint32_t DSOReader::readU32(const uint8_t*& ptr, size_t& remaining) {
     if (remaining < 4) return 0;
-    uint32_t v = *(uint32_t*)ptr;
+    uint32_t v = *(const uint32_t*)ptr;
     ptr += 4; remaining -= 4;
     return v;
 }
 
-int32_t DSOReader::readS32(const uint8_t*& ptr, size_t& remaining) {
-    return (int32_t)readU32(ptr, remaining);
-}
-
-float DSOReader::readF32(const uint8_t*& ptr, size_t& remaining) {
-    if (remaining < 4) return 0;
-    float v = *(float*)ptr;
-    ptr += 4; remaining -= 4;
+double DSOReader::readF64(const uint8_t*& ptr, size_t& remaining) {
+    if (remaining < 8) return 0;
+    double v = *(const double*)ptr;
+    ptr += 8; remaining -= 8;
     return v;
 }
 
-std::string DSOReader::readString(const uint8_t*& ptr, size_t& remaining) {
-    if (remaining < 2) return "";
-    uint16_t len = *(uint16_t*)ptr;
-    ptr += 2; remaining -= 2;
-    if (remaining < len) len = remaining;
-    std::string s((char*)ptr, len);
-    ptr += len; remaining -= len;
+std::string DSOReader::readString(const uint8_t*& ptr, size_t& remaining, uint32_t maxLen) {
+    if (remaining == 0) return "";
+    uint32_t len = 0;
+    const uint8_t* start = ptr;
+    while (ptr < start + remaining && *ptr) { ptr++; len++; if (maxLen && len >= maxLen) break; }
+    std::string s((const char*)start, len);
+    if (remaining > 0) { ptr++; remaining -= (len + 1); }  // skip null
     return s;
+}
+
+uint32_t DSOReader::readOpcodeSlot(const uint8_t*& ptr, size_t& remaining) {
+    if (remaining < 1) return 0xFF; // HALT
+    uint32_t op = *ptr++;
+    remaining--;
+    if (op == 0xFF) {
+        // Extended opcode: read u32
+        if (remaining < 4) return 0xFF;
+        op = *(const uint32_t*)ptr;
+        ptr += 4; remaining -= 4;
+    }
+    return op;
+}
+
+bool DSOReader::readStringTable(const uint8_t*& ptr, size_t& remaining, std::vector<char>& out) {
+    uint32_t totalLen = readU32(ptr, remaining);
+    if (remaining < totalLen) {
+        Console::instance().printf(LogLevel::Warn, "DSO: string table truncated (need %u, have %zu)", totalLen, remaining);
+        return false;
+    }
+    out.assign((const char*)ptr, (const char*)ptr + totalLen);
+    ptr += totalLen; remaining -= totalLen;
+    return true;
+}
+
+bool DSOReader::readFloatTable(const uint8_t*& ptr, size_t& remaining, std::vector<double>& out) {
+    uint32_t count = readU32(ptr, remaining);
+    out.reserve(count);
+    for (uint32_t i = 0; i < count; i++)
+        out.push_back(readF64(ptr, remaining));
+    return true;
+}
+
+bool DSOReader::readCodeStream(const uint8_t*& ptr, size_t& remaining, uint32_t& outCodeSize, uint32_t& outLineBreakCount, DSOFile& out) {
+    outCodeSize = readU32(ptr, remaining);
+    outLineBreakCount = readU32(ptr, remaining);
+    out.codeSize = outCodeSize;
+    out.code.reserve(outCodeSize);
+
+    for (uint32_t i = 0; i < outCodeSize; i++) {
+        uint8_t op = (remaining > 0) ? *ptr : 0xFF;
+        out.code.push_back(op);
+        if (op == 0xFF) {
+            ptr++; remaining--;
+            if (remaining >= 4) {
+                for (int j = 0; j < 4; j++) {
+                    out.code.push_back(*ptr++);
+                    remaining--;
+                }
+            }
+        } else {
+            ptr++; remaining--;
+        }
+    }
+
+    // Read line break pairs
+    for (uint32_t i = 0; i < outLineBreakCount; i++) {
+        if (remaining < 8) break;
+        uint32_t line = readU32(ptr, remaining);
+        uint32_t ip = readU32(ptr, remaining);
+        out.lineBreaks.emplace_back(line, ip);
+    }
+    return true;
+}
+
+bool DSOReader::readIdentTable(const uint8_t*& ptr, size_t& remaining, DSOFile& out) {
+    uint32_t count = readU32(ptr, remaining);
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t strIdx = readU32(ptr, remaining);
+        uint32_t posCount = readU32(ptr, remaining);
+        for (uint32_t j = 0; j < posCount; j++) {
+            uint32_t ip = readU32(ptr, remaining);
+            out.identTable[ip] = strIdx;
+        }
+    }
+    return true;
+}
+
+const char* DSOReader::globalString(DSOFile& file, uint32_t index) {
+    if (index < file.globalStrings.size())
+        return &file.globalStrings[index];
+    return "";
+}
+
+const char* DSOReader::functionString(DSOFile& file, uint32_t index) {
+    if (index < file.functionStrings.size())
+        return &file.functionStrings[index];
+    return "";
 }
 
 bool DSOReader::read(const uint8_t* data, size_t size, DSOFile& out) {
     const uint8_t* ptr = data;
     size_t remaining = size;
 
-    // DSO signature "TES "
-    if (remaining < 4 || memcmp(ptr, "TES ", 4) != 0) {
-        Console::instance().printf(LogLevel::Warn, "Invalid DSO signature");
-        return false;
-    }
-    ptr += 4; remaining -= 4;
-
+    // Version (u32 LE)
     out.version = readU32(ptr, remaining);
-    out.name = readString(ptr, remaining);
+    Console::instance().printf(LogLevel::Debug, "DSO version: %u", out.version);
 
-    uint32_t numFuncs = readU32(ptr, remaining);
-    for (uint32_t i = 0; i < numFuncs; i++) {
-        DSOFunction func;
-        func.name = readString(ptr, remaining);
-        func.package = readString(ptr, remaining);
-        func.address = readU32(ptr, remaining);
-        func.argc = readS32(ptr, remaining);
-        func.hasVarArgs = readU32(ptr, remaining) != 0;
-        uint32_t numArgNames = readU32(ptr, remaining);
-        for (uint32_t j = 0; j < numArgNames; j++)
-            func.argNames.push_back(readString(ptr, remaining));
-        out.functions.push_back(func);
-    }
+    // Global string table
+    if (!readStringTable(ptr, remaining, out.globalStrings)) return false;
 
-    // Read constants
-    uint32_t numConsts = readU32(ptr, remaining);
-    for (uint32_t i = 0; i < numConsts; i++) {
-        DSOConstant c;
-        uint32_t type = readU32(ptr, remaining);
-        if (type == 0) {
-            c.type = DSOConstant::Int;
-            c.i = readS32(ptr, remaining);
-        } else if (type == 1) {
-            c.type = DSOConstant::Float;
-            c.f = readF32(ptr, remaining);
-        } else if (type == 2) {
-            c.type = DSOConstant::String;
-            c.str = readString(ptr, remaining);
-        }
-        out.constants.push_back(c);
-    }
+    // Global float table
+    if (!readFloatTable(ptr, remaining, out.globalFloats)) return false;
 
-    // Read bytecode
-    uint32_t codeSize = readU32(ptr, remaining);
-    const uint8_t* codeStart = ptr;
-    uint32_t codeEnd = 0;
-    while (codeEnd < codeSize) {
-        // Skip for now, store raw
-        uint8_t op = ptr[codeEnd];
-        codeEnd++;
-        // Skip args based on opcode
-        // For now just read all bytes
-    }
-    ptr += codeSize; remaining -= codeSize;
+    // Function string table
+    if (!readStringTable(ptr, remaining, out.functionStrings)) return false;
 
-    Console::instance().printf(LogLevel::Debug, "DSO: %s v%u, %zu funcs, %zu consts, %u bytes code",
-        out.name.c_str(), out.version, out.functions.size(), out.constants.size(), codeSize);
+    // Function float table
+    if (!readFloatTable(ptr, remaining, out.functionFloats)) return false;
+
+    // Code stream (includes code size, line break count, code slots, and line break pairs)
+    uint32_t codeSize = 0, lineBreakCount = 0;
+    if (!readCodeStream(ptr, remaining, codeSize, lineBreakCount, out)) return false;
+
+    // Identifier table
+    if (!readIdentTable(ptr, remaining, out)) return false;
+
+    Console::instance().printf(LogLevel::Info, "DSO: v%u, %zu global strings, %zu global floats, %zu func strings, %zu func floats, %u code slots, %zu line breaks, %zu idents",
+        out.version,
+        out.globalStrings.size(), out.globalFloats.size(),
+        out.functionStrings.size(), out.functionFloats.size(),
+        out.codeSize, out.lineBreaks.size(), out.identTable.size());
+
     return true;
 }
 
@@ -130,4 +161,13 @@ bool DSOReader::readFromFile(const char* path, DSOFile& out) {
     if (!f) return false;
     std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)), {});
     return read(data.data(), data.size(), out);
+}
+
+void DSOReader::dumpInfo(DSOFile& file) {
+    Console::instance().printf(LogLevel::Info, "=== DSO: %u functions ===", file.functions.size());
+    for (auto& fn : file.functions) {
+        Console::instance().printf(LogLevel::Info, "  %s(%u args, IP %u-%u)%s",
+            fn.name.c_str(), fn.argc, fn.startIp, fn.endIp,
+            fn.hasVarArgs ? " ..." : "");
+    }
 }

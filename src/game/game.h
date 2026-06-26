@@ -1,5 +1,6 @@
 #pragma once
 #include "core/math.h"
+#include "audio/audio_system.h"
 #include "render/renderer.h"
 #include <vector>
 #include <string>
@@ -77,7 +78,8 @@ public:
     // Object management
     struct WorldObject {
         Point3F pos;
-        Point3F rot;
+        Point3F rot; // raw axis-angle: (axisX, axisY, axisZ, angle) but angle stored in angleDeg
+        float rotAngleDeg = 0;
         Point3F scale{1,1,1};
         std::string shapeName;
         DTSShape* shape{};
@@ -94,6 +96,7 @@ private:
     Sky skyBox;
     std::vector<WorldObject> worldObjects;
     std::vector<DTSShape> shapes;
+    std::string skyMaterialList;
     bool loaded = false;
 };
 
@@ -145,5 +148,8 @@ private:
     World* w{};
     State gameState = Menu;
     float time = 0;
+    SoundSource* ambientSource{};
+    SoundBuffer* ambientSound{};
+    int32_t weatherType = 0; // 0=dry, 1=cold, 2=wet
     InputMove currentInput;
 };

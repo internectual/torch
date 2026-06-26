@@ -1,9 +1,11 @@
 #include "render/renderer.h"
 #include "render/shader.h"
+#include "render/glb_loader.h"
 #include "core/engine.h"
 #include "stb_image.h"
 #include <GL/glew.h>
 #include <cstring>
+#include <cctype>
 #include <vector>
 #include <cmath>
 
@@ -68,12 +70,59 @@ void TerrainBlock::generateMesh() {
 }
 
 bool TerrainBlock::load(const uint8_t* data, size_t size) {
-    // DIF terrain loading - simplified
-    // Just generate flat terrain if no data
-    heights.resize(size * size, 0.0f);
-    for (int32_t z = 0; z < size; z++)
-        for (int32_t x = 0; x < size; x++)
-            heights[z * size + x] = std::sin(x * 0.05f) * std::cos(z * 0.05f) * 10.0f;
+    Console::instance().printf(LogLevel::Debug, "Terrain load: %zu bytes", size);
+    if (!data || size < 4) {
+        // Generate procedural terrain
+        Console::instance().printf(LogLevel::Info, "Terrain: generating procedural terrain");
+        heights.resize(size >= 4 ? reinterpret_cast<const uint32_t*>(data)[0] * reinterpret_cast<const uint32_t*>(data)[0] : 256 * 256, 0.0f);
+        uint32_t s = (uint32_t)std::sqrt((float)heights.size());
+        if (s > 0) this->size = s;
+        for (int32_t z = 0; z < this->size; z++)
+            for (int32_t x = 0; x < this->size; x++)
+                heights[z * this->size + x] = std::sin(x * 0.05f) * std::cos(z * 0.05f) * 10.0f;
+        generateMesh();
+        loaded = true;
+        return true;
+    }
+
+    // Parse .ter heightmap format
+    // Version 1 byte, then SIZE*SIZE u16 height values
+    uint32_t pos = 0;
+    uint8_t version = data[pos++];
+    const uint32_t TERRAIN_SIZE = 256;
+
+    this->size = TERRAIN_SIZE;
+    heights.resize(TERRAIN_SIZE * TERRAIN_SIZE, 0.0f);
+
+    float maxH = 0;
+    for (uint32_t z = 0; z < TERRAIN_SIZE; z++) {
+        for (uint32_t x = 0; x < TERRAIN_SIZE; x++) {
+            if (pos + 2 <= size) {
+                uint16_t raw = data[pos] | ((uint16_t)data[pos + 1] << 8);
+                pos += 2;
+                // Convert from T2 height units (usually 0-65535) to world units
+                float h = (float)raw / 65535.0f * 200.0f - 100.0f;
+                heights[z * TERRAIN_SIZE + x] = h;
+                if (std::abs(h) > maxH) maxH = std::abs(h);
+            }
+        }
+    }
+
+    Console::instance().printf(LogLevel::Info, "Terrain: loaded .ter v%u, max height=%.1f", version, maxH);
+
+    // Skip lightmap (SIZE*SIZE bytes)
+    pos += TERRAIN_SIZE * TERRAIN_SIZE;
+
+    // Read texture names (8 entries)
+    for (int i = 0; i < 8 && pos < size; i++) {
+        uint8_t nameLen = data[pos++];
+        if (nameLen > 0 && pos + nameLen <= size) {
+            std::string texName((const char*)data + pos, nameLen);
+            Console::instance().printf(LogLevel::Debug, "  terrain tex[%d]: %s", i, texName.c_str());
+            pos += nameLen;
+        }
+    }
+
     generateMesh();
     loaded = true;
     return true;
@@ -84,16 +133,10 @@ void TerrainBlock::render(const Point3F& cameraPos) {
     if (!shader) return;
     shader->bind();
 
+    auto& renderer = Engine::instance().renderer();
     MatrixF model;
-    shader->setUniform("uProjection", Engine::instance().renderer().config().fov > 0 ?
-        Engine::instance().renderer().config().fov > 0 ?
-            []() -> MatrixF {
-                MatrixF p;
-                p.perspective(Math::DEG2RAD(90), 4.0f/3.0f, 0.1f, 1000.0f);
-                return p;
-            }() : MatrixF{}
-        : MatrixF{});
-
+    shader->setUniform("uProjection", renderer.projection);
+    shader->setUniform("uView", renderer.view);
     shader->setUniform("uModel", model);
     shader->setUniform("uLightDir", Point3F{0.5f, 0.8f, 0.6f});
 
@@ -295,6 +338,70 @@ void Sky::render(const MatrixF& view, const MatrixF& proj) {
     glDepthFunc(GL_LESS);
 }
 
+bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
+    ::GLBMesh glb = ::loadGLB(data, size);
+    if (glb.meshes.empty()) return false;
+    meshes = std::move(glb.meshes);
+    materialTextures = std::move(glb.textures);
+
+    // Resolve textures from filesystem for materials with resource_path
+    // but no embedded texture loaded (common for shapes)
+    std::vector<int> matToTex(glb.materials.size(), -1);
+    bool needsResolution = false;
+    for (size_t i = 0; i < glb.materials.size(); i++) {
+        if (!glb.materials[i].resourcePath.empty() &&
+            (i >= materialTextures.size() || !materialTextures[i].loaded)) {
+            needsResolution = true;
+            break;
+        }
+    }
+
+    if (needsResolution) {
+        auto& fs = Engine::instance().fs();
+        static const char* exts[] = {".png", ".bm8", ".jpg", ".gif", ".bmp"};
+
+        for (size_t i = 0; i < glb.materials.size(); i++) {
+            auto& mat = glb.materials[i];
+            if (mat.resourcePath.empty()) continue;
+
+            std::string texPath = "textures/" + mat.resourcePath;
+            // Normalize to lowercase for filesystem lookup (VL2 archives are lowercase)
+            for (auto& c : texPath) c = std::tolower(c);
+            std::vector<uint8_t> texData;
+            for (auto* ext : exts) {
+                auto data = fs.read((texPath + ext).c_str());
+                if (!data.empty()) {
+                    texData = std::move(data);
+                    break;
+                }
+            }
+
+            if (!texData.empty()) {
+                Texture tex;
+                tex.load(texData.data(), texData.size());
+                if (tex.loaded) {
+                    matToTex[i] = (int)materialTextures.size();
+                    materialTextures.push_back(std::move(tex));
+                    Console::instance().printf(LogLevel::Debug, "  loaded texture: %s", texPath.c_str());
+                }
+            } else {
+                Console::instance().printf(LogLevel::Debug, "  texture not found: %s", texPath.c_str());
+            }
+        }
+
+        // Update mesh materialIndex to point into our new materialTextures
+        for (auto& mesh : meshes) {
+            if (mesh.materialIdx >= 0 && mesh.materialIdx < (int)matToTex.size()) {
+                int newIdx = matToTex[mesh.materialIdx];
+                if (newIdx >= 0) mesh.materialIndex = newIdx;
+            }
+        }
+    }
+
+    loaded = true;
+    return true;
+}
+
 // DTS shape stub
 bool DTSShape::load(const uint8_t* data, size_t size) {
     // DTS loading - full implementation would parse the shape format
@@ -304,6 +411,19 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
 }
 
 void DTSShape::render(int32_t detailLevel) {
-    for (auto& mesh : meshes)
+    auto* shader = ShaderManager::getDefaultShader();
+    for (auto& mesh : meshes) {
+        if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialTextures.size()) {
+            auto& tex = materialTextures[mesh.materialIndex];
+            if (tex.loaded) {
+                tex.bind(0);
+                if (shader) shader->setUniform("uUseTexture", (int32_t)1);
+            } else {
+                if (shader) shader->setUniform("uUseTexture", (int32_t)0);
+            }
+        } else {
+            if (shader) shader->setUniform("uUseTexture", (int32_t)0);
+        }
         mesh.render();
+    }
 }
