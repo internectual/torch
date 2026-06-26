@@ -268,6 +268,46 @@ void Texture::load(const uint8_t* data, size_t size) {
     stbi_image_free(pixels);
 }
 
+bool Texture::decodeBM8(const uint8_t* data, size_t size,
+                         std::vector<uint8_t>& outPixels,
+                         int32_t& outW, int32_t& outH) {
+    if (size < 32) return false;
+    uint32_t hdr[8];
+    memcpy(hdr, data, 32);
+    uint32_t w = hdr[1], h = hdr[2], flags = hdr[4];
+    if (w == 0 || h == 0 || w > 4096 || h > 4096) return false;
+    if (flags != 1 && flags < 3) return false;
+
+    uint32_t paletteSize = 1024;
+    if (flags != 1) paletteSize += (flags - 1) * 4;
+    uint32_t pixelOffset = 32 + paletteSize;
+    uint32_t pixelCount = w * h;
+    if (pixelOffset + pixelCount > size) return false;
+
+    uint8_t palette[1024];
+    memcpy(palette, data + 32, 1024);
+
+    outPixels.resize(pixelCount * 4);
+    for (uint32_t i = 0; i < pixelCount; i++) {
+        uint8_t idx = data[pixelOffset + i];
+        outPixels[i * 4 + 0] = palette[idx * 4 + 0];
+        outPixels[i * 4 + 1] = palette[idx * 4 + 1];
+        outPixels[i * 4 + 2] = palette[idx * 4 + 2];
+        outPixels[i * 4 + 3] = palette[idx * 4 + 3];
+    }
+    outW = (int32_t)w;
+    outH = (int32_t)h;
+    return true;
+}
+
+bool Texture::loadBM8(const uint8_t* data, size_t size) {
+    std::vector<uint8_t> rgba;
+    int32_t w, h;
+    if (!decodeBM8(data, size, rgba, w, h)) return false;
+    loadRaw(rgba.data(), w, h, 4);
+    return loaded;
+}
+
 void Texture::loadRaw(const uint8_t* pixels, int32_t w, int32_t h, int32_t channels) {
     if (!id) glGenTextures(1, &id);
     glBindTexture(GL_TEXTURE_2D, id);

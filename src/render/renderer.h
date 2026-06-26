@@ -42,9 +42,15 @@ struct Texture {
     int32_t format{};
     bool loaded = false;
     void load(const uint8_t* data, size_t size);
+    bool loadBM8(const uint8_t* data, size_t size);
     void loadRaw(const uint8_t* pixels, int32_t w, int32_t h, int32_t channels);
     void bind(int32_t unit = 0);
     void destroy();
+
+    // Decode .bm8 to raw RGBA pixels without creating a GL texture
+    static bool decodeBM8(const uint8_t* data, size_t size,
+                          std::vector<uint8_t>& outPixels,
+                          int32_t& outW, int32_t& outH);
 };
 
 struct Shader {

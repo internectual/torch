@@ -284,11 +284,24 @@ void Sky::load(const std::vector<std::string>& faces) {
     for (int i = 0; i < 6 && i < (int)faces.size(); i++) {
         auto data = Engine::instance().fs().read(faces[i].c_str());
         if (!data.empty()) {
-            int w, h, ch;
-            unsigned char* pixels = stbi_load_from_memory(data.data(), (int)data.size(), &w, &h, &ch, 4);
+            int w = 0, h = 0, ch = 0;
+            unsigned char* pixels = nullptr;
+            std::vector<uint8_t> bm8pixels;
+            bool isBM8 = faces[i].size() >= 4 &&
+                (faces[i].compare(faces[i].size() - 4, 4, ".bm8") == 0 ||
+                 faces[i].compare(faces[i].size() - 4, 4, ".BM8") == 0);
+            if (isBM8) {
+                int32_t bw, bh;
+                if (Texture::decodeBM8(data.data(), data.size(), bm8pixels, bw, bh)) {
+                    pixels = bm8pixels.data();
+                    w = bw; h = bh; ch = 4;
+                }
+            } else {
+                pixels = stbi_load_from_memory(data.data(), (int)data.size(), &w, &h, &ch, 4);
+            }
             if (pixels) {
                 glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-                stbi_image_free(pixels);
+                if (!isBM8) stbi_image_free(pixels);
             }
         }
     }
@@ -368,17 +381,23 @@ bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
             // Normalize to lowercase for filesystem lookup (VL2 archives are lowercase)
             for (auto& c : texPath) c = std::tolower(c);
             std::vector<uint8_t> texData;
+            const char* matchedExt = nullptr;
             for (auto* ext : exts) {
                 auto data = fs.read((texPath + ext).c_str());
                 if (!data.empty()) {
                     texData = std::move(data);
+                    matchedExt = ext;
                     break;
                 }
             }
 
             if (!texData.empty()) {
                 Texture tex;
-                tex.load(texData.data(), texData.size());
+                // .bm8 uses a custom paletted format; others use stb_image
+                if (matchedExt && std::strcmp(matchedExt, ".bm8") == 0)
+                    tex.loadBM8(texData.data(), texData.size());
+                else
+                    tex.load(texData.data(), texData.size());
                 if (tex.loaded) {
                     matToTex[i] = (int)materialTextures.size();
                     materialTextures.push_back(std::move(tex));
