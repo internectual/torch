@@ -453,18 +453,72 @@ void Game::update(float dt) {
     time += dt;
 
     if (gameState == Playing) {
-        // Update physics
-        Physics physics;
-        physics.update(pl, dt, currentInput);
+        // F1 toggle for free camera (edge-triggered)
+        static bool prevFreeCam = false;
+        if (currentInput.freeCam && !prevFreeCam) {
+            freeCamActive = !freeCamActive;
+            if (freeCamActive) {
+                freeCamPos = pl->cameraPos();
+                freeCamTarget = pl->cameraTarget();
+                freeCamRot = pl->rotation();
+            }
+        }
+        prevFreeCam = currentInput.freeCam;
+
+        if (freeCamActive) {
+            // Move free camera using WASD + mouse
+            float camSpeed = 50.0f * dt;
+            float yaw = freeCamRot.z;
+            float pitch = freeCamRot.x;
+
+            // Mouse look
+            yaw += currentInput.lookDelta.y;
+            pitch -= currentInput.lookDelta.x;
+            if (pitch > 1.5f) pitch = 1.5f;
+            if (pitch < -1.5f) pitch = -1.5f;
+            freeCamRot = {pitch, 0, yaw};
+
+            // Direction vectors
+            Point3F fwd = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+            Point3F right = {std::cos(yaw), 0, -std::sin(yaw)};
+
+            if (currentInput.forward) {
+                freeCamPos.x += fwd.x * camSpeed;
+                freeCamPos.y += fwd.y * camSpeed;
+                freeCamPos.z += fwd.z * camSpeed;
+            }
+            if (currentInput.backward) {
+                freeCamPos.x -= fwd.x * camSpeed;
+                freeCamPos.y -= fwd.y * camSpeed;
+                freeCamPos.z -= fwd.z * camSpeed;
+            }
+            if (currentInput.left) {
+                freeCamPos.x -= right.x * camSpeed;
+                freeCamPos.z -= right.z * camSpeed;
+            }
+            if (currentInput.right) {
+                freeCamPos.x += right.x * camSpeed;
+                freeCamPos.z += right.z * camSpeed;
+            }
+            if (currentInput.jump) freeCamPos.y += camSpeed;
+            if (currentInput.jet) freeCamPos.y -= camSpeed;
+
+            // Compute look target
+            freeCamTarget = {freeCamPos.x + fwd.x, freeCamPos.y + fwd.y, freeCamPos.z + fwd.z};
+        } else {
+            // Update physics
+            Physics physics;
+            physics.update(pl, dt, currentInput);
+        }
 
         // Update world
         w->update(dt);
 
-        // Update audio listener from player camera
+        // Update audio listener from camera
         auto& audio = Engine::instance().audio();
         if (audio.config().enabled) {
-            Point3F camPos = pl->cameraPos();
-            Point3F camTarget = pl->cameraTarget();
+            Point3F camPos = freeCamActive ? freeCamPos : pl->cameraPos();
+            Point3F camTarget = freeCamActive ? freeCamTarget : pl->cameraTarget();
             Point3F forward = {camTarget.x - camPos.x, camTarget.y - camPos.y, camTarget.z - camPos.z};
             float flen = std::sqrt(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
             if (flen > 0.0001f) { forward.x /= flen; forward.y /= flen; forward.z /= flen; }
@@ -477,12 +531,24 @@ void Game::update(float dt) {
 void Game::render(float dt) {
     if (gameState != Playing && gameState != Dead) return;
 
-    auto& r = Engine::instance().renderer();
+    auto& eng = Engine::instance();
+    auto& r = eng.renderer();
     r.beginFrame({0.3f, 0.5f, 0.8f, 1.0f});
 
-    r.setCamera(pl->cameraPos(), pl->cameraTarget(), {0, 1, 0});
-    w->render(pl->position());
-    pl->render();
+    Point3F camPos, camTarget;
+    if (freeCamActive) {
+        camPos = freeCamPos;
+        camTarget = freeCamTarget;
+    } else if (eng.hasPreviewCam()) {
+        camPos = eng.getPreviewCamPos();
+        camTarget = eng.getPreviewCamTarget();
+    } else {
+        camPos = pl->cameraPos();
+        camTarget = pl->cameraTarget();
+    }
+    r.setCamera(camPos, camTarget, {0, 1, 0});
+    w->render(camPos);
+    if (!freeCamActive) pl->render();
 
     r.endFrame();
 }

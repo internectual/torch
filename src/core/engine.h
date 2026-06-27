@@ -37,6 +37,10 @@ public:
 
     void quit() { running = false; }
 
+    Point3F getPreviewCamPos() const { return previewCamPos; }
+    Point3F getPreviewCamTarget() const { return previewCamTarget; }
+    bool hasPreviewCam() const { return usePreviewCam; }
+
 private:
     struct Impl;
     Impl* impl;
@@ -54,4 +58,7 @@ private:
     bool running = false;
     bool previewDone = false;
     std::string previewMap;
+    Point3F previewCamPos{0, 200, -400};
+    Point3F previewCamTarget{0, 0, 0};
+    bool usePreviewCam = false;
 };

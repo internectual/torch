@@ -27,6 +27,18 @@ bool Engine::init(int argc, char* argv[]) {
         if (strcmp(argv[i], "-online") == 0) Console::instance().setVariable("online", "1");
         if (strcmp(argv[i], "-nologin") == 0) noLogin = true;
         if (strcmp(argv[i], "-preview") == 0 && i + 1 < argc) previewMap = argv[i + 1];
+        if (strcmp(argv[i], "-campos") == 0 && i + 3 < argc) {
+            previewCamPos.x = (float)atof(argv[i + 1]);
+            previewCamPos.y = (float)atof(argv[i + 2]);
+            previewCamPos.z = (float)atof(argv[i + 3]);
+            usePreviewCam = true;
+        }
+        if (strcmp(argv[i], "-camtarget") == 0 && i + 3 < argc) {
+            previewCamTarget.x = (float)atof(argv[i + 1]);
+            previewCamTarget.y = (float)atof(argv[i + 2]);
+            previewCamTarget.z = (float)atof(argv[i + 3]);
+            usePreviewCam = true;
+        }
     }
 
     // Init subsystems
@@ -153,6 +165,18 @@ bool Engine::init(int argc, char* argv[]) {
     // -preview mode: screenshot after map loads (implies -nologin)
     if (!previewMap.empty()) {
         g->startLocalGame(previewMap.c_str());
+        // Auto-compute preview camera over the terrain center if not explicitly set
+        if (!usePreviewCam && g->state() == Game::Playing) {
+            auto& tb = *g->world().terrain();
+            float half = tb.size * tb.squareSize * 0.5f;
+            float cx = tb.worldOffset.x + half;
+            float cz = tb.worldOffset.z + half;
+            float h = g->world().getHeight(cx, cz);
+            if (h < 0) h = 0;
+            previewCamTarget = {cx, h, cz};
+            previewCamPos = {cx, h + half * 0.5f, cz - half * 0.8f};
+            usePreviewCam = true;
+        }
     } else if (noLogin) {
         Console::instance().printf(LogLevel::Info, "-nologin: starting local game");
         g->startLocalGame();
@@ -194,6 +218,7 @@ void Engine::run() {
             input.right = keys[7] != 0;       // D
             input.jump = keys[44] != 0;       // Space
             input.jet = keys[44] != 0;        // Space (same as jump)
+            input.freeCam = keys[58] != 0;     // F1
             input.lookDelta = {
                 (float)plat->input().mouseDeltaY * 0.002f,
                 (float)plat->input().mouseDeltaX * 0.002f,

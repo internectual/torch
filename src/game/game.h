@@ -139,6 +139,7 @@ public:
         bool forward{}, backward{}, left{}, right{};
         bool jump{}, jet{}, fire{}, altFire{};
         bool zoom{}, reload{};
+        bool freeCam{};
         Point3F lookDelta{};
     };
 
@@ -154,4 +155,8 @@ private:
     SoundBuffer* ambientSound{};
     int32_t weatherType = 0; // 0=dry, 1=cold, 2=wet
     InputMove currentInput;
+    bool freeCamActive = false;
+    Point3F freeCamPos{0, 10, 0};
+    Point3F freeCamTarget{0, 10, -1};
+    Point3F freeCamRot{0, 0, 0};
 };
