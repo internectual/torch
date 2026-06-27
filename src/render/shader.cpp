@@ -37,7 +37,9 @@ in vec2 vUV;
 in vec4 vColor;
 
 uniform sampler2D uTexture;
+uniform sampler2D uLightmap;
 uniform bool uUseTexture;
+uniform bool uUseLightmap = false;
 uniform bool uSelfIlluminated = false;
 uniform vec3 uLightDir = vec3(0.5, 0.8, 0.6);
 
@@ -46,6 +48,10 @@ out vec4 FragColor;
 void main() {
     vec4 texColor = uUseTexture ? texture(uTexture, vUV) : vec4(1.0);
     vec4 col = vColor * texColor;
+    if (uUseLightmap) {
+        vec4 lm = texture(uLightmap, vUV);
+        col.rgb = col.rgb * (0.5 + 0.5 * lm.rgb);
+    }
     if (uSelfIlluminated) {
         FragColor = vec4(col.rgb, col.a);
     } else {
@@ -88,20 +94,36 @@ in vec2 vUV;
 in vec4 vColor;
 in float vHeight;
 
-uniform sampler2D uTexture0;
-uniform sampler2D uTexture1;
+uniform sampler2D uSplatMap;
+uniform sampler2D uDetail0;
+uniform sampler2D uDetail1;
+uniform sampler2D uDetail2;
+uniform sampler2D uDetail3;
+uniform sampler2D uLightmap;
+uniform bool uUseLightmap = false;
 uniform vec3 uLightDir = vec3(0.5, 0.8, 0.6);
 
 out vec4 FragColor;
 
 void main() {
+    vec4 weights = texture(uSplatMap, vUV);
+    float total = weights.r + weights.g + weights.b + weights.a;
+    if (total > 0.0) weights /= total;
+
+    vec4 c0 = texture(uDetail0, vUV * 32.0);
+    vec4 c1 = texture(uDetail1, vUV * 32.0);
+    vec4 c2 = texture(uDetail2, vUV * 32.0);
+    vec4 c3 = texture(uDetail3, vUV * 32.0);
+    vec4 base = c0 * weights.r + c1 * weights.g + c2 * weights.b + c3 * weights.a;
+
     vec3 N = normalize(vNormal);
-    float diff = max(dot(N, normalize(uLightDir)), 0.15);
-    float blend = smoothstep(0.0, 1.0, vHeight / 100.0);
-    vec4 c0 = texture(uTexture0, vUV * 8.0);
-    vec4 c1 = texture(uTexture1, vUV * 8.0);
-    vec4 base = mix(c0, c1, blend);
-    FragColor = vec4(base.rgb * diff * vColor.rgb, 1.0);
+    float ndotl = max(dot(N, normalize(uLightDir)), 0.0);
+    vec3 lighting = vec3(0.3 + 0.7 * ndotl);
+    if (uUseLightmap) {
+        vec4 lm = texture(uLightmap, vUV);
+        lighting *= lm.r;
+    }
+    FragColor = vec4(base.rgb * lighting, 1.0);
 }
 )";
 

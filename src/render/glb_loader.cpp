@@ -300,9 +300,8 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
     }
 
     // Build per-material texture index mapping
-    // Material → texture index (or -1 if no baseColorTexture)
     const JVal& matArr = root["materials"];
-    struct MatInfo { int texIndex = -1; };
+    struct MatInfo { int texIndex = -1; int emissiveIndex = -1; };
     std::vector<MatInfo> matInfos;
     result.materials.resize(matArr.size());
     for (size_t i = 0; i < matArr.size(); i++) {
@@ -312,9 +311,12 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
         if (bct.t != JType::Null) {
             mi.texIndex = (int)bct["index"].asInt();
         }
+        // Also check for emissiveTexture (lightmaps)
+        const JVal& emTex = matArr[i]["emissiveTexture"];
+        if (emTex.t != JType::Null) {
+            mi.emissiveIndex = (int)emTex["index"].asInt();
+        }
         matInfos.push_back(mi);
-
-        // Extract resource_path and flags from extras
         MaterialInfo& matInfo = result.materials[i];
         if (matArr[i]["extras"].t != JType::Null) {
             const JVal& ext = matArr[i]["extras"];
@@ -348,22 +350,42 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
 
     // Collect unique textures referenced by materials
     result.textures.clear();
+    result.lightmaps.clear();
     std::vector<int> matToTexIndex(matInfos.size(), -1); // material index → index in result.textures
     for (size_t i = 0; i < matInfos.size(); i++) {
+        // Base color texture → result.textures
         int ti = matInfos[i].texIndex;
         if (ti >= 0 && ti < (int)loadedTextures.size() && loadedTextures[ti].loaded) {
-            // Check if this texture is already in result.textures
+            uint32_t tid = loadedTextures[ti].id;
             bool found = false;
             for (size_t j = 0; j < result.textures.size(); j++) {
-                if (result.textures[j].id == loadedTextures[ti].id) {
-                    matToTexIndex[i] = (int)j;
-                    found = true;
-                    break;
+                if (result.textures[j].id == tid) {
+                    matToTexIndex[i] = (int)j; found = true; break;
                 }
             }
             if (!found) {
                 matToTexIndex[i] = (int)result.textures.size();
                 result.textures.push_back(std::move(loadedTextures[ti]));
+            }
+        }
+        // Emissive/lightmap texture → result.lightmaps
+        int ei = matInfos[i].emissiveIndex;
+        if (ei >= 0 && ei < (int)loadedTextures.size() && loadedTextures[ei].loaded) {
+            if (ei != ti) {
+                uint32_t eid = loadedTextures[ei].id;
+                bool found = false;
+                for (size_t j = 0; j < result.lightmaps.size(); j++) {
+                    if (result.lightmaps[j].id == eid) {
+                        result.materials[i].emissiveTextureIndex = (int)j; found = true; break;
+                    }
+                }
+                if (!found) {
+                    result.materials[i].emissiveTextureIndex = (int)result.lightmaps.size();
+                    result.lightmaps.push_back(std::move(loadedTextures[ei]));
+                }
+            } else {
+                // Same texture used as both base color and emissive
+                result.materials[i].emissiveTextureIndex = matToTexIndex[i];
             }
         }
     }

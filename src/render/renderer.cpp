@@ -6,6 +6,7 @@
 #include "stb_image.h"
 #include <GL/glew.h>
 #include <SDL3/SDL.h>
+#include "../stb_image_write.h"
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
@@ -402,3 +403,12 @@ void Shader::setUniform(const char* name, int32_t v) {
 }
 
 void Shader::destroy() { if (id) glDeleteProgram(id); loaded = false; }
+
+bool Renderer::screenshot(const char* path) {
+    int w = cfg.width, h = cfg.height;
+    std::vector<uint8_t> pixels(w * h * 3);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+    stbi_flip_vertically_on_write(1);
+    return stbi_write_png(path, w, h, 3, pixels.data(), w * 3) != 0;
+}

@@ -17,7 +17,7 @@ Engine& Engine::instance() {
 }
 
 bool Engine::init(int argc, char* argv[]) {
-    Console::instance().printf(LogLevel::Info, "T2 Client v0.1.0");
+    Console::instance().printf(LogLevel::Info, "Torch v0.1.0");
 
     // Parse args
     std::string dataDir = "/home/methodown/t2-linux";
@@ -26,6 +26,7 @@ bool Engine::init(int argc, char* argv[]) {
         if (strcmp(argv[i], "-data") == 0 && i + 1 < argc) dataDir = argv[i + 1];
         if (strcmp(argv[i], "-online") == 0) Console::instance().setVariable("online", "1");
         if (strcmp(argv[i], "-nologin") == 0) noLogin = true;
+        if (strcmp(argv[i], "-preview") == 0 && i + 1 < argc) previewMap = argv[i + 1];
     }
 
     // Init subsystems
@@ -41,7 +42,7 @@ bool Engine::init(int argc, char* argv[]) {
 
     // Platform
     PlatformConfig pconfig;
-    pconfig.title = "Tribes 2 Open Client";
+    pconfig.title = "TORCH";
     pconfig.width = Console::instance().getIntVariable("videoWidth", 1280);
     pconfig.height = Console::instance().getIntVariable("videoHeight", 720);
     if (!plat->init(pconfig)) return false;
@@ -50,7 +51,7 @@ bool Engine::init(int argc, char* argv[]) {
     std::vector<std::string> paths = {
         dataDir, dataDir + "/base", "./base", "./data",
         "/home/methodown/t2-mapper/docs/base",  // extracted assets
-        "/home/methodown/t2client/glb"           // decompressed GLB files
+        "/home/methodown/torch/glb"           // decompressed GLB files
     };
     filesys->init(paths);
 
@@ -139,10 +140,20 @@ bool Engine::init(int argc, char* argv[]) {
         if (argc > 1) Console::instance().executeFile(argv[1]);
     });
 
+    con->addCommand("screenshot", [this](int32_t argc, const char* const* argv) {
+        const char* path = argc > 1 ? argv[1] : "screenshot.png";
+        if (ren->screenshot(path))
+            Console::instance().printf(LogLevel::Info, "Screenshot saved: %s", path);
+        else
+            Console::instance().printf(LogLevel::Error, "Screenshot failed: %s", path);
+    }, "screenshot [path] - save a screenshot to path (default: screenshot.png)");
+
     Console::instance().printf(LogLevel::Info, "Engine initialized successfully");
 
-    // Auto-start local game in -nologin mode
-    if (noLogin) {
+    // -preview mode: screenshot after map loads (implies -nologin)
+    if (!previewMap.empty()) {
+        g->startLocalGame(previewMap.c_str());
+    } else if (noLogin) {
         Console::instance().printf(LogLevel::Info, "-nologin: starting local game");
         g->startLocalGame();
     }
@@ -201,6 +212,18 @@ void Engine::run() {
             g->applyInput(input);
             g->update(dt);
             g->render(dt);
+
+            // Preview mode: take screenshot after first render
+            if (!previewMap.empty() && !previewDone) {
+                char path[256];
+                snprintf(path, sizeof(path), "preview_%s.png", previewMap.c_str());
+                if (ren->screenshot(path))
+                    Console::instance().printf(LogLevel::Info, "Preview saved: %s", path);
+                else
+                    Console::instance().printf(LogLevel::Error, "Preview screenshot failed");
+                previewDone = true;
+                quit();
+            }
         } else {
             // Menu rendering
             plat->setRelativeMouse(false);
@@ -217,7 +240,7 @@ void Engine::run() {
         fpsTimer += dt;
         if (fpsTimer >= 1.0f) {
             char title[128];
-            snprintf(title, sizeof(title), "T2 Client - %d FPS", frameCount);
+            snprintf(title, sizeof(title), "Torch - %d FPS", frameCount);
             plat->setTitle(title);
             frameCount = 0;
             fpsTimer = 0;

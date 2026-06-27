@@ -14,6 +14,8 @@ Platform::Platform() : impl(new Impl) {}
 Platform::~Platform() { delete impl; }
 
 bool Platform::init(const PlatformConfig& config) {
+    // Force X11 backend for GLX compatibility with GLEW
+    SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         fprintf(stderr, "SDL3 init failed: %s\n", SDL_GetError());
         return false;

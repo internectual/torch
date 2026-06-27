@@ -1,5 +1,6 @@
 #include "fs/vl2_archive.h"
 #include "core/console.h"
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <unordered_map>
@@ -9,6 +10,14 @@
 struct Vl2Archive::Impl {
     std::ifstream file;
     std::unordered_map<std::string, std::vector<uint8_t>> entries;
+
+    static bool iequals(const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); i++)
+            if (std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)b[i]))
+                return false;
+        return true;
+    }
 };
 
 Vl2Archive::Vl2Archive() : impl(new Impl) {}
@@ -81,13 +90,26 @@ bool Vl2Archive::open(const char* path) {
 
 bool Vl2Archive::readFile(const char* path, std::vector<uint8_t>& data) {
     auto it = impl->entries.find(path);
-    if (it == impl->entries.end()) return false;
-    data = it->second;
-    return true;
+    if (it != impl->entries.end()) {
+        data = it->second;
+        return true;
+    }
+    // Case-insensitive fallback
+    for (auto& [name, content] : impl->entries) {
+        if (Impl::iequals(name, path)) {
+            data = content;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool Vl2Archive::fileExists(const char* path) const {
-    return impl->entries.find(path) != impl->entries.end();
+    if (impl->entries.find(path) != impl->entries.end()) return true;
+    for (auto& [name, _] : impl->entries) {
+        if (Impl::iequals(name, path)) return true;
+    }
+    return false;
 }
 
 void Vl2Archive::listFiles(const char* pattern, std::vector<std::string>& out) const {

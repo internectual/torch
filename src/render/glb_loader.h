@@ -16,12 +16,14 @@ enum MaterialFlag : uint32_t {
 struct MaterialInfo {
     std::string resourcePath; // e.g. "skins/base.lbioderm" or "lush/BE_EWAL01B"
     int embeddedTextureIndex = -1; // index into GLB textures array, -1 if none
+    int emissiveTextureIndex = -1; // index into GLB textures for emissive/lightmap, -1 if none
     uint32_t flags = 0;
 };
 
 struct GLBMesh {
     std::vector<MeshData> meshes;
-    std::vector<Texture> textures; // loaded embedded textures
+    std::vector<Texture> textures; // loaded embedded textures (base colors)
+    std::vector<Texture> lightmaps; // loaded embedded lightmap textures
     std::vector<MaterialInfo> materials; // per-GLB-material metadata
     std::string name;
 };

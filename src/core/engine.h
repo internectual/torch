@@ -52,4 +52,6 @@ private:
     Timer* tim{};
 
     bool running = false;
+    bool previewDone = false;
+    std::string previewMap;
 };

@@ -94,6 +94,9 @@ struct DTSShape {
     std::vector<Animation> animations;
     std::vector<Texture> materialTextures;
     std::vector<uint32_t> materialFlags; // parallel to materialTextures
+    std::vector<Texture> lightmaps;
+    std::vector<int8_t> materialLightmapIndex; // per-material: -1 no lightmap, >=0 index into lightmaps[]
+    bool isInterior = false;
     bool loaded = false;
     bool load(const uint8_t* data, size_t size);
     bool loadGLB(const uint8_t* data, size_t size);
@@ -103,10 +106,15 @@ struct DTSShape {
 
 struct TerrainBlock {
     int32_t size{256};
-    float heightScale{100.0f};
+    float heightScale{1.0f};
+    float squareSize{8.0f};
+    Point3F worldOffset{-1024,-1024,0};
     std::vector<float> heights;
-    std::vector<ColorF> colors;
     std::vector<MeshData> meshes;
+    std::vector<Texture> detailTextures;
+    Texture splatMap;
+    Texture lightmap;
+    std::vector<std::string> textureNames;
     bool loaded = false;
 
     bool load(const uint8_t* data, size_t size);
@@ -156,6 +164,7 @@ public:
 
     RenderConfig& config() { return cfg; }
     void onResize(int32_t w, int32_t h);
+    bool screenshot(const char* path);
 
     Font* defaultFont{};
     TerrainBlock* terrain{};

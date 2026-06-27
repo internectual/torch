@@ -74,6 +74,7 @@ public:
 
     TerrainBlock* terrain() { return &terrainBlock; }
     Sky* sky() { return &skyBox; }
+    const Point3F& spawnPoint() const { return playerSpawn; }
 
     // Object management
     struct WorldObject {
@@ -97,6 +98,7 @@ private:
     std::vector<WorldObject> worldObjects;
     std::vector<DTSShape> shapes;
     std::string skyMaterialList;
+    Point3F playerSpawn{0, 5, 0};
     bool loaded = false;
 };
 
@@ -111,7 +113,7 @@ public:
     void update(float dt);
     void render(float dt);
 
-    void startLocalGame();
+    void startLocalGame(const char* map = nullptr);
     void connectToServer(const char* host, uint16_t port);
 
     GameConfig& config() { return cfg; }

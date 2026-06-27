@@ -1,13 +1,13 @@
-# T2 Client
+# Torch
 
-A script, protocol, and bytecode compatible modern Linux client for Tribes 2 using OpenGL 3.3 Core and SDL3.
+**Torque Open (Re)source Client Hack** — a script, protocol, and bytecode compatible modern Linux client for Tribes 2 using OpenGL 3.3 Core and SDL3.
 
 ## Build
 
 ```bash
 cmake -B build
 cmake --build build -j$(nproc)
-./build/t2client -data /path/to/tribes2
+./build/torch -data /path/to/tribes2
 ```
 
 ## Dependencies

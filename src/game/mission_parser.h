@@ -80,6 +80,9 @@ static MisObject parseMisObject(const std::string& input, size_t& pos) {
             if (!child.className.empty()) {
                 obj.children.push_back(std::move(child));
             }
+            // Consume ; after child's }
+            while (pos < input.size() && input[pos] <= ' ') pos++;
+            if (pos < input.size() && input[pos] == ';') pos++;
             continue;
         }
 
@@ -151,6 +154,21 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
         if (!obj.className.empty()) {
             objects.push_back(std::move(obj));
         }
+        // Consume ; after top-level }
+        while (pos < clean.size() && clean[pos] <= ' ') pos++;
+        if (pos < clean.size() && clean[pos] == ';') pos++;
+    }
+
+    // Flatten children into top-level objects (recursive breadth-first)
+    size_t i = 0;
+    while (i < objects.size()) {
+        if (!objects[i].children.empty()) {
+            for (auto& child : objects[i].children) {
+                objects.push_back(std::move(child));
+            }
+            objects[i].children.clear();
+        }
+        i++;
     }
 
     return objects;
@@ -158,8 +176,10 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
 
 // Find a property value by name (case-insensitive)
 static std::string getProp(const std::vector<MisProp>& props, const std::string& name) {
+    std::string lower;
+    for (auto& c : name) lower += (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
     for (auto& p : props) {
-        if (p.name == name) return p.value;
+        if (p.name == lower) return p.value;
     }
     return "";
 }

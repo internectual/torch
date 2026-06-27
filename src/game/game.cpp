@@ -7,6 +7,7 @@
 #include "core/console.h"
 #include "core/engine.h"
 #include "fs/file_system.h"
+#include <cstdio>
 #include <cmath>
 #include <cstdlib>
 #include <unordered_map>
@@ -80,10 +81,10 @@ bool World::load(const char* mapName) {
     }
 
     if (!misData.empty()) {
-        Console::instance().printf(LogLevel::Info, "Found mission: %s", misPath.c_str());
+        Console::instance().printf(LogLevel::Info, "Found mission: %s (%zu bytes, first 30: '%s')", misPath.c_str(), misData.size(),
+            misData.substr(0, 30).c_str());
 
         auto objects = parseMisFile(misData);
-        Console::instance().printf(LogLevel::Info, "  parsed %zu objects", objects.size());
 
         // Find TerrainBlock
         MisObject* terrainObj = findObject(objects, "TerrainBlock");
@@ -100,6 +101,19 @@ bool World::load(const char* mapName) {
                 "missions/" + terrainFile + ".ter",
                 "terrains/" + terrainFile + ".ter"
             };
+
+            // Read terrain positioning
+            std::string sqStr = getProp(terrainObj->props, "squaresize");
+            if (!sqStr.empty()) terrainBlock.squareSize = (float)std::atof(sqStr.c_str());
+            Console::instance().printf(LogLevel::Debug, "  terrain squareSize: %.1f", terrainBlock.squareSize);
+            std::string posStr = getProp(terrainObj->props, "position");
+            if (!posStr.empty()) {
+                float px, py, pz;
+                if (sscanf(posStr.c_str(), "%f %f %f", &px, &py, &pz) == 3) {
+                    terrainBlock.worldOffset = {px, py, pz};
+                    Console::instance().printf(LogLevel::Debug, "  terrain position: %.1f %.1f %.1f", px, py, pz);
+                }
+            }
 
             for (auto& tp : terPaths) {
                 auto terData = fs.read(tp.c_str());
@@ -163,34 +177,49 @@ bool World::load(const char* mapName) {
 
             if (ext == ".dif") {
                 glbPath = "interiors/" + base + ".glb";
+                shape.isInterior = true;
             } else {
                 glbPath = "shapes/" + base + ".glb";
             }
 
             auto data = Engine::instance().fs().read(glbPath.c_str());
             if (data.empty() && ext != ".dif") {
-                // Try interiors as fallback
                 std::string altPath = "interiors/" + base + ".glb";
                 data = Engine::instance().fs().read(altPath.c_str());
             }
+            // Try stripping TR2 prefix (e.g. TR2heavy_male.dts -> heavy_male.glb)
+            if (data.empty() && base.compare(0, 3, "TR2") == 0) {
+                std::string stripped = base.substr(3);
+                std::string tryPath = (ext == ".dif" ? "interiors/" : "shapes/") + stripped + ".glb";
+                data = Engine::instance().fs().read(tryPath.c_str());
+            }
 
             if (!data.empty()) {
-                GLBMesh glb = loadGLB(data.data(), data.size());
-                shape.meshes = std::move(glb.meshes);
-                shape.materialTextures = std::move(glb.textures);
-                shape.loaded = !glb.meshes.empty();
+                shape.loadGLB(data.data(), data.size());
             }
 
             if (shape.loaded) {
-                // Upload meshes to GPU
-                for (auto& m : shape.meshes)
-                    m.upload();
-                Console::instance().printf(LogLevel::Debug, "  loaded shape: %s (%zu meshes)", shapeName.c_str(), shape.meshes.size());
+                Console::instance().printf(LogLevel::Debug, "  loaded shape: %s (%zu meshes, %zu textures)", shapeName.c_str(), shape.meshes.size(), shape.materialTextures.size());
             } else {
                 Console::instance().printf(LogLevel::Debug, "  shape not found: %s", shapeName.c_str());
             }
 
             shapes.push_back(std::move(shape));
+        }
+
+        // Find player spawn point from SpawnSphere objects
+        for (auto& obj : objects) {
+            if (obj.className == "SpawnSphere") {
+                std::string sp = getProp(obj.props, "position");
+                if (!sp.empty()) {
+                    float sx, sy, sz;
+                    if (sscanf(sp.c_str(), "%f %f %f", &sx, &sy, &sz) >= 3) {
+                        playerSpawn = {sx, sy, sz};
+                        Console::instance().printf(LogLevel::Debug, "  spawn point: (%.1f, %.1f, %.1f)", sx, sy, sz);
+                        break;
+                    }
+                }
+            }
         }
 
         // Place objects from mission, mapping to loaded shapes
@@ -244,10 +273,14 @@ bool World::load(const char* mapName) {
     if (!skyMaterialList.empty()) {
         // Try to load the DML file
         std::string dmlPath = "textures/" + skyMaterialList;
+        Console::instance().printf(LogLevel::Debug, "  reading DML: %s", dmlPath.c_str());
         auto dmlData = fs.read(dmlPath.c_str());
+        Console::instance().printf(LogLevel::Debug, "  DML read returned %zu bytes", dmlData.size());
         if (dmlData.empty()) {
             dmlPath = skyMaterialList;
+            Console::instance().printf(LogLevel::Debug, "  trying DML: %s", dmlPath.c_str());
             dmlData = fs.read(dmlPath.c_str());
+            Console::instance().printf(LogLevel::Debug, "  DML read returned %zu bytes", dmlData.size());
         }
         if (!dmlData.empty()) {
             std::string dmlContent((const char*)dmlData.data(), dmlData.size());
@@ -265,14 +298,19 @@ bool World::load(const char* mapName) {
                 pos = end + 1;
             }
 
+            Console::instance().printf(LogLevel::Debug, "  DML face names (%zu):", faceNames.size());
+            for (auto& fn : faceNames) Console::instance().printf(LogLevel::Debug, "    '%s'", fn.c_str());
+
             if (faceNames.size() >= 6) {
                 std::vector<std::string> exts = {".png", ".jpg", ".bm8"};
                 for (auto& fn : faceNames) {
                     bool found = false;
                     for (auto& ext : exts) {
                         std::string texPath = "textures/" + fn + ext;
+                        Console::instance().printf(LogLevel::Debug, "  trying: %s", texPath.c_str());
                         auto test = fs.read(texPath.c_str());
                         if (!test.empty()) {
+                            Console::instance().printf(LogLevel::Debug, "  FOUND: %s (%zu bytes)", texPath.c_str(), test.size());
                             skyFaces.push_back(texPath);
                             found = true;
                             break;
@@ -281,16 +319,23 @@ bool World::load(const char* mapName) {
                     if (!found) {
                         for (auto& ext : exts) {
                             std::string texPath = fn + ext;
+                            Console::instance().printf(LogLevel::Debug, "  trying (no prefix): %s", texPath.c_str());
                             auto test = fs.read(texPath.c_str());
                             if (!test.empty()) {
+                                Console::instance().printf(LogLevel::Debug, "  FOUND: %s (%zu bytes)", texPath.c_str(), test.size());
                                 skyFaces.push_back(texPath);
                                 found = true;
                                 break;
                             }
                         }
                     }
-                    if (!found) { skyFaces.clear(); break; }
+                    if (!found) {
+                        Console::instance().printf(LogLevel::Debug, "  NOT FOUND: %s", fn.c_str());
+                        skyFaces.clear(); break;
+                    }
                 }
+            } else {
+                Console::instance().printf(LogLevel::Warn, "  DML has < 6 face names (%zu)", faceNames.size());
             }
         }
     }
@@ -373,10 +418,8 @@ void World::addObject(const WorldObject& obj) {
 float World::getHeight(float x, float z) const {
     if (!terrainBlock.loaded || terrainBlock.heights.empty()) return 0;
 
-    int tx = (int)((x / (float)terrainBlock.size + 0.5f) * terrainBlock.size);
-    int tz = (int)((z / (float)terrainBlock.size + 0.5f) * terrainBlock.size);
-    tx = Math::clamp(tx, 0, terrainBlock.size - 1);
-    tz = Math::clamp(tz, 0, terrainBlock.size - 1);
+    int tx = Math::clamp((int)((x - terrainBlock.worldOffset.x) / terrainBlock.squareSize), 0, terrainBlock.size - 1);
+    int tz = Math::clamp((int)((z - terrainBlock.worldOffset.z) / terrainBlock.squareSize), 0, terrainBlock.size - 1);
     return terrainBlock.heights[tz * terrainBlock.size + tx] * terrainBlock.heightScale;
 }
 
@@ -444,48 +487,53 @@ void Game::render(float dt) {
     r.endFrame();
 }
 
-void Game::startLocalGame() {
+void Game::startLocalGame(const char* map) {
     Console::instance().printf(LogLevel::Info, "Starting local game");
     setState(Loading);
 
-    // Try loading missions in order - first one that exists wins
-    const char* mapsToTry[] = {
-        "Training1", "Training2", "Test",
-        "Katabatic", "Damnation", "Rasp",
-        "Oasis", "Gauntlet", "Desiccator",
-        "Crater71", "Haven", "Tombstone",
-        "Whiteout", "SolsDescent", "TreasureIsland",
-        nullptr
-    };
-
-    // Try to find the first available mission from VL2 archives
     std::string missionPath;
-    for (int i = 0; mapsToTry[i]; i++) {
-        std::string p = std::string("missions/") + mapsToTry[i] + ".mis";
-        auto test = Engine::instance().fs().read(p.c_str());
-        if (!test.empty()) {
-            missionPath = mapsToTry[i];
-            Console::instance().printf(LogLevel::Info, "Found mission: %s", p.c_str());
-            break;
-        }
-    }
 
-    if (missionPath.empty()) {
-        Console::instance().printf(LogLevel::Warn, "No .mis files found in archives, trying extracted paths");
-        // Try from t2-mapper extracted files
+    if (map && map[0]) {
+        missionPath = map;
+        Console::instance().printf(LogLevel::Info, "Using specified mission: %s", missionPath.c_str());
+    } else {
+        // Try loading missions in order - first one that exists wins
+        const char* mapsToTry[] = {
+            "Training1", "Training2", "Test",
+            "Katabatic", "Damnation", "Rasp",
+            "Oasis", "Gauntlet", "Desiccator",
+            "Crater71", "Haven", "Tombstone",
+            "Whiteout", "SolsDescent", "TreasureIsland",
+            nullptr
+        };
+
+        // Try to find the first available mission from VL2 archives
         for (int i = 0; mapsToTry[i]; i++) {
-            std::string p = std::string("@vl2/missions.vl2/") + mapsToTry[i] + ".mis";
+            std::string p = std::string("missions/") + mapsToTry[i] + ".mis";
             auto test = Engine::instance().fs().read(p.c_str());
             if (!test.empty()) {
                 missionPath = mapsToTry[i];
+                Console::instance().printf(LogLevel::Info, "Found mission: %s", p.c_str());
                 break;
             }
         }
-    }
 
-    if (missionPath.empty()) {
-        missionPath = "Katabatic";
-        Console::instance().printf(LogLevel::Info, "Using default mission: %s", missionPath.c_str());
+        if (missionPath.empty()) {
+            Console::instance().printf(LogLevel::Warn, "No .mis files found in archives, trying extracted paths");
+            for (int i = 0; mapsToTry[i]; i++) {
+                std::string p = std::string("@vl2/missions.vl2/") + mapsToTry[i] + ".mis";
+                auto test = Engine::instance().fs().read(p.c_str());
+                if (!test.empty()) {
+                    missionPath = mapsToTry[i];
+                    break;
+                }
+            }
+        }
+
+        if (missionPath.empty()) {
+            missionPath = "Katabatic";
+            Console::instance().printf(LogLevel::Info, "Using default mission: %s", missionPath.c_str());
+        }
     }
 
     // Classify weather by mission name for ambient audio selection
@@ -499,9 +547,11 @@ void Game::startLocalGame() {
 
     if (w->load(missionPath.c_str())) {
         pl->respawn();
-        // Move player above terrain
-        float h = w->getHeight(0, 0);
-        pl->setPosition({0, h + 5.0f, 0});
+        // Use mission spawn point, or fall back to above terrain center
+        Point3F spawnPos = w->spawnPoint();
+        float h = w->getHeight(spawnPos.x, spawnPos.z);
+        if (spawnPos.y < h) spawnPos.y = h + 2.0f;
+        pl->setPosition(spawnPos);
         setState(Playing);
         Console::instance().printf(LogLevel::Info, "Game started on '%s'", missionPath.c_str());
 

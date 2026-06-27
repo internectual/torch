@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(t2client VERSION 0.1.0 LANGUAGES CXX)
+project(torch VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,9 +15,10 @@ pkg_check_modules(GLU REQUIRED IMPORTED_TARGET glu)
 find_package(OpenGL REQUIRED)
 find_package(ZLIB REQUIRED)
 
-add_executable(t2client
+add_executable(torch
     src/main.cpp
     src/stb_image_impl.cpp
+    src/stb_image_write_impl.cpp
     src/core/engine.cpp
     src/core/platform.cpp
     src/core/console.cpp
@@ -49,9 +50,9 @@ add_executable(t2client
     src/game/menu.cpp
 )
 
-target_include_directories(t2client PRIVATE src)
+target_include_directories(torch PRIVATE src)
 
-target_link_libraries(t2client PRIVATE
+target_link_libraries(torch PRIVATE
     OpenGL::GL
     ZLIB::ZLIB
     PkgConfig::SDL3
@@ -62,7 +63,7 @@ target_link_libraries(t2client PRIVATE
     dl
 )
 
-target_compile_definitions(t2client PRIVATE
+target_compile_definitions(torch PRIVATE
     GLEW_STATIC
     T2_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
 )
