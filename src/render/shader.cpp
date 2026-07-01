@@ -138,6 +138,7 @@ uniform sampler2D uDetail2;
 uniform sampler2D uDetail3;
 uniform sampler2D uLightmap;
 uniform bool uUseLightmap = false;
+uniform bool uUseVertexColor = false;
 uniform vec3 uLightDir = vec3(0.5, 0.8, 0.6);
 
 uniform bool uFogEnabled = false;
@@ -148,15 +149,19 @@ uniform vec3 uCamPos = vec3(0);
 out vec4 FragColor;
 
 void main() {
-    vec4 weights = texture(uSplatMap, vUV);
-    float total = weights.r + weights.g + weights.b + weights.a;
-    if (total > 0.0) weights /= total;
-
-    vec4 c0 = texture(uDetail0, vUV * 32.0);
-    vec4 c1 = texture(uDetail1, vUV * 32.0);
-    vec4 c2 = texture(uDetail2, vUV * 32.0);
-    vec4 c3 = texture(uDetail3, vUV * 32.0);
-    vec4 base = c0 * weights.r + c1 * weights.g + c2 * weights.b + c3 * weights.a;
+    vec4 base;
+    if (uUseVertexColor) {
+        base = vColor;
+    } else {
+        vec4 weights = texture(uSplatMap, vUV);
+        float total = weights.r + weights.g + weights.b + weights.a;
+        if (total > 0.0) weights /= total;
+        vec4 c0 = texture(uDetail0, vUV * 32.0);
+        vec4 c1 = texture(uDetail1, vUV * 32.0);
+        vec4 c2 = texture(uDetail2, vUV * 32.0);
+        vec4 c3 = texture(uDetail3, vUV * 32.0);
+        base = c0 * weights.r + c1 * weights.g + c2 * weights.b + c3 * weights.a;
+    }
 
     vec3 N = normalize(vNormal);
     float ndotl = max(dot(N, normalize(uLightDir)), 0.0);

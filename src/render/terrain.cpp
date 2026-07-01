@@ -46,6 +46,24 @@ void TerrainBlock::generateMesh() {
             if (nlen > 0) { n.x /= nlen; n.y /= nlen; n.z /= nlen; }
 
             verts.push_back({{wx, h, wz}, n, {(float)x / gridRes, (float)z / gridRes}, {0,0}, {1,1,1,1}});
+            // Height-based vertex coloring
+            float hn = (h + 10.0f) / 40.0f; // normalize 0..1 roughly
+            hn = std::max(0.0f, std::min(1.0f, hn));
+            ColorF vc;
+            if (hn < 0.3f) {
+                // Low: green (grass)
+                float t = hn / 0.3f;
+                vc = {0.2f + t * 0.2f, 0.4f + t * 0.3f, 0.1f + t * 0.1f, 1.0f};
+            } else if (hn < 0.6f) {
+                // Mid: brown/dirt
+                float t = (hn - 0.3f) / 0.3f;
+                vc = {0.4f + t * 0.2f, 0.7f - t * 0.3f, 0.2f - t * 0.1f, 1.0f};
+            } else {
+                // High: grey/rock
+                float t = (hn - 0.6f) / 0.4f;
+                vc = {0.6f + t * 0.3f, 0.4f + t * 0.4f, 0.1f + t * 0.5f, 1.0f};
+            }
+            verts.back().color = vc;
         }
     }
 
@@ -78,7 +96,9 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
         if (s > 0) this->size = s;
         for (int32_t z = 0; z < this->size; z++)
             for (int32_t x = 0; x < this->size; x++)
-                heights[z * this->size + x] = std::sin(x * 0.05f) * std::cos(z * 0.05f) * 10.0f;
+                heights[z * this->size + x] = (std::sin(x * 0.03f) * std::cos(z * 0.04f) * 20.0f
+                    + std::sin(x * 0.07f + 1.3f) * std::cos(z * 0.08f + 0.7f) * 8.0f
+                    + std::sin(x * 0.15f + 3.1f) * std::cos(z * 0.12f + 2.3f) * 3.0f);
         generateMesh();
         loaded = true;
         return true;
@@ -243,6 +263,10 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
     } else {
         shader->setUniform("uUseLightmap", (int32_t)0);
     }
+
+    // Use vertex color when no detail textures (procedural terrain)
+    bool hasDetails = splatMap.loaded && detailTextures.size() >= 1 && detailTextures[0].loaded;
+    shader->setUniform("uUseVertexColor", (int32_t)(hasDetails ? 0 : 1));
 
     auto& renderer = Engine::instance().renderer();
     MatrixF model;
