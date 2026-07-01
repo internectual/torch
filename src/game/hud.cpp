@@ -409,7 +409,39 @@ void HUD::addChatLine(const char* text) {
 void Menu::init() {}
 
 void Menu::update(float dt) {
-    // Menu logic
+    (void)dt;
+    if (!active) return;
+
+    auto& input = Engine::instance().platform().input();
+
+    static bool prevUp = false, prevDown = false, prevEnter = false, prevEsc = false;
+    bool up = input.keysDown[SCANCODE_UP];
+    bool down = input.keysDown[SCANCODE_DOWN];
+    bool enter = input.keysDown[SCANCODE_RETURN];
+    bool esc = input.keysDown[SCANCODE_ESCAPE];
+
+    if (currentScreen == Main) {
+        const int itemCount = 5;
+        if (up && !prevUp) { selectedItem = (selectedItem - 1 + itemCount) % itemCount; }
+        if (down && !prevDown) { selectedItem = (selectedItem + 1) % itemCount; }
+
+        if (enter && !prevEnter) {
+            switch (selectedItem) {
+                case 0:
+                    Engine::instance().game().startLocalGame();
+                    setActive(false);
+                    break;
+                case 4:
+                    Engine::instance().quit();
+                    break;
+                default: break;
+            }
+        }
+    } else if (currentScreen == ServerBrowser) {
+        if (esc && !prevEsc) { currentScreen = Main; selectedItem = 0; }
+    }
+
+    prevUp = up; prevDown = down; prevEnter = enter; prevEsc = esc;
 }
 
 void Menu::render() {
@@ -427,7 +459,14 @@ void Menu::render() {
 
             const char* items[] = {"Start Local Game", "Server Browser", "Settings", "Controls", "Quit"};
             for (int i = 0; i < 5; i++) {
-                if (font) font->render(items[i], w * 0.5f - 80, 200 + i * 40, {1, 1, 1, 1}, 1.2f);
+                float ix = w * 0.5f - 80;
+                float iy = 200 + i * 40;
+                ColorF col = (i == selectedItem) ? ColorF{1, 1, 0, 1} : ColorF{1, 1, 1, 1};
+                if (font) font->render(items[i], ix, iy, col, 1.2f);
+                if (i == selectedItem) {
+                    // Arrow indicator
+                    if (font) font->render(">", ix - 20, iy, {1, 1, 0, 1}, 1.2f);
+                }
             }
             break;
         }

@@ -73,6 +73,7 @@ public:
 private:
     Screen currentScreen = Main;
     bool active = true;
+    int32_t selectedItem = 0;
     std::vector<ServerEntry> servers;
     int32_t selServer = 0;
 };

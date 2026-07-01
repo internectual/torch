@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_map>
 
+class Menu;
 class Game;
 
 struct GameConfig {
@@ -198,7 +199,7 @@ public:
     World& world() { return *w; }
 
     enum State {
-        Menu,
+        MenuScreen,
         Loading,
         Playing,
         Dead,
@@ -210,7 +211,7 @@ public:
     void togglePauseGame() { gamePaused = !gamePaused; }
     bool isGamePaused() const { return gamePaused; }
 
-    bool isRunning() const { return gameState != Menu; }
+    bool isRunning() const { return gameState != MenuScreen; }
     float gameTime() const { return time; }
 
     // Input handling
@@ -245,6 +246,7 @@ public:
     const std::vector<Point3F>& getDemoPath() const { return demoPath; }
     void setDemoFastForward(bool v) { demoFastForward = v; }
     DemoParser* getDemoParser() const { return demoParser; }
+    Menu& menu() { return *mMenu; }
     int getDemoBlocksDone() const { return demoBlocksDone; }
     int getDemoBlocksTotal() const { return demoBlocksTotal; }
     DTSShape* getOrLoadDemoShape(const std::string& className, const std::string& skinName = "");
@@ -253,7 +255,8 @@ private:
     GameConfig cfg;
     Player* pl{};
     World* w{};
-    State gameState = Menu;
+    Menu* mMenu{};
+    State gameState = MenuScreen;
     float time = 0;
     SoundSource* ambientSource{};
     SoundBuffer* ambientSound{};

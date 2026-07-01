@@ -1,6 +1,7 @@
 #include "game/game.h"
 #include <GL/glew.h>
 #include "game/demo.h"
+#include "game/hud.h"
 #include "game/physics.h"
 #include "game/mission_parser.h"
 #include "render/renderer.h"
@@ -1045,7 +1046,9 @@ float World::getHeight(float x, float z) const {
     return terrainBlock.heights[tz * terrainBlock.size + tx] * terrainBlock.heightScale;
 }
 
-Game::Game() : pl(new Player), w(new World) {}
+Game::Game() : pl(new Player), w(new World) {
+    mMenu = new Menu;
+}
 Game::~Game() { delete pl; delete w; }
 
 bool Game::init() {
@@ -1113,6 +1116,8 @@ bool Game::init() {
 }
 
 void Game::shutdown() {
+    delete mMenu;
+    mMenu = nullptr;
     auto& audio = Engine::instance().audio();
     if (ambientSource) audio.releaseSource(ambientSource);
     ambientSource = nullptr;
@@ -1168,7 +1173,7 @@ void Game::update(float dt) {
                         demoBlocksDone, demoTime);
                     demoPlaying = false;
                     delete demoParser; demoParser = nullptr;
-                    setState(Menu);
+                    setState(MenuScreen);
                     return;
                 }
                 demoBlocksDone++;
@@ -1916,7 +1921,7 @@ void Game::startLocalGame(const char* map) {
         }
     } else {
         Console::instance().printf(LogLevel::Error, "Failed to load map '%s'", missionPath.c_str());
-        setState(Menu);
+        setState(MenuScreen);
     }
 }
 
@@ -1935,7 +1940,7 @@ void Game::connectToServer(const char* host, uint16_t port) {
                 Console::instance().printf(LogLevel::Info, "Connected!");
             } else {
                 Console::instance().printf(LogLevel::Info, "Connection failed");
-                setState(Menu);
+                setState(MenuScreen);
             }
         });
 

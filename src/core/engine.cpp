@@ -6,6 +6,7 @@
 #include "render/shader.h"
 #include "render/renderer.h"
 #include "render/dif_loader.h"
+#include "game/hud.h"
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -379,7 +380,7 @@ void Engine::run() {
         if (!showConsole) {
             static bool prevEsc = false;
             bool escDown = plat->input().keysDown[SCANCODE_ESCAPE];
-            if (escDown && !prevEsc && g->state() != Game::Menu)
+            if (escDown && !prevEsc && g->state() != Game::MenuScreen)
                 g->togglePauseGame();
             prevEsc = escDown;
             // Q during pause quits to desktop
@@ -437,7 +438,7 @@ void Engine::run() {
         scr->vm()->setVariable("time", (float)now);
 
         // Game update
-        if (g->state() != Game::Menu) {
+        if (g->state() != Game::MenuScreen) {
             if (!showConsole && !g->isGamePaused()) {
                 // Read input
                 Game::InputMove input;
@@ -526,11 +527,13 @@ void Engine::run() {
                 quit();
             }
         } else {
-            // Menu rendering
+            // Menu state
+            g->menu().update(dt);
             plat->setRelativeMouse(false);
             plat->showMouse(true);
             auto& r = *ren;
             r.beginFrame({0.1f, 0.1f, 0.2f, 1.0f});
+            g->menu().render();
             r.endFrame();
         }
 
