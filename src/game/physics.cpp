@@ -15,12 +15,15 @@ void Physics::update(Player* player, float dt, const Game::InputMove& input) {
 
     // Apply input acceleration
     float speed = 10.0f;
+    float yaw = rot.z;
+    float sinYaw = std::sin(yaw);
+    float cosYaw = std::cos(yaw);
     Point3F moveDir{0,0,0};
 
-    if (input.forward) moveDir.x += std::sin(rot.z) * speed;
-    if (input.backward) moveDir.x -= std::sin(rot.z) * speed;
-    if (input.left) moveDir.z += std::cos(rot.z) * speed;
-    if (input.right) moveDir.z -= std::cos(rot.z) * speed;
+    if (input.forward)  { moveDir.x += sinYaw * speed; moveDir.z += cosYaw * speed; }
+    if (input.backward) { moveDir.x -= sinYaw * speed; moveDir.z -= cosYaw * speed; }
+    if (input.left)     { moveDir.x -= cosYaw * speed; moveDir.z += sinYaw * speed; }
+    if (input.right)    { moveDir.x += cosYaw * speed; moveDir.z -= sinYaw * speed; }
 
     // Apply movement
     vel.x += (moveDir.x - vel.x) * dt * 10.0f;
