@@ -13,6 +13,7 @@
 #include "fs/file_system.h"
 #include <cstdio>
 #include <cmath>
+#include <fstream>
 #include <cstdlib>
 #include <unistd.h>
 #include <algorithm>
@@ -267,10 +268,27 @@ bool World::load(const char* mapName) {
 
     // Try to load mission file
     std::string misPath = std::string("missions/") + mapName + ".mis";
-    auto misData = fs.readText(misPath.c_str());
+    std::string misData = fs.readText(misPath.c_str());
 
     if (misData.empty()) {
-        // Try alternative path
+        // Fallback: read directly from known data directories
+        static const char* misDirs[] = {
+            "/home/methodown/t2-linux/base/missions/",
+            "/home/methodown/t2-mapper/docs/base/missions/",
+            nullptr
+        };
+        for (int d = 0; misDirs[d]; d++) {
+            std::string fp = std::string(misDirs[d]) + mapName + ".mis";
+            std::ifstream f(fp.c_str());
+            if (f) {
+                misData.assign((std::istreambuf_iterator<char>(f)), {});
+                if (!misData.empty()) break;
+            }
+        }
+    }
+
+    if (misData.empty()) {
+        // Try alternative VL2 path
         misPath = std::string("Missions/") + mapName + ".mis";
         misData = fs.readText(misPath.c_str());
     }
@@ -2260,14 +2278,40 @@ void Game::playDemo(const char* path) {
     std::string loadMap;
     if (!ib.missionName.empty()) {
         loadMap = extractMapName(ib.missionName);
+        // Verify the mission file actually exists
+        if (!loadMap.empty()) {
+            auto& fs = Engine::instance().fs();
+            std::string testPath = std::string("missions/") + loadMap + ".mis";
+            if (!fs.fileExists(testPath.c_str())) {
+                loadMap.clear();
+            }
+        }
     }
-    // Verify the mission file actually exists
-    if (!loadMap.empty()) {
-        auto& fs = Engine::instance().fs();
-        std::string testPath = std::string("missions/") + loadMap + ".mis";
-        if (!fs.fileExists(testPath.c_str())) {
-            Console::instance().printf(LogLevel::Debug, "Mission '%s' not found, defaulting", loadMap.c_str());
-            loadMap.clear();
+    // Try to guess mission from demo filename (before the first underscore, capitalized)
+    if (loadMap.empty()) {
+        std::string fname = path;
+        auto slash = fname.rfind('/');
+        if (slash != std::string::npos) fname = fname.substr(slash + 1);
+        auto dot = fname.rfind('.');
+        if (dot != std::string::npos) fname = fname.substr(0, dot);
+        auto us = fname.find('_');
+        if (us != std::string::npos) fname = fname.substr(0, us);
+        if (!fname.empty()) {
+            fname[0] = (char)toupper((unsigned char)fname[0]);
+            loadMap = fname;
+        }
+    }
+    // If extraction gave garbage, try the demo filename
+    if (loadMap.empty() || loadMap.find_first_of("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") == std::string::npos) {
+        std::string fname = path;
+        auto slash = fname.rfind('/');
+        if (slash != std::string::npos) fname = fname.substr(slash + 1);
+        auto dot = fname.rfind('.');
+        if (dot != std::string::npos) fname = fname.substr(0, dot);
+        // Check if filename looks like a mission name (starts with uppercase letter)
+        if (!fname.empty() && isalpha((unsigned char)fname[0])) {
+            fname[0] = (char)toupper((unsigned char)fname[0]);
+            loadMap = fname;
         }
     }
     if (loadMap.empty()) {
