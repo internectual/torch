@@ -532,13 +532,18 @@ void Engine::run() {
             }
         } else {
             // Menu state
-            g->menu().update(dt);
-            plat->setRelativeMouse(false);
-            plat->showMouse(true);
-            auto& r = *ren;
-            r.beginFrame({0.1f, 0.1f, 0.2f, 1.0f});
-            g->menu().render();
-            r.endFrame();
+             g->menu().update(dt);
+             plat->setRelativeMouse(false);
+             plat->showMouse(true);
+             auto& r = *ren;
+             r.beginFrame({0.1f, 0.1f, 0.2f, 1.0f});
+             // Render T2 GUI if canvas exists, otherwise fall back to simple menu
+             if (gui && gui->getCanvas()) {
+                 gui->render();
+             } else {
+                 g->menu().render();
+             }
+             r.endFrame();
         }
 
         // TORCH overlay (rendered on top of everything)
