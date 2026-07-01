@@ -54,6 +54,8 @@ void GuiRenderer::init() {
             if (it != obj->fields.end()) ctl->text = it->second.toString();
             it = obj->fields.find("bitmap");
             if (it != obj->fields.end()) ctl->bitmap = it->second.toString();
+            it = obj->fields.find("command");
+            if (it != obj->fields.end()) ctl->command = it->second.toString();
             it = obj->fields.find("visible");
             if (it != obj->fields.end()) ctl->visible = it->second.toBool();
 
@@ -61,6 +63,18 @@ void GuiRenderer::init() {
 
             if (ctl->className == "GuiCanvas") {
                 canvas = ctl;
+            }
+
+            // Wire command execution for clickable controls
+            if (!ctl->command.empty() &&
+                (ctl->className.find("Button") != std::string::npos ||
+                 ctl->className == "GuiCheckBoxCtrl" ||
+                 ctl->className == "GuiRadioCtrl")) {
+                std::string cmd = ctl->command;
+                ctl->onClick = [cmd]() {
+                    Console::instance().printf(LogLevel::Info, "GUI: %s", cmd.c_str());
+                    Console::instance().execute(cmd.c_str());
+                };
             }
         }
     }

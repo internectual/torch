@@ -441,6 +441,19 @@ void Engine::run() {
         g->gameServer().update();
         scr->vm()->setVariable("time", (float)now);
 
+        // GUI mouse input
+        bool guiHandled = false;
+        if (gui && gui->getCanvas()) {
+            int mx = plat->input().mouseX;
+            int my = plat->input().mouseY;
+            bool pressed = plat->input().mouseButtons[1] != 0;
+            static bool prevPressed = false;
+            if (pressed && !prevPressed) {
+                guiHandled = gui->handleInput(mx, my, true);
+            }
+            prevPressed = pressed;
+        }
+
         // Game update
         if (g->state() != Game::MenuScreen) {
             if (!showConsole && !g->isGamePaused()) {

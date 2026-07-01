@@ -14,6 +14,7 @@ struct GuiControl {
     float minExtentX = 8, minExtentY = 8;
     std::string text;
     std::string bitmap;
+    std::string command;  // TS command to execute when activated
     bool visible = true;
     bool active = true;
     std::vector<GuiControl*> children;
