@@ -7,6 +7,7 @@
 #include "core/string_table.h"
 
 #include "render/renderer.h"
+#include "render/gui_renderer.h"
 #include "audio/audio_system.h"
 #include "script/script_engine.h"
 #include "fs/file_system.h"
@@ -67,6 +68,7 @@ private:
     NetworkManager* net{};
     Game* g{};
     Timer* tim{};
+    GuiRenderer* gui{};
 
     bool running = false;
     bool previewDone = false;

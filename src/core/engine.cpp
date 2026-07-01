@@ -119,6 +119,7 @@ bool Engine::init(int argc, char* argv[]) {
     scr = new ScriptEngine;
     net = new NetworkManager;
     g = new Game;
+    gui = new GuiRenderer;
 
     // Platform
     PlatformConfig pconfig;
@@ -308,6 +309,9 @@ bool Engine::init(int argc, char* argv[]) {
             scr->ts()->execute(csSource, "console_start.cs");
         }
     }
+
+    // Initialize GUI renderer from script-created objects
+    gui->init();
 
     // -preview mode: screenshot after map loads (implies -nologin)
     if (!previewMap.empty()) {
