@@ -58,6 +58,8 @@ struct Texture {
 struct Shader {
     uint32_t id{};
     bool loaded = false;
+    std::unordered_map<std::string, int> uniformCache;
+    int getUniformLoc(const char* name);
     bool load(const char* vertSrc, const char* fragSrc);
     bool loadFromFiles(const char* vertPath, const char* fragPath);
     void bind();
@@ -140,6 +142,7 @@ struct TerrainBlock {
     std::vector<std::string> textureNames;
     bool loaded = false;
 
+    float sampleHeight(float wx, float wz) const;
     bool load(const uint8_t* data, size_t size);
     void generateMesh();
     void render(const Point3F& cameraPos, bool fogEnabled = false, const ColorF& fogColor = {0.5f, 0.6f, 0.7f, 1.0f}, float fogDensity = 0.005f, const Point3F* lightDir = nullptr);

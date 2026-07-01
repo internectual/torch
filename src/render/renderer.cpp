@@ -436,24 +436,32 @@ bool Shader::loadFromFiles(const char* vertPath, const char* fragPath) {
 
 void Shader::bind() { if (id) glUseProgram(id); }
 
+GLint Shader::getUniformLoc(const char* name) {
+    auto it = uniformCache.find(name);
+    if (it != uniformCache.end()) return it->second;
+    GLint loc = glGetUniformLocation(id, name);
+    uniformCache[name] = loc;
+    return loc;
+}
+
 void Shader::setUniform(const char* name, float v) {
-    glUniform1f(glGetUniformLocation(id, name), v);
+    glUniform1f(getUniformLoc(name), v);
 }
 
 void Shader::setUniform(const char* name, const Point3F& v) {
-    glUniform3f(glGetUniformLocation(id, name), v.x, v.y, v.z);
+    glUniform3f(getUniformLoc(name), v.x, v.y, v.z);
 }
 
 void Shader::setUniform(const char* name, const MatrixF& m) {
-    glUniformMatrix4fv(glGetUniformLocation(id, name), 1, GL_FALSE, m.data());
+    glUniformMatrix4fv(getUniformLoc(name), 1, GL_FALSE, m.data());
 }
 
 void Shader::setUniform(const char* name, int32_t v) {
-    glUniform1i(glGetUniformLocation(id, name), v);
+    glUniform1i(getUniformLoc(name), v);
 }
 
 void Shader::setUniform(const char* name, const ColorF& v) {
-    glUniform4f(glGetUniformLocation(id, name), v.r, v.g, v.b, v.a);
+    glUniform4f(getUniformLoc(name), v.r, v.g, v.b, v.a);
 }
 
 void Shader::destroy() { if (id) glDeleteProgram(id); loaded = false; }

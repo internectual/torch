@@ -109,7 +109,6 @@ uniform mat4 uModel;
 out vec3 vNormal;
 out vec2 vUV;
 out vec4 vColor;
-out float vHeight;
 out vec3 vWorldPos;
 
 void main() {
@@ -118,7 +117,6 @@ void main() {
     vNormal = mat3(uModel) * aNormal;
     vUV = aUV;
     vColor = aColor;
-    vHeight = aPos.y;
     vWorldPos = worldPos.xyz;
 }
 )";
@@ -128,7 +126,6 @@ static const char* terrainFrag = R"(
 in vec3 vNormal;
 in vec2 vUV;
 in vec4 vColor;
-in float vHeight;
 in vec3 vWorldPos;
 
 uniform sampler2D uSplatMap;

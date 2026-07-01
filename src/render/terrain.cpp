@@ -13,10 +13,30 @@
 #include <cmath>
 #include <algorithm>
 
+float TerrainBlock::sampleHeight(float wx, float wz) const {
+    float fx = (wx - worldOffset.x) / squareSize;
+    float fz = (wz - worldOffset.z) / squareSize;
+    int ix = (int)std::floor(fx);
+    int iz = (int)std::floor(fz);
+    float tx = fx - ix;
+    float tz = fz - iz;
+    ix = Math::clamp(ix, 0, size - 2);
+    iz = Math::clamp(iz, 0, size - 2);
+    tx = Math::clamp(tx, 0.0f, 1.0f);
+    tz = Math::clamp(tz, 0.0f, 1.0f);
+    float h00 = heights[iz * size + ix];
+    float h10 = heights[iz * size + ix + 1];
+    float h01 = heights[(iz + 1) * size + ix];
+    float h11 = heights[(iz + 1) * size + ix + 1];
+    float h0 = h00 + (h10 - h00) * tx;
+    float h1 = h01 + (h11 - h01) * tx;
+    return (h0 + (h1 - h0) * tz) * heightScale;
+}
+
 void TerrainBlock::generateMesh() {
     if (heights.empty()) return;
 
-    int32_t gridRes = 128; // Render grid resolution (higher = smoother terrain)
+    int32_t gridRes = 128;
     float totalWorldSize = (float)size * squareSize;
     float step = totalWorldSize / (float)gridRes;
 
@@ -27,39 +47,28 @@ void TerrainBlock::generateMesh() {
         for (int32_t x = 0; x < gridRes; x++) {
             float wx = (float)x * step + worldOffset.x;
             float wz = (float)z * step + worldOffset.z;
+            float h = sampleHeight(wx, wz);
 
-            int hx = Math::clamp((int)((wx - worldOffset.x) / squareSize), 0, size - 1);
-            int hz = Math::clamp((int)((wz - worldOffset.z) / squareSize), 0, size - 1);
-            float h = heights[hz * size + hx] * heightScale;
-
-            // Simple normal from neighbors
-            int nxl = Math::clamp(hx - 1, 0, size - 1);
-            int nxr = Math::clamp(hx + 1, 0, size - 1);
-            int nzd = Math::clamp(hz - 1, 0, size - 1);
-            int nzu = Math::clamp(hz + 1, 0, size - 1);
-            Point3F n = {
-                heights[hz * size + nxl] - heights[hz * size + nxr],
-                2.0f / step,
-                heights[nzd * size + hx] - heights[nzu * size + hx]
-            };
+            float eps = 0.5f;
+            float hxr = sampleHeight(wx + eps, wz);
+            float hxl = sampleHeight(wx - eps, wz);
+            float hzf = sampleHeight(wx, wz + eps);
+            float hzb = sampleHeight(wx, wz - eps);
+            Point3F n = { hxl - hxr, 2.0f * eps, hzb - hzf };
             float nlen = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
             if (nlen > 0) { n.x /= nlen; n.y /= nlen; n.z /= nlen; }
 
             verts.push_back({{wx, h, wz}, n, {(float)x / gridRes, (float)z / gridRes}, {0,0}, {1,1,1,1}});
-            // Height-based vertex coloring
-            float hn = (h + 10.0f) / 40.0f; // normalize 0..1 roughly
+            float hn = (h + 10.0f) / 40.0f;
             hn = std::max(0.0f, std::min(1.0f, hn));
             ColorF vc;
             if (hn < 0.3f) {
-                // Low: green (grass)
                 float t = hn / 0.3f;
                 vc = {0.2f + t * 0.2f, 0.4f + t * 0.3f, 0.1f + t * 0.1f, 1.0f};
             } else if (hn < 0.6f) {
-                // Mid: brown/dirt
                 float t = (hn - 0.3f) / 0.3f;
                 vc = {0.4f + t * 0.2f, 0.7f - t * 0.3f, 0.2f - t * 0.1f, 1.0f};
             } else {
-                // High: grey/rock
                 float t = (hn - 0.6f) / 0.4f;
                 vc = {0.6f + t * 0.3f, 0.4f + t * 0.4f, 0.1f + t * 0.5f, 1.0f};
             }
