@@ -56,4 +56,25 @@ namespace Math {
     inline float clamp(float v, float mn, float mx) { return v < mn ? mn : (v > mx ? mx : v); }
     inline float min(float a, float b) { return a < b ? a : b; }
     inline float max(float a, float b) { return a > b ? a : b; }
+    inline QuatF quatSlerp(const QuatF& a, const QuatF& b, float t) {
+        float dot = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
+        float sign = 1.0f;
+        if (dot < 0) { dot = -dot; sign = -1.0f; }
+        if (dot > 0.9999f) {
+            // Almost parallel - use NLERP
+            QuatF r = {Math::lerp(a.x, b.x * sign, t),
+                       Math::lerp(a.y, b.y * sign, t),
+                       Math::lerp(a.z, b.z * sign, t),
+                       Math::lerp(a.w, b.w * sign, t)};
+            float len = sqrtf(r.x*r.x + r.y*r.y + r.z*r.z + r.w*r.w);
+            if (len > 1e-6f) { r.x /= len; r.y /= len; r.z /= len; r.w /= len; }
+            return r;
+        }
+        float theta = acosf(clamp(dot, -1.0f, 1.0f));
+        float sinTheta = sinf(theta);
+        if (fabsf(sinTheta) < 1e-6f) return a;
+        float ka = sinf((1-t)*theta) / sinTheta;
+        float kb = sinf(t*theta) / sinTheta * sign;
+        return {a.x*ka + b.x*kb, a.y*ka + b.y*kb, a.z*ka + b.z*kb, a.w*ka + b.w*kb};
+    }
 }

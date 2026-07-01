@@ -983,14 +983,7 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             if (ka && !kb) rot = ka->rotation;
             else if (!ka && kb) rot = kb->rotation;
             else {
-                rot = {
-                    Math::lerp(ka->rotation.x, kb->rotation.x, lerpT),
-                    Math::lerp(ka->rotation.y, kb->rotation.y, lerpT),
-                    Math::lerp(ka->rotation.z, kb->rotation.z, lerpT),
-                    Math::lerp(ka->rotation.w, kb->rotation.w, lerpT)
-                };
-                float len = sqrtf(rot.x * rot.x + rot.y * rot.y + rot.z * rot.z + rot.w * rot.w);
-                if (len > 0.0001f) { rot.x /= len; rot.y /= len; rot.z /= len; rot.w /= len; }
+                rot = Math::quatSlerp(ka->rotation, kb->rotation, lerpT);
             }
 
             Point3F scale;
