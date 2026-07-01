@@ -131,6 +131,28 @@ void HUD::render(Game* game) {
             if (font) font->render(buf, 20.0f, 48.0f, {0.7f, 0.7f, 0.7f, 0.8f}, 1.4f);
         }
 
+        // Chat message overlay (recent demo events)
+        if (font) {
+            const auto& events = game->getDemoEventLog();
+            int total = (int)events.size();
+            int chatStart = std::max(0, total - 6);
+            float cy = (float)h - 180.0f;
+            for (int i = chatStart; i < total; i++) {
+                const auto& e = events[i];
+                ColorF chatCol = (e.type == 0) ? ColorF{0.3f, 1.0f, 0.3f, 0.8f} :
+                                 (e.type == 1) ? ColorF{1.0f, 1.0f, 0.3f, 0.8f} :
+                                                  ColorF{0.8f, 0.8f, 0.8f, 0.7f};
+                char line[512];
+                if (e.text.size() > 80) {
+                    snprintf(line, sizeof(line), "<%.60s...", e.text.c_str());
+                } else {
+                    snprintf(line, sizeof(line), "<%s", e.text.c_str());
+                }
+                font->render(line, 20.0f, cy, chatCol, 1.0f);
+                cy += 20.0f;
+            }
+        }
+
         // Player name tags
         if (auto* dp = game->getDemoParser()) {
             const GhostTracker& gt = dp->getGhostTracker();
@@ -166,7 +188,14 @@ void HUD::render(Game* game) {
                 // Background box for name
                 float tw = (float)g->playerName.size() * 10.0f;
                 r.drawBox({{sx - tw/2 - 4, sy - 2, 0}, {sx + tw/2 + 4, sy + 16, 0}}, {0,0,0,0.5f});
-                font->render(g->playerName.c_str(), sx - tw/2, sy, {1,1,0,1}, 1.2f);
+                // Team color dot
+                std::string sn = g->skinName;
+                for (auto& c : sn) c = (char)tolower(c);
+                ColorF nameCol = {1,1,0,1};
+                if (sn.find("red") != std::string::npos) nameCol = {1,0.3f,0.3f,1};
+                else if (sn.find("blue") != std::string::npos) nameCol = {0.3f,0.4f,1,1};
+                else if (sn.find("green") != std::string::npos) nameCol = {0.3f,1,0.3f,1};
+                font->render(g->playerName.c_str(), sx - tw/2, sy, nameCol, 1.2f);
                 // Health bar below name
                 float hp = std::max(0.0f, std::min(1.0f, g->health / 100.0f));
                 float barW = 60.0f, barH = 6.0f;

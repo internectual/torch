@@ -1682,12 +1682,24 @@ void Game::render(float dt) {
                     if (pts[i].life <= 0) pts.erase(pts.begin() + i);
                 }
                 if (pts.empty()) { it = demoTrails.erase(it); continue; } else { ++it; }
-                // Draw trail as a fading line strip
+                // Draw trail as a fading line strip with glow
                 if (pts.size() >= 2) {
                     std::vector<Point3F> linePts;
                     for (auto& tp : pts) linePts.push_back({tp.x, tp.y, tp.z});
                     float alpha = pts.back().life;
-                    r.drawLineStrip(linePts, {0.3f, 0.8f, 1.0f, alpha * 0.6f});
+                    // Glow layer (wider, fainter)
+                    { std::vector<Point3F> glowPts = linePts;
+                      float ga = alpha * 0.25f;
+                      Point3F off = {0.3f, 0, 0.3f};
+                      for (auto& p : glowPts) { p.x += off.x; p.z += off.z; }
+                      r.drawLineStrip(glowPts, {0.2f, 0.6f, 1.0f, ga}); }
+                    { std::vector<Point3F> glowPts = linePts;
+                      float ga = alpha * 0.25f;
+                      Point3F off = {-0.3f, 0, -0.3f};
+                      for (auto& p : glowPts) { p.x += off.x; p.z += off.z; }
+                      r.drawLineStrip(glowPts, {0.2f, 0.6f, 1.0f, ga}); }
+                    // Core line
+                    r.drawLineStrip(linePts, {0.5f, 1.0f, 1.0f, alpha * 0.9f});
                 }
             }
         }
