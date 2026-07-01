@@ -233,6 +233,7 @@ public:
     float getDemoTotalTime() const { return demoTotalTime; }
     bool demoHasPosition() const { return demoHasPos; }
     int getControlGhostIndex() const { return controlGhostIndex; }
+    int getSpectateGhostIndex() const { return spectateGhostIndex; }
     float getDamageFlash() const { return damageFlash; }
     float getWhiteOut() const { return whiteOut; }
     void toggleDemoPause() { demoPaused = !demoPaused; }

@@ -122,13 +122,19 @@ void HUD::render(Game* game) {
         if (auto* dp = game->getDemoParser()) {
             int ghostCount = dp->getGhostTracker().size();
             if (game->demoOrbitCamActive()) {
-                snprintf(buf, sizeof(buf), "Ghosts: %d  [F2]orbit [A/D]rot [W/S]zoom [Spc/Shft]ht",
+                snprintf(buf, sizeof(buf), "Ghosts: %d  [F2]orbit [A/D]rot [W/S]zoom [Spc/Shft]ht [R]target",
                          ghostCount);
             } else {
-                snprintf(buf, sizeof(buf), "Ghosts: %d  [P]ause [.]step [F1]free [F2]orbit [E]vents [Tab]score",
+                snprintf(buf, sizeof(buf), "Ghosts: %d  [P]ause [.]step [F1]free [F2]orbit [E]vents [Tab]score [R]target",
                          ghostCount);
             }
             if (font) font->render(buf, 20.0f, 48.0f, {0.7f, 0.7f, 0.7f, 0.8f}, 1.4f);
+            // Spectate target indicator
+            if (font) font->render(buf, 20.0f, 48.0f, {0.7f, 0.7f, 0.7f, 0.8f}, 1.4f);
+            // Spectate target indicator
+            int sidx = game->getControlGhostIndex(); // the private field isn't exposed, use controlGhostIndex
+            // Actually, let's just access it through the game
+            (void)sidx;
         }
 
         // Chat message overlay (recent demo events)

@@ -300,7 +300,21 @@ void MeshData::destroy() {
 void Texture::load(const uint8_t* data, size_t size) {
     int w, h, channels;
     unsigned char* pixels = stbi_load_from_memory(data, (int)size, &w, &h, &channels, 4);
-    if (!pixels) return;
+    if (!pixels) {
+        // Generate magenta/black checkerboard as fallback for missing/broken textures
+        const int cw = 32, ch = 32;
+        std::vector<uint8_t> cb(cw * ch * 4);
+        for (int y = 0; y < ch; y++)
+            for (int x = 0; x < cw; x++) {
+                bool bright = ((x / 8) + (y / 8)) % 2 == 0;
+                cb[(y * cw + x) * 4 + 0] = bright ? 255 : 0;
+                cb[(y * cw + x) * 4 + 1] = 0;
+                cb[(y * cw + x) * 4 + 2] = bright ? 255 : 0;
+                cb[(y * cw + x) * 4 + 3] = 255;
+            }
+        loadRaw(cb.data(), cw, ch, 4);
+        return;
+    }
     loadRaw(pixels, w, h, 4);
     stbi_image_free(pixels);
 }
