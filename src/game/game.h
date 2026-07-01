@@ -177,6 +177,22 @@ private:
     std::string skyMaterialList;
     Point3F playerSpawn{0, 5, 0};
     bool loaded = false;
+
+    // Bots (simple AI targets)
+    struct Bot {
+        Point3F pos{0, 5, 0};
+        Point3F startPos{0, 5, 0};
+        float health = 100.0f;
+        bool alive = true;
+        float respawnTimer = 0;
+        DTSShape* shape{};
+        float patrolOffset = 0;
+        float moveYaw = 0;
+        float animTime = 0;
+    };
+public:
+    std::vector<Bot> bots;
+    void spawnBots(int count);
 };
 
 class Game {

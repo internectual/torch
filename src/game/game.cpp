@@ -819,6 +819,19 @@ void World::update(float dt) {
     for (auto& e : explosions) {
         e.lifetime -= dt;
         e.radius += dt * 4.0f;
+        // Check explosion against bots
+        for (auto& b : bots) {
+            if (!b.alive) continue;
+            float dx = b.pos.x - e.pos.x;
+            float dy = b.pos.y - e.pos.y;
+            float dz = b.pos.z - e.pos.z;
+            float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+            if (dist < e.radius) {
+                float dmg = 30.0f * (1.0f - dist / e.radius);
+                b.health -= dmg;
+                if (b.health <= 0) { b.health = 0; b.alive = false; b.respawnTimer = 5.0f; }
+            }
+        }
     }
     explosions.erase(
         std::remove_if(explosions.begin(), explosions.end(),
@@ -885,6 +898,19 @@ void World::update(float dt) {
                 float factor = 1.0f - dist / p.splashRadius;
                 game.player().applyDamage(p.damage * factor * 0.5f);
             }
+            // Splash damage bots
+            for (auto& b : game.world().bots) {
+                if (!b.alive) continue;
+                float bdx = p.pos.x - b.pos.x;
+                float bdy = p.pos.y - b.pos.y;
+                float bdz = p.pos.z - b.pos.z;
+                float bdist = sqrtf(bdx*bdx + bdy*bdy + bdz*bdz);
+                if (bdist < p.splashRadius) {
+                    float factor = 1.0f - bdist / p.splashRadius;
+                    b.health -= p.damage * factor;
+                    if (b.health <= 0) { b.health = 0; b.alive = false; b.respawnTimer = 5.0f; }
+                }
+            }
         }
     }
 
@@ -894,6 +920,25 @@ void World::update(float dt) {
             [](const Projectile& p) { return !p.active || p.hasImpacted; }),
         projList.end()
     );
+
+    // Update bots
+    for (auto& b : bots) {
+        if (b.alive) {
+            // Simple patrol: move in a circle around start position
+            b.patrolOffset += dt * 2.0f;
+            b.pos.x = b.startPos.x + sinf(b.patrolOffset) * 8.0f;
+            b.pos.z = b.startPos.z + cosf(b.patrolOffset) * 8.0f;
+            b.moveYaw = b.patrolOffset + 3.14159f;
+            b.animTime += dt;
+        } else {
+            b.respawnTimer -= dt;
+            if (b.respawnTimer <= 0) {
+                b.health = 100.0f;
+                b.alive = true;
+                b.pos = b.startPos;
+            }
+        }
+    }
 
     // Advance animation time for world objects
     for (auto& obj : worldObjects) {
@@ -1039,6 +1084,80 @@ void World::render(const Point3F& cameraPos) {
             glDisable(GL_BLEND);
         }
     }
+
+    // Render bots
+    auto& game = Engine::instance().game();
+    auto* shader = ShaderManager::getDefaultShader();
+    if (shader) shader->bind();
+    for (auto& b : bots) {
+        if (!b.alive) continue;
+        if (!b.shape) {
+            // Load shape on first render
+            auto& fs = Engine::instance().fs();
+            for (auto* p : {"shapes/bioderm_light.glb", "shapes/bioderm_light.dts", "shapes/light_male.glb"}) {
+                auto d = fs.read(p);
+                if (!d.empty()) {
+                    DTSShape* s = new DTSShape;
+                    s->name = "bot";
+                    if (s->load(d.data(), d.size())) {
+                        b.shape = s;
+                        break;
+                    }
+                    delete s;
+                }
+            }
+        }
+        if (b.shape && b.shape->loaded) {
+            MatrixF model;
+            Point3F ax = {0, 1, 0};
+            model.setRotationAxis(ax, b.moveYaw);
+            model.setTranslation(b.pos);
+            Engine::instance().renderer().setModel(model);
+            shader->setUniform("uUseTexture", (int32_t)0);
+            shader->setUniform("uUseLightmap", (int32_t)0);
+            b.shape->render(0);
+        } else {
+            // Fallback: colored box
+            float hs = 0.8f;
+            Box3F box = {{b.pos.x - hs, b.pos.y - 1.0f, b.pos.z - hs},
+                         {b.pos.x + hs, b.pos.y + 1.0f, b.pos.z + hs}};
+            ColorF col = b.health > 50 ? ColorF{0, 0.6f, 0, 1} : ColorF{0.8f, 0.2f, 0, 1};
+            Engine::instance().renderer().drawBox(box, col);
+        }
+        // Health bar above bot
+        {
+            auto* font = Engine::instance().renderer().getFont();
+            if (font) {
+                Point3F above = {b.pos.x, b.pos.y + 2.5f, b.pos.z};
+                Point3F screen = worldToScreen(above, Engine::instance().renderer().viewMatrix(),
+                    Engine::instance().renderer().projectionMatrix(), 1024, 768);
+                if (screen.z > 0 && screen.x >= 0 && screen.x <= 1024 && screen.y >= 0 && screen.y <= 768) {
+                    float barW = 40, barH = 5;
+                    float by = screen.y - 15;
+                    Engine::instance().renderer().drawBox({{screen.x - barW/2 - 1, by - 1, 0},
+                        {screen.x + barW/2 + 1, by + barH + 1, 0}}, {0,0,0,0.5f});
+                    float hp = std::max(0.0f, b.health / 100.0f);
+                    ColorF hc = hp > 0.5f ? ColorF{0,1,0,0.9f} : hp > 0.25f ? ColorF{1,1,0,0.9f} : ColorF{1,0,0,0.9f};
+                    Engine::instance().renderer().drawBox({{screen.x - barW/2, by, 0},
+                        {screen.x - barW/2 + barW * hp, by + barH, 0}}, hc);
+                }
+            }
+        }
+    }
+}
+
+void World::spawnBots(int count) {
+    bots.clear();
+    for (int i = 0; i < count; i++) {
+        Bot b;
+        b.startPos = {20.0f + (i % 5) * 15.0f, 5.0f, 20.0f + (i / 5) * 15.0f};
+        b.pos = b.startPos;
+        b.health = 100.0f;
+        b.patrolOffset = i * 0.5f;
+        b.moveYaw = 0;
+        bots.push_back(b);
+    }
+    Console::instance().printf(LogLevel::Info, "Spawned %d bots", count);
 }
 
 void World::addObject(const WorldObject& obj) {
@@ -1945,6 +2064,9 @@ void Game::startLocalGame(const char* map) {
         pl->setPosition(spawnPos);
         setState(Playing);
         Console::instance().printf(LogLevel::Info, "Game started on '%s'", missionPath.c_str());
+
+        // Spawn practice bots
+        w->spawnBots(6);
 
         // Start ambient audio
         auto& audio = Engine::instance().audio();
