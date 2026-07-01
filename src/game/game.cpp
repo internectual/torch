@@ -62,12 +62,12 @@ void Player::loadModel() {
 
     auto& fs = Engine::instance().fs();
     std::vector<std::string> paths = {
-        "shapes/player/armor/light/light.dts",
-        "shapes/player/armor/light/light.glb",
-        "shapes/player/armor/light/light",
-        "shapes/player/armor/medium/medium.dts",
-        "shapes/player/armor/medium/medium.glb",
-        "shapes/player/armor/medium/medium",
+        "shapes/bioderm_light.dts",
+        "shapes/bioderm_light.glb",
+        "shapes/bioderm_medium.dts",
+        "shapes/bioderm_medium.glb",
+        "shapes/bioderm_light",
+        "shapes/bioderm_medium",
     };
     for (auto& p : paths) {
         auto data = fs.read(p.c_str());
