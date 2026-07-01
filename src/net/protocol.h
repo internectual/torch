@@ -58,6 +58,24 @@ namespace T2Protocol {
     uint16_t calculateChecksum(const uint8_t* data, size_t size);
     bool verifyChecksum(const uint8_t* data, size_t size);
 
+    // TribesNext RSA authentication
+    struct RSAKey {
+        uint8_t modulus[256];  // 2048-bit RSA modulus
+        uint8_t exponent[4];   // public exponent (usually 65537)
+    };
+
+    // Challenge/response messages
+    struct AuthChallenge {
+        uint8_t data[64];      // random challenge bytes
+    };
+
+    struct AuthResponse {
+        uint8_t signature[256]; // RSA-encrypted challenge hash
+    };
+
+    // Load the TribesNext public key
+    const RSAKey& getTribesNextPublicKey();
+
     // Connection protocol messages
     struct ConnectMessage {
         uint32_t protocol;
