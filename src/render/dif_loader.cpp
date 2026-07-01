@@ -783,7 +783,6 @@ static bool interiorToMeshes(DIFInterior& interior,
     }
 
     if (!outMeshes.empty() && outCollVerts && outCollIndices) {
-            interior.hulls.size(), interior.hullSurfaceIndices.size(), interior.windings.size());
         // Extract collision triangles from hull-referenced surfaces
         size_t totalSurfs = 0;
         for (auto& hull : interior.hulls) {
@@ -811,11 +810,8 @@ static bool interiorToMeshes(DIFInterior& interior,
                 }
             }
         }
-        Console::instance().printf(LogLevel::Debug, "  DIF: %zu hull surfaces processed, %zu collision verts, %zu indices",
+        Console::instance().printf(LogLevel::Info, "  DIF: %zu hull surfaces processed, %zu collision verts, %zu indices",
             totalSurfs, outCollVerts->size(), outCollIndices->size());
-        if (!outCollVerts->empty()) {
-                outCollIndices->size() / 3);
-        }
     }
 
     return !outMeshes.empty();
@@ -867,8 +863,6 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
         }
         prevRem = rem;
     }
-        interiors[0].surfaces.size(), interiors[0].points.size() / 3,
-        interiors[0].windings.size(), interiors[0].matNames.size());
 
     // Skip sub-objects and remaining top-level data (triggers, paths, etc.)
     // We only need the highest-detail level for rendering.
@@ -876,7 +870,6 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
 
     if (interiors.empty()) return result;
 
-        interiors[0].surfaces.size(), interiors[0].points.size() / 3, interiors[0].windings.size());
 
     if (!interiorToMeshes(interiors[0],
                           result.meshes,
