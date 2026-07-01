@@ -1752,6 +1752,30 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
+    // File search for .gui discovery
+    {
+        static std::vector<std::string> s_fileList;
+        static size_t s_fileIdx = 0;
+        tsInstance->registerNative("findFirstFile", [](const auto& args) -> VMValue {
+            s_fileList.clear();
+            s_fileIdx = 0;
+            if (args.empty()) return VMValue("");
+            std::string pattern = args[0].toString();
+            // Strip "*" prefix/suffix for listFiles matching
+            std::string clean = pattern;
+            if (clean.size() > 1 && clean[0] == '*') clean = clean.substr(1);
+            if (clean.size() > 1 && clean.back() == '*') clean.pop_back();
+            Engine::instance().fs().listFiles(clean.c_str(), s_fileList);
+            // Sort to match T2 behavior
+            std::sort(s_fileList.begin(), s_fileList.end());
+            return s_fileList.empty() ? VMValue("") : VMValue(s_fileList[0]);
+        });
+        tsInstance->registerNative("findNextFile", [](const auto&) -> VMValue {
+            s_fileIdx++;
+            return s_fileIdx < s_fileList.size() ? VMValue(s_fileList[s_fileIdx]) : VMValue("");
+        });
+    }
+
     Console::instance().printf(LogLevel::Info, "ScriptEngine initialized with %zu native functions + DTS support", 12);
     return true;
 }
