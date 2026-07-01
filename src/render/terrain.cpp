@@ -2,6 +2,7 @@
 #include "render/shader.h"
 #include "render/glb_loader.h"
 #include "render/dts_loader.h"
+#include "render/dif_loader.h"
 #include "core/engine.h"
 #include "stb_image.h"
 #include <GL/glew.h>
@@ -623,43 +624,61 @@ bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
     return true;
 }
 
-// DTS shape loader — parses Torque DTS binary format (T2 v24-26)
+// DTS/DIF shape loader — parses Torque DTS binary or DIF interior format
 bool DTSShape::load(const uint8_t* data, size_t size) {
     if (!data || size < 12) return false;
 
-    // Check if this is actually a GLB file (embedded in DTS extras from conversion tools)
+    // Check if this is actually a GLB file
     uint32_t magic = *(const uint32_t*)data;
     if (magic == 0x46546C67) {
         Console::instance().printf(LogLevel::Debug, "  detected GLB format, using GLB loader");
         return loadGLB(data, size);
     }
 
+    // DIF interiors: version 44 at offset 0 (or isInterior flag is set)
+    uint32_t version = *(const uint32_t*)data;
+    if (isInterior || version == 44) {
+        DIFLoadResult difResult = loadDIF(data, size, name.c_str());
+        if (difResult.loaded) {
+            meshes = std::move(difResult.meshes);
+            materialTextures = std::move(difResult.textures);
+            materialFlags = std::move(difResult.materialFlags);
+            materialLightmapIndex = std::move(difResult.materialLightmapIndex);
+            lightmaps = std::move(difResult.lightmaps);
+            materialNames = std::move(difResult.materialNames);
+            details = difResult.details;
+            isInterior = true;
+            loaded = true;
+            return true;
+        }
+    }
+
     // Try native DTS loading
     DTSLoadResult dtsResult = loadDTS(data, size, name.c_str());
-    if (!dtsResult.loaded) {
-        return loadGLB(data, size);
+    if (dtsResult.loaded) {
+        meshes = std::move(dtsResult.meshes);
+        materialTextures = std::move(dtsResult.textures);
+        materialFlags = std::move(dtsResult.materialFlags);
+        lightmaps = std::move(dtsResult.lightmaps);
+        materialLightmapIndex = std::move(dtsResult.materialLightmapIndex);
+        materialNames = std::move(dtsResult.materialNames);
+        details = dtsResult.details;
+        animations = dtsResult.animations;
+        nodes = dtsResult.nodes;
+
+        if (details.empty()) {
+            DTSShape::DetailLevel dl;
+            dl.size = 1000.0f;
+            dl.meshIndex = 0;
+            details.push_back(dl);
+        }
+
+        loaded = true;
+        return true;
     }
 
-    meshes = std::move(dtsResult.meshes);
-    materialTextures = std::move(dtsResult.textures);
-    materialFlags = std::move(dtsResult.materialFlags);
-    lightmaps = std::move(dtsResult.lightmaps);
-    materialLightmapIndex = std::move(dtsResult.materialLightmapIndex);
-    materialNames = std::move(dtsResult.materialNames);
-    details = dtsResult.details;
-    animations = dtsResult.animations;
-    nodes = dtsResult.nodes;
-
-    // Replicate first detail level's meshIndex across all details if missing
-    if (details.empty()) {
-        DTSShape::DetailLevel dl;
-        dl.size = 1000.0f;
-        dl.meshIndex = 0;
-        details.push_back(dl);
-    }
-
-    loaded = true;
-    return true;
+    // Fallback to GLB
+    return loadGLB(data, size);
 }
 
 bool DTSShape::applySkin(const std::string& skinName) {

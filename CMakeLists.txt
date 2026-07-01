@@ -40,6 +40,7 @@ add_executable(torch
     src/render/sky.cpp
     src/render/glb_loader.cpp
     src/render/dts_loader.cpp
+    src/render/dif_loader.cpp
     src/audio/audio_system.cpp
     src/net/network.cpp
     src/net/protocol.cpp

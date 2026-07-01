@@ -23,13 +23,17 @@ cmake --build build -j$(nproc)
 
 - [x] SDL3 window + OpenGL 3.3 core context
 - [x] VOL/VL2 archive reader (T2 asset loading)
-- [x] DSO bytecode reader and stack VM
-- [x] TorqueScript console system (vars, commands, exec)
-- [x] OpenGL 3.3 renderer with terrain, skybox, text
+- [x] DSO bytecode reader and full VM opcode dispatch (~60 opcodes)
+- [x] TorqueScript interpreter (parser, locals, functions, natives)
+- [x] OpenGL 3.3 renderer with terrain, skybox, text, DTS models, DIF interiors
 - [x] OpenAL 3D audio (WAV playback)
 - [x] UDP networking with T2 protocol constants
 - [x] Player physics (gravity, jet, jump)
 - [x] HUD and menu system
-- [ ] Full bytecode VM opcode dispatch
+- [x] Weapon system (spinfusor, blaster, chaingun, grenade launcher, sniper, mortar)
+- [x] Collision detection (ray-triangle, sphere-triangle, spatial grid)
+- [x] DTS model loader with skeletal animation
+- [x] DIF interior loader with BSP, surfaces, lightmaps, materials
+- [x] Demo playback (BitStream, Huffman, GhostTracker, full parser)
+- [x] Mission parser (.mis files with Terrain, Sky, Sun, interiors, items)
 - [ ] TribesNext RSA authentication
-- [x] DTS/DIF model/map loaders
