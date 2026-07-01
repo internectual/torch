@@ -1129,6 +1129,20 @@ void Game::update(float dt) {
                 return;
             }
             demoTime += dt;
+            // Decay camera shake
+            if (shakeIntensity > 0) {
+                shakeIntensity = std::max(0.0f, shakeIntensity - dt * 8.0f);
+                shakeOffset = {
+                    (float)(rand() % 1000) / 500.0f - 1.0f,
+                    (float)(rand() % 1000) / 500.0f - 1.0f,
+                    (float)(rand() % 1000) / 500.0f - 1.0f,
+                };
+                shakeOffset.x *= shakeIntensity;
+                shakeOffset.y *= shakeIntensity;
+                shakeOffset.z *= shakeIntensity;
+            } else {
+                shakeOffset = {0,0,0};
+            }
             int blocksThisFrame;
             if (demoStepRequest) {
                 blocksThisFrame = 1;
@@ -1221,6 +1235,9 @@ void Game::update(float dt) {
                     // Store damage flash and whiteout for screen effects
                     damageFlash = pd.gameState.damageFlash;
                     whiteOut = pd.gameState.whiteOut;
+                    // Camera shake on damage
+                    if (pd.gameState.damageFlash > 0.5f)
+                        shakeIntensity = std::max(shakeIntensity, pd.gameState.damageFlash * 3.0f);
                     // Store control object ghost index for highlight
                     if (pd.gameState.controlObjectGhostIndex >= 0)
                         controlGhostIndex = pd.gameState.controlObjectGhostIndex;
@@ -1483,7 +1500,9 @@ void Game::render(float dt) {
         camPos = pl->cameraPos();
         camTarget = pl->cameraTarget();
     }
-    r.setCamera(camPos, camTarget, {0, 1, 0});
+    // Apply camera shake
+    Point3F finalCam = {camPos.x + shakeOffset.x, camPos.y + shakeOffset.y, camPos.z + shakeOffset.z};
+    r.setCamera(finalCam, camTarget, {0, 1, 0});
     w->render(camPos);
     if (!freeCamActive && !demoPlaying) pl->render();
 

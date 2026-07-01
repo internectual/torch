@@ -291,6 +291,8 @@ private:
     int controlGhostIndex = -1;  // control object ghost index during demo
     float damageFlash = -1.0f;  // red screen flash during demo playback
     float whiteOut = -1.0f;     // white screen flash during demo playback
+    float shakeIntensity = 0.0f; // camera shake for explosions
+    Point3F shakeOffset{0,0,0};
     std::vector<DemoTimedEvent> demoEventLog;
     bool demoShowEvents = true;
     // Orbit camera for demo spectator mode

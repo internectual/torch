@@ -578,7 +578,6 @@ static bool interiorToMeshes(DIFInterior& interior,
                               std::vector<float>* outCollVerts = nullptr,
                               std::vector<uint32_t>* outCollIndices = nullptr)
 {
-    Console::instance().printf(LogLevel::Debug, "  i2m: start (mats=%zu)", interior.matNames.size());
     if (interior.surfaces.empty() || interior.points.empty()) {
         Console::instance().printf(LogLevel::Warn, "DIF: no surfaces or points in interior");
         return false;
@@ -599,7 +598,6 @@ static bool interiorToMeshes(DIFInterior& interior,
             }
         }
     }
-    Console::instance().printf(LogLevel::Debug, "  i2m: textures done (%zu mats)", interior.matNames.size());
 
     // Load lightmaps (skip GPU ops if skipGpu)
     if (!skipGpu) {
@@ -785,7 +783,6 @@ static bool interiorToMeshes(DIFInterior& interior,
     }
 
     if (!outMeshes.empty() && outCollVerts && outCollIndices) {
-        Console::instance().printf(LogLevel::Debug, "  DIF: extracting hull collision (%zu hulls, %zu surfIdxs, %zu windings)",
             interior.hulls.size(), interior.hullSurfaceIndices.size(), interior.windings.size());
         // Extract collision triangles from hull-referenced surfaces
         size_t totalSurfs = 0;
@@ -817,7 +814,6 @@ static bool interiorToMeshes(DIFInterior& interior,
         Console::instance().printf(LogLevel::Debug, "  DIF: %zu hull surfaces processed, %zu collision verts, %zu indices",
             totalSurfs, outCollVerts->size(), outCollIndices->size());
         if (!outCollVerts->empty()) {
-            Console::instance().printf(LogLevel::Debug, "  DIF: hull collision: %zu triangles",
                 outCollIndices->size() / 3);
         }
     }
@@ -851,12 +847,10 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
     }
 
     uint32_t numDetailLevels = readU32(ptr, rem);
-    Console::instance().printf(LogLevel::Debug, "DIF: %u detail levels, starting parse", numDetailLevels);
 
     size_t prevRem = rem;
     std::vector<DIFInterior> interiors(numDetailLevels);
     for (uint32_t i = 0; i < numDetailLevels; i++) {
-        Console::instance().printf(LogLevel::Debug, "DIF: parsing detail level %u (%zu bytes remaining)", i, rem);
         if (rem < 60) {
             Console::instance().printf(LogLevel::Warn, "DIF: not enough data for detail level %u", i);
             break;
@@ -867,25 +861,21 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
         }
         // Sanity: if we consumed suspiciously few bytes (e.g., all zeros), skip
         size_t consumed = prevRem - rem;
-        Console::instance().printf(LogLevel::Debug, "DIF: detail level %u done (%zu surfaces, consumed %zu)", i, interiors[i].surfaces.size(), consumed);
         if (interiors[i].surfaces.empty() && consumed < 100) {
             Console::instance().printf(LogLevel::Warn, "DIF: detail level %u suspiciously small, stopping", i);
             break;
         }
         prevRem = rem;
     }
-    Console::instance().printf(LogLevel::Debug, "DIF: all detail levels parsed (surfaces=%zu, points=%zu, windings=%zu, materials=%zu)",
         interiors[0].surfaces.size(), interiors[0].points.size() / 3,
         interiors[0].windings.size(), interiors[0].matNames.size());
 
     // Skip sub-objects and remaining top-level data (triggers, paths, etc.)
     // We only need the highest-detail level for rendering.
 
-    Console::instance().printf(LogLevel::Debug, "DIF: converting interior meshes for '%s'", name);
 
     if (interiors.empty()) return result;
 
-    Console::instance().printf(LogLevel::Debug, "DIF: highest detail: %zu surfaces, %zu points, %zu windings",
         interiors[0].surfaces.size(), interiors[0].points.size() / 3, interiors[0].windings.size());
 
     if (!interiorToMeshes(interiors[0],
