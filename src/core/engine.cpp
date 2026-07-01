@@ -308,6 +308,11 @@ bool Engine::init(int argc, char* argv[]) {
             std::string csSource((const char*)startupData.data(), startupData.size());
             scr->ts()->execute(csSource, "console_start.cs");
         }
+        // Auto-start login process to reach the LAN lobby
+        if (scr->ts()) {
+            Console::instance().printf(LogLevel::Info, "Calling StartLoginProcess...");
+            scr->ts()->execute("StartLoginProcess();", "autoexec");
+        }
     }
 
     // Initialize GUI renderer from script-created objects

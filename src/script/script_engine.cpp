@@ -1693,10 +1693,18 @@ bool ScriptEngine::init() {
 
     // GUI Canvas methods (called as Canvas.pushDialog() etc.)
     // These are registered globally so the dot-notation lookup finds them
-    tsInstance->registerNative("pushDialog", [](const auto&) -> VMValue {
+    tsInstance->registerNative("pushDialog", [](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            std::string name = args[0].toString();
+            if (!name.empty()) Engine::instance().guiRenderer().pushDialog(name);
+        }
         return VMValue(1);
     });
-    tsInstance->registerNative("popDialog", [](const auto&) -> VMValue {
+    tsInstance->registerNative("popDialog", [](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            std::string name = args[0].toString();
+            Engine::instance().guiRenderer().popDialog(name);
+        }
         return VMValue(1);
     });
     tsInstance->registerNative("showCursor", [](const auto&) -> VMValue {
@@ -1778,6 +1786,7 @@ bool ScriptEngine::init() {
             if (clean.size() > 1 && clean[0] == '*') clean = clean.substr(1);
             if (clean.size() > 1 && clean.back() == '*') clean.pop_back();
             Engine::instance().fs().listFiles(clean.c_str(), s_fileList);
+            Console::instance().printf(LogLevel::Debug, "findFirstFile(\"%s\"): found %zu files, first=\"%s\"", pattern.c_str(), s_fileList.size(), s_fileList.empty() ? "" : s_fileList[0].c_str());
             // Sort to match T2 behavior
             std::sort(s_fileList.begin(), s_fileList.end());
             return s_fileList.empty() ? VMValue("") : VMValue(s_fileList[0]);
