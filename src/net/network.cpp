@@ -147,19 +147,6 @@ void Connection::sendGamePacket(const uint8_t* data, size_t size, bool reliable)
     sendPacket(PacketType::GameData, data, size);
 }
 
-uint16_t T2Protocol::calculateChecksum(const uint8_t* data, size_t size) {
-    uint32_t sum = 0;
-    for (size_t i = 0; i < size; i++)
-        sum += data[i];
-    return (uint16_t)(sum & 0xFFFF);
-}
-
-bool T2Protocol::verifyChecksum(const uint8_t* data, size_t size) {
-    if (size < 2) return false;
-    uint16_t stored = *(uint16_t*)(data + size - 2);
-    return calculateChecksum(data, size - 2) == stored;
-}
-
 // NetworkManager
 struct NetworkManager::Impl {
     int broadcastSock = -1;

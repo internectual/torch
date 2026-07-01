@@ -50,12 +50,17 @@ uniform bool uUseEnvMap = false;
 uniform bool uSelfIlluminated = false;
 uniform vec3 uLightDir = vec3(0.5, 0.8, 0.6);
 uniform vec3 uCamPos = vec3(0);
+uniform vec4 uTint = vec4(1.0);
+
+uniform bool uFogEnabled = false;
+uniform vec3 uFogColor = vec3(0.5, 0.6, 0.7);
+uniform float uFogDensity = 0.01;
 
 out vec4 FragColor;
 
 void main() {
     vec4 texColor = uUseTexture ? texture(uTexture, vUV) : vec4(1.0);
-    vec4 col = vColor * texColor;
+    vec4 col = vColor * texColor * uTint;
     if (uUseLightmap) {
         vec4 lm = texture(uLightmap, vUV);
         col.rgb = col.rgb * (0.5 + 0.5 * lm.rgb);
@@ -73,6 +78,12 @@ void main() {
             vec2 envUV = vec2(R.x / m + 0.5, R.y / m + 0.5);
             vec4 env = texture(uEnvMap, envUV);
             lit = mix(lit, env.rgb, 0.25);
+        }
+        if (uFogEnabled) {
+            float dist = length(vWorldPos - uCamPos);
+            float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * dist * dist);
+            fogFactor = clamp(fogFactor, 0.0, 1.0);
+            lit = mix(lit, uFogColor, fogFactor);
         }
         FragColor = vec4(lit, col.a);
     }
@@ -94,13 +105,16 @@ out vec3 vNormal;
 out vec2 vUV;
 out vec4 vColor;
 out float vHeight;
+out vec3 vWorldPos;
 
 void main() {
-    gl_Position = uProjection * uView * uModel * vec4(aPos, 1.0);
+    vec4 worldPos = uModel * vec4(aPos, 1.0);
+    gl_Position = uProjection * uView * worldPos;
     vNormal = mat3(uModel) * aNormal;
     vUV = aUV;
     vColor = aColor;
     vHeight = aPos.y;
+    vWorldPos = worldPos.xyz;
 }
 )";
 
@@ -110,6 +124,7 @@ in vec3 vNormal;
 in vec2 vUV;
 in vec4 vColor;
 in float vHeight;
+in vec3 vWorldPos;
 
 uniform sampler2D uSplatMap;
 uniform sampler2D uDetail0;
@@ -119,6 +134,11 @@ uniform sampler2D uDetail3;
 uniform sampler2D uLightmap;
 uniform bool uUseLightmap = false;
 uniform vec3 uLightDir = vec3(0.5, 0.8, 0.6);
+
+uniform bool uFogEnabled = false;
+uniform vec3 uFogColor = vec3(0.5, 0.6, 0.7);
+uniform float uFogDensity = 0.01;
+uniform vec3 uCamPos = vec3(0);
 
 out vec4 FragColor;
 
@@ -140,7 +160,14 @@ void main() {
         vec4 lm = texture(uLightmap, vUV);
         lighting *= lm.r;
     }
-    FragColor = vec4(base.rgb * lighting, 1.0);
+    vec3 lit = base.rgb * lighting;
+    if (uFogEnabled) {
+        float dist = length(vWorldPos - uCamPos);
+        float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * dist * dist);
+        fogFactor = clamp(fogFactor, 0.0, 1.0);
+        lit = mix(lit, uFogColor, fogFactor);
+    }
+    FragColor = vec4(lit, 1.0);
 }
 )";
 

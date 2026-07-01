@@ -30,6 +30,7 @@ struct MeshData {
     uint32_t vao{}, vbo{}, ebo{};
     int32_t materialIndex = -1; // index into DTSShape::materialTextures
     int32_t materialIdx = -1;   // raw material index from GLB file
+    int32_t nodeIndex = -1;     // DTS node index (-1 = no node)
     bool uploaded = false;
     void upload();
     void render();
@@ -63,6 +64,7 @@ struct Shader {
     void setUniform(const char* name, const Point3F& v);
     void setUniform(const char* name, const MatrixF& m);
     void setUniform(const char* name, int32_t v);
+    void setUniform(const char* name, const ColorF& v);
     void destroy();
 };
 
@@ -73,6 +75,7 @@ struct Font {
     float charUV[256][4]{};
     bool loaded = false;
     bool load(const uint8_t* data, size_t size);
+    bool loadDefault();
     void render(const char* text, float x, float y, const ColorF& color, float scale = 1.0f);
     Point2F measure(const char* text, float scale = 1.0f);
 };
@@ -86,12 +89,27 @@ struct DTSShape {
         int32_t meshIndex;
     };
     std::vector<DetailLevel> details;
+    struct Node {
+        std::string name;
+        int32_t parentIndex = -1;
+    };
+    std::vector<Node> nodes;
+
+    struct Keyframe {
+        float time;
+        int32_t nodeIndex;
+        Point3F translation;
+        QuatF rotation;
+        Point3F scale;
+    };
     struct Animation {
         std::string name;
         float duration;
-        // Keyframe data would go here
+        bool looping = false;
+        std::vector<Keyframe> keyframes;
     };
     std::vector<Animation> animations;
+    std::vector<std::string> materialNames; // original material names (for skin overrides)
     std::vector<Texture> materialTextures;
     std::vector<uint32_t> materialFlags; // parallel to materialTextures
     std::vector<Texture> lightmaps;
@@ -102,6 +120,7 @@ struct DTSShape {
     bool loadGLB(const uint8_t* data, size_t size);
     void render(int32_t detailLevel = 0);
     void renderAnimation(const char* animName, float time);
+    bool applySkin(const std::string& skinName);
 };
 
 struct TerrainBlock {
@@ -119,7 +138,7 @@ struct TerrainBlock {
 
     bool load(const uint8_t* data, size_t size);
     void generateMesh();
-    void render(const Point3F& cameraPos);
+    void render(const Point3F& cameraPos, bool fogEnabled = false, const ColorF& fogColor = {0.5f, 0.6f, 0.7f, 1.0f}, float fogDensity = 0.005f, const Point3F* lightDir = nullptr);
 };
 
 struct Sky {
@@ -146,10 +165,14 @@ public:
     void setProjection(const MatrixF& proj);
     void setView(const MatrixF& view);
     void setModel(const MatrixF& model);
+    const MatrixF& modelMatrix() const;
+    const MatrixF& viewMatrix() const { return view; }
+    const MatrixF& projectionMatrix() const { return projection; }
     void setCamera(const Point3F& pos, const Point3F& target, const Point3F& up);
 
     void drawMesh(MeshData& mesh, const MatrixF& transform);
     void drawLine(const Point3F& a, const Point3F& b, const ColorF& color);
+    void drawLineStrip(const std::vector<Point3F>& points, const ColorF& color);
     void drawBox(const Box3F& box, const ColorF& color);
 
     Texture* loadTexture(const char* path);

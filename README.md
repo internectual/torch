@@ -32,4 +32,4 @@ cmake --build build -j$(nproc)
 - [x] HUD and menu system
 - [ ] Full bytecode VM opcode dispatch
 - [ ] TribesNext RSA authentication
-- [ ] DTS/DIF model/map loaders
+- [x] DTS/DIF model/map loaders

@@ -53,6 +53,7 @@ public:
     void update();
 
     State state() const { return connState; }
+    void setState(State s) { connState = s; }
     NetAddress address() const { return remoteAddr; }
     uint32_t ping() const { return currentPing; }
 

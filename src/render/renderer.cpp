@@ -111,6 +111,10 @@ void Renderer::setModel(const MatrixF& model) {
     }
 }
 
+const MatrixF& Renderer::modelMatrix() const {
+    return impl->model;
+}
+
 void Renderer::setCamera(const Point3F& pos, const Point3F& target, const Point3F& up) {
     cameraPos = pos;
     MatrixF v;
@@ -150,6 +154,35 @@ void Renderer::drawLine(const Point3F& a, const Point3F& b, const ColorF& color)
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), 0);
     glEnableVertexAttribArray(0);
     glDrawArrays(GL_LINES, 0, 2);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+
+    stats.drawCalls++;
+}
+
+void Renderer::drawLineStrip(const std::vector<Point3F>& points, const ColorF& color) {
+    if (points.size() < 2) return;
+    auto* ls = ShaderManager::getLineShader();
+    if (!ls) return;
+    ls->bind();
+    ls->setUniform("uProjection", projection);
+    ls->setUniform("uView", view);
+    ls->setUniform("uColor", Point3F{color.r, color.g, color.b});
+
+    size_t vertCount = points.size();
+    std::vector<float> verts;
+    verts.reserve(vertCount * 3);
+    for (auto& p : points) { verts.push_back(p.x); verts.push_back(p.y); verts.push_back(p.z); }
+
+    uint32_t vao, vbo;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), 0);
+    glEnableVertexAttribArray(0);
+    glDrawArrays(GL_LINE_STRIP, 0, (GLsizei)vertCount);
     glDeleteVertexArrays(1, &vao);
     glDeleteBuffers(1, &vbo);
 
@@ -401,6 +434,10 @@ void Shader::setUniform(const char* name, const MatrixF& m) {
 
 void Shader::setUniform(const char* name, int32_t v) {
     glUniform1i(glGetUniformLocation(id, name), v);
+}
+
+void Shader::setUniform(const char* name, const ColorF& v) {
+    glUniform4f(glGetUniformLocation(id, name), v.r, v.g, v.b, v.a);
 }
 
 void Shader::destroy() { if (id) glDeleteProgram(id); loaded = false; }

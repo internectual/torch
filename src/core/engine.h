@@ -37,9 +37,21 @@ public:
 
     void quit() { running = false; }
 
+    // Overlay (TORCH debug menu, triggered by Pause)
+    void toggleOverlay() { showOverlay = !showOverlay; }
+    bool overlayActive() const { return showOverlay; }
+
+    // Console (triggered by ~ key)
+    void toggleConsole();
+    bool consoleActive() const { return showConsole; }
+    const std::string& consoleBuffer() const { return consoleBuf; }
+    void executeConsole();
+
     Point3F getPreviewCamPos() const { return previewCamPos; }
     Point3F getPreviewCamTarget() const { return previewCamTarget; }
     bool hasPreviewCam() const { return usePreviewCam; }
+
+    std::string testShapePath;
 
 private:
     struct Impl;
@@ -58,7 +70,20 @@ private:
     bool running = false;
     bool previewDone = false;
     std::string previewMap;
+    std::string demoPath;
+    bool demoMode = false;
     Point3F previewCamPos{0, 200, -400};
     Point3F previewCamTarget{0, 0, 0};
     bool usePreviewCam = false;
+    bool showOverlay = false;
+    bool showConsole = false;
+    bool showMinimap = true;
+    std::string consoleBuf;
+    int lockFd = -1;
+
+    void renderOverlay();
+    void renderConsole();
+    void renderMinimap();
+    Font* overlayFont = nullptr;
+    bool overlayFontOwned = false;
 };

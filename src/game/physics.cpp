@@ -26,7 +26,7 @@ void Physics::update(Player* player, float dt, const Game::InputMove& input) {
     vel.x += (moveDir.x - vel.x) * dt * 10.0f;
     vel.z += (moveDir.z - vel.z) * dt * 10.0f;
 
-    // Jump
+    // Ground detection with interior collision
     float groundHeight = Engine::instance().game().world().getHeight(pos.x, pos.z);
     bool onGround = pos.y <= groundHeight + 0.1f;
 
@@ -61,6 +61,12 @@ void Physics::update(Player* player, float dt, const Game::InputMove& input) {
     pos.y += vel.y * dt;
     pos.z += vel.z * dt;
 
+    // Resolve interior collision (push player out of walls/floors)
+    resolveCollision(player, pos, dt);
+
+    // Re-check ground after collision resolve
+    groundHeight = Engine::instance().game().world().getHeight(pos.x, pos.z);
+
     // Ground clamp
     if (pos.y < groundHeight) {
         pos.y = groundHeight;
@@ -75,7 +81,30 @@ void Physics::update(Player* player, float dt, const Game::InputMove& input) {
 
     player->setPosition(pos);
     player->setRotation(rot);
-    // Set velocity via the player (would need a setter)
+    player->setVelocity(vel);
+    player->setEnergy(energy);
+    player->setOnGround(onGround);
+}
+
+void Physics::resolveCollision(Player* player, Point3F& pos, float dt) {
+    auto& world = Engine::instance().game().world();
+    auto& collision = world.collision();
+    if (!collision.loaded) return;
+
+    float radius = 0.5f;
+    float eyeHeight = 1.5f;
+    float playerHeight = eyeHeight + 0.1f;
+
+    // Sphere collision push-out
+    Point3F pushOut{0,0,0};
+    collision.sphereCollide(pos, radius, pushOut);
+
+    // If pushed out, add to position and zero velocity in that direction
+    if (pushOut.x != 0 || pushOut.y != 0 || pushOut.z != 0) {
+        pos.x += pushOut.x;
+        pos.y += pushOut.y;
+        pos.z += pushOut.z;
+    }
 }
 
 Physics::RayCastResult Physics::rayCast(const Point3F& origin, const Point3F& dir, float maxDist) {

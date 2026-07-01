@@ -1,12 +1,14 @@
 #include "render/renderer.h"
 #include "render/shader.h"
 #include "render/glb_loader.h"
+#include "render/dts_loader.h"
 #include "core/engine.h"
 #include "stb_image.h"
 #include <GL/glew.h>
 #include <cstring>
 #include <cctype>
 #include <vector>
+#include <algorithm>
 #include <cmath>
 #include <algorithm>
 
@@ -214,10 +216,15 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
     return true;
 }
 
-void TerrainBlock::render(const Point3F& cameraPos) {
+void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const ColorF& fogColor, float fogDensity, const Point3F* lightDir) {
     auto* shader = ShaderManager::getTerrainShader();
     if (!shader) return;
     shader->bind();
+
+    // Apply dynamic light direction if provided
+    if (lightDir) {
+        shader->setUniform("uLightDir", *lightDir);
+    }
 
     if (splatMap.loaded) splatMap.bind(0);
     if (detailTextures.size() >= 1 && detailTextures[0].loaded) detailTextures[0].bind(1);
@@ -244,12 +251,69 @@ void TerrainBlock::render(const Point3F& cameraPos) {
     shader->setUniform("uView", renderer.view);
     shader->setUniform("uModel", model);
     shader->setUniform("uLightDir", Point3F{0.5f, 0.8f, 0.6f});
+    shader->setUniform("uCamPos", cameraPos);
+    shader->setUniform("uFogEnabled", (int32_t)(fogEnabled ? 1 : 0));
+    if (fogEnabled) {
+        shader->setUniform("uFogColor", Point3F{fogColor.r, fogColor.g, fogColor.b});
+        shader->setUniform("uFogDensity", fogDensity);
+    }
 
     for (auto& mesh : meshes)
         mesh.render();
 }
 
 // Font
+#include "render/font8x8.h"
+
+bool Font::loadDefault() {
+    static const int cw = 8, ch = 8;
+    static const int cols = 16, rows = 16;
+    int tw = cols * cw, th = rows * ch;
+    std::vector<uint8_t> pixels(tw * th * 4, 0);
+
+    // Render ASCII 32-126 into the font texture
+    for (int i = 32; i <= 126; i++) {
+        int idx = i - 32;
+        int cx = (i % cols) * cw;
+        int cy = (i / cols) * ch;
+        for (int py = 0; py < ch && idx < 95; py++) {
+            uint8_t row = font8x8_basic[idx][py];
+            for (int px = 0; px < cw; px++) {
+                int pi = ((cy + py) * tw + (cx + px)) * 4;
+                if (row & (0x80 >> px)) {
+                    pixels[pi + 0] = 255;
+                    pixels[pi + 1] = 255;
+                    pixels[pi + 2] = 255;
+                    pixels[pi + 3] = 255;
+                }
+            }
+        }
+    }
+
+    texWidth = tw;
+    texHeight = th;
+    charWidth = cw;
+    charHeight = ch;
+
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    float cw_f = 1.0f / cols, ch_f = 1.0f / rows;
+    for (int i = 0; i < 256; i++) {
+        int x = i % cols, y = i / cols;
+        charUV[i][0] = x * cw_f;
+        charUV[i][1] = y * ch_f;
+        charUV[i][2] = (x + 1) * cw_f;
+        charUV[i][3] = (y + 1) * ch_f;
+    }
+
+    loaded = true;
+    return true;
+}
+
 bool Font::load(const uint8_t* data, size_t size) {
     // Load a bitmap font texture
     int w, h, channels;
@@ -519,6 +583,11 @@ bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
         }
     }
 
+    // Store material names (resource paths) for skin override support
+    materialNames.clear();
+    for (auto& mat : glb.materials)
+        materialNames.push_back(mat.resourcePath);
+
     // Finalize material flags — one per slot in materialTextures
     materialFlags.resize(materialTextures.size(), 0);
     for (size_t i = 0; i < glb.materials.size(); i++) {
@@ -547,38 +616,111 @@ bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
         }
     }
 
+    // Copy animations from GLB
+    animations = std::move(glb.animations);
+
     loaded = true;
     return true;
 }
 
-// DTS shape loader — parses Torque DTS binary format (tested with T2 v25-26)
+// DTS shape loader — parses Torque DTS binary format (T2 v24-26)
 bool DTSShape::load(const uint8_t* data, size_t size) {
-    Console::instance().printf(LogLevel::Debug, "DTS load: %s (%zu bytes)", name.c_str(), size);
-    if (!data || size < 16) return false;
+    if (!data || size < 12) return false;
 
-    uint32_t version = *(const uint32_t*)(data + 4);
-    Console::instance().printf(LogLevel::Debug, "  DTS version: %u", version);
-
-    // DTS v24+ header: [size(4), version(4), nodeCount(4),...]
-    // For now, try loading embedded GLB data if present in DTS extras,
-    // otherwise attempt primitive mesh extraction
-    uint32_t headerSize = *(const uint32_t*)(data);
-    (void)headerSize;
-
-    // Try to find GLB data embedded in DTS extras (custom export tool adds it)
-    if (loadGLB(data, size)) {
-        Console::instance().printf(LogLevel::Debug, "  loaded via embedded GLB");
-        return true;
+    // Check if this is actually a GLB file (embedded in DTS extras from conversion tools)
+    uint32_t magic = *(const uint32_t*)data;
+    if (magic == 0x46546C67) {
+        Console::instance().printf(LogLevel::Debug, "  detected GLB format, using GLB loader");
+        return loadGLB(data, size);
     }
 
-    // Minimal DTS mesh extraction: parse subobjects with triangle strips
-    // DTS uses a sequential format with named sections
-    // Section IDs: 0=End, 1=Header, 2=Node, 3=Mesh, 4=Anim, 5=Skin, 6=Mat, 7=Detail
-    // For now we create a placeholder shape with all available materials from DTS
-    // Full implementation would parse the mesh section with vertices/triangles
+    // Try native DTS loading
+    DTSLoadResult dtsResult = loadDTS(data, size, name.c_str());
+    if (!dtsResult.loaded) {
+        return loadGLB(data, size);
+    }
+
+    meshes = std::move(dtsResult.meshes);
+    materialTextures = std::move(dtsResult.textures);
+    materialFlags = std::move(dtsResult.materialFlags);
+    lightmaps = std::move(dtsResult.lightmaps);
+    materialLightmapIndex = std::move(dtsResult.materialLightmapIndex);
+    materialNames = std::move(dtsResult.materialNames);
+    details = dtsResult.details;
+    animations = dtsResult.animations;
+    nodes = dtsResult.nodes;
+
+    // Replicate first detail level's meshIndex across all details if missing
+    if (details.empty()) {
+        DTSShape::DetailLevel dl;
+        dl.size = 1000.0f;
+        dl.meshIndex = 0;
+        details.push_back(dl);
+    }
 
     loaded = true;
     return true;
+}
+
+bool DTSShape::applySkin(const std::string& skinName) {
+    if (materialNames.empty() || materialTextures.empty() || skinName.empty()) return false;
+
+    auto& fs = Engine::instance().fs();
+    bool anyReplaced = false;
+    static const char* exts[] = {".png", ".bm8", ".jpg", ".jpeg", ".gif", ".bmp", ".dds"};
+
+    for (size_t i = 0; i < materialNames.size(); i++) {
+        std::string matName = materialNames[i];
+        if (matName.empty()) continue;
+
+        // Strip extension for searching
+        auto dot = matName.rfind('.');
+        if (dot != std::string::npos) matName = matName.substr(0, dot);
+
+        // Remove leading "textures/" prefix if present (it's added by texture search)
+        if (matName.find("textures/") == 0) matName = matName.substr(9);
+
+        // Try multiple candidate paths for the skin variant
+        std::vector<std::string> candidates = {
+            matName + "/" + skinName,                        // "skins/base/light_red"
+            "skins/" + skinName + "/" + matName,             // "skins/light_red/skins/base"
+            skinName + "/" + matName,                        // "light_red/skins/base"
+            "skins/" + skinName,                             // "skins/light_red"
+            skinName,                                        // "light_red"
+        };
+
+        // Try each candidate with the "textures/" prefix and each extension
+        bool found = false;
+        for (auto& cand : candidates) {
+            std::string basePath = "textures/" + cand;
+            for (auto* ext : exts) {
+                std::vector<uint8_t> data = fs.read((basePath + ext).c_str());
+                if (!data.empty()) {
+                    Texture tex;
+                    if (std::strcmp(ext, ".bm8") == 0)
+                        tex.loadBM8(data.data(), data.size());
+                    else
+                        tex.load(data.data(), data.size());
+                    if (tex.loaded) {
+                        // Find the texture slot for this material
+                        // materialNames[i] corresponds to the i-th material in the DTS/GLB
+                        // We need to find which texture slot it maps to
+                        if (i < materialTextures.size()) {
+                            materialTextures[i] = std::move(tex);
+                            anyReplaced = true;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (found) break;
+        }
+    }
+
+    if (anyReplaced)
+        Console::instance().printf(LogLevel::Debug, "applySkin('%s'): replaced %zu materials", skinName.c_str(), materialTextures.size());
+    return anyReplaced;
 }
 
 void DTSShape::render(int32_t detailLevel) {
@@ -644,5 +786,183 @@ void DTSShape::render(int32_t detailLevel) {
         mesh.render();
     }
 
+    glEnable(GL_CULL_FACE);
+}
+
+void DTSShape::renderAnimation(const char* animName, float time) {
+    if (!loaded) return;
+
+    auto& r = Engine::instance().renderer();
+    auto* shader = ShaderManager::getDefaultShader();
+    if (shader) shader->bind();
+
+    // Find animation
+    int animIndex = -1;
+    for (size_t i = 0; i < animations.size(); i++) {
+        if (animName && animations[i].name == animName) {
+            animIndex = (int)i;
+            break;
+        }
+    }
+
+    size_t nodeCount = std::max(nodes.size(), (size_t)1);
+    std::vector<MatrixF> nodeLocal(nodeCount);
+    for (auto& m : nodeLocal) m.identity();
+
+    if (animIndex >= 0 && !animations[animIndex].keyframes.empty()) {
+        auto& anim = animations[animIndex];
+
+        float t = time;
+        if (anim.looping && anim.duration > 0)
+            t = fmodf(time, anim.duration);
+        else if (t > anim.duration)
+            t = anim.duration;
+
+        // For each node, find bracketing keyframes and interpolate
+        for (size_t ni = 0; ni < nodeCount; ni++) {
+            int kfA = -1, kfB = -1;
+            for (size_t ki = 0; ki < anim.keyframes.size(); ki++) {
+                auto& kf = anim.keyframes[ki];
+                if (kf.nodeIndex != (int)ni) continue;
+                if (kf.time <= t) {
+                    if (kfA < 0 || kf.time > anim.keyframes[kfA].time)
+                        kfA = (int)ki;
+                }
+                if (kf.time >= t) {
+                    if (kfB < 0 || kf.time < anim.keyframes[kfB].time)
+                        kfB = (int)ki;
+                }
+            }
+
+            if (kfA < 0 && kfB < 0) continue;
+
+            auto* ka = (kfA >= 0) ? &anim.keyframes[kfA] : nullptr;
+            auto* kb = (kfB >= 0) ? &anim.keyframes[kfB] : nullptr;
+
+            if (ka && kb && ka->time == kb->time) kb = nullptr;
+
+            float lerpT = 0;
+            if (ka && kb && kb->time != ka->time)
+                lerpT = (t - ka->time) / (kb->time - ka->time);
+
+            Point3F trans;
+            if (ka && !kb) trans = ka->translation;
+            else if (!ka && kb) trans = kb->translation;
+            else trans = {
+                Math::lerp(ka->translation.x, kb->translation.x, lerpT),
+                Math::lerp(ka->translation.y, kb->translation.y, lerpT),
+                Math::lerp(ka->translation.z, kb->translation.z, lerpT)
+            };
+
+            QuatF rot;
+            if (ka && !kb) rot = ka->rotation;
+            else if (!ka && kb) rot = kb->rotation;
+            else {
+                rot = {
+                    Math::lerp(ka->rotation.x, kb->rotation.x, lerpT),
+                    Math::lerp(ka->rotation.y, kb->rotation.y, lerpT),
+                    Math::lerp(ka->rotation.z, kb->rotation.z, lerpT),
+                    Math::lerp(ka->rotation.w, kb->rotation.w, lerpT)
+                };
+                float len = sqrtf(rot.x * rot.x + rot.y * rot.y + rot.z * rot.z + rot.w * rot.w);
+                if (len > 0.0001f) { rot.x /= len; rot.y /= len; rot.z /= len; rot.w /= len; }
+            }
+
+            Point3F scale;
+            if (ka && !kb) scale = ka->scale;
+            else if (!ka && kb) scale = kb->scale;
+            else scale = {
+                Math::lerp(ka->scale.x, kb->scale.x, lerpT),
+                Math::lerp(ka->scale.y, kb->scale.y, lerpT),
+                Math::lerp(ka->scale.z, kb->scale.z, lerpT)
+            };
+
+            MatrixF tMat, sMat;
+            tMat.setTranslation(trans);
+            sMat.setScale(scale);
+            nodeLocal[ni] = tMat * rot.toMatrix() * sMat;
+        }
+    }
+
+    // Build world transforms through hierarchy
+    std::vector<MatrixF> nodeWorld(nodeCount);
+    for (size_t ni = 0; ni < nodeCount; ni++) {
+        int parent = (ni < nodes.size()) ? nodes[ni].parentIndex : -1;
+        if (parent >= 0 && parent < (int)ni)
+            nodeWorld[ni] = nodeWorld[parent] * nodeLocal[ni];
+        else
+            nodeWorld[ni] = nodeLocal[ni];
+    }
+
+    // Render meshes
+    const MatrixF& baseModel = r.modelMatrix();
+
+    if (isInterior) {
+        glDisable(GL_CULL_FACE);
+    } else {
+        glEnable(GL_CULL_FACE);
+    }
+
+    for (auto& mesh : meshes) {
+        // Compute final model matrix
+        MatrixF finalModel = baseModel;
+        if (mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)nodeCount)
+            finalModel = baseModel * nodeWorld[mesh.nodeIndex];
+
+        r.setModel(finalModel);
+
+        uint32_t flags = 0;
+        if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialTextures.size()) {
+            auto& tex = materialTextures[mesh.materialIndex];
+            if (tex.loaded) {
+                tex.bind(0);
+                if (shader) shader->setUniform("uUseTexture", (int32_t)1);
+            } else {
+                if (shader) shader->setUniform("uUseTexture", (int32_t)0);
+            }
+            if (mesh.materialIndex < (int)materialFlags.size())
+                flags = materialFlags[mesh.materialIndex];
+        } else {
+            if (shader) shader->setUniform("uUseTexture", (int32_t)0);
+        }
+
+        int lmIdx = (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
+            ? materialLightmapIndex[mesh.materialIdx] : -1;
+        if (lmIdx >= 0 && lmIdx < (int)lightmaps.size() && lightmaps[lmIdx].loaded) {
+            lightmaps[lmIdx].bind(1);
+            if (shader) shader->setUniform("uLightmap", (int32_t)1);
+            if (shader) shader->setUniform("uUseLightmap", (int32_t)1);
+        } else {
+            if (shader) shader->setUniform("uUseLightmap", (int32_t)0);
+        }
+
+        if (flags & MatFlag_Additive) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            glDepthMask(GL_FALSE);
+        } else if (flags & MatFlag_Translucent) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        } else {
+            glDisable(GL_BLEND);
+            glDepthMask(GL_TRUE);
+        }
+
+        if (shader) shader->setUniform("uSelfIlluminated", (int32_t)((flags & MatFlag_SelfIlluminating) ? 1 : 0));
+
+        bool useEnvMap = false;
+        if (r.sky && r.sky->emap.loaded && !(flags & MatFlag_NeverEnvMap)) {
+            useEnvMap = true;
+        }
+        if (shader) shader->setUniform("uUseEnvMap", (int32_t)(useEnvMap ? 1 : 0));
+
+        mesh.render();
+        r.stats.drawCalls++;
+        r.stats.triangles += (int32_t)(mesh.indices.size() / 3);
+    }
+
+    // Restore base model
+    r.setModel(baseModel);
     glEnable(GL_CULL_FACE);
 }

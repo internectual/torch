@@ -67,18 +67,24 @@ bool Platform::processEvents() {
     inputState.mouseDeltaX = 0;
     inputState.mouseDeltaY = 0;
     inputState.mouseWheel = 0;
+    inputState.textInput.clear();
 
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         switch (e.type) {
             case SDL_EVENT_QUIT:
+            case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
                 running = false;
                 return false;
+            case SDL_EVENT_TEXT_INPUT:
+                inputState.textInput += e.text.text;
+                break;
             case SDL_EVENT_KEY_DOWN:
-                if (e.key.key < 512) inputState.keysDown[e.key.key] = true;
+                if (e.key.scancode < 512) inputState.keysDown[e.key.scancode] = true;
+                if (e.key.key == SDLK_ESCAPE) { running = false; return false; }
                 break;
             case SDL_EVENT_KEY_UP:
-                if (e.key.key < 512) inputState.keysDown[e.key.key] = false;
+                if (e.key.scancode < 512) inputState.keysDown[e.key.scancode] = false;
                 break;
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
                 if (e.button.button < 8) inputState.mouseButtons[e.button.button] = true;
@@ -128,3 +134,6 @@ void* Platform::nativeWindow() { return impl->window; }
 void* Platform::nativeGLContext() { return impl->glContext; }
 
 void Platform::setResizeCallback(ResizeCallback cb) { impl->resizeCb = std::move(cb); }
+
+void Platform::startTextInput() { SDL_StartTextInput(impl->window); }
+void Platform::stopTextInput() { SDL_StopTextInput(impl->window); }

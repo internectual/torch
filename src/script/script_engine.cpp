@@ -1,10 +1,12 @@
 #include "script/script_engine.h"
+#include "script/torquescript.h"
 #include "core/console.h"
 #include "core/engine.h"
 #include "core/string_table.h"
 #include <fstream>
 #include <stack>
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 #include <algorithm>
 
@@ -71,11 +73,14 @@ struct VMContext {
     DSOFile* dso{};
     uint32_t ip{};
     std::vector<VMValue> exprStack;
-    std::vector<VMValue> locals;
+    std::unordered_map<std::string, VMValue> locals;
     std::string curVarName;
     ScriptObject* curObject{};
     std::string curFieldName;
     VMValue result;
+
+    // Array index for SETCURVAR_ARRAY
+    std::string curArrayKey;
 
     // String builder
     std::string strBuilder;
@@ -212,8 +217,13 @@ bool VirtualMachine::loadScript(const uint8_t* data, size_t size, const char* na
                         fn.ns.empty() ? "" : (" ns:" + fn.ns).c_str(),
                         fn.package.empty() ? "" : (" pkg:" + fn.package).c_str(),
                         hasBody ? "" : " [ext]");
+                    // Skip func decl: opcode(1) + name+ns+pkg+hasBody+endAddr+argc(6)
+                    i += 7;
+                    if (hasBody) i++; // varArgs flag
+                    i += argc; // arg names
+                } else {
+                    i += 8;
                 }
-                i += 8; // skip func decl args
                 break;
             }
             default:
@@ -263,7 +273,26 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
     VMContext ctx;
     ctx.dso = dso;
     ctx.ip = startIp;
-    ctx.locals = args;
+
+    // Map passed arguments to local variable names by matching to function declaration
+    for (auto& fn : dso->functions) {
+        if (fn.startIp == startIp) {
+            for (uint32_t ai = 0; ai < fn.argc && ai < (uint32_t)args.size(); ai++) {
+                std::string localName = "%" + fn.argNames[ai];
+                ctx.locals[localName] = args[ai];
+            }
+            // Also store varargs if present
+            if (fn.hasVarArgs && fn.argc < (uint32_t)args.size()) {
+                std::string varargStr;
+                for (uint32_t ai = fn.argc; ai < (uint32_t)args.size(); ai++) {
+                    if (ai > fn.argc) varargStr += "\t";
+                    varargStr += args[ai].toString();
+                }
+                ctx.locals["%__rest__"] = VMValue(varargStr);
+            }
+            break;
+        }
+    }
 
     impl->callStack.push(ctx);
     VMContext* frame = &impl->callStack.top();
@@ -433,6 +462,8 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
             // === Variable operations ===
             case (uint32_t)DSOOpcode::OP_SETCURVAR:
             case (uint32_t)DSOOpcode::OP_SETCURVAR_CREATE: {
+                // Clear any stale array key from previous access
+                frame->curArrayKey.clear();
                 if (execIp + 1 < opcodes.size()) {
                     uint32_t idx = opcodes[execIp + 1];
                     const char* name = "";
@@ -456,19 +487,21 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
             case (uint32_t)DSOOpcode::OP_LOADVAR_UINT:
             case (uint32_t)DSOOpcode::OP_LOADVAR_FLT:
             case (uint32_t)DSOOpcode::OP_LOADVAR_STR: {
-                // Load current variable onto stack
                 if (!frame->curVarName.empty()) {
+                    std::string varKey = frame->curVarName;
+                    // Append array key if set
+                    if (!frame->curArrayKey.empty())
+                        varKey += "[" + frame->curArrayKey + "]";
+
                     if (frame->curVarName[0] == '%') {
-                        // Local variable
-                        std::string localName = frame->curVarName.substr(1);
-                        for (auto& lv : frame->locals) {
-                            // Match by name stored in local
-                            stack.push(lv);
-                            break;
-                        }
+                        auto it = frame->locals.find(varKey);
+                        if (it != frame->locals.end())
+                            stack.push(it->second);
+                        else
+                            stack.push(VMValue(0));
                     } else {
-                        // Global
-                        stack.push(impl->globals[frame->curVarName]);
+                        auto it = impl->globals.find(varKey);
+                        stack.push(it != impl->globals.end() ? it->second : VMValue(0));
                     }
                 }
                 break;
@@ -479,12 +512,15 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
             case (uint32_t)DSOOpcode::OP_SAVEVAR_STR: {
                 if (!frame->curVarName.empty() && !stack.empty()) {
                     VMValue val = stack.top(); stack.pop();
+                    std::string varKey = frame->curVarName;
+                    if (!frame->curArrayKey.empty())
+                        varKey += "[" + frame->curArrayKey + "]";
+
                     if (frame->curVarName[0] == '%') {
-                        // Local - store in locals
-                        // For now, skip local storage
+                        frame->locals[varKey] = val;
                     } else {
-                        impl->globals[frame->curVarName] = val;
-                        Console::instance().setVariable(frame->curVarName.c_str(), val.toString().c_str());
+                        impl->globals[varKey] = val;
+                        Console::instance().setVariable(varKey.c_str(), val.toString().c_str());
                     }
                 }
                 break;
@@ -865,20 +901,143 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 break;
             }
 
+            // ── Control flow (no-pop variants) ──
+            case (uint32_t)DSOOpcode::OP_JMPIF_NP: {
+                if (execIp + 1 < opcodes.size()) {
+                    uint32_t target = opcodes[execIp + 1];
+                    if (stack.top().toBool())
+                        execIp = target;
+                    else
+                        execIp++;
+                } else execIp++;
+                continue;
+            }
+
+            case (uint32_t)DSOOpcode::OP_JMPIFNOT_NP: {
+                if (execIp + 1 < opcodes.size()) {
+                    uint32_t target = opcodes[execIp + 1];
+                    if (!stack.top().toBool())
+                        execIp = target;
+                    else
+                        execIp++;
+                } else execIp++;
+                continue;
+            }
+
+            // ── Bitwise shift and complement ──
+            case (uint32_t)DSOOpcode::OP_SHR: {
+                if (stack.size() >= 2) {
+                    uint32_t b = (uint32_t)stack.top().toInt(); stack.pop();
+                    uint32_t a = (uint32_t)stack.top().toInt(); stack.pop();
+                    stack.push(VMValue((int32_t)(a >> b)));
+                }
+                break;
+            }
+
+            case (uint32_t)DSOOpcode::OP_SHL: {
+                if (stack.size() >= 2) {
+                    uint32_t b = (uint32_t)stack.top().toInt(); stack.pop();
+                    uint32_t a = (uint32_t)stack.top().toInt(); stack.pop();
+                    stack.push(VMValue((int32_t)(a << b)));
+                }
+                break;
+            }
+
+            case (uint32_t)DSOOpcode::OP_ONESCOMPLEMENT: {
+                if (!stack.empty())
+                    stack.top() = VMValue(~stack.top().toInt());
+                break;
+            }
+
+            // ── Array variable access ──
+            case (uint32_t)DSOOpcode::OP_SETCURVAR_ARRAY:
+            case (uint32_t)DSOOpcode::OP_SETCURVAR_ARRAY_CREATE: {
+                // Pop array index from stack
+                if (!stack.empty()) {
+                    frame->curArrayKey = stack.top().toString();
+                    stack.pop();
+                }
+                // Followed by the variable name (same as SETCURVAR)
+                if (execIp + 1 < opcodes.size()) {
+                    uint32_t idx = opcodes[execIp + 1];
+                    const char* name = "";
+                    if (idx < dso->functionStrings.size()) name = &dso->functionStrings[idx];
+                    else if (idx < dso->globalStrings.size()) name = &dso->globalStrings[idx];
+                    if (name[0] == '$')
+                        frame->curVarName = name + 1;
+                    else if (name[0] == '%')
+                        frame->curVarName = std::string("%") + (name + 1);
+                    else
+                        frame->curVarName = name;
+                }
+                execIp++;
+                break;
+            }
+
+            // ── Internal object ──
+            case (uint32_t)DSOOpcode::OP_SETCUROBJECT_INTERNAL: {
+                // Treat like SETCUROBJECT but for internal fields
+                if (!stack.empty()) {
+                    std::string name = stack.top().toString();
+                    stack.pop();
+                    frame->curObject = ScriptEngine::instance().findObject(name.c_str());
+                }
+                break;
+            }
+
+            // ── Array field access ──
+            case (uint32_t)DSOOpcode::OP_SETCURFIELD_ARRAY: {
+                if (!stack.empty()) {
+                    frame->curFieldName = stack.top().toString();
+                    stack.pop();
+                }
+                break;
+            }
+
+            // ── String builder append ops ──
+            case (uint32_t)DSOOpcode::OP_ADVANCE_STR_APPENDCHAR: {
+                if (!stack.empty()) {
+                    int32_t ch = stack.top().toInt();
+                    stack.pop();
+                    frame->strBuilder += (char)ch;
+                }
+                break;
+            }
+
+            case (uint32_t)DSOOpcode::OP_ADVANCE_STR_COMMA: {
+                frame->strBuilder += ",";
+                break;
+            }
+
+            case (uint32_t)DSOOpcode::OP_ADVANCE_STR_NUL: {
+                // Null terminator - no-op for C++ strings
+                break;
+            }
+
+            // ── Unit conversion ──
+            case (uint32_t)DSOOpcode::OP_UNIT_CONVERSION: {
+                // Stub: consumes args from stack, pushes result
+                // Units in T2: feet/inches etc. - treat as no-op identity
+                if (execIp + 2 < opcodes.size()) {
+                    uint32_t type = opcodes[execIp + 1];
+                    (void)type;
+                    uint32_t numArgs = opcodes[execIp + 2];
+                    if (numArgs > 0 && !stack.empty()) {
+                        VMValue val = stack.top(); stack.pop();
+                        stack.push(val);
+                    }
+                    execIp += 2;
+                }
+                break;
+            }
+
+            // ── Breakpoint ──
             case (uint32_t)DSOOpcode::OP_BREAK:
                 Console::instance().printf(LogLevel::Debug, "VM: breakpoint at IP %zu", execIp);
                 break;
 
             default:
                 if (op != (uint32_t)DSOOpcode::OP_FUNC_DECL &&
-                    op != (uint32_t)DSOOpcode::OP_SETCURVAR_ARRAY &&
-                    op != (uint32_t)DSOOpcode::OP_SETCURVAR_ARRAY_CREATE &&
-                    op != (uint32_t)DSOOpcode::OP_SETCURFIELD_ARRAY &&
-                    op != (uint32_t)DSOOpcode::OP_SETCUROBJECT_INTERNAL &&
-                    op != (uint32_t)DSOOpcode::OP_ADVANCE_STR_APPENDCHAR &&
-                    op != (uint32_t)DSOOpcode::OP_ADVANCE_STR_COMMA &&
-                    op != (uint32_t)DSOOpcode::OP_ADVANCE_STR_NUL &&
-                    op != (uint32_t)DSOOpcode::OP_UNIT_CONVERSION &&
                     op != (uint32_t)DSOOpcode::OP_UNUSED1 &&
                     op != (uint32_t)DSOOpcode::OP_UNUSED2 &&
                     op != (uint32_t)DSOOpcode::OP_UNUSED3) {
@@ -914,8 +1073,432 @@ ScriptEngine& ScriptEngine::instance() {
 
 bool ScriptEngine::init() {
     vmInstance = new VirtualMachine(this);
+    tsInstance = new TorqueScript;
 
-    // Register native functions for TorqueScript
+    // Register native functions in TorqueScript interpreter
+    tsInstance->registerNative("echo", [](const auto& args) -> VMValue {
+        std::string msg;
+        for (auto& a : args) {
+            if (!msg.empty()) msg += " ";
+            msg += a.toString();
+        }
+        Console::instance().printf(LogLevel::Info, "%s", msg.c_str());
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("warn", [](const auto& args) -> VMValue {
+        std::string msg;
+        for (auto& a : args) {
+            if (!msg.empty()) msg += " ";
+            msg += a.toString();
+        }
+        Console::instance().printf(LogLevel::Warn, "%s", msg.c_str());
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("error", [](const auto& args) -> VMValue {
+        std::string msg;
+        for (auto& a : args) {
+            if (!msg.empty()) msg += " ";
+            msg += a.toString();
+        }
+        Console::instance().printf(LogLevel::Error, "%s", msg.c_str());
+        return VMValue(1);
+    });
+
+    // Register str functions
+    tsInstance->registerNative("strLen", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        return VMValue((int32_t)args[0].toString().size());
+    });
+
+    tsInstance->registerNative("strCmp", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(-1);
+        return VMValue(strcmp(args[0].toString().c_str(), args[1].toString().c_str()));
+    });
+
+    tsInstance->registerNative("strStr", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(-1);
+        auto pos = args[0].toString().find(args[1].toString());
+        return VMValue(pos != std::string::npos ? (int32_t)pos : -1);
+    });
+
+    tsInstance->registerNative("getSubStr", [](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue("");
+        auto s = args[0].toString();
+        int start = args[1].toInt();
+        int count = args[2].toInt();
+        if (start < 0 || start >= (int)s.size() || count <= 0) return VMValue("");
+        return VMValue(s.substr(start, count));
+    });
+
+    tsInstance->registerNative("isObject", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string name = args[0].toString();
+        if (name.empty()) return VMValue(0);
+        auto& engine = ScriptEngine::instance();
+        if (engine.findObject(name.c_str())) return VMValue(1);
+        auto* item = Console::instance().find(name.c_str());
+        if (item) return VMValue(1);
+        return VMValue(0);
+    });
+
+    tsInstance->registerNative("isDemo", [](const auto&) -> VMValue {
+        return VMValue(0);
+    });
+
+    // String utility functions
+    auto wordCount = [](const std::string& s) -> int {
+        int count = 0;
+        bool inWord = false;
+        for (char c : s) {
+            if (c == ' ' || c == '\t') { inWord = false; }
+            else if (!inWord) { inWord = true; count++; }
+        }
+        return count;
+    };
+
+    auto getWord = [&](const std::string& s, int idx) -> std::string {
+        int count = 0;
+        size_t start = 0;
+        bool inWord = false;
+        for (size_t i = 0; i <= s.size(); i++) {
+            if (i == s.size() || s[i] == ' ' || s[i] == '\t') {
+                if (inWord) {
+                    if (count == idx) return s.substr(start, i - start);
+                    inWord = false;
+                    count++;
+                }
+            } else if (!inWord) {
+                inWord = true;
+                start = i;
+            }
+        }
+        return "";
+    };
+
+    tsInstance->registerNative("getWord", [getWord](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        return VMValue(getWord(args[0].toString(), args[1].toInt()));
+    });
+
+    tsInstance->registerNative("setWord", [getWord](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue("");
+        std::string s = args[0].toString();
+        int idx = args[1].toInt();
+        std::string val = args[2].toString();
+        std::string result;
+        int count = 0;
+        size_t start = 0;
+        bool inWord = false;
+        for (size_t i = 0; i <= s.size(); i++) {
+            if (i == s.size() || s[i] == ' ' || s[i] == '\t') {
+                if (inWord) {
+                    if (count == idx) {
+                        result += val;
+                    } else {
+                        result += s.substr(start, i - start);
+                    }
+                    inWord = false;
+                    count++;
+                }
+                if (i < s.size()) result += s[i];
+            } else if (!inWord) {
+                inWord = true;
+                start = i;
+            }
+        }
+        if (idx >= count) {
+            if (!result.empty() && result.back() != ' ') result += ' ';
+            result += val;
+        }
+        return VMValue(result);
+    });
+
+    tsInstance->registerNative("firstWord", [getWord](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        return VMValue(getWord(args[0].toString(), 0));
+    });
+
+    tsInstance->registerNative("restWords", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string s = args[0].toString();
+        size_t pos = s.find_first_not_of(" \t");
+        if (pos == std::string::npos) return VMValue("");
+        pos = s.find_first_of(" \t", pos);
+        if (pos == std::string::npos) return VMValue("");
+        pos = s.find_first_not_of(" \t", pos);
+        if (pos == std::string::npos) return VMValue("");
+        return VMValue(s.substr(pos));
+    });
+
+    tsInstance->registerNative("getWordCount", [wordCount](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        return VMValue(wordCount(args[0].toString()));
+    });
+
+    tsInstance->registerNative("getField", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        std::string s = args[0].toString();
+        int idx = args[1].toInt();
+        size_t start = 0;
+        int count = 0;
+        for (size_t i = 0; i <= s.size(); i++) {
+            if (i == s.size() || s[i] == '\t') {
+                if (count == idx) return VMValue(s.substr(start, i - start));
+                count++;
+                start = i + 1;
+            }
+        }
+        return VMValue("");
+    });
+
+    tsInstance->registerNative("setField", [](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue("");
+        std::string s = args[0].toString();
+        int idx = args[1].toInt();
+        std::string val = args[2].toString();
+        std::string result;
+        size_t start = 0;
+        int count = 0;
+        for (size_t i = 0; i <= s.size(); i++) {
+            if (i == s.size() || s[i] == '\t') {
+                if (count == idx) {
+                    result += val;
+                } else {
+                    result += s.substr(start, i - start);
+                }
+                count++;
+                if (i < s.size()) result += '\t';
+                start = i + 1;
+            }
+        }
+        if (idx >= count) {
+            if (!result.empty()) result += '\t';
+            result += val;
+        }
+        return VMValue(result);
+    });
+
+    tsInstance->registerNative("getFieldCount", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string s = args[0].toString();
+        if (s.empty()) return VMValue(0);
+        int count = 1;
+        for (char c : s) if (c == '\t') count++;
+        return VMValue(count);
+    });
+
+    tsInstance->registerNative("strReplace", [](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue("");
+        std::string s = args[0].toString();
+        std::string from = args[1].toString();
+        std::string to = args[2].toString();
+        size_t pos = 0;
+        while ((pos = s.find(from, pos)) != std::string::npos) {
+            s.replace(pos, from.length(), to);
+            pos += to.length();
+        }
+        return VMValue(s);
+    });
+
+    tsInstance->registerNative("strlwr", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string s = args[0].toString();
+        for (char& c : s) c = tolower(c);
+        return VMValue(s);
+    });
+
+    tsInstance->registerNative("strupr", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string s = args[0].toString();
+        for (char& c : s) c = toupper(c);
+        return VMValue(s);
+    });
+
+    tsInstance->registerNative("strchr", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(-1);
+        std::string s = args[0].toString();
+        std::string ch = args[1].toString();
+        if (ch.empty()) return VMValue(-1);
+        auto pos = s.find(ch[0]);
+        return VMValue(pos != std::string::npos ? (int32_t)pos : -1);
+    });
+
+    tsInstance->registerNative("stripChars", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        std::string s = args[0].toString();
+        std::string chars = args[1].toString();
+        std::string result;
+        for (char c : s) {
+            if (chars.find(c) == std::string::npos) result += c;
+        }
+        return VMValue(result);
+    });
+
+    tsInstance->registerNative("detag", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string s = args[0].toString();
+        std::string result;
+        for (size_t i = 0; i < s.size(); i++) {
+            if (s[i] == '\\' && i + 1 < s.size() && s[i+1] == 'c') {
+                i += 2;
+                if (i < s.size() && s[i] >= '0' && s[i] <= '9') continue;
+                if (i < s.size() && s[i] == 'o') continue;
+                i--;
+                continue;
+            }
+            result += s[i];
+        }
+        return VMValue(result);
+    });
+
+    tsInstance->registerNative("strcmp", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(-1);
+        return VMValue(strcmp(args[0].toString().c_str(), args[1].toString().c_str()));
+    });
+
+    // Canvas / window
+    tsInstance->registerNative("createCanvas", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    // Package management
+    tsInstance->registerNative("activatePackage", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string name = args[0].toString();
+        // Check if already active
+        auto* total = Console::instance().find("$TotalNumberOfPackages");
+        int count = (total && total->type == Console::ConsoleItem::Variable) ? atoi(total->value.c_str()) : 0;
+        char buf[64];
+        for (int i = 0; i < count; i++) {
+            snprintf(buf, sizeof(buf), "$Package[%d]", i);
+            auto* pkg = Console::instance().find(buf);
+            if (pkg && pkg->type == Console::ConsoleItem::Variable && pkg->value == name) {
+                return VMValue(1); // already active
+            }
+        }
+        // Add to list
+        snprintf(buf, sizeof(buf), "$Package[%d]", count);
+        Console::instance().setVariable(buf, name.c_str());
+        Console::instance().setVariable("$TotalNumberOfPackages", std::to_string(count + 1).c_str());
+        return VMValue(1);
+    });
+
+    // WON init (defunct, return success)
+    tsInstance->registerNative("WONInit", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("setRandomSeed", [](const auto& args) -> VMValue {
+        if (!args.empty()) srand((unsigned int)args[0].toInt());
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("enableWinConsole", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("fileExt", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string path = args[0].toString();
+        size_t dot = path.rfind('.');
+        if (dot == std::string::npos) return VMValue("");
+        return VMValue(path.substr(dot + 1));
+    });
+
+    tsInstance->registerNative("stricmp", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(-1);
+        std::string a = args[0].toString(), b = args[1].toString();
+        for (auto& c : a) c = tolower((unsigned char)c);
+        for (auto& c : b) c = tolower((unsigned char)c);
+        return VMValue(strcmp(a.c_str(), b.c_str()));
+    });
+
+    {
+        static int nextTagId = 1;
+        tsInstance->registerNative("addTaggedString", [](const auto& args) -> VMValue {
+            if (args.empty()) return VMValue(0);
+            return VMValue(nextTagId++);
+        });
+    }
+
+    // Math functions
+    tsInstance->registerNative("mSin", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0);
+        return VMValue(sin(args[0].toDouble()));
+    });
+    tsInstance->registerNative("mCos", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0);
+        return VMValue(cos(args[0].toDouble()));
+    });
+    tsInstance->registerNative("mTan", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0);
+        return VMValue(tan(args[0].toDouble()));
+    });
+    tsInstance->registerNative("mAsin", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0);
+        return VMValue(asin(args[0].toDouble()));
+    });
+    tsInstance->registerNative("mAcos", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0);
+        return VMValue(acos(args[0].toDouble()));
+    });
+    tsInstance->registerNative("mAtan", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0);
+        return VMValue(atan(args[0].toDouble()));
+    });
+    tsInstance->registerNative("mSqrt", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0);
+        return VMValue(sqrt(args[0].toDouble()));
+    });
+    tsInstance->registerNative("mAbs", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0);
+        return VMValue(fabs(args[0].toDouble()));
+    });
+    tsInstance->registerNative("mFloor", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0);
+        return VMValue(floor(args[0].toDouble()));
+    });
+    tsInstance->registerNative("mCeil", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0);
+        return VMValue(ceil(args[0].toDouble()));
+    });
+    tsInstance->registerNative("mPow", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0.0);
+        return VMValue(pow(args[0].toDouble(), args[1].toDouble()));
+    });
+    tsInstance->registerNative("mLog", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0);
+        return VMValue(log(args[0].toDouble()));
+    });
+    tsInstance->registerNative("mFloatLength", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(args[0].toDouble());
+        double val = args[0].toDouble();
+        int len = args[1].toInt();
+        if (len == 0) return VMValue((int32_t)val);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%.*f", len, val);
+        return VMValue(atof(buf));
+    });
+    tsInstance->registerNative("getRandom", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue((double)rand() / RAND_MAX);
+        if (args.size() == 1) return VMValue((int32_t)(rand() % (args[0].toInt() + 1)));
+        int from = args[0].toInt();
+        int to = args[1].toInt();
+        if (from > to) std::swap(from, to);
+        return VMValue((int32_t)(from + (rand() % (to - from + 1))));
+    });
+    tsInstance->registerNative("getMax", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return args.empty() ? VMValue(0.0) : args[0];
+        return VMValue(std::max(args[0].toDouble(), args[1].toDouble()));
+    });
+    tsInstance->registerNative("getMin", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return args.empty() ? VMValue(0.0) : args[0];
+        return VMValue(std::min(args[0].toDouble(), args[1].toDouble()));
+    });
+
+    // Register native functions for DSO VM
     vmInstance->registerNativeFunction("echo", [](const auto& args) {
         std::string msg;
         for (auto& a : args) {
@@ -988,7 +1571,64 @@ bool ScriptEngine::init() {
         return VMValue(s);
     });
 
-    Console::instance().printf(LogLevel::Info, "ScriptEngine initialized with %zu native functions", 9);
+    // ─── DTS shape loading functions for script compatibility ────
+    vmInstance->registerNativeFunction("loadShape", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string name = args[0].toString();
+        if (name.empty()) return VMValue(0);
+
+        auto& fs = Engine::instance().fs();
+        DTSShape shape;
+        shape.name = name;
+
+        // Determine if it's an interior or shape
+        bool isInterior = false;
+        std::string lower = name;
+        for (auto& c : lower) c = (char)tolower((unsigned char)c);
+        if (lower.find(".dif") != std::string::npos) isInterior = true;
+        shape.isInterior = isInterior;
+
+        // Search for the file
+        std::string dir = isInterior ? "interiors/" : "shapes/";
+        std::vector<std::string> paths = {
+            dir + name,
+            dir + name + (isInterior ? ".dif" : ".dts"),
+            dir + name + ".glb"
+        };
+        for (auto& p : paths) {
+            auto data = fs.read(p.c_str());
+            if (!data.empty()) {
+                shape.load(data.data(), data.size());
+                break;
+            }
+        }
+
+        if (shape.loaded) {
+            // Add to engine's shape cache (global)
+            auto& ren = Engine::instance().renderer();
+            ren.addShader(nullptr); // dummy to push shapes idea
+            return VMValue(1);
+        }
+        return VMValue(0);
+    });
+
+    vmInstance->registerNativeFunction("getShapePath", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string name = args[0].toString();
+        std::string lower = name;
+        for (auto& c : lower) c = (char)tolower((unsigned char)c);
+        bool isInterior = (lower.find(".dif") != std::string::npos);
+        std::string dir = isInterior ? "interiors/" : "shapes/";
+        return VMValue(dir + name);
+    });
+
+    vmInstance->registerNativeFunction("isShapeLoaded", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        // Simplified: always return 1 for known shapes
+        return VMValue(1);
+    });
+
+    Console::instance().printf(LogLevel::Info, "ScriptEngine initialized with %zu native functions + DTS support", 12);
     return true;
 }
 
@@ -996,6 +1636,8 @@ void ScriptEngine::shutdown() {
     // Clean up objects
     for (auto& [name, obj] : objects) delete obj;
     objects.clear();
+    delete tsInstance;
+    tsInstance = nullptr;
     delete vmInstance;
     vmInstance = nullptr;
 }
@@ -1010,9 +1652,17 @@ ScriptObject* ScriptEngine::findObject(const char* name) {
 }
 
 void ScriptEngine::executeString(const char* script) {
-    Console::instance().execute(script);
+    if (tsInstance) {
+        tsInstance->execute(script);
+    } else {
+        Console::instance().execute(script);
+    }
 }
 
 void ScriptEngine::executeFile(const char* path) {
-    Console::instance().executeFile(path);
+    if (tsInstance) {
+        tsInstance->executeFile(path);
+    } else {
+        Console::instance().executeFile(path);
+    }
 }

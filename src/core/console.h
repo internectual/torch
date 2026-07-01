@@ -48,9 +48,13 @@ public:
 
     ConsoleItem* find(const char* name);
     void list(const char* pattern = nullptr);
+    using ItemCallback = std::function<void(const char* name, const ConsoleItem&)>;
+    void forEach(ItemCallback cb) const;
 
     void setLogFile(const char* path);
     void processEvents();
+
+    const std::vector<std::string>& getLog() const;
 
 private:
     struct Impl;

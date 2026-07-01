@@ -73,4 +73,42 @@ namespace T2Protocol {
     struct ChallengeResponse {
         uint32_t response[2];
     };
+
+    // ─── Game Messages ─────────────────────────────────────────────
+
+    struct MoveMessage {
+        float posX, posY, posZ;
+        float rotZ, rotX;
+        uint8_t flags;
+        float lookX, lookY;
+    };
+
+    struct UpdateMessage {
+        float posX, posY, posZ;
+        float rotZ, rotX;
+        float velX, velY, velZ;
+        float health, energy;
+        uint8_t flags;
+    };
+
+    bool encodeMove(uint8_t* buf, size_t bufSize, const MoveMessage& msg);
+    bool decodeMove(const uint8_t* data, size_t size, MoveMessage& msg);
+    bool encodeUpdate(uint8_t* buf, size_t bufSize, const UpdateMessage& msg);
+    bool decodeUpdate(const uint8_t* data, size_t size, UpdateMessage& msg);
+};
+
+// ─── Game Server ──────────────────────────────────────────────────
+
+class GameServer {
+public:
+    GameServer();
+    ~GameServer();
+
+    bool start(uint16_t port);
+    void stop();
+    void update();
+
+private:
+    struct Impl;
+    Impl* impl;
 };

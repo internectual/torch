@@ -40,6 +40,7 @@ void Console::printf(LogLevel level, const char* fmt, ...) {
     impl->log.push_back(msg);
     fputs(msg.c_str(), stdout);
     fputc('\n', stdout);
+    fflush(stdout);
 
     if (impl->logFile) {
         fprintf(impl->logFile, "%s\n", msg.c_str());
@@ -180,6 +181,16 @@ void Console::executeFile(const char* path) {
     fclose(f);
 }
 
+void Console::forEach(ItemCallback cb) const {
+    for (auto& [name, item] : impl->items) {
+        cb(name.c_str(), item);
+    }
+}
+
 void Console::processEvents() {
     // Input processing for interactive console
+}
+
+const std::vector<std::string>& Console::getLog() const {
+    return impl->log;
 }

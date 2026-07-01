@@ -23,6 +23,8 @@ public:
     void setGravity(float g) { gravity = g; }
     float getGravity() const { return gravity; }
 
+    void resolveCollision(Player* player, Point3F& pos, float dt);
+
 private:
     float gravity = -20.0f;
     float friction = 0.85f;

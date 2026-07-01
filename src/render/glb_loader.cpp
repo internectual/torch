@@ -194,7 +194,6 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
     uint32_t fileLen = data[8] | ((uint32_t)data[9] << 8) | ((uint32_t)data[10] << 16) | ((uint32_t)data[11] << 24);
 
     if (magic != 0x46546C67) {
-        Console::instance().printf(LogLevel::Error, "GLB: invalid magic 0x%08X", magic);
         return result;
     }
     if (version != 2) {
@@ -392,8 +391,6 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
 
     // ─── Parse meshes ──────────────────────────────────────────────
     const JVal& meshArr = root["meshes"];
-    Console::instance().printf(LogLevel::Debug, "GLB: %zu meshes, %zu accessors, %zu bufViews, %zu materials, %zu textures, %zu images, bin=%zu bytes",
-        meshArr.size(), accessors.size(), bufViews.size(), matInfos.size(), result.textures.size(), glbImages.size(), binLen);
 
     for (size_t m = 0; m < meshArr.size(); m++) {
         const JVal& primArr = meshArr[m]["primitives"];
@@ -525,7 +522,110 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
         }
     }
 
-    Console::instance().printf(LogLevel::Debug, "GLB: loaded %zu meshes, %zu textures", result.meshes.size(), result.textures.size());
+    // ─── Parse animations ──────────────────────────────────
+    auto readAccessorFloats = [&](int accIdx) -> std::vector<float> {
+        if (accIdx < 0 || accIdx >= (int)accessors.size()) return {};
+        const auto& acc = accessors[accIdx];
+        if (acc.bufferView < 0 || acc.bufferView >= (int)bufViews.size()) return {};
+        const auto& bv = bufViews[acc.bufferView];
+        int compSz = componentSize(acc.componentType);
+        int compCnt = componentCount(acc.type);
+        if (compSz <= 0 || compCnt <= 0) return {};
+        int total = acc.count * compCnt;
+        std::vector<float> vals(total);
+        int stride = bv.byteStride > 0 ? bv.byteStride : compSz * compCnt;
+        for (int i = 0; i < acc.count; i++) {
+            const uint8_t* src = binData + bv.byteOffset + acc.byteOffset + i * stride;
+            for (int j = 0; j < compCnt; j++) {
+                uint32_t raw;
+                memcpy(&raw, src + j * compSz, 4);
+                float f;
+                memcpy(&f, &raw, 4);
+                vals[i * compCnt + j] = f;
+            }
+        }
+        return vals;
+    };
+
+    const JVal& animArr = root["animations"];
+    for (size_t ai = 0; ai < animArr.size(); ai++) {
+        DTSShape::Animation anim;
+        anim.name = animArr[ai]["name"].asStr();
+        anim.looping = true;
+
+        const JVal& samplers = animArr[ai]["samplers"];
+        const JVal& channels = animArr[ai]["channels"];
+
+        // Collect per-node channels: key=nodeIndex, value=list of (path, input, output)
+        struct NodeChannel { std::string path; int input; int output; };
+        std::map<int, std::vector<NodeChannel>> nodeChannels;
+
+        for (size_t ci = 0; ci < channels.size(); ci++) {
+            NodeChannel nc;
+            nc.path = channels[ci]["target"]["path"].asStr();
+            int samplerIdx = (int)channels[ci]["sampler"].asInt();
+            nc.input = (int)samplers[samplerIdx]["input"].asInt();
+            nc.output = (int)samplers[samplerIdx]["output"].asInt();
+            int nodeIdx = (int)channels[ci]["target"]["node"].asInt();
+            nodeChannels[nodeIdx].push_back(nc);
+        }
+
+        // For each node, build keyframes from its channels
+        for (auto& [nodeIdx, chans] : nodeChannels) {
+            // Read all input times and output values from the channels
+            std::vector<float> times;
+            std::vector<float> values[3]; // 0=translation, 1=rotation, 2=scale
+            for (auto& c : chans) {
+                auto t = readAccessorFloats(c.input);
+                auto v = readAccessorFloats(c.output);
+                int pathIdx = (c.path == "translation") ? 0 : (c.path == "rotation") ? 1 : 2;
+                if (times.empty()) times = t;
+                values[pathIdx] = v;
+            }
+            if (times.empty()) continue;
+
+            // Track max time for duration
+            float maxTime = 0;
+            for (auto t : times) if (t > maxTime) maxTime = t;
+            if (maxTime > anim.duration) anim.duration = maxTime;
+
+                // Create a keyframe for each time
+            for (size_t ki = 0; ki < times.size(); ki++) {
+                DTSShape::Keyframe kf;
+                kf.time = times[ki];
+                kf.nodeIndex = nodeIdx;
+
+                // Translation (default 0)
+                kf.translation.x = 0; kf.translation.y = 0; kf.translation.z = 0;
+                if (!values[0].empty() && (int)(ki * 3 + 2) < (int)values[0].size()) {
+                    kf.translation.x = values[0][ki*3];
+                    kf.translation.z = values[0][ki*3+1];
+                    kf.translation.y = values[0][ki*3+2];
+                }
+                // Rotation (default identity quaternion)
+                kf.rotation.x = 0; kf.rotation.y = 0; kf.rotation.z = 0; kf.rotation.w = 1;
+                if (!values[1].empty() && (int)(ki * 4 + 3) < (int)values[1].size()) {
+                    kf.rotation.x = values[1][ki*4];
+                    kf.rotation.z = values[1][ki*4+1];
+                    kf.rotation.y = values[1][ki*4+2];
+                    kf.rotation.w = values[1][ki*4+3];
+                }
+                // Scale (default 1)
+                kf.scale.x = 1; kf.scale.y = 1; kf.scale.z = 1;
+                if (!values[2].empty() && (int)(ki * 3 + 2) < (int)values[2].size()) {
+                    kf.scale.x = values[2][ki*3];
+                    kf.scale.z = values[2][ki*3+1];
+                    kf.scale.y = values[2][ki*3+2];
+                }
+                anim.keyframes.push_back(kf);
+            }
+        }
+
+        if (!anim.keyframes.empty()) {
+            result.animations.push_back(std::move(anim));
+        }
+    }
+
     return result;
 }
 

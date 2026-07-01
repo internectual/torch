@@ -30,6 +30,7 @@ add_executable(torch
     src/fs/vl2_archive.cpp
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
+    src/script/torquescript.cpp
     src/render/renderer.cpp
     src/render/shader.cpp
     src/render/texture.cpp
@@ -38,6 +39,7 @@ add_executable(torch
     src/render/font.cpp
     src/render/sky.cpp
     src/render/glb_loader.cpp
+    src/render/dts_loader.cpp
     src/audio/audio_system.cpp
     src/net/network.cpp
     src/net/protocol.cpp
@@ -45,9 +47,12 @@ add_executable(torch
     src/game/world.cpp
     src/game/player.cpp
     src/game/physics.cpp
+    src/game/collision.cpp
+    src/game/weapon.cpp
     src/game/game.cpp
     src/game/hud.cpp
     src/game/menu.cpp
+    src/game/demo.cpp
 )
 
 target_include_directories(torch PRIVATE src)

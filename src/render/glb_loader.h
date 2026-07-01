@@ -26,6 +26,7 @@ struct GLBMesh {
     std::vector<Texture> lightmaps; // loaded embedded lightmap textures
     std::vector<MaterialInfo> materials; // per-GLB-material metadata
     std::string name;
+    std::vector<DTSShape::Animation> animations;
 };
 
 GLBMesh loadGLB(const uint8_t* data, size_t size);

@@ -9,6 +9,7 @@
 #include <cstdint>
 
 class ScriptEngine;
+class TorqueScript;
 
 struct VMValue {
     enum Type { None, Int, Float, String };
@@ -83,6 +84,7 @@ public:
     void registerFunction(const char* name, NativeFunc fn);
 
     VirtualMachine* vm() { return vmInstance; }
+    TorqueScript* ts() { return tsInstance; }
 
     ScriptObject* findObject(const char* name);
 
@@ -92,5 +94,6 @@ public:
 private:
     static ScriptEngine* instance_;
     VirtualMachine* vmInstance{};
+    TorqueScript* tsInstance{};
     Console* con{};
 };
