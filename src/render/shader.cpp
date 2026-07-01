@@ -57,7 +57,7 @@ uniform vec3 uCamPos = vec3(0);
 uniform vec4 uTint = vec4(1.0);
 
 uniform bool uFogEnabled = false;
-uniform vec3 uFogColor = vec3(0.5, 0.6, 0.7);
+uniform vec3 uFogColor = vec3(0.75, 0.8, 0.85);
 uniform float uFogDensity = 0.01;
 
 out vec4 FragColor;
@@ -142,7 +142,7 @@ uniform bool uUseVertexColor = false;
 uniform vec3 uLightDir = vec3(0.5, 0.8, 0.6);
 
 uniform bool uFogEnabled = false;
-uniform vec3 uFogColor = vec3(0.5, 0.6, 0.7);
+uniform vec3 uFogColor = vec3(0.75, 0.8, 0.85);
 uniform float uFogDensity = 0.01;
 uniform vec3 uCamPos = vec3(0);
 

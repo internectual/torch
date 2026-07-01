@@ -160,10 +160,10 @@ private:
     std::vector<ItemPickup> items;
 
     struct FogParams {
-        bool enabled = false;
-        ColorF color{0.5f, 0.6f, 0.7f, 1.0f};
-        float density = 0.005f;
-        float distance = 500.0f;
+        bool enabled = true;
+        ColorF color{0.75f, 0.8f, 0.85f, 1.0f}; // matches gradient sky horizon
+        float density = 0.0015f;  // gentle fade
+        float distance = 666.0f;
     };
     FogParams fog;
 
