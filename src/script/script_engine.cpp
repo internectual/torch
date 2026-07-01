@@ -1371,6 +1371,14 @@ bool ScriptEngine::init() {
 
     // Canvas / window
     tsInstance->registerNative("createCanvas", [](const auto&) -> VMValue {
+        // Create the GuiCanvas ScriptObject for the GUI renderer
+        auto* canvas = new ScriptObject;
+        canvas->className = "GuiCanvas";
+        canvas->name = "Canvas";
+        canvas->fields["extent"] = VMValue("1024 768");
+        canvas->fields["position"] = VMValue("0 0");
+        ScriptEngine::instance().objects["Canvas"] = canvas;
+        Console::instance().printf(LogLevel::Info, "GUI: created GuiCanvas");
         return VMValue(1);
     });
 
