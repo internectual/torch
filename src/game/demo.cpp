@@ -1097,9 +1097,9 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents)
         } else if (ev.classId == T2Demo::NetEventClassFirst + 19) { // SimDataBlockEvent
         } else if (ev.classId == T2Demo::NetEventClassFirst + 17 ||
                    ev.classId == T2Demo::NetEventClassFirst + 18) {
-            bs.readRangedU32(0, 1024);
+            ev.audioProfileId = bs.readRangedU32(0, 1024);
         } else if (ev.classId == T2Demo::NetEventClassFirst + 20) { // SimTargetAudioEvent
-            bs.readRangedU32(0, 1024);
+            ev.audioProfileId = bs.readRangedU32(0, 1024);
             bs.readRangedU32(0, T2Demo::MaxGhostCount - 1);
         } else if (ev.classId == T2Demo::NetEventClassFirst + 5) { // GravityEvent
             bs.readF32();

@@ -288,6 +288,7 @@ struct NetEventInfo {
     int dataBitsStart{}, dataBitsEnd{};
     std::string message;    // parsed text for chat/server messages
     std::string eventName;  // class name for display
+    int audioProfileId = -1; // for audio events
 };
 
 struct DemoTimedEvent {

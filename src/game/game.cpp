@@ -1205,6 +1205,31 @@ void Game::update(float dt) {
                     PacketData pd = demoParser->parsePacket(block->data.data(), block->data.size(), demoBlocksDone - 1);
                     // Collect chat/server events for the event pane
                     for (const auto& ev : pd.events) {
+                        // Handle audio events
+                        if (ev.audioProfileId >= 0) {
+                            auto& audio = Engine::instance().audio();
+                            if (audio.config().enabled && audio.config().sfxVolume > 0) {
+                                // Try to find and play an audio file matching this profile
+                                // Audio profiles are defined in DataBlocks; without a parser we
+                                // try common paths based on the profile ID modulo file count
+                                static std::vector<std::string> s_audioFiles;
+                                if (s_audioFiles.empty()) {
+                                    Engine::instance().fs().listFiles("audio/fx/", s_audioFiles);
+                                }
+                                if (!s_audioFiles.empty()) {
+                                    int idx = ev.audioProfileId % (int)s_audioFiles.size();
+                                    auto* buf = audio.loadSound(s_audioFiles[idx].c_str());
+                                    if (buf) {
+                                        auto* src = audio.createSource();
+                                        if (src) {
+                                            src->setVolume(0.3f);
+                                            src->play(buf);
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         if (ev.message.empty()) continue;
                         DemoTimedEvent te;
                         te.time = demoTime;
