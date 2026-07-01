@@ -431,6 +431,18 @@ void Menu::update(float dt) {
                     Engine::instance().game().startLocalGame();
                     setActive(false);
                     break;
+                case 1: // Server Browser
+                    currentScreen = ServerBrowser;
+                    selectedItem = 0;
+                    break;
+                case 2: // Settings
+                    currentScreen = Settings;
+                    selectedItem = 0;
+                    break;
+                case 3: // Controls
+                    currentScreen = Controls;
+                    selectedItem = 0;
+                    break;
                 case 4:
                     Engine::instance().quit();
                     break;
@@ -439,6 +451,10 @@ void Menu::update(float dt) {
         }
     } else if (currentScreen == ServerBrowser) {
         if (esc && !prevEsc) { currentScreen = Main; selectedItem = 0; }
+    } else if (currentScreen == Settings) {
+        if (esc && !prevEsc) { currentScreen = Main; selectedItem = 2; }
+    } else if (currentScreen == Controls) {
+        if (esc && !prevEsc) { currentScreen = Main; selectedItem = 3; }
     }
 
     prevUp = up; prevDown = down; prevEnter = enter; prevEsc = esc;
@@ -472,12 +488,72 @@ void Menu::render() {
         }
         case ServerBrowser: {
             if (font) font->render("Server Browser", 20, 20, {1, 1, 0, 1}, 1.5f);
-            for (size_t i = 0; i < servers.size(); i++) {
-                char buf[256];
-                snprintf(buf, sizeof(buf), "%s | %s | %d/%d | %dms",
-                    servers[i].name.c_str(), servers[i].map.c_str(),
-                    servers[i].players, servers[i].maxPlayers, servers[i].ping);
-                if (font) font->render(buf, 20, 80 + i * 30, {1, 1, 1, 1}, 1.0f);
+            if (font) font->render("[ESC] Back", 20, 700, {0.7f, 0.7f, 0.7f, 0.8f}, 1.0f);
+            if (servers.empty() && font) {
+                font->render("No servers found.", 20, 80, {0.5f, 0.5f, 0.5f, 1}, 1.2f);
+            } else {
+                for (size_t i = 0; i < servers.size(); i++) {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "%s | %s | %d/%d | %dms",
+                        servers[i].name.c_str(), servers[i].map.c_str(),
+                        servers[i].players, servers[i].maxPlayers, servers[i].ping);
+                    if (font) font->render(buf, 20, 80 + i * 30, {1, 1, 1, 1}, 1.0f);
+                }
+            }
+            break;
+        }
+        case Settings: {
+            if (font) font->render("Settings", 20, 20, {1, 1, 0, 1}, 1.5f);
+            if (font) font->render("[ESC] Back", 20, 700, {0.7f, 0.7f, 0.7f, 0.8f}, 1.0f);
+            int sy = 80;
+            // Resolution
+            auto& r2 = Engine::instance().renderer();
+            if (font) {
+                char res[64];
+                snprintf(res, sizeof(res), "Resolution: %dx%d", r2.config().width, r2.config().height);
+                font->render(res, 20, sy, {1, 1, 1, 1}, 1.2f);
+            }
+            sy += 30;
+            // Volume
+            auto& audio = Engine::instance().audio();
+            if (font) {
+                char vol[64];
+                snprintf(vol, sizeof(vol), "Master Volume: %d%%", (int)(audio.config().masterVolume * 100));
+                font->render(vol, 20, sy, {1, 1, 1, 1}, 1.2f);
+            }
+            sy += 30;
+            if (font) font->render("SFX Volume: see master", 20, sy, {0.6f, 0.6f, 0.6f, 1}, 1.0f);
+            sy += 30;
+            if (font) font->render("(Settings are read-only in this build)", 20, sy, {0.5f, 0.5f, 0.5f, 1}, 1.0f);
+            break;
+        }
+        case Controls: {
+            if (font) font->render("Controls", 20, 20, {1, 1, 0, 1}, 1.5f);
+            if (font) font->render("[ESC] Back", 20, 700, {0.7f, 0.7f, 0.7f, 0.8f}, 1.0f);
+            const char* binds[] = {
+                "WASD / Arrows", "Move",
+                "Mouse", "Look",
+                "Space", "Jump",
+                "Shift", "Jet",
+                "Left Click", "Fire",
+                "Right Click", "Alt Fire",
+                "R", "Reload / Spectate",
+                "F1", "Free Camera",
+                "F2", "Orbit Camera",
+                "P", "Pause Demo",
+                "E", "Demo Events",
+                "Tab", "Scoreboard",
+                "ESC", "Pause / Menu",
+                "~", "Console",
+                nullptr, nullptr
+            };
+            int sy = 80;
+            for (int i = 0; binds[i]; i += 2) {
+                if (font) {
+                    font->render(binds[i], 40, sy, {1, 1, 0, 1}, 1.0f);
+                    font->render(binds[i+1], 250, sy, {1, 1, 1, 1}, 1.0f);
+                }
+                sy += 24;
             }
             break;
         }
