@@ -43,7 +43,12 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  -testshape <path>  Load and display a GLB shape\n");
             fprintf(stdout, "  -testdif <path>    Load and dump DIF interior stats\n");
             fprintf(stdout, "  -online            Enable online mode\n");
+            fprintf(stdout, "  -version           Show version\n");
             fprintf(stdout, "  -help              Show this help\n");
+            std::exit(0);
+        }
+        if (strcmp(argv[i], "-version") == 0 || strcmp(argv[i], "--version") == 0) {
+            fprintf(stdout, "Torch v0.1.0\n");
             std::exit(0);
         }
     }
