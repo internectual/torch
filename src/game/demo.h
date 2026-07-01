@@ -129,63 +129,74 @@ namespace T2Demo {
     // Tagged strings
     constexpr int TaggedStringCount = 1024;
 
-    // Deterministic ghost class names for T2 25034 (sorted by strcmp order,
+    // Deterministic ghost class names for T2 (sorted by strcmp order,
     // matching AbstractClassRep::initialize). Index = classId.
-    // Derived from t2-demo-parser / machine code analysis of T2 25034 binary.
+    // Includes base classes + known extensions from the V12 engine.
+    // Derived from t2-demo-parser + T2 engine source analysis.
     inline const char* const NetObjectClassNames[] = {
-        "AIObjective",          // 0
-        "AudioEmitter",         // 1
-        "BeaconObject",         // 2
-        "BombProjectile",       // 3
-        "Camera",               // 4
-        "Debris",               // 5
-        "ELFProjectile",        // 6
-        "EnergyProjectile",     // 7
-        "FireballAtmosphere",   // 8
-        "FlareProjectile",      // 9
-        "FlyingVehicle",        // 10
-        "ForceFieldBare",       // 11
-        "GameBase",             // 12
-        "GrenadeProjectile",    // 13
-        "HoverVehicle",         // 14
-        "InteriorInstance",     // 15
-        "Item",                 // 16
-        "Lightning",            // 17
-        "LinearFlareProjectile",// 18
-        "LinearProjectile",     // 19
-        "Marker",               // 20
-        "MissionArea",          // 21
-        "MissionMarker",        // 22
-        "ParticleEmissionDummy",// 23
-        "PhysicalZone",         // 24
-        "Player",               // 25
-        "Precipitation",        // 26
-        "Projectile",           // 27
-        "RepairProjectile",     // 28
-        "ScopeAlwaysShape",     // 29
-        "SeekerProjectile",     // 30
-        "ShapeBase",            // 31
-        "ShockLanceProjectile", // 32
-        "Shockwave",            // 33
-        "SimpleNetObject",      // 34
-        "Sky",                  // 35
-        "SniperProjectile",     // 36
-        "SpawnSphere",          // 37
-        "Splash",               // 38
-        "StaticShape",          // 39
-        "StationFXPersonal",    // 40
-        "StationFXVehicle",     // 41
-        "Sun",                  // 42
-        "TSStatic",             // 43
-        "TargetProjectile",     // 44
-        "TerrainBlock",         // 45
-        "TracerProjectile",     // 46
-        "Trigger",              // 47
-        "Turret",               // 48
-        "VehicleBlocker",       // 49
-        "WaterBlock",           // 50
-        "WayPoint",             // 51
-        "WheeledVehicle",       // 52
+        "AIObjective",              // 0
+        "AudioEmitter",             // 1
+        "BeaconObject",             // 2
+        "BombProjectile",           // 3
+        "BombSight",                // 4
+        "Camera",                   // 5
+        "Debris",                   // 6
+        "DecalManager",             // 7
+        "ELFProjectile",            // 8
+        "EnergyProjectile",         // 9
+        "Explosion",                // 10
+        "FireballAtmosphere",       // 11
+        "FlareProjectile",          // 12
+        "FlyingVehicle",            // 13
+        "ForceFieldBare",           // 14
+        "GameBase",                 // 15
+        "GrenadeProjectile",        // 16
+        "HoverVehicle",             // 17
+        "InteriorInstance",         // 18
+        "InteriorSubObject",        // 19
+        "Item",                     // 20
+        "Lightning",                // 21
+        "LinearFlareProjectile",    // 22
+        "LinearProjectile",         // 23
+        "Marker",                   // 24
+        "MirrorSubObject",          // 25
+        "MissionArea",              // 26
+        "MissionMarker",            // 27
+        "ParticleEmissionDummy",    // 28
+        "ParticleEmitter",          // 29
+        "PhysicalZone",             // 30
+        "Player",                   // 31
+        "Precipitation",            // 32
+        "Projectile",               // 33
+        "RepairProjectile",         // 34
+        "SceneRoot",                // 35
+        "ScopeAlwaysShape",         // 36
+        "SeekerProjectile",         // 37
+        "ShapeBase",                // 38
+        "ShockLanceElectricity",    // 39
+        "ShockLanceProjectile",     // 40
+        "Shockwave",                // 41
+        "ShowTSShape",              // 42
+        "SimpleNetObject",          // 43
+        "Sky",                      // 44
+        "SniperProjectile",         // 45
+        "SpawnSphere",              // 46
+        "Splash",                   // 47
+        "StaticShape",              // 48
+        "StationFXPersonal",        // 49
+        "StationFXVehicle",         // 50
+        "Sun",                      // 51
+        "TSStatic",                 // 52
+        "TargetProjectile",         // 53
+        "TerrainBlock",             // 54
+        "TracerProjectile",         // 55
+        "Trigger",                  // 56
+        "Turret",                   // 57
+        "Vehicle",                  // 58
+        "VehicleBlocker",           // 59
+        "WaterBlock",               // 60
+        "WayPoint",                 // 61
+        "WheeledVehicle",           // 62
     };
     constexpr int NetObjectClassCount = sizeof(NetObjectClassNames) / sizeof(NetObjectClassNames[0]);
 }
