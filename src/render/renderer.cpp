@@ -277,6 +277,8 @@ void MeshData::upload() {
     glEnableVertexAttribArray(2);
     glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, color));
     glEnableVertexAttribArray(3);
+    glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, uv2));
+    glEnableVertexAttribArray(4);
 
     uploaded = true;
 }

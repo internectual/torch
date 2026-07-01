@@ -648,6 +648,30 @@ static bool interiorToMeshes(DIFInterior& interior,
         return {0, 0};
     };
 
+    // Decode lightmap texgen for a surface
+    // returns {genX[0..3], genY[0..3]} where [0]=x coefficient, [1]=y, [2]=z, [3]=offset
+    auto decodeLMTexGen = [](uint16_t encoded, float offsetX, float offsetY) -> std::pair<float[4], float[4]> {
+        uint32_t stEnc = (encoded >> 13) & 7;
+        uint32_t logScaleX = (encoded >> 6) & 0x3F;
+        uint32_t logScaleY = encoded & 0x3F;
+        int sc = 0, tc = 1;
+        switch (stEnc) {
+            case 0: sc = 0; tc = 1; break;
+            case 1: sc = 0; tc = 2; break;
+            case 2: sc = 1; tc = 0; break;
+            case 3: sc = 1; tc = 2; break;
+            case 4: sc = 2; tc = 0; break;
+            case 5: sc = 2; tc = 1; break;
+        }
+        std::pair<float[4], float[4]> result;
+        for (int i = 0; i < 4; i++) result.first[i] = result.second[i] = 0;
+        result.first[sc] = 1.0f / (float)(1 << logScaleX);
+        result.second[tc] = 1.0f / (float)(1 << logScaleY);
+        result.first[3] = offsetX;
+        result.second[3] = offsetY;
+        return result;
+    };
+
     // Build meshes
     for (auto& [texGroup, surfIdxs] : surfGroups) {
         MeshData mesh;
@@ -678,6 +702,11 @@ static bool interiorToMeshes(DIFInterior& interior,
             auto& surf = interior.surfaces[si];
             Point3F normal = getPlaneNormal(surf.planeIndex);
 
+            // Decode lightmap texgen for this surface
+            auto lmtg = decodeLMTexGen(surf.encodedTexGen, surf.texGenOffsetX, surf.texGenOffsetY);
+            float* lmGX = lmtg.first;
+            float* lmGY = lmtg.second;
+
             uint8_t fanMaskBytes[32] = {};
             for (int b = 0; b < 4 && b < 32; b++) {
                 fanMaskBytes[b] = (uint8_t)((surf.fanMask >> (b * 8)) & 0xFF);
@@ -692,6 +721,10 @@ static bool interiorToMeshes(DIFInterior& interior,
                     float pz = interior.points[ptIdx * 3 + 2];
                     Point3F pos = {px, py, pz};
                     Point2F uv = genUV(surf.texGenIndex, pos);
+                    Point2F uv2 = {
+                        pos.x * lmGX[0] + pos.y * lmGX[1] + pos.z * lmGX[2] + lmGX[3],
+                        pos.x * lmGY[0] + pos.y * lmGY[1] + pos.z * lmGY[2] + lmGY[3]
+                    };
 
                     VertKey vk = {pos.x, pos.y, pos.z, normal.x, normal.y, normal.z, uv.x, uv.y};
                     auto it = vertMap.find(vk);
@@ -705,6 +738,7 @@ static bool interiorToMeshes(DIFInterior& interior,
                         vert.pos = pos;
                         vert.normal = normal;
                         vert.uv = uv;
+                        vert.uv2 = uv2;
                         vert.color = {1, 1, 1, 1};
                         mesh.vertices.push_back(vert);
                     }

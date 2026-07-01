@@ -21,6 +21,7 @@ struct Vertex {
     Point3F pos;
     Point3F normal;
     Point2F uv;
+    Point2F uv2; // lightmap UV (for DIF interiors)
     ColorF color = {1,1,1,1};
 };
 

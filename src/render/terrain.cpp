@@ -45,7 +45,7 @@ void TerrainBlock::generateMesh() {
             float nlen = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
             if (nlen > 0) { n.x /= nlen; n.y /= nlen; n.z /= nlen; }
 
-            verts.push_back({{wx, h, wz}, n, {(float)x / gridRes, (float)z / gridRes}, {1,1,1,1}});
+            verts.push_back({{wx, h, wz}, n, {(float)x / gridRes, (float)z / gridRes}, {0,0}, {1,1,1,1}});
         }
     }
 
