@@ -100,6 +100,50 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
                     + std::sin(x * 0.07f + 1.3f) * std::cos(z * 0.08f + 0.7f) * 8.0f
                     + std::sin(x * 0.15f + 3.1f) * std::cos(z * 0.12f + 2.3f) * 3.0f);
         generateMesh();
+        // Generate procedural splatmap for texture blending
+        {
+            int S = 128;
+            std::vector<uint8_t> splatPixels(S * S * 4);
+            for (int y = 0; y < S; y++) {
+                for (int x = 0; x < S; x++) {
+                    float fx = (float)x / S, fy = (float)y / S;
+                    float n1 = sinf(fx * 12.0f + fy * 8.0f) * 0.5f + 0.5f;
+                    float n2 = sinf(fx * 5.0f + fy * 15.0f + 1.3f) * 0.5f + 0.5f;
+                    float n3 = sinf(fx * 20.0f - fy * 7.0f + 3.7f) * 0.5f + 0.5f;
+                    float total = n1 + n2 + n3 + 0.01f;
+                    splatPixels[(y * S + x) * 4 + 0] = (uint8_t)(n1 / total * 255);
+                    splatPixels[(y * S + x) * 4 + 1] = (uint8_t)(n2 / total * 255);
+                    splatPixels[(y * S + x) * 4 + 2] = (uint8_t)(n3 / total * 255);
+                    splatPixels[(y * S + x) * 4 + 3] = 0;
+                }
+            }
+            splatMap.loadRaw(splatPixels.data(), S, S, 4);
+            // Try loading some default terrain textures
+            auto& fs = Engine::instance().fs();
+            const char* texNames[] = {
+                "textures/terrain/LushWorld.DirtMossy",
+                "textures/terrain/LushWorld.Dirt",
+                "textures/terrain/LushWorld.Grass",
+                "textures/terrain/LushWorld.Rock",
+            };
+            for (int i = 0; i < 4; i++) {
+                for (auto* ext : {".png", ".bm8", ".jpg"}) {
+                    auto d = fs.read((std::string(texNames[i]) + ext).c_str());
+                    if (!d.empty()) {
+                        Texture t;
+                        if (strcmp(ext, ".bm8") == 0) t.loadBM8(d.data(), d.size());
+                        else t.load(d.data(), d.size());
+                        if (t.loaded) { detailTextures.push_back(std::move(t)); break; }
+                    }
+                }
+                if ((int)detailTextures.size() <= i) {
+                    Texture white;
+                    std::vector<uint8_t> whitePx(16, 200);
+                    white.loadRaw(whitePx.data(), 2, 2, 4);
+                    detailTextures.push_back(std::move(white));
+                }
+            }
+        }
         loaded = true;
         return true;
     }
