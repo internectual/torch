@@ -377,12 +377,11 @@ void Engine::run() {
             if (escDown && !prevEsc && g->state() != Game::Menu)
                 g->togglePauseGame();
             prevEsc = escDown;
-            // Q during pause quits to menu
+            // Q during pause quits to desktop
             static bool prevQ = false;
             bool qDown = plat->input().keysDown[SCANCODE_Q];
             if (qDown && !prevQ && g->isGamePaused()) {
-                g->setState(Game::Menu);
-                g->togglePauseGame();
+                quit();
             }
             prevQ = qDown;
         }

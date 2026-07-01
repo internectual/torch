@@ -250,7 +250,7 @@ void HUD::render(Game* game) {
         auto& plat = Engine::instance().platform();
         r.drawBox({{0, 0, 0}, {(float)plat.width(), (float)plat.height(), 0}}, {0, 0, 0, 0.6f});
         font->render("PAUSED", 400, 300, {1, 1, 1, 1}, 3.0f);
-        font->render("[ESC] Resume  [Q] Quit", 350, 360, {0.7f, 0.7f, 0.7f, 0.8f}, 1.5f);
+        font->render("[ESC] Resume  [Q] Quit to Desktop", 300, 360, {0.7f, 0.7f, 0.7f, 0.8f}, 1.5f);
     }
 
     // Clean old messages
