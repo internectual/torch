@@ -507,14 +507,17 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     ptr += nameBufSize; rem -= nameBufSize;
 
     // ── Sub-objects ──
-    // InteriorSubObject::readISO reads U32 key, then tag-dependent data
+    // InteriorSubObject::readISO reads U32 key, then tag-dependent data.
+    // MirrorSubObject (key=0): adds U32 dl, U32 zone, F32 alpha, U32 sc, U32 ss, 3xF32
+    // Other keys: only the U32 key is consumed (readISO returns NULL)
     uint32_t subObjectCount = readU32(ptr, rem);
     for (uint32_t i = 0; i < subObjectCount; i++) {
-        readU32(ptr, rem); // key
-        // MirrorSubObject: U32 dl, U32 zone, F32 alpha, U32 sc, U32 ss, 3xF32
-        readU32(ptr, rem); readU32(ptr, rem); readF32(ptr, rem);
-        readU32(ptr, rem); readU32(ptr, rem);
-        readF32(ptr, rem); readF32(ptr, rem); readF32(ptr, rem);
+        uint32_t key = readU32(ptr, rem);
+        if (key == 0) { // MirrorSubObjectKey
+            readU32(ptr, rem); readU32(ptr, rem); readF32(ptr, rem);
+            readU32(ptr, rem); readU32(ptr, rem);
+            readF32(ptr, rem); readF32(ptr, rem); readF32(ptr, rem);
+        }
     }
 
     // ── Convex hulls (52 bytes each, no padding between fields) ──
@@ -556,8 +559,8 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     skipVecU16(); // coord bin indices
     readU32(ptr, rem); // coord bin mode
 
-    // ── Ambient colors (ColorF = 4xF32 each, ambient + alarm) ──
-    if (rem >= 32) { ptr += 32; rem -= 32; }
+    // ── Ambient colors (stored as ColorI = 4×U8 each, base + alarm) ──
+    if (rem >= 8) { ptr += 8; rem -= 8; }
 
     // ── 4x U32 padding ──
     if (rem >= 16) { ptr += 16; rem -= 16; }
