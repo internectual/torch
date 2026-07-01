@@ -1660,6 +1660,30 @@ bool ScriptEngine::init() {
         return VMValue((int32_t)std::stoul(args[0].toString(), nullptr, 2));
     });
 
+    // T2 compatibility stubs (functions called by startup scripts)
+    auto stubVM = [&](const char* name) {
+        vmInstance->registerNativeFunction(name, [](const auto&) { return VMValue(1); });
+    };
+    auto stubVMS = [&](const char* name) {
+        vmInstance->registerNativeFunction(name, [](const auto& args) {
+            return args.empty() ? VMValue(1) : args[0];
+        });
+    };
+    stubVM("schedule");
+    stubVM("audioSetDriver");
+    stubVM("audioDetect");
+    stubVM("startAudio");
+    stubVM("setZoomSpeed");
+    stubVM("setShadowDetailLevel");
+    stubVM("setOpenGLTextureCompressionHint");
+    stubVM("setOpenGLSkyMipReduction");
+    stubVM("setOpenGLMipReduction");
+    stubVM("setOpenGLInteriorMipReduction");
+    stubVM("setOpenGLAnisotropy");
+    stubVM("setLogMode");
+    stubVM("enableWinConsole");
+    stubVMS("setDefaultFov");
+
     Console::instance().printf(LogLevel::Info, "ScriptEngine initialized with %zu native functions + DTS support", 12);
     return true;
 }
