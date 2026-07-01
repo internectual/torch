@@ -850,9 +850,10 @@ void DTSShape::render(int32_t detailLevel) {
     auto* shader = ShaderManager::getDefaultShader();
 
     if (isInterior) {
-        glDisable(GL_CULL_FACE);
+        glCullFace(GL_FRONT);
     } else {
         glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
     }
 
     for (auto& mesh : meshes) {
@@ -909,6 +910,7 @@ void DTSShape::render(int32_t detailLevel) {
         mesh.render();
     }
 
+    glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
 }
 
@@ -1021,9 +1023,10 @@ void DTSShape::renderAnimation(const char* animName, float time) {
     const MatrixF& baseModel = r.modelMatrix();
 
     if (isInterior) {
-        glDisable(GL_CULL_FACE);
+        glCullFace(GL_FRONT);
     } else {
         glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
     }
 
     for (auto& mesh : meshes) {
@@ -1087,5 +1090,6 @@ void DTSShape::renderAnimation(const char* animName, float time) {
 
     // Restore base model
     r.setModel(baseModel);
+    glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
 }
