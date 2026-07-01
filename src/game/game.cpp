@@ -1250,8 +1250,11 @@ void Game::update(float dt) {
                 freeCamTarget = {freeCamPos.x + fwd.x, freeCamPos.y + fwd.y, freeCamPos.z + fwd.z};
             } else if (demoOrbitCam) {
                 float orbitSpeed = 60.0f * dt;
+                bool orbitInput = currentInput.left || currentInput.right;
                 if (currentInput.left) orbitAngle -= orbitSpeed;
-                if (currentInput.right) orbitAngle += orbitSpeed;
+                else if (currentInput.right) orbitAngle += orbitSpeed;
+                // Auto-rotate when no input (gentle spin to show the scene)
+                if (!orbitInput) orbitAngle += dt * 8.0f;
                 if (currentInput.forward) orbitDistance = std::max(20.0f, orbitDistance - 50.0f * dt);
                 if (currentInput.backward) orbitDistance = std::min(2000.0f, orbitDistance + 50.0f * dt);
                 if (currentInput.jump) orbitHeight = std::min(500.0f, orbitHeight + 30.0f * dt);
@@ -1410,6 +1413,11 @@ void Game::render(float dt) {
                 orbitCenter = demoCameraPos;
                 orbitCenterInit = true;
             }
+            // Smoothly track the action: orbit center follows demo camera
+            float trackSpeed = 0.02f;
+            orbitCenter.x += (demoCameraPos.x - orbitCenter.x) * trackSpeed;
+            orbitCenter.y += (demoCameraPos.y + 20.0f - orbitCenter.y) * trackSpeed;
+            orbitCenter.z += (demoCameraPos.z - orbitCenter.z) * trackSpeed;
             float rad = orbitAngle * (3.14159f / 180.0f);
             camPos.x = orbitCenter.x + sinf(rad) * orbitDistance;
             camPos.z = orbitCenter.z + cosf(rad) * orbitDistance;
