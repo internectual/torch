@@ -301,7 +301,7 @@ private:
     std::vector<DemoTimedEvent> demoEventLog;
     bool demoShowEvents = true;
     // Orbit camera for demo spectator mode
-    bool demoOrbitCam = true;
+    bool demoOrbitCam = false;
     float orbitAngle = 0;
     float orbitDistance = 300.0f;
     float orbitHeight = 150.0f;
