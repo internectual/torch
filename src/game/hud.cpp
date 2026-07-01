@@ -128,7 +128,14 @@ void HUD::render(Game* game) {
             for (int gi : indices) {
                 const GhostEntry* g = gt.getGhost(gi);
                 if (!g || g->playerName.empty()) continue;
-                // Project world position to screen
+                // Only show tags for Player-class ghosts within range
+                if (g->className != "Player" && g->className != "MPB") continue;
+                float dx = g->position.x - r.cameraPos.x;
+                float dy = g->position.y - r.cameraPos.y;
+                float dz = g->position.z - r.cameraPos.z;
+                float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+                if (dist > 500.0f) continue;
+                // Project world position to screen (above head)
                 Point3F wp = {g->position.x, g->position.y + 2.5f, g->position.z};
                 const float* v = &view.m[0][0];
                 float cx = wp.x*v[0]+wp.y*v[4]+wp.z*v[8]+v[12];
@@ -140,15 +147,22 @@ void HUD::render(Game* game) {
                 float ny = cx*p[1]+cy*p[5]+cz*p[9]+cw*p[13];
                 float nz = cx*p[2]+cy*p[6]+cz*p[10]+cw*p[14];
                 float nw = cx*p[3]+cy*p[7]+cz*p[11]+cw*p[15];
-                if (nw == 0) continue;
+                if (nw == 0 || nz < 0) continue;
                 float invW = 1.0f / nw;
                 float sx = (nx*invW*0.5f+0.5f)*w;
                 float sy = (-ny*invW*0.5f+0.5f)*h;
-                if (nz < 0) continue; // behind camera
-                // Background box
+                // Background box for name
                 float tw = (float)g->playerName.size() * 10.0f;
                 r.drawBox({{sx - tw/2 - 4, sy - 2, 0}, {sx + tw/2 + 4, sy + 16, 0}}, {0,0,0,0.5f});
                 font->render(g->playerName.c_str(), sx - tw/2, sy, {1,1,0,1}, 1.2f);
+                // Health bar below name
+                float hp = std::max(0.0f, std::min(1.0f, g->health / 100.0f));
+                float barW = 60.0f, barH = 6.0f;
+                float bx = sx - barW/2, by = sy + 18;
+                ColorF bgCol = {0.2f, 0.0f, 0.0f, 0.7f};
+                ColorF fgCol = hp > 0.5f ? ColorF{0,1,0,0.9f} : (hp > 0.25f ? ColorF{1,1,0,0.9f} : ColorF{1,0,0,0.9f});
+                r.drawBox({{bx - 1, by - 1, 0}, {bx + barW + 1, by + barH + 1, 0}}, {0,0,0,0.5f});
+                r.drawBox({{bx, by, 0}, {bx + barW * hp, by + barH, 0}}, fgCol);
             }
         }
 
