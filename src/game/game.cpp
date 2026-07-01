@@ -2256,21 +2256,31 @@ void Game::playDemo(const char* path) {
     Console::instance().printf(LogLevel::Info, "  Mission: %s", ib.missionName.empty() ? "(unknown)" : ib.missionName.c_str());
 
     // Try to load the mission terrain for visual playback
+    // Fall back to Training1 if mission name is unknown or unavailable
+    std::string loadMap;
     if (!ib.missionName.empty()) {
-        std::string mapName = extractMapName(ib.missionName);
-        if (!mapName.empty()) {
-            Console::instance().printf(LogLevel::Info, "Loading mission map: %s", mapName.c_str());
-            // Store current state before mission load
-            State prevState = gameState;
-            startLocalGame(mapName.c_str());
-            // If mission loaded (Playing), keep it; restore otherwise
-            if (gameState != Playing) {
-                gameState = prevState;
-                Console::instance().printf(LogLevel::Warn, "Mission load failed, playing without terrain");
-            }
+        loadMap = extractMapName(ib.missionName);
+    }
+    // Verify the mission file actually exists
+    if (!loadMap.empty()) {
+        auto& fs = Engine::instance().fs();
+        std::string testPath = std::string("missions/") + loadMap + ".mis";
+        if (!fs.fileExists(testPath.c_str())) {
+            Console::instance().printf(LogLevel::Debug, "Mission '%s' not found, defaulting", loadMap.c_str());
+            loadMap.clear();
         }
-    } else {
-        Console::instance().printf(LogLevel::Warn, "No mission name in demo, playing without terrain");
+    }
+    if (loadMap.empty()) {
+        loadMap = "Training1";
+        Console::instance().printf(LogLevel::Info, "Unknown mission, defaulting to '%s' for terrain", loadMap.c_str());
+    }
+
+    Console::instance().printf(LogLevel::Info, "Loading mission map: %s", loadMap.c_str());
+    State prevState = gameState;
+    startLocalGame(loadMap.c_str());
+    if (gameState != Playing) {
+        gameState = prevState;
+        Console::instance().printf(LogLevel::Warn, "Mission load failed, playing without terrain");
     }
 
     // Reset demo path history
