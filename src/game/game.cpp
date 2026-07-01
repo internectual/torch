@@ -1645,6 +1645,22 @@ void Game::render(float dt) {
                 r.drawBox(box, {rcol, gcol, bcol, 1.0f});
             }
 
+            // Ground shadow for all renderable ghosts
+            if (isRenderableGhostClass(g->className)) {
+                float groundH = 0.0f;
+                if (w->terrain() && w->terrain()->loaded)
+                    groundH = w->getHeight(rp.x, rp.z);
+                float shadowY = std::max(groundH, 0.0f);
+                float shadowSize = (g->className == "Player" || g->className == "MPB") ? 0.8f : 1.5f;
+                float distAboveGround = rp.y - shadowY;
+                if (distAboveGround > 0 && distAboveGround < 50.0f) {
+                    float shadowAlpha = std::max(0.05f, 0.4f - distAboveGround * 0.008f);
+                    r.drawBox({{rp.x - shadowSize, shadowY + 0.1f, rp.z - shadowSize},
+                               {rp.x + shadowSize, shadowY + 0.1f, rp.z + shadowSize}},
+                              {0, 0, 0, shadowAlpha});
+                }
+            }
+
             // Update projectile trail
             bool isProjectile = (g->className.find("Projectile") != std::string::npos ||
                 g->className == "EnergyBolt" || g->className == "LinearFlare" ||
