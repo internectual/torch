@@ -342,25 +342,31 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
 #include "render/font8x8.h"
 
 bool Font::loadDefault() {
-    static const int cw = 8, ch = 8;
+    static const int srcSize = 8;
+    static const int scale = 3; // scale up 3x for readability
+    static const int cw = srcSize * scale, ch = srcSize * scale;
     static const int cols = 16, rows = 16;
     int tw = cols * cw, th = rows * ch;
     std::vector<uint8_t> pixels(tw * th * 4, 0);
 
-    // Render ASCII 32-126 into the font texture
+    // Render ASCII 32-126 into the font texture (scaled up)
     for (int i = 32; i <= 126; i++) {
         int idx = i - 32;
         int cx = (i % cols) * cw;
         int cy = (i / cols) * ch;
-        for (int py = 0; py < ch && idx < 95; py++) {
+        for (int py = 0; py < srcSize && idx < 95; py++) {
             uint8_t row = font8x8_basic[idx][py];
-            for (int px = 0; px < cw; px++) {
-                int pi = ((cy + py) * tw + (cx + px)) * 4;
+            for (int px = 0; px < srcSize; px++) {
                 if (row & (0x80 >> px)) {
-                    pixels[pi + 0] = 255;
-                    pixels[pi + 1] = 255;
-                    pixels[pi + 2] = 255;
-                    pixels[pi + 3] = 255;
+                    // Fill scaled block
+                    for (int sy = 0; sy < scale; sy++)
+                        for (int sx = 0; sx < scale; sx++) {
+                            int pi = ((cy + py * scale + sy) * tw + (cx + px * scale + sx)) * 4;
+                            pixels[pi + 0] = 255;
+                            pixels[pi + 1] = 255;
+                            pixels[pi + 2] = 255;
+                            pixels[pi + 3] = 255;
+                        }
                 }
             }
         }
@@ -374,8 +380,8 @@ bool Font::loadDefault() {
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     float cw_f = 1.0f / cols, ch_f = 1.0f / rows;
     for (int i = 0; i < 256; i++) {

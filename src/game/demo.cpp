@@ -633,15 +633,33 @@ static std::string scanMissionName(const uint8_t* data, size_t size, uint32_t* o
         size_t firstUpper = s.find_first_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
         size_t firstDigit = s.find_first_of("0123456789");
         if (firstDigit != std::string::npos && firstUpper != std::string::npos && firstDigit < firstUpper) continue;
-        // Score: high alpha ratio wins
-        int alnum = 0;
-        for (char c : s) if (isalnum((unsigned char)c)) alnum++;
-        double alphaRatio = (double)alnum / (double)s.size();
-        if (alphaRatio < 0.80) continue;
-        // First char must be alphanumeric and uppercase (most T2 missions)
-        if (!isalnum((unsigned char)s[0])) continue;
-        if (islower((unsigned char)s[0])) continue;
-        int score = (int)(alphaRatio * 100) + (int)s.size();
+    // Score: high alpha ratio wins
+    int alnum = 0;
+    for (char c : s) if (isalnum((unsigned char)c)) alnum++;
+    double alphaRatio = (double)alnum / (double)s.size();
+    if (alphaRatio < 0.80) continue;
+    // First char must be alphanumeric and uppercase (most T2 missions)
+    if (!isalnum((unsigned char)s[0])) continue;
+    if (islower((unsigned char)s[0])) continue;
+    // Reject strings with runs of >3 same character case (e.g. "AAAA" is garbage)
+    int caseRun = 1;
+    for (size_t k = 1; k < s.size(); k++) {
+        if (isupper((unsigned char)s[k]) == isupper((unsigned char)s[k-1]))
+            { caseRun++; if (caseRun > 3) { bad = true; break; } }
+        else caseRun = 1;
+    }
+    if (bad) continue;
+    // Reject strings with more than 4 consecutive consonants (garbage)
+    int conRun = 1;
+    const char* vowels = "aeiouAEIOU";
+    for (size_t k = 1; k < s.size(); k++) {
+        bool isVowel = strchr(vowels, s[k]) != nullptr;
+        bool prevVowel = strchr(vowels, s[k-1]) != nullptr;
+        if (!isVowel && !prevVowel) { conRun++; if (conRun > 4) { bad = true; break; } }
+        else conRun = 1;
+    }
+    if (bad) continue;
+    int score = (int)(alphaRatio * 100) + (int)s.size();
         if (score > bestScore) { bestScore = score; best = s; bestCRC = crc; }
     }
     if (bestScore > 0 && !best.empty()) {
@@ -719,12 +737,44 @@ void DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
         if (bs.readFlag()) initialBlock.taggedStrings[i] = bs.readString();
 
     // ─── Find mission name ───────────────────────────────────
-    // 1. First try scanning tagged strings for a .mis path
+    // 1. First try scanning tagged strings for a .mis path or mission name
     std::string taggedMission;
     for (auto& [tag, str] : initialBlock.taggedStrings) {
         if (str.find(".mis") != std::string::npos || str.find("missions/") != std::string::npos) {
             taggedMission = str;
             break;
+        }
+    }
+    if (taggedMission.empty()) {
+        // Scan all tagged strings for mission-like patterns
+        for (auto& [tag, str] : initialBlock.taggedStrings) {
+            std::string lower = str;
+            for (auto& c : lower) c = (char)tolower((unsigned char)c);
+            if (lower.find("missions/") != std::string::npos ||
+                lower.find("levels/") != std::string::npos ||
+                lower.find(".mis") != std::string::npos) {
+                taggedMission = str;
+                break;
+            }
+            // Direct mission name match
+            if (lower == "katabatic" || lower == "damnation" || lower == "desert" ||
+                lower == "snow" || lower == "training1" || lower == "training2")
+                taggedMission = str;
+        }
+    }
+    // 2. Try path-like strings: extract base name
+    if (taggedMission.empty()) {
+        for (auto& [tag, str] : initialBlock.taggedStrings) {
+            if (str.size() > 6 && str.size() < 80 && str.find('/') != std::string::npos) {
+                size_t slash = str.rfind('/');
+                std::string base = (slash != std::string::npos) ? str.substr(slash + 1) : str;
+                size_t dot = base.rfind('.');
+                if (dot != std::string::npos) base = base.substr(0, dot);
+                if (base.size() >= 3 && isupper((unsigned char)base[0])) {
+                    taggedMission = base;
+                    break;
+                }
+            }
         }
     }
 
