@@ -189,6 +189,7 @@ private:
         float patrolOffset = 0;
         float moveYaw = 0;
         float animTime = 0;
+        float lastHitTime = -10.0f; // time of last damage (-10 = never)
     };
 public:
     std::vector<Bot> bots;

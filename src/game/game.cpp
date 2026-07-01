@@ -830,6 +830,7 @@ void World::update(float dt) {
                 float dmg = 30.0f * (1.0f - dist / e.radius);
                 b.health -= dmg;
                 if (b.health <= 0) { b.health = 0; b.alive = false; b.respawnTimer = 5.0f; }
+                else { b.lastHitTime = Engine::instance().game().gameTime(); }
             }
         }
     }
@@ -908,7 +909,7 @@ void World::update(float dt) {
                 if (bdist < p.splashRadius) {
                     float factor = 1.0f - bdist / p.splashRadius;
                     b.health -= p.damage * factor;
-                    if (b.health <= 0) { b.health = 0; b.alive = false; b.respawnTimer = 5.0f; }
+                    if (b.health <= 0) { b.health = 0; b.alive = false; b.respawnTimer = 5.0f; } else { b.lastHitTime = Engine::instance().game().gameTime(); }
                 }
             }
         }
@@ -922,13 +923,38 @@ void World::update(float dt) {
     );
 
     // Update bots
+    auto& player = Engine::instance().game().player();
+    Point3F ppos = player.position();
     for (auto& b : bots) {
         if (b.alive) {
-            // Simple patrol: move in a circle around start position
-            b.patrolOffset += dt * 2.0f;
-            b.pos.x = b.startPos.x + sinf(b.patrolOffset) * 8.0f;
-            b.pos.z = b.startPos.z + cosf(b.patrolOffset) * 8.0f;
-            b.moveYaw = b.patrolOffset + 3.14159f;
+            float dx = ppos.x - b.pos.x;
+            float dz = ppos.z - b.pos.z;
+            float distToPlayer = sqrtf(dx*dx + dz*dz);
+            float timeSinceHit = dt > 0 ? (Engine::instance().game().gameTime() - b.lastHitTime) : 999.0f;
+
+            if (timeSinceHit < 2.0f && b.health < 70) {
+                // Flee from player when low health and recently hit
+                float fleeAngle = atan2f(-dx, -dz);
+                b.moveYaw = fleeAngle;
+                b.pos.x += sinf(fleeAngle) * dt * 6.0f;
+                b.pos.z += cosf(fleeAngle) * dt * 6.0f;
+            } else if (timeSinceHit < 4.0f) {
+                // Recently hit: face player and strafe
+                float faceAngle = atan2f(dx, dz);
+                b.moveYaw = faceAngle;
+                float strafeAngle = faceAngle + 1.57f;
+                b.pos.x += sinf(strafeAngle) * dt * 4.0f;
+                b.pos.z += cosf(strafeAngle) * dt * 4.0f;
+            } else {
+                // Patrol: move in a circle around start position
+                b.patrolOffset += dt * 2.0f;
+                b.pos.x = b.startPos.x + sinf(b.patrolOffset) * 8.0f;
+                b.pos.z = b.startPos.z + cosf(b.patrolOffset) * 8.0f;
+                b.moveYaw = b.patrolOffset + 3.14159f;
+            }
+            // Stay near ground
+            float th = Engine::instance().game().world().getHeight(b.pos.x, b.pos.z);
+            if (b.pos.y < th + 0.5f) b.pos.y = th + 0.5f;
             b.animTime += dt;
         } else {
             b.respawnTimer -= dt;
