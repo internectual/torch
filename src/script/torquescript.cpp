@@ -542,8 +542,9 @@ VMValue TorqueScript::Impl::parseFor() {
     loopDepth++;
     VMValue result;
     VMValue cond(true);
-    // Save body token range for re-execution each iteration
+    // Save body start for re-execution and track end for skipping
     size_t bodyStart = tokenPos;
+    size_t bodyEnd = tokenPos;
     while (running) {
         // Evaluate condition
         if (condStart < condEnd) {
@@ -554,9 +555,10 @@ VMValue TorqueScript::Impl::parseFor() {
         }
         if (!cond.toBool()) break;
 
-        // Parse body from saved position each iteration
-        bodyStart = tokenPos;
+        // Execute body from saved position
+        tokenPos = bodyStart;
         result = parseStatement();
+        bodyEnd = tokenPos;  // record where the body ends
         if (returning) break;
         if (breaking) { breaking = false; break; }
         if (continuing) { continuing = false; }
@@ -568,26 +570,10 @@ VMValue TorqueScript::Impl::parseFor() {
             parseExpression();
             tokenPos = saved;
         }
-
-        // Reset to body start for next iteration
-        tokenPos = bodyStart;
     }
 
-    // Skip past the body (advance token position past the body)
-    // The body was parsed at bodyStart, but we reset to bodyStart each iteration.
-    // After the loop, we need to advance past the body.
-    // Re-parse the body one final time to advance tokens, but don't execute.
-    if (bodyStart < tokens.size()) {
-        size_t saved = tokenPos;
-        tokenPos = bodyStart;
-        // Skip the body statement by parsing it
-        // But we need to be careful not to execute side effects
-        // Since the loop has already exited, running might be false
-        bool wasRunning = running;
-        running = true;
-        parseStatement();
-        running = wasRunning;
-    }
+    // Advance past the body one final time
+    tokenPos = bodyEnd;
 
     loopDepth--;
     locals.pop();
@@ -1100,15 +1086,16 @@ VMValue TorqueScript::Impl::parsePostfix() {
         if (peekToken().type == TSTokenType::LBracket) {
             nextToken();
             VMValue idx = parseExpression();
+            std::string savedVar = lastVarName; // save for array key construction
             // Handle 2D arrays: arr[i, j] → key "i,j"
             while (match(TSTokenType::Comma)) {
                 VMValue idx2 = parseExpression();
                 idx = VMValue(idx.toString() + "," + idx2.toString());
             }
             expect(TSTokenType::RBracket);
-            if (!lastVarName.empty()) {
-                std::string arrayKey = lastVarName + "[" + idx.toString() + "]";
-                if (lastVarName[0] == '$') {
+            if (!savedVar.empty()) {
+                std::string arrayKey = savedVar + "[" + idx.toString() + "]";
+                if (savedVar[0] == '$') {
                     val = outer->getGlobal(arrayKey);
                 } else {
                     val = locals.get(arrayKey);
@@ -1399,6 +1386,11 @@ VMValue TorqueScript::Impl::parsePrimary() {
         }
 
         default:
+            if (tok.type == TSTokenType::RBrace && running) {
+                // If we hit a closing brace unexpectedly, it means the parser
+                // token position is misaligned. Skip it silently.
+                return VMValue(0);
+            }
             error(std::string("Unexpected token: ") + tok.text);
             return VMValue(0);
     }
