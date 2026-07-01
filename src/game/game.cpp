@@ -1,4 +1,5 @@
 #include "game/game.h"
+#include <GL/glew.h>
 #include "game/demo.h"
 #include "game/physics.h"
 #include "game/mission_parser.h"
@@ -985,6 +986,35 @@ void World::render(const Point3F& cameraPos) {
 
     // Render sky
     skyBox.render(r.view, r.projection);
+
+    // Simple water plane for procedural terrain (no mission loaded)
+    if (!loaded || terrainBlock.loaded) {
+        float waterLevel = 0.0f;
+        float time = Engine::instance().game().gameTime();
+        float waveOffset = sinf(time * 0.5f) * 0.15f;
+        int gridRes = 16;
+        float size = 2048.0f;
+        float step = size / gridRes;
+        Point3F cam = r.cameraPos;
+        // Only render water within reasonable distance
+        if (cam.y > waterLevel - 20.0f && cam.y < waterLevel + 50.0f) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            for (int z = 0; z < gridRes; z++) {
+                for (int x = 0; x < gridRes; x++) {
+                    float wx = -size/2 + x * step;
+                    float wz = -size/2 + z * step;
+                    // Only draw quads near camera
+                    float dist = (wx - cam.x) * (wx - cam.x) + (wz - cam.z) * (wz - cam.z);
+                    if (dist > 600.0f * 600.0f) continue;
+                    float wy = waterLevel + waveOffset + sinf(wx * 0.01f + time) * 0.1f;
+                    Box3F quad = {{wx, wy - 0.1f, wz}, {wx + step, wy + 0.1f, wz + step}};
+                    r.drawBox(quad, {0.1f, 0.3f, 0.6f, 0.5f});
+                }
+            }
+            glDisable(GL_BLEND);
+        }
+    }
 }
 
 void World::addObject(const WorldObject& obj) {

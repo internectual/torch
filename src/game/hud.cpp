@@ -326,9 +326,9 @@ void HUD::renderScoreboard(Game* game) {
     if (font) font->render("SCOREBOARD", bx + 10, by + 10, {1, 1, 0, 1}, 2.0f);
 
     // Column headers
-    float colX[] = {bx + 20, bx + 220, bx + 350, bx + 470};
-    const char* headers[] = {"Player", "Skin", "Damage", "Health"};
-    for (int i = 0; i < 4; i++) {
+    float colX[] = {bx + 20, bx + 160, bx + 300, bx + 400, bx + 470};
+    const char* headers[] = {"Player", "Team", "Skin", "Damage", "Health"};
+    for (int i = 0; i < 5; i++) {
         if (font) font->render(headers[i], colX[i], by + 50, {1, 1, 1, 1}, 1.2f);
     }
 
@@ -345,13 +345,22 @@ void HUD::renderScoreboard(Game* game) {
                 if (row >= maxRows) break;
                 float ry = by + 80 + row * 22;
                 ColorF col = {0.8f, 0.8f, 1.0f, 0.9f};
+                ColorF teamCol = {0.5f, 0.5f, 0.5f, 0.8f};
+                if (p.teamId == 0) teamCol = {1, 0.3f, 0.3f, 0.9f};   // Red team
+                else if (p.teamId == 1) teamCol = {0.3f, 0.4f, 1, 0.9f};  // Blue team
+                else if (p.teamId == 2) teamCol = {0.3f, 1, 0.3f, 0.9f};  // Green team
                 snprintf(buf, sizeof(buf), "%s", p.name.c_str());
                 if (font) font->render(buf, colX[0], ry, col, 1.0f);
+                const char* teamName = "N/A";
+                if (p.teamId == 0) teamName = "Red";
+                else if (p.teamId == 1) teamName = "Blue";
+                else if (p.teamId == 2) teamName = "Green";
+                if (font) font->render(teamName, colX[1], ry, teamCol, 1.0f);
                 snprintf(buf, sizeof(buf), "%s", p.skin.c_str());
-                if (font) font->render(buf, colX[1], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 1.0f);
+                if (font) font->render(buf, colX[2], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 1.0f);
                 float dmgPct = (1.0f - p.damage) * 100.0f;
                 snprintf(buf, sizeof(buf), "%.0f%%", p.damage * 100.0f);
-                if (font) font->render(buf, colX[2], ry, {1, 0.5f, 0.2f, 0.9f}, 1.0f);
+                if (font) font->render(buf, colX[3], ry, {1, 0.5f, 0.2f, 0.9f}, 1.0f);
                 ColorF hc = dmgPct > 66 ? ColorF{0,1,0,0.9f} : dmgPct > 33 ? ColorF{1,1,0,0.9f} : ColorF{1,0,0,0.9f};
                 snprintf(buf, sizeof(buf), "%.0f%%", dmgPct);
                 if (font) font->render(buf, colX[3], ry, hc, 1.0f);
