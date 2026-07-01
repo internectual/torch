@@ -890,7 +890,8 @@ void World::render(const Point3F& cameraPos) {
     // Render terrain
     if (terrainBlock.loaded) {
         ShaderManager::getTerrainShader()->bind();
-        terrainBlock.render(cameraPos, fog.enabled, fog.color, fog.density, sunLightDirUsed ? &sunLightDir : nullptr);
+        Point3F terrainLight = sunLightDirUsed ? sunLightDir : Point3F{0.5f, 0.7f, 0.5f};
+        terrainBlock.render(cameraPos, fog.enabled, fog.color, fog.density, &terrainLight);
     }
 
     // Render world objects with default shader
@@ -905,9 +906,12 @@ void World::render(const Point3F& cameraPos) {
         defShader->setUniform("uFogDensity", fog.density);
     }
 
-    // Apply sun lighting direction from mission data
+    // Apply sun lighting direction from mission data (or default for demo/procedural)
     if (sunLightDirUsed) {
         defShader->setUniform("uLightDir", sunLightDir);
+    } else {
+        // Default sun: 45 degrees elevation, from upper-right
+        defShader->setUniform("uLightDir", Point3F{0.5f, 0.7f, 0.5f});
     }
 
     // Bind environment map from sky (for reflections on shapes)
