@@ -6,6 +6,13 @@
 #include <sstream>
 #include <fstream>
 #include <set>
+#include <cctype>
+
+static std::string toLower(const std::string& s) {
+    std::string r = s;
+    for (auto& c : r) c = (char)std::tolower((unsigned char)c);
+    return r;
+}
 
 struct TorqueScript::Impl {
     TorqueScript* outer;
@@ -116,7 +123,9 @@ VMValue TorqueScript::getGlobal(const std::string& name) {
 
 void TorqueScript::registerNative(const std::string& name,
     std::function<VMValue(const std::vector<VMValue>&)> fn) {
-    impl->natives[name] = std::move(fn);
+    std::string lower = name;
+    for (auto& c : lower) c = (char)tolower((unsigned char)c);
+    impl->natives[lower] = std::move(fn);
 }
 
 // === TSLocals ===
@@ -533,6 +542,8 @@ VMValue TorqueScript::Impl::parseFor() {
     loopDepth++;
     VMValue result;
     VMValue cond(true);
+    // Save body token range for re-execution each iteration
+    size_t bodyStart = tokenPos;
     while (running) {
         // Evaluate condition
         if (condStart < condEnd) {
@@ -543,6 +554,8 @@ VMValue TorqueScript::Impl::parseFor() {
         }
         if (!cond.toBool()) break;
 
+        // Parse body from saved position each iteration
+        bodyStart = tokenPos;
         result = parseStatement();
         if (returning) break;
         if (breaking) { breaking = false; break; }
@@ -555,7 +568,27 @@ VMValue TorqueScript::Impl::parseFor() {
             parseExpression();
             tokenPos = saved;
         }
+
+        // Reset to body start for next iteration
+        tokenPos = bodyStart;
     }
+
+    // Skip past the body (advance token position past the body)
+    // The body was parsed at bodyStart, but we reset to bodyStart each iteration.
+    // After the loop, we need to advance past the body.
+    // Re-parse the body one final time to advance tokens, but don't execute.
+    if (bodyStart < tokens.size()) {
+        size_t saved = tokenPos;
+        tokenPos = bodyStart;
+        // Skip the body statement by parsing it
+        // But we need to be careful not to execute side effects
+        // Since the loop has already exited, running might be false
+        bool wasRunning = running;
+        running = true;
+        parseStatement();
+        running = wasRunning;
+    }
+
     loopDepth--;
     locals.pop();
     return result;
@@ -1188,7 +1221,7 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 expect(TSTokenType::RParen);
 
                 // Try native first
-                auto nit = natives.find(nameTok.text);
+                auto nit = natives.find(toLower(nameTok.text));
                 if (nit != natives.end()) {
                     return nit->second(args);
                 }
@@ -1223,7 +1256,7 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 parseArgumentList(args);
                 expect(TSTokenType::RParen);
 
-                auto nit = natives.find(nameTok.text);
+                auto nit = natives.find(toLower(nameTok.text));
                 if (nit != natives.end()) return nit->second(args);
 
                 auto& engine = ScriptEngine::instance();
@@ -1242,8 +1275,10 @@ VMValue TorqueScript::Impl::parsePrimary() {
             return locals.get(lastVarName);
         }
 
-        case TSTokenType::Ident: {
+        case TSTokenType::Ident:
+        case TSTokenType::Parent: {
             std::string name = tok.text;
+            if (tok.type == TSTokenType::Parent) name = "Parent";
 
             // Helper to look up and call a function by name with args
             auto lookupAndCall = [&](const std::string& fn, std::vector<VMValue>& args) -> VMValue {
@@ -1258,7 +1293,7 @@ VMValue TorqueScript::Impl::parsePrimary() {
                     return VMValue(0);
                 }
                 // Try natives
-                auto nit = natives.find(fn);
+                auto nit = natives.find(toLower(fn));
                 if (nit != natives.end()) return nit->second(args);
                 // Try DSO VM
                 auto& engine = ScriptEngine::instance();

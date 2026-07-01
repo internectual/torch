@@ -1314,6 +1314,19 @@ bool ScriptEngine::init() {
         return VMValue(s);
     });
 
+    tsInstance->registerNative("collapseEscape", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        return args[0];
+    });
+
+    tsInstance->registerNative("setLogMode", [](const auto& args) -> VMValue {
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("enableWinConsole", [](const auto& args) -> VMValue {
+        return VMValue(1);
+    });
+
     tsInstance->registerNative("strchr", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(-1);
         std::string s = args[0].toString();

@@ -13,6 +13,7 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aUV;
 layout(location = 3) in vec4 aColor;
+layout(location = 4) in vec2 aUV2;
 
 uniform mat4 uProjection;
 uniform mat4 uView;
@@ -21,6 +22,7 @@ uniform vec3 uCamPos = vec3(0);
 
 out vec3 vNormal;
 out vec2 vUV;
+out vec2 vUV2;
 out vec4 vColor;
 out vec3 vWorldPos;
 
@@ -29,6 +31,7 @@ void main() {
     gl_Position = uProjection * uView * worldPos;
     vNormal = mat3(uModel) * aNormal;
     vUV = aUV;
+    vUV2 = aUV2;
     vColor = aColor;
     vWorldPos = worldPos.xyz;
 }
@@ -38,6 +41,7 @@ static const char* defaultFrag = R"(
 #version 330 core
 in vec3 vNormal;
 in vec2 vUV;
+in vec2 vUV2;
 in vec4 vColor;
 in vec3 vWorldPos;
 
@@ -62,7 +66,7 @@ void main() {
     vec4 texColor = uUseTexture ? texture(uTexture, vUV) : vec4(1.0);
     vec4 col = vColor * texColor * uTint;
     if (uUseLightmap) {
-        vec4 lm = texture(uLightmap, vUV);
+        vec4 lm = texture(uLightmap, vUV2);
         col.rgb = col.rgb * (0.5 + 0.5 * lm.rgb);
     }
     if (uSelfIlluminated) {
@@ -96,6 +100,7 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aUV;
 layout(location = 3) in vec4 aColor;
+layout(location = 4) in vec2 aUV2;
 
 uniform mat4 uProjection;
 uniform mat4 uView;

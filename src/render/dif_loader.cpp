@@ -590,13 +590,14 @@ static bool interiorToMeshes(DIFInterior& interior,
         }
     }
 
-    // Build lightmap index per material
+    // Build lightmap index per material (normalLMapIndices is indexed by surface, not material)
     outMatLMIndex.assign(interior.matNames.size(), -1);
-    for (auto& surf : interior.surfaces) {
+    for (size_t si = 0; si < interior.surfaces.size(); si++) {
+        auto& surf = interior.surfaces[si];
         int matIdx = surf.textureIndex;
         if (matIdx >= 0 && matIdx < (int)outMatLMIndex.size()) {
-            int lmIdx = surf.textureIndex < (int)interior.normalLMapIndices.size()
-                ? interior.normalLMapIndices[surf.textureIndex] : -1;
+            int lmIdx = si < interior.normalLMapIndices.size()
+                ? interior.normalLMapIndices[si] : -1;
             if (lmIdx >= 0 && lmIdx < (int)outLightmaps.size()) {
                 if (outMatLMIndex[matIdx] < 0)
                     outMatLMIndex[matIdx] = (int8_t)lmIdx;
