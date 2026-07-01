@@ -55,7 +55,9 @@ Player::Player() {
 Player::~Player() {}
 
 void Player::update(float dt) {
-    (void)dt;
+    if (hp > 0) {
+        updateAnimation(dt, false);
+    }
 }
 
 void Player::loadModel() {
@@ -145,7 +147,6 @@ void Player::render() {
 }
 
 void Player::applyMove(const Point3F& move, bool jump, bool jet) {
-    // Movement handled by Physics system
 }
 
 void Player::selectWeapon(int32_t idx) {
@@ -1216,9 +1217,7 @@ float World::getHeight(float x, float z) const {
     // Fall back to terrain height
     if (!terrainBlock.loaded || terrainBlock.heights.empty()) return 0;
 
-    int tx = Math::clamp((int)((x - terrainBlock.worldOffset.x) / terrainBlock.squareSize), 0, terrainBlock.size - 1);
-    int tz = Math::clamp((int)((z - terrainBlock.worldOffset.z) / terrainBlock.squareSize), 0, terrainBlock.size - 1);
-    return terrainBlock.heights[tz * terrainBlock.size + tx] * terrainBlock.heightScale;
+    return terrainBlock.sampleHeight(x, z);
 }
 
 // ─── Particle System ──────────────────────────────────────────
