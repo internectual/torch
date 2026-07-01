@@ -44,25 +44,6 @@ static float readF32(const uint8_t*& ptr, size_t& rem) {
     return v;
 }
 
-static void readPoint3F(const uint8_t*& ptr, size_t& rem, float& x, float& y, float& z) {
-    x = readF32(ptr, rem);
-    y = readF32(ptr, rem);
-    z = readF32(ptr, rem);
-}
-
-static std::string readString(const uint8_t*& ptr, size_t& rem) {
-    if (rem == 0) return "";
-    uint32_t len = readU32(ptr, rem);
-    if (len == 0 || len > rem) {
-        if (len > rem) rem = 0;
-        return "";
-    }
-    std::string s((const char*)ptr, len);
-    ptr += len; rem -= len;
-    if (!s.empty() && s.back() == '\0') s.pop_back();
-    return s;
-}
-
 static std::string readNullString(const uint8_t*& ptr, size_t& rem) {
     if (rem == 0) return "";
     const uint8_t* start = ptr;
@@ -89,8 +70,6 @@ static void fanToTriangles(const std::vector<uint32_t>& windings,
 {
     if (fan.windingCount < 3) return;
 
-    // fanMask is a bitmask: bit j set means vertex j is a fan start
-    // If no fan bits are set, treat the whole winding as one fan
     bool hasFanBits = false;
     for (uint32_t j = 0; j < fan.windingCount; j++) {
         if (fanMask && (fanMask[j >> 3] & (1 << (j & 7)))) {
@@ -100,7 +79,6 @@ static void fanToTriangles(const std::vector<uint32_t>& windings,
     }
 
     if (!hasFanBits) {
-        // Simple fan: vertices 0,1,2,3,... → triangles (0,1,2), (0,2,3), (0,3,4), ...
         for (uint32_t j = 2; j < fan.windingCount; j++) {
             outIndices.push_back(baseIndex + windings[fan.windingStart]);
             outIndices.push_back(baseIndex + windings[fan.windingStart + j - 1]);
@@ -109,11 +87,9 @@ static void fanToTriangles(const std::vector<uint32_t>& windings,
         return;
     }
 
-    // Multi-fan: each fan bit marks the start of a new fan
     uint32_t fanStart = 0;
     for (uint32_t j = 0; j < fan.windingCount; j++) {
         if (fanMask && (fanMask[j >> 3] & (1 << (j & 7))) && j > fanStart) {
-            // Emit fan from fanStart to j
             for (uint32_t k = fanStart + 2; k < j; k++) {
                 outIndices.push_back(baseIndex + windings[fan.windingStart + fanStart]);
                 outIndices.push_back(baseIndex + windings[fan.windingStart + k - 1]);
@@ -122,7 +98,6 @@ static void fanToTriangles(const std::vector<uint32_t>& windings,
             fanStart = j;
         }
     }
-    // Emit remaining fan
     if (fanStart + 2 < fan.windingCount) {
         for (uint32_t k = fanStart + 2; k < fan.windingCount; k++) {
             outIndices.push_back(baseIndex + windings[fan.windingStart + fanStart]);
@@ -132,7 +107,7 @@ static void fanToTriangles(const std::vector<uint32_t>& windings,
     }
 }
 
-// ─── Texture resolution (shared pattern with DTS loader) ────────
+// ─── Texture resolution ────────────────────────────────────────
 
 static Texture resolveDIFTexture(const std::string& matName) {
     Texture tex;
@@ -146,7 +121,6 @@ static Texture resolveDIFTexture(const std::string& matName) {
     candidates.push_back("textures/" + lower);
     candidates.push_back(lower);
 
-    // Strip extensions to try variations
     std::string base = lower;
     for (auto* se : {".lbioderm", ".ifl", ".iflod", ".dml", ".mis", ".png", ".bm8", ".jpg", ".dds"}) {
         size_t seLen = strlen(se);
@@ -203,16 +177,19 @@ struct DIFInterior {
     float sphere[4];
     bool hasAlarmState;
 
-    // Planes (indexed for compression)
-    std::vector<float> uniqueNormals; // 3 floats per normal
+    // Planes
+    std::vector<float> uniqueNormals;
     std::vector<uint16_t> planeNormalIndices;
     std::vector<float> planeD;
 
-    // Points (padded)
-    std::vector<float> points; // 3 floats per point
+    // Points (Point3F only, no fog coord padding)
+    std::vector<float> points;
+
+    // Point visibility
+    std::vector<uint8_t> pointVisibility;
 
     // TexGen planes
-    std::vector<float> texGenEqs; // 8 floats per entry (S: 4, T: 4)
+    std::vector<float> texGenEqs;
 
     // BSP
     struct BSPNode {
@@ -228,11 +205,10 @@ struct DIFInterior {
     };
     std::vector<BSPSolidLeaf> bspSolidLeaves;
 
-    // Material list
-    std::vector<uint32_t> matFlags;
+    // Material list (from MaterialList::read)
     std::vector<std::string> matNames;
 
-    // Windings (index arrays)
+    // Windings
     std::vector<uint32_t> windings;
     std::vector<TriFan> windingIndices;
 
@@ -259,7 +235,7 @@ struct DIFInterior {
     // Surfaces
     std::vector<DIFSurface> surfaces;
 
-    // Lightmap indices
+    // Lightmap indices (always read)
     std::vector<uint8_t> normalLMapIndices;
     std::vector<uint8_t> alarmLMapIndices;
 
@@ -272,7 +248,7 @@ struct DIFInterior {
     };
     std::vector<NullSurface> nullSurfaces;
 
-    // Lightmaps (raw PNG data)
+    // Lightmaps
     struct LMapEntry {
         std::vector<uint8_t> pngData;
         bool keep;
@@ -303,7 +279,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     uint32_t numLightStateEntries = readU32(ptr, rem);
     (void)numLightStateEntries;
 
-    // ── 8. Planes (indexed) ──
+    // ── Planes (indexed encoding) ──
     uint32_t uniqueNormalCount = readU32(ptr, rem);
     out.uniqueNormals.reserve(uniqueNormalCount * 3);
     for (uint32_t i = 0; i < uniqueNormalCount; i++) {
@@ -320,33 +296,32 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
         out.planeD.push_back(readF32(ptr, rem));
     }
 
-    // ── 9. Points ──
+    // ── Points (Point3F only, no fog coord) ──
     uint32_t pointCount = readU32(ptr, rem);
     out.points.reserve(pointCount * 3);
     for (uint32_t i = 0; i < pointCount; i++) {
         float x = readF32(ptr, rem);
         float y = readF32(ptr, rem);
         float z = readF32(ptr, rem);
-        // DIF is Z-up (y is up), keep as-is
         out.points.push_back(x);
         out.points.push_back(y);
         out.points.push_back(z);
-        // Skip fog coord union (4 bytes)
-        readU32(ptr, rem);
     }
 
-    // ── 10. Point visibility ──
+    // ── Point visibility ──
     uint32_t pointVisCount = readU32(ptr, rem);
-    for (uint32_t i = 0; i < pointVisCount; i++) readU8(ptr, rem);
+    out.pointVisibility.resize(pointVisCount);
+    for (uint32_t i = 0; i < pointVisCount; i++)
+        out.pointVisibility[i] = readU8(ptr, rem);
 
-    // ── 11. TexGen planes ──
+    // ── TexGen planes ──
     uint32_t texGenCount = readU32(ptr, rem);
     out.texGenEqs.reserve(texGenCount * 8);
     for (uint32_t i = 0; i < texGenCount; i++) {
         for (int j = 0; j < 8; j++) out.texGenEqs.push_back(readF32(ptr, rem));
     }
 
-    // ── 12. BSP nodes ──
+    // ── BSP nodes ──
     uint32_t nodeCount = readU32(ptr, rem);
     out.bspNodes.resize(nodeCount);
     for (uint32_t i = 0; i < nodeCount; i++) {
@@ -355,7 +330,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
         out.bspNodes[i].backIndex = readU16(ptr, rem);
     }
 
-    // ── 13. BSP solid leaves ──
+    // ── BSP solid leaves ──
     uint32_t leafCount = readU32(ptr, rem);
     out.bspSolidLeaves.resize(leafCount);
     for (uint32_t i = 0; i < leafCount; i++) {
@@ -363,23 +338,33 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
         out.bspSolidLeaves[i].surfaceCount = readU16(ptr, rem);
     }
 
-    // ── 14. Material list ──
+    // ── Material list (MaterialList::read format) ──
+    // U8 BINARY_FILE_VERSION, U32 count, then (U8 length, string) per entry
+    uint8_t mlVersion = readU8(ptr, rem);
+    if (mlVersion != 1 && mlVersion != 2) {
+        Console::instance().printf(LogLevel::Warn, "DIF: unexpected MaterialList version %u", mlVersion);
+    }
+    (void)mlVersion;
     uint32_t matCount = readU32(ptr, rem);
     out.matNames.reserve(matCount);
-    out.matFlags.reserve(matCount);
     for (uint32_t i = 0; i < matCount; i++) {
-        out.matFlags.push_back(readU32(ptr, rem));
-        out.matNames.push_back(readNullString(ptr, rem));
+        uint8_t strLen = readU8(ptr, rem);
+        if (strLen > rem) {
+            out.matNames.push_back("");
+            break;
+        }
+        out.matNames.push_back(std::string((const char*)ptr, strLen));
+        ptr += strLen; rem -= strLen;
     }
 
-    // ── 15. Windings ──
+    // ── Windings ──
     uint32_t windingCount = readU32(ptr, rem);
     out.windings.reserve(windingCount);
     for (uint32_t i = 0; i < windingCount; i++) {
         out.windings.push_back(readU32(ptr, rem));
     }
 
-    // ── 16. Winding indices (TriFans) ──
+    // ── Winding indices (TriFans) ──
     uint32_t fanCount = readU32(ptr, rem);
     out.windingIndices.resize(fanCount);
     for (uint32_t i = 0; i < fanCount; i++) {
@@ -387,7 +372,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
         out.windingIndices[i].windingCount = readU32(ptr, rem);
     }
 
-    // ── 17. Zones ──
+    // ── Zones ──
     uint32_t zoneCount = readU32(ptr, rem);
     out.zones.resize(zoneCount);
     for (uint32_t i = 0; i < zoneCount; i++) {
@@ -398,21 +383,21 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
         out.zones[i].flags = readU16(ptr, rem);
     }
 
-    // ── 18. Zone surfaces ──
+    // ── Zone surfaces ──
     uint32_t zoneSurfaceCount = readU32(ptr, rem);
     out.zoneSurfaces.resize(zoneSurfaceCount);
     for (uint32_t i = 0; i < zoneSurfaceCount; i++) {
         out.zoneSurfaces[i] = readU16(ptr, rem);
     }
 
-    // ── 19. Zone portal list ──
+    // ── Zone portal list ──
     uint32_t zonePortalCount = readU32(ptr, rem);
     out.zonePortalList.resize(zonePortalCount);
     for (uint32_t i = 0; i < zonePortalCount; i++) {
         out.zonePortalList[i] = readU16(ptr, rem);
     }
 
-    // ── 20. Portals ──
+    // ── Portals ──
     uint32_t portalCount = readU32(ptr, rem);
     out.portals.resize(portalCount);
     for (uint32_t i = 0; i < portalCount; i++) {
@@ -423,7 +408,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
         out.portals[i].zoneBack = readU16(ptr, rem);
     }
 
-    // ── 21. Surfaces ──
+    // ── Surfaces ──
     uint32_t surfaceCount = readU32(ptr, rem);
     out.surfaces.resize(surfaceCount);
     for (uint32_t i = 0; i < surfaceCount; i++) {
@@ -434,8 +419,9 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
         s.textureIndex = readU16(ptr, rem);
         s.texGenIndex = readU32(ptr, rem);
         s.surfaceFlags = readU8(ptr, rem);
-        readU8(ptr, rem); // padding
+        // No padding here - fanMask follows immediately
         s.fanMask = readU32(ptr, rem);
+        // Lightmap texgen: U16 encoded + F32 offsetX + F32 offsetY
         s.encodedTexGen = readU16(ptr, rem);
         s.texGenOffsetX = readF32(ptr, rem);
         s.texGenOffsetY = readF32(ptr, rem);
@@ -447,23 +433,21 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
         s.mapSizeY = readU8(ptr, rem);
     }
 
-    // ── 22. Normal lightmap indices ──
+    // ── Normal lightmap indices (always read) ──
     uint32_t normalLMapCount = readU32(ptr, rem);
     out.normalLMapIndices.resize(normalLMapCount);
     for (uint32_t i = 0; i < normalLMapCount; i++) {
         out.normalLMapIndices[i] = readU8(ptr, rem);
     }
 
-    // ── 23. Alarm lightmap indices ──
-    if (out.hasAlarmState) {
-        uint32_t alarmLMapCount = readU32(ptr, rem);
-        out.alarmLMapIndices.resize(alarmLMapCount);
-        for (uint32_t i = 0; i < alarmLMapCount; i++) {
-            out.alarmLMapIndices[i] = readU8(ptr, rem);
-        }
+    // ── Alarm lightmap indices (always read) ──
+    uint32_t alarmLMapCount = readU32(ptr, rem);
+    out.alarmLMapIndices.resize(alarmLMapCount);
+    for (uint32_t i = 0; i < alarmLMapCount; i++) {
+        out.alarmLMapIndices[i] = readU8(ptr, rem);
     }
 
-    // ── 24. Null surfaces ──
+    // ── Null surfaces ──
     uint32_t nullSurfaceCount = readU32(ptr, rem);
     out.nullSurfaces.resize(nullSurfaceCount);
     for (uint32_t i = 0; i < nullSurfaceCount; i++) {
@@ -474,75 +458,127 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
         ns.windingCount = readU8(ptr, rem);
     }
 
-    // ── 25. Lightmaps ──
+    // ── Lightmaps ──
+    // PNG data is stored raw (no size prefix), self-delimiting via IEND chunk
+    // PNG chunk lengths are big-endian
     uint32_t lightmapCount = readU32(ptr, rem);
     out.lightmapEntries.resize(lightmapCount);
+    static const uint8_t s_pngMagic[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
     for (uint32_t i = 0; i < lightmapCount; i++) {
-        // Each lightmap is a PNG with a "keep" flag
-        uint32_t pngSize = readU32(ptr, rem);
-        if (pngSize == 0 || pngSize > rem) {
-            out.lightmapEntries[i].keep = (readU8(ptr, rem) != 0);
-            continue;
+        if (rem >= 8 && memcmp(ptr, s_pngMagic, 8) == 0) {
+            const uint8_t* scan = ptr + 8;
+            size_t scanRem = rem - 8;
+            bool foundEnd = false;
+            while (scanRem >= 12) {
+                uint32_t chunkLen = ((uint32_t)scan[0] << 24) | ((uint32_t)scan[1] << 16) |
+                                    ((uint32_t)scan[2] << 8) | (uint32_t)scan[3];
+                if (memcmp(scan + 4, "IEND", 4) == 0) {
+                    uint32_t pngSize = (uint32_t)(scan + 12 - ptr);
+                    out.lightmapEntries[i].pngData.assign(ptr, ptr + pngSize);
+                    ptr += pngSize; rem -= pngSize;
+                    foundEnd = true;
+                    break;
+                }
+                uint32_t skip = chunkLen + 12;
+                if (skip > scanRem) skip = (uint32_t)scanRem;
+                scan += skip;
+                scanRem -= skip;
+            }
+            if (!foundEnd) {
+                out.lightmapEntries[i].keep = false;
+                continue;
+            }
         }
-        out.lightmapEntries[i].pngData.assign(ptr, ptr + pngSize);
-        ptr += pngSize; rem -= pngSize;
         out.lightmapEntries[i].keep = (readU8(ptr, rem) != 0);
     }
 
-    // ── 26. Solid leaf surfaces ──
+    // ── Solid leaf surfaces ──
     uint32_t slsCount = readU32(ptr, rem);
     out.solidLeafSurfaces.resize(slsCount);
     for (uint32_t i = 0; i < slsCount; i++) {
         out.solidLeafSurfaces[i] = readU32(ptr, rem);
     }
 
-    // ── 27. Animated lights ── skip ──
+    // ── Animated lights ──
     uint32_t animLightCount = readU32(ptr, rem);
     for (uint32_t i = 0; i < animLightCount; i++) {
-        readU32(ptr, rem); // nameIndex
-        readU32(ptr, rem); // stateIndex
-        readU16(ptr, rem); // stateCount
-        readU16(ptr, rem); // flags
-        readU32(ptr, rem); // duration
+        readU32(ptr, rem); readU32(ptr, rem); readU16(ptr, rem); readU16(ptr, rem); readU32(ptr, rem);
     }
 
-    // ── 28. Light states ── skip ──
+    // ── Light states ──
     uint32_t lightStateCount = readU32(ptr, rem);
     for (uint32_t i = 0; i < lightStateCount; i++) {
-        readU8(ptr, rem); readU8(ptr, rem); readU8(ptr, rem); readU8(ptr, rem); // color
+        readU8(ptr, rem); readU8(ptr, rem); readU8(ptr, rem); // RGB
         readU32(ptr, rem); // activeTime
         readU32(ptr, rem); // dataIndex
         readU16(ptr, rem); // dataCount
-        readU16(ptr, rem); // padding
     }
 
-    // ── 29. State data ── skip ──
+    // ── State data ──
     uint32_t stateDataCount = readU32(ptr, rem);
     for (uint32_t i = 0; i < stateDataCount; i++) {
         readU32(ptr, rem); // surfaceIndex
         readU32(ptr, rem); // mapIndex
         readU16(ptr, rem); // lightStateIndex
-        readU16(ptr, rem); // padding
     }
 
-    // ── 30. State data buffer ── skip ──
+    // ── State data buffer ──
     uint32_t stateDataBufSize = readU32(ptr, rem);
-    readU32(ptr, rem); // flags
+    readU32(ptr, rem); // flags (always 0)
     if (stateDataBufSize > rem) stateDataBufSize = (uint32_t)rem;
     ptr += stateDataBufSize; rem -= stateDataBufSize;
 
-    // ── 31. Name buffer ── skip ──
+    // ── Name buffer ──
     uint32_t nameBufSize = readU32(ptr, rem);
     if (nameBufSize > rem) nameBufSize = (uint32_t)rem;
     ptr += nameBufSize; rem -= nameBufSize;
 
-    // ── 32. Sub-objects ── skip ──
+    // ── Sub-objects ──
+    // InteriorSubObject::readISO reads U32 key, then tag-dependent data
     uint32_t subObjectCount = readU32(ptr, rem);
     for (uint32_t i = 0; i < subObjectCount; i++) {
-        // InteriorSubObject: U16 tag, U32 data
-        readU16(ptr, rem); // tag
-        readU32(ptr, rem); // data
+        readU32(ptr, rem); // key
+        // MirrorSubObject: U32 dl, U32 zone, F32 alpha, U32 sc, U32 ss, 3xF32
+        readU32(ptr, rem); readU32(ptr, rem); readF32(ptr, rem);
+        readU32(ptr, rem); readU32(ptr, rem);
+        readF32(ptr, rem); readF32(ptr, rem); readF32(ptr, rem);
     }
+
+    // ── Convex hulls ──
+    // Serialized size: 52 bytes per hull (empirically verified)
+    // layout: hullStart(U32), hullCount(U16), pad(?), minX(F32), maxX(F32),
+    //   minY(F32), maxY(F32), minZ(F32), maxZ(F32), surfaceStart(U32),
+    //   surfaceCount(U16), pad(?), planeStart(U32), polyListPlaneStart(U32),
+    //   polyListPointStart(U32), polyListStringStart(U32)
+    uint32_t hullCount = readU32(ptr, rem);
+    if (rem >= hullCount * 52ull) {
+        ptr += hullCount * 52;
+        rem -= hullCount * 52;
+    }
+
+    auto skipVecU8 = [&]() { uint32_t n = readU32(ptr, rem); ptr += n; rem -= n; };
+    auto skipVecU16 = [&]() { uint32_t n = readU32(ptr, rem); ptr += n * 2; rem -= n * 2; };
+    auto skipVecU32 = [&]() { uint32_t n = readU32(ptr, rem); ptr += n * 4; rem -= n * 4; };
+
+    skipVecU8();  // hullEmitStrings
+    skipVecU32(); // hullIndices
+    skipVecU16(); // hullPlaneIndices
+    skipVecU32(); // hullEmitStringIndices
+    skipVecU32(); // hullSurfaceIndices
+    skipVecU16(); // polyListPlanes
+    skipVecU32(); // polyListPoints
+    skipVecU8();  // polyListStrings
+
+    // ── Coord bins (16x16 = 256 entries, each U32+U32) ──
+    if (rem >= 256 * 8) { ptr += 256 * 8; rem -= 256 * 8; }
+    skipVecU16(); // coord bin indices
+    readU32(ptr, rem); // coord bin mode
+
+    // ── Ambient colors (ColorF = 4xF32 each, ambient + alarm) ──
+    if (rem >= 32) { ptr += 32; rem -= 32; }
+
+    // ── 4x U32 padding ──
+    if (rem >= 16) { ptr += 16; rem -= 16; }
 
     return true;
 }
@@ -563,7 +599,7 @@ static bool interiorToMeshes(DIFInterior& interior,
     }
 
     // Load textures from material names
-    struct MatSlot { int texIdx = -1; int lmIdx = -1; };
+    struct MatSlot { int texIdx = -1; };
     std::vector<MatSlot> matSlots(interior.matNames.size());
 
     for (size_t i = 0; i < interior.matNames.size(); i++) {
@@ -571,11 +607,9 @@ static bool interiorToMeshes(DIFInterior& interior,
         if (tex.loaded) {
             matSlots[i].texIdx = (int)outTextures.size();
             outTextures.push_back(std::move(tex));
-            outMatFlags.push_back(interior.matFlags[i]);
+            outMatFlags.push_back(0);
             outMatNames.push_back(interior.matNames[i]);
         }
-        // Map lightmap
-        // Multiple surfaces can share a lightmap; we load them below
     }
 
     // Load lightmaps
@@ -590,7 +624,7 @@ static bool interiorToMeshes(DIFInterior& interior,
         outLightmaps.push_back(std::move(lmap));
     }
 
-    // Build lightmap index per material (use first surface's lightmap index)
+    // Build lightmap index per material
     outMatLMIndex.assign(interior.matNames.size(), -1);
     for (auto& surf : interior.surfaces) {
         int matIdx = surf.textureIndex;
@@ -604,24 +638,21 @@ static bool interiorToMeshes(DIFInterior& interior,
         }
     }
 
-    // Group surfaces by material index for mesh batching
-    // Each group becomes one MeshData
+    // Group surfaces by material index
     std::unordered_map<int, std::vector<int>> surfGroups;
-
     for (size_t si = 0; si < interior.surfaces.size(); si++) {
         auto& surf = interior.surfaces[si];
         if (surf.windingCount < 3) continue;
         int matIdx = surf.textureIndex;
-        // Map through texture loading
         int texIdx = (matIdx >= 0 && matIdx < (int)matSlots.size()) ? matSlots[matIdx].texIdx : -1;
         surfGroups[texIdx].push_back((int)si);
     }
 
     if (surfGroups.empty()) return false;
 
-    // Compute normals: get plane normal for each surface
+    // Get plane normal
     auto getPlaneNormal = [&](uint16_t planeIdx) -> Point3F {
-        uint16_t ni = planeIdx & 0x7FFF; // strip flip flag (bit 15)
+        uint16_t ni = planeIdx & 0x7FFF;
         bool flipped = (planeIdx & 0x8000) != 0;
         if (ni < interior.planeNormalIndices.size()) {
             uint16_t normIdx = interior.planeNormalIndices[ni];
@@ -641,8 +672,6 @@ static bool interiorToMeshes(DIFInterior& interior,
     auto genUV = [&](uint32_t texGenIdx, const Point3F& pos) -> Point2F {
         if (texGenIdx < interior.texGenEqs.size() / 8) {
             float* eq = &interior.texGenEqs[texGenIdx * 8];
-            // S = eq[0]*x + eq[1]*y + eq[2]*z + eq[3]
-            // T = eq[4]*x + eq[5]*y + eq[6]*z + eq[7]
             float u = eq[0]*pos.x + eq[1]*pos.y + eq[2]*pos.z + eq[3];
             float v = eq[4]*pos.x + eq[5]*pos.y + eq[6]*pos.z + eq[7];
             return {u, v};
@@ -656,7 +685,6 @@ static bool interiorToMeshes(DIFInterior& interior,
         mesh.materialIndex = texGroup;
         mesh.materialIdx = texGroup;
 
-        // Collect unique vertices with deduplication
         struct VertKey {
             float x, y, z;
             float nx, ny, nz;
@@ -681,17 +709,11 @@ static bool interiorToMeshes(DIFInterior& interior,
             auto& surf = interior.surfaces[si];
             Point3F normal = getPlaneNormal(surf.planeIndex);
 
-            // Build fan mask bytes from fanMask u32
             uint8_t fanMaskBytes[32] = {};
             for (int b = 0; b < 4 && b < 32; b++) {
                 fanMaskBytes[b] = (uint8_t)((surf.fanMask >> (b * 8)) & 0xFF);
             }
 
-            TriFan fan;
-            fan.windingStart = surf.windingStart;
-            fan.windingCount = surf.windingCount;
-
-            // Gather vertex indices for this surface's winding
             std::vector<uint32_t> windVerts;
             for (uint32_t j = 0; j < surf.windingCount && (surf.windingStart + j) < interior.windings.size(); j++) {
                 uint32_t ptIdx = interior.windings[surf.windingStart + j];
@@ -723,7 +745,6 @@ static bool interiorToMeshes(DIFInterior& interior,
 
             if (windVerts.size() < 3) continue;
 
-            // Convert fan to triangles
             fanToTriangles(windVerts, {0, (uint32_t)windVerts.size()}, fanMaskBytes, triIndices, 0);
         }
 
@@ -746,7 +767,6 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name) {
     const uint8_t* ptr = data;
     size_t rem = size;
 
-    // Top-level InteriorResource
     uint32_t fileVersion = readU32(ptr, rem);
     if (fileVersion != 44) {
         Console::instance().printf(LogLevel::Warn, "DIF: unsupported version %u (expected 44) for '%s'", fileVersion, name);
@@ -755,7 +775,6 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name) {
 
     Console::instance().printf(LogLevel::Debug, "DIF: loading '%s' v%u (%zu bytes)", name, fileVersion, size);
 
-    // Preview bitmap? (bool + optional PNG)
     bool hasPreview = readU8(ptr, rem) != 0;
     if (hasPreview) {
         uint32_t pngSize = readU32(ptr, rem);
@@ -764,7 +783,6 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name) {
         }
     }
 
-    // Detail levels
     uint32_t numDetailLevels = readU32(ptr, rem);
     Console::instance().printf(LogLevel::Debug, "DIF: %u detail levels", numDetailLevels);
 
@@ -776,19 +794,15 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name) {
         }
     }
 
-    // Sub-objects (mirrors, etc) - skip for now
+    // Sub-objects
     uint32_t numSubObjects = readU32(ptr, rem);
     for (uint32_t i = 0; i < numSubObjects; i++) {
         DIFInterior sub;
         if (!readInterior(ptr, rem, sub)) break;
     }
 
-    // Skip remaining top-level data: triggers, paths, force fields, AI nodes, vehicle collision
-    // For a complete implementation these would be parsed
-
     Console::instance().printf(LogLevel::Debug, "DIF: converting interior meshes for '%s'", name);
 
-    // Use the highest-detail level (index 0)
     if (interiors.empty()) return result;
 
     if (!interiorToMeshes(interiors[0],
@@ -803,7 +817,6 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name) {
         return result;
     }
 
-    // Add detail level
     DTSShape::DetailLevel dl;
     dl.size = interiors[0].minPixels > 0 ? interiors[0].minPixels : 1000.0f;
     dl.meshIndex = 0;
