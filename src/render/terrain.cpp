@@ -693,10 +693,14 @@ bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
 
     // Finalize material flags — one per slot in materialTextures
     materialFlags.resize(materialTextures.size(), 0);
+    materialMetallic.resize(materialTextures.size(), 0.0f);
+    materialRoughness.resize(materialTextures.size(), 0.5f);
     for (size_t i = 0; i < glb.materials.size(); i++) {
         int ti = matToTex[i];
         if (ti >= 0 && ti < (int)materialFlags.size()) {
             materialFlags[ti] = glb.materials[i].flags;
+            materialMetallic[ti] = glb.materials[i].metallic;
+            materialRoughness[ti] = glb.materials[i].roughness;
         }
     }
 
@@ -899,6 +903,15 @@ void DTSShape::render(int32_t detailLevel) {
 
         if (shader) shader->setUniform("uSelfIlluminated", (int32_t)((flags & MatFlag_SelfIlluminating) ? 1 : 0));
 
+        // Set PBR metallic/roughness per-material
+        float metallic = 0.0f, roughness = 0.5f;
+        if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialMetallic.size()) {
+            metallic = materialMetallic[mesh.materialIndex];
+            roughness = materialRoughness[mesh.materialIndex];
+        }
+        if (shader) shader->setUniform("uMetallic", metallic);
+        if (shader) shader->setUniform("uRoughness", roughness);
+
         // Enable env map for materials that don't have NeverEnvMap
         bool useEnvMap = false;
         auto& ren = Engine::instance().renderer();
@@ -1069,6 +1082,16 @@ void DTSShape::renderAnimation(const char* animName, float time) {
         }
 
         if (shader) shader->setUniform("uSelfIlluminated", (int32_t)((flags & MatFlag_SelfIlluminating) ? 1 : 0));
+
+        {
+            float m = 0.0f, r = 0.5f;
+            if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialMetallic.size()) {
+                m = materialMetallic[mesh.materialIndex];
+                r = materialRoughness[mesh.materialIndex];
+            }
+            if (shader) shader->setUniform("uMetallic", m);
+            if (shader) shader->setUniform("uRoughness", r);
+        }
 
         bool useEnvMap = false;
         if (r.sky && r.sky->emap.loaded && !(flags & MatFlag_NeverEnvMap)) {

@@ -302,7 +302,7 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
 
     // Build per-material texture index mapping
     const JVal& matArr = root["materials"];
-    struct MatInfo { int texIndex = -1; int emissiveIndex = -1; };
+    struct MatInfo { int texIndex = -1; int emissiveIndex = -1; float metallic = 0; float roughness = 0.5f; float baseColorR = 1, baseColorG = 1, baseColorB = 1, baseColorA = 1; };
     std::vector<MatInfo> matInfos;
     result.materials.resize(matArr.size());
     for (size_t i = 0; i < matArr.size(); i++) {
@@ -312,6 +312,20 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
         if (bct.t != JType::Null) {
             mi.texIndex = (int)bct["index"].asInt();
         }
+        // Parse PBR metallic-roughness parameters
+        if (pbr["metallicFactor"].t != JType::Null)
+            mi.metallic = (float)pbr["metallicFactor"].asNum();
+        if (pbr["roughnessFactor"].t != JType::Null)
+            mi.roughness = (float)pbr["roughnessFactor"].asNum();
+        if (pbr["baseColorFactor"].t != JType::Null) {
+            const JVal& bcf = pbr["baseColorFactor"];
+            if (bcf.t == JType::Arr && bcf.size() >= 3) {
+                mi.baseColorR = (float)bcf[0].asNum();
+                mi.baseColorG = (float)bcf[1].asNum();
+                mi.baseColorB = (float)bcf[2].asNum();
+                mi.baseColorA = (bcf.size() >= 4) ? (float)bcf[3].asNum() : 1.0f;
+            }
+        }
         // Also check for emissiveTexture (lightmaps)
         const JVal& emTex = matArr[i]["emissiveTexture"];
         if (emTex.t != JType::Null) {
@@ -319,6 +333,9 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
         }
         matInfos.push_back(mi);
         MaterialInfo& matInfo = result.materials[i];
+        matInfo.metallic = mi.metallic;
+        matInfo.roughness = mi.roughness;
+        matInfo.baseColorFactor = {mi.baseColorR, mi.baseColorG, mi.baseColorB, mi.baseColorA};
         if (matArr[i]["extras"].t != JType::Null) {
             const JVal& ext = matArr[i]["extras"];
             if (ext["resource_path"].t != JType::Null) {

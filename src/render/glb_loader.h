@@ -18,6 +18,9 @@ struct MaterialInfo {
     int embeddedTextureIndex = -1; // index into GLB textures array, -1 if none
     int emissiveTextureIndex = -1; // index into GLB textures for emissive/lightmap, -1 if none
     uint32_t flags = 0;
+    float metallic = 0.0f;
+    float roughness = 0.5f;
+    ColorF baseColorFactor{1, 1, 1, 1};
 };
 
 struct GLBMesh {

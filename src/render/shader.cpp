@@ -66,6 +66,9 @@ uniform sampler2DShadow uShadowMap;
 uniform mat4 uShadowMatrix;
 uniform float uShadowStrength = 0.5;
 
+uniform float uMetallic = 0.0;
+uniform float uRoughness = 0.5;
+
 out vec4 FragColor;
 
 float shadowPCF(vec4 shadowCoord) {
@@ -92,13 +95,43 @@ void main() {
         FragColor = vec4(col.rgb, col.a);
     } else {
         vec3 N = normalize(vNormal);
-        float diff = max(dot(N, normalize(uLightDir)), 0.0);
+        vec3 V = normalize(uCamPos - vWorldPos);
+        vec3 L = normalize(uLightDir);
+        vec3 H = normalize(L + V);
+
+        float NdotL = max(dot(N, L), 0.0);
+        float NdotV = max(dot(N, V), 0.001);
+        float NdotH = max(dot(N, H), 0.001);
+        float HdotV = max(dot(H, V), 0.001);
+
         float shadowFactor = 1.0;
         if (uShadowStrength > 0.0) {
             vec4 shadowCoord = uShadowMatrix * vec4(vWorldPos, 1.0);
             shadowFactor = mix(shadowPCF(shadowCoord), 1.0, 1.0 - uShadowStrength);
         }
-        vec3 lit = col.rgb * (0.3 + 0.7 * diff * shadowFactor);
+
+        // PBR: Cook-Torrance BRDF
+        float metallic = uMetallic;
+        float roughness = clamp(uRoughness, 0.04, 1.0);
+        vec3 F0 = mix(vec3(0.04), col.rgb, metallic);
+
+        // Diffuse (Lambertian)
+        vec3 diffuse = col.rgb * (1.0 - metallic) * (1.0 / 3.14159);
+
+        // Specular: D (GGX), G (Smith-Schlick), F (Schlick)
+        float alpha = roughness * roughness;
+        float a2 = alpha * alpha;
+        float NdotH2 = NdotH * NdotH;
+        float D = a2 / (3.14159 * (NdotH2 * (a2 - 1.0) + 1.0) * (NdotH2 * (a2 - 1.0) + 1.0));
+
+        float k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+        float G = NdotL / (NdotL * (1.0 - k) + k) * NdotV / (NdotV * (1.0 - k) + k);
+
+        vec3 F = F0 + (1.0 - F0) * pow(1.0 - HdotV, 5.0);
+
+        vec3 specular = D * G * F / (4.0 * NdotV * NdotL + 0.0001);
+
+        vec3 lit = (diffuse + specular) * (0.3 + 0.7 * NdotL * shadowFactor);
         if (uUseEnvMap) {
             vec3 V = normalize(uCamPos - vWorldPos);
             vec3 R = reflect(-V, N);

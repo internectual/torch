@@ -115,6 +115,8 @@ struct DTSShape {
     std::vector<std::string> materialNames; // original material names (for skin overrides)
     std::vector<Texture> materialTextures;
     std::vector<uint32_t> materialFlags; // parallel to materialTextures
+    std::vector<float> materialMetallic; // parallel to materialTextures
+    std::vector<float> materialRoughness; // parallel to materialTextures
     std::vector<Texture> lightmaps;
     std::vector<int8_t> materialLightmapIndex; // per-material: -1 no lightmap, >=0 index into lightmaps[]
     bool isInterior = false;
