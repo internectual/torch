@@ -1365,8 +1365,16 @@ VMValue TorqueScript::Impl::parsePrimary() {
             obj->className = className.text;
             if (!args.empty()) obj->name = args[0].toString();
 
+            // Track parent-child for GUI controls
+            static std::vector<ScriptObject*> guiParentStack;
+
+            // If this is a GuiControl subclass, track parent
+            bool isGuiControl = (obj->className.find("Gui") == 0);
+
             if (peekToken().type == TSTokenType::LBrace) {
-                nextToken(); // consume opening brace
+                nextToken();
+                // Record this object as parent for nested new expressions
+                if (isGuiControl) guiParentStack.push_back(obj);
                 while (peekToken().type != TSTokenType::RBrace && peekToken().type != TSTokenType::Eof) {
                     TSToken fieldName = nextToken();
                     if (fieldName.type == TSTokenType::Eof) break;
@@ -1378,7 +1386,16 @@ VMValue TorqueScript::Impl::parsePrimary() {
                     }
                     while (peekToken().type == TSTokenType::Semicolon) nextToken();
                 }
+                if (isGuiControl && !guiParentStack.empty()) guiParentStack.pop_back();
                 if (peekToken().type == TSTokenType::RBrace) nextToken();
+            }
+
+            // Link parent-child for GUI controls
+            if (isGuiControl && !guiParentStack.empty()) {
+                ScriptObject* parent = guiParentStack.back();
+                if (parent != obj) {
+                    obj->internals["parent"] = VMValue(parent->name);
+                }
             }
 
             ScriptEngine::instance().objects[obj->name] = obj;

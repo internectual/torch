@@ -38,7 +38,6 @@ public:
 
 private:
     GuiControl* canvas{};
-    GuiControl* buildFromScriptObject(ScriptObject* obj, GuiControl* parent);
     void renderControl(GuiControl* ctl);
     GuiControl* hitTest(GuiControl* ctl, int x, int y);
 

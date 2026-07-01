@@ -3,6 +3,7 @@
 #include "core/engine.h"
 #include "script/script_engine.h"
 #include <algorithm>
+#include <cstdio>
 #include <cmath>
 
 GuiControl* GuiControl::findChild(const std::string& name) {
@@ -20,16 +21,69 @@ GuiRenderer::GuiRenderer() {}
 GuiRenderer::~GuiRenderer() {}
 
 void GuiRenderer::init() {
-    // Build GUI tree from existing ScriptObjects
     canvas = nullptr;
     auto& objs = ScriptEngine::instance().objects;
+
+    // First pass: create GuiControl objects for all GUI-related ScriptObjects
+    std::unordered_map<std::string, GuiControl*> controlMap;
     for (auto& [name, obj] : objs) {
-        if (obj->className == "GuiCanvas" && canvas == nullptr) {
-            canvas = buildFromScriptObject(obj, nullptr);
+        if (obj->className.find("Gui") == 0) {
+            GuiControl* ctl = new GuiControl;
+            ctl->name = obj->name;
+            ctl->className = obj->className;
+
+            auto rf = [&](const std::string& key, float def) {
+                auto it = obj->fields.find(key);
+                if (it != obj->fields.end()) return (float)it->second.toDouble();
+                auto it2 = obj->internals.find(key);
+                if (it2 != obj->internals.end()) return (float)it2->second.toDouble();
+                return def;
+            };
+            // Parse "x y" format strings
+            auto parsePair = [&](const std::string& key, float& a, float& b) {
+                auto it = obj->fields.find(key);
+                if (it != obj->fields.end()) {
+                    std::string s = it->second.toString();
+                    sscanf(s.c_str(), "%f %f", &a, &b);
+                }
+            };
+            parsePair("position", ctl->posX, ctl->posY);
+            parsePair("extent", ctl->extentX, ctl->extentY);
+
+            auto it = obj->fields.find("text");
+            if (it != obj->fields.end()) ctl->text = it->second.toString();
+            it = obj->fields.find("bitmap");
+            if (it != obj->fields.end()) ctl->bitmap = it->second.toString();
+            it = obj->fields.find("visible");
+            if (it != obj->fields.end()) ctl->visible = it->second.toBool();
+
+            controlMap[name] = ctl;
+
+            if (ctl->className == "GuiCanvas") {
+                canvas = ctl;
+            }
         }
     }
+
+    // Second pass: link parent-child relationships
+    for (auto& [name, obj] : objs) {
+        if (obj->className.find("Gui") == 0) {
+            auto ctl = controlMap[name];
+            auto pit = obj->internals.find("parent");
+            if (pit != obj->internals.end()) {
+                std::string pname = pit->second.toString();
+                auto pc = controlMap.find(pname);
+                if (pc != controlMap.end()) {
+                    pc->second->addChild(ctl);
+                }
+            } else if (ctl != canvas && canvas) {
+                // Orphan controls go directly on canvas
+                canvas->addChild(ctl);
+            }
+        }
+    }
+
     if (!canvas) {
-        // Create a default canvas
         canvas = new GuiControl;
         canvas->name = "Canvas";
         canvas->className = "GuiCanvas";
@@ -37,7 +91,7 @@ void GuiRenderer::init() {
         canvas->extentY = 768;
     }
 
-    // Checkerboard texture for failed bitmap loads
+    // Checkerboard texture
     std::vector<uint8_t> cb(16*16*4);
     for (int y = 0; y < 16; y++)
         for (int x = 0; x < 16; x++) {
@@ -49,46 +103,6 @@ void GuiRenderer::init() {
     checkerTex->loadRaw(cb.data(), 16, 16, 4);
 }
 
-GuiControl* GuiRenderer::buildFromScriptObject(ScriptObject* obj, GuiControl* parent) {
-    if (!obj) return nullptr;
-    GuiControl* ctl = new GuiControl;
-    ctl->name = obj->name;
-    ctl->className = obj->className;
-
-    // Read common properties from script object fields
-    auto readFloat = [&](const std::string& key, float def) {
-        auto it = obj->fields.find(key);
-        if (it != obj->fields.end()) return (float)it->second.toDouble();
-        auto it2 = obj->internals.find(key);
-        if (it2 != obj->internals.end()) return (float)it2->second.toDouble();
-        return def;
-    };
-    ctl->posX = readFloat("position", 0);
-    ctl->posY = readFloat("position", 0); // "position x y" format
-    ctl->extentX = readFloat("extent", 100);
-    ctl->extentY = readFloat("extent", 100);
-    ctl->minExtentX = readFloat("minExtent", 8);
-    ctl->minExtentY = readFloat("minExtent", 8);
-
-    auto it = obj->fields.find("text");
-    if (it != obj->fields.end()) ctl->text = it->second.toString();
-    it = obj->fields.find("bitmap");
-    if (it != obj->fields.end()) ctl->bitmap = it->second.toString();
-    it = obj->fields.find("visible");
-    if (it != obj->fields.end()) ctl->visible = it->second.toBool();
-
-    if (parent) parent->addChild(ctl);
-
-    // Recursively build children (GuiControl containers)
-    for (auto& [name, childObj] : ScriptEngine::instance().objects) {
-        if (childObj->className.find("Gui") != std::string::npos) {
-            // Simple check: objects with GUI class names might be children
-            // In T2, children are defined in the .gui file via "new GuiControl() {}" nesting
-            // For now, we just link known GUI objects into the tree
-        }
-    }
-
-    return ctl;
 }
 
 void GuiRenderer::render() {
