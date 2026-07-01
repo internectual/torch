@@ -449,7 +449,7 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
     ortho.m[3][1] = -1.0f;
 
     shader->setUniform("uProjection", ortho);
-    shader->setUniform("uColor", Point3F{color.r, color.g, color.b});
+    shader->setUniform("uColor", color);
     shader->setUniform("uTexture", 0);
 
     glActiveTexture(GL_TEXTURE0);
