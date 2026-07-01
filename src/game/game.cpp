@@ -2115,22 +2115,41 @@ DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::stri
     auto& fs = Engine::instance().fs();
     const char* path = shapePathForClass(className, skinName);
     if (!path) {
-        std::vector<std::string> defaultPaths = {
-            "shapes/light_male.glb",
-            "@vl2/TR2final105-client.vl2/shapes/TR2light_male.glb",
+        // Try class-name-based paths for unknown classes
+        std::string lower = className;
+        for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
+        std::vector<std::string> candidates = {
+            "shapes/" + lower + ".dts",
+            "shapes/" + lower + ".glb",
+            "shapes/" + lower,
+            "shapes/" + className + ".dts",
+            "shapes/" + className + ".glb",
         };
-        for (auto& dp : defaultPaths) {
-            auto glbData = fs.read(dp.c_str());
-            if (!glbData.empty()) {
-                DTSShape shape;
-                shape.name = className;
-                if (shape.load(glbData.data(), glbData.size())) {
-                    auto inserted = demoShapeCache.emplace(cacheKey, std::move(shape));
-                    return inserted.first->second.loaded ? &inserted.first->second : nullptr;
+        for (auto& c : candidates) {
+            auto d = fs.read(c.c_str());
+            if (!d.empty()) {
+                DTSShape s;
+                s.name = className;
+                if (s.load(d.data(), d.size())) {
+                    auto ins = demoShapeCache.emplace(cacheKey, std::move(s));
+                    return ins.first->second.loaded ? &ins.first->second : nullptr;
+                }
+            }
+        }
+        // Try generic fallback shapes
+        for (auto& f : {"shapes/bioderm_light.glb", "shapes/bomb.dts"}) {
+            auto d = fs.read(f);
+            if (!d.empty()) {
+                DTSShape s;
+                s.name = className;
+                if (s.load(d.data(), d.size())) {
+                    auto ins = demoShapeCache.emplace(cacheKey, std::move(s));
+                    return ins.first->second.loaded ? &ins.first->second : nullptr;
                 }
             }
         }
         demoShapeCache[cacheKey] = DTSShape{};
+        Console::instance().printf(LogLevel::Debug, "Demo: no shape for class '%s'", className.c_str());
         return nullptr;
     }
 
