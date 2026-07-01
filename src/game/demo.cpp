@@ -628,11 +628,19 @@ static std::string scanMissionName(const uint8_t* data, size_t size, uint32_t* o
             else curRun = 1;
         }
         if (maxRun > 2) continue;
+        // Reject strings that have digits before the first uppercase letter
+        // (typical T2 missions start with uppercase: "Katabatic", "Training1")
+        size_t firstUpper = s.find_first_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+        size_t firstDigit = s.find_first_of("0123456789");
+        if (firstDigit != std::string::npos && firstUpper != std::string::npos && firstDigit < firstUpper) continue;
         // Score: high alpha ratio wins
         int alnum = 0;
         for (char c : s) if (isalnum((unsigned char)c)) alnum++;
         double alphaRatio = (double)alnum / (double)s.size();
-        if (alphaRatio < 0.75) continue;
+        if (alphaRatio < 0.80) continue;
+        // First char must be alphanumeric and uppercase (most T2 missions)
+        if (!isalnum((unsigned char)s[0])) continue;
+        if (islower((unsigned char)s[0])) continue;
         int score = (int)(alphaRatio * 100) + (int)s.size();
         if (score > bestScore) { bestScore = score; best = s; bestCRC = crc; }
     }
@@ -710,17 +718,33 @@ void DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
     for (int i = 0; i < T2Demo::TaggedStringCount && !bs.isError(); i++)
         if (bs.readFlag()) initialBlock.taggedStrings[i] = bs.readString();
 
-    // ─── Find mission name via heuristic scan ────────────────
+    // ─── Find mission name ───────────────────────────────────
+    // 1. First try scanning tagged strings for a .mis path
+    std::string taggedMission;
+    for (auto& [tag, str] : initialBlock.taggedStrings) {
+        if (str.find(".mis") != std::string::npos || str.find("missions/") != std::string::npos) {
+            taggedMission = str;
+            break;
+        }
+    }
+
     // Skip the rest (datablocks, connection state, etc.) — we
     // can't consume datablock payloads without full parsers.
     bs.setCurPos(totalBits);
 
-    // Try the C++ heuristic scan first (works for all protocol versions)
+    // 2. Try the C++ heuristic scan
     uint32_t crc = 0;
-    initialBlock.missionName = scanMissionName(data, size, &crc);
+    std::string scanned = scanMissionName(data, size, &crc);
     initialBlock.missionCRC = crc;
 
-    // Fallback: reference parser via Node.js for protocol versions where scan fails
+    // 3. Prefer tagged string mission (more reliable) over heuristic scan
+    if (!taggedMission.empty()) {
+        initialBlock.missionName = taggedMission;
+    } else {
+        initialBlock.missionName = scanned;
+    }
+
+    // Fallback: reference parser via Node.js
     if (initialBlock.missionName.empty()) {
         initialBlock.missionName = extractMissionNameViaNode(data, size);
     }

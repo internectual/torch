@@ -2081,7 +2081,7 @@ DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::stri
     }
 
     Console::instance().printf(LogLevel::Debug, "Demo: loaded shape for '%s' (%zu meshes)",
-        path, className.c_str(), shape.meshes.size());
+        path, shape.meshes.size());
 
     auto inserted = demoShapeCache.emplace(cacheKey, std::move(shape));
     return inserted.first->second.loaded ? &inserted.first->second : nullptr;

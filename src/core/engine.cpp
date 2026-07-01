@@ -298,7 +298,7 @@ bool Engine::init(int argc, char* argv[]) {
             previewCamPos = {cx, h + half * 0.5f, cz - half * 0.8f};
             usePreviewCam = true;
         }
-    } else if (noLogin) {
+    } else if (noLogin && demoPath.empty()) {
         Console::instance().printf(LogLevel::Info, "-nologin: starting local game");
         g->startLocalGame();
     }
