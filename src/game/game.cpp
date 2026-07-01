@@ -2174,41 +2174,49 @@ void Game::startLocalGame(const char* map) {
         missionPath = map;
         Console::instance().printf(LogLevel::Info, "Using specified mission: %s", missionPath.c_str());
     } else {
-        // Try loading missions in order - first one that exists wins
-        const char* mapsToTry[] = {
-            "Training1", "Training2", "Test",
-            "Katabatic", "Damnation", "Rasp",
-            "Oasis", "Gauntlet", "Desiccator",
-            "Crater71", "Haven", "Tombstone",
-            "Whiteout", "SolsDescent", "TreasureIsland",
-            nullptr
-        };
-
-        // Try to find the first available mission from VL2 archives
-        for (int i = 0; mapsToTry[i]; i++) {
-            std::string p = std::string("missions/") + mapsToTry[i] + ".mis";
-            auto test = Engine::instance().fs().read(p.c_str());
-            if (!test.empty()) {
-                missionPath = mapsToTry[i];
-                Console::instance().printf(LogLevel::Info, "Found mission: %s", p.c_str());
-                break;
+        // Dynamically discover available missions
+        auto& fs = Engine::instance().fs();
+        std::vector<std::string> allEntries;
+        fs.listFiles("missions/", allEntries);
+        std::vector<std::string> foundMissions;
+        for (auto& e : allEntries) {
+            size_t dot = e.rfind('.');
+            std::string ext = (dot != std::string::npos) ? e.substr(dot) : "";
+            if (ext == ".mis" || ext == ".misPK") {
+                size_t slash = e.rfind('/');
+                std::string base = (slash != std::string::npos) ? e.substr(slash + 1) : e;
+                size_t edot = base.rfind('.');
+                if (edot != std::string::npos) base = base.substr(0, edot);
+                if (!base.empty()) foundMissions.push_back(base);
             }
         }
 
-        if (missionPath.empty()) {
-            Console::instance().printf(LogLevel::Warn, "No .mis files found in archives, trying extracted paths");
+        if (!foundMissions.empty()) {
+            std::sort(foundMissions.begin(), foundMissions.end());
+            // Prefer Training1, then Training2, then Katabatic
+            std::vector<std::string> priority = {"Training1", "Training2", "Katabatic"};
+            missionPath = foundMissions[0];
+            for (auto& p : priority)
+                if (std::find(foundMissions.begin(), foundMissions.end(), p) != foundMissions.end())
+                    { missionPath = p; break; }
+            Console::instance().printf(LogLevel::Info, "Found %zu missions, loading: %s", foundMissions.size(), missionPath.c_str());
+        } else {
+            // Fallback to hardcoded list if dynamic discovery fails
+            const char* mapsToTry[] = {
+                "Training1", "Training2", "Katabatic", "Damnation", nullptr
+            };
             for (int i = 0; mapsToTry[i]; i++) {
-                std::string p = std::string("@vl2/missions.vl2/") + mapsToTry[i] + ".mis";
-                auto test = Engine::instance().fs().read(p.c_str());
-                if (!test.empty()) {
+                std::string p = std::string("missions/") + mapsToTry[i] + ".mis";
+                if (!fs.read(p.c_str()).empty()) {
                     missionPath = mapsToTry[i];
+                    Console::instance().printf(LogLevel::Info, "Found mission (fallback): %s", p.c_str());
                     break;
                 }
             }
         }
 
         if (missionPath.empty()) {
-            missionPath = "Katabatic";
+            missionPath = "Training1";
             Console::instance().printf(LogLevel::Info, "Using default mission: %s", missionPath.c_str());
         }
     }
