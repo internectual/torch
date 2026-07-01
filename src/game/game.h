@@ -289,6 +289,7 @@ private:
     float demoMoveBlend = 1.0f;
     bool demoHasPos = false;
     int controlGhostIndex = -1;  // control object ghost index during demo
+    int spectateGhostIndex = -1; // spectating a specific ghost (-1 = follow control object)
     float damageFlash = -1.0f;  // red screen flash during demo playback
     float whiteOut = -1.0f;     // white screen flash during demo playback
     float shakeIntensity = 0.0f; // camera shake for explosions

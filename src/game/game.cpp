@@ -8,6 +8,7 @@
 #include "render/glb_loader.h"
 #include "core/console.h"
 #include "core/engine.h"
+#include <algorithm>
 #include "fs/file_system.h"
 #include <cstdio>
 #include <cmath>
@@ -1465,16 +1466,23 @@ void Game::render(float dt) {
     } else if (demoPlaying && demoHasPos) {
         // Orbit camera for spectator mode
         if (demoOrbitCam) {
-            // Initialize orbit center from the first demo position
+            Point3F targetPos = demoCameraPos;
+            // If spectating a specific ghost, track its position
+            if (spectateGhostIndex >= 0 && demoParser) {
+                const GhostEntry* g = demoParser->getGhostTracker().getGhost(spectateGhostIndex);
+                if (g && (g->position.x != 0 || g->position.y != 0 || g->position.z != 0))
+                    targetPos = {g->position.x, g->position.y, g->position.z};
+            }
+            // Initialize orbit center from target position
             if (!orbitCenterInit) {
-                orbitCenter = demoCameraPos;
+                orbitCenter = targetPos;
                 orbitCenterInit = true;
             }
-            // Smoothly track the action: orbit center follows demo camera
+            // Smoothly track the target
             float trackSpeed = 0.02f;
-            orbitCenter.x += (demoCameraPos.x - orbitCenter.x) * trackSpeed;
-            orbitCenter.y += (demoCameraPos.y + 20.0f - orbitCenter.y) * trackSpeed;
-            orbitCenter.z += (demoCameraPos.z - orbitCenter.z) * trackSpeed;
+            orbitCenter.x += (targetPos.x - orbitCenter.x) * trackSpeed;
+            orbitCenter.y += (targetPos.y + 20.0f - orbitCenter.y) * trackSpeed;
+            orbitCenter.z += (targetPos.z - orbitCenter.z) * trackSpeed;
             float rad = orbitAngle * (3.14159f / 180.0f);
             camPos.x = orbitCenter.x + sinf(rad) * orbitDistance;
             camPos.z = orbitCenter.z + cosf(rad) * orbitDistance;
@@ -2279,4 +2287,30 @@ void Game::applyInput(const InputMove& input) {
     if (demoPlaying && input.demoShowEvents && !prevEventKey)
         toggleDemoEvents();
     prevEventKey = input.demoShowEvents;
+
+    // Spectate cycle on reload key (R) during demo playback
+    static bool prevReload = false;
+    if (demoPlaying && input.reload && !prevReload) {
+        if (demoParser) {
+            auto indices = demoParser->getGhostTracker().getAllIndices();
+            // Find all Player/MPB class ghosts
+            std::vector<int> players;
+            for (int i : indices) {
+                const GhostEntry* g = demoParser->getGhostTracker().getGhost(i);
+                if (g && (g->className == "Player" || g->className == "MPB"))
+                    players.push_back(i);
+            }
+            if (!players.empty()) {
+                // Find current spectate index (or control index) in player list
+                int current = (spectateGhostIndex >= 0) ? spectateGhostIndex : controlGhostIndex;
+                auto it = std::find(players.begin(), players.end(), current);
+                if (it != players.end() && ++it != players.end())
+                    spectateGhostIndex = *it;
+                else
+                    spectateGhostIndex = players[0];
+                Console::instance().printf(LogLevel::Info, "Spectating ghost %d", spectateGhostIndex);
+            }
+        }
+    }
+    prevReload = input.reload;
 }
