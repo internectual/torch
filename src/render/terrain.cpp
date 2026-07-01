@@ -16,7 +16,7 @@
 void TerrainBlock::generateMesh() {
     if (heights.empty()) return;
 
-    int32_t gridRes = 64; // Render grid resolution
+    int32_t gridRes = 128; // Render grid resolution (higher = smoother terrain)
     float totalWorldSize = (float)size * squareSize;
     float step = totalWorldSize / (float)gridRes;
 

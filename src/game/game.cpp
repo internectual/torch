@@ -1187,6 +1187,9 @@ void Game::update(float dt) {
                     // Store damage flash and whiteout for screen effects
                     damageFlash = pd.gameState.damageFlash;
                     whiteOut = pd.gameState.whiteOut;
+                    // Store control object ghost index for highlight
+                    if (pd.gameState.controlObjectGhostIndex >= 0)
+                        controlGhostIndex = pd.gameState.controlObjectGhostIndex;
                 }
                 delete block;
             }
@@ -1659,6 +1662,20 @@ void Game::render(float dt) {
                                {rp.x + shadowSize, shadowY + 0.1f, rp.z + shadowSize}},
                               {0, 0, 0, shadowAlpha});
                 }
+            }
+
+            // Highlight ring for control object (recording player)
+            if (idx == controlGhostIndex) {
+                float pulse = sinf(demoTime * 4.0f) * 0.3f + 0.7f;
+                float ringY = rp.y - 0.5f;
+                float ringR = 1.2f + pulse * 0.3f;
+                int segments = 20;
+                std::vector<Point3F> ring;
+                for (int i = 0; i <= segments; i++) {
+                    float a = (float)i / (float)segments * 6.28318f;
+                    ring.push_back({rp.x + cosf(a) * ringR, ringY, rp.z + sinf(a) * ringR});
+                }
+                r.drawLineStrip(ring, {0.3f, 1.0f, 0.5f, 0.7f + pulse * 0.3f});
             }
 
             // Update projectile trail

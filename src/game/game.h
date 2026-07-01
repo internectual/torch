@@ -232,6 +232,7 @@ public:
     float getDemoTime() const { return demoTime; }
     float getDemoTotalTime() const { return demoTotalTime; }
     bool demoHasPosition() const { return demoHasPos; }
+    int getControlGhostIndex() const { return controlGhostIndex; }
     float getDamageFlash() const { return damageFlash; }
     float getWhiteOut() const { return whiteOut; }
     void toggleDemoPause() { demoPaused = !demoPaused; }
@@ -287,6 +288,7 @@ private:
     Point3F demoPrevCameraTarget{0, 5, -1};
     float demoMoveBlend = 1.0f;
     bool demoHasPos = false;
+    int controlGhostIndex = -1;  // control object ghost index during demo
     float damageFlash = -1.0f;  // red screen flash during demo playback
     float whiteOut = -1.0f;     // white screen flash during demo playback
     std::vector<DemoTimedEvent> demoEventLog;
