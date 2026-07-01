@@ -143,6 +143,23 @@ private:
     std::vector<DTSShape> shapes;
     std::vector<Projectile> projList;
 
+    // Particle system
+    struct Particle {
+        Point3F pos;
+        Point3F vel;
+        float lifetime;
+        float maxLifetime;
+        float size;
+        ColorF color;
+        bool active = false;
+    };
+    std::vector<Particle> particles;
+    void spawnExplosion(const Point3F& pos, const ColorF& color, float radius = 2.0f, int count = 20);
+    void spawnTrail(const Point3F& pos, const ColorF& color, float size = 0.2f);
+    void updateParticles(float dt);
+    void renderParticles();
+
+    // Temp explosion struct for API compatibility
     struct Explosion {
         Point3F pos;
         float lifetime;

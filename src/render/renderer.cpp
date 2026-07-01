@@ -282,6 +282,68 @@ void Renderer::drawBox(const Box3F& box, const ColorF& color) {
         drawLine(verts[e[0]], verts[e[1]], color);
 }
 
+void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color, uint32_t texture) {
+    auto* shader = ShaderManager::getSpriteShader();
+    if (!shader) return;
+    shader->bind();
+
+    // Billboarding: extract right/up from view matrix
+    const float* v = view.data();
+    Point3F right = {v[0], v[4], v[8]};  // first column (transpose for row-major in memory)
+    Point3F up = {v[1], v[5], v[9]};     // second column
+    float s = size * 0.5f;
+
+    struct SpriteVert { float x, y, z; float u, v; float r, g, b, a; };
+    SpriteVert verts[4] = {
+        {pos.x + (-right.x + up.x) * s, pos.y + (-right.y + up.y) * s, pos.z + (-right.z + up.z) * s, 0, 0, color.r, color.g, color.b, color.a},
+        {pos.x + (right.x + up.x) * s,  pos.y + (right.y + up.y) * s,  pos.z + (right.z + up.z) * s,  1, 0, color.r, color.g, color.b, color.a},
+        {pos.x + (right.x - up.x) * s,  pos.y + (right.y - up.y) * s,  pos.z + (right.z - up.z) * s,  1, 1, color.r, color.g, color.b, color.a},
+        {pos.x + (-right.x - up.x) * s, pos.y + (-right.y - up.y) * s, pos.z + (-right.z - up.z) * s, 0, 1, color.r, color.g, color.b, color.a},
+    };
+    uint16_t idxs[6] = {0, 1, 2, 0, 2, 3};
+
+    GLuint vao, vbo, ebo;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STREAM_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idxs), idxs, GL_STREAM_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)(5*sizeof(float)));
+    glEnableVertexAttribArray(2);
+
+    shader->setUniform("uProjection", projection);
+    shader->setUniform("uUseTexture", (int32_t)(texture ? 1 : 0));
+    if (texture) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        shader->setUniform("uTexture", (int32_t)0);
+    }
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, 0);
+
+    glDepthMask(GL_TRUE);
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &ebo);
+
+    stats.drawCalls++;
+    stats.triangles += 2;
+}
+
 Texture* Renderer::loadTexture(const char* path) {
     auto it = impl->textures.find(path);
     if (it != impl->textures.end()) return it->second;

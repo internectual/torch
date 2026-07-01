@@ -845,6 +845,19 @@ void World::update(float dt) {
         if (!p.active) continue;
         updateProjectile(p, dt);
 
+        // Spawn trail particles
+        if (std::rand() % 3 == 0) {
+            ColorF trailColor;
+            switch (p.type) {
+                case ProjectileType::Disc:    trailColor = {1.0f, 0.6f, 0.1f, 0.6f}; break;
+                case ProjectileType::Bolt:    trailColor = {0.2f, 0.8f, 1.0f, 0.6f}; break;
+                case ProjectileType::Grenade:
+                case ProjectileType::Mortar:  trailColor = {0.3f, 1.0f, 0.3f, 0.6f}; break;
+                default:                      trailColor = {1.0f, 1.0f, 0.5f, 0.6f}; break;
+            }
+            spawnTrail(p.pos, trailColor, 0.15f);
+        }
+
         // Check for impact
             float groundH = 0;
             if (checkProjectileCollision(p, groundH)) {
@@ -864,6 +877,8 @@ void World::update(float dt) {
                 exp.radius = 1.0f;
                 exp.color = expColor;
                 explosions.push_back(exp);
+                // Spawn particles
+                spawnExplosion(p.pos, expColor, 1.5f, 25);
 
                 // Play explosion sound
                 if (p.weaponType >= 0 && p.weaponType < gWeaponCount) {
@@ -971,6 +986,9 @@ void World::update(float dt) {
         if (!obj.animName.empty() && obj.shape && obj.shape->loaded)
             obj.animTime += dt;
     }
+
+    // Update particles
+    updateParticles(dt);
 }
 
 void World::render(const Point3F& cameraPos) {
@@ -1048,36 +1066,30 @@ void World::render(const Point3F& cameraPos) {
         r.drawBox(box, col);
     }
 
-    // Render projectiles
-    float projSize = 0.15f;
-    ColorF discColor = {1.0f, 0.6f, 0.1f, 1.0f};
-    ColorF boltColor = {0.2f, 0.8f, 1.0f, 1.0f};
-    ColorF grenadeColor = {0.3f, 1.0f, 0.3f, 1.0f};
+    // Render projectiles as sprites
     for (auto& p : projList) {
         if (!p.active) continue;
         ColorF col;
         switch (p.type) {
-            case ProjectileType::Disc:    col = discColor;    break;
-            case ProjectileType::Bolt:    col = boltColor;    break;
+            case ProjectileType::Disc:    col = {1.0f, 0.6f, 0.1f, 1.0f}; break;
+            case ProjectileType::Bolt:    col = {0.2f, 0.8f, 1.0f, 1.0f}; break;
             case ProjectileType::Grenade:
-            case ProjectileType::Mortar:  col = grenadeColor; break;
+            case ProjectileType::Mortar:  col = {0.3f, 1.0f, 0.3f, 1.0f}; break;
             default:                      col = {1,1,1,1};    break;
         }
-        Box3F box = {{p.pos.x - projSize, p.pos.y - projSize, p.pos.z - projSize},
-                     {p.pos.x + projSize, p.pos.y + projSize, p.pos.z + projSize}};
-        r.drawBox(box, col);
+        r.drawSprite(p.pos, 0.3f, col);
     }
 
-    // Render explosions
+    // Render explosion boxes (legacy, still used for visual feedback)
     for (auto& e : explosions) {
         float t = e.lifetime / e.maxLifetime;
-        float alpha = t;
         float size = e.radius * (1.0f + (1.0f - t) * 2.0f);
-        Box3F box = {{e.pos.x - size, e.pos.y - size, e.pos.z - size},
-                     {e.pos.x + size, e.pos.y + size, e.pos.z + size}};
-        ColorF col = {e.color.r, e.color.g, e.color.b, alpha * 0.5f};
-        r.drawBox(box, col);
+        ColorF col = {e.color.r, e.color.g, e.color.b, t * 0.3f};
+        r.drawSprite(e.pos, size * 0.5f, col);
     }
+
+    // Render particles
+    renderParticles();
 
     // Render sky
     skyBox.render(r.view, r.projection);
@@ -1207,6 +1219,65 @@ float World::getHeight(float x, float z) const {
     int tx = Math::clamp((int)((x - terrainBlock.worldOffset.x) / terrainBlock.squareSize), 0, terrainBlock.size - 1);
     int tz = Math::clamp((int)((z - terrainBlock.worldOffset.z) / terrainBlock.squareSize), 0, terrainBlock.size - 1);
     return terrainBlock.heights[tz * terrainBlock.size + tx] * terrainBlock.heightScale;
+}
+
+// ─── Particle System ──────────────────────────────────────────
+
+void World::spawnExplosion(const Point3F& pos, const ColorF& color, float radius, int count) {
+    for (int i = 0; i < count; i++) {
+        Particle p;
+        float theta = ((float)std::rand() / RAND_MAX) * 3.14159f * 2.0f;
+        float phi = ((float)std::rand() / RAND_MAX) * 3.14159f;
+        float speed = ((float)std::rand() / RAND_MAX) * radius * 4.0f;
+        p.pos = pos;
+        p.vel = {sinf(phi) * cosf(theta) * speed, fabsf(cosf(phi)) * speed * 0.8f, sinf(phi) * sinf(theta) * speed};
+        p.lifetime = 0.3f + ((float)std::rand() / RAND_MAX) * 0.6f;
+        p.maxLifetime = p.lifetime;
+        p.size = 0.3f + ((float)std::rand() / RAND_MAX) * 0.5f;
+        p.color = color;
+        p.active = true;
+        // Fade alpha over lifetime
+        if (particles.size() < 1000) particles.push_back(p);
+    }
+}
+
+void World::spawnTrail(const Point3F& pos, const ColorF& color, float size) {
+    Particle p;
+    p.pos = pos;
+    p.vel = {0, 0, 0};
+    p.lifetime = 0.3f;
+    p.maxLifetime = 0.3f;
+    p.size = size;
+    p.color = color;
+    p.color.a = 0.5f;
+    p.active = true;
+    if (particles.size() < 1000) particles.push_back(p);
+}
+
+void World::updateParticles(float dt) {
+    for (auto& p : particles) {
+        if (!p.active) continue;
+        p.lifetime -= dt;
+        if (p.lifetime <= 0) { p.active = false; continue; }
+        p.vel.y -= 5.0f * dt; // gravity
+        p.pos.x += p.vel.x * dt;
+        p.pos.y += p.vel.y * dt;
+        p.pos.z += p.vel.z * dt;
+        p.size += dt * 0.5f; // expand
+        float t = p.lifetime / p.maxLifetime;
+        p.color.a = t; // fade out
+    }
+    // Remove dead particles
+    particles.erase(std::remove_if(particles.begin(), particles.end(),
+        [](const Particle& p) { return !p.active; }), particles.end());
+}
+
+void World::renderParticles() {
+    auto& r = Engine::instance().renderer();
+    for (auto& p : particles) {
+        if (!p.active) continue;
+        r.drawSprite(p.pos, p.size, p.color);
+    }
 }
 
 Game::Game() : pl(new Player), w(new World) {

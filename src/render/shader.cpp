@@ -7,6 +7,7 @@ Shader* ShaderManager::skyShader = nullptr;
 Shader* ShaderManager::textShader = nullptr;
 Shader* ShaderManager::lineShader = nullptr;
 Shader* ShaderManager::shadowShader = nullptr;
+Shader* ShaderManager::spriteShader = nullptr;
 
 static const char* defaultVert = R"(
 #version 330 core
@@ -305,6 +306,36 @@ void main() {
 }
 )";
 
+static const char* spriteVert = R"(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUV;
+layout(location = 2) in vec4 aColor;
+uniform mat4 uProjection;
+uniform mat4 uView;
+out vec2 vUV;
+out vec4 vColor;
+void main() {
+    gl_Position = uProjection * uView * vec4(aPos, 1.0);
+    vUV = aUV;
+    vColor = aColor;
+}
+)";
+
+static const char* spriteFrag = R"(
+#version 330 core
+in vec2 vUV;
+in vec4 vColor;
+uniform sampler2D uTexture;
+uniform bool uUseTexture = false;
+out vec4 FragColor;
+void main() {
+    vec4 tex = uUseTexture ? texture(uTexture, vUV) : vec4(1.0);
+    FragColor = vColor * tex;
+    if (FragColor.a < 0.01) discard;
+}
+)";
+
 static const char* shadowDepthVert = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -351,6 +382,11 @@ void ShaderManager::init() {
     if (!shadowShader->load(shadowDepthVert, shadowDepthFrag)) {
         Console::instance().printf(LogLevel::Error, "Failed to load shadow shader");
     }
+
+    spriteShader = new Shader();
+    if (!spriteShader->load(spriteVert, spriteFrag)) {
+        Console::instance().printf(LogLevel::Error, "Failed to load sprite shader");
+    }
 }
 
 void ShaderManager::destroy() {
@@ -360,6 +396,7 @@ void ShaderManager::destroy() {
     delete textShader; textShader = nullptr;
     delete lineShader; lineShader = nullptr;
     delete shadowShader; shadowShader = nullptr;
+    delete spriteShader; spriteShader = nullptr;
 }
 
 Shader* ShaderManager::getDefaultShader() { return defaultShader; }
@@ -368,3 +405,4 @@ Shader* ShaderManager::getSkyShader() { return skyShader; }
 Shader* ShaderManager::getTextShader() { return textShader; }
 Shader* ShaderManager::getLineShader() { return lineShader; }
 Shader* ShaderManager::getShadowShader() { return shadowShader; }
+Shader* ShaderManager::getSpriteShader() { return spriteShader; }

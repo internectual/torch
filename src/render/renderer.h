@@ -181,6 +181,7 @@ public:
     void drawLine(const Point3F& a, const Point3F& b, const ColorF& color);
     void drawLineStrip(const std::vector<Point3F>& points, const ColorF& color);
     void drawBox(const Box3F& box, const ColorF& color);
+    void drawSprite(const Point3F& pos, float size, const ColorF& color, uint32_t texture = 0);
 
     Texture* loadTexture(const char* path);
     Shader* loadShader(const char* vertPath, const char* fragPath);
