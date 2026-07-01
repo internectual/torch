@@ -629,7 +629,7 @@ void Engine::shutdown() {
 
 void Engine::renderOverlay() {
     if (!overlayFont) return;
-    float sy = 12.0f;
+    float sy = 26.0f;
 
     int line = 0;
     float lx = 16, ly = 16;
@@ -699,16 +699,17 @@ void Engine::executeConsole() {
 void Engine::renderConsole() {
     if (!overlayFont) return;
     auto& r = *ren;
-    // Background: dark semi-transparent box covering top quarter
-    r.drawBox({{0, 0, 0}, {800, 200, 0}}, {0, 0, 0, 0.75f});
+    int w = plat->width();
+    // Background: dark semi-transparent box covering top portion
+    r.drawBox({{0, 0, 0}, {(float)w, 250, 0}}, {0, 0, 0, 0.75f});
     // Border line
-    r.drawLine({0, 202, 0}, {800, 202, 0}, {0.3f, 0.3f, 0.5f, 0.8f});
+    r.drawLine({0, 252, 0}, {(float)w, 252, 0}, {0.3f, 0.3f, 0.5f, 0.8f});
     // Log history (last 5 lines from console)
     const auto& log = Console::instance().getLog();
     int logSize = (int)log.size();
     int logStart = std::max(0, logSize - 5);
     for (int i = logStart; i < logSize; i++) {
-        overlayFont->render(log[i].c_str(), 8, (float)((i - logStart) * 22 + 4),
+        overlayFont->render(log[i].c_str(), 8, (float)((i - logStart) * 28 + 4),
             ColorF{0.7f, 0.7f, 0.7f, 0.9f}, 1.2f);
     }
     // Input line with cursor
@@ -717,7 +718,7 @@ void Engine::renderConsole() {
     bool cursorOn = ((int)(cursorTimer / 0.4f) % 2) == 0;
     std::string display = "> " + consoleBuf;
     if (cursorOn) display += '_';
-    overlayFont->render(display.c_str(), 8, 170, ColorF{0.2f, 0.8f, 0.2f, 1}, 1.5f);
+    overlayFont->render(display.c_str(), 8, 210, ColorF{0.2f, 0.8f, 0.2f, 1}, 1.5f);
 }
 
 void Engine::renderMinimap() {
