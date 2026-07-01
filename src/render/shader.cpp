@@ -199,10 +199,18 @@ static const char* skyFrag = R"(
 #version 330 core
 in vec3 vUV;
 uniform samplerCube uSkybox;
+uniform bool uUseGradient = false;
+uniform vec3 uGradTop = vec3(0.3, 0.5, 0.8);
+uniform vec3 uGradBot = vec3(0.7, 0.8, 0.9);
 out vec4 FragColor;
 
 void main() {
-    FragColor = texture(uSkybox, vUV);
+    if (uUseGradient) {
+        float t = abs(vUV.y) * 0.8 + 0.1;
+        FragColor = vec4(mix(uGradBot, uGradTop, t), 1.0);
+    } else {
+        FragColor = texture(uSkybox, vUV);
+    }
 }
 )";
 

@@ -525,8 +525,6 @@ void Sky::load(const std::vector<std::string>& faces) {
 }
 
 void Sky::render(const MatrixF& view, const MatrixF& proj) {
-    if (!loaded) return;
-
     auto* shader = ShaderManager::getSkyShader();
     if (!shader) return;
     shader->bind();
@@ -534,10 +532,39 @@ void Sky::render(const MatrixF& view, const MatrixF& proj) {
     glDepthFunc(GL_LEQUAL);
     shader->setUniform("uProjection", proj);
     shader->setUniform("uView", view);
-    shader->setUniform("uSkybox", 0);
 
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap);
+    if (loaded && emap.loaded) {
+        // Cubemap sky
+        shader->setUniform("uUseGradient", (int32_t)0);
+        shader->setUniform("uSkybox", 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap);
+    } else {
+        // Gradient sky fallback (no cubemap available)
+        shader->setUniform("uUseGradient", (int32_t)1);
+        shader->setUniform("uGradTop", Point3F{0.2f, 0.4f, 0.7f});
+        shader->setUniform("uGradBot", Point3F{0.75f, 0.8f, 0.85f});
+    }
+
+    // Ensure VAO exists (create on first render if needed)
+    if (!vao) {
+        float skyVerts[] = {
+            -1,-1,-1, 1,-1,-1, 1,1,-1, -1,1,-1,
+            -1,-1,1, 1,-1,1, 1,1,1, -1,1,1,
+            -1,-1,-1, -1,1,-1, -1,1,1, -1,-1,1,
+            1,-1,-1, 1,1,-1, 1,1,1, 1,-1,1,
+            -1,-1,-1, -1,-1,1, 1,-1,1, 1,-1,-1,
+            -1,1,-1, -1,1,1, 1,1,1, 1,1,-1,
+        };
+        glGenVertexArrays(1, &vao);
+        glGenBuffers(1, &vbo);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(skyVerts), skyVerts, GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, 0);
+        glEnableVertexAttribArray(0);
+    }
+
     glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLES, 0, 36);
     glDepthFunc(GL_LESS);
