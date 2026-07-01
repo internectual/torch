@@ -1669,7 +1669,6 @@ bool ScriptEngine::init() {
             return args.empty() ? VMValue(1) : args[0];
         });
     };
-    stubVM("schedule");
     stubVM("audioSetDriver");
     stubVM("audioDetect");
     stubVM("startAudio");
@@ -1683,6 +1682,75 @@ bool ScriptEngine::init() {
     stubVM("setLogMode");
     stubVM("enableWinConsole");
     stubVMS("setDefaultFov");
+
+    // GUI Canvas methods (called as Canvas.pushDialog() etc.)
+    // These are registered globally so the dot-notation lookup finds them
+    tsInstance->registerNative("pushDialog", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("popDialog", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("showCursor", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("hideCursor", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setContent", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("playGui", [](const auto& args) -> VMValue {
+        if (!args.empty())
+            Console::instance().printf(LogLevel::Info, "playGui: %s", args[0].toString().c_str());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("Show", [](const auto& args) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("Hide", [](const auto& args) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setVisible", [](const auto& args) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("isActive", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("makeFirstResponder", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    // File operations needed by startup scripts
+    tsInstance->registerNative("isFile", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto& fs = Engine::instance().fs();
+        return VMValue(fs.fileExists(args[0].toString().c_str()) ? 1 : 0);
+    });
+    tsInstance->registerNative("fileExt", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string path = args[0].toString();
+        auto dot = path.rfind('.');
+        if (dot != std::string::npos) return VMValue(path.substr(dot));
+        return VMValue("");
+    });
+    tsInstance->registerNative("getFileName", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string path = args[0].toString();
+        auto slash = path.rfind('/');
+        if (slash != std::string::npos) return VMValue(path.substr(slash + 1));
+        return VMValue(path);
+    });
+
+    // Schedule: store callback and execute later (simplified: execute immediately)
+    tsInstance->registerNative("schedule", [](const auto& args) -> VMValue {
+        // schedule(timeMs, targetId, functionName, ...args)
+        // Simplified: just log and return
+        if (args.size() >= 3) {
+            Console::instance().printf(LogLevel::Debug, "schedule: %s (delay=%s)", args[2].toString().c_str(), args[0].toString().c_str());
+        }
+        return VMValue(1);
+    });
 
     Console::instance().printf(LogLevel::Info, "ScriptEngine initialized with %zu native functions + DTS support", 12);
     return true;
