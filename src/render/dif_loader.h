@@ -15,4 +15,4 @@ struct DIFLoadResult {
     bool loaded = false;
 };
 
-DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name);
+DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool skipGpu = false);

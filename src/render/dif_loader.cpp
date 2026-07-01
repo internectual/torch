@@ -55,40 +55,15 @@ static void fanToTriangles(const std::vector<uint32_t>& windings,
 {
     if (fan.windingCount < 3) return;
 
-    bool hasFanBits = false;
-    for (uint32_t j = 0; j < fan.windingCount; j++) {
-        if (fanMask && (fanMask[j >> 3] & (1 << (j & 7)))) {
-            hasFanBits = true;
-            break;
+    uint32_t center = windings[fan.windingStart];
+    for (uint32_t j = 2; j < fan.windingCount; j++) {
+        // bit (j-2) of fanMask controls whether center switches to vertex (j-1)
+        if (fanMask && (fanMask[(j - 2) >> 3] & (1 << ((j - 2) & 7)))) {
+            center = windings[fan.windingStart + j - 1];
         }
-    }
-
-    if (!hasFanBits) {
-        for (uint32_t j = 2; j < fan.windingCount; j++) {
-            outIndices.push_back(baseIndex + windings[fan.windingStart]);
-            outIndices.push_back(baseIndex + windings[fan.windingStart + j - 1]);
-            outIndices.push_back(baseIndex + windings[fan.windingStart + j]);
-        }
-        return;
-    }
-
-    uint32_t fanStart = 0;
-    for (uint32_t j = 0; j < fan.windingCount; j++) {
-        if (fanMask && (fanMask[j >> 3] & (1 << (j & 7))) && j > fanStart) {
-            for (uint32_t k = fanStart + 2; k < j; k++) {
-                outIndices.push_back(baseIndex + windings[fan.windingStart + fanStart]);
-                outIndices.push_back(baseIndex + windings[fan.windingStart + k - 1]);
-                outIndices.push_back(baseIndex + windings[fan.windingStart + k]);
-            }
-            fanStart = j;
-        }
-    }
-    if (fanStart + 2 < fan.windingCount) {
-        for (uint32_t k = fanStart + 2; k < fan.windingCount; k++) {
-            outIndices.push_back(baseIndex + windings[fan.windingStart + fanStart]);
-            outIndices.push_back(baseIndex + windings[fan.windingStart + k - 1]);
-            outIndices.push_back(baseIndex + windings[fan.windingStart + k]);
-        }
+        outIndices.push_back(baseIndex + center);
+        outIndices.push_back(baseIndex + windings[fan.windingStart + j - 1]);
+        outIndices.push_back(baseIndex + windings[fan.windingStart + j]);
     }
 }
 
@@ -454,7 +429,8 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
             const uint8_t* scan = ptr + 8;
             size_t scanRem = rem - 8;
             bool foundEnd = false;
-            while (scanRem >= 12) {
+            int safety = 100000;
+            while (scanRem >= 12 && --safety > 0) {
                 uint32_t chunkLen = ((uint32_t)scan[0] << 24) | ((uint32_t)scan[1] << 16) |
                                     ((uint32_t)scan[2] << 8) | (uint32_t)scan[3];
                 if (memcmp(scan + 4, "IEND", 4) == 0) {
@@ -466,6 +442,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
                 }
                 uint32_t skip = chunkLen + 12;
                 if (skip > scanRem) skip = (uint32_t)scanRem;
+                if (skip < 12) skip = 12; // minimum forward progress
                 scan += skip;
                 scanRem -= skip;
             }
@@ -530,20 +507,17 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     }
 
     // ── Convex hulls ──
-    // Serialized size: 52 bytes per hull (empirically verified)
-    // layout: hullStart(U32), hullCount(U16), pad(?), minX(F32), maxX(F32),
-    //   minY(F32), maxY(F32), minZ(F32), maxZ(F32), surfaceStart(U32),
-    //   surfaceCount(U16), pad(?), planeStart(U32), polyListPlaneStart(U32),
-    //   polyListPointStart(U32), polyListStringStart(U32)
     uint32_t hullCount = readU32(ptr, rem);
-    if (rem >= hullCount * 52ull) {
-        ptr += hullCount * 52;
-        rem -= hullCount * 52;
+    {
+        size_t hullBytes = (size_t)hullCount * 52;
+        if (hullBytes > rem) hullBytes = rem;
+        ptr += hullBytes; rem -= hullBytes;
     }
+    Console::instance().printf(LogLevel::Debug, "  hull: count=%u skipped=%zu", hullCount, (size_t)hullCount * 52);
 
-    auto skipVecU8 = [&]() { uint32_t n = readU32(ptr, rem); ptr += n; rem -= n; };
-    auto skipVecU16 = [&]() { uint32_t n = readU32(ptr, rem); ptr += n * 2; rem -= n * 2; };
-    auto skipVecU32 = [&]() { uint32_t n = readU32(ptr, rem); ptr += n * 4; rem -= n * 4; };
+    auto skipVecU8 = [&]() { uint32_t n = readU32(ptr, rem); size_t nb = n; if (nb > rem) nb = rem; ptr += nb; rem -= nb; };
+    auto skipVecU16 = [&]() { uint32_t n = readU32(ptr, rem); size_t nb = (size_t)n * 2; if (nb > rem) nb = rem; ptr += nb; rem -= nb; };
+    auto skipVecU32 = [&]() { uint32_t n = readU32(ptr, rem); size_t nb = (size_t)n * 4; if (nb > rem) nb = rem; ptr += nb; rem -= nb; };
 
     skipVecU8();  // hullEmitStrings
     skipVecU32(); // hullIndices
@@ -576,37 +550,44 @@ static bool interiorToMeshes(DIFInterior& interior,
                               std::vector<uint32_t>& outMatFlags,
                               std::vector<int8_t>& outMatLMIndex,
                               std::vector<Texture>& outLightmaps,
-                              std::vector<std::string>& outMatNames)
+                              std::vector<std::string>& outMatNames,
+                              bool skipGpu = false)
 {
+    Console::instance().printf(LogLevel::Debug, "  i2m: start (mats=%zu)", interior.matNames.size());
     if (interior.surfaces.empty() || interior.points.empty()) {
         Console::instance().printf(LogLevel::Warn, "DIF: no surfaces or points in interior");
         return false;
     }
 
-    // Load textures from material names
+    // Load textures from material names (skip GPU ops if skipGpu)
     struct MatSlot { int texIdx = -1; };
     std::vector<MatSlot> matSlots(interior.matNames.size());
 
-    for (size_t i = 0; i < interior.matNames.size(); i++) {
-        Texture tex = resolveDIFTexture(interior.matNames[i]);
-        if (tex.loaded) {
-            matSlots[i].texIdx = (int)outTextures.size();
-            outTextures.push_back(std::move(tex));
-            outMatFlags.push_back(0);
-            outMatNames.push_back(interior.matNames[i]);
+    if (!skipGpu) {
+        for (size_t i = 0; i < interior.matNames.size(); i++) {
+            Texture tex = resolveDIFTexture(interior.matNames[i]);
+            if (tex.loaded) {
+                matSlots[i].texIdx = (int)outTextures.size();
+                outTextures.push_back(std::move(tex));
+                outMatFlags.push_back(0);
+                outMatNames.push_back(interior.matNames[i]);
+            }
         }
     }
+    Console::instance().printf(LogLevel::Debug, "  i2m: textures done (%zu mats)", interior.matNames.size());
 
-    // Load lightmaps
-    for (auto& lme : interior.lightmapEntries) {
-        if (lme.pngData.empty()) {
-            Texture empty;
-            outLightmaps.push_back(std::move(empty));
-            continue;
+    // Load lightmaps (skip GPU ops if skipGpu)
+    if (!skipGpu) {
+        for (auto& lme : interior.lightmapEntries) {
+            if (lme.pngData.empty()) {
+                Texture empty;
+                outLightmaps.push_back(std::move(empty));
+                continue;
+            }
+            Texture lmap;
+            lmap.load(lme.pngData.data(), lme.pngData.size());
+            outLightmaps.push_back(std::move(lmap));
         }
-        Texture lmap;
-        lmap.load(lme.pngData.data(), lme.pngData.size());
-        outLightmaps.push_back(std::move(lmap));
     }
 
     // Build lightmap index per material
@@ -633,7 +614,10 @@ static bool interiorToMeshes(DIFInterior& interior,
         surfGroups[texIdx].push_back((int)si);
     }
 
-    if (surfGroups.empty()) return false;
+    if (surfGroups.empty()) {
+        Console::instance().printf(LogLevel::Warn, "DIF: no surface groups");
+        return false;
+    }
 
     // Get plane normal
     auto getPlaneNormal = [&](uint16_t planeIdx) -> Point3F {
@@ -736,7 +720,7 @@ static bool interiorToMeshes(DIFInterior& interior,
         if (triIndices.empty()) continue;
 
         mesh.indices = std::move(triIndices);
-        mesh.upload();
+        // upload() called later when renderer is ready (DTSShape::render)
         outMeshes.push_back(std::move(mesh));
     }
 
@@ -745,7 +729,7 @@ static bool interiorToMeshes(DIFInterior& interior,
 
 // ─── Main DIF Loader ──────────────────────────────────────────────
 
-DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name) {
+DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool skipGpu) {
     DIFLoadResult result;
     if (!data || size < 12) return result;
 
@@ -769,26 +753,42 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name) {
     }
 
     uint32_t numDetailLevels = readU32(ptr, rem);
-    Console::instance().printf(LogLevel::Debug, "DIF: %u detail levels", numDetailLevels);
+    Console::instance().printf(LogLevel::Debug, "DIF: %u detail levels, starting parse", numDetailLevels);
 
+    size_t prevRem = rem;
     std::vector<DIFInterior> interiors(numDetailLevels);
     for (uint32_t i = 0; i < numDetailLevels; i++) {
+        Console::instance().printf(LogLevel::Debug, "DIF: parsing detail level %u (%zu bytes remaining)", i, rem);
+        if (rem < 60) {
+            Console::instance().printf(LogLevel::Warn, "DIF: not enough data for detail level %u", i);
+            break;
+        }
         if (!readInterior(ptr, rem, interiors[i])) {
             Console::instance().printf(LogLevel::Warn, "DIF: failed to parse detail level %u", i);
-            return result;
+            break;
         }
+        // Sanity: if we consumed suspiciously few bytes (e.g., all zeros), skip
+        size_t consumed = prevRem - rem;
+        Console::instance().printf(LogLevel::Debug, "DIF: detail level %u done (%zu surfaces, consumed %zu)", i, interiors[i].surfaces.size(), consumed);
+        if (interiors[i].surfaces.empty() && consumed < 100) {
+            Console::instance().printf(LogLevel::Warn, "DIF: detail level %u suspiciously small, stopping", i);
+            break;
+        }
+        prevRem = rem;
     }
+    Console::instance().printf(LogLevel::Debug, "DIF: all detail levels parsed (surfaces=%zu, points=%zu, windings=%zu, materials=%zu)",
+        interiors[0].surfaces.size(), interiors[0].points.size() / 3,
+        interiors[0].windings.size(), interiors[0].matNames.size());
 
-    // Sub-objects
-    uint32_t numSubObjects = readU32(ptr, rem);
-    for (uint32_t i = 0; i < numSubObjects; i++) {
-        DIFInterior sub;
-        if (!readInterior(ptr, rem, sub)) break;
-    }
+    // Skip sub-objects and remaining top-level data (triggers, paths, etc.)
+    // We only need the highest-detail level for rendering.
 
     Console::instance().printf(LogLevel::Debug, "DIF: converting interior meshes for '%s'", name);
 
     if (interiors.empty()) return result;
+
+    Console::instance().printf(LogLevel::Debug, "DIF: highest detail: %zu surfaces, %zu points, %zu windings",
+        interiors[0].surfaces.size(), interiors[0].points.size() / 3, interiors[0].windings.size());
 
     if (!interiorToMeshes(interiors[0],
                           result.meshes,
@@ -796,7 +796,8 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name) {
                           result.materialFlags,
                           result.materialLightmapIndex,
                           result.lightmaps,
-                          result.materialNames))
+                          result.materialNames,
+                          skipGpu))
     {
         Console::instance().printf(LogLevel::Warn, "DIF: no meshes generated from '%s'", name);
         return result;

@@ -5,6 +5,7 @@
 #include "script/torquescript.h"
 #include "render/shader.h"
 #include "render/renderer.h"
+#include "render/dif_loader.h"
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -13,6 +14,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
+#include <fstream>
+#include <sys/stat.h>
 
 struct Engine::Impl {};
 
@@ -76,6 +79,8 @@ bool Engine::init(int argc, char* argv[]) {
             demoPath = argv[i + 1];
         if (strcmp(argv[i], "-testshape") == 0 && i + 1 < argc)
             testShapePath = argv[i + 1];
+        if (strcmp(argv[i], "-testdif") == 0 && i + 1 < argc)
+            testDifPath = argv[i + 1];
     }
 
     // Init subsystems
@@ -126,6 +131,36 @@ bool Engine::init(int argc, char* argv[]) {
         }
         return found;
     };
+
+    // -testdif: directly from disk, before slow VL2 mounting
+    if (!testDifPath.empty()) {
+        std::string fullPath = testDifPath;
+        { struct stat st; if (stat(fullPath.c_str(), &st) != 0) fullPath = dataDir + "/" + testDifPath; }
+        std::ifstream difFile(fullPath, std::ios::binary);
+        if (!difFile) {
+            Console::instance().printf(LogLevel::Error, "testdif: cannot open '%s'", fullPath.c_str());
+        } else {
+            std::vector<uint8_t> d((std::istreambuf_iterator<char>(difFile)), {});
+            DIFLoadResult r = loadDIF(d.data(), d.size(), fullPath.c_str(), true);
+            if (r.loaded) {
+                size_t totalVerts = 0, totalTris = 0;
+                for (auto& m : r.meshes) { totalVerts += m.vertices.size(); totalTris += m.indices.size() / 3; }
+                Console::instance().printf(LogLevel::Info, "--- DIF test: '%s' ---", fullPath.c_str());
+                Console::instance().printf(LogLevel::Info, "  Meshes:    %zu", r.meshes.size());
+                Console::instance().printf(LogLevel::Info, "  Vertices:  %zu", totalVerts);
+                Console::instance().printf(LogLevel::Info, "  Triangles: %zu", totalTris);
+                Console::instance().printf(LogLevel::Info, "  Textures:  %zu", r.textures.size());
+                Console::instance().printf(LogLevel::Info, "  Lightmaps: %zu", r.lightmaps.size());
+                Console::instance().printf(LogLevel::Info, "  Materials: %zu", r.materialNames.size());
+                int lLoaded = 0;
+                for (auto& lm : r.lightmaps) if (lm.loaded) lLoaded++;
+                Console::instance().printf(LogLevel::Info, "  Lightmaps loaded: %d/%zu", lLoaded, r.lightmaps.size());
+            } else {
+                Console::instance().printf(LogLevel::Error, "testdif: failed to load '%s'", fullPath.c_str());
+            }
+        }
+        exit(0);
+    }
 
     // Scan data dir and its subdirs for archives
     archives = scanArchives(dataDir);

@@ -52,6 +52,7 @@ public:
     bool hasPreviewCam() const { return usePreviewCam; }
 
     std::string testShapePath;
+    std::string testDifPath;
 
 private:
     struct Impl;
