@@ -6,6 +6,7 @@ Shader* ShaderManager::terrainShader = nullptr;
 Shader* ShaderManager::skyShader = nullptr;
 Shader* ShaderManager::textShader = nullptr;
 Shader* ShaderManager::lineShader = nullptr;
+Shader* ShaderManager::shadowShader = nullptr;
 
 static const char* defaultVert = R"(
 #version 330 core
@@ -60,7 +61,24 @@ uniform bool uFogEnabled = false;
 uniform vec3 uFogColor = vec3(0.75, 0.8, 0.85);
 uniform float uFogDensity = 0.01;
 
+uniform sampler2DShadow uShadowMap;
+uniform mat4 uShadowMatrix;
+uniform float uShadowStrength = 0.5;
+
 out vec4 FragColor;
+
+float shadowPCF(vec4 shadowCoord) {
+    vec3 sc = shadowCoord.xyz / shadowCoord.w;
+    if (sc.x < 0 || sc.x > 1 || sc.y < 0 || sc.y > 1 || sc.z < 0 || sc.z > 1) return 1.0;
+    float s = 0.0;
+    vec2 texelSize = 1.0 / textureSize(uShadowMap, 0);
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            s += texture(uShadowMap, vec3(sc.xy + vec2(x, y) * texelSize, sc.z - 0.002));
+        }
+    }
+    return s / 9.0;
+}
 
 void main() {
     vec4 texColor = uUseTexture ? texture(uTexture, vUV) : vec4(1.0);
@@ -74,7 +92,12 @@ void main() {
     } else {
         vec3 N = normalize(vNormal);
         float diff = max(dot(N, normalize(uLightDir)), 0.0);
-        vec3 lit = col.rgb * (0.3 + 0.7 * diff);
+        float shadowFactor = 1.0;
+        if (uShadowStrength > 0.0) {
+            vec4 shadowCoord = uShadowMatrix * vec4(vWorldPos, 1.0);
+            shadowFactor = mix(shadowPCF(shadowCoord), 1.0, 1.0 - uShadowStrength);
+        }
+        vec3 lit = col.rgb * (0.3 + 0.7 * diff * shadowFactor);
         if (uUseEnvMap) {
             vec3 V = normalize(uCamPos - vWorldPos);
             vec3 R = reflect(-V, N);
@@ -143,7 +166,24 @@ uniform vec3 uFogColor = vec3(0.75, 0.8, 0.85);
 uniform float uFogDensity = 0.01;
 uniform vec3 uCamPos = vec3(0);
 
+uniform sampler2DShadow uShadowMap;
+uniform mat4 uShadowMatrix;
+uniform float uShadowStrength = 0.5;
+
 out vec4 FragColor;
+
+float terrainShadowPCF(vec4 shadowCoord) {
+    vec3 sc = shadowCoord.xyz / shadowCoord.w;
+    if (sc.x < 0 || sc.x > 1 || sc.y < 0 || sc.y > 1 || sc.z < 0 || sc.z > 1) return 1.0;
+    float s = 0.0;
+    vec2 texelSize = 1.0 / textureSize(uShadowMap, 0);
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            s += texture(uShadowMap, vec3(sc.xy + vec2(x, y) * texelSize, sc.z - 0.003));
+        }
+    }
+    return s / 9.0;
+}
 
 void main() {
     vec4 base;
@@ -162,7 +202,12 @@ void main() {
 
     vec3 N = normalize(vNormal);
     float ndotl = max(dot(N, normalize(uLightDir)), 0.0);
-    vec3 lighting = vec3(0.3 + 0.7 * ndotl);
+    float shadowFactor = 1.0;
+    if (uShadowStrength > 0.0) {
+        vec4 shadowCoord = uShadowMatrix * vec4(vWorldPos, 1.0);
+        shadowFactor = mix(terrainShadowPCF(shadowCoord), 1.0, 1.0 - uShadowStrength);
+    }
+    vec3 lighting = vec3(0.3 + 0.7 * ndotl * shadowFactor);
     if (uUseLightmap) {
         vec4 lm = texture(uLightmap, vUV);
         lighting *= lm.r;
@@ -260,6 +305,22 @@ void main() {
 }
 )";
 
+static const char* shadowDepthVert = R"(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uLightMVP;
+void main() {
+    gl_Position = uLightMVP * vec4(aPos, 1.0);
+}
+)";
+
+static const char* shadowDepthFrag = R"(
+#version 330 core
+void main() {
+    // Depth is written automatically
+}
+)";
+
 void ShaderManager::init() {
     defaultShader = new Shader();
     if (!defaultShader->load(defaultVert, defaultFrag)) {
@@ -285,6 +346,11 @@ void ShaderManager::init() {
     if (!lineShader->load(lineVert, lineFrag)) {
         Console::instance().printf(LogLevel::Error, "Failed to load line shader");
     }
+
+    shadowShader = new Shader();
+    if (!shadowShader->load(shadowDepthVert, shadowDepthFrag)) {
+        Console::instance().printf(LogLevel::Error, "Failed to load shadow shader");
+    }
 }
 
 void ShaderManager::destroy() {
@@ -293,6 +359,7 @@ void ShaderManager::destroy() {
     delete skyShader; skyShader = nullptr;
     delete textShader; textShader = nullptr;
     delete lineShader; lineShader = nullptr;
+    delete shadowShader; shadowShader = nullptr;
 }
 
 Shader* ShaderManager::getDefaultShader() { return defaultShader; }
@@ -300,3 +367,4 @@ Shader* ShaderManager::getTerrainShader() { return terrainShader; }
 Shader* ShaderManager::getSkyShader() { return skyShader; }
 Shader* ShaderManager::getTextShader() { return textShader; }
 Shader* ShaderManager::getLineShader() { return lineShader; }
+Shader* ShaderManager::getShadowShader() { return shadowShader; }

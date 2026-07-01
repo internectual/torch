@@ -72,6 +72,17 @@ void MatrixF::perspective(float fov, float aspect, float near, float far) {
     m[3][2] = 2.0f * far * near / (near - far);
 }
 
+void MatrixF::orthographic(float left, float right, float bottom, float top, float near, float far) {
+    std::memset(m, 0, sizeof(m));
+    m[0][0] = 2.0f / (right - left);
+    m[1][1] = 2.0f / (top - bottom);
+    m[2][2] = -2.0f / (far - near);
+    m[3][0] = -(right + left) / (right - left);
+    m[3][1] = -(top + bottom) / (top - bottom);
+    m[3][2] = -(far + near) / (far - near);
+    m[3][3] = 1.0f;
+}
+
 void MatrixF::lookAt(const Point3F& eye, const Point3F& center, const Point3F& up) {
     Point3F f = { center.x - eye.x, center.y - eye.y, center.z - eye.z };
     float flen = std::sqrt(f.x * f.x + f.y * f.y + f.z * f.z);

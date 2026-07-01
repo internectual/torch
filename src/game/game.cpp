@@ -1704,6 +1704,77 @@ void Game::render(float dt) {
     // Apply camera shake
     Point3F finalCam = {camPos.x + shakeOffset.x, camPos.y + shakeOffset.y, camPos.z + shakeOffset.z};
     r.setCamera(finalCam, camTarget, {0, 1, 0});
+
+    // Shadow pass
+        if (r.shadowEnabled()) {
+            // Compute scene bounds from terrain
+            Point3F sceneCenter = {0, 0, 0};
+            float sceneRadius = 500.0f;
+            auto* tb = w->terrain();
+            if (tb && tb->loaded) {
+                sceneCenter.x = tb->worldOffset.x + tb->size * tb->squareSize * 0.5f;
+                sceneCenter.z = tb->worldOffset.z + tb->size * tb->squareSize * 0.5f;
+                float maxH = 0;
+                for (auto h : tb->heights) if (h > maxH) maxH = h;
+                sceneCenter.y = maxH * tb->heightScale * 0.5f;
+                sceneRadius = tb->size * tb->squareSize * 0.8f;
+        }
+        Point3F lightDir = r.sunDir;
+        float llen = std::sqrt(lightDir.x * lightDir.x + lightDir.y * lightDir.y + lightDir.z * lightDir.z);
+        if (llen > 0) { lightDir.x /= llen; lightDir.y /= llen; lightDir.z /= llen; }
+
+        r.beginShadowPass(lightDir, sceneCenter, sceneRadius);
+
+        // Render shadow casters with shadow depth shader
+        auto* shadowShader = ShaderManager::getShadowShader();
+        if (shadowShader) {
+            shadowShader->bind();
+
+            // Render terrain
+            auto* tb2 = w->terrain();
+            if (tb2 && tb2->loaded) {
+                for (auto& mesh : tb2->meshes) {
+                    shadowShader->setUniform("uLightMVP", r.lightViewProj());
+                    mesh.render();
+                }
+            }
+
+            // Render bots
+            for (auto& b : w->bots) {
+                if (!b.alive || b.respawnTimer > 0) continue;
+                if (b.shape && b.shape->loaded) {
+                    MatrixF model;
+                    model.setTranslation(b.pos);
+                    MatrixF mvp = r.lightViewProj() * model;
+                    shadowShader->setUniform("uLightMVP", mvp);
+                    b.shape->render(0);
+                }
+            }
+        }
+
+        r.endShadowPass();
+
+        // Bind shadow map to texture unit 5 and set uniforms for main pass
+        float shadowStrength = 0.6f;
+        {
+            auto* defShader = ShaderManager::getDefaultShader();
+            defShader->bind();
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(GL_TEXTURE_2D, r.shadowDepthTex);
+            defShader->setUniform("uShadowMap", (int32_t)5);
+            defShader->setUniform("uShadowStrength", shadowStrength);
+            defShader->setUniform("uShadowMatrix", r.shadowMatrix());
+
+            auto* terrShader = ShaderManager::getTerrainShader();
+            terrShader->bind();
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(GL_TEXTURE_2D, r.shadowDepthTex);
+            terrShader->setUniform("uShadowMap", (int32_t)5);
+            terrShader->setUniform("uShadowStrength", shadowStrength);
+            terrShader->setUniform("uShadowMatrix", r.shadowMatrix());
+        }
+    }
+
     w->render(camPos);
     if (!freeCamActive && !demoPlaying) pl->render();
 

@@ -25,6 +25,7 @@ struct MatrixF {
     void setTranslation(const Point3F& t);
     void setScale(const Point3F& s);
     void perspective(float fov, float aspect, float near, float far);
+    void orthographic(float left, float right, float bottom, float top, float near, float far);
     void lookAt(const Point3F& eye, const Point3F& center, const Point3F& up);
     const float* data() const { return &m[0][0]; }
 };

@@ -197,6 +197,15 @@ public:
     void onResize(int32_t w, int32_t h);
     bool screenshot(const char* path);
 
+    // Shadow mapping
+    void initShadowMap(int32_t size = 2048);
+    void beginShadowPass(const Point3F& lightDir, const Point3F& sceneCenter, float sceneRadius);
+    void endShadowPass();
+    const MatrixF& shadowMatrix() const { return shadowBiasVP; }
+    const MatrixF& lightViewProj() const { return shadowVP; }
+    bool shadowEnabled() const { return shadowSize > 0; }
+    uint32_t shadowDepthTex = 0;
+
     Font* defaultFont{};
     TerrainBlock* terrain{};
     Sky* sky{};
@@ -205,6 +214,7 @@ public:
     MatrixF projection;
     MatrixF view;
     Point3F cameraPos;
+    Point3F sunDir{0.5f, 0.8f, 0.6f};
 
     // Stats
     struct Stats {
@@ -218,4 +228,11 @@ private:
     Impl* impl;
     RenderConfig cfg;
     bool initialized = false;
+
+    // Shadow mapping internals
+    int32_t shadowSize = 0;
+    uint32_t shadowFbo = 0;
+    MatrixF shadowVP;           // light's view-projection
+    MatrixF shadowBiasVP;       // bias * lightVP (world -> shadow UV)
+    MatrixF shadowBiasMatrix;   // bias for NDC -> UV
 };

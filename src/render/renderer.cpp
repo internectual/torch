@@ -60,7 +60,86 @@ bool Renderer::init(void* window) {
     defaultShader = ShaderManager::getDefaultShader();
     currentShader = defaultShader;
 
+    initShadowMap();
+
     return true;
+}
+
+void Renderer::initShadowMap(int32_t size) {
+    if (shadowFbo) {
+        glDeleteFramebuffers(1, &shadowFbo);
+        glDeleteTextures(1, &shadowDepthTex);
+    }
+    shadowSize = size;
+
+    glGenTextures(1, &shadowDepthTex);
+    glBindTexture(GL_TEXTURE_2D, shadowDepthTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32, size, size, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    // Enable depth comparison for shadow sampling (PCF)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+
+    glGenFramebuffers(1, &shadowFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowDepthTex, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        Console::instance().printf(LogLevel::Error, "Shadow FBO incomplete: %x", status);
+        shadowSize = 0;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // Pre-compute bias matrix for NDC -> UV (0,1) mapping
+    float bias[] = {
+        0.5f, 0.0f, 0.0f, 0.5f,
+        0.0f, 0.5f, 0.0f, 0.5f,
+        0.0f, 0.0f, 0.5f, 0.5f,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+    memcpy((void*)shadowBiasMatrix.data(), bias, sizeof(bias));
+}
+
+void Renderer::beginShadowPass(const Point3F& lightDir, const Point3F& sceneCenter, float sceneRadius) {
+    if (!shadowSize) return;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo);
+    glViewport(0, 0, shadowSize, shadowSize);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glCullFace(GL_FRONT); // Front-face culling for shadow volumes (reduces peter-panning)
+    glDisable(GL_BLEND);
+
+    // Orthographic projection from light direction
+    Point3F up = {0, 1, 0};
+    if (fabsf(lightDir.y) > 0.99f) up = {1, 0, 0};
+    Point3F target = {sceneCenter.x + lightDir.x, sceneCenter.y + lightDir.y, sceneCenter.z + lightDir.z};
+
+    float dist = sceneRadius * 1.5f;
+    Point3F eye = {sceneCenter.x + lightDir.x * dist, sceneCenter.y + lightDir.y * dist, sceneCenter.z + lightDir.z * dist};
+    MatrixF lightView;
+    lightView.lookAt(eye, sceneCenter, up);
+
+    MatrixF lightProj;
+    lightProj.orthographic(-sceneRadius * 1.5f, sceneRadius * 1.5f,
+                           -sceneRadius * 1.5f, sceneRadius * 1.5f,
+                           0.1f, sceneRadius * 4.0f);
+
+    shadowVP = lightProj * lightView;
+    shadowBiasVP = shadowBiasMatrix * shadowVP;
+}
+
+void Renderer::endShadowPass() {
+    if (!shadowSize) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, cfg.width, cfg.height);
+    glCullFace(GL_BACK);
+    glEnable(GL_BLEND);
 }
 
 void Renderer::shutdown() {

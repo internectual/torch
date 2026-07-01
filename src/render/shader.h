@@ -8,6 +8,7 @@ public:
     static Shader* getSkyShader();
     static Shader* getTextShader();
     static Shader* getLineShader();
+    static Shader* getShadowShader();
 
     static void init();
     static void destroy();
@@ -18,4 +19,5 @@ private:
     static Shader* skyShader;
     static Shader* textShader;
     static Shader* lineShader;
+    static Shader* shadowShader;
 };
