@@ -1142,7 +1142,7 @@ bool ScriptEngine::init() {
     });
 
     tsInstance->registerNative("isDemo", [](const auto&) -> VMValue {
-        return VMValue(0);
+        return VMValue(Engine::instance().game().isDemoPlaying() ? 1 : 0);
     });
 
     // String utility functions
