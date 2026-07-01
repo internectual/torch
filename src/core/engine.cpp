@@ -300,20 +300,17 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().printf(LogLevel::Info, "Registered console commands as TS natives");
     }
 
-    // Skip startup scripts in -demo mode (they often block on login GUI)
-    if (demoPath.empty()) {
-        auto startupData = fs.read("console_start.cs");
-        if (!startupData.empty() && scr->ts()) {
-            Console::instance().printf(LogLevel::Info, "Executing console_start.cs (%zu bytes)", startupData.size());
-            std::string csSource((const char*)startupData.data(), startupData.size());
-            scr->ts()->execute(csSource, "console_start.cs");
-        }
-        // Auto-start login process to reach the LAN lobby
-        if (scr->ts()) {
-            Console::instance().printf(LogLevel::Info, "Calling StartLoginProcess...");
-            scr->ts()->execute("StartLoginProcess();", "autoexec");
-        }
-    }
+     // Skip startup scripts in -demo mode (they often block on login GUI)
+     if (demoPath.empty()) {
+         auto startupData = fs.read("console_start.cs");
+         if (!startupData.empty() && scr->ts()) {
+             Console::instance().printf(LogLevel::Info, "Executing console_start.cs (%zu bytes)", startupData.size());
+             std::string csSource((const char*)startupData.data(), startupData.size());
+             // Append StartLoginProcess to run immediately after definitions
+             csSource += "\nStartLoginProcess();\n";
+             scr->ts()->execute(csSource, "console_start.cs");
+         }
+     }
 
     // Initialize GUI renderer from script-created objects
     gui->init();
