@@ -839,6 +839,20 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
         extractScoreboardData(recFilePath_.c_str());
     }
 
+    // FALLBACK: populate scoreboard from ghost tracker if Node.js didn't provide data
+    if (playerInfo_.empty()) {
+        for (int i : ghostTracker.getAllIndices()) {
+            const GhostEntry* g = ghostTracker.getGhost(i);
+            if (!g || (g->className != "Player" && g->className != "MPB")) continue;
+            PlayerInfo pi;
+            pi.name = g->playerName.empty() ? g->skinName : g->playerName;
+            pi.skin = g->skinName;
+            pi.teamId = g->teamId;
+            pi.damage = 1.0f - (g->health / 100.0f);
+            playerInfo_.push_back(pi);
+        }
+    }
+
     return true;
 }
 
