@@ -2028,14 +2028,11 @@ static const char* shapePathForClass(const std::string& className, const std::st
     if (className == "Player" || className == "MPB") {
         if (skinName.find("medium") != std::string::npos ||
             skinName.find("Medium") != std::string::npos)
-            return "shapes/medium_male.dts";
+            return "shapes/bioderm_medium.dts";
         if (skinName.find("heavy") != std::string::npos ||
             skinName.find("Heavy") != std::string::npos)
-            return "shapes/heavy_male.dts";
-        if (skinName.find("light") != std::string::npos ||
-            skinName.find("Light") != std::string::npos)
-            return "shapes/light_male.dts";
-        return "shapes/light_male.dts";
+            return "shapes/bioderm_heavy.dts";
+        return "shapes/bioderm_light.dts";
     }
     if (className == "FlyingVehicle" || className == "Shrike")
         return "shapes/vehicle_air_scout.dts";
@@ -2079,6 +2076,7 @@ static const char* shapePathForClass(const std::string& className, const std::st
         return "shapes/energy_bolt.dts";
     if (className == "Splash")
         return "shapes/effect_plasma_explosion.dts";
+    // For unknown classes, try a path based on the class name
     return nullptr;
 }
 
