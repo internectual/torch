@@ -1635,8 +1635,29 @@ bool ScriptEngine::init() {
 
     vmInstance->registerNativeFunction("isShapeLoaded", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
-        // Simplified: always return 1 for known shapes
         return VMValue(1);
+    });
+
+    // DSO script compatibility stubs
+    vmInstance->registerNativeFunction("t2csri_glue_initChecks", [](const auto&) { return VMValue(1); });
+    vmInstance->registerNativeFunction("Base64_CreateArray", [](const auto&) { return VMValue(""); });
+    vmInstance->registerNativeFunction("DecToHex", [](const auto& args) {
+        if (args.empty()) return VMValue("0");
+        char buf[32]; snprintf(buf, sizeof(buf), "%X", args[0].toInt());
+        return VMValue(buf);
+    });
+    vmInstance->registerNativeFunction("DecToBin", [](const auto& args) {
+        if (args.empty()) return VMValue("0");
+        int v = args[0].toInt();
+        std::string r;
+        for (int i = 31; i >= 0; i--) r += (v & (1 << i)) ? '1' : '0';
+        // Trim leading zeros
+        auto p = r.find_first_not_of('0');
+        return VMValue(p != std::string::npos ? r.substr(p) : "0");
+    });
+    vmInstance->registerNativeFunction("BinToDec", [](const auto& args) {
+        if (args.empty()) return VMValue(0);
+        return VMValue((int32_t)std::stoul(args[0].toString(), nullptr, 2));
     });
 
     Console::instance().printf(LogLevel::Info, "ScriptEngine initialized with %zu native functions + DTS support", 12);
