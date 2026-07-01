@@ -179,7 +179,6 @@ void HUD::renderCrosshair() {
 
 void HUD::renderHealthBar(float health, float maxHealth) {
     auto& r = Engine::instance().renderer();
-    int32_t w = Engine::instance().platform().width();
     int32_t h = Engine::instance().platform().height();
     float barW = 200.0f, barH = 16.0f;
     float x = 20.0f, y = (float)h - 80.0f;
@@ -201,7 +200,6 @@ void HUD::renderHealthBar(float health, float maxHealth) {
 
 void HUD::renderEnergyBar(float energy, float maxEnergy) {
     auto& r = Engine::instance().renderer();
-    int32_t w = Engine::instance().platform().width();
     int32_t h = Engine::instance().platform().height();
     float barW = 200.0f, barH = 12.0f;
     float x = 20.0f, y = (float)h - 56.0f;
@@ -315,7 +313,6 @@ void Menu::render() {
     auto& r = Engine::instance().renderer();
     auto* font = r.getFont();
     int32_t w = Engine::instance().platform().width();
-    int32_t h = Engine::instance().platform().height();
 
     // Simple menu rendering
     if (!active) return;

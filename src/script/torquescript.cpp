@@ -354,13 +354,13 @@ void TorqueScript::Impl::tokenize(const std::string& source) {
 
 TSToken TorqueScript::Impl::nextToken() {
     if (tokenPos < tokens.size()) return tokens[tokenPos++];
-    return {TSTokenType::Eof, ""};
+    return {TSTokenType::Eof, "", 0, {}};
 }
 
 TSToken TorqueScript::Impl::peekToken(size_t ahead) {
     size_t idx = tokenPos + ahead;
     if (idx < tokens.size()) return tokens[idx];
-    return {TSTokenType::Eof, ""};
+    return {TSTokenType::Eof, "", 0, {}};
 }
 
 void TorqueScript::Impl::expect(TSTokenType type) {
@@ -568,7 +568,6 @@ VMValue TorqueScript::Impl::parseWhile() {
     // Save condition token range
     size_t condStart = tokenPos;
     parseExpression();
-    size_t condEnd = tokenPos;
     expect(TSTokenType::RParen);
 
     loopDepth++;
@@ -1378,9 +1377,6 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
     std::vector<TSToken> savedTokens = std::move(impl->tokens);
     size_t savedPos = impl->tokenPos;
     bool savedRunning = impl->running;
-    bool savedReturning = impl->returning;
-    bool savedBreaking = impl->breaking;
-    bool savedContinuing = impl->continuing;
     VMValue savedReturnValue = impl->returnValue;
     std::string savedLastVarName = std::move(impl->lastVarName);
     std::string savedLastFieldObj = std::move(impl->lastFieldObj);

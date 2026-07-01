@@ -289,15 +289,7 @@ void Engine::run() {
     int frameCount = 0;
 
     while (running && plat->isRunning()) {
-        static int loopCount = 0;
-        loopCount++;
         double now = Timer::now();
-        static double tPrevFrame = 0;
-        static double tPrint = 0;
-        if (now - tPrint >= 0.5) {
-            tPrint = now;
-        }
-        tPrevFrame = now;
         float dt = (float)(now - lastTime);
         lastTime = now;
 
@@ -417,14 +409,12 @@ void Engine::run() {
                 // Weapon cycling - cooldown to avoid cycling too fast
                 {
                     static float weaponCycleCooldown = 0;
-                    static int lastWheel = 0;
                     weaponCycleCooldown -= dt;
                     int wheel = plat->input().mouseWheel;
                     if (weaponCycleCooldown <= 0 && wheel != 0) {
                         g->player().weaponCycle(wheel > 0 ? 1 : -1);
                         weaponCycleCooldown = 0.2f;
                     }
-                    lastWheel = wheel;
                 }
 
                 // Number keys for direct weapon selection
@@ -532,9 +522,6 @@ void Engine::shutdown() {
 
 void Engine::renderOverlay() {
     if (!overlayFont) return;
-    auto& r = *ren;
-    auto w = (float)plat->width();
-    auto h = (float)plat->height();
     float sy = 12.0f;
 
     int line = 0;

@@ -81,7 +81,8 @@ static std::string parseStr(const char*& p) {
 
 static JVal parseArr(const char*& p) {
     JVal v; v.t = JType::Arr;
-    if (*p != '[') return v; ++p;
+    if (*p != '[') return v;
+    ++p;
     skipWS(p);
     if (*p == ']') { ++p; return v; }
     while (true) {
@@ -95,7 +96,8 @@ static JVal parseArr(const char*& p) {
 
 static JVal parseObj(const char*& p) {
     JVal v; v.t = JType::Obj;
-    if (*p != '{') return v; ++p;
+    if (*p != '{') return v;
+    ++p;
     skipWS(p);
     if (*p == '}') { ++p; return v; }
     while (true) {

@@ -176,7 +176,6 @@ bool VirtualMachine::loadScript(const uint8_t* data, size_t size, const char* na
     }
 
     // Now walk opcodes looking for OP_FUNC_DECL
-    const uint8_t* codeBase = code;
     size_t i = 0;
     while (i < opcodes.size()) {
         uint32_t op = opcodes[i];
@@ -683,7 +682,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 if (execIp + 3 < opcodes.size()) {
                     uint32_t nameIdx = opcodes[execIp + 1];
                     uint32_t nsIdx = opcodes[execIp + 2];
-                    uint32_t callType = opcodes[execIp + 3];
+                    (void)opcodes[execIp + 3];
 
                     const char* name = "";
                     if (nameIdx < dso->functionStrings.size()) name = &dso->functionStrings[nameIdx];
@@ -828,8 +827,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 // Create a new script object
                 if (execIp + 3 < opcodes.size()) {
                     uint32_t parentIdx = opcodes[execIp + 1];
-                    uint32_t isDataBlock = opcodes[execIp + 2];
-                    uint32_t failAddr = opcodes[execIp + 3];
+                    (void)opcodes[execIp + 3];
 
                     const char* parent = "";
                     if (parentIdx < dso->functionStrings.size()) parent = &dso->functionStrings[parentIdx];

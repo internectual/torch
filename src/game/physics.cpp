@@ -92,8 +92,6 @@ void Physics::resolveCollision(Player* player, Point3F& pos, float dt) {
     if (!collision.loaded) return;
 
     float radius = 0.5f;
-    float eyeHeight = 1.5f;
-    float playerHeight = eyeHeight + 0.1f;
 
     // Sphere collision push-out
     Point3F pushOut{0,0,0};

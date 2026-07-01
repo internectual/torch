@@ -51,7 +51,7 @@ namespace T2Protocol {
         uint32_t sequence{};
         uint32_t ack{};
         uint32_t ackMask{};
-        uint8_t data[];
+        uint8_t data[1]; // variable-length data follows header
     };
 
     // Helper functions

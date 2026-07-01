@@ -80,7 +80,7 @@ namespace T2Demo {
     constexpr int NetEventClassBitSize = 6;
     constexpr int NetEventClassFirst = 255;
     constexpr int NetEventClassCount = 26;
-    inline static const char* NetEventClassNames[NetEventClassCount] = {
+    inline static const char* NetEventClassNames[NetEventClassCount] __attribute__((unused)) = {
         "CRCChallengeEvent",       // 0
         "CRCChallengeResponseEvent",// 1
         "FogChallengeEvent",       // 2

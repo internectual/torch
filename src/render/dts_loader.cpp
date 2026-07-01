@@ -190,7 +190,6 @@ static bool parseMeshSection(const uint8_t*& ptr, size_t& rem, std::vector<DTSMe
             Console::instance().printf(LogLevel::Warn, "DTS: strip %u has invalid count %u", s, count);
             break;
         }
-        size_t startIdx = allIndices.size();
         for (uint32_t j = 0; j < count; j++) {
             allIndices.push_back(readU32(ptr, rem));
         }
@@ -383,7 +382,6 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     std::vector<DTSMeshSection> meshes;
     std::vector<std::string> materialNames;
     std::vector<DTSShape::DetailLevel> details;
-    bool hasHeader = false;
 
     // Parse sections
     while (rem >= 8) {
@@ -405,7 +403,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
 
         switch (sectionType) {
             case DTSECT_HEADER:
-                hasHeader = parseHeaderSection(sectPtr, sectRem);
+                parseHeaderSection(sectPtr, sectRem);
                 break;
             case DTSECT_MESH:
                 parseMeshSection(sectPtr, sectRem, meshes);

@@ -32,27 +32,12 @@ static uint32_t readU32(const uint8_t*& ptr, size_t& rem) {
     return v;
 }
 
-static int32_t readS32(const uint8_t*& ptr, size_t& rem) {
-    return (int32_t)readU32(ptr, rem);
-}
-
 static float readF32(const uint8_t*& ptr, size_t& rem) {
     if (rem < 4) return 0;
     float v;
     memcpy(&v, ptr, 4);
     ptr += 4; rem -= 4;
     return v;
-}
-
-static std::string readNullString(const uint8_t*& ptr, size_t& rem) {
-    if (rem == 0) return "";
-    const uint8_t* start = ptr;
-    while (rem > 0 && *ptr) {
-        ptr++; rem--;
-    }
-    std::string s((const char*)start, (size_t)(ptr - start));
-    if (rem > 0) { ptr++; rem--; }
-    return s;
 }
 
 // ─── Helper: triangle fan → indexed triangles ──────────────────

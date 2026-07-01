@@ -65,10 +65,10 @@ void CollisionGrid::build(const std::vector<CollisionTri>& tris, float gridSize,
         int iz0 = (int)((az - minZ) / cellH);
         int ix1 = (int)((bx - minX) / cellW);
         int iz1 = (int)((bz - minZ) / cellH);
-        if (ix0 < 0) ix0 = 0; if (ix0 >= resX) ix0 = resX - 1;
-        if (iz0 < 0) iz0 = 0; if (iz0 >= resZ) iz0 = resZ - 1;
-        if (ix1 < 0) ix1 = 0; if (ix1 >= resX) ix1 = resX - 1;
-        if (iz1 < 0) iz1 = 0; if (iz1 >= resZ) iz1 = resZ - 1;
+        if (ix0 < 0) { ix0 = 0; } if (ix0 >= resX) { ix0 = resX - 1; }
+        if (iz0 < 0) { iz0 = 0; } if (iz0 >= resZ) { iz0 = resZ - 1; }
+        if (ix1 < 0) { ix1 = 0; } if (ix1 >= resX) { ix1 = resX - 1; }
+        if (iz1 < 0) { iz1 = 0; } if (iz1 >= resZ) { iz1 = resZ - 1; }
 
         for (int iz = iz0; iz <= iz1; iz++)
             for (int ix = ix0; ix <= ix1; ix++)
@@ -97,12 +97,12 @@ bool CollisionGrid::raycast(const std::vector<CollisionTri>& tris, const Point3F
     int cx, cz;
     if (fabs(dir.x) > 1e-10f) {
         cx = (int)((origin.x - minX + (dir.x > 0 ? 0 : 0)) / cellW);
-    } else cx = 0;
+    } else { cx = 0; }
     if (fabs(dir.z) > 1e-10f) {
         cz = (int)((origin.z - minZ + (dir.z > 0 ? 0 : 0)) / cellH);
-    } else cz = 0;
-    if (cx < 0) cx = 0; if (cx >= resX) cx = resX - 1;
-    if (cz < 0) cz = 0; if (cz >= resZ) cz = resZ - 1;
+    } else { cz = 0; }
+    if (cx < 0) { cx = 0; } if (cx >= resX) { cx = resX - 1; }
+    if (cz < 0) { cz = 0; } if (cz >= resZ) { cz = resZ - 1; }
 
     float tMaxX = (dir.x > 0)
         ? ((cx + 1) * cellW + minX - origin.x) / dir.x
@@ -169,9 +169,6 @@ bool CollisionGrid::sphereCollide(const std::vector<CollisionTri>& tris, const P
             if (gx < 0 || gx >= resX || gz < 0 || gz >= resZ) continue;
             for (int ti : cells[gz * resX + gx]) {
                 const auto& tri = tris[ti];
-                // Point-to-triangle distance
-                Point3F e1 = {tri.v1.x - tri.v0.x, tri.v1.y - tri.v0.y, tri.v1.z - tri.v0.z};
-                Point3F e2 = {tri.v2.x - tri.v0.x, tri.v2.y - tri.v0.y, tri.v2.z - tri.v0.z};
                 Point3F toCenter = {center.x - tri.v0.x, center.y - tri.v0.y, center.z - tri.v0.z};
 
                 // Project onto normal
@@ -196,7 +193,6 @@ bool CollisionGrid::sphereCollide(const std::vector<CollisionTri>& tris, const P
 }
 
 void CollisionMesh::addMesh(const float* verts, int vertCount, const uint32_t* indices, int indexCount) {
-    int startTri = (int)triangles.size();
     for (int i = 0; i + 2 < indexCount; i += 3) {
         CollisionTri tri;
         uint32_t i0 = indices[i], i1 = indices[i + 1], i2 = indices[i + 2];

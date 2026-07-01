@@ -297,7 +297,11 @@ const GhostEntry* GhostTracker::getGhost(int index) const {
 GhostEntry* GhostTracker::getMutableGhost(int index) {
     auto it = ghosts.find(index); return it != ghosts.end() ? &it->second : nullptr;
 }
-void GhostTracker::createGhost(int index, int classId, const std::string& cn) { ghosts[index] = {classId, cn}; }
+void GhostTracker::createGhost(int index, int classId, const std::string& cn) {
+    GhostEntry e;
+    e.classId = classId; e.className = cn;
+    ghosts[index] = e;
+}
 void GhostTracker::deleteGhost(int index) { ghosts.erase(index); }
 void GhostTracker::clear() { ghosts.clear(); }
 int GhostTracker::size() const { return (int)ghosts.size(); }
@@ -539,16 +543,6 @@ void DemoParser::extractScoreboardData(const char* recPath) {
         }
         return val;
     };
-    // Count targets
-    int targetCount = 0;
-    {
-        std::string s(buf);
-        auto pos = s.find("\"targets\"");
-        if (pos != std::string::npos) {
-            pos = s.find('[', pos);
-            while (pos < n) { pos = s.find('{', pos); if (pos == std::string::npos) break; targetCount++; pos++; }
-        }
-    }
     // Simple state machine to parse target entries
     const char* p = buf;
     const char* end = buf + n;
@@ -651,6 +645,7 @@ static std::string scanMissionName(const uint8_t* data, size_t size, uint32_t* o
 }
 
 // ─── Initial Block readers (protocol v25034) ────────────────
+static std::vector<uint32_t> readScoreEntry(BitStream& bs) __attribute__((unused));
 static std::vector<uint32_t> readScoreEntry(BitStream& bs) {
     // ScoreEntry: 6× U32 (FUN_00601800)
     std::vector<uint32_t> e;
@@ -658,6 +653,7 @@ static std::vector<uint32_t> readScoreEntry(BitStream& bs) {
     return e;
 }
 
+static std::vector<uint32_t> readDemoValues(BitStream& bs) __attribute__((unused));
 static std::vector<uint32_t> readDemoValues(BitStream& bs) {
     std::vector<uint32_t> vals;
     int count = bs.readU32();
@@ -665,6 +661,7 @@ static std::vector<uint32_t> readDemoValues(BitStream& bs) {
     return vals;
 }
 
+static void readComplexTargetManager(BitStream& bs) __attribute__((unused));
 static void readComplexTargetManager(BitStream& bs) {
     // Sensor group colors: U32 count + entries (each 5× U8)
     uint32_t sgCount = bs.readU32();
@@ -684,6 +681,7 @@ static void readComplexTargetManager(BitStream& bs) {
     }
 }
 
+static void readConnectionProtocol(BitStream& bs) __attribute__((unused));
 static void readConnectionProtocol(BitStream& bs) {
     bs.readU32(); // lastSeqRecvd
     bs.readU32(); // highestAckedSeq
@@ -695,6 +693,7 @@ static void readConnectionProtocol(BitStream& bs) {
     bs.readU32(); // nextRecvEventSeq
 }
 
+static void readPathManager(BitStream& bs) __attribute__((unused));
 static void readPathManager(BitStream& bs) {
     uint32_t count = bs.readU32();
     for (uint32_t i = 0; i < count; i++) {
@@ -877,7 +876,7 @@ void DemoParser::scanMissionChanges() {
     while (true) {
         if (blockStreamOffset + 2 > (int)decompressedSize) break;
         int ts = decompressed[blockStreamOffset] | (decompressed[blockStreamOffset+1] << 8);
-        int type = ts >> 12, size = ts & 0xfff;
+        int size = ts & 0xfff;
         if (blockStreamOffset + 2 + size > (int)decompressedSize) break;
         int bi = blockCursor_++;
         const uint8_t* d = decompressed + blockStreamOffset + 2;
@@ -1046,15 +1045,12 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents)
         if (ev.guaranteed) ev.sequenceNumber = (int)bs.readU32();
         ev.dataBitsStart = bs.getCurPos();
         // Parse known event payloads
-        bool parsed = false;
         if (ev.classId == T2Demo::NetEventClassFirst + 22) { // SimpleMessageEvent
             ev.message = bs.readString();
-            parsed = true;
         } else if (ev.classId == T2Demo::NetEventClassFirst + 9) { // RemoteCommandEvent
             int argc = bs.readInt(5);
             for (int i = 0; i < argc; i++) {
                 std::string arg = bs.unpackNetString();
-                // Resolve tagged string references
                 if (arg.size() > 2 && arg[0] == '\\' && arg[1] == 'x') {
                     int tag = atoi(arg.c_str() + 2);
                     auto it = initialBlock.taggedStrings.find(tag);
@@ -1063,63 +1059,38 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents)
                 if (!ev.message.empty()) ev.message += ' ';
                 ev.message += arg;
             }
-            parsed = true;
         } else if (ev.classId == T2Demo::NetEventClassFirst + 7) { // NetStringEvent
-            // NetStringEvent: writes a single net string (tagged)
-            if (bs.readFlag()) { // has tag
-                bs.readInt(8); // offset
-                bs.readString(); // the actual string
+            if (bs.readFlag()) {
+                bs.readInt(8);
+                bs.readString();
             }
-            parsed = true;
         } else if (ev.classId == T2Demo::NetEventClassFirst + 4) { // GhostingMessageEvent
-            // GhostingMessageEvent: variable ghost messages
             if (bs.readFlag()) { int n = bs.readInt(5); for (int i = 0; i < n; i++) { bs.readFlag(); } }
-            parsed = true;
         } else if (ev.classId == T2Demo::NetEventClassFirst + 0) { // CRCChallengeEvent
             bs.readU32(); bs.readU32(); bs.readU32(); bs.readFlag();
-            parsed = true;
         } else if (ev.classId == T2Demo::NetEventClassFirst + 1) { // CRCChallengeResponseEvent
             bs.readU32(); bs.readU32(); bs.readU32();
-            parsed = true;
         } else if (ev.classId == T2Demo::NetEventClassFirst + 19) { // SimDataBlockEvent
-            int oid = bs.readInt(T2Demo::SimDBEventObjectIdBits);
-            int cid = bs.readInt(T2Demo::SimDBEventClassIdBits) + T2Demo::DataBlockClassFirst;
-            int idx = bs.readInt(T2Demo::SimDBEventIndexBits);
-            int tot = bs.readInt(T2Demo::SimDBEventTotalBits);
-            parsed = true;
         } else if (ev.classId == T2Demo::NetEventClassFirst + 17 ||
                    ev.classId == T2Demo::NetEventClassFirst + 18) {
-            // Sim2DAudioEvent / Sim3DAudioEvent
-            int profileId = bs.readRangedU32(0, 1024);
-            parsed = true;
+            bs.readRangedU32(0, 1024);
         } else if (ev.classId == T2Demo::NetEventClassFirst + 20) { // SimTargetAudioEvent
-            int profileId = bs.readRangedU32(0, 1024);
-            int target = bs.readRangedU32(0, T2Demo::MaxGhostCount - 1);
-            parsed = true;
+            bs.readRangedU32(0, 1024);
+            bs.readRangedU32(0, T2Demo::MaxGhostCount - 1);
         } else if (ev.classId == T2Demo::NetEventClassFirst + 5) { // GravityEvent
-            bs.readF32(); // gravity magnitude
-            parsed = true;
+            bs.readF32();
         } else if (ev.classId == T2Demo::NetEventClassFirst + 6) { // LightningStrikeEvent
-            bs.readPoint3F(); bs.readPoint3F(); // start, end
-            parsed = true;
+            bs.readPoint3F(); bs.readPoint3F();
         } else if (ev.classId == T2Demo::NetEventClassFirst + 24) { // TargetInfoEvent
-            int idx = bs.readInt(4);
-            int mask = (int)bs.readInt(32);
-            parsed = true;
+            bs.readInt(4); bs.readInt(32);
         } else if (ev.classId == T2Demo::NetEventClassFirst + 25) { // TargetToEvent
-            int from = bs.readInt(4);
-            int to = bs.readInt(4);
-            parsed = true;
+            bs.readInt(4); bs.readInt(4);
         } else if (ev.classId == T2Demo::NetEventClassFirst + 23) { // TargetFreeEvent
-            int idx = bs.readInt(4);
-            parsed = true;
+            bs.readInt(4);
         } else if (ev.classId == T2Demo::NetEventClassFirst + 13) { // SetMissionCRCEvent
-            bs.readU32(); // new CRC
-            parsed = true;
+            bs.readU32();
         } else if (ev.classId == T2Demo::NetEventClassFirst + 12) { // SensorGroupColorEvent
-            int idx = bs.readInt(4);
-            uint32_t color = bs.readU32();
-            parsed = true;
+            bs.readInt(4); bs.readU32();
         } else {
             // Unknown event: break to avoid stream corruption
             ev.dataBitsEnd = bs.getCurPos();
@@ -1716,16 +1687,13 @@ bool DemoParser::applyProtocolHeader(const DnetHeader& dnet, bool& dispatchData)
 
 PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIndex) {
     PacketData pd{};
-    double t0 = Timer::now();
     BitStream bs(data, size);
     pd.dnetHeader = readDnetHeader(bs);
-    double t1 = Timer::now();
     bool dispatchData = false;
     applyProtocolHeader(pd.dnetHeader, dispatchData);
     int rateBits = bs.readInt(2);
     int rateCount[] = {4, 6, 8, 10};
     for (int i = 0; i < rateCount[rateBits]; i++) bs.readFloat(7);
-    double t2 = Timer::now();
 
     pd.gameState = readGameState(bs);
     readEvents(bs, pd.events);
