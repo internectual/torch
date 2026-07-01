@@ -117,6 +117,9 @@ struct DTSShape {
     std::vector<int8_t> materialLightmapIndex; // per-material: -1 no lightmap, >=0 index into lightmaps[]
     bool isInterior = false;
     bool loaded = false;
+    // Hull collision data (from DIF files)
+    std::vector<float> collisionVerts;
+    std::vector<uint32_t> collisionIndices;
     bool load(const uint8_t* data, size_t size);
     bool loadGLB(const uint8_t* data, size_t size);
     void render(int32_t detailLevel = 0);

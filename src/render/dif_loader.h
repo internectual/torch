@@ -13,6 +13,9 @@ struct DIFLoadResult {
     std::vector<std::string> materialNames;
     std::vector<DTSShape::DetailLevel> details;
     bool loaded = false;
+    // Collision triangles extracted from hull surfaces
+    std::vector<float> hullCollisionVerts;
+    std::vector<uint32_t> hullCollisionIndices;
 };
 
 DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool skipGpu = false);

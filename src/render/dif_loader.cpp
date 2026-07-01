@@ -217,6 +217,17 @@ struct DIFInterior {
 
     // Solid leaf surfaces
     std::vector<uint32_t> solidLeafSurfaces;
+
+    // Convex hull data for collision
+    struct ConvexHull {
+        float minX, maxX, minY, maxY, minZ, maxZ;
+        uint32_t surfaceStart;
+        uint16_t surfaceCount;
+    };
+    std::vector<ConvexHull> hulls;
+    std::vector<uint32_t> hullSurfaceIndices;
+    std::vector<uint32_t> hullIndices;
+    std::vector<uint16_t> hullPlaneIndices;
 };
 
 // ─── Read a single Interior (detail level) ──────────────────────
@@ -506,27 +517,39 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
         readF32(ptr, rem); readF32(ptr, rem); readF32(ptr, rem);
     }
 
-    // ── Convex hulls ──
+    // ── Convex hulls (52 bytes each, no padding between fields) ──
     uint32_t hullCount = readU32(ptr, rem);
-    {
-        size_t hullBytes = (size_t)hullCount * 52;
-        if (hullBytes > rem) hullBytes = rem;
-        ptr += hullBytes; rem -= hullBytes;
+    out.hulls.resize(hullCount);
+    for (uint32_t i = 0; i < hullCount; i++) {
+        auto& h = out.hulls[i];
+        readU32(ptr, rem);             // hullStart
+        readU16(ptr, rem);             // hullCount (U16, no padding)
+        h.minX = readF32(ptr, rem); h.maxX = readF32(ptr, rem);
+        h.minY = readF32(ptr, rem); h.maxY = readF32(ptr, rem);
+        h.minZ = readF32(ptr, rem); h.maxZ = readF32(ptr, rem);
+        h.surfaceStart = readU32(ptr, rem);
+        h.surfaceCount = readU16(ptr, rem);
+        readU32(ptr, rem);             // planeStart
+        readU32(ptr, rem);             // polyListPlaneStart
+        readU32(ptr, rem);             // polyListPointStart
+        readU32(ptr, rem);             // polyListStringStart
     }
-    Console::instance().printf(LogLevel::Debug, "  hull: count=%u skipped=%zu", hullCount, (size_t)hullCount * 52);
 
-    auto skipVecU8 = [&]() { uint32_t n = readU32(ptr, rem); size_t nb = n; if (nb > rem) nb = rem; ptr += nb; rem -= nb; };
+    auto readVecU8 = [&]() { uint32_t n = readU32(ptr, rem); size_t nb = n; if (nb > rem) nb = rem; ptr += nb; rem -= nb; };
+    auto readVecU16 = [&](std::vector<uint16_t>& v) { uint32_t n = readU32(ptr, rem); v.resize(n); for (uint32_t i = 0; i < n && rem >= 2; i++) v[i] = readU16(ptr, rem); };
+    auto readVecU32 = [&](std::vector<uint32_t>& v) { uint32_t n = readU32(ptr, rem); v.resize(n); for (uint32_t i = 0; i < n && rem >= 4; i++) v[i] = readU32(ptr, rem); };
+    auto skipVecU8 = readVecU8;
     auto skipVecU16 = [&]() { uint32_t n = readU32(ptr, rem); size_t nb = (size_t)n * 2; if (nb > rem) nb = rem; ptr += nb; rem -= nb; };
     auto skipVecU32 = [&]() { uint32_t n = readU32(ptr, rem); size_t nb = (size_t)n * 4; if (nb > rem) nb = rem; ptr += nb; rem -= nb; };
 
-    skipVecU8();  // hullEmitStrings
-    skipVecU32(); // hullIndices
-    skipVecU16(); // hullPlaneIndices
-    skipVecU32(); // hullEmitStringIndices
-    skipVecU32(); // hullSurfaceIndices
-    skipVecU16(); // polyListPlanes
-    skipVecU32(); // polyListPoints
-    skipVecU8();  // polyListStrings
+    readVecU8();                    // hullEmitStrings
+    readVecU32(out.hullIndices);    // hullIndices
+    readVecU16(out.hullPlaneIndices);
+    skipVecU32();                   // hullEmitStringIndices
+    readVecU32(out.hullSurfaceIndices);
+    skipVecU16();                   // polyListPlanes
+    skipVecU32();                   // polyListPoints
+    skipVecU8();                    // polyListStrings
 
     // ── Coord bins (16x16 = 256 entries, each U32+U32) ──
     if (rem >= 256 * 8) { ptr += 256 * 8; rem -= 256 * 8; }
@@ -551,7 +574,9 @@ static bool interiorToMeshes(DIFInterior& interior,
                               std::vector<int8_t>& outMatLMIndex,
                               std::vector<Texture>& outLightmaps,
                               std::vector<std::string>& outMatNames,
-                              bool skipGpu = false)
+                              bool skipGpu = false,
+                              std::vector<float>* outCollVerts = nullptr,
+                              std::vector<uint32_t>* outCollIndices = nullptr)
 {
     Console::instance().printf(LogLevel::Debug, "  i2m: start (mats=%zu)", interior.matNames.size());
     if (interior.surfaces.empty() || interior.points.empty()) {
@@ -759,6 +784,44 @@ static bool interiorToMeshes(DIFInterior& interior,
         outMeshes.push_back(std::move(mesh));
     }
 
+    if (!outMeshes.empty() && outCollVerts && outCollIndices) {
+        Console::instance().printf(LogLevel::Debug, "  DIF: extracting hull collision (%zu hulls, %zu surfIdxs, %zu windings)",
+            interior.hulls.size(), interior.hullSurfaceIndices.size(), interior.windings.size());
+        // Extract collision triangles from hull-referenced surfaces
+        size_t totalSurfs = 0;
+        for (auto& hull : interior.hulls) {
+            for (uint16_t j = 0; j < hull.surfaceCount; j++) {
+                uint32_t surfIdx = hull.surfaceStart + j < interior.hullSurfaceIndices.size()
+                    ? interior.hullSurfaceIndices[hull.surfaceStart + j] : UINT32_MAX;
+                if (surfIdx >= interior.surfaces.size()) continue;
+                totalSurfs++;
+                auto& surf = interior.surfaces[surfIdx];
+                if (surf.windingCount < 3) continue;
+                uint32_t baseVert = (uint32_t)outCollVerts->size() / 3;
+                for (uint32_t k = 0; k < surf.windingCount && (surf.windingStart + k) < interior.windings.size(); k++) {
+                    uint32_t ptIdx = interior.windings[surf.windingStart + k];
+                    if (ptIdx * 3 + 2 < interior.points.size()) {
+                        outCollVerts->push_back(interior.points[ptIdx * 3]);
+                        outCollVerts->push_back(interior.points[ptIdx * 3 + 1]);
+                        outCollVerts->push_back(interior.points[ptIdx * 3 + 2]);
+                    }
+                }
+                // Triangle fan from baseVert
+                for (uint32_t k = 2; k < surf.windingCount; k++) {
+                    outCollIndices->push_back(baseVert);
+                    outCollIndices->push_back(baseVert + k - 1);
+                    outCollIndices->push_back(baseVert + k);
+                }
+            }
+        }
+        Console::instance().printf(LogLevel::Debug, "  DIF: %zu hull surfaces processed, %zu collision verts, %zu indices",
+            totalSurfs, outCollVerts->size(), outCollIndices->size());
+        if (!outCollVerts->empty()) {
+            Console::instance().printf(LogLevel::Debug, "  DIF: hull collision: %zu triangles",
+                outCollIndices->size() / 3);
+        }
+    }
+
     return !outMeshes.empty();
 }
 
@@ -832,7 +895,9 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
                           result.materialLightmapIndex,
                           result.lightmaps,
                           result.materialNames,
-                          skipGpu))
+                          skipGpu,
+                          &result.hullCollisionVerts,
+                          &result.hullCollisionIndices))
     {
         Console::instance().printf(LogLevel::Warn, "DIF: no meshes generated from '%s'", name);
         return result;

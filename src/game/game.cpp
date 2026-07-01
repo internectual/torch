@@ -476,6 +476,7 @@ bool World::load(const char* mapName) {
         }
 
         // Build collision mesh from DIF interior shapes
+        // Prefer hull collision data when available (more accurate)
         {
             std::vector<float> allVerts;
             std::vector<uint32_t> allIndices;
@@ -483,17 +484,23 @@ bool World::load(const char* mapName) {
 
             for (auto& s : shapes) {
                 if (!s.isInterior || !s.loaded) continue;
-                for (auto& mesh : s.meshes) {
-                    // Extract position data
-                    for (auto& v : mesh.vertices) {
-                        allVerts.push_back(v.pos.x);
-                        allVerts.push_back(v.pos.y);
-                        allVerts.push_back(v.pos.z);
+                // Use hull collision data if available, otherwise fall back to visual mesh
+                if (!s.collisionVerts.empty() && !s.collisionIndices.empty()) {
+                    for (auto v : s.collisionVerts) allVerts.push_back(v);
+                    for (auto idx : s.collisionIndices) allIndices.push_back(vertBase + idx);
+                    vertBase += (uint32_t)s.collisionVerts.size() / 3;
+                } else {
+                    for (auto& mesh : s.meshes) {
+                        for (auto& v : mesh.vertices) {
+                            allVerts.push_back(v.pos.x);
+                            allVerts.push_back(v.pos.y);
+                            allVerts.push_back(v.pos.z);
+                        }
+                        for (auto idx : mesh.indices) {
+                            allIndices.push_back(vertBase + idx);
+                        }
+                        vertBase += (uint32_t)mesh.vertices.size();
                     }
-                    for (auto idx : mesh.indices) {
-                        allIndices.push_back(vertBase + idx);
-                    }
-                    vertBase += (uint32_t)mesh.vertices.size();
                 }
             }
 

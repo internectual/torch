@@ -644,6 +644,8 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
             materialLightmapIndex = std::move(difResult.materialLightmapIndex);
             lightmaps = std::move(difResult.lightmaps);
             materialNames = std::move(difResult.materialNames);
+            collisionVerts = std::move(difResult.hullCollisionVerts);
+            collisionIndices = std::move(difResult.hullCollisionIndices);
             details = difResult.details;
             isInterior = true;
             loaded = true;
