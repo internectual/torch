@@ -748,6 +748,27 @@ void DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
     if (initialBlock.missionName.empty()) {
         initialBlock.missionName = extractMissionNameViaNode(data, size);
     }
+
+    // Last resort: try to extract mission name from demo filename
+    if (initialBlock.missionName.empty() && !recFilePath_.empty()) {
+        std::string lower = recFilePath_;
+        for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
+        static const char* knownMissions[] = {
+            "katabatic", "damnation", "training1", "training2",
+            "oasis", "gauntlet", "icebound", "desiccator",
+            "crater71", "haven", "tombstone", "whiteout",
+            "treachery", "archipelago", "caldera",
+            nullptr
+        };
+        for (int i = 0; knownMissions[i]; i++) {
+            if (lower.find(knownMissions[i]) != std::string::npos) {
+                initialBlock.missionName = knownMissions[i];
+                // Capitalize first letter
+                initialBlock.missionName[0] = (char)std::toupper((unsigned char)initialBlock.missionName[0]);
+                break;
+            }
+        }
+    }
 }
 
 // ─── Block stream ────────────────────────────────────────────
