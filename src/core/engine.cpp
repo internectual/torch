@@ -504,7 +504,7 @@ void Engine::run() {
                 double t2 = Timer::now();
                 if (t1 - lastTiming >= 1.0) {
                     lastTiming = t1;
-                    Console::instance().printf(LogLevel::Warn, "TIMING: update=%.1fms render=%.1fms total=%.1fms",
+                    Console::instance().printf(LogLevel::Debug, "TIMING: update=%.1fms render=%.1fms total=%.1fms",
                         (t1-t0)*1000, (t2-t1)*1000, (t2-t0)*1000);
                 }
             }

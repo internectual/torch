@@ -1249,7 +1249,7 @@ void Game::update(float dt) {
             // Debug: ghost stats every ~500 blocks
             if (demoPlaying && demoParser && (demoBlocksDone % 500) == 0 && demoBlocksDone > 0) {
                 const GhostTracker& gt = demoParser->getGhostTracker();
-                Console::instance().printf(LogLevel::Warn, "Blocks: %d, Ghosts: %d", demoBlocksDone, gt.size());
+                Console::instance().printf(LogLevel::Debug, "Blocks: %d, Ghosts: %d", demoBlocksDone, gt.size());
                 if (gt.size() > 0) {
                     int withPos = 0;
                     for (int i : gt.getAllIndices()) {
@@ -1257,12 +1257,12 @@ void Game::update(float dt) {
                         if (g) {
                             if (g->position.x != 0 || g->position.y != 0 || g->position.z != 0) {
                                 withPos++;
-                                Console::instance().printf(LogLevel::Warn, "  HAS POS: Ghost[%d] class=%d '%s' pos=(%.1f %.1f %.1f)",
+                                Console::instance().printf(LogLevel::Debug, "  HAS POS: Ghost[%d] class=%d '%s' pos=(%.1f %.1f %.1f)",
                                     i, g->classId, g->className.c_str(), g->position.x, g->position.y, g->position.z);
                             }
                         }
                     }
-                    Console::instance().printf(LogLevel::Warn, "Ghosts: %d total, %d with pos", gt.size(), withPos);
+                    Console::instance().printf(LogLevel::Debug, "Ghosts: %d total, %d with pos", gt.size(), withPos);
                 }
             }
 
