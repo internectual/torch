@@ -28,6 +28,26 @@ Engine& Engine::instance() {
 }
 
 bool Engine::init(int argc, char* argv[]) {
+    // Check for help before any output
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-help") == 0 || strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            fprintf(stdout, "Torch v0.1.0 — Tribes 2 Open Source Client\n");
+            fprintf(stdout, "Usage: torch [options]\n\n");
+            fprintf(stdout, "Options:\n");
+            fprintf(stdout, "  -data <dir>        Tribes 2 data directory\n");
+            fprintf(stdout, "  -nologin           Skip login screen, start local game\n");
+            fprintf(stdout, "  -demo <file.rec>   Play a demo recording\n");
+            fprintf(stdout, "  -preview <map>     Load a map and take a screenshot\n");
+            fprintf(stdout, "  -campos x y z      Preview camera position\n");
+            fprintf(stdout, "  -camtarget x y z   Preview camera target\n");
+            fprintf(stdout, "  -testshape <path>  Load and display a GLB shape\n");
+            fprintf(stdout, "  -testdif <path>    Load and dump DIF interior stats\n");
+            fprintf(stdout, "  -online            Enable online mode\n");
+            fprintf(stdout, "  -help              Show this help\n");
+            std::exit(0);
+        }
+    }
+
     Console::instance().printf(LogLevel::Info, "Torch v0.1.0");
 
     // Single-instance lock
