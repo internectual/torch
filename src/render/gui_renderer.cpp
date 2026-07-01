@@ -103,8 +103,6 @@ void GuiRenderer::init() {
     checkerTex->loadRaw(cb.data(), 16, 16, 4);
 }
 
-}
-
 void GuiRenderer::render() {
     if (!canvas) return;
     auto& r = Engine::instance().renderer();
@@ -125,40 +123,71 @@ void GuiRenderer::renderControl(GuiControl* ctl) {
     float y = ctl->posY;
 
     // Add parent offset
-    if (ctl->parent && ctl->parent != canvas) {
-        x += ctl->parent->posX;
-        y += ctl->parent->posY;
+    GuiControl* p = ctl->parent;
+    while (p && p != canvas) {
+        x += p->posX;
+        y += p->posY;
+        p = p->parent;
+    }
+
+    // For GuiCanvas, just use full screen
+    if (ctl->className == "GuiCanvas") {
+        r.drawBox({{0,0,0}, {1024,768,0}}, {0.15f,0.15f,0.2f,1});
+        for (auto* child : ctl->children) renderControl(child);
+        return;
     }
 
     // Render based on class name
-    if (ctl->className == "GuiButtonCtrl") {
-        // Draw button background
-        r.drawBox({{x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}}, {0.3f, 0.3f, 0.4f, 1});
-        r.drawBox({{x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}}, {0.5f, 0.5f, 0.6f, 0.3f});
-        if (font && !ctl->text.empty()) {
-            float tx = x + 5;
-            float ty = y + (ctl->extentY - 16) * 0.5f;
-            font->render(ctl->text.c_str(), tx, ty, {1,1,1,1}, 1.0f);
-        }
+    if (ctl->className == "GuiButtonCtrl" || ctl->className == "GuiTextButtonCtrl") {
+        r.drawBox({{x-1, y-1, 0}, {x + ctl->extentX + 1, y + ctl->extentY + 1, 0}}, {0.5f, 0.5f, 0.6f, 1});
+        r.drawBox({{x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}}, {0.25f, 0.25f, 0.35f, 1});
+        if (font && !ctl->text.empty())
+            font->render(ctl->text.c_str(), x + 5, y + (ctl->extentY - 16) * 0.5f, {1,1,1,1}, 1.0f);
     } else if (ctl->className == "GuiTextCtrl") {
-        if (font && !ctl->text.empty()) {
+        if (font && !ctl->text.empty())
             font->render(ctl->text.c_str(), x + 2, y + 2, {1,1,1,1}, 1.0f);
-        }
-    } else if (ctl->className == "GuiBitmapCtrl" && !ctl->bitmap.empty()) {
-        // Try to load and display bitmap
-        auto data = Engine::instance().fs().read(ctl->bitmap.c_str());
-        if (!data.empty()) {
-            Texture tex;
-            tex.load(data.data(), data.size());
-            if (tex.loaded) {
-                r.drawBox({{x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}}, {1,1,1,1});
+    } else if (ctl->className == "GuiBitmapCtrl") {
+        // Try to load bitmap
+        if (!ctl->bitmap.empty()) {
+            auto data = Engine::instance().fs().read(ctl->bitmap.c_str());
+            if (data.empty()) {
+                // Try common paths
+                std::string b = "textures/" + ctl->bitmap;
+                data = Engine::instance().fs().read(b.c_str());
+            }
+            if (!data.empty()) {
+                Texture tex;
+                tex.load(data.data(), data.size());
+                if (tex.loaded) {
+                    // Render using texture coordinates (simplified)
+                    r.drawBox({{x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}}, {1,1,1,1});
+                }
             }
         }
-    } else if (ctl->className == "GuiCanvas") {
-        // Top-level container - just render children
+    } else if (ctl->className == "GuiTextEditCtrl") {
+        r.drawBox({{x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}}, {0.3f, 0.3f, 0.35f, 1});
+        r.drawBox({{x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}}, {0.4f, 0.4f, 0.5f, 0.3f});
+        if (font) {
+            std::string display = ctl->text.empty() ? "..." : ctl->text;
+            font->render(display.c_str(), x + 3, y + 2, {0.8f,0.8f,1,1}, 1.0f);
+        }
+    } else if (ctl->className == "GuiListBoxCtrl") {
+        r.drawBox({{x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}}, {0.2f, 0.2f, 0.25f, 1});
+    } else if (ctl->className == "GuiScrollCtrl") {
+        r.drawBox({{x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}}, {0.18f, 0.18f, 0.22f, 1});
+    } else if (ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl") {
+        r.drawBox({{x, y, 0}, {x + 16, y + 16, 0}}, {0.5f, 0.5f, 0.6f, 1});
+        if (font && !ctl->text.empty())
+            font->render(ctl->text.c_str(), x + 20, y + 2, {1,1,1,1}, 1.0f);
+    } else if (ctl->className == "GuiSliderCtrl") {
+        float barY = y + ctl->extentY * 0.4f;
+        float barH = ctl->extentY * 0.2f;
+        r.drawBox({{x, barY, 0}, {x + ctl->extentX, barY + barH, 0}}, {0.4f,0.4f,0.5f,1});
+        float knobX = x + ctl->extentX * 0.5f;
+        r.drawBox({{knobX-4, y, 0}, {knobX+4, y+ctl->extentY, 0}}, {0.7f,0.7f,0.8f,1});
     } else {
-        // Generic GuiControl or unknown: render as a simple box
-        r.drawBox({{x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}}, {0.2f, 0.2f, 0.25f, 0.5f});
+        // Generic GuiControl
+        r.drawBox({{x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}}, {0.2f, 0.2f, 0.25f, 0.3f});
     }
 
     // Render children
