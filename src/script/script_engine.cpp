@@ -1750,12 +1750,16 @@ bool ScriptEngine::init() {
         return VMValue(path);
     });
 
-    // Schedule: store callback and execute later (simplified: execute immediately)
+    // Schedule: store callback for later execution
     tsInstance->registerNative("schedule", [](const auto& args) -> VMValue {
-        // schedule(timeMs, targetId, functionName, ...args)
-        // Simplified: just log and return
         if (args.size() >= 3) {
-            Console::instance().printf(LogLevel::Debug, "schedule: %s (delay=%s)", args[2].toString().c_str(), args[0].toString().c_str());
+            double delay = args[0].toDouble() / 1000.0; // ms to seconds
+            std::string command = args[2].toString();
+            // Build argument string
+            for (size_t i = 3; i < args.size(); i++) {
+                command += " " + args[i].toString();
+            }
+            Engine::instance().guiRenderer().addSchedule(delay, command);
         }
         return VMValue(1);
     });

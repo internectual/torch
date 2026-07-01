@@ -34,6 +34,7 @@ public:
     ScriptEngine& script() { return *scr; }
     NetworkManager& network() { return *net; }
     Game& game() { return *g; }
+    GuiRenderer& guiRenderer() { return *gui; }
     Timer& timer() { return *tim; }
 
     void quit() { running = false; }

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
+#include <cmath>
 
 GuiControl* GuiControl::findChild(const std::string& name) {
     for (auto* c : children) if (c->name == name) return c;
@@ -124,7 +125,12 @@ void GuiRenderer::render() {
     // Background
     r.drawBox({{0,0,0}, {1024,768,0}}, {0.15f,0.15f,0.2f,1});
 
-    renderControl(canvas);
+    // Render active dialog (top of stack) or full canvas
+    if (!dialogStack.empty()) {
+        renderControl(dialogStack.back());
+    } else {
+        renderControl(canvas);
+    }
 }
 
 void GuiRenderer::renderControl(GuiControl* ctl) {
@@ -208,6 +214,26 @@ void GuiRenderer::renderControl(GuiControl* ctl) {
     for (auto* child : ctl->children) renderControl(child);
 }
 
+void GuiRenderer::update(float dt) {
+    (void)dt;
+    double now = Engine::instance().timer().now();
+    for (auto it = events.begin(); it != events.end(); ) {
+        if (now >= it->triggerTime) {
+            Console::instance().execute(it->command.c_str());
+            it = events.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void GuiRenderer::addSchedule(double delay, const std::string& command) {
+    ScheduledEvent ev;
+    ev.triggerTime = Engine::instance().timer().now() + delay;
+    ev.command = command;
+    events.push_back(ev);
+}
+
 GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
     if (!ctl || !ctl->visible || !ctl->active) return nullptr;
     float x = ctl->posX;
@@ -222,12 +248,31 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
 }
 
 bool GuiRenderer::handleInput(int x, int y, bool pressed) {
-    auto* hit = hitTest(canvas, x, y);
+    auto* hit = hitTest(activeDialog(), x, y);
     if (hit && hit->onClick && pressed) {
         hit->onClick();
         return true;
     }
     return false;
+}
+
+void GuiRenderer::pushDialog(const std::string& name) {
+    GuiControl* ctl = findControl(name);
+    if (ctl) {
+        ctl->visible = true;
+        dialogStack.push_back(ctl);
+        Console::instance().printf(LogLevel::Debug, "GUI: pushDialog %s", name.c_str());
+    }
+}
+
+void GuiRenderer::popDialog(const std::string& name) {
+    for (auto it = dialogStack.begin(); it != dialogStack.end(); ++it) {
+        if ((*it)->name == name || name.empty()) {
+            dialogStack.erase(it);
+            Console::instance().printf(LogLevel::Debug, "GUI: popDialog %s", name.c_str());
+            return;
+        }
+    }
 }
 
 GuiControl* GuiRenderer::findControl(const std::string& name) {

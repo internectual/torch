@@ -441,6 +441,9 @@ void Engine::run() {
         g->gameServer().update();
         scr->vm()->setVariable("time", (float)now);
 
+        // Process GUI events
+        if (gui) gui->update(dt);
+
         // GUI mouse input
         bool guiHandled = false;
         if (gui && gui->getCanvas()) {

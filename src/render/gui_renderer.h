@@ -36,9 +36,22 @@ public:
 
     GuiControl* getCanvas() { return canvas; }
     GuiControl* findControl(const std::string& name);
+    void pushDialog(const std::string& name);
+    void popDialog(const std::string& name);
+    GuiControl* activeDialog() { return dialogStack.empty() ? canvas : dialogStack.back(); }
+    void update(float dt); // process scheduled events
+    void addSchedule(double delay, const std::string& command);
 
 private:
     GuiControl* canvas{};
+    std::vector<GuiControl*> dialogStack;
+
+    // Scheduler
+    struct ScheduledEvent {
+        double triggerTime;
+        std::string command;
+    };
+    std::vector<ScheduledEvent> events;
     void renderControl(GuiControl* ctl);
     GuiControl* hitTest(GuiControl* ctl, int x, int y);
 
