@@ -119,6 +119,39 @@ void HUD::render(Game* game) {
             if (font) font->render(buf, 20.0f, 48.0f, {0.7f, 0.7f, 0.7f, 0.8f}, 1.4f);
         }
 
+        // Player name tags
+        if (auto* dp = game->getDemoParser()) {
+            const GhostTracker& gt = dp->getGhostTracker();
+            const MatrixF& view = r.viewMatrix();
+            const MatrixF& proj = r.projectionMatrix();
+            auto indices = gt.getAllIndices();
+            for (int gi : indices) {
+                const GhostEntry* g = gt.getGhost(gi);
+                if (!g || g->playerName.empty()) continue;
+                // Project world position to screen
+                Point3F wp = {g->position.x, g->position.y + 2.5f, g->position.z};
+                const float* v = &view.m[0][0];
+                float cx = wp.x*v[0]+wp.y*v[4]+wp.z*v[8]+v[12];
+                float cy = wp.x*v[1]+wp.y*v[5]+wp.z*v[9]+v[13];
+                float cz = wp.x*v[2]+wp.y*v[6]+wp.z*v[10]+v[14];
+                float cw = wp.x*v[3]+wp.y*v[7]+wp.z*v[11]+v[15];
+                const float* p = &proj.m[0][0];
+                float nx = cx*p[0]+cy*p[4]+cz*p[8]+cw*p[12];
+                float ny = cx*p[1]+cy*p[5]+cz*p[9]+cw*p[13];
+                float nz = cx*p[2]+cy*p[6]+cz*p[10]+cw*p[14];
+                float nw = cx*p[3]+cy*p[7]+cz*p[11]+cw*p[15];
+                if (nw == 0) continue;
+                float invW = 1.0f / nw;
+                float sx = (nx*invW*0.5f+0.5f)*w;
+                float sy = (-ny*invW*0.5f+0.5f)*h;
+                if (nz < 0) continue; // behind camera
+                // Background box
+                float tw = (float)g->playerName.size() * 10.0f;
+                r.drawBox({{sx - tw/2 - 4, sy - 2, 0}, {sx + tw/2 + 4, sy + 16, 0}}, {0,0,0,0.5f});
+                font->render(g->playerName.c_str(), sx - tw/2, sy, {1,1,0,1}, 1.2f);
+            }
+        }
+
         // Event log pane
         if (game->demoEventsShown() && font) {
             const auto& events = game->getDemoEventLog();
