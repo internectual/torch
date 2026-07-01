@@ -232,6 +232,8 @@ public:
     float getDemoTime() const { return demoTime; }
     float getDemoTotalTime() const { return demoTotalTime; }
     bool demoHasPosition() const { return demoHasPos; }
+    float getDamageFlash() const { return damageFlash; }
+    float getWhiteOut() const { return whiteOut; }
     void toggleDemoPause() { demoPaused = !demoPaused; }
     void toggleDemoEvents() { demoShowEvents = !demoShowEvents; }
     bool demoEventsShown() const { return demoShowEvents; }
@@ -285,6 +287,8 @@ private:
     Point3F demoPrevCameraTarget{0, 5, -1};
     float demoMoveBlend = 1.0f;
     bool demoHasPos = false;
+    float damageFlash = -1.0f;  // red screen flash during demo playback
+    float whiteOut = -1.0f;     // white screen flash during demo playback
     std::vector<DemoTimedEvent> demoEventLog;
     bool demoShowEvents = true;
     // Orbit camera for demo spectator mode

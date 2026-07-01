@@ -1176,14 +1176,17 @@ void Game::update(float dt) {
                     } else if (pd.gameState.compressionPoint.x != 0 ||
                                pd.gameState.compressionPoint.y != 0 ||
                                pd.gameState.compressionPoint.z != 0) {
-                        // Update compression point from partial control update
-                        const Vec3& cp = pd.gameState.compressionPoint;
-                        if (!demoHasPos) {
-                            demoCameraPos = {cp.x, cp.y, cp.z};
-                            demoCameraTarget = {cp.x, cp.y + 2.0f, cp.z};
-                            demoHasPos = true;
-                        }
-                    }
+                         // Update compression point from partial control update
+                         const Vec3& cp = pd.gameState.compressionPoint;
+                         if (!demoHasPos) {
+                             demoCameraPos = {cp.x, cp.y, cp.z};
+                             demoCameraTarget = {cp.x, cp.y + 2.0f, cp.z};
+                             demoHasPos = true;
+                         }
+                     }
+                    // Store damage flash and whiteout for screen effects
+                    damageFlash = pd.gameState.damageFlash;
+                    whiteOut = pd.gameState.whiteOut;
                 }
                 delete block;
             }

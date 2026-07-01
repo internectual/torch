@@ -84,6 +84,18 @@ void HUD::render(Game* game) {
 
     // Demo playback info
     if (game->isDemoPlaying()) {
+        // Screen effects from demo game state
+        float df = game->getDamageFlash();
+        float wo = game->getWhiteOut();
+        if (df > 0.0f) {
+            float alpha = std::min(df * 0.5f, 0.6f);
+            r.drawBox({{0, 0, 0}, {(float)w, (float)h, 0}}, {0.8f, 0, 0, alpha});
+        }
+        if (wo > 0.0f) {
+            float alpha = std::min(wo * 0.5f, 0.8f);
+            r.drawBox({{0, 0, 0}, {(float)w, (float)h, 0}}, {1, 1, 1, alpha});
+        }
+
         int mins = (int)(game->getDemoTime() / 60);
         int secs = (int)(game->getDemoTime()) % 60;
         int totalMins = (int)(game->getDemoTotalTime() / 60);
