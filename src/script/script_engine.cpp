@@ -1797,6 +1797,24 @@ bool ScriptEngine::init() {
         });
     }
 
+    // Login flow stubs (called by T2 startup scripts)
+    tsInstance->registerNative("CleanUpAndGo", [](const auto&) -> VMValue {
+        Console::instance().printf(LogLevel::Info, "Login complete: CleanUpAndGo");
+        return VMValue(1);
+    });
+    tsInstance->registerNative("cleanupAudio", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("WONDisableFutureCalls", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("export", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("addMessageCallback", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
     Console::instance().printf(LogLevel::Info, "ScriptEngine initialized with %zu native functions + DTS support", 12);
     return true;
 }

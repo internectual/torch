@@ -300,17 +300,31 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().printf(LogLevel::Info, "Registered console commands as TS natives");
     }
 
-     // Skip startup scripts in -demo mode (they often block on login GUI)
-     if (demoPath.empty()) {
-         auto startupData = fs.read("console_start.cs");
-         if (!startupData.empty() && scr->ts()) {
-             Console::instance().printf(LogLevel::Info, "Executing console_start.cs (%zu bytes)", startupData.size());
-             std::string csSource((const char*)startupData.data(), startupData.size());
-             // Append StartLoginProcess to run immediately after definitions
-             csSource += "\nStartLoginProcess();\n";
-             scr->ts()->execute(csSource, "console_start.cs");
-         }
-     }
+      // Skip startup scripts in -demo mode (they often block on login GUI)
+      if (demoPath.empty()) {
+          auto startupData = fs.read("console_start.cs");
+          if (!startupData.empty() && scr->ts()) {
+              Console::instance().printf(LogLevel::Info, "Executing console_start.cs (%zu bytes)", startupData.size());
+              std::string csSource((const char*)startupData.data(), startupData.size());
+              // Remove the slow .gui file loading loop for faster startup
+              size_t pos = 0;
+              while ((pos = csSource.find("findFirstFile(\"*.gui\")", pos)) != std::string::npos) {
+                  // Find the line start and the exec() call after it
+                  size_t lineStart = csSource.rfind('\n', pos);
+                  if (lineStart == std::string::npos) lineStart = 0;
+                  size_t execPos = csSource.find("exec(", pos);
+                  if (execPos != std::string::npos) {
+                      size_t semiPos = csSource.find(';', execPos);
+                      if (semiPos != std::string::npos) {
+                          csSource.erase(lineStart, semiPos - lineStart + 1);
+                          Console::instance().printf(LogLevel::Info, "  (stripped .gui loading loop)");
+                      } else { break; }
+                  } else { break; }
+              }
+              csSource += "\n$SkipLogin = true; $pref::AcceptedEULA = true; LoginDone();\n";
+              scr->ts()->execute(csSource, "console_start.cs");
+          }
+      }
 
     // Initialize GUI renderer from script-created objects
     gui->init();
