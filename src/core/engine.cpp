@@ -329,7 +329,6 @@ bool Engine::init(int argc, char* argv[]) {
       }
 
     // Initialize GUI renderer from script-created objects
-    Console::instance().printf(LogLevel::Info, "After TS execute, initializing GUI...");
     gui->init();
 
     // Load essential GUI files for HUD, menus, and login
