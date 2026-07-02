@@ -119,11 +119,13 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
                     float n1 = sinf(fx * 12.0f + fy * 8.0f) * 0.5f + 0.5f;
                     float n2 = sinf(fx * 5.0f + fy * 15.0f + 1.3f) * 0.5f + 0.5f;
                     float n3 = sinf(fx * 20.0f - fy * 7.0f + 3.7f) * 0.5f + 0.5f;
-                    float total = n1 + n2 + n3 + 0.01f;
+                    float n4 = sinf(fx * 0.3f + fy * 0.7f) * 0.5f + 0.5f;
+                    float total = n1 + n2 + n3 + n4;
+                    if (total < 0.01f) total = 0.01f;
                     splatPixels[(y * S + x) * 4 + 0] = (uint8_t)(n1 / total * 255);
                     splatPixels[(y * S + x) * 4 + 1] = (uint8_t)(n2 / total * 255);
                     splatPixels[(y * S + x) * 4 + 2] = (uint8_t)(n3 / total * 255);
-                    splatPixels[(y * S + x) * 4 + 3] = 0;
+                    splatPixels[(y * S + x) * 4 + 3] = (uint8_t)(n4 / total * 255);
                 }
             }
             splatMap.loadRaw(splatPixels.data(), S, S, 4);
