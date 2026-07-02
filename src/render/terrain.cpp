@@ -344,31 +344,24 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
 #include "render/font8x8.h"
 
 bool Font::loadDefault() {
-    static const int srcSize = 8;
-    static const int scale = 3; // scale up 3x for readability
-    static const int cw = srcSize * scale, ch = srcSize * scale;
+    static const int cw = 8, ch = 8;
     static const int cols = 16, rows = 16;
     int tw = cols * cw, th = rows * ch;
     std::vector<uint8_t> pixels(tw * th * 4, 0);
 
-    // Render ASCII 32-126 into the font texture (scaled up)
     for (int i = 32; i <= 126; i++) {
         int idx = i - 32;
         int cx = (i % cols) * cw;
         int cy = (i / cols) * ch;
-        for (int py = 0; py < srcSize && idx < 95; py++) {
+        for (int py = 0; py < ch && idx < 95; py++) {
             uint8_t row = font8x8_basic[idx][py];
-            for (int px = 0; px < srcSize; px++) {
+            for (int px = 0; px < cw; px++) {
+                int pi = ((cy + py) * tw + (cx + px)) * 4;
                 if (row & (0x80 >> px)) {
-                    // Fill scaled block
-                    for (int sy = 0; sy < scale; sy++)
-                        for (int sx = 0; sx < scale; sx++) {
-                            int pi = ((cy + py * scale + sy) * tw + (cx + px * scale + sx)) * 4;
-                            pixels[pi + 0] = 255;
-                            pixels[pi + 1] = 255;
-                            pixels[pi + 2] = 255;
-                            pixels[pi + 3] = 255;
-                        }
+                    pixels[pi + 0] = 255;
+                    pixels[pi + 1] = 255;
+                    pixels[pi + 2] = 255;
+                    pixels[pi + 3] = 255;
                 }
             }
         }
@@ -382,8 +375,8 @@ bool Font::loadDefault() {
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
     float cw_f = 1.0f / cols, ch_f = 1.0f / rows;
     for (int i = 0; i < 256; i++) {
@@ -392,19 +385,6 @@ bool Font::loadDefault() {
         charUV[i][1] = y * ch_f;
         charUV[i][2] = (x + 1) * cw_f;
         charUV[i][3] = (y + 1) * ch_f;
-    }
-
-    // Flip the pixel buffer vertically so row 0 (atlas top) maps to v=1 (texture top)
-    std::vector<uint8_t> flipped(tw * th * 4);
-    for (int row = 0; row < th; row++)
-        memcpy(&flipped[row * tw * 4], &pixels[(th - 1 - row) * tw * 4], tw * 4);
-    pixels = std::move(flipped);
-
-    // Flip UVs to match the flipped buffer: row y → v = (rows-1-y)/rows
-    for (int i = 0; i < 256; i++) {
-        int y = i / cols;
-        charUV[i][1] = (rows - 1 - y) * ch_f;
-        charUV[i][3] = (rows - y) * ch_f;
     }
 
     loaded = true;
@@ -459,7 +439,7 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
     MatrixF ortho;
     ortho.identity();
     ortho.m[0][0] = 2.0f / w;
-    ortho.m[1][1] = -2.0f / h;  // flip Y: screen y=0 (top) → NDC y=1 (top)
+    ortho.m[1][1] = -2.0f / h;
     ortho.m[3][0] = -1.0f;
     ortho.m[3][1] = 1.0f;
 
