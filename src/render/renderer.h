@@ -5,6 +5,16 @@
 #include <vector>
 #include <unordered_map>
 
+struct SkinInfo {
+    bool hasSkin = false;
+    std::vector<Point3F> initialPositions;
+    std::vector<Point3F> initialNormals;
+    std::vector<MatrixF> initialTransforms;
+    std::vector<int32_t> boneIndices;
+    std::vector<float> boneWeights;
+    std::vector<int32_t> nodeIndices;
+};
+
 struct RenderConfig {
     int32_t width = 1024;
     int32_t height = 768;
