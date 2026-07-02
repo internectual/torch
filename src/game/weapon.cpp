@@ -10,12 +10,12 @@
 #define SND(path) "audio/fx/weapons/" path ".wav"
 
 const WeaponData gWeaponTable[] = {
-    WEAPON("Spinfusor",    ProjectileType::Disc,    0.8f,  1.5f, 60.0f, 50.0f,  5.0f,  40, 5.0f, false, false, SND("spinfusor/spinfusor_fire"), SND("spinfusor/spinfusor_explosion")),
-    WEAPON("Blaster",      ProjectileType::Bolt,    0.2f,  0.0f, 20.0f, 80.0f,  3.0f,  -1, 2.0f, true,  false, SND("blaster/blaster_fire"),        SND("blaster/blaster_impact")),
-    WEAPON("Chaingun",     ProjectileType::Hitscan, 0.08f, 2.0f, 10.0f,  0.0f,  0.0f, 200, 0.0f, true,  false, SND("chaingun/chaingun_fire"),      nullptr),
-    WEAPON("GrenadeLauncher", ProjectileType::Grenade, 0.6f, 1.2f, 80.0f, 25.0f, 10.0f,  15, 6.0f, false, false, SND("grenade/grenade_fire"),       SND("grenade/grenade_explosion")),
-    WEAPON("SniperRifle",  ProjectileType::Hitscan, 0.5f,  2.5f, 100.0f, 0.0f,  0.0f,  10, 0.0f, false, false, SND("sniper/sniper_fire"),          nullptr),
-    WEAPON("Mortar",       ProjectileType::Mortar,  1.0f,  2.0f, 120.0f, 30.0f, 15.0f,  10, 7.0f, false, false, SND("mortar/mortar_fire"),          SND("mortar/mortar_explosion")),
+    WEAPON("Spinfusor",    ProjectileType::Disc,    0.8f,  1.5f, 60.0f, 50.0f,  5.0f,  40, 5.0f, false, false, SND("spinfusor_fire"), SND("spinfusor_impact")),
+    WEAPON("Blaster",      ProjectileType::Bolt,    0.2f,  0.0f, 20.0f, 80.0f,  3.0f,  -1, 2.0f, true,  false, SND("blaster_fire"),        SND("blaster_impact")),
+    WEAPON("Chaingun",     ProjectileType::Hitscan, 0.08f, 2.0f, 10.0f,  0.0f,  0.0f, 200, 0.0f, true,  false, SND("chaingun_fire"),      nullptr),
+    WEAPON("GrenadeLauncher", ProjectileType::Grenade, 0.6f, 1.2f, 80.0f, 25.0f, 10.0f,  15, 6.0f, false, false, SND("grenadelauncher_fire"),       SND("grenade_explode")),
+    WEAPON("SniperRifle",  ProjectileType::Hitscan, 0.5f,  2.5f, 100.0f, 0.0f,  0.0f,  10, 0.0f, false, false, SND("sniper_fire"),          nullptr),
+    WEAPON("Mortar",       ProjectileType::Mortar,  1.0f,  2.0f, 120.0f, 30.0f, 15.0f,  10, 7.0f, false, false, SND("mortar_fire"),          SND("mortar_explode")),
 };
 
 const int gWeaponCount = sizeof(gWeaponTable) / sizeof(gWeaponTable[0]);

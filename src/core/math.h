@@ -18,6 +18,7 @@ struct MatrixF {
     void identity();
     MatrixF operator*(const MatrixF& o) const;
     Point3F transform(const Point3F& p) const;
+    Point3F transformNormal(const Point3F& n) const;
     void setRotationX(float a);
     void setRotationY(float a);
     void setRotationZ(float a);

@@ -23,6 +23,14 @@ Point3F MatrixF::transform(const Point3F& p) const {
     };
 }
 
+Point3F MatrixF::transformNormal(const Point3F& n) const {
+    return {
+        m[0][0] * n.x + m[0][1] * n.y + m[0][2] * n.z,
+        m[1][0] * n.x + m[1][1] * n.y + m[1][2] * n.z,
+        m[2][0] * n.x + m[2][1] * n.y + m[2][2] * n.z
+    };
+}
+
 void MatrixF::setRotationX(float a) {
     identity();
     float c = std::cos(a), s = std::sin(a);
