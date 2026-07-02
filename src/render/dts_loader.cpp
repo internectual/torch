@@ -160,6 +160,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         bool shareData = (parentMesh >= 0);
         buf.readPoint3F(); buf.readPoint3F(); buf.readPoint3F(); buf.readF32(); // bounds, center, radius
         int32_t numVerts = buf.readS32();
+        if (numVerts > 10000 || numVerts < 0) { Console::instance().printf(LogLevel::Warn, "DTS: mesh %d bad numVerts=%d", m, numVerts); numVerts = 0; }
         if (!shareData) {
             meshVerts[m].resize(numVerts * numFrames);
             for (int i = 0; i < numVerts; i++) meshVerts[m][i] = buf.readPoint3F();
@@ -171,6 +172,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             meshVerts[m].assign(meshVerts[parentMesh].begin(), meshVerts[parentMesh].begin() + cc);
         }
         int32_t numTVerts = buf.readS32();
+        if (numTVerts > 10000 || numTVerts < 0) { Console::instance().printf(LogLevel::Warn, "DTS: mesh %d bad numTVerts=%d", m, numTVerts); numTVerts = 0; }
         if (!shareData) {
             meshTVerts[m].resize(numTVerts * numMatFrames);
             for (int i = 0; i < numTVerts; i++) { meshTVerts[m][i].x = buf.readF32(); meshTVerts[m][i].y = buf.readF32(); }
@@ -191,14 +193,17 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             meshNorms[m].assign(meshNorms[parentMesh].begin(), meshNorms[parentMesh].begin() + cc);
         }
         int32_t numPrimitives = buf.readS32();
+        if (numPrimitives > 10000 || numPrimitives < 0) { Console::instance().printf(LogLevel::Warn, "DTS: mesh %d bad numPrimitives=%d", m, numPrimitives); numPrimitives = 0; }
         struct Prim { int32_t start, numElements, matIndex; };
         std::vector<Prim> prims(numPrimitives);
         for (int i = 0; i < numPrimitives; i++) { prims[i].start = buf.readS16(); prims[i].numElements = buf.readS16(); }
         for (int i = 0; i < numPrimitives; i++) { prims[i].matIndex = 0; buf.readU32(); }
         int32_t numIndices = buf.readS32();
+        if (numIndices > 100000 || numIndices < 0) { Console::instance().printf(LogLevel::Warn, "DTS: mesh %d bad numIndices=%d", m, numIndices); numIndices = 0; }
         std::vector<uint32_t> indices(numIndices);
         for (int i = 0; i < numIndices; i++) indices[i] = buf.readU16();
         int32_t numMerge = buf.readS32();
+        if (numMerge > 10000 || numMerge < 0) { Console::instance().printf(LogLevel::Warn, "DTS: mesh %d bad numMerge=%d", m, numMerge); numMerge = 0; }
         for (int i = 0; i < numMerge; i++) buf.readS16();
         int32_t vertsPerFrame = buf.readS32(); (void)vertsPerFrame;
         uint32_t flags = buf.readU32(); (void)flags;
