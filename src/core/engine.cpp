@@ -62,6 +62,7 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  Pause              Debug overlay\n");
             fprintf(stdout, "  ESC                Pause / Quit\n");
             fprintf(stdout, "  1-0                Select weapon\n");
+            std::exit(0);
         }
         if (strcmp(argv[i], "-version") == 0 || strcmp(argv[i], "--version") == 0) {
             fprintf(stdout, "Torch v0.1.0\n");
