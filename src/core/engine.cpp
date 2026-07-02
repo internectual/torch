@@ -349,6 +349,29 @@ bool Engine::init(int argc, char* argv[]) {
     // Initialize GUI renderer from script-created objects
     gui->init();
 
+    // Load essential GUI files for HUD and menus
+    {
+        const char* guiFiles[] = {
+            "gui/PlayGui.gui",
+            "gui/GameGui.gui",
+            "gui/ChatGui.gui",
+            "gui/HUDDlgs.gui",
+            "gui/LoadingGui.gui",
+            "gui/CenterPrint.gui",
+            nullptr
+        };
+        for (int i = 0; guiFiles[i]; i++) {
+            if (scr->ts()) {
+                auto guiData = fs.read(guiFiles[i]);
+                if (!guiData.empty()) {
+                    std::string src((const char*)guiData.data(), guiData.size());
+                    scr->ts()->execute(src, guiFiles[i]);
+                    Console::instance().printf(LogLevel::Info, "Loaded GUI: %s", guiFiles[i]);
+                }
+            }
+        }
+    }
+
     // -preview mode: screenshot after map loads (implies -nologin)
     if (!previewMap.empty()) {
         g->startLocalGame(previewMap.c_str());
