@@ -1,8 +1,9 @@
 #pragma once
-#include "game/game.h"
 #include "render/renderer.h"
 #include <functional>
 #include <vector>
+
+class Game;
 
 class HUD {
 public:

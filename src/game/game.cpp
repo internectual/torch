@@ -1284,8 +1284,9 @@ void World::renderParticles() {
 
 Game::Game() : pl(new Player), w(new World) {
     mMenu = new Menu;
+    hud = new HUD;
 }
-Game::~Game() { delete pl; delete w; }
+Game::~Game() { delete pl; delete w; delete hud; }
 
 bool Game::init() {
     Console::instance().printf(LogLevel::Info, "Game initialized");
@@ -1903,6 +1904,8 @@ void Game::render(float dt) {
 
     w->render(camPos);
     if (pl && !freeCamActive && !demoPlaying && !testShapeLoaded) pl->render();
+
+    if (hud && gameState == Playing) hud->render(this);
 
     // Render test shape (loaded via testshape command)
     if (testShapeLoaded && testShape.loaded) {

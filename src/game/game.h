@@ -6,6 +6,7 @@
 #include "game/weapon.h"
 #include "net/protocol.h"
 #include "game/demo.h"
+#include "game/hud.h"
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -291,6 +292,7 @@ private:
     Player* pl{};
     World* w{};
     Menu* mMenu{};
+    HUD* hud{};
     State gameState = MenuScreen;
     float time = 0;
     SoundSource* ambientSource{};
