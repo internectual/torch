@@ -13,6 +13,8 @@
 #include "fs/file_system.h"
 #include <cstdio>
 #include <cmath>
+#include <cstring>
+#include <cctype>
 #include <fstream>
 #include <cstdlib>
 #include <unistd.h>
@@ -2602,18 +2604,62 @@ void Game::playDemo(const char* path) {
             }
         }
     }
-    // Try to guess mission from demo filename (before the first underscore, capitalized)
+    // Try to guess mission from demo filename
     if (loadMap.empty()) {
         std::string fname = path;
         auto slash = fname.rfind('/');
         if (slash != std::string::npos) fname = fname.substr(slash + 1);
         auto dot = fname.rfind('.');
         if (dot != std::string::npos) fname = fname.substr(0, dot);
+
+        // Try: text before first underscore (common: Map_Player_vs_Player.rec)
+        std::string candidate;
         auto us = fname.find('_');
-        if (us != std::string::npos) fname = fname.substr(0, us);
-        if (!fname.empty()) {
-            fname[0] = (char)toupper((unsigned char)fname[0]);
-            loadMap = fname;
+        if (us != std::string::npos) candidate = fname.substr(0, us);
+        // Try: text after last underscore (common: Player_vs_Player_Map.rec)
+        auto lus = fname.rfind('_');
+        if (lus != std::string::npos && lus != us) {
+            std::string c2 = fname.substr(lus + 1);
+            // Prefer shorter (map names are usually shorter than player names)
+            if (candidate.empty() || c2.size() < candidate.size()) candidate = c2;
+        }
+        // Try: last space-separated word
+        auto sp = fname.rfind(' ');
+        if (sp != std::string::npos) {
+            std::string c3 = fname.substr(sp + 1);
+            if (candidate.empty() || c3.size() < candidate.size()) candidate = c3;
+        }
+        if (!candidate.empty()) {
+            candidate[0] = (char)toupper((unsigned char)candidate[0]);
+            // Match known abbreviations to full mission names
+            static const char* abbrevMatch[][2] = {
+                {"Kata", "Katabatic"}, {"Mino", "Minotaur"}, {"Pande", "Pandemonium"},
+                {"Dessi", "Desiccator"}, {"Boss", "Boss"}, {"BB", "BeachBlitz"},
+                {"DX", "DeathBirdsFly"}, {"Drifts", "Drifts"}, {"RC", "Rollercoaster"},
+                {"SH", "Stonehenge"}, {"HO", "Haven"}, {"LD", "LastDance"},
+                {"DOTA", "DeathOfTheAges"}, {"DBS", "DeathBirdsFly"},
+                {"TWL", "TWL"}, {"WO", "Whiteout"}, {"DBF", "DeathBirdsFly"},
+                {"Mag", "Magmatic"}, {"Kata", "Katabatic"}, {"Beggars", "BeggarsRun"},
+                {"Stone", "Stonehenge"}, {"Slap", "Slapdash"},
+                {"Tomb", "Tombstone"}, {"Quag", "Quagmire"},
+                {"River", "RiverDance"}, {"Wild", "Wilderzone"},
+                {"Sanc", "Sanctuary"}, {"Cine", "Cinerous"},
+                {"Feign", "Feign"}, {"Drorck", "Drorck"},
+                {"Harp", "Harvester"}, {"Ramp", "Ramparts"},
+                {"Dam", "Damnation"}, {"Soul", "SoulFire"},
+                {nullptr, nullptr}
+            };
+            for (int i = 0; abbrevMatch[i][0]; i++) {
+                bool match = true;
+                for (size_t ci = 0; abbrevMatch[i][0][ci]; ci++) {
+                    if (ci >= candidate.size() || tolower((unsigned char)candidate[ci]) != tolower((unsigned char)abbrevMatch[i][0][ci])) { match = false; break; }
+                }
+                if (match && candidate.size() == strlen(abbrevMatch[i][0])) {
+                    candidate = abbrevMatch[i][1];
+                    break;
+                }
+            }
+            loadMap = candidate;
         }
     }
     // If extraction gave garbage, try the demo filename
