@@ -2592,7 +2592,9 @@ DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::stri
                         // Check if Blender is available
                         int blenderAvail = system("which blender >/dev/null 2>&1");
                         if (blenderAvail == 0) {
-                            std::string blenderScript = std::string(getenv("HOME")) + "/t2-mapper/scripts/blender/dts2gltf.py";
+                            const char* home = getenv("HOME");
+                            std::string homeDir = home ? home : "/tmp";
+                            std::string blenderScript = homeDir + "/t2-mapper/scripts/blender/dts2gltf.py";
                             std::string cmd = "blender --background --python \"" + blenderScript + "\" -- \"" + tmpDts + "\" 2>/dev/null";
                             int ret = system(cmd.c_str());
                             if (ret == 0) {

@@ -325,7 +325,8 @@ bool DemoParser::loadFile(const char* path) {
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
     uint8_t* b = (uint8_t*)malloc(sz);
     if (!b) { fclose(f); return false; }
-    fread(b, 1, sz, f); fclose(f);
+    size_t readBytes = fread(b, 1, sz, f); fclose(f);
+    if ((long)readBytes != sz) { free(b); Console::instance().printf(LogLevel::Error, "Demo: short read %s", path); return false; }
     bool ok = load(b, sz);
     if (ownsBuffer) free((void*)buf);
     buf = b; bufSize = sz; ownsBuffer = true;
