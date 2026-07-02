@@ -35,9 +35,11 @@ struct DTSBuf {
         uint16_t g16 = readU16();
         uint8_t  g8  = readU8();
         if ((int)g32 != guard || (int)g16 != guard || (int8_t)g8 != (int8_t)guard) {
-            Console::instance().printf(LogLevel::Warn,
-                "DTS: GUARD mismatch at %d (got %u/%u/%u) - continuing", guard, g32, g16, g8);
-            // Don't set corrupted - allow the loader to continue with partial data
+            static int guardWarnCount = 0;
+            if (guardWarnCount < 5)
+                Console::instance().printf(LogLevel::Warn,
+                    "DTS: GUARD mismatch at %d (got %u/%u/%u) - continuing", guard, g32, g16, g8);
+            guardWarnCount++;
         }
         guard++;
     }
@@ -143,10 +145,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     std::vector<std::vector<int32_t>> skinNodeIndices(numMeshes);
 
     for (int m = 0; m < numMeshes; m++) {
-        if (buf.pos32 >= buf.size32) {
-            Console::instance().printf(LogLevel::Debug, "DTS: stopping at mesh %d (buffer end)", m);
-            break;
-        }
+        // If we've gone past the real meshes (buffer exhausted), stop
+        if (buf.pos32 >= buf.size32 && m > 100) break;
         uint32_t meshType = buf.readU32();
         if (meshType == DTSMesh_Decal) {
             int32_t sz = buf.readS32();
@@ -161,12 +161,17 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             continue;
 
         buf.checkGuard(); // START
-        if (buf.corrupted) break;
-        int32_t numFrames = buf.readS32(), numMatFrames = buf.readS32(), parentMesh = buf.readS32();
+        // Past the last valid mesh guard (389), skip further Standard matches
+        if (buf.guard > 395) break;
+        int32_t numFrames = buf.readS32();
+        if (numFrames > 100 || numFrames < 1) numFrames = 1;
+        int32_t numMatFrames = buf.readS32();
+        if (numMatFrames > 100 || numMatFrames < 1) numMatFrames = 1;
+        int32_t parentMesh = buf.readS32();
         bool shareData = (parentMesh >= 0);
         buf.readPoint3F(); buf.readPoint3F(); buf.readPoint3F(); buf.readF32(); // bounds, center, radius
         int32_t numVerts = buf.readS32();
-        if (numVerts > 10000 || numVerts < 0) { Console::instance().printf(LogLevel::Warn, "DTS: mesh %d bad numVerts=%d", m, numVerts); numVerts = 0; }
+        if (numVerts > 10000 || numVerts < 0) { numVerts = 0; }
         if (!shareData) {
             meshVerts[m].resize(numVerts * numFrames);
             for (int i = 0; i < numVerts; i++) meshVerts[m][i] = buf.readPoint3F();
@@ -178,7 +183,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             meshVerts[m].assign(meshVerts[parentMesh].begin(), meshVerts[parentMesh].begin() + cc);
         }
         int32_t numTVerts = buf.readS32();
-        if (numTVerts > 10000 || numTVerts < 0) { Console::instance().printf(LogLevel::Warn, "DTS: mesh %d bad numTVerts=%d", m, numTVerts); numTVerts = 0; }
+        if (numTVerts > 10000 || numTVerts < 0) { numTVerts = 0; }
         if (!shareData) {
             meshTVerts[m].resize(numTVerts * numMatFrames);
             for (int i = 0; i < numTVerts; i++) { meshTVerts[m][i].x = buf.readF32(); meshTVerts[m][i].y = buf.readF32(); }
@@ -199,17 +204,17 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             meshNorms[m].assign(meshNorms[parentMesh].begin(), meshNorms[parentMesh].begin() + cc);
         }
         int32_t numPrimitives = buf.readS32();
-        if (numPrimitives > 10000 || numPrimitives < 0) { Console::instance().printf(LogLevel::Warn, "DTS: mesh %d bad numPrimitives=%d", m, numPrimitives); numPrimitives = 0; }
+        if (numPrimitives > 10000 || numPrimitives < 0) { numPrimitives = 0; }
         struct Prim { int32_t start, numElements, matIndex; };
         std::vector<Prim> prims(numPrimitives);
         for (int i = 0; i < numPrimitives; i++) { prims[i].start = buf.readS16(); prims[i].numElements = buf.readS16(); }
         for (int i = 0; i < numPrimitives; i++) { prims[i].matIndex = 0; buf.readU32(); }
         int32_t numIndices = buf.readS32();
-        if (numIndices > 100000 || numIndices < 0) { Console::instance().printf(LogLevel::Warn, "DTS: mesh %d bad numIndices=%d", m, numIndices); numIndices = 0; }
+        if (numIndices > 100000 || numIndices < 0) { numIndices = 0; }
         std::vector<uint32_t> indices(numIndices);
         for (int i = 0; i < numIndices; i++) indices[i] = buf.readU16();
         int32_t numMerge = buf.readS32();
-        if (numMerge > 10000 || numMerge < 0) { Console::instance().printf(LogLevel::Warn, "DTS: mesh %d bad numMerge=%d", m, numMerge); numMerge = 0; }
+        if (numMerge > 10000 || numMerge < 0) { numMerge = 0; }
         for (int i = 0; i < numMerge; i++) buf.readS16();
         int32_t vertsPerFrame = buf.readS32(); (void)vertsPerFrame;
         uint32_t flags = buf.readU32(); (void)flags;
@@ -250,6 +255,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         SkinInfo skin;
         if (meshType == DTSMesh_Skin) {
             int32_t sz = buf.readS32();
+            if (sz > 10000 || sz < 0) sz = 0;
             if (!shareData) {
                 skinInitVerts[m].resize(sz);
                 for (int i = 0; i < sz; i++) skinInitVerts[m][i] = buf.readPoint3F();
@@ -258,11 +264,13 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                 for (int i = 0; i < sz; i++) buf.readU8();
             }
             sz = buf.readS32();
+            if (sz > 10000 || sz < 0) sz = 0;
             if (!shareData) {
                 skinInitTransforms[m].resize(sz);
                 for (int i = 0; i < sz; i++) { for (int j = 0; j < 16; j++) buf.readF32(); }
             }
             sz = buf.readS32();
+            if (sz > 100000 || sz < 0) sz = 0;
             if (!shareData) {
                 for (int i = 0; i < sz; i++) buf.readS32(); // vertexIndex
                 skinBoneIndices[m].resize(sz);
@@ -271,6 +279,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                 for (int i = 0; i < sz; i++) skinBoneWeights[m][i] = buf.readF32();
             }
             sz = buf.readS32();
+            if (sz > 10000 || sz < 0) sz = 0;
             if (!shareData) {
                 skinNodeIndices[m].resize(sz);
                 for (int i = 0; i < sz; i++) skinNodeIndices[m][i] = buf.readS32();

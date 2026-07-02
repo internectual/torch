@@ -80,6 +80,13 @@ void Player::loadModel() {
         if (!data.empty()) {
             modelShape.name = p;
             if (modelShape.load(data.data(), data.size())) {
+                // Require reasonable mesh count for a character model
+                if (modelShape.meshes.size() < (modelShape.nodes.size() / 4)) {
+                    Console::instance().printf(LogLevel::Debug,
+                        "Player: '%s' incomplete (%zu meshes), trying next", p.c_str(), modelShape.meshes.size());
+                    modelShape = DTSShape{};
+                    continue;
+                }
                 modelLoaded = true;
                 Console::instance().printf(LogLevel::Info, "Player: loaded model '%s'", p.c_str());
                 return;
