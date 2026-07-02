@@ -318,38 +318,21 @@ bool Engine::init(int argc, char* argv[]) {
 
       // Skip startup scripts in -demo mode (they often block on login GUI)
       if (demoPath.empty()) {
-          // For -nologin: just start the game directly, no GUI scripts
-          if (noLogin || !previewMap.empty()) {
-              Console::instance().printf(LogLevel::Info, "Skipping startup scripts for -nologin");
-          } else {
-              auto startupData = fs.read("console_start.cs");
-              if (!startupData.empty() && scr->ts()) {
-                  Console::instance().printf(LogLevel::Info, "Executing console_start.cs (%zu bytes)", startupData.size());
-                  std::string csSource((const char*)startupData.data(), startupData.size());
-                  // Remove the slow .gui file loading loop for faster startup
-                  size_t pos = 0;
-                  while ((pos = csSource.find("findFirstFile(\"*.gui\")", pos)) != std::string::npos) {
-                      size_t lineStart = csSource.rfind('\n', pos);
-                      if (lineStart == std::string::npos) lineStart = 0;
-                      size_t execPos = csSource.find("exec(", pos);
-                      if (execPos != std::string::npos) {
-                          size_t semiPos = csSource.find(';', execPos);
-                          if (semiPos != std::string::npos) {
-                              csSource.erase(lineStart, semiPos - lineStart + 1);
-                              Console::instance().printf(LogLevel::Info, "  (stripped .gui loading loop)");
-                          } else { break; }
-                      } else { break; }
-                  }
-                  csSource += "\n$SkipLogin = true; $pref::AcceptedEULA = true; LoginDone();\n";
-                  scr->ts()->execute(csSource, "console_start.cs");
-              }
+          // For -nologin and normal mode: skip the slow startup scripts,
+          // but load the essential GUI files and run login completion
+          Console::instance().printf(LogLevel::Info, "Skipping startup scripts (fast boot)");
+          if (scr->ts()) {
+              // Set login bypass variables
+              std::string loginScript = "$SkipLogin = true; $pref::AcceptedEULA = true; LoginDone();";
+              scr->ts()->execute(loginScript, "login_bypass");
           }
       }
 
     // Initialize GUI renderer from script-created objects
+    Console::instance().printf(LogLevel::Info, "After TS execute, initializing GUI...");
     gui->init();
 
-    // Load essential GUI files for HUD and menus
+    // Load essential GUI files for HUD, menus, and login
     {
         const char* guiFiles[] = {
             "gui/PlayGui.gui",
@@ -358,6 +341,24 @@ bool Engine::init(int argc, char* argv[]) {
             "gui/HUDDlgs.gui",
             "gui/LoadingGui.gui",
             "gui/CenterPrint.gui",
+            "gui/EULADlg.gui",
+            "gui/LoginDlg.gui",
+            "gui/ImmSplashDlg.gui",
+            "gui/CreateAccountDlg.gui",
+            "gui/LoginMessageBoxDlg.gui",
+            "gui/LoginMessagePopupDlg.gui",
+            "gui/EditAccountDlg.gui",
+            "gui/PickLoginInfoDlg.gui",
+            "gui/PasswordDlg.gui",
+            "gui/PickTeamDlg.gui",
+            "gui/MessageBoxDlg.gui",
+            "gui/MessagePopupDlg.gui",
+            "gui/OptionsDlg.gui",
+            "gui/ServerInfoDlg.gui",
+            "gui/RecordingsDlg.gui",
+            "gui/DemoPlaybackDlg.gui",
+            "gui/DemoLoadProgressDlg.gui",
+            "gui/TrainingGui.gui",
             nullptr
         };
         for (int i = 0; guiFiles[i]; i++) {
@@ -367,6 +368,8 @@ bool Engine::init(int argc, char* argv[]) {
                     std::string src((const char*)guiData.data(), guiData.size());
                     scr->ts()->execute(src, guiFiles[i]);
                     Console::instance().printf(LogLevel::Info, "Loaded GUI: %s", guiFiles[i]);
+                } else {
+                    Console::instance().printf(LogLevel::Debug, "GUI not found: %s", guiFiles[i]);
                 }
             }
         }
