@@ -505,6 +505,11 @@ private:
     // Apply protocol header
     bool applyProtocolHeader(const DnetHeader& dnet, bool& dispatchData);
 
+    // Audio profile mapping
+    static std::vector<std::string> s_audioProfilePaths;
+    static std::string soundPathForProfile(int profileId);
+    static void scanAudioProfiles();
+
 public:
     DemoMove readRawMove(const uint8_t* data, size_t size);
     PacketData parsePacket(const uint8_t* data, size_t size, int blockIndex = -1);

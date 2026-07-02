@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <unordered_map>
+#include <set>
 
 // ─── 3D to screen projection ─────────────────────────────────
 static Point3F worldToScreen(const Point3F& worldPos, const MatrixF& view, const MatrixF& proj, int screenW, int screenH) {
@@ -1359,6 +1360,62 @@ void Game::shutdown() {
     ambientSound = nullptr;
 }
 
+// ─── AudioProfile scanner ────────────────────────────────────
+// Scans game scripts for AudioProfile definitions and builds a
+// profile-ID → sound-file-path mapping for demo playback.
+struct AudioProfileEntry {
+    std::string profileName;
+    std::string filename;
+};
+static std::vector<AudioProfileEntry> s_audioProfiles;
+static void scanAudioProfiles() {
+    if (!s_audioProfiles.empty()) return;
+    auto& fs = Engine::instance().fs();
+    std::vector<std::string> scriptFiles;
+    fs.listFiles("scripts/", scriptFiles);
+    std::set<std::string> seen;
+    for (auto& f : scriptFiles) {
+        if (f.size() < 3 || f.substr(f.size() - 3) != ".cs") continue;
+        if (f.find(".dso") != std::string::npos) continue;
+        if (!seen.insert(f).second) continue;
+        auto data = fs.readText(f.c_str());
+        if (data.empty()) continue;
+        const char* p = data.c_str();
+        while (true) {
+            const char* db = strstr(p, "datablock AudioProfile(");
+            if (!db) break;
+            p = db + 23;
+            const char* np = strchr(p, ')');
+            if (!np) break;
+            std::string name(p, np - p);
+            const char* ob = strchr(np, '{');
+            if (!ob) break;
+            const char* cb = strchr(ob, '}');
+            if (!cb) break;
+            std::string body(ob, cb - ob);
+            const char* fk = body.c_str();
+            const char* fnq = nullptr;
+            while ((fk = strstr(fk, "filename"))) {
+                const char* eq = strchr(fk, '=');
+                if (!eq) { fk += 8; continue; }
+                fnq = strchr(eq, '"');
+                if (fnq) break;
+                fk += 8;
+            }
+            if (fnq) {
+                const char* fnq2 = strchr(fnq + 1, '"');
+                if (fnq2) {
+                    std::string fn(fnq + 1, fnq2 - fnq - 1);
+                    if (!fn.empty()) s_audioProfiles.push_back({name, "audio/" + fn});
+                }
+            }
+            p = cb + 1;
+        }
+    }
+    Console::instance().printf(LogLevel::Info, "Audio: scanned %zu AudioProfiles from %zu scripts",
+        s_audioProfiles.size(), seen.size());
+}
+
 void Game::update(float dt) {
     time += dt;
 
@@ -1444,16 +1501,10 @@ void Game::update(float dt) {
                         if (ev.audioProfileId >= 0) {
                             auto& audio = Engine::instance().audio();
                             if (audio.config().enabled && audio.config().sfxVolume > 0) {
-                                // Try to find and play an audio file matching this profile
-                                // Audio profiles are defined in DataBlocks; without a parser we
-                                // try common paths based on the profile ID modulo file count
-                                static std::vector<std::string> s_audioFiles;
-                                if (s_audioFiles.empty()) {
-                                    Engine::instance().fs().listFiles("audio/fx/", s_audioFiles);
-                                }
-                                if (!s_audioFiles.empty()) {
-                                    int idx = ev.audioProfileId % (int)s_audioFiles.size();
-                                    auto* buf = audio.loadSound(s_audioFiles[idx].c_str());
+                                scanAudioProfiles();
+                                if (ev.audioProfileId < (int)s_audioProfiles.size()) {
+                                    const auto& entry = s_audioProfiles[ev.audioProfileId];
+                                    auto* buf = audio.loadSound(entry.filename.c_str());
                                     if (buf) {
                                         auto* src = audio.createSource();
                                         if (src) {
