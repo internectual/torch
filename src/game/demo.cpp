@@ -1287,7 +1287,8 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
     if (bs.readFlag()) bs.readInt(8); // ArmAction
     if (bs.readFlag()) return; // control object shortcut
     if (bs.readFlag()) { // MoveMask
-        bs.readInt(3); // actionState
+        int actionState = bs.readInt(3); // actionState: 0=Stop, 1=Walk, 2=Run, 3=Sprint
+        if (entry) entry->isMoving = (actionState > 0);
         if (bs.readFlag()) bs.readInt(7); // recoverState
         bs.readFlag(); bs.readFlag(); // move flags
         if (entry) entry->position = bs.readCompressedPoint(cp);
@@ -1296,8 +1297,8 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
         float headX = bs.readSignedFloat(6); // head pitch
         float headZ = bs.readSignedFloat(6); // head yaw
         float bodyYaw = bs.readFloat(7) * (2.0f * 3.14159f); // rotationZ (0-1 maps to 0-2PI)
-        if (entry && !entry->hasRotation) {
-            // Convert body yaw to quaternion (rotation around Y axis)
+        if (entry) {
+            // Always update body yaw rotation from MoveMask
             float half = bodyYaw * 0.5f;
             entry->rotation = {0, sinf(half), 0, cosf(half)};
             entry->hasRotation = true;
