@@ -31,14 +31,13 @@ struct DTSBuf {
         return {(float)x/32767.f, (float)z/32767.f, (float)y/32767.f, (float)w/32767.f};
     }
     void checkGuard() {
-        if (corrupted) return;
         uint32_t g32 = readU32();
         uint16_t g16 = readU16();
         uint8_t  g8  = readU8();
         if ((int)g32 != guard || (int)g16 != guard || (int8_t)g8 != (int8_t)guard) {
             Console::instance().printf(LogLevel::Warn,
-                "DTS: GUARD mismatch at %d (got %u/%u/%u)", guard, g32, g16, g8);
-            corrupted = true;
+                "DTS: GUARD mismatch at %d (got %u/%u/%u) - continuing", guard, g32, g16, g8);
+            // Don't set corrupted - allow the loader to continue with partial data
         }
         guard++;
     }
@@ -144,7 +143,10 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     std::vector<std::vector<int32_t>> skinNodeIndices(numMeshes);
 
     for (int m = 0; m < numMeshes; m++) {
-        if (buf.corrupted || buf.pos32 >= buf.size32) break;
+        if (buf.pos32 >= buf.size32) {
+            Console::instance().printf(LogLevel::Debug, "DTS: stopping at mesh %d (buffer end)", m);
+            break;
+        }
         uint32_t meshType = buf.readU32();
         if (meshType == DTSMesh_Decal) {
             int32_t sz = buf.readS32();
@@ -278,8 +280,6 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         result.skins.push_back(std::move(skin));
     }
 
-    if (!buf.corrupted) buf.checkGuard(); // after meshes
-
     // ─── Names (from 8-bit buffer) ───────────────────────────────────
     std::vector<std::string> names(numNames);
     for (int i = 0; i < numNames && buf.pos8 < buf.size8; i++) {
@@ -288,7 +288,6 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         names[i] = std::string(s, len);
         buf.pos8 += len + 1;
     }
-    if (!buf.corrupted) buf.checkGuard(); // after names
 
     // ─── Post-buffer: sequences, materials ────────────────────────────
     size_t postOff = 16 + sz32b + sz16b + sz8b;
