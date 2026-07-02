@@ -680,25 +680,25 @@ void Engine::renderOverlay() {
     ColorF dim = {0.6f, 0.6f, 0.6f, 1};
     ColorF cyan = {0.3f, 0.8f, 1, 1};
 
-    overlayFont->render("=== TORCH Debug Menu ===", lx, ly + (line++) * sy, cyan, 1.5f);
+    overlayFont->render("=== TORCH Debug Menu ===", lx, ly + (line++) * sy, cyan, 2.0f);
     line++;
 
     std::string emuStr = "Emulation Version: 25034  [1/2 to switch]";
-    overlayFont->render(emuStr.c_str(), lx, ly + (line++) * sy, white, 1.5f);
+    overlayFont->render(emuStr.c_str(), lx, ly + (line++) * sy, white, 2.0f);
     line++;
 
     if (g->getDemoParser()) {
         uint32_t pv = g->getDemoParser()->getHeader().protocolVersion;
         char pvStr[64];
         snprintf(pvStr, sizeof(pvStr), "Detected Protocol: 0x%08X", (unsigned)pv);
-        overlayFont->render(pvStr, lx, ly + (line++) * sy, dim, 1.5f);
+        overlayFont->render(pvStr, lx, ly + (line++) * sy, dim, 2.0f);
 
         if (pv == T2Demo::ProtocolV24834)
-            overlayFont->render("  (Tribes 2 v24834 - experimental)", lx, ly + (line++) * sy, dim, 1.5f);
+            overlayFont->render("  (Tribes 2 v24834 - experimental)", lx, ly + (line++) * sy, dim, 2.0f);
         else if (pv == T2Demo::ProtocolV25034)
-            overlayFont->render("  (Tribes 2 v25034 - supported)", lx, ly + (line++) * sy, dim, 1.5f);
+            overlayFont->render("  (Tribes 2 v25034 - supported)", lx, ly + (line++) * sy, dim, 2.0f);
         else
-            overlayFont->render("  (unknown version)", lx, ly + (line++) * sy, dim, 1.5f);
+            overlayFont->render("  (unknown version)", lx, ly + (line++) * sy, dim, 2.0f);
         line++;
     }
 
@@ -707,19 +707,19 @@ void Engine::renderOverlay() {
         (int)g->state(),
         g->isDemoPlaying() ? "PLAYING" : "idle",
         g->getDemoBlocksDone(), g->getDemoBlocksTotal());
-    overlayFont->render(buf, lx, ly + (line++) * sy, dim, 1.5f);
+    overlayFont->render(buf, lx, ly + (line++) * sy, dim, 2.0f);
 
     // Current mission (tracks map changes across the demo)
     if (g->getDemoParser()) {
         const std::string& mis = g->getDemoParser()->currentMission();
         if (!mis.empty()) {
             snprintf(buf, sizeof(buf), "Mission: %s", mis.c_str());
-            overlayFont->render(buf, lx, ly + (line++) * sy, white, 1.5f);
+            overlayFont->render(buf, lx, ly + (line++) * sy, white, 2.0f);
         }
     }
 
     line++;
-    overlayFont->render("ESC to quit | Pause to close", lx, ly + (line++) * sy, dim, 1.5f);
+    overlayFont->render("ESC to quit | Pause to close", lx, ly + (line++) * sy, dim, 2.0f);
 }
 
 void Engine::toggleConsole() {
@@ -766,7 +766,7 @@ void Engine::renderConsole() {
     int logStart = std::max(0, logSize - 5);
     for (int i = logStart; i < logSize; i++) {
         overlayFont->render(log[i].c_str(), 8, (float)((i - logStart) * 32 + 4),
-            ColorF{0.7f, 0.7f, 0.7f, 0.9f}, 4.0f);
+            ColorF{0.7f, 0.7f, 0.7f, 0.9f}, 2.0f);
     }
     // Input line with cursor
     static float cursorTimer = 0;
@@ -774,7 +774,7 @@ void Engine::renderConsole() {
     bool cursorOn = ((int)(cursorTimer / 0.4f) % 2) == 0;
     std::string display = "> " + consoleBuf;
     if (cursorOn) display += '_';
-    overlayFont->render(display.c_str(), 8, 220, ColorF{0.2f, 0.8f, 0.2f, 1}, 4.0f);
+    overlayFont->render(display.c_str(), 8, 220, ColorF{0.2f, 0.8f, 0.2f, 1}, 2.0f);
 }
 
 void Engine::renderMinimap() {
