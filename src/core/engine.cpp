@@ -700,6 +700,19 @@ void Engine::renderConsole() {
     if (!overlayFont) return;
     auto& r = *ren;
     int w = plat->width();
+    int h = plat->height();
+
+    // Set orthographic projection for 2D console rendering
+    MatrixF ortho;
+    ortho.identity();
+    ortho.m[0][0] = 2.0f / w;
+    ortho.m[1][1] = -2.0f / h;
+    ortho.m[3][0] = -1.0f;
+    ortho.m[3][1] = 1.0f;
+    r.setProjection(ortho);
+    MatrixF id; id.identity();
+    r.setView(id);
+
     // Background: dark semi-transparent box covering top portion
     r.drawBox({{0, 0, 0}, {(float)w, 250, 0}}, {0, 0, 0, 0.75f});
     // Border line
