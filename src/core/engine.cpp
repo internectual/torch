@@ -45,8 +45,23 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  -testdif <path>    Load and dump DIF interior stats\n");
             fprintf(stdout, "  -online            Enable online mode\n");
             fprintf(stdout, "  -version           Show version\n");
-            fprintf(stdout, "  -help              Show this help\n");
-            std::exit(0);
+            fprintf(stdout, "  -help              Show this help\n\n");
+            fprintf(stdout, "Controls:\n");
+            fprintf(stdout, "  WASD               Move / free camera\n");
+            fprintf(stdout, "  Mouse              Look around\n");
+            fprintf(stdout, "  Left Click         Fire weapon\n");
+            fprintf(stdout, "  Right Click        Alt fire\n");
+            fprintf(stdout, "  Space              Jump / Jet\n");
+            fprintf(stdout, "  F1                 Free camera toggle\n");
+            fprintf(stdout, "  F2                 Orbit camera (demo)\n");
+            fprintf(stdout, "  R                  Cycle spectate target (demo)\n");
+            fprintf(stdout, "  P                  Pause demo\n");
+            fprintf(stdout, "  .                  Step demo frame\n");
+            fprintf(stdout, "  Tab                Scoreboard\n");
+            fprintf(stdout, "  ~                  Console\n");
+            fprintf(stdout, "  Pause              Debug overlay\n");
+            fprintf(stdout, "  ESC                Pause / Quit\n");
+            fprintf(stdout, "  1-0                Select weapon\n");
         }
         if (strcmp(argv[i], "-version") == 0 || strcmp(argv[i], "--version") == 0) {
             fprintf(stdout, "Torch v0.1.0\n");
@@ -548,7 +563,7 @@ void Engine::run() {
                 double t1 = Timer::now();
                 g->render(dt);
                 double t2 = Timer::now();
-                if (t1 - lastTiming >= 1.0) {
+                if (t1 - lastTiming >= 5.0) {
                     lastTiming = t1;
                     Console::instance().printf(LogLevel::Debug, "TIMING: update=%.1fms render=%.1fms total=%.1fms",
                         (t1-t0)*1000, (t2-t1)*1000, (t2-t0)*1000);

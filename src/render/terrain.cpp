@@ -398,6 +398,13 @@ bool Font::loadDefault() {
         memcpy(&flipped[row * tw * 4], &pixels[(th - 1 - row) * tw * 4], tw * 4);
     pixels = std::move(flipped);
 
+    // Flip UVs to match the flipped buffer: row y → v = (rows-1-y)/rows
+    for (int i = 0; i < 256; i++) {
+        int y = i / cols;
+        charUV[i][1] = (rows - 1 - y) * ch_f;
+        charUV[i][3] = (rows - y) * ch_f;
+    }
+
     loaded = true;
     return true;
 }
