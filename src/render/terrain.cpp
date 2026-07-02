@@ -392,6 +392,12 @@ bool Font::loadDefault() {
         charUV[i][3] = (y + 1) * ch_f;
     }
 
+    // Flip the pixel buffer vertically so row 0 (atlas top) maps to v=1 (texture top)
+    std::vector<uint8_t> flipped(tw * th * 4);
+    for (int row = 0; row < th; row++)
+        memcpy(&flipped[row * tw * 4], &pixels[(th - 1 - row) * tw * 4], tw * 4);
+    pixels = std::move(flipped);
+
     loaded = true;
     return true;
 }
@@ -444,9 +450,9 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
     MatrixF ortho;
     ortho.identity();
     ortho.m[0][0] = 2.0f / w;
-    ortho.m[1][1] = 2.0f / h;
+    ortho.m[1][1] = -2.0f / h;  // flip Y: screen y=0 (top) → NDC y=1 (top)
     ortho.m[3][0] = -1.0f;
-    ortho.m[3][1] = -1.0f;
+    ortho.m[3][1] = 1.0f;
 
     shader->setUniform("uProjection", ortho);
     shader->setUniform("uColor", color);
