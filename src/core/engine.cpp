@@ -622,6 +622,10 @@ void Engine::run() {
         }
 
         // TORCH overlay (rendered on top of everything)
+        ren->setViewport(0, 0, plat->width(), plat->height());
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_BLEND);
         if (showOverlay) renderOverlay();
         if (showConsole) renderConsole();
         if (showMinimap && g->isDemoPlaying()) renderMinimap();
@@ -762,7 +766,7 @@ void Engine::renderConsole() {
     int logStart = std::max(0, logSize - 5);
     for (int i = logStart; i < logSize; i++) {
         overlayFont->render(log[i].c_str(), 8, (float)((i - logStart) * 32 + 4),
-            ColorF{0.7f, 0.7f, 0.7f, 0.9f}, 3.0f);
+            ColorF{0.7f, 0.7f, 0.7f, 0.9f}, 4.0f);
     }
     // Input line with cursor
     static float cursorTimer = 0;
@@ -770,7 +774,7 @@ void Engine::renderConsole() {
     bool cursorOn = ((int)(cursorTimer / 0.4f) % 2) == 0;
     std::string display = "> " + consoleBuf;
     if (cursorOn) display += '_';
-    overlayFont->render(display.c_str(), 8, 220, ColorF{0.2f, 0.8f, 0.2f, 1}, 3.0f);
+    overlayFont->render(display.c_str(), 8, 220, ColorF{0.2f, 0.8f, 0.2f, 1}, 4.0f);
 }
 
 void Engine::renderMinimap() {
