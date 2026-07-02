@@ -2235,7 +2235,8 @@ void Game::startLocalGame(const char* map) {
         // Use mission spawn point, or fall back to above terrain center
         Point3F spawnPos = w->spawnPoint();
         float h = w->getHeight(spawnPos.x, spawnPos.z);
-        if (spawnPos.y < h) spawnPos.y = h + 2.0f;
+        if (spawnPos.y < h + 0.5f) spawnPos.y = h + 2.0f;
+        else if (spawnPos.y > h + 10.0f) spawnPos.y = h + 2.0f; // bring down from sky spawns
         pl->setPosition(spawnPos);
         setState(Playing);
         Console::instance().printf(LogLevel::Info, "Game started on '%s'", missionPath.c_str());
