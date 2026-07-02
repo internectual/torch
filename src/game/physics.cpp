@@ -78,7 +78,7 @@ void Physics::update(Player* player, float dt, const Game::InputMove& input) {
     }
 
     // Update rotation from look input
-    rot.x += input.lookDelta.x;
+    rot.x -= input.lookDelta.x;
     rot.z += input.lookDelta.y;
     rot.x = Math::clamp(rot.x, -Math::PI * 0.45f, Math::PI * 0.45f);
 
