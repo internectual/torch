@@ -4,6 +4,7 @@
 #include "fs/file_system.h"
 #include <AL/al.h>
 #include <AL/alc.h>
+#include <vorbis/vorbisfile.h>
 #include <cstdio>
 #include <algorithm>
 #include <unordered_map>
@@ -176,9 +177,63 @@ bool SoundBuffer::loadWav(const uint8_t* data, size_t size) {
 }
 
 bool SoundBuffer::loadOgg(const uint8_t* data, size_t size) {
-    // Would need libvorbis - for now fall through to unsupported
-    Console::instance().printf(LogLevel::Warn, "OGG loading requires libvorbis");
-    return false;
+    // OGG Vorbis loader using libvorbisfile
+    struct MemFile {
+        const uint8_t* ptr;
+        size_t left;
+    };
+    MemFile mf = {data, size};
+
+    ov_callbacks cb;
+    cb.read_func = [](void* ptr, size_t sz, size_t nmemb, void* datasource) -> size_t {
+        auto* m = (MemFile*)datasource;
+        size_t want = sz * nmemb;
+        if (want > m->left) want = m->left;
+        memcpy(ptr, m->ptr, want);
+        m->ptr += want;
+        m->left -= want;
+        return want;
+    };
+    cb.seek_func = [](void* datasource, ogg_int64_t offset, int whence) -> int {
+        auto* m = (MemFile*)datasource;
+        // Can't seek in memory without original start - return error
+        (void)offset; (void)whence;
+        return -1;
+    };
+    cb.close_func = [](void*) -> int { return 0; };
+    cb.tell_func = [](void* datasource) -> long {
+        auto* m = (MemFile*)datasource;
+        return (long)(m->ptr - m->left); // approximate, not used by ov_read
+    };
+
+    OggVorbis_File vf;
+    if (ov_open_callbacks(&mf, &vf, nullptr, 0, cb) < 0) {
+        Console::instance().printf(LogLevel::Warn, "Audio: OGG parse failed");
+        return false;
+    }
+
+    vorbis_info* vi = ov_info(&vf, -1);
+    if (!vi) { ov_clear(&vf); return false; }
+
+    ALenum format = (vi->channels == 1) ? AL_FORMAT_MONO16 : AL_FORMAT_STEREO16;
+    int freq = vi->rate;
+
+    // Read all PCM data
+    std::vector<int16_t> pcm;
+    char readBuf[4096];
+    int bitStream = 0;
+    long bytesRead;
+    while ((bytesRead = ov_read(&vf, readBuf, sizeof(readBuf), 0, 2, 1, &bitStream)) > 0)
+        pcm.insert(pcm.end(), (int16_t*)readBuf, (int16_t*)(readBuf + bytesRead));
+
+    ov_clear(&vf);
+
+    if (pcm.empty()) return false;
+
+    alGenBuffers(1, &buffer);
+    alBufferData(buffer, format, pcm.data(), (ALsizei)(pcm.size() * sizeof(int16_t)), freq);
+    loaded = (alGetError() == AL_NO_ERROR);
+    return loaded;
 }
 
 void SoundBuffer::destroy() {

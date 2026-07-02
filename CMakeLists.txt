@@ -66,6 +66,7 @@ target_link_libraries(torch PRIVATE
     PkgConfig::GLEW
     PkgConfig::OpenAL
     PkgConfig::GLU
+    vorbisfile vorbis
     m
     dl
 )
