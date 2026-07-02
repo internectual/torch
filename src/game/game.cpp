@@ -1769,7 +1769,7 @@ void Game::update(float dt) {
 }
 
 void Game::render(float dt) {
-    if (gameState != Playing && gameState != Dead) return;
+    if (gameState != Playing && gameState != Dead && !testShapeLoaded) return;
 
     auto& eng = Engine::instance();
     auto& r = eng.renderer();
@@ -1820,9 +1820,12 @@ void Game::render(float dt) {
     } else if (eng.hasPreviewCam()) {
         camPos = eng.getPreviewCamPos();
         camTarget = eng.getPreviewCamTarget();
-    } else {
+    } else if (pl) {
         camPos = pl->cameraPos();
         camTarget = pl->cameraTarget();
+    } else {
+        camPos = {0, 6, 0};
+        camTarget = {0, 6, 1};
     }
     // Apply camera shake
     Point3F finalCam = {camPos.x + shakeOffset.x, camPos.y + shakeOffset.y, camPos.z + shakeOffset.z};
@@ -1899,13 +1902,25 @@ void Game::render(float dt) {
     }
 
     w->render(camPos);
-    if (!freeCamActive && !demoPlaying) pl->render();
+    if (pl && !freeCamActive && !demoPlaying && !testShapeLoaded) pl->render();
 
     // Render test shape (loaded via testshape command)
     if (testShapeLoaded && testShape.loaded) {
+        auto* defShader = ShaderManager::getDefaultShader();
+        defShader->bind();
+        auto& plat = Engine::instance().platform();
+        static float viewYaw = 0, viewPitch = 0;
+        if (plat.input().mouseButtons[1]) {
+            viewYaw   += plat.input().mouseDeltaX * 0.005f;
+            viewPitch += plat.input().mouseDeltaY * 0.005f;
+            if (viewPitch > 1.5f) viewPitch = 1.5f;
+            if (viewPitch < -1.5f) viewPitch = -1.5f;
+        }
         MatrixF model;
-        model.identity();
-        model.setTranslation({0, 0, -5});
+        MatrixF ry; ry.setRotationY(viewYaw);
+        MatrixF rx; rx.setRotationX(viewPitch);
+        model = ry * rx * model;
+        model.setTranslation({0, 6, 8});
         r.setModel(model);
         bool animated = false;
         if (!testShape.animations.empty()) {

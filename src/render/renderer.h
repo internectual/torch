@@ -122,6 +122,8 @@ struct DTSShape {
         std::vector<Keyframe> keyframes;
     };
     std::vector<Animation> animations;
+    std::vector<SkinInfo> skins; // parallel to meshes
+    std::vector<MatrixF> defaultTransforms; // per-node bind pose transforms
     std::vector<std::string> materialNames; // original material names (for skin overrides)
     std::vector<Texture> materialTextures;
     std::vector<uint32_t> materialFlags; // parallel to materialTextures

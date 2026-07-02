@@ -231,6 +231,7 @@ public:
     GameConfig& config() { return cfg; }
     Player& player() { return *pl; }
     World& world() { return *w; }
+    bool isTestShapeLoaded() const { return testShapeLoaded; }
 
     enum State {
         MenuScreen,

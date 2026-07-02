@@ -519,7 +519,7 @@ void Engine::run() {
         }
 
         // Game update
-        if (g->state() != Game::MenuScreen) {
+        if (g->state() != Game::MenuScreen || g->isTestShapeLoaded()) {
             if (!showConsole && !g->isGamePaused()) {
                 // Read input
                 Game::InputMove input;

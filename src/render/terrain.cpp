@@ -766,6 +766,8 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
     DTSLoadResult dtsResult = loadDTS(data, size, name.c_str());
     if (dtsResult.loaded) {
         meshes = std::move(dtsResult.meshes);
+        skins = std::move(dtsResult.skins);
+        defaultTransforms = std::move(dtsResult.defaultTransforms);
         materialTextures = std::move(dtsResult.textures);
         materialFlags = std::move(dtsResult.materialFlags);
         lightmaps = std::move(dtsResult.lightmaps);
@@ -853,6 +855,18 @@ bool DTSShape::applySkin(const std::string& skinName) {
 
 void DTSShape::render(int32_t detailLevel) {
     auto* shader = ShaderManager::getDefaultShader();
+    if (shader) shader->bind();
+    auto& r = Engine::instance().renderer();
+    shader->setUniform("uProjection", r.projection);
+    shader->setUniform("uView", r.view);
+    shader->setUniform("uCamPos", r.cameraPos);
+
+    // Apply default transforms for skinned meshes (bind pose)
+    for (size_t si = 0; si < skins.size() && si < meshes.size(); si++) {
+        if (skins[si].hasSkin) {
+            updateSkinnedMesh(meshes[si], skins[si], defaultTransforms, defaultTransforms);
+        }
+    }
 
     if (isInterior) {
         glCullFace(GL_FRONT);
