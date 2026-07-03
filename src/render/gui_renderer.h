@@ -21,6 +21,11 @@ struct GuiControl {
     GuiControl* parent = nullptr;
     std::function<void()> onClick;
 
+    // Scroll state (for GuiScrollCtrl and similar)
+    // scrollY=0 = at bottom (newest), scrollY=maxScroll = at top (oldest)
+    float scrollX = 0, scrollY = 0;
+    float contentW = 0, contentH = 0; // virtual content size
+
     GuiControl* findChild(const std::string& name);
     void addChild(GuiControl* child);
 };

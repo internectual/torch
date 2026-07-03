@@ -27,6 +27,12 @@ constexpr int SCANCODE_F2      = 59;
 constexpr int SCANCODE_LBRACKET = 47;
 constexpr int SCANCODE_RBRACKET = 48;
 constexpr int SCANCODE_PERIOD  = 54;
+constexpr int SCANCODE_PAGEUP  = 75;
+constexpr int SCANCODE_PAGEDOWN = 78;
+constexpr int SCANCODE_HOME    = 74;
+constexpr int SCANCODE_END     = 77;
+constexpr int SCANCODE_LEFT    = 80;
+constexpr int SCANCODE_RIGHT   = 79;
 
 struct PlatformConfig {
     std::string title = "Tribes 2";

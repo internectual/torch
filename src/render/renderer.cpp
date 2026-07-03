@@ -333,6 +333,39 @@ void Renderer::drawRectFill(const Point3F& a, const Point3F& b, const ColorF& co
     stats.drawCalls++;
 }
 
+void Renderer::drawTexturedRect(const Point3F& a, const Point3F& b, uint32_t texId) {
+    float verts[] = {
+        a.x, a.y, a.z,  0,0,  1,1,1,1,
+        b.x, a.y, a.z,  1,0,  1,1,1,1,
+        a.x, b.y, a.z,  0,1,  1,1,1,1,
+        b.x, b.y, a.z,  1,1,  1,1,1,1,
+    };
+    uint32_t idxs[] = {0,1,2,1,3,2};
+    uint32_t vao, vbo, ebo;
+    glGenVertexArrays(1, &vao); glGenBuffers(1, &vbo); glGenBuffers(1, &ebo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo); glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,9*sizeof(float),(void*)0); glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,9*sizeof(float),(void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,9*sizeof(float),(void*)(5*sizeof(float))); glEnableVertexAttribArray(2);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idxs), idxs, GL_STATIC_DRAW);
+    auto* ss = ShaderManager::getSpriteShader();
+    if (ss) {
+        ss->bind();
+        ss->setUniform("uProjection", projection);
+        ss->setUniform("uView", view);
+        ss->setUniform("uUseTexture", int32_t(1));
+        ss->setUniform("uTexture", int32_t(0));
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texId);
+    glDisable(GL_CULL_FACE);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    glEnable(GL_CULL_FACE);
+    glDeleteVertexArrays(1, &vao); glDeleteBuffers(1, &vbo); glDeleteBuffers(1, &ebo);
+    stats.drawCalls++;
+}
+
 void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color, uint32_t texture) {
     auto* shader = ShaderManager::getSpriteShader();
     if (!shader) return;
@@ -401,7 +434,6 @@ Texture* Renderer::loadTexture(const char* path) {
 
     auto data = Engine::instance().fs().read(path);
     if (data.empty()) {
-        Console::instance().printf(LogLevel::Warn, "Texture not found: %s", path);
         return nullptr;
     }
 

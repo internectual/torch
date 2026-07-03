@@ -466,9 +466,15 @@ void Engine::run() {
                 if (gui->isDialogActive("ConsoleDlg")) {
                     gui->popDialog("ConsoleDlg");
                     plat->stopTextInput();
+                    if (g->state() == Game::Playing) {
+                        plat->setRelativeMouse(true);
+                        plat->showMouse(false);
+                    }
                 } else {
                     gui->pushDialog("ConsoleDlg");
                     plat->startTextInput();
+                    plat->setRelativeMouse(false);
+                    plat->showMouse(true);
                 }
             }
             prevTilde = tildeDown;
@@ -478,6 +484,8 @@ void Engine::run() {
         {
             static bool prevBS = false, prevEnter = false, prevEsc = false;
             static bool prevUp = false, prevDown = false;
+            static bool prevPgUp = false, prevPgDn = false, prevHome = false, prevEnd = false;
+            static bool prevLeft = false, prevRight = false;
             static std::vector<std::string> history;
             static int historyIdx = -1;
             bool guiConsoleActive = gui && gui->isDialogActive("ConsoleDlg");
@@ -536,8 +544,35 @@ void Engine::run() {
                     gui->popDialog("ConsoleDlg");
                 }
                 prevEsc = plat->input().keysDown[SCANCODE_ESCAPE];
+                // Scroll: PageUp/PageDown, Home/End, Left/Right
+                auto findScroll = [&]() -> GuiControl* {
+                    std::function<GuiControl*(GuiControl*)> f = [&](GuiControl* c) -> GuiControl* {
+                        if (!c) return nullptr;
+                        if (c->className == "GuiScrollCtrl" || c->className == "ShellScrollCtrl") return c;
+                        for (auto* ch : c->children) { auto* r = f(ch); if (r) return r; }
+                        return nullptr;
+                    };
+                    return f(gui->activeDialog());
+                };
+                GuiControl* sc = findScroll();
+                if (sc) {
+                    float pageH = sc->extentY * 0.9f;
+                    if (plat->input().keysDown[SCANCODE_PAGEUP] && !prevPgUp) sc->scrollY += pageH;
+                    if (plat->input().keysDown[SCANCODE_PAGEDOWN] && !prevPgDn) sc->scrollY -= pageH;
+                    if (plat->input().keysDown[SCANCODE_HOME] && !prevHome) sc->scrollY = 1e10f;
+                    if (plat->input().keysDown[SCANCODE_END] && !prevEnd) sc->scrollY = 0;
+                    if (plat->input().keysDown[SCANCODE_LEFT] && !prevLeft) sc->scrollX -= 8;
+                    if (plat->input().keysDown[SCANCODE_RIGHT] && !prevRight) sc->scrollX += 8;
+                }
+                prevPgUp = plat->input().keysDown[SCANCODE_PAGEUP];
+                prevPgDn = plat->input().keysDown[SCANCODE_PAGEDOWN];
+                prevHome = plat->input().keysDown[SCANCODE_HOME];
+                prevEnd = plat->input().keysDown[SCANCODE_END];
+                prevLeft = plat->input().keysDown[SCANCODE_LEFT];
+                prevRight = plat->input().keysDown[SCANCODE_RIGHT];
             } else {
                 prevBS = prevEnter = prevEsc = prevUp = prevDown = false;
+                prevPgUp = prevPgDn = prevHome = prevEnd = prevLeft = prevRight = false;
             }
         }
 
@@ -560,6 +595,34 @@ void Engine::run() {
                 guiHandled = gui->handleInput(mx, my, true);
             }
             prevPressed = pressed;
+        }
+
+        // Mouse wheel: GUI scroll or weapon cycle (outside console check)
+        {
+            static float weaponCycleCooldown = 0;
+            weaponCycleCooldown -= dt;
+            int wheel = plat->input().mouseWheel;
+            if (wheel != 0) {
+                bool scrolled = false;
+                if (gui) {
+                    std::function<GuiControl*(GuiControl*)> findScroll = [&](GuiControl* ctl) -> GuiControl* {
+                        if (!ctl) return nullptr;
+                        if (ctl->className == "GuiScrollCtrl" || ctl->className == "ShellScrollCtrl")
+                            return ctl;
+                        for (auto* ch : ctl->children) {
+                            auto* r = findScroll(ch);
+                            if (r) return r;
+                        }
+                        return nullptr;
+                    };
+                    GuiControl* sc = findScroll(gui->activeDialog());
+                    if (sc) { sc->scrollY += (wheel > 0 ? 30 : -30); scrolled = true; }
+                }
+                if (!scrolled && weaponCycleCooldown <= 0) {
+                    g->player().weaponCycle(wheel > 0 ? 1 : -1);
+                    weaponCycleCooldown = 0.2f;
+                }
+            }
         }
 
         // Game update
@@ -590,17 +653,6 @@ void Engine::run() {
                     (float)plat->input().mouseDeltaX * 0.002f,
                     0
                 };
-
-                // Weapon cycling - cooldown to avoid cycling too fast
-                {
-                    static float weaponCycleCooldown = 0;
-                    weaponCycleCooldown -= dt;
-                    int wheel = plat->input().mouseWheel;
-                    if (weaponCycleCooldown <= 0 && wheel != 0) {
-                        g->player().weaponCycle(wheel > 0 ? 1 : -1);
-                        weaponCycleCooldown = 0.2f;
-                    }
-                }
 
                 // Number keys for direct weapon selection
                 static int lastNumKey = 0;

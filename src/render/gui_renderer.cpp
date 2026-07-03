@@ -2,6 +2,7 @@
 #include "core/console.h"
 #include "core/engine.h"
 #include "script/script_engine.h"
+#include <GL/glew.h>
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
@@ -165,16 +166,55 @@ void GuiRenderer::render() {
     r.setView(savedView);
 }
 
+struct ClipRect { float x, y, w, h; };
+
+// Forward declaration with clip support
+static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canvas,
+    float scrollOfsX, float scrollOfsY, const ClipRect* clip);
+
+static void computeContentExtent(GuiControl* ctl) {
+    float maxX = 0, maxY = 0;
+    std::function<void(GuiControl*)> recurse = [&](GuiControl* c) {
+        if (c->className == "GuiConsole") {
+            float linesH = (float)Console::instance().getLog().size() * 12.0f;
+            float cy = c->posY + std::max(c->extentY, linesH);
+            if (cy > maxY) maxY = cy;
+            // Content width from longest log line (approx 8px per char at scale 1.5)
+            size_t maxLen = 0;
+            for (auto& ln : Console::instance().getLog())
+                if (ln.size() > maxLen) maxLen = ln.size();
+            float cw = c->posX + std::max(c->extentX, (float)maxLen * 10.0f);
+            if (cw > maxX) maxX = cw;
+        } else {
+            float cx = c->posX + c->extentX;
+            float cy = c->posY + c->extentY;
+            if (cx > maxX) maxX = cx;
+            if (cy > maxY) maxY = cy;
+        }
+        for (auto* ch : c->children) recurse(ch);
+    };
+    for (auto* ch : ctl->children) recurse(ch);
+    ctl->contentH = maxY;
+    ctl->contentW = maxX;
+}
+
 void GuiRenderer::renderControl(GuiControl* ctl) {
+    renderControlRec(this, ctl, canvas, 0, 0, nullptr);
+}
+
+static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canvas,
+    float scrollOfsX, float scrollOfsY, const ClipRect* clip)
+{
     if (!ctl || !ctl->visible) return;
 
     auto& r = Engine::instance().renderer();
+    auto& fs = Engine::instance().fs();
     auto* font = r.getFont();
 
-    float x = ctl->posX;
-    float y = ctl->posY;
+    float x = ctl->posX + scrollOfsX;
+    float y = ctl->posY + scrollOfsY;
 
-    // Add parent offset
+    // Add parent offset (walk up to canvas, excluding scroll ancestor's offset which is in scrollOfs)
     GuiControl* p = ctl->parent;
     while (p && p != canvas) {
         x += p->posX;
@@ -182,76 +222,150 @@ void GuiRenderer::renderControl(GuiControl* ctl) {
         p = p->parent;
     }
 
+    const std::string& cn = ctl->className;
+
     // For GuiCanvas, just use full screen
-    if (ctl->className == "GuiCanvas") {
+    if (cn == "GuiCanvas") {
         r.drawBox({{0,0,0}, {1024,768,0}}, {0.15f,0.15f,0.2f,1});
-        for (auto* child : ctl->children) renderControl(child);
+        for (auto* child : ctl->children) renderControlRec(gr, child, canvas, 0, 0, nullptr);
         return;
     }
 
-    // Render based on class name
-    if (ctl->className == "GuiButtonCtrl" || ctl->className == "GuiTextButtonCtrl") {
+    // Button types
+    if (cn == "GuiButtonCtrl" || cn == "GuiTextButtonCtrl" ||
+        cn == "ShellBitmapButton" || cn == "GuiBitmapButtonCtrl") {
         r.drawRectFill({x-1, y-1, 0}, {x + ctl->extentX + 1, y + ctl->extentY + 1, 0}, {0.5f, 0.5f, 0.6f, 1});
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.25f, 0.25f, 0.35f, 1});
-        if (font && !ctl->text.empty())
-            font->render(ctl->text.c_str(), x + 5, y + (ctl->extentY - 16) * 0.5f, {1,1,1,1}, 1.0f);
-    } else if (ctl->className == "GuiTextCtrl") {
-        if (font && !ctl->text.empty())
-            font->render(ctl->text.c_str(), x + 2, y + 2, {1,1,1,1}, 1.0f);
-    } else if (ctl->className == "GuiBitmapCtrl") {
-        // Try to load bitmap
         if (!ctl->bitmap.empty()) {
-            auto data = Engine::instance().fs().read(ctl->bitmap.c_str());
-            if (data.empty()) {
-                // Try common paths
-                std::string b = "textures/" + ctl->bitmap;
-                data = Engine::instance().fs().read(b.c_str());
-            }
-            if (!data.empty()) {
-                Texture tex;
-                tex.load(data.data(), data.size());
-                if (tex.loaded) {
-                    r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {1,1,1,1});
+            Texture* tex = r.loadTexture(ctl->bitmap.c_str());
+            if (!tex) {
+                std::string tryPath = "textures/gui/" + ctl->bitmap;
+                tex = r.loadTexture(tryPath.c_str());
+                if (!tex) {
+                    auto slash = ctl->bitmap.rfind('/');
+                    std::string fname = (slash != std::string::npos) ? ctl->bitmap.substr(slash + 1) : ctl->bitmap;
+                    if (!fname.empty()) fname[0] = (char)toupper(fname[0]);
+                    tex = r.loadTexture(("textures/gui/" + fname).c_str());
                 }
             }
+            if (tex && tex->loaded)
+                r.drawTexturedRect({x+2,y+2,0}, {x+ctl->extentX-2,y+ctl->extentY-2,0}, tex->id);
         }
-    } else if (ctl->className == "GuiTextEditCtrl") {
+        if (font && !ctl->text.empty())
+            font->render(ctl->text.c_str(), x + 5, y + (ctl->extentY - 16) * 0.5f, {1,1,1,1}, 1.0f);
+    } else if (cn == "GuiTextCtrl" || cn == "GuiMLTextCtrl") {
+        if (font && !ctl->text.empty()) {
+            std::string txt = ctl->text;
+            float ch = 12;
+            float lineY = y + 2;
+            size_t pos = 0;
+            while (pos < txt.size()) {
+                size_t nl = txt.find('\n', pos);
+                std::string line = (nl != std::string::npos) ? txt.substr(pos, nl - pos) : txt.substr(pos);
+                float lw = (float)line.size() * ch * 0.7f;
+                if (lw > ctl->extentX - 4) {
+                    size_t brk = line.size();
+                    while (brk > 0 && lw > ctl->extentX - 4) {
+                        brk = line.rfind(' ', brk - 1);
+                        if (brk == std::string::npos) break;
+                        lw = (float)brk * ch * 0.7f;
+                    }
+                    if (brk != std::string::npos && brk > 0) {
+                        font->render(line.substr(0, brk).c_str(), x + 2, lineY, {1,1,1,1}, 1.0f);
+                        lineY += ch;
+                        line = line.substr(brk + 1);
+                    }
+                }
+                font->render(line.c_str(), x + 2, lineY, {1,1,1,1}, 1.0f);
+                lineY += ch;
+                pos = (nl != std::string::npos) ? nl + 1 : txt.size();
+            }
+        }
+    } else if (cn == "GuiBitmapCtrl" || cn == "GuiChunkedBitmapCtrl") {
+        if (!ctl->bitmap.empty()) {
+            // Strip gui/ prefix if present, then look in textures/gui/
+            std::string fname = ctl->bitmap;
+            if (fname.find("gui/") == 0) fname = fname.substr(4);
+            auto sl = fname.rfind('/');
+            std::string baseName = (sl != std::string::npos) ? fname.substr(sl + 1) : fname;
+            auto dot = baseName.rfind('.');
+            std::string stem = (dot != std::string::npos) ? baseName.substr(0, dot) : baseName;
+            Texture* tex = nullptr;
+            // Try exact match first
+            tex = r.loadTexture(("textures/gui/" + baseName).c_str());
+            // Try capitalizing first letter
+            if (!tex && !stem.empty()) {
+                std::string cap = stem;
+                cap[0] = (char)toupper(cap[0]);
+                for (auto& ext : {".png", ".jpg", ".bm8"}) {
+                    tex = r.loadTexture(("textures/gui/" + cap + ext).c_str());
+                    if (tex) break;
+                }
+            }
+            if (tex && tex->loaded)
+                r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, tex->id);
+        }
+    } else if (cn == "GuiTextEditCtrl" || cn == "ShellTextEditCtrl" ||
+               cn == "GuiLoginPasswordCtrl") {
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.3f, 0.3f, 0.35f, 1});
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.4f, 0.4f, 0.5f, 0.3f});
         if (font) {
             std::string display = ctl->text.empty() ? "..." : ctl->text;
             font->render(display.c_str(), x + 3, y + 2, {0.8f,0.8f,1,1}, 1.0f);
         }
-    } else if (ctl->className == "GuiListBoxCtrl") {
+    } else if (cn == "GuiListBoxCtrl" || cn == "ShellTextList" || cn == "GuiTextListCtrl") {
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.2f, 0.2f, 0.25f, 1});
-    } else if (ctl->className == "GuiScrollCtrl") {
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.18f, 0.18f, 0.22f, 1});
-    } else if (ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl") {
-        r.drawRectFill({x, y, 0}, {x + 16, y + 16, 0}, {0.5f, 0.5f, 0.6f, 1});
         if (font && !ctl->text.empty())
-            font->render(ctl->text.c_str(), x + 20, y + 2, {1,1,1,1}, 1.0f);
-    } else if (ctl->className == "GuiSliderCtrl") {
+            font->render(ctl->text.c_str(), x + 3, y + 2, {0.8f,0.8f,1,1}, 1.0f);
+    } else if (cn == "GuiCheckBoxCtrl" || cn == "GuiRadioCtrl" ||
+               cn == "ShellToggleButton" || cn == "ShellRadioButton") {
+        float sz = 16;
+        r.drawRectFill({x, y, 0}, {x + sz, y + sz, 0}, {0.5f, 0.5f, 0.6f, 1});
+        if (font && !ctl->text.empty())
+            font->render(ctl->text.c_str(), x + sz + 4, y + 2, {1,1,1,1}, 1.0f);
+    } else if (cn == "GuiSliderCtrl" || cn == "ShellSliderCtrl") {
         float barY = y + ctl->extentY * 0.4f;
         float barH = ctl->extentY * 0.2f;
         r.drawRectFill({x, barY, 0}, {x + ctl->extentX, barY + barH, 0}, {0.4f,0.4f,0.5f,1});
         float knobX = x + ctl->extentX * 0.5f;
         r.drawRectFill({knobX-4, y, 0}, {knobX+4, y+ctl->extentY, 0}, {0.7f,0.7f,0.8f,1});
-    } else if (ctl->className == "GuiConsole") {
+    } else if (cn == "GuiProgressCtrl") {
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.2f, 0.2f, 0.25f, 1});
+        float progress = 0.5f;
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX * progress, y + ctl->extentY, 0}, {0.0f, 0.4f, 0.8f, 1});
+    } else if (cn == "GuiConsole") {
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0, 0, 0, 0.75f});
         if (font) {
+            // Find scroll offsets from parent scroll control
+            float scrollOfsY = 0, scrollOfsX = 0;
+            GuiControl* sp = ctl->parent;
+            while (sp) {
+                if (sp->className == "GuiScrollCtrl" || sp->className == "ShellScrollCtrl") {
+                    scrollOfsY = sp->scrollY;
+                    scrollOfsX = sp->scrollX;
+                    break;
+                }
+                sp = sp->parent;
+            }
             auto& lines = Console::instance().getLog();
-            float ly = y + ctl->extentY - 12;
-            for (int i = (int)lines.size() - 1; i >= 0 && ly >= y; i--, ly -= 12) {
+            float lh = 12;
+            int visLines = (int)(ctl->extentY / lh);
+            int totalLines = (int)lines.size();
+            int topLine = totalLines - visLines - (int)(scrollOfsY / lh);
+            if (topLine < 0) topLine = 0;
+            float ly = y;
+            float hScroll = scrollOfsX;
+            for (int i = topLine; i < totalLines && (i - topLine) < visLines; i++, ly += lh) {
                 ColorF col{0.7f, 0.7f, 0.7f, 0.9f};
                 const std::string& line = lines[i];
                 if (line.find("[ERROR]") == 0)       col = {1, 0.2f, 0.2f, 0.9f};
                 else if (line.find("[WARN]") == 0)   col = {1, 0.8f, 0.2f, 0.9f};
                 else if (line.find("[INFO]") == 0)   col = {0.7f, 0.7f, 1, 0.9f};
                 else if (line.find("[DEBUG]") == 0)  col = {0.5f, 0.5f, 0.5f, 0.7f};
-                font->render(line.c_str(), x + 4, ly, col, 1.5f);
+                font->render(line.c_str(), x + 4 - hScroll, ly, col, 1.5f);
             }
         }
-    } else if (ctl->className == "GuiConsoleEditCtrl") {
+    } else if (cn == "GuiConsoleEditCtrl") {
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0, 0, 0, 0.85f});
         if (font) {
             std::string prompt = "> " + ctl->text;
@@ -261,13 +375,114 @@ void GuiRenderer::renderControl(GuiControl* ctl) {
             if (cursorOn) prompt += '_';
             font->render(prompt.c_str(), x + 4, y + 3, {0, 1, 0, 1}, 1.5f);
         }
+    } else if (cn == "ShellPaneCtrl" || cn == "GuiPaneControl" ||
+               cn.find("ShellPane") == 0 || cn == "ShellDlgFrame") {
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.15f, 0.15f, 0.2f, 0.9f});
+        r.drawBox({{x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}}, {0.3f, 0.3f, 0.4f, 1});
+        if (!ctl->text.empty() && font)
+            font->render(ctl->text.c_str(), x + 6, y + 4, {1, 1, 1, 1}, 1.5f);
+    } else if (cn == "ShellTabButton" || cn == "GuiTabPageCtrl") {
+        r.drawRectFill({x-1, y-1, 0}, {x + ctl->extentX + 1, y + ctl->extentY + 1, 0}, {0.4f, 0.4f, 0.5f, 1});
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.3f, 0.3f, 0.4f, 1});
+        if (font && !ctl->text.empty())
+            font->render(ctl->text.c_str(), x + 4, y + (ctl->extentY - 16) * 0.5f, {1,1,1,1}, 1.0f);
+    } else if (cn == "GuiPopUpMenuCtrl" || cn == "ShellPopupMenu") {
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.25f, 0.25f, 0.3f, 1});
+        r.drawRectFill({x + ctl->extentX - 16, y + 4, 0}, {x + ctl->extentX - 4, y + ctl->extentY - 4, 0}, {0.5f,0.5f,0.6f,1});
+        if (font && !ctl->text.empty())
+            font->render(ctl->text.c_str(), x + 4, y + 2, {0.8f,0.8f,1,1}, 1.0f);
+    } else if (cn == "GuiScrollCtrl" || cn == "ShellScrollCtrl") {
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.18f, 0.18f, 0.22f, 1});
+
+        // Save old content height to detect if user was at bottom
+        float oldContentH = ctl->contentH;
+        computeContentExtent(ctl);
+
+        // Auto-scroll: if at bottom (scrollY=0), stay at bottom as new content arrives
+        if (oldContentH > 0 && ctl->scrollY < 1.0f)
+            ctl->scrollY = 0;
+
+        // Clamp scroll: scrollY=0 = bottom (newest), scrollY=maxScroll = top (oldest)
+        float maxScroll = ctl->contentH - ctl->extentY;
+        if (maxScroll < 0) maxScroll = 0;
+        if (ctl->scrollY > maxScroll) ctl->scrollY = maxScroll;
+        if (ctl->scrollY < 0) ctl->scrollY = 0;
+
+        // Set up clip rect for children
+        ClipRect childClip = {x, y, ctl->extentX, ctl->extentY};
+        bool useScissor = false;
+        GLboolean scissorWas = glIsEnabled(GL_SCISSOR_TEST);
+        GLint oldScissor[4];
+        if (clip) {
+            // Intersect with existing clip
+            float cx = (x > clip->x) ? x : clip->x;
+            float cy = (y > clip->y) ? y : clip->y;
+            float cxe = (x + ctl->extentX < clip->x + clip->w) ? x + ctl->extentX : clip->x + clip->w;
+            float cye = (y + ctl->extentY < clip->y + clip->h) ? y + ctl->extentY : clip->y + clip->h;
+            if (cxe > cx && cye > cy) {
+                childClip = {cx, cy, cxe - cx, cye - cy};
+                useScissor = true;
+            }
+        } else {
+            useScissor = true;
+        }
+        if (useScissor) {
+            auto& plat = Engine::instance().platform();
+            int winH = plat.height();
+            glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
+            glEnable(GL_SCISSOR_TEST);
+            glScissor((GLint)childClip.x, (GLint)(winH - childClip.y - childClip.h),
+                      (GLint)childClip.w, (GLint)childClip.h);
+        }
+
+        // Render children at normal positions (each control uses scrollY directly)
+        for (auto* child : ctl->children)
+            renderControlRec(gr, child, canvas, 0, 0, &childClip);
+
+        // Restore scissor
+        if (useScissor) {
+            if (scissorWas)
+                glScissor(oldScissor[0], oldScissor[1], oldScissor[2], oldScissor[3]);
+            else
+                glDisable(GL_SCISSOR_TEST);
+        }
+
+        // Scrollbar thumb (vertical)
+        if (maxScroll > 0) {
+            float thumbH = ctl->extentY * (ctl->extentY / ctl->contentH);
+            if (thumbH < 16) thumbH = 16;
+            if (thumbH > ctl->extentY) thumbH = ctl->extentY;
+            float thumbY = (1.0f - ctl->scrollY / maxScroll) * (ctl->extentY - thumbH);
+            float sbW = 8;
+            r.drawRectFill({x + ctl->extentX - sbW, y + thumbY, 0},
+                          {x + ctl->extentX, y + thumbY + thumbH, 0},
+                          {0.5f, 0.5f, 0.6f, 0.7f});
+        }
+        // Horizontal scrollbar
+        float maxScrollX = ctl->contentW - ctl->extentX;
+        if (maxScrollX > 0) {
+            ctl->scrollX = (ctl->scrollX < 0) ? 0 : ctl->scrollX;
+            if (ctl->scrollX > maxScrollX) ctl->scrollX = maxScrollX;
+            float thumbW = ctl->extentX * (ctl->extentX / ctl->contentW);
+            if (thumbW < 16) thumbW = 16;
+            if (thumbW > ctl->extentX) thumbW = ctl->extentX;
+            float thumbX = (1.0f - ctl->scrollX / maxScrollX) * (ctl->extentX - thumbW);
+            float sbH = 8;
+            float sbY2 = y + ctl->extentY - sbH;
+            r.drawRectFill({x + thumbX, sbY2, 0}, {x + thumbX + thumbW, sbY2 + sbH, 0},
+                          {0.5f, 0.5f, 0.6f, 0.7f});
+        }
+        return; // Don't do default child rendering below
+    } else if (cn == "GuiScrollContentCtrl") {
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.15f, 0.15f, 0.2f, 0.3f});
     } else {
         // Generic GuiControl
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.2f, 0.2f, 0.25f, 0.3f});
     }
 
-    // Render children
-    for (auto* child : ctl->children) renderControl(child);
+    // Render children (propagate scroll offset)
+    for (auto* child : ctl->children)
+        renderControlRec(gr, child, canvas, scrollOfsX, scrollOfsY, clip);
 }
 
 void GuiRenderer::update(float dt) {

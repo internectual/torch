@@ -11,6 +11,7 @@ struct Console::Impl {
     std::unordered_map<std::string, ConsoleItem> items;
     std::vector<std::string> log;
     FILE* logFile = nullptr;
+    size_t maxLogLines = 500;
 };
 
 Console::Console() : impl(new Impl) {}
@@ -38,6 +39,8 @@ void Console::printf(LogLevel level, const char* fmt, ...) {
 
     std::string msg = prefix + std::string(buf);
     impl->log.push_back(msg);
+    if (impl->log.size() > impl->maxLogLines)
+        impl->log.erase(impl->log.begin(), impl->log.begin() + (impl->log.size() - impl->maxLogLines));
     fputs(msg.c_str(), stdout);
     fputc('\n', stdout);
     fflush(stdout);

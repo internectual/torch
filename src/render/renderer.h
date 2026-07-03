@@ -197,6 +197,7 @@ public:
     void drawBox(const Box3F& box, const ColorF& color);
     void drawRectFill(const Point3F& a, const Point3F& b, const ColorF& color);
     void drawSprite(const Point3F& pos, float size, const ColorF& color, uint32_t texture = 0);
+    void drawTexturedRect(const Point3F& a, const Point3F& b, uint32_t texture);
 
     Texture* loadTexture(const char* path);
     Shader* loadShader(const char* vertPath, const char* fragPath);
