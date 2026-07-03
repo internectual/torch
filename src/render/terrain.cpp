@@ -427,6 +427,7 @@ bool Font::load(const uint8_t* data, size_t size) {
 
 void Font::render(const char* text, float x, float y, const ColorF& color, float scale) {
     if (!loaded || !text) return;
+    scale *= defaultScale;
 
     auto* shader = ShaderManager::getSpriteShader();
     if (!shader || !shader->loaded) return;

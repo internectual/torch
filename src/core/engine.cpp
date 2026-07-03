@@ -956,8 +956,21 @@ void Engine::run() {
                 lastRespCheck = now;
             }
 
+            // Ctrl+wheel adjusts font scale for dev panel + bottom tabs
+            {
+                static float sv = 1.0f;
+                int wd = plat->input().mouseWheel;
+                if (wd && (plat->input().keysDown[SCANCODE_LCTRL] || plat->input().keysDown[SCANCODE_RCTRL])) {
+                    sv += wd * 0.1f;
+                    if (sv < 0.5f) sv = 0.5f;
+                    if (sv > 3.0f) sv = 3.0f;
+                    if (overlayFont) overlayFont->defaultScale = sv;
+                }
+            }
+
             // Right-side dev info panel (clipped to canvas bottom at y=480)
             if (overlayFont) {
+                float sc = overlayFont->defaultScale; // for layout calculations that tracked sc
                 char buf[256];
                 int ly = 4;
                 const int rightX = 650;
@@ -965,7 +978,7 @@ void Engine::run() {
 
                 // dataDir
                 std::string cfgDir = Console::instance().getStringVariable("dataDir", ".");
-                overlayFont->render(("dataDir: " + cfgDir).c_str(), rightX, ly, {0.5f, 0.5f, 0.5f, 1}, 1.0f); ly += 14;
+                overlayFont->render(("dataDir: " + cfgDir).c_str(), rightX, ly, {0.5f, 0.5f, 0.5f, 1}, sc); ly += int(14 * sc);
 
                 // Editable init path
                 static std::string editBuf;
@@ -974,18 +987,18 @@ void Engine::run() {
                 static float blink = 0;
                 if (!pathFocused) editBuf = Console::instance().getStringVariable("initScript", "console_start.cs");
                 std::string sp = editBuf;
-                overlayFont->render("init:", rightX, ly, {0.5f, 0.8f, 1, 1}, 1.0f);
+                overlayFont->render("init:", rightX, ly, {0.5f, 0.8f, 1, 1}, sc);
                 float pathX = (float)(rightX + 50);
                 ColorF pathCol = pathFocused ? ColorF{0,1,0.5f,1} : ColorF{1,1,1,1};
-                overlayFont->render(sp.c_str(), pathX, (float)ly, pathCol, 1.0f);
+                overlayFont->render(sp.c_str(), pathX, (float)ly, pathCol, sc);
                 if (pathFocused) {
                     blink += 0.05f;
                     if ((int)(blink / 0.4f) % 2 == 0)
-                        overlayFont->render("_", pathX + (float)pathCursor * 8.0f, (float)ly, {0,1,0.5f,1}, 1.0f);
+                        overlayFont->render("_", pathX + (float)pathCursor * 8.0f, (float)ly, {0,1,0.5f,1}, sc);
                 }
                 float launchX = pathX + std::max((float)sp.size(), 1.0f) * 8.0f + 10;
                 float launchY = (float)ly;
-                overlayFont->render(" [Launch]", launchX, launchY, {0,1,0.5f,1}, 1.0f); ly += 16;
+                overlayFont->render(" [Launch]", launchX, launchY, {0,1,0.5f,1}, sc); ly += int(16 * sc);
 
                 // Editable args field
                 static std::string argsBuf;
@@ -994,16 +1007,16 @@ void Engine::run() {
                 static float argsBlink = 0;
                 int argsY = ly;
                 if (!argsFocused) argsBuf = cmdArgs;
-                overlayFont->render("args:", rightX, ly, {0.5f, 0.8f, 1, 1}, 1.0f);
+                overlayFont->render("args:", rightX, ly, {0.5f, 0.8f, 1, 1}, sc);
                 float argsX = (float)(rightX + 50);
                 ColorF argsCol = argsFocused ? ColorF{0,1,0.5f,1} : ColorF{1,1,1,1};
-                overlayFont->render(argsBuf.c_str(), argsX, (float)ly, argsCol, 1.0f);
+                overlayFont->render(argsBuf.c_str(), argsX, (float)ly, argsCol, sc);
                 if (argsFocused) {
                     argsBlink += 0.05f;
                     if ((int)(argsBlink / 0.4f) % 2 == 0)
-                        overlayFont->render("_", argsX + (float)argsCursor * 8.0f, (float)ly, {0,1,0.5f,1}, 1.0f);
+                        overlayFont->render("_", argsX + (float)argsCursor * 8.0f, (float)ly, {0,1,0.5f,1}, sc);
                 }
-                ly += 16;
+                ly += int(16 * sc);
 
                 // Launch/Enter handling
                 static bool prevLaunchEnter = false, prevLaunchClick = false;
@@ -1108,15 +1121,15 @@ void Engine::run() {
                 }
 
                 ly += 2;
-                overlayFont->render("=== Torch GUI Dev ===", rightX, ly, {0.3f, 0.8f, 1, 1}, 1.5f); ly += 18;
+                overlayFont->render("=== Torch GUI Dev ===", rightX, ly, {0.3f, 0.8f, 1, 1}, 1.5f * sc); ly += int(18 * sc);
                 snprintf(buf, sizeof(buf), "FPS: %d  dt: %.1fms", frameCount, dt * 1000);
-                overlayFont->render(buf, rightX, ly, {0.6f, 0.6f, 0.6f, 1}, 1.0f); ly += 16;
+                overlayFont->render(buf, rightX, ly, {0.6f, 0.6f, 0.6f, 1}, sc); ly += int(16 * sc);
                 snprintf(buf, sizeof(buf), "GUI dialogs: %zu", gui ? gui->dialogCount() : 0);
-                overlayFont->render(buf, rightX, ly, {0.6f, 0.6f, 0.6f, 1}, 1.0f); ly += 16;
-                overlayFont->render("F1: overlay  ~: console  Enter:launch", rightX, ly, {0.4f, 0.4f, 0.4f, 1}, 1.0f); ly += 16;
+                overlayFont->render(buf, rightX, ly, {0.6f, 0.6f, 0.6f, 1}, sc); ly += int(16 * sc);
+                overlayFont->render("F1: overlay  ~: console  Enter:launch", rightX, ly, {0.4f, 0.4f, 0.4f, 1}, sc); ly += int(16 * sc);
                 ly += 4;
                 // Object tree view — replaces old console log
-                overlayFont->render("--- Object Tree ---", rightX, ly, {0.3f, 0.8f, 1, 1}, 1.0f); ly += 18;
+                overlayFont->render("--- Object Tree ---", rightX, ly, {0.3f, 0.8f, 1, 1}, sc); ly += int(18 * sc);
                 {
                     // Build parent→children map from all script objects
                     static std::unordered_map<std::string, std::vector<std::string>> treeChildren;

@@ -86,6 +86,7 @@ struct Font {
     int32_t charWidth{}, charHeight{};
     int32_t texWidth{}, texHeight{};
     float charUV[256][4]{};
+    float defaultScale = 1.0f;
     bool loaded = false;
     bool load(const uint8_t* data, size_t size);
     bool loadDefault();
