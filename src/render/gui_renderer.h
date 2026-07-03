@@ -38,6 +38,7 @@ public:
     GuiControl* findControl(const std::string& name);
     void pushDialog(const std::string& name);
     void popDialog(const std::string& name);
+    bool isDialogActive(const std::string& name);
     GuiControl* activeDialog() { return dialogStack.empty() ? canvas : dialogStack.back(); }
     void update(float dt); // process scheduled events
     void addSchedule(double delay, const std::string& command);

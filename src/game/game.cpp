@@ -7,6 +7,7 @@
 #include "render/renderer.h"
 #include "render/shader.h"
 #include "render/glb_loader.h"
+#include "render/gui_renderer.h"
 #include "core/console.h"
 #include "core/engine.h"
 #include <algorithm>
@@ -2237,6 +2238,15 @@ void Game::render(float dt) {
     if (demoPlaying && demoPathCount > 1) {
         // Full path in dim green
         r.drawLineStrip(demoPath, {0.2f, 0.8f, 0.2f, 0.6f});
+    }
+
+    // GUI overlay (console, dialogs, etc.)
+    {
+        auto& eng2 = Engine::instance();
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        eng2.guiRenderer().render();
+        glEnable(GL_DEPTH_TEST);
     }
 
     r.endFrame();

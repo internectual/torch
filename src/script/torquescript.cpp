@@ -43,6 +43,9 @@ struct TorqueScript::Impl {
     std::string lastFieldName;
     int execDepth = 0;
 
+    // GUI parent-child tracking (persists across expressions within a file)
+    std::vector<ScriptObject*> guiParentStack;
+
     void writeBackVar(VMValue val) {
         if (!lastFieldObj.empty() && !lastFieldName.empty()) {
             auto* obj = ScriptEngine::instance().findObject(lastFieldObj.c_str());
@@ -1358,15 +1361,28 @@ VMValue TorqueScript::Impl::parsePrimary() {
             TSToken className = nextToken();
             expect(TSTokenType::LParen);
             std::vector<VMValue> args;
-            parseArgumentList(args);
+            // Parse arguments: treat bare identifiers as string literals
+            while (peekToken().type != TSTokenType::RParen && peekToken().type != TSTokenType::Eof) {
+                if (peekToken().type == TSTokenType::Ident) {
+                    // Bare identifier → string literal
+                    args.push_back(VMValue(nextToken().text));
+                } else {
+                    args.push_back(parseExpression());
+                }
+                if (peekToken().type == TSTokenType::Comma) nextToken();
+            }
             expect(TSTokenType::RParen);
 
             auto* obj = new ScriptObject;
             obj->className = className.text;
             if (!args.empty()) obj->name = args[0].toString();
+            // Auto-generate name for unnamed controls
+            if (obj->name.empty() && obj->className.find("Gui") == 0) {
+                static uint32_t guiCounter = 0;
+                obj->name = "_unnamed" + std::to_string(guiCounter++);
+            }
 
             // Track parent-child for GUI controls
-            static std::vector<ScriptObject*> guiParentStack;
 
             // If this is a GuiControl subclass, track parent
             bool isGuiControl = (obj->className.find("Gui") == 0);
@@ -1375,14 +1391,40 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 nextToken();
                 // Record this object as parent for nested new expressions
                 if (isGuiControl) guiParentStack.push_back(obj);
-                while (peekToken().type != TSTokenType::RBrace && peekToken().type != TSTokenType::Eof) {
+                int depth = 1;
+                while (depth > 0 && peekToken().type != TSTokenType::Eof) {
+                    TSToken tok = peekToken();
+                    if (tok.type == TSTokenType::RBrace) {
+                        nextToken();
+                        if (--depth == 0) break;
+                        continue;
+                    }
+                    if (tok.type == TSTokenType::LBrace) {
+                        nextToken();
+                        depth++;
+                        continue;
+                    }
+                    if (tok.type == TSTokenType::Semicolon) { nextToken(); continue; }
+                    if (tok.type == TSTokenType::New) {
+                        parseExpression();
+                        continue;
+                    }
+                    if (tok.type == TSTokenType::Function) {
+                        parseFunctionDecl();
+                        continue;
+                    }
+                    // Field assignment or expression
                     TSToken fieldName = nextToken();
-                    if (fieldName.type == TSTokenType::Eof) break;
-                    if (fieldName.type == TSTokenType::Semicolon) continue;
                     if (peekToken().type == TSTokenType::Eq) {
                         nextToken();
                         VMValue fieldVal = parseExpression();
                         obj->fields[fieldName.text] = fieldVal;
+                    } else {
+                        // Could be a method call or other expression
+                        // Re-tokenize? No, just consume until semicolon
+                        while (peekToken().type != TSTokenType::Semicolon && peekToken().type != TSTokenType::Eof
+                               && peekToken().type != TSTokenType::RBrace)
+                            nextToken();
                     }
                     while (peekToken().type == TSTokenType::Semicolon) nextToken();
                 }

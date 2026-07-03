@@ -428,8 +428,8 @@ bool Font::load(const uint8_t* data, size_t size) {
 void Font::render(const char* text, float x, float y, const ColorF& color, float scale) {
     if (!loaded || !text) return;
 
-    auto* shader = ShaderManager::getTextShader();
-    if (!shader) return;
+    auto* shader = ShaderManager::getSpriteShader();
+    if (!shader || !shader->loaded) return;
     shader->bind();
 
     auto& eng = Engine::instance();
@@ -443,8 +443,13 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
     ortho.m[3][0] = -1.0f;
     ortho.m[3][1] = 1.0f;
 
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
     shader->setUniform("uProjection", ortho);
-    shader->setUniform("uColor", color);
+    shader->setUniform("uView", MatrixF{});
+    shader->setUniform("uUseTexture", int32_t(1));
     shader->setUniform("uTexture", 0);
 
     glActiveTexture(GL_TEXTURE0);
@@ -453,8 +458,8 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
     float cw = charWidth * scale;
     float ch = charHeight * scale;
 
-    std::vector<float> verts;
-    std::vector<float> uvs;
+    struct SpriteVert { float x, y, z; float u, v; float r, g, b, a; };
+    std::vector<SpriteVert> verts;
     std::vector<uint32_t> idxs;
 
     float penX = x;
@@ -468,50 +473,44 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
             continue;
         }
 
-        float l = penX;
-        float r = penX + cw;
-        float t = penY;
-        float b = penY + ch;
+        float l = penX, r2 = penX + cw;
+        float t = penY, b2 = penY + ch;
+        float ra = color.r, ga = color.g, ba = color.b, aa = color.a;
 
-        verts.insert(verts.end(), {l, t, r, t, l, b, r, b});
-        uvs.insert(uvs.end(), {
-            charUV[c][0], charUV[c][1],
-            charUV[c][2], charUV[c][1],
-            charUV[c][0], charUV[c][3],
-            charUV[c][2], charUV[c][3]
-        });
-
-        uint32_t base = (uint32_t)(verts.size() / 2 - 4);
+        uint32_t base = (uint32_t)verts.size();
+        verts.push_back({l, t, 0, charUV[c][0], charUV[c][1], ra, ga, ba, aa});
+        verts.push_back({r2, t, 0, charUV[c][2], charUV[c][1], ra, ga, ba, aa});
+        verts.push_back({l, b2, 0, charUV[c][0], charUV[c][3], ra, ga, ba, aa});
+        verts.push_back({r2, b2, 0, charUV[c][2], charUV[c][3], ra, ga, ba, aa});
         idxs.insert(idxs.end(), {base, base+1, base+2, base+1, base+3, base+2});
         penX += cw;
     }
 
     if (verts.empty()) return;
 
-    uint32_t vao, vbo, uvbo, ebo;
+    uint32_t vao, vbo, ebo;
     glGenVertexArrays(1, &vao);
     glGenBuffers(1, &vbo);
-    glGenBuffers(1, &uvbo);
     glGenBuffers(1, &ebo);
 
     glBindVertexArray(vao);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STREAM_DRAW);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(SpriteVert), verts.data(), GL_STREAM_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)0);
     glEnableVertexAttribArray(0);
-
-    glBindBuffer(GL_ARRAY_BUFFER, uvbo);
-    glBufferData(GL_ARRAY_BUFFER, uvs.size() * sizeof(float), uvs.data(), GL_STREAM_DRAW);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)(3*sizeof(float)));
     glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)(5*sizeof(float)));
+    glEnableVertexAttribArray(2);
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, idxs.size() * sizeof(uint32_t), idxs.data(), GL_STREAM_DRAW);
+    glDisable(GL_CULL_FACE);
     glDrawElements(GL_TRIANGLES, (GLsizei)idxs.size(), GL_UNSIGNED_INT, 0);
+    glEnable(GL_CULL_FACE);
 
     glDeleteVertexArrays(1, &vao);
     glDeleteBuffers(1, &vbo);
-    glDeleteBuffers(1, &uvbo);
     glDeleteBuffers(1, &ebo);
 }
 

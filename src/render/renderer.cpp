@@ -282,6 +282,57 @@ void Renderer::drawBox(const Box3F& box, const ColorF& color) {
         drawLine(verts[e[0]], verts[e[1]], color);
 }
 
+void Renderer::drawRectFill(const Point3F& a, const Point3F& b, const ColorF& color) {
+    // Interleaved: pos.xy, uv (unused), color
+    float verts[] = {
+        a.x, a.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
+        b.x, a.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
+        a.x, b.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
+        b.x, b.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
+    };
+    uint32_t idxs[] = {0, 1, 2, 1, 3, 2};
+
+    uint32_t vao, vbo, ebo;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+
+    // aPos (3 floats)
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    // aUV (2 floats)
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    // aColor (4 floats)
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)(5 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idxs), idxs, GL_STATIC_DRAW);
+
+    auto* ss = ShaderManager::getSpriteShader();
+    if (ss) {
+        ss->bind();
+        ss->setUniform("uProjection", projection);
+        ss->setUniform("uView", view);
+        ss->setUniform("uUseTexture", false);
+    }
+
+    glDisable(GL_CULL_FACE);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    glEnable(GL_CULL_FACE);
+
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+    glDeleteBuffers(1, &ebo);
+
+    stats.drawCalls++;
+}
+
 void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color, uint32_t texture) {
     auto* shader = ShaderManager::getSpriteShader();
     if (!shader) return;

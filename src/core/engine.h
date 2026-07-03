@@ -43,11 +43,9 @@ public:
     void toggleOverlay() { showOverlay = !showOverlay; }
     bool overlayActive() const { return showOverlay; }
 
-    // Console (triggered by ~ key)
-    void toggleConsole();
-    bool consoleActive() const { return showConsole; }
-    const std::string& consoleBuffer() const { return consoleBuf; }
-    void executeConsole();
+    // Console (now handled by GUI dialog ConsoleDlg)
+    bool consoleActive() const { return gui && gui->isDialogActive("ConsoleDlg"); }
+    Font* guiFont() const { return overlayFont; }
 
     Point3F getPreviewCamPos() const { return previewCamPos; }
     Point3F getPreviewCamTarget() const { return previewCamTarget; }
@@ -80,13 +78,10 @@ private:
     Point3F previewCamTarget{0, 0, 0};
     bool usePreviewCam = false;
     bool showOverlay = false;
-    bool showConsole = false;
     bool showMinimap = true;
-    std::string consoleBuf;
     int lockFd = -1;
 
     void renderOverlay();
-    void renderConsole();
     void renderMinimap();
     Font* overlayFont = nullptr;
     bool overlayFontOwned = false;

@@ -328,9 +328,6 @@ bool Engine::init(int argc, char* argv[]) {
           }
       }
 
-    // Initialize GUI renderer from script-created objects
-    gui->init();
-
     // Load essential GUI files for HUD, menus, and login
     {
         const char* guiFiles[] = {
@@ -358,6 +355,7 @@ bool Engine::init(int argc, char* argv[]) {
             "gui/DemoPlaybackDlg.gui",
             "gui/DemoLoadProgressDlg.gui",
             "gui/TrainingGui.gui",
+            "gui/ConsoleDlg.gui",
             nullptr
         };
         for (int i = 0; guiFiles[i]; i++) {
@@ -373,6 +371,9 @@ bool Engine::init(int argc, char* argv[]) {
             }
         }
     }
+
+    // Initialize GUI renderer from script-created objects
+    gui->init();
 
     // -preview mode: screenshot after map loads (implies -nologin)
     if (!previewMap.empty()) {
@@ -442,7 +443,7 @@ void Engine::run() {
         }
 
         // ESC toggles pause menu (when not in console)
-        if (!showConsole) {
+        if (!gui->isDialogActive("ConsoleDlg")) {
             static bool prevEsc = false;
             bool escDown = plat->input().keysDown[SCANCODE_ESCAPE];
             if (escDown && !prevEsc && g->state() != Game::MenuScreen)
@@ -457,43 +458,86 @@ void Engine::run() {
             prevQ = qDown;
         }
 
-        // ~ key toggles console
+        // ~ key toggles console via GUI ConsoleDlg
         {
             static bool prevTilde = false;
             bool tildeDown = plat->input().keysDown[SCANCODE_GRAVE];
-            if (tildeDown && !prevTilde) toggleConsole();
+            if (tildeDown && !prevTilde) {
+                if (gui->isDialogActive("ConsoleDlg")) {
+                    gui->popDialog("ConsoleDlg");
+                    plat->stopTextInput();
+                } else {
+                    gui->pushDialog("ConsoleDlg");
+                    plat->startTextInput();
+                }
+            }
             prevTilde = tildeDown;
         }
 
-        // Console text input
+        // Console text input handled by GuiConsoleEditCtrl
         {
             static bool prevBS = false, prevEnter = false, prevEsc = false;
-            if (showConsole) {
+            static bool prevUp = false, prevDown = false;
+            static std::vector<std::string> history;
+            static int historyIdx = -1;
+            bool guiConsoleActive = gui && gui->isDialogActive("ConsoleDlg");
+            if (guiConsoleActive) {
+                GuiControl* entry = gui->findControl("ConsoleEntry");
                 const std::string& ti = plat->input().textInput;
                 if (!ti.empty()) {
-                    for (char c : ti) {
-                        if (c >= 0x20 && c <= 0x7e && consoleBuf.size() < 200)
-                            consoleBuf += c;
+                    if (entry) {
+                        for (char c : ti) {
+                            if (c >= 0x20 && c <= 0x7e && entry->text.size() < 200)
+                                entry->text += c;
+                        }
                     }
                 }
                 // Backspace
                 if (plat->input().keysDown[SCANCODE_BACKSPACE] && !prevBS) {
-                    if (!consoleBuf.empty()) consoleBuf.pop_back();
+                    if (entry && !entry->text.empty()) entry->text.pop_back();
                 }
                 prevBS = plat->input().keysDown[SCANCODE_BACKSPACE];
-                // Enter
+                // Up arrow - history back
+                if (plat->input().keysDown[SCANCODE_UP] && !prevUp) {
+                    if (!history.empty()) {
+                        if (historyIdx < 0) historyIdx = (int)history.size() - 1;
+                        else if (historyIdx > 0) historyIdx--;
+                        if (entry) entry->text = history[historyIdx];
+                    }
+                }
+                prevUp = plat->input().keysDown[SCANCODE_UP];
+                // Down arrow - history forward
+                if (plat->input().keysDown[SCANCODE_DOWN] && !prevDown) {
+                    if (!history.empty() && historyIdx >= 0) {
+                        if (historyIdx < (int)history.size() - 1) {
+                            historyIdx++;
+                            if (entry) entry->text = history[historyIdx];
+                        } else {
+                            historyIdx = -1;
+                            if (entry) entry->text.clear();
+                        }
+                    }
+                }
+                prevDown = plat->input().keysDown[SCANCODE_DOWN];
+                // Enter - execute console command
                 if (plat->input().keysDown[SCANCODE_RETURN] && !prevEnter) {
-                    executeConsole();
+                    if (entry && !entry->text.empty()) {
+                        std::string cmd = entry->text;
+                        history.push_back(cmd);
+                        historyIdx = -1;
+                        entry->text.clear();
+                        Console::instance().printf(LogLevel::Info, "==> %s", cmd.c_str());
+                        Console::instance().execute(cmd.c_str());
+                    }
                 }
                 prevEnter = plat->input().keysDown[SCANCODE_RETURN];
-                // Escape closes console without executing
+                // Escape closes console
                 if (plat->input().keysDown[SCANCODE_ESCAPE] && !prevEsc) {
-                    if (showConsole) { showConsole = false; plat->stopTextInput(); }
+                    gui->popDialog("ConsoleDlg");
                 }
                 prevEsc = plat->input().keysDown[SCANCODE_ESCAPE];
             } else {
-                // Reset edge-detection states when console closes
-                prevBS = prevEnter = prevEsc = false;
+                prevBS = prevEnter = prevEsc = prevUp = prevDown = false;
             }
         }
 
@@ -520,7 +564,7 @@ void Engine::run() {
 
         // Game update
         if (g->state() != Game::MenuScreen || g->isTestShapeLoaded()) {
-            if (!showConsole && !g->isGamePaused()) {
+            if (!gui->isDialogActive("ConsoleDlg") && !g->isGamePaused()) {
                 // Read input
                 Game::InputMove input;
                 auto& keys = plat->input().keysDown;
@@ -629,7 +673,6 @@ void Engine::run() {
         glDisable(GL_CULL_FACE);
         glEnable(GL_BLEND);
         if (showOverlay) renderOverlay();
-        if (showConsole) renderConsole();
         if (showMinimap && g->isDemoPlaying()) renderMinimap();
 
         plat->swapBuffers();
@@ -722,61 +765,6 @@ void Engine::renderOverlay() {
 
     line++;
     overlayFont->render("ESC to quit | Pause to close", lx, ly + (line++) * sy, dim, 2.0f);
-}
-
-void Engine::toggleConsole() {
-    showConsole = !showConsole;
-    if (showConsole) {
-        plat->startTextInput();
-    } else {
-        plat->stopTextInput();
-    }
-}
-
-void Engine::executeConsole() {
-    if (consoleBuf.empty()) { showConsole = false; plat->stopTextInput(); return; }
-    Console::instance().execute(consoleBuf.c_str());
-    consoleBuf.clear();
-    showConsole = false;
-    plat->stopTextInput();
-}
-
-void Engine::renderConsole() {
-    if (!overlayFont) return;
-    auto& r = *ren;
-    int w = plat->width();
-    int h = plat->height();
-
-    // Set orthographic projection for 2D console rendering
-    MatrixF ortho;
-    ortho.identity();
-    ortho.m[0][0] = 2.0f / w;
-    ortho.m[1][1] = -2.0f / h;
-    ortho.m[3][0] = -1.0f;
-    ortho.m[3][1] = 1.0f;
-    r.setProjection(ortho);
-    MatrixF id; id.identity();
-    r.setView(id);
-
-    // Background: dark semi-transparent box covering top portion
-    r.drawBox({{0, 0, 0}, {(float)w, 250, 0}}, {0, 0, 0, 0.75f});
-    // Border line
-    r.drawLine({0, 252, 0}, {(float)w, 252, 0}, {0.3f, 0.3f, 0.5f, 0.8f});
-    // Log history (last 5 lines from console)
-    const auto& log = Console::instance().getLog();
-    int logSize = (int)log.size();
-    int logStart = std::max(0, logSize - 5);
-    for (int i = logStart; i < logSize; i++) {
-        overlayFont->render(log[i].c_str(), 8, (float)((i - logStart) * 32 + 4),
-            ColorF{0.7f, 0.7f, 0.7f, 0.9f}, 2.0f);
-    }
-    // Input line with cursor
-    static float cursorTimer = 0;
-    cursorTimer += 0.05f;
-    bool cursorOn = ((int)(cursorTimer / 0.4f) % 2) == 0;
-    std::string display = "> " + consoleBuf;
-    if (cursorOn) display += '_';
-    overlayFont->render(display.c_str(), 8, 220, ColorF{0.2f, 0.8f, 0.2f, 1}, 2.0f);
 }
 
 void Engine::renderMinimap() {

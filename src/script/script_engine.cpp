@@ -1707,6 +1707,22 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
+
+    // Console functions used by ConsoleDlg.gui (ToggleConsole / ConsoleEntry::eval)
+    tsInstance->registerNative("activateKeyboard", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("deactivateKeyboard", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("eval", [](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            std::string code = args[0].toString();
+            auto* ts = Engine::instance().script().ts();
+            if (ts) ts->execute(code, "eval");
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("getValue", [](const auto&) -> VMValue { return VMValue(std::string("")); });
+    tsInstance->registerNative("setValue", [](const auto&) -> VMValue { return VMValue(1); });
+
+    // Console history
     tsInstance->registerNative("showCursor", [](const auto&) -> VMValue {
         return VMValue(1);
     });

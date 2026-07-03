@@ -300,15 +300,19 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
 
     // ─── Post-buffer: sequences, materials ────────────────────────────
     size_t postOff = 16 + sz32b + sz16b + sz8b;
-    const uint8_t* post = data + postOff;
-    size_t postRem = size - postOff;
-    auto prS32 = [&]() -> int32_t { if (postRem < 4) return 0; int32_t v; memcpy(&v, post, 4); post+=4; postRem-=4; return v; };
+    bool postBad = postOff >= size;
+    const uint8_t* post = data + (postBad ? size : postOff);
+    size_t postRem = postBad ? 0 : (size - postOff);
+    auto prS32 = [&]() -> int32_t { if (postRem < 4) { postRem = 0; return 0; } int32_t v; memcpy(&v, post, 4); post+=4; postRem-=4; return v; };
     auto prStr = [&]() -> std::string {
         if (postRem < 1) return "";
         uint8_t len = *post; post++; postRem--;
-        if (len == 0 || (size_t)len > postRem) return "";
+        if (len == 0) return "";
+        if ((size_t)len > postRem) { postRem = 0; return ""; }
         std::string s((const char*)post, len); post += len; postRem -= len; return s;
     };
+    auto prS16 = [&]() -> int16_t { if (postRem < 2) { postRem = 0; return 0; } int16_t v; memcpy(&v, post, 2); post+=2; postRem-=2; return v; };
+    auto prF32 = [&]() -> float { if (postRem < 4) { postRem = 0; return 0; } float v; memcpy(&v, post, 4); post+=4; postRem-=4; return v; };
 
     int32_t numSeqs = prS32();
     for (int s = 0; s < numSeqs; s++) {
@@ -317,8 +321,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         float dur; memcpy(&dur, post, 4); post+=4; postRem-=4; // duration
         for (int j = 0; j < 9; j++) prS32(); // base indices
         // Skip BitSets (8 inline bitsets)
-        auto skipBitSet = [&]() { prS32(); int nw = prS32(); for (int i = 0; i < nw; i++) prS32(); };
-        for (int b = 0; b < 8; b++) skipBitSet();
+        auto skipBitSet = [&]() { prS32(); int nw = prS32(); if (nw > 0 && nw < 256) for (int i = 0; i < nw && postRem >= 4; i++) prS32(); };
+        for (int b = 0; b < 8 && postRem >= 4; b++) skipBitSet();
 
         DTSShape::Animation anim;
         anim.name = (nameIdx >= 0 && nameIdx < (int)names.size()) ? names[nameIdx] : "seq" + std::to_string(s);
