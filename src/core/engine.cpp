@@ -49,6 +49,7 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  -testdif <path>    Load and dump DIF interior stats\n");
             fprintf(stdout, "  -preload <files>   Comma-separated scripts/guis to preload\n");
             fprintf(stdout, "  -version           Show version\n");
+            fprintf(stdout, "  -init,-i <file>    Init script (auto-exec, saved to config, default console_start.cs)\n");
             fprintf(stdout, "  -exec <file>       Execute a script/dataDir file at startup\n");
             fprintf(stdout, "  -compile <file>    Compile a script to .dso and exit\n");
             fprintf(stdout, "  -previewImg <path> Preview PNG to show in bottom-right\n");
@@ -181,6 +182,13 @@ bool Engine::init(int argc, char* argv[]) {
             testDifPath = argv[i + 1];
         if (strcmp(argv[i], "-exec") == 0 && i + 1 < argc)
             execFile = argv[i + 1];
+        if ((strcmp(argv[i], "-init") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) {
+            execFile = argv[i + 1];
+            Console::instance().setVariable("initScript", argv[i + 1]);
+            // Save to config
+            std::ofstream of("torch.cfg", std::ios::app);
+            if (of) of << "initScript = " << argv[i + 1] << std::endl;
+        }
         if (strcmp(argv[i], "-compile") == 0 && i + 1 < argc)
             compileFile = argv[i + 1];
         if (strcmp(argv[i], "-previewImg") == 0 && i + 1 < argc)
@@ -219,6 +227,7 @@ bool Engine::init(int argc, char* argv[]) {
             const char* flags[] = {
                 "-data", "-preview", "-demo", "--demo", "-testshape",
                 "-testdif", "-preload", "-previewImg", "-exec", "-compile",
+                "-init", "-i",
                 nullptr
             };
             for (int f = 0; flags[f]; f++)
@@ -480,6 +489,24 @@ bool Engine::init(int argc, char* argv[]) {
     }, "setScriptPath <path> - set the init script path (relative to dataDir)");
 
     Console::instance().printf(LogLevel::Info, "Engine initialized successfully");
+
+    // Set up $Game::argc and $Game::argv from command-line args (for console_start.cs)
+    if (scr->ts()) {
+        auto* ts = scr->ts();
+        std::vector<std::string> args;
+        // Parse cmdArgs into individual words
+        std::string a;
+        for (char c : cmdArgs) {
+            if (c == ' ') { if (!a.empty()) { args.push_back(a); a.clear(); } }
+            else a += c;
+        }
+        if (!a.empty()) args.push_back(a);
+        ts->setGlobal("Game::argc", VMValue((int32_t)args.size()));
+        for (size_t i = 0; i < args.size(); i++)
+            ts->setGlobal("Game::argv[" + std::to_string(i) + "]", VMValue(args[i]));
+        for (size_t i = 0; i < args.size(); i++)
+            ts->setGlobal("ARGV[" + std::to_string(i) + "]", VMValue(args[i]));
+    }
 
     // Load essential scripts: profiles first, then startup
     if (scr->ts()) {
