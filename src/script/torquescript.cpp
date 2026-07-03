@@ -1137,11 +1137,29 @@ VMValue TorqueScript::Impl::parsePostfix() {
                 // Look up method: objClass::methodName
                 std::string objName = val.toString();
                 std::string methodName = member.text;
-                // For now, just try calling the method
-                std::string fullName = methodName; // Simplified
+                bool called = false;
+                // Try the bare function name first
+                std::string fullName = methodName;
                 auto fit = functions.find(fullName);
-                if (fit != functions.end()) {
-                    val = outer->callFunction(fullName, args);
+                if (fit != functions.end()) { val = outer->callFunction(fullName, args); called = true; }
+                if (!called) {
+                    std::string lower = fullName;
+                    for (auto& c : lower) c = (char)tolower((unsigned char)c);
+                    auto nit = natives.find(lower);
+                    if (nit != natives.end()) { val = nit->second(args); called = true; }
+                }
+                if (!called) {
+                    // Try namespace-qualified: ClassName::method
+                    std::string nsFull = objName + "::" + methodName;
+                    auto nsFit = functions.find(nsFull);
+                    if (nsFit != functions.end()) { val = outer->callFunction(nsFull, args); called = true; }
+                }
+                if (!called) {
+                    std::string nsFull = objName + "::" + methodName;
+                    std::string nsLower = nsFull;
+                    for (auto& c : nsLower) c = (char)tolower((unsigned char)c);
+                    auto nsNit = natives.find(nsLower);
+                    if (nsNit != natives.end()) { val = nsNit->second(args); called = true; }
                 }
             } else {
                 // Field access
@@ -1343,8 +1361,16 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 return lookupAndCall(name, args);
             }
 
-            // Variable reference
-            return locals.get(name);
+            // Variable reference: check globals if locals returns default (0 or empty)
+            {
+                VMValue lv = locals.get(name);
+                bool notFound = (lv.type == VMValue::Int && lv.toInt() == 0);
+                if (notFound) {
+                    auto git = globals.find(name);
+                    if (git != globals.end()) return git->second;
+                }
+                return lv;
+            }
         }
 
         case TSTokenType::LParen: {
@@ -1443,6 +1469,11 @@ VMValue TorqueScript::Impl::parsePrimary() {
             }
 
             ScriptEngine::instance().objects[obj->name] = obj;
+            // Set globals so script can reference the object by name (both $name and bare name)
+            if (!obj->name.empty()) {
+                outer->setGlobal("$" + obj->name, VMValue(obj->name));
+                globals[obj->name] = VMValue(obj->name);
+            }
             return VMValue(obj->name);
         }
 

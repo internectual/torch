@@ -1313,6 +1313,41 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
 
 void GuiRenderer::pushDialog(const std::string& name) {
     GuiControl* ctl = findControl(name);
+    if (!ctl) {
+        // Try creating the GuiControl from the ScriptObject on-the-fly
+        auto& objs = ScriptEngine::instance().objects;
+        auto it = objs.find(name);
+        if (it != objs.end() && (it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className == "GameTSCtrl")) {
+            ctl = new GuiControl;
+            ctl->name = it->second->name;
+            ctl->className = it->second->className;
+            auto parsePair = [&](const std::string& key, float& a, float& b) {
+                auto fi = it->second->fields.find(key);
+                if (fi != it->second->fields.end()) { std::string s = fi->second.toString(); sscanf(s.c_str(), "%f %f", &a, &b); }
+            };
+            parsePair("position", ctl->posX, ctl->posY);
+            parsePair("extent", ctl->extentX, ctl->extentY);
+            auto fi = it->second->fields.find("text"); if (fi != it->second->fields.end()) ctl->text = fi->second.toString();
+            fi = it->second->fields.find("bitmap"); if (fi != it->second->fields.end()) ctl->bitmap = fi->second.toString();
+            fi = it->second->fields.find("command"); if (fi != it->second->fields.end()) ctl->command = fi->second.toString();
+            fi = it->second->fields.find("altCommand"); if (fi != it->second->fields.end()) ctl->altCommand = fi->second.toString();
+            fi = it->second->fields.find("profile"); if (fi != it->second->fields.end()) ctl->profileName = fi->second.toString();
+            fi = it->second->fields.find("visible"); if (fi != it->second->fields.end()) ctl->visible = fi->second.toBool();
+            if (ctl->className == "GuiCanvas") canvas = ctl;
+            bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellBitmapButton" || ctl->className == "ShellToggleButton" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl" || ctl->className == "ShellTextEditCtrl";
+            if (!ctl->command.empty() && isClickable) { std::string cmd = ctl->command; ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); }; }
+            auto pit = it->second->internals.find("parent");
+            if (pit != it->second->internals.end()) {
+                std::string pname = pit->second.toString();
+                GuiControl* parent = findControl(pname);
+                if (parent) parent->addChild(ctl);
+            } else if (ctl != canvas && canvas) { canvas->addChild(ctl); }
+            if (canvas) {
+                ctl->extentX = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentX : ctl->extentX;
+                ctl->extentY = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentY : ctl->extentY;
+            }
+        }
+    }
     if (ctl) {
         ctl->visible = true;
         dialogStack.push_back(ctl);
