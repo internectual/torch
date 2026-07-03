@@ -36,4 +36,12 @@ cmake --build build -j$(nproc)
 - [x] DIF interior loader with BSP, surfaces, lightmaps, materials
 - [x] Demo playback (BitStream, Huffman, GhostTracker, full parser)
 - [x] Mission parser (.mis files with Terrain, Sky, Sun, interiors, items)
+- [x] GUI shell rendering (bitmap buttons, text fields, panes, titlebars, checkboxes, sliders, scrollbars)
+- [x] BM8 texture format and 3-slice/9-slice bitmap border rendering
+- [x] GFT font loader with proportional glyphs (Arial, Verdana, Lucida Console, Sui Generis)
+- [x] Profile-aware control rendering (fillColor, fontColor, textOffset, bitmap)
+- [x] TorqueScript object tree viewer and property inspector
+- [x] Console with scroll, history, input, and AI IPC (@ prefix)
+- [x] Dev panel with editable init path, args, log, and tabbed bottom panel
+- [x] Preload system, -exec and -compile CLI flags
 - [ ] TribesNext RSA authentication
