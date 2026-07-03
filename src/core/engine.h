@@ -13,6 +13,7 @@
 #include "fs/file_system.h"
 #include "net/network.h"
 #include "game/game.h"
+#include <vector>
 
 class Engine {
 public:
@@ -53,6 +54,7 @@ public:
 
     std::string testShapePath;
     std::string testDifPath;
+    std::vector<std::string> preloadFiles;
 
 private:
     struct Impl;

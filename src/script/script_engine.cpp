@@ -1827,6 +1827,17 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("export", [](const auto&) -> VMValue {
         return VMValue(1);
     });
+
+    // exec() - load and execute from modpath (base/), NOT from dataDir root
+    tsInstance->registerNative("exec", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string path = args[0].toString();
+        // Prepend modpath (base/) - dataDir root scripts use a different engine mechanism
+        std::string basePath = std::string("base/") + path;
+        auto* ts = Engine::instance().script().ts();
+        if (ts) ts->executeFile(basePath);
+        return VMValue(1);
+    });
     tsInstance->registerNative("addMessageCallback", [](const auto&) -> VMValue {
         return VMValue(1);
     });

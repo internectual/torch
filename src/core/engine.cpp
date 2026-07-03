@@ -45,6 +45,7 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  -testshape <path>  Load and display a GLB shape\n");
             fprintf(stdout, "  -testdif <path>    Load and dump DIF interior stats\n");
             fprintf(stdout, "  -online            Enable online mode\n");
+            fprintf(stdout, "  -preload <files>   Comma-separated scripts/guis to preload\n");
             fprintf(stdout, "  -version           Show version\n");
             fprintf(stdout, "  -help              Show this help\n\n");
             fprintf(stdout, "Controls:\n");
@@ -125,6 +126,21 @@ bool Engine::init(int argc, char* argv[]) {
                 };
                 trim(key); trim(val);
                 if (key == "dataDir") dataDir = val;
+                if (key == "preload") {
+                    // Comma-separated list of files to load at startup
+                    size_t pos = 0, comma;
+                    while ((comma = val.find(',', pos)) != std::string::npos) {
+                        std::string f = val.substr(pos, comma - pos);
+                        auto trim = [](std::string& s) { while (!s.empty()&&s[0]==' ') s.erase(0,1); while (!s.empty()&&s.back()==' ') s.pop_back(); };
+                        trim(f);
+                        if (!f.empty()) preloadFiles.push_back(f);
+                        pos = comma + 1;
+                    }
+                    std::string f = val.substr(pos);
+                    auto trim = [](std::string& s) { while (!s.empty()&&s[0]==' ') s.erase(0,1); while (!s.empty()&&s.back()==' ') s.pop_back(); };
+                    trim(f);
+                    if (!f.empty()) preloadFiles.push_back(f);
+                }
             }
         }
     }
@@ -156,6 +172,21 @@ bool Engine::init(int argc, char* argv[]) {
             testShapePath = argv[i + 1];
         if (strcmp(argv[i], "-testdif") == 0 && i + 1 < argc)
             testDifPath = argv[i + 1];
+        if (strcmp(argv[i], "-preload") == 0 && i + 1 < argc) {
+            std::string val = argv[i + 1];
+            size_t pos = 0, comma;
+            while ((comma = val.find(',', pos)) != std::string::npos) {
+                std::string f = val.substr(pos, comma - pos);
+                auto trim = [](std::string& s) { while (!s.empty()&&s[0]==' ') s.erase(0,1); while (!s.empty()&&s.back()==' ') s.pop_back(); };
+                trim(f);
+                if (!f.empty()) preloadFiles.push_back(f);
+                pos = comma + 1;
+            }
+            std::string f = val.substr(pos);
+            auto trim = [](std::string& s) { while (!s.empty()&&s[0]==' ') s.erase(0,1); while (!s.empty()&&s.back()==' ') s.pop_back(); };
+            trim(f);
+            if (!f.empty()) preloadFiles.push_back(f);
+        }
     }
 
     // Init subsystems
@@ -384,6 +415,21 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().printf(LogLevel::Info, "Profiles loaded: %zu script objects", scr->objects.size());
     }
 
+    // Execute preload files (from torch.cfg preload = ...)
+    if (scr->ts() && !preloadFiles.empty()) {
+        auto* ts = scr->ts();
+        Console::instance().printf(LogLevel::Info, "Preloading %zu file(s)...", preloadFiles.size());
+        for (auto& pf : preloadFiles) {
+            auto pdata = fs.read(pf.c_str());
+            if (!pdata.empty()) {
+                Console::instance().printf(LogLevel::Info, "Preload: %s (%zu bytes)", pf.c_str(), pdata.size());
+                ts->execute(std::string((const char*)pdata.data(), pdata.size()), pf);
+            } else {
+                Console::instance().printf(LogLevel::Warn, "Preload: file not found: %s", pf.c_str());
+            }
+        }
+    }
+
     // Wire console commands into TorqueScript interpreter
     if (scr->ts()) {
         auto* tsi = scr->ts();
@@ -467,9 +513,13 @@ bool Engine::init(int argc, char* argv[]) {
             previewCamPos = {cx, h + half * 0.5f, cz - half * 0.8f};
             usePreviewCam = true;
         }
-    } else if (demoPath.empty() && previewMap.empty() && !noLogin) {
+    } else if (noLogin) {
+        Console::instance().printf(LogLevel::Info, "-nologin: dev panel (F1 overlay, ~ console, Pause debug)");
+    } else if (demoPath.empty() && previewMap.empty()) {
         Console::instance().printf(LogLevel::Info, "Pushing login dialog");
         gui->pushDialog("LoginDlg");
+        // Set RubyEnabled so the login scripts don't block
+        Console::instance().setVariable("RubyEnabled", "1");
     }
 
     // -testshape: load a GLB shape for preview
@@ -911,7 +961,7 @@ void Engine::run() {
                 overlayFont->render(buf, 650, ly, {0.6f, 0.6f, 0.6f, 1}, 1.0f); ly += 16;
                 snprintf(buf, sizeof(buf), "GUI dialogs: %zu", gui ? gui->dialogCount() : 0);
                 overlayFont->render(buf, 650, ly, {0.6f, 0.6f, 0.6f, 1}, 1.0f); ly += 16;
-                overlayFont->render("F1: overlay  ~: console  Enter:launch", 650, ly, {0.4f, 0.4f, 0.4f, 1}, 1.0f); ly += 16;
+                overlayFont->render("F1: overlay  ~: console  Enter:launch  Pause:debug", 650, ly, {0.4f, 0.4f, 0.4f, 1}, 1.0f); ly += 16;
                 ly += 4;
                 overlayFont->render("--- Console Log ---", 650, ly, {0.3f, 0.8f, 1, 1}, 1.0f); ly += 18;
                 auto& log = Console::instance().getLog();
