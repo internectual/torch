@@ -143,6 +143,42 @@ void GuiRenderer::init() {
     checkerTex->loadRaw(cb.data(), 16, 16, 4);
 }
 
+void GuiRenderer::refresh() {
+    auto& objs = ScriptEngine::instance().objects;
+    for (auto& [name, obj] : objs) {
+        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl") {
+            if (findControl(name)) continue;
+            GuiControl* ctl = new GuiControl;
+            ctl->name = obj->name; ctl->className = obj->className;
+            auto parsePair = [&](const std::string& key, float& a, float& b) {
+                auto it = obj->fields.find(key);
+                if (it != obj->fields.end()) { std::string s = it->second.toString(); sscanf(s.c_str(), "%f %f", &a, &b); }
+            };
+            parsePair("position", ctl->posX, ctl->posY);
+            parsePair("extent", ctl->extentX, ctl->extentY);
+            auto it = obj->fields.find("text"); if (it != obj->fields.end()) ctl->text = it->second.toString();
+            it = obj->fields.find("bitmap"); if (it != obj->fields.end()) ctl->bitmap = it->second.toString();
+            it = obj->fields.find("command"); if (it != obj->fields.end()) ctl->command = it->second.toString();
+            it = obj->fields.find("altCommand"); if (it != obj->fields.end()) ctl->altCommand = it->second.toString();
+            it = obj->fields.find("profile"); if (it != obj->fields.end()) ctl->profileName = it->second.toString();
+            it = obj->fields.find("visible"); if (it != obj->fields.end()) ctl->visible = it->second.toBool();
+            if (ctl->className == "GuiCanvas") canvas = ctl;
+            bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellBitmapButton" || ctl->className == "ShellToggleButton" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl" || ctl->className == "ShellTextEditCtrl";
+            if (!ctl->command.empty() && isClickable) { std::string cmd = ctl->command; ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); }; }
+            auto pit = obj->internals.find("parent");
+            if (pit != obj->internals.end()) {
+                std::string pname = pit->second.toString();
+                GuiControl* parent = findControl(pname);
+                if (parent) parent->addChild(ctl);
+            } else if (ctl != canvas && canvas) { canvas->addChild(ctl); }
+            if (canvas) {
+                ctl->extentX = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentX : ctl->extentX;
+                ctl->extentY = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentY : ctl->extentY;
+            }
+        }
+    }
+}
+
 void GuiRenderer::render() {
     if (!canvas) return;
     auto& r = Engine::instance().renderer();

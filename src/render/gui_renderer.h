@@ -38,6 +38,7 @@ public:
     ~GuiRenderer();
 
     void init();
+    void refresh();
     void render();
     bool handleInput(int x, int y, bool pressed);
 

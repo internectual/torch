@@ -543,18 +543,6 @@ bool Engine::init(int argc, char* argv[]) {
         }
     }
 
-    // -exec: execute a file at startup (engine-level, not passed to init)
-    if (scr->ts() && !execFile.empty()) {
-        auto* ts = scr->ts();
-        auto edata = fs.read(execFile.c_str());
-        if (!edata.empty()) {
-            Console::instance().printf(LogLevel::Info, "Exec: %s (%zu bytes)", execFile.c_str(), edata.size());
-            ts->execute(std::string((const char*)edata.data(), edata.size()), execFile);
-        } else {
-            Console::instance().printf(LogLevel::Warn, "Exec: file not found: %s", execFile.c_str());
-        }
-    }
-
     // -compile: parse/validate then exit (DSO writing not yet implemented)
     if (!compileFile.empty()) {
         auto cdata = fs.read(compileFile.c_str());
@@ -638,6 +626,20 @@ bool Engine::init(int argc, char* argv[]) {
 
     // Initialize GUI renderer from script-created objects
     gui->init();
+
+    // -exec: execute a file at startup (after gui init so Canvas calls work)
+    if (scr->ts() && !execFile.empty()) {
+        auto* ts = scr->ts();
+        auto edata = fs.read(execFile.c_str());
+        if (!edata.empty()) {
+            Console::instance().printf(LogLevel::Info, "Exec: %s (%zu bytes)", execFile.c_str(), edata.size());
+            ts->execute(std::string((const char*)edata.data(), edata.size()), execFile);
+            // Sync any new GUI controls created by the script
+            gui->refresh();
+        } else {
+            Console::instance().printf(LogLevel::Warn, "Exec: file not found: %s", execFile.c_str());
+        }
+    }
 
     // -preview mode: screenshot after map loads (implies -nologin)
     if (!previewMap.empty()) {
