@@ -53,6 +53,7 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  -exec,-e <file>     Execute a script file at startup\n");
             fprintf(stdout, "  -compile,-c <file>  Compile a script to .dso and exit\n");
             fprintf(stdout, "  -watermark,-w <path> Preview PNG in bottom-right corner\n");
+            fprintf(stdout, "  -canvasBg <path>     Background image for GUI canvas\n");
             fprintf(stdout, "  -help              Show this help\n\n");
             fprintf(stdout, "Script args are passed through unmodified to the init script.\n\n");
             fprintf(stdout, "Controls:\n");
@@ -134,6 +135,7 @@ bool Engine::init(int argc, char* argv[]) {
                 trim(key); trim(val);
                 if (key == "dataDir") dataDir = val;
                 if (key == "previewImg") previewImgPath = val;
+                if (key == "canvasBg") canvasBgPath = val;
                 if (key == "preload") {
                     // Comma-separated list of files to load at startup
                     size_t pos = 0, comma;
@@ -192,6 +194,8 @@ bool Engine::init(int argc, char* argv[]) {
             compileFile = argv[i + 1];
         if ((strcmp(argv[i], "-previewImg") == 0 || strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "-watermark") == 0) && i + 1 < argc)
             previewImgPath = argv[i + 1];
+        if (strcmp(argv[i], "-canvasBg") == 0 && i + 1 < argc)
+            canvasBgPath = argv[i + 1];
         if ((strcmp(argv[i], "-preload") == 0 || strcmp(argv[i], "-p") == 0) && i + 1 < argc) {
             std::string val = argv[i + 1];
             size_t pos = 0, comma;
@@ -225,7 +229,7 @@ bool Engine::init(int argc, char* argv[]) {
         auto isEngineFlagWithArg = [](const char* a) {
             const char* flags[] = {
                 "-data", "-preview", "-demo", "--demo", "-testshape",
-                "-testdif", "-preload", "-p", "-previewImg", "-w", "-watermark",
+                "-testdif", "-preload", "-p", "-previewImg", "-w", "-watermark", "-canvasBg",
                 "-exec", "-e", "-compile", "-c", "-init", "-i",
                 nullptr
             };
@@ -1386,6 +1390,23 @@ void Engine::run() {
                 }
             }
 
+            // Canvas background image (if specified)
+            if (!canvasBgPath.empty()) {
+                static uint32_t bgTex = 0;
+                static int bgW = 0, bgH = 0;
+                if (!bgTex) {
+                    auto* tex = ren->loadTexture(canvasBgPath.c_str());
+                    if (tex) { bgTex = tex->id; bgW = tex->width; bgH = tex->height; }
+                }
+                if (bgTex) {
+                    ren->setViewport(0, 0, w, h);
+                    float sx = 640.0f / bgW, sy = 480.0f / bgH;
+                    float s = std::min(sx, sy);
+                    float dw = bgW * s, dh = bgH * s;
+                    float dx = (640 - dw) * 0.5f, dy = (480 - dh) * 0.5f;
+                    r.drawTexturedRectUV({dx, dy, 0}, {dx + dw, dy + dh, 0}, bgTex, 0, 0, 1, 1);
+                }
+            }
             // GUI canvas at fixed 640x480 upper-left
             ren->setViewport(0, 0, w, h);
             glEnable(GL_SCISSOR_TEST);

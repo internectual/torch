@@ -57,6 +57,7 @@ public:
     std::vector<std::string> preloadFiles;
     std::string cmdArgs;
     std::string previewImgPath;
+    std::string canvasBgPath;
     std::string execFile;
     std::string compileFile;
 
