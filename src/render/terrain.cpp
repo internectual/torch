@@ -343,6 +343,67 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
 // Font
 #include "render/font8x8.h"
 
+bool Font::loadGFT(const uint8_t* data, size_t size) {
+    // GFT header: version(u32), charWidth(u32), charHeight(u32), charCount(u32)
+    if (size < 16) { Console::instance().printf(LogLevel::Debug, "GFT: too small (%zu)", size); return false; }
+    uint32_t ver, cw, ch, count;
+    memcpy(&ver, data, 4); memcpy(&cw, data+4, 4); memcpy(&ch, data+8, 4); memcpy(&count, data+12, 4);
+    if (ver != 1 || count > 256) { Console::instance().printf(LogLevel::Debug, "GFT: bad ver/count"); return false; }
+    // Per-char data: array of GFTChar (9 bytes each): bitmapIndex(u16), xOrigin,u8, yOrigin,u8, width,u8, height,u8, xOffset,s8, yOffset,s8, xAdvance,u8
+    uint32_t charDataOff = 16;
+    uint32_t charDataSize = count * 9;
+    size_t pngStartOff = charDataOff + charDataSize + 4; // 4 bytes for PNG data length
+    if (pngStartOff >= size) return false;
+    // Read per-char metrics
+    uint32_t maxW = 0, maxH = 0;
+    for (uint32_t i = 0; i < count && i < 256; i++) {
+        const uint8_t* cd = data + charDataOff + i * 9;
+        uint16_t bmIdx; memcpy(&bmIdx, cd, 2);
+        glyphs[i].width = cd[5];   // width
+        glyphs[i].height = cd[6];  // height
+        glyphs[i].xOff = (int8_t)cd[7];  // xOffset
+        glyphs[i].yOff = (int8_t)cd[8];  // yOffset
+        glyphs[i].xAdvance = cd[4]; // xAdvance (byte 4 in the 9-byte struct)
+        if (glyphs[i].width > maxW) maxW = glyphs[i].width;
+        if (glyphs[i].height > maxH) maxH = glyphs[i].height;
+    }
+    charWidth = maxW > 0 ? maxW : (int32_t)cw;
+    charHeight = maxH > 0 ? maxH : (int32_t)ch;
+    fontSize = (int32_t)ch;
+    proportional = true;
+
+    // Skip bitmapCount (4 bytes) - always 1
+    const uint8_t* pngData = data + pngStartOff;
+    size_t pngAvail = size - pngStartOff;
+    // Decode PNG (rest of file)
+    int w, h, chans;
+    unsigned char* pixels = stbi_load_from_memory(pngData, (int)pngAvail, &w, &h, &chans, 4);
+    if (!pixels) { Console::instance().printf(LogLevel::Debug, "GFT: stbi failed at offset %zu (%zu bytes)", pngStartOff, pngAvail); return false; }
+    texWidth = w; texHeight = h;
+    // Create GL texture
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    stbi_image_free(pixels);
+
+    // Build UV coordinates for each char from the per-char position data
+    for (uint32_t i = 0; i < count && i < 256; i++) {
+        const uint8_t* cd = data + charDataOff + i * 9;
+        uint16_t bmIdx; memcpy(&bmIdx, cd, 2);
+        uint8_t xo = cd[2], yo = cd[3]; // xOrigin, yOrigin
+        uint8_t gw = cd[5], gh = cd[6];
+        if (gw == 0 || gh == 0) continue;
+        float u0 = (float)xo / w, v0 = (float)yo / h;
+        float u1 = (float)(xo + gw) / w, v1 = (float)(yo + gh) / h;
+        charUV[i][0] = u0; charUV[i][1] = v0;
+        charUV[i][2] = u1; charUV[i][3] = v1;
+    }
+    loaded = true;
+    return true;
+}
+
 bool Font::loadDefault() {
     static const int cw = 8, ch = 8;
     static const int cols = 16, rows = 16;
@@ -456,8 +517,8 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture);
 
-    float cw = charWidth * scale;
-    float ch = charHeight * scale;
+    float lh = charHeight * scale;
+    bool prop = proportional;
 
     struct SpriteVert { float x, y, z; float u, v; float r, g, b, a; };
     std::vector<SpriteVert> verts;
@@ -470,12 +531,18 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
         unsigned char c = (unsigned char)*p;
         if (c == '\n') {
             penX = x;
-            penY += ch;
+            penY += lh;
             continue;
         }
 
-        float l = penX, r2 = penX + cw;
-        float t = penY, b2 = penY + ch;
+        float gW = prop ? (float)glyphs[c].width * scale : lh;
+        float gH = prop ? (float)glyphs[c].height * scale : lh;
+        float gXOff = prop ? (float)glyphs[c].xOff * scale : 0;
+        float gYOff = prop ? (float)glyphs[c].yOff * scale : 0;
+        float adv = prop ? (float)glyphs[c].xAdvance * scale : lh;
+
+        float l = penX + gXOff, r2 = l + gW;
+        float t = penY + gYOff, b2 = t + gH;
         float ra = color.r, ga = color.g, ba = color.b, aa = color.a;
 
         uint32_t base = (uint32_t)verts.size();
@@ -484,7 +551,7 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
         verts.push_back({l, b2, 0, charUV[c][0], charUV[c][3], ra, ga, ba, aa});
         verts.push_back({r2, b2, 0, charUV[c][2], charUV[c][3], ra, ga, ba, aa});
         idxs.insert(idxs.end(), {base, base+1, base+2, base+1, base+3, base+2});
-        penX += cw;
+        penX += adv;
     }
 
     if (verts.empty()) return;
@@ -517,8 +584,15 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
 
 Point2F Font::measure(const char* text, float scale) {
     Point2F result;
-    result.x = (float)strlen(text) * charWidth * scale;
     result.y = charHeight * scale;
+    if (!proportional) {
+        result.x = (float)strlen(text) * charWidth * scale;
+    } else {
+        float w = 0;
+        for (const char* p = text; *p; p++)
+            w += (float)glyphs[(unsigned char)*p].xAdvance * scale;
+        result.x = w;
+    }
     return result;
 }
 

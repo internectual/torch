@@ -361,6 +361,45 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().printf(LogLevel::Warn, "Failed to load overlay font");
     }
 
+    // Load GFT fonts from data directory
+    Console::instance().printf(LogLevel::Info, "Loading GFT fonts from VL2...");
+    {
+        auto fontFiles = {"fonts/Arial_12.gft", "fonts/Arial_13.gft", "fonts/Arial_14.gft",
+                          "fonts/Arial_16.gft", "fonts/Arial_18.gft", "fonts/Arial_20.gft",
+                          "fonts/Arial Bold_10.gft", "fonts/Arial Bold_12.gft", "fonts/Arial Bold_13.gft",
+                          "fonts/Arial Bold_14.gft", "fonts/Arial Bold_16.gft", "fonts/Arial Bold_18.gft",
+                          "fonts/Arial Bold_24.gft", "fonts/Arial Bold_32.gft",
+                          "fonts/Verdana_12.gft", "fonts/Verdana_14.gft",
+                          "fonts/Verdana Bold_12.gft", "fonts/Verdana Bold_16.gft",
+                          "fonts/Lucida Console_12.gft", "fonts/Sui Generis_14.gft"};
+        for (const char* f : fontFiles) {
+            auto fdata = fs.read(f);
+            if (fdata.empty()) { Console::instance().printf(LogLevel::Debug, "GFT not found: %s", f); continue; }
+            auto* ft = new Font;
+            if (ft->loadGFT(fdata.data(), fdata.size())) {
+                // Extract name/size from filename
+                std::string fn = f;
+                // Remove fonts/ prefix and .gft suffix
+                if (fn.find("fonts/") == 0) fn = fn.substr(6);
+                size_t dot = fn.rfind('.');
+                if (dot != std::string::npos) fn = fn.substr(0, dot);
+                // Parse "Name_Size" format
+                size_t us = fn.rfind('_');
+                if (us != std::string::npos) {
+                    ft->fontName = fn.substr(0, us);
+                    ft->fontSize = atoi(fn.substr(us + 1).c_str());
+                } else {
+                    ft->fontName = fn;
+                    ft->fontSize = ft->charHeight;
+                }
+                ren->addFont(ft);
+                Console::instance().printf(LogLevel::Info, "Loaded font: %s %d", ft->fontName.c_str(), ft->fontSize);
+            } else {
+                delete ft;
+            }
+        }
+    }
+
     // Audio
     aud->init();
 

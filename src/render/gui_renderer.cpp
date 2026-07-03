@@ -190,6 +190,30 @@ static ScriptObject* getProfile(const std::string& name) {
     return nullptr;
 }
 
+// Get font from profile's fontType/fontSize
+static Font* getProfileFont(ScriptObject* prof) {
+    if (!prof) return Engine::instance().renderer().getFont();
+    auto ft = prof->fields.find("fontType");
+    auto fs = prof->fields.find("fontSize");
+    std::string name = (ft != prof->fields.end()) ? ft->second.toString() : "";
+    int size = (fs != prof->fields.end()) ? fs->second.toInt() : 0;
+    if (name.empty() || size <= 0) return Engine::instance().renderer().getFont();
+    return Engine::instance().renderer().getFont(name.c_str(), size);
+}
+
+// Parse textOffset from profile (two ints: "x y")
+static bool getTextOffset(ScriptObject* prof, float& ox, float& oy) {
+    if (!prof) return false;
+    auto to = prof->fields.find("textOffset");
+    if (to == prof->fields.end()) return false;
+    int ix = 0, iy = 0;
+    if (sscanf(to->second.toString().c_str(), "%d %d", &ix, &iy) >= 2) {
+        ox = (float)ix; oy = (float)iy;
+        return true;
+    }
+    return false;
+}
+
 // Parse "R G B" or "R G B A" color string (0-255 range)
 static bool parseColor(const std::string& s, ColorF& out) {
     int r = 0, g = 0, b = 0, a = 255;
@@ -554,8 +578,15 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (font && !ctl->text.empty()) {
             ColorF tc{1,1,1,1};
             auto* prof = getProfile(ctl->profileName);
-            if (prof) { auto fi = prof->fields.find("fontColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), tc); }
-            font->render(ctl->text.c_str(), x + 5, y + (ctl->extentY - 16) * 0.5f, tc, 1.0f);
+            if (prof) {
+                auto fci = prof->fields.find("fontColor");
+                if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
+                font = getProfileFont(prof);
+            }
+            float tx = x + 5, ty = y + (ctl->extentY - (float)font->charHeight) * 0.5f;
+            float toX, toY;
+            if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
+            font->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
         }
     } else if (cn == "GuiTextCtrl" || cn == "GuiMLTextCtrl") {
         ColorF tc{1,1,1,1};
@@ -858,7 +889,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     }
                 };
                 dq(x+4,ty,lw,bh,cL,false); dq(x+4+lw,ty,midW,bh,cM,true); dq(x+4+lw+midW,ty,rw,bh,cR,false);
-                if(font) font->render(ctl->text.c_str(), x+4+lw+4, ty+bh*0.2f, txc, 1.0f);
+                if (font) {
+                    float tx = x+4+lw+4;
+                    font = getProfileFont(prof);
+                    float toX, toY;
+                    if (getTextOffset(prof, toX, toY)) { tx += toX; }
+                    font->render(ctl->text.c_str(), tx, ty+bh*0.2f, txc, 1.0f);
+                }
             }
         } else if (!ctl->text.empty()) {
             // Title tab: 2 cells = top row (left cap), bottom row (fill). Right cap = left cap flipped.
@@ -880,11 +917,23 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 r.drawTexturedRectUV({x + lw, y, 0}, {x + lw + midW, y + th, 0}, tabTex->id,
                     (float)cF.x/tabTex->width, (float)cF.y/tabTex->height,
                     (float)(cF.x+cF.w)/tabTex->width, (float)(cF.y+cF.h)/tabTex->height);
-                if (font) font->render(ctl->text.c_str(), x + lw + 4, y + 2, txc, 1.0f);
+                if (font) {
+                    font = getProfileFont(prof);
+                    float tx = x + lw + 4, ty = y + 2;
+                    float toX, toY;
+                    if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
+                    font->render(ctl->text.c_str(), tx, ty, txc, 1.0f);
+                }
             } else if (tabTex && tabTex->loaded) {
                 float th = (float)tabTex->height;
                 r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + th, 0}, tabTex->id);
-                if (font) font->render(ctl->text.c_str(), x + 8, y + 2, txc, 1.0f);
+                if (font) {
+                    font = getProfileFont(prof);
+                    float tx = x + 8, ty = y + 2;
+                    float toX, toY;
+                    if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
+                    font->render(ctl->text.c_str(), tx, ty, txc, 1.0f);
+                }
             } else if (font) {
                 font->render(ctl->text.c_str(), x + 6, y + 4, txc, 1.5f);
             }

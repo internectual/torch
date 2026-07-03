@@ -712,6 +712,19 @@ void Shader::setUniform(const char* name, const ColorF& v) {
 
 void Shader::destroy() { if (id) glDeleteProgram(id); loaded = false; }
 
+Font* Renderer::getFont(const char* name, int size) {
+    std::string key = std::string(name) + "_" + std::to_string(size);
+    auto it = fontCache.find(key);
+    if (it != fontCache.end()) return it->second;
+    return defaultFont;
+}
+
+void Renderer::addFont(Font* font) {
+    if (!font || !font->loaded) return;
+    std::string key = font->fontName + "_" + std::to_string(font->fontSize);
+    fontCache[key] = font;
+}
+
 bool Renderer::screenshot(const char* path) {
     int w = cfg.width, h = cfg.height;
     std::vector<uint8_t> pixels(w * h * 3);

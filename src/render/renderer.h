@@ -81,15 +81,34 @@ struct Shader {
     void destroy();
 };
 
+struct GlyphInfo {
+    uint8_t width = 0, height = 0;
+    int8_t xOff = 0, yOff = 0;
+    uint8_t xAdvance = 0;
+};
+
+struct GFTChar {
+    uint16_t bitmapIndex{};
+    uint8_t xOrigin{}, yOrigin{}, width{}, height{};
+    int8_t xOffset{}, yOffset{};
+    uint8_t xAdvance{};
+};
+
 struct Font {
     uint32_t texture{};
-    int32_t charWidth{}, charHeight{};
+    int32_t charWidth{}, charHeight{};   // max glyph size
     int32_t texWidth{}, texHeight{};
     float charUV[256][4]{};
+    GlyphInfo glyphs[256]{};
     float defaultScale = 1.0f;
     bool loaded = false;
+    bool proportional = false;
+    std::string fontName;
+    int32_t fontSize = 0;
+
     bool load(const uint8_t* data, size_t size);
     bool loadDefault();
+    bool loadGFT(const uint8_t* data, size_t size);
     void render(const char* text, float x, float y, const ColorF& color, float scale = 1.0f);
     Point2F measure(const char* text, float scale = 1.0f);
 };
@@ -207,6 +226,8 @@ public:
     void addTexture(Texture* tex);
 
     Font* getFont() { return defaultFont; }
+    Font* getFont(const char* name, int size);
+    void addFont(Font* font);
     void renderText(const char* text, float x, float y, const ColorF& color, float scale = 1.0f);
 
     TerrainBlock* getTerrain() { return terrain; }
@@ -254,4 +275,7 @@ private:
     MatrixF shadowVP;           // light's view-projection
     MatrixF shadowBiasVP;       // bias * lightVP (world -> shadow UV)
     MatrixF shadowBiasMatrix;   // bias for NDC -> UV
+
+    // Font cache
+    std::unordered_map<std::string, Font*> fontCache;
 };
