@@ -1377,15 +1377,17 @@ VMValue TorqueScript::Impl::parsePrimary() {
             obj->className = className.text;
             if (!args.empty()) obj->name = args[0].toString();
             // Auto-generate name for unnamed controls
-            if (obj->name.empty() && obj->className.find("Gui") == 0) {
+            if (obj->name.empty() && (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 ||
+                                       obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl")) {
                 static uint32_t guiCounter = 0;
                 obj->name = "_unnamed" + std::to_string(guiCounter++);
             }
 
-            // Track parent-child for GUI controls
-
-            // If this is a GuiControl subclass, track parent
-            bool isGuiControl = (obj->className.find("Gui") == 0);
+            // Track parent-child for GUI controls (Gui*, Shell*, GameTSCtrl)
+            bool isGuiControl = (obj->className.find("Gui") == 0) ||
+                                (obj->className.find("Shell") == 0) ||
+                                obj->className == "GameTSCtrl" ||
+                                obj->className.find("Hud") == 0;
 
             if (peekToken().type == TSTokenType::LBrace) {
                 nextToken();

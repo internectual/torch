@@ -33,6 +33,7 @@ constexpr int SCANCODE_HOME    = 74;
 constexpr int SCANCODE_END     = 77;
 constexpr int SCANCODE_LEFT    = 80;
 constexpr int SCANCODE_RIGHT   = 79;
+constexpr int SCANCODE_DELETE  = 76;
 
 struct PlatformConfig {
     std::string title = "Tribes 2";

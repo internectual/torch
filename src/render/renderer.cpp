@@ -366,6 +366,26 @@ void Renderer::drawTexturedRect(const Point3F& a, const Point3F& b, uint32_t tex
     stats.drawCalls++;
 }
 
+void Renderer::drawTexturedRectUV(const Point3F& a, const Point3F& b, uint32_t texId, float u0, float v0, float u1, float v1) {
+    float verts[] = {a.x,a.y,a.z, u0,v0, 1,1,1,1, b.x,a.y,a.z, u1,v0, 1,1,1,1, a.x,b.y,a.z, u0,v1, 1,1,1,1, b.x,b.y,a.z, u1,v1, 1,1,1,1};
+    uint32_t idxs[] = {0,1,2,1,3,2};
+    uint32_t vao, vbo, ebo;
+    glGenVertexArrays(1,&vao); glGenBuffers(1,&vbo); glGenBuffers(1,&ebo);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER,vbo); glBufferData(GL_ARRAY_BUFFER,sizeof(verts),verts,GL_STATIC_DRAW);
+    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,9*sizeof(float),(void*)0); glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,9*sizeof(float),(void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,9*sizeof(float),(void*)(5*sizeof(float))); glEnableVertexAttribArray(2);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,ebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER,sizeof(idxs),idxs,GL_STATIC_DRAW);
+    auto* ss = ShaderManager::getSpriteShader();
+    if (ss) { ss->bind(); ss->setUniform("uProjection",projection); ss->setUniform("uView",view);
+        ss->setUniform("uUseTexture",int32_t(1)); ss->setUniform("uTexture",int32_t(0)); }
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, texId);
+    glDisable(GL_CULL_FACE); glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,0); glEnable(GL_CULL_FACE);
+    glDeleteVertexArrays(1,&vao); glDeleteBuffers(1,&vbo); glDeleteBuffers(1,&ebo);
+    stats.drawCalls++;
+}
+
 void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color, uint32_t texture) {
     auto* shader = ShaderManager::getSpriteShader();
     if (!shader) return;
@@ -441,6 +461,7 @@ Texture* Renderer::loadTexture(const char* path) {
     tex->load(data.data(), data.size());
     impl->textures[path] = tex;
     stats.textures++;
+    Console::instance().printf(LogLevel::Debug, "Texture loaded: %s (%dx%d)", path, tex->width, tex->height);
     return tex;
 }
 
@@ -525,7 +546,9 @@ void Texture::load(const uint8_t* data, size_t size) {
     int w, h, channels;
     unsigned char* pixels = stbi_load_from_memory(data, (int)size, &w, &h, &channels, 4);
     if (!pixels) {
-        // Generate magenta/black checkerboard as fallback for missing/broken textures
+        // Try BM8 format (Tribes 2 proprietary)
+        if (loadBM8(data, size)) return;
+        // Generate magenta/black checkerboard as fallback
         const int cw = 32, ch = 32;
         std::vector<uint8_t> cb(cw * ch * 4);
         for (int y = 0; y < ch; y++)
@@ -588,11 +611,10 @@ void Texture::loadRaw(const uint8_t* pixels, int32_t w, int32_t h, int32_t chann
     glBindTexture(GL_TEXTURE_2D, id);
     GLenum fmt = (channels == 4) ? GL_RGBA : GL_RGB;
     glTexImage2D(GL_TEXTURE_2D, 0, (GLint)fmt, w, h, 0, fmt, GL_UNSIGNED_BYTE, pixels);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     width = w; height = h;
     loaded = true;
 }

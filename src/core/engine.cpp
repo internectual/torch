@@ -17,6 +17,7 @@
 #include <signal.h>
 #include <fstream>
 #include <sys/stat.h>
+#include <sstream>
 
 struct Engine::Impl {};
 
@@ -97,8 +98,40 @@ bool Engine::init(int argc, char* argv[]) {
         sigaction(SIGTERM, &sa, nullptr);
     }
 
+    // Load config from torch.cfg
+    std::string dataDir = ".";
+    {
+        std::ifstream cfg("torch.cfg");
+        if (!cfg) {
+            // Try next to the executable
+            std::string exePath = argc > 0 ? argv[0] : "";
+            auto sl = exePath.rfind('/');
+            if (sl != std::string::npos)
+                cfg.open(exePath.substr(0, sl + 1) + "torch.cfg");
+        }
+        if (cfg) {
+            std::string line;
+            while (std::getline(cfg, line)) {
+                // Skip comments and empty lines
+                if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+                auto eq = line.find('=');
+                if (eq == std::string::npos) continue;
+                std::string key = line.substr(0, eq);
+                std::string val = line.substr(eq + 1);
+                // Trim whitespace
+                auto trim = [](std::string& s) {
+                    while (!s.empty() && (s[0]==' '||s[0]=='\t'||s[0]=='\r')) s.erase(0,1);
+                    while (!s.empty() && (s.back()==' '||s.back()=='\t'||s.back()=='\r')) s.pop_back();
+                };
+                trim(key); trim(val);
+                if (key == "dataDir") dataDir = val;
+            }
+        }
+    }
+    if (dataDir == ".") dataDir = "/home/methodown/t2-linux"; // fallback
+    Console::instance().setVariable("dataDir", dataDir.c_str());
+
     // Parse args
-    std::string dataDir = "/home/methodown/t2-linux";
     bool noLogin = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-data") == 0 && i + 1 < argc) dataDir = argv[i + 1];
@@ -293,7 +326,63 @@ bool Engine::init(int argc, char* argv[]) {
             Console::instance().printf(LogLevel::Error, "Screenshot failed: %s", path);
     }, "screenshot [path] - save a screenshot to path (default: screenshot.png)");
 
+    // Login flow commands
+    con->addCommand("LoginDone", [this](int32_t, const char* const*) {
+        gui->popDialog("LoginDlg");
+        Console::instance().printf(LogLevel::Info, "Login complete, starting game");
+        g->startLocalGame();
+    }, "LoginDone() - transition from login to game");
+
+    con->addCommand("LoginProcess", [](int32_t, const char* const*) {
+        Console::instance().printf(LogLevel::Info, "LoginProcess called (stub)");
+        Console::instance().execute("LoginDone()");
+    }, "LoginProcess - attempt login");
+
+    con->addCommand("CreateAccount", [](int32_t, const char* const*) {
+        Console::instance().printf(LogLevel::Info, "CreateAccount called (stub)");
+    });
+
+    con->addCommand("PasswordProcess", [](int32_t, const char* const*) {
+        Console::instance().printf(LogLevel::Info, "PasswordProcess called (stub)");
+    });
+
+    con->addCommand("Disconnect", [](int32_t, const char* const*) {
+        Console::instance().printf(LogLevel::Info, "Disconnect called");
+    });
+
+    // Init script path management
+    Console::instance().setVariable("initScript", "console_start.cs");
+    con->addCommand("setScriptPath", [](int32_t argc, const char* const* argv) {
+        if (argc > 1) {
+            Console::instance().setVariable("initScript", argv[1]);
+            Console::instance().printf(LogLevel::Info, "Init script set to: %s", argv[1]);
+        } else {
+            Console::instance().printf(LogLevel::Info, "Init script: %s", Console::instance().getStringVariable("initScript", ""));
+        }
+    }, "setScriptPath <path> - set the init script path (relative to dataDir)");
+
     Console::instance().printf(LogLevel::Info, "Engine initialized successfully");
+
+    // Load essential scripts: profiles first, then startup
+    if (scr->ts()) {
+        auto* ts = scr->ts();
+        // Try loading the main profile definitions
+        const char* profileScripts[] = {
+            "gui/guiProfiles.cs",
+            "scripts/EditorProfiles.cs",
+            nullptr
+        };
+        for (int i = 0; profileScripts[i]; i++) {
+            auto sdata = fs.read(profileScripts[i]);
+            if (!sdata.empty()) {
+                Console::instance().printf(LogLevel::Info, "Loading script: %s (%zu bytes)", profileScripts[i], sdata.size());
+                ts->execute(std::string((const char*)sdata.data(), sdata.size()), profileScripts[i]);
+            } else {
+                Console::instance().printf(LogLevel::Debug, "Script not found: %s", profileScripts[i]);
+            }
+        }
+        Console::instance().printf(LogLevel::Info, "Profiles loaded: %zu script objects", scr->objects.size());
+    }
 
     // Wire console commands into TorqueScript interpreter
     if (scr->ts()) {
@@ -315,18 +404,6 @@ bool Engine::init(int argc, char* argv[]) {
         });
         Console::instance().printf(LogLevel::Info, "Registered console commands as TS natives");
     }
-
-      // Skip startup scripts in -demo mode (they often block on login GUI)
-      if (demoPath.empty()) {
-          // For -nologin and normal mode: skip the slow startup scripts,
-          // but load the essential GUI files and run login completion
-          Console::instance().printf(LogLevel::Info, "Skipping startup scripts (fast boot)");
-          if (scr->ts()) {
-              // Set login bypass variables
-              std::string loginScript = "$SkipLogin = true; $pref::AcceptedEULA = true; LoginDone();";
-              scr->ts()->execute(loginScript, "login_bypass");
-          }
-      }
 
     // Load essential GUI files for HUD, menus, and login
     {
@@ -390,9 +467,9 @@ bool Engine::init(int argc, char* argv[]) {
             previewCamPos = {cx, h + half * 0.5f, cz - half * 0.8f};
             usePreviewCam = true;
         }
-    } else if (noLogin && demoPath.empty()) {
-        Console::instance().printf(LogLevel::Info, "-nologin: starting local game");
-        g->startLocalGame();
+    } else if (demoPath.empty() && previewMap.empty() && !noLogin) {
+        Console::instance().printf(LogLevel::Info, "Pushing login dialog");
+        gui->pushDialog("LoginDlg");
     }
 
     // -testshape: load a GLB shape for preview
@@ -704,19 +781,175 @@ void Engine::run() {
                 quit();
             }
         } else {
-            // Menu state
-             g->menu().update(dt);
-             plat->setRelativeMouse(false);
-             plat->showMouse(true);
-             auto& r = *ren;
-             r.beginFrame({0.1f, 0.1f, 0.2f, 1.0f});
-             // Render T2 GUI if canvas exists, otherwise fall back to simple menu
-             if (gui && gui->getCanvas()) {
-                 gui->render();
-             } else {
-                 g->menu().render();
-             }
-             r.endFrame();
+            // Dev sandbox view (menu state, no 3D game)
+            g->menu().update(dt);
+            plat->setRelativeMouse(false);
+            plat->showMouse(true);
+            auto& r = *ren;
+            auto w = plat->width(), h = plat->height();
+            r.beginFrame({0.05f, 0.05f, 0.08f, 1.0f});
+
+            // Set ortho projection for all 2D rendering
+            MatrixF ortho;
+            ortho.identity();
+            ortho.m[0][0] = 2.0f / w;
+            ortho.m[1][1] = -2.0f / h;
+            ortho.m[3][0] = -1.0f;
+            ortho.m[3][1] = 1.0f;
+            r.setProjection(ortho);
+            r.setView(MatrixF{});
+            ren->setViewport(0, 0, w, h);
+
+            // Dev info panel (right side)
+            if (overlayFont) {
+                char buf[256];
+                int ly = 4;
+                // Data directory and init script path
+                std::string cfgDir = Console::instance().getStringVariable("dataDir", ".");
+                overlayFont->render(("dataDir: " + cfgDir).c_str(), 650, ly, {0.5f, 0.5f, 0.5f, 1}, 1.0f); ly += 14;
+                // Editable init path
+                static std::string editBuf;
+                static bool pathFocused = false;
+                static int pathCursor = 0;
+                static float blink = 0;
+                if (!pathFocused) editBuf = Console::instance().getStringVariable("initScript", "console_start.cs");
+                std::string sp = editBuf;
+                overlayFont->render("init:", 650, ly, {0.5f, 0.8f, 1, 1}, 1.0f);
+                float pathX = 700;
+                ColorF pathCol = pathFocused ? ColorF{0,1,0.5f,1} : ColorF{1,1,1,1};
+                overlayFont->render(sp.c_str(), pathX, ly, pathCol, 1.0f);
+                if (pathFocused) {
+                    blink += 0.05f;
+                    if ((int)(blink / 0.4f) % 2 == 0)
+                        overlayFont->render("_", pathX + (float)pathCursor * 8.0f, ly, {0,1,0.5f,1}, 1.0f);
+                }
+                float launchX = pathX + std::max((float)sp.size(), 1.0f) * 8.0f + 10;
+                float launchY = (float)ly;
+                overlayFont->render(" [Launch]", launchX, launchY, {0,1,0.5f,1}, 1.0f); ly += 16;
+                // Launch when Enter pressed or [Launch] clicked
+                static bool prevLaunchEnter = false, prevLaunchClick = false;
+                static bool prevPathBS = false, prevPathEsc = false, prevPathDel = false;
+                static bool prevPathLeft = false, prevPathRight = false, prevPathHome = false, prevPathEnd = false;
+                bool launchEnter = plat->input().keysDown[SCANCODE_RETURN];
+                auto doLaunch = [&]() {
+                    std::string path = pathFocused ? editBuf : Console::instance().getStringVariable("initScript", "console_start.cs");
+                    if (!path.empty() && scr->ts()) {
+                        auto sdata = Engine::instance().fs().read(path.c_str());
+                        if (!sdata.empty()) {
+                            Console::instance().printf(LogLevel::Info, "Launching script: %s (%zu bytes)", path.c_str(), sdata.size());
+                            scr->ts()->execute(std::string((const char*)sdata.data(), sdata.size()), path);
+                            Console::instance().setVariable("initScript", path.c_str());
+                            // Save script path to config
+                            std::ofstream of("torch.cfg", std::ios::app);
+                            if (of) of << "initScript = " << path << std::endl;
+                        } else {
+                            Console::instance().printf(LogLevel::Warn, "Script not found: %s", sp.c_str());
+                        }
+                    }
+                };
+                if (launchEnter && !prevLaunchEnter && !gui->isDialogActive("ConsoleDlg")) doLaunch();
+                prevLaunchEnter = launchEnter;
+                // Click on path to focus it or [Launch] to execute
+                if (plat->input().mouseButtons[1] && !prevLaunchClick) {
+                    float mx = (float)plat->input().mouseX, my = (float)plat->input().mouseY;
+                    if (mx >= launchX && mx <= launchX + 72 && my >= launchY && my <= launchY + 14)
+                        doLaunch();
+                    else if (mx >= pathX && mx <= pathX + (float)editBuf.size() * 8.0f + 30 && my >= launchY && my <= launchY + 14)
+                        pathFocused = !pathFocused;
+                }
+                prevLaunchClick = plat->input().mouseButtons[1];
+                // Handle text input when path focused
+                if (pathFocused) {
+                    const std::string& ti = plat->input().textInput;
+                    for (char c : ti) {
+                        if (c >= 0x20 && c <= 0x7e && editBuf.size() < 200) {
+                            editBuf.insert(editBuf.begin() + pathCursor, c);
+                            pathCursor++;
+                        }
+                    }
+                    // Backspace
+                    if (plat->input().keysDown[SCANCODE_BACKSPACE] && !prevPathBS) {
+                        if (pathCursor > 0) { editBuf.erase(pathCursor - 1, 1); pathCursor--; }
+                    }
+                    prevPathBS = plat->input().keysDown[SCANCODE_BACKSPACE];
+                    // Delete
+                    if (plat->input().keysDown[SCANCODE_DELETE] && !prevPathDel) {
+                        if (pathCursor < (int)editBuf.size()) editBuf.erase(pathCursor, 1);
+                    }
+                    prevPathDel = plat->input().keysDown[SCANCODE_DELETE];
+                    // Left/Right arrows
+                    if (plat->input().keysDown[SCANCODE_LEFT] && !prevPathLeft) pathCursor--;
+                    if (plat->input().keysDown[SCANCODE_RIGHT] && !prevPathRight) pathCursor++;
+                    prevPathLeft = plat->input().keysDown[SCANCODE_LEFT];
+                    prevPathRight = plat->input().keysDown[SCANCODE_RIGHT];
+                    // Home/End
+                    if (plat->input().keysDown[SCANCODE_HOME] && !prevPathHome) pathCursor = 0;
+                    if (plat->input().keysDown[SCANCODE_END] && !prevPathEnd) pathCursor = (int)editBuf.size();
+                    prevPathHome = plat->input().keysDown[SCANCODE_HOME];
+                    prevPathEnd = plat->input().keysDown[SCANCODE_END];
+                    // Clamp cursor
+                    if (pathCursor < 0) pathCursor = 0;
+                    if (pathCursor > (int)editBuf.size()) pathCursor = (int)editBuf.size();
+                    // Enter launches
+                    if (launchEnter && !prevLaunchEnter) {
+                        Console::instance().setVariable("initScript", editBuf.c_str());
+                        pathFocused = false;
+                        doLaunch();
+                    }
+                    // Escape cancels editing
+                    if (plat->input().keysDown[SCANCODE_ESCAPE] && !prevPathEsc) { pathFocused = false; }
+                    prevPathEsc = plat->input().keysDown[SCANCODE_ESCAPE];
+                } else {
+                    prevPathBS = prevPathEsc = prevPathDel = false;
+                    prevPathLeft = prevPathRight = false;
+                    prevPathHome = prevPathEnd = false;
+                    pathCursor = (int)editBuf.size();
+                }
+                ly += 2;
+                overlayFont->render("=== Torch GUI Dev ===", 650, ly, {0.3f, 0.8f, 1, 1}, 1.5f); ly += 18;
+                snprintf(buf, sizeof(buf), "FPS: %d  dt: %.1fms", frameCount, dt * 1000);
+                overlayFont->render(buf, 650, ly, {0.6f, 0.6f, 0.6f, 1}, 1.0f); ly += 16;
+                snprintf(buf, sizeof(buf), "GUI dialogs: %zu", gui ? gui->dialogCount() : 0);
+                overlayFont->render(buf, 650, ly, {0.6f, 0.6f, 0.6f, 1}, 1.0f); ly += 16;
+                overlayFont->render("F1: overlay  ~: console  Enter:launch", 650, ly, {0.4f, 0.4f, 0.4f, 1}, 1.0f); ly += 16;
+                ly += 4;
+                overlayFont->render("--- Console Log ---", 650, ly, {0.3f, 0.8f, 1, 1}, 1.0f); ly += 18;
+                auto& log = Console::instance().getLog();
+                int start = std::max(0, (int)log.size() - 40);
+                for (int i = start; i < (int)log.size(); i++, ly += 12) {
+                    ColorF col{0.5f, 0.5f, 0.5f, 0.8f};
+                    const std::string& line = log[i];
+                    if (line.find("[ERROR]") == 0) col = {1, 0.3f, 0.3f, 0.8f};
+                    else if (line.find("[WARN]") == 0) col = {1, 0.8f, 0.3f, 0.8f};
+                    else if (line.find("[INFO]") == 0) col = {0.5f, 0.8f, 1, 0.8f};
+                    overlayFont->render(line.c_str(), 650, ly, col, 1.0f);
+                }
+            }
+
+            // GUI canvas at fixed 640x480 upper-left (full-window ortho, scissored)
+            ren->setViewport(0, 0, w, h);
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(0, h - 480, 640, 480);
+            if (gui && gui->getCanvas())
+                gui->render();
+            glDisable(GL_SCISSOR_TEST);
+
+            // Border around GUI area (2px bright border) - needs ortho for 640x480 area
+            ren->setViewport(0, 0, w, h);
+            MatrixF borderOrtho;
+            borderOrtho.identity();
+            borderOrtho.m[0][0] = 2.0f / w;
+            borderOrtho.m[1][1] = -2.0f / h;
+            borderOrtho.m[3][0] = -1.0f;
+            borderOrtho.m[3][1] = 1.0f;
+            r.setProjection(borderOrtho);
+            r.setView(MatrixF{});
+            r.drawRectFill({0, 0, 0}, {640, 2, 0}, {0, 1, 0.5f, 1});     // top
+            r.drawRectFill({0, 478, 0}, {640, 480, 0}, {0, 1, 0.5f, 1});  // bottom
+            r.drawRectFill({0, 0, 0}, {2, 480, 0}, {0, 1, 0.5f, 1});     // left
+            r.drawRectFill({638, 0, 0}, {640, 480, 0}, {0, 1, 0.5f, 1});  // right
+
+            r.endFrame();
         }
 
         // TORCH overlay (rendered on top of everything)

@@ -15,6 +15,8 @@ struct GuiControl {
     std::string text;
     std::string bitmap;
     std::string command;  // TS command to execute when activated
+    std::string altCommand; // alternate command (Enter in text fields)
+    std::string profileName; // GuiControlProfile name
     bool visible = true;
     bool active = true;
     std::vector<GuiControl*> children;
@@ -47,6 +49,7 @@ public:
     GuiControl* activeDialog() { return dialogStack.empty() ? canvas : dialogStack.back(); }
     void update(float dt); // process scheduled events
     void addSchedule(double delay, const std::string& command);
+    size_t dialogCount() const { return dialogStack.size(); }
 
 private:
     GuiControl* canvas{};
