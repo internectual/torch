@@ -45,6 +45,7 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  -testdif <path>    Load and dump DIF interior stats\n");
             fprintf(stdout, "  -preload <files>   Comma-separated scripts/guis to preload\n");
             fprintf(stdout, "  -version           Show version\n");
+            fprintf(stdout, "  -previewImg <path> Preview PNG to show in bottom-right corner\n");
             fprintf(stdout, "  -help              Show this help\n\n");
             fprintf(stdout, "Script args are passed through unmodified to the init script.\n\n");
             fprintf(stdout, "Controls:\n");
@@ -125,6 +126,7 @@ bool Engine::init(int argc, char* argv[]) {
                 };
                 trim(key); trim(val);
                 if (key == "dataDir") dataDir = val;
+                if (key == "previewImg") previewImgPath = val;
                 if (key == "preload") {
                     // Comma-separated list of files to load at startup
                     size_t pos = 0, comma;
@@ -171,6 +173,8 @@ bool Engine::init(int argc, char* argv[]) {
             testShapePath = argv[i + 1];
         if (strcmp(argv[i], "-testdif") == 0 && i + 1 < argc)
             testDifPath = argv[i + 1];
+        if (strcmp(argv[i], "-previewImg") == 0 && i + 1 < argc)
+            previewImgPath = argv[i + 1];
         if (strcmp(argv[i], "-preload") == 0 && i + 1 < argc) {
             std::string val = argv[i + 1];
             size_t pos = 0, comma;
@@ -1115,6 +1119,27 @@ void Engine::run() {
                             }
                         }
                     }
+                }
+            }
+
+            // Preview image in bottom-right corner
+            if (!previewImgPath.empty()) {
+                static uint32_t previewTex = 0;
+                static int pW = 0, pH = 0;
+                if (!previewTex) {
+                    auto* tex = ren->loadTexture(previewImgPath.c_str());
+                    if (tex) { previewTex = tex->id; pW = tex->width; pH = tex->height; }
+                }
+                if (previewTex) {
+                    int maxW = w / 4, maxH = h / 4;
+                    if (maxW < 100) maxW = 100;
+                    if (maxH < 100) maxH = 100;
+                    int dW = pW, dH = pH;
+                    if (dW > maxW) { dH = dH * maxW / dW; dW = maxW; }
+                    if (dH > maxH) { dW = dW * maxH / dH; dH = maxH; }
+                    int rx = w - dW - 6, ry = h - dH - 6;
+                    r.drawRectFill({(float)(rx - 2), (float)(ry - 2)}, {(float)(rx + dW + 2), (float)(ry + dH + 2)}, {0.2f, 0.2f, 0.2f, 0.8f});
+                    r.drawTexturedRectUV({(float)rx, (float)ry}, {(float)(rx + dW), (float)(ry + dH)}, previewTex, 0, 0, 1, 1);
                 }
             }
 
