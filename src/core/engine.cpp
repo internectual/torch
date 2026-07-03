@@ -47,12 +47,12 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  -camtarget x y z   Preview camera target\n");
             fprintf(stdout, "  -testshape <path>  Load and display a GLB shape\n");
             fprintf(stdout, "  -testdif <path>    Load and dump DIF interior stats\n");
-            fprintf(stdout, "  -preload <files>   Comma-separated scripts/guis to preload\n");
-            fprintf(stdout, "  -version           Show version\n");
-            fprintf(stdout, "  -init,-i <file>    Init script (auto-exec, saved to config, default console_start.cs)\n");
-            fprintf(stdout, "  -exec <file>       Execute a script/dataDir file at startup\n");
-            fprintf(stdout, "  -compile <file>    Compile a script to .dso and exit\n");
-            fprintf(stdout, "  -previewImg <path> Preview PNG to show in bottom-right\n");
+            fprintf(stdout, "  -preload,-p <files> Comma-separated scripts/guis to preload\n");
+            fprintf(stdout, "  -version,-v         Show version\n");
+            fprintf(stdout, "  -init,-i <file>     Init script (auto-exec, saved to config)\n");
+            fprintf(stdout, "  -exec,-e <file>     Execute a script file at startup\n");
+            fprintf(stdout, "  -compile,-c <file>  Compile a script to .dso and exit\n");
+            fprintf(stdout, "  -watermark,-w <path> Preview PNG in bottom-right corner\n");
             fprintf(stdout, "  -help              Show this help\n\n");
             fprintf(stdout, "Script args are passed through unmodified to the init script.\n\n");
             fprintf(stdout, "Controls:\n");
@@ -73,7 +73,7 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  1-0                Select weapon\n");
             std::exit(0);
         }
-        if (strcmp(argv[i], "-version") == 0 || strcmp(argv[i], "--version") == 0) {
+        if (strcmp(argv[i], "-version") == 0 || strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
             fprintf(stdout, "Torch v0.1.0\n");
             std::exit(0);
         }
@@ -180,20 +180,19 @@ bool Engine::init(int argc, char* argv[]) {
             testShapePath = argv[i + 1];
         if (strcmp(argv[i], "-testdif") == 0 && i + 1 < argc)
             testDifPath = argv[i + 1];
-        if (strcmp(argv[i], "-exec") == 0 && i + 1 < argc)
+        if ((strcmp(argv[i], "-exec") == 0 || strcmp(argv[i], "-e") == 0) && i + 1 < argc)
             execFile = argv[i + 1];
         if ((strcmp(argv[i], "-init") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) {
             execFile = argv[i + 1];
             Console::instance().setVariable("initScript", argv[i + 1]);
-            // Save to config
             std::ofstream of("torch.cfg", std::ios::app);
             if (of) of << "initScript = " << argv[i + 1] << std::endl;
         }
-        if (strcmp(argv[i], "-compile") == 0 && i + 1 < argc)
+        if ((strcmp(argv[i], "-compile") == 0 || strcmp(argv[i], "-c") == 0) && i + 1 < argc)
             compileFile = argv[i + 1];
-        if (strcmp(argv[i], "-previewImg") == 0 && i + 1 < argc)
+        if ((strcmp(argv[i], "-previewImg") == 0 || strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "-watermark") == 0) && i + 1 < argc)
             previewImgPath = argv[i + 1];
-        if (strcmp(argv[i], "-preload") == 0 && i + 1 < argc) {
+        if ((strcmp(argv[i], "-preload") == 0 || strcmp(argv[i], "-p") == 0) && i + 1 < argc) {
             std::string val = argv[i + 1];
             size_t pos = 0, comma;
             while ((comma = val.find(',', pos)) != std::string::npos) {
@@ -215,7 +214,7 @@ bool Engine::init(int argc, char* argv[]) {
         // Engine flags that take no value args (or are already consumed)
         auto isEngineFlag = [](const char* a) {
             const char* flags[] = {
-                "-help", "-h", "--help", "-version", "--version",
+                "-help", "-h", "--help", "-version", "-v", "--version",
                 "-nologin", "-online", nullptr
             };
             for (int f = 0; flags[f]; f++)
@@ -226,8 +225,8 @@ bool Engine::init(int argc, char* argv[]) {
         auto isEngineFlagWithArg = [](const char* a) {
             const char* flags[] = {
                 "-data", "-preview", "-demo", "--demo", "-testshape",
-                "-testdif", "-preload", "-previewImg", "-exec", "-compile",
-                "-init", "-i",
+                "-testdif", "-preload", "-p", "-previewImg", "-w", "-watermark",
+                "-exec", "-e", "-compile", "-c", "-init", "-i",
                 nullptr
             };
             for (int f = 0; flags[f]; f++)
