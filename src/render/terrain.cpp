@@ -345,10 +345,11 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
 
 bool Font::loadGFT(const uint8_t* data, size_t size) {
     // GFT header: version(u32), charWidth(u32), charHeight(u32), charCount(u32)
-    if (size < 16) { Console::instance().printf(LogLevel::Debug, "GFT: too small (%zu)", size); return false; }
+    if (size < 16) return false;
     uint32_t ver, cw, ch, count;
     memcpy(&ver, data, 4); memcpy(&cw, data+4, 4); memcpy(&ch, data+8, 4); memcpy(&count, data+12, 4);
-    if (ver != 1 || count > 256) { Console::instance().printf(LogLevel::Debug, "GFT: bad ver/count"); return false; }
+    (void)ver; (void)cw;
+    if (count > 256) return false;
     // Per-char data: array of GFTChar (9 bytes each): bitmapIndex(u16), xOrigin,u8, yOrigin,u8, width,u8, height,u8, xOffset,s8, yOffset,s8, xAdvance,u8
     uint32_t charDataOff = 16;
     uint32_t charDataSize = count * 9;
@@ -378,7 +379,7 @@ bool Font::loadGFT(const uint8_t* data, size_t size) {
     // Decode PNG (rest of file)
     int w, h, chans;
     unsigned char* pixels = stbi_load_from_memory(pngData, (int)pngAvail, &w, &h, &chans, 4);
-    if (!pixels) { Console::instance().printf(LogLevel::Debug, "GFT: stbi failed at offset %zu (%zu bytes)", pngStartOff, pngAvail); return false; }
+    if (!pixels) return false;
     texWidth = w; texHeight = h;
     // Create GL texture
     glGenTextures(1, &texture);

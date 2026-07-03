@@ -362,7 +362,6 @@ bool Engine::init(int argc, char* argv[]) {
     }
 
     // Load GFT fonts from data directory
-    Console::instance().printf(LogLevel::Info, "Loading GFT fonts from VL2...");
     {
         auto fontFiles = {"fonts/Arial_12.gft", "fonts/Arial_13.gft", "fonts/Arial_14.gft",
                           "fonts/Arial_16.gft", "fonts/Arial_18.gft", "fonts/Arial_20.gft",
@@ -374,7 +373,7 @@ bool Engine::init(int argc, char* argv[]) {
                           "fonts/Lucida Console_12.gft", "fonts/Sui Generis_14.gft"};
         for (const char* f : fontFiles) {
             auto fdata = fs.read(f);
-            if (fdata.empty()) { Console::instance().printf(LogLevel::Debug, "GFT not found: %s", f); continue; }
+            if (fdata.empty()) continue;
             auto* ft = new Font;
             if (ft->loadGFT(fdata.data(), fdata.size())) {
                 // Extract name/size from filename
