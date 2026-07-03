@@ -1468,39 +1468,37 @@ void Engine::run() {
                                     std::string display = "> " + bottomInput;
                                     overlayFont->render(display.c_str(), 6, inputY + 3, {0.9f, 0.9f, 0.9f, 0.9f}, 1.0f);
                                 }
-                                // Console log with scroll support
-                                static int consoleScroll = 0;
+                                // Console log: absolute line scroll (sticks only at bottom)
+                                static int consoleScroll = 0; // first visible line
                                 auto& log = Console::instance().getLog();
                                 int logH = contentH - inputH - 2;
                                 if (logH > 0) {
                                     int totalLines = (int)log.size();
                                     int visibleLines = logH / 12;
-                                    int maxScroll = std::max(0, totalLines - visibleLines);
-                                    // Scroll keys only when input not focused
+                                    int bottomLine = std::max(0, totalLines - visibleLines);
+                                    // Scroll keys (only when input not focused)
                                     if (!bottomInputActive) {
                                         static bool prevPgUp = false, prevPgDn = false;
                                         static bool prevHome = false, prevEnd = false;
-                                        if (plat->input().keysDown[SCANCODE_PAGEUP] && !prevPgUp) consoleScroll += visibleLines;
-                                        if (plat->input().keysDown[SCANCODE_PAGEDOWN] && !prevPgDn) consoleScroll -= visibleLines;
-                                        if (plat->input().keysDown[SCANCODE_HOME] && !prevHome) consoleScroll = maxScroll;
-                                        if (plat->input().keysDown[SCANCODE_END] && !prevEnd) consoleScroll = 0;
+                                        if (plat->input().keysDown[SCANCODE_PAGEUP] && !prevPgUp) consoleScroll -= visibleLines;
+                                        if (plat->input().keysDown[SCANCODE_PAGEDOWN] && !prevPgDn) consoleScroll += visibleLines;
+                                        if (plat->input().keysDown[SCANCODE_HOME] && !prevHome) consoleScroll = 0;
+                                        if (plat->input().keysDown[SCANCODE_END] && !prevEnd) consoleScroll = bottomLine;
                                         prevPgUp = plat->input().keysDown[SCANCODE_PAGEUP];
                                         prevPgDn = plat->input().keysDown[SCANCODE_PAGEDOWN];
                                         prevHome = plat->input().keysDown[SCANCODE_HOME];
                                         prevEnd = plat->input().keysDown[SCANCODE_END];
                                     }
-                                    // Mouse wheel scroll
-                                    static int prevWheel = 0;
-                                    int wheel = plat->input().mouseWheel;
-                                    if (wheel != prevWheel) { consoleScroll += (wheel - prevWheel) * 3; }
-                                    prevWheel = wheel;
-                                    // Clamp
+                                    // Mouse wheel
+                                    int w = plat->input().mouseWheel;
+                                    if (w > 0) consoleScroll -= 3;
+                                    else if (w < 0) consoleScroll += 3;
+                                    // Clamp; sticks only if already at bottom
                                     if (consoleScroll < 0) consoleScroll = 0;
-                                    if (consoleScroll > maxScroll) consoleScroll = maxScroll;
-                                    // Render
-                                    int start = std::max(0, totalLines - visibleLines - consoleScroll);
+                                    if (consoleScroll > bottomLine) consoleScroll = bottomLine;
+                                    // Render from consoleScroll
                                     int lY = contentY + 2;
-                                    for (int i = start; i < (int)log.size() && lY + 12 <= inputY; i++, lY += 12) {
+                                    for (int i = consoleScroll; i < totalLines && lY + 12 <= inputY; i++, lY += 12) {
                                         ColorF col{0.5f, 0.5f, 0.5f, 0.9f};
                                         const std::string& line = log[i];
                                         if (line.find("[ERROR]") == 0) col = {1, 0.3f, 0.3f, 0.9f};
