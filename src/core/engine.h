@@ -55,6 +55,7 @@ public:
     std::string testShapePath;
     std::string testDifPath;
     std::vector<std::string> preloadFiles;
+    std::string cmdArgs;
 
 private:
     struct Impl;

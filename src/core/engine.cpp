@@ -37,17 +37,16 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "Usage: torch [options]\n\n");
             fprintf(stdout, "Options:\n");
             fprintf(stdout, "  -data <dir>        Tribes 2 data directory\n");
-            fprintf(stdout, "  -nologin           Skip login screen, start local game\n");
             fprintf(stdout, "  -demo <file.rec>   Play a demo recording\n");
             fprintf(stdout, "  -preview <map>     Load a map and take a screenshot\n");
             fprintf(stdout, "  -campos x y z      Preview camera position\n");
             fprintf(stdout, "  -camtarget x y z   Preview camera target\n");
             fprintf(stdout, "  -testshape <path>  Load and display a GLB shape\n");
             fprintf(stdout, "  -testdif <path>    Load and dump DIF interior stats\n");
-            fprintf(stdout, "  -online            Enable online mode\n");
             fprintf(stdout, "  -preload <files>   Comma-separated scripts/guis to preload\n");
             fprintf(stdout, "  -version           Show version\n");
             fprintf(stdout, "  -help              Show this help\n\n");
+            fprintf(stdout, "Script args are passed through unmodified to the init script.\n\n");
             fprintf(stdout, "Controls:\n");
             fprintf(stdout, "  WASD               Move / free camera\n");
             fprintf(stdout, "  Mouse              Look around\n");
@@ -187,6 +186,12 @@ bool Engine::init(int argc, char* argv[]) {
             trim(f);
             if (!f.empty()) preloadFiles.push_back(f);
         }
+    }
+
+    // Store command-line args for display/passthrough to init scripts
+    for (int i = 0; i < argc; i++) {
+        if (!cmdArgs.empty()) cmdArgs += " ";
+        cmdArgs += argv[i];
     }
 
     // Init subsystems
@@ -752,8 +757,9 @@ void Engine::run() {
             }
         }
 
-        // Game update
-        if (g->state() != Game::MenuScreen || g->isTestShapeLoaded()) {
+        // Game update + 3D render (if playing / test shape)
+        bool isPlaying = (g->state() != Game::MenuScreen || g->isTestShapeLoaded());
+        if (isPlaying) {
             if (!gui->isDialogActive("ConsoleDlg") && !g->isGamePaused()) {
                 // Read input
                 Game::InputMove input;
@@ -767,9 +773,9 @@ void Engine::run() {
                 input.jet = keys[SCANCODE_SPACE] != 0;
                 input.freeCam = keys[SCANCODE_F1] != 0;
                 input.orbitCam = keys[SCANCODE_F2] != 0;
-                input.fire = mButtons[1] != 0;      // Left mouse
-                input.altFire = mButtons[3] != 0;   // Right mouse
-                input.zoom = mButtons[2] != 0;      // Middle mouse
+                input.fire = mButtons[1] != 0;
+                input.altFire = mButtons[3] != 0;
+                input.zoom = mButtons[2] != 0;
                 input.reload = keys[SCANCODE_R] != 0;
                 input.showScoreboard = keys[SCANCODE_TAB] != 0;
                 input.demoPause = keys[SCANCODE_P] != 0;
@@ -780,29 +786,17 @@ void Engine::run() {
                     (float)plat->input().mouseDeltaX * 0.002f,
                     0
                 };
-
-                // Number keys for direct weapon selection
                 static int lastNumKey = 0;
                 for (int nk = 0; nk < 9; nk++) {
                     if (keys[30 + nk]) {
-                        if (lastNumKey != nk + 1) {
-                            g->player().selectWeapon(nk);
-                            lastNumKey = nk + 1;
-                        }
+                        if (lastNumKey != nk + 1) { g->player().selectWeapon(nk); lastNumKey = nk + 1; }
                         break;
                     }
                     if (lastNumKey && !keys[29 + lastNumKey]) lastNumKey = 0;
                 }
-
-                // Toggle relative mouse for FPS
                 static bool wasInMenu = true;
-                if (g->state() == Game::Playing && wasInMenu) {
-                    plat->setRelativeMouse(true);
-                    plat->showMouse(false);
-                    wasInMenu = false;
-                }
+                if (g->state() == Game::Playing && wasInMenu) { plat->setRelativeMouse(true); plat->showMouse(false); wasInMenu = false; }
                 if (g->state() != Game::Playing) wasInMenu = true;
-
                 g->applyInput(input);
             }
             {
@@ -810,7 +804,7 @@ void Engine::run() {
                 double t0 = Timer::now();
                 g->update(dt);
                 double t1 = Timer::now();
-                g->render(dt);
+                g->render(dt);  // 3D render with own beginFrame/endFrame
                 double t2 = Timer::now();
                 if (t1 - lastTiming >= 5.0) {
                     lastTiming = t1;
@@ -818,45 +812,54 @@ void Engine::run() {
                         (t1-t0)*1000, (t2-t1)*1000, (t2-t0)*1000);
                 }
             }
-
-            // Preview mode: take screenshot after first render
+            // Preview mode
             if (!previewMap.empty() && !previewDone) {
                 char path[256];
                 snprintf(path, sizeof(path), "preview_%s.png", previewMap.c_str());
-                if (ren->screenshot(path))
-                    Console::instance().printf(LogLevel::Info, "Preview saved: %s", path);
-                else
-                    Console::instance().printf(LogLevel::Error, "Preview screenshot failed");
-                previewDone = true;
-                quit();
+                if (ren->screenshot(path)) Console::instance().printf(LogLevel::Info, "Preview saved: %s", path);
+                else Console::instance().printf(LogLevel::Error, "Preview screenshot failed");
+                previewDone = true; quit();
             }
-        } else {
-            // Dev sandbox view (menu state, no 3D game)
-            g->menu().update(dt);
-            plat->setRelativeMouse(false);
-            plat->showMouse(true);
+        }
+
+        // ─── Dev panel (always rendered) ───────────────────────────────────
+        g->menu().update(dt);
+        plat->setRelativeMouse(false);
+        plat->showMouse(true);
+        {
             auto& r = *ren;
-            auto w = plat->width(), h = plat->height();
-            r.beginFrame({0.05f, 0.05f, 0.08f, 1.0f});
+            int w = (int)plat->width(), h = (int)plat->height();
+            bool menuState = !isPlaying;
 
-            // Set ortho projection for all 2D rendering
-            MatrixF ortho;
-            ortho.identity();
-            ortho.m[0][0] = 2.0f / w;
-            ortho.m[1][1] = -2.0f / h;
-            ortho.m[3][0] = -1.0f;
-            ortho.m[3][1] = 1.0f;
-            r.setProjection(ortho);
-            r.setView(MatrixF{});
-            ren->setViewport(0, 0, w, h);
+            if (menuState) r.beginFrame({0.05f, 0.05f, 0.08f, 1.0f});
 
-            // Dev info panel (right side)
+            // Ortho projection for 2D rendering
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glEnable(GL_BLEND);
+            {
+                MatrixF ortho;
+                ortho.identity();
+                ortho.m[0][0] = 2.0f / w;
+                ortho.m[1][1] = -2.0f / h;
+                ortho.m[3][0] = -1.0f;
+                ortho.m[3][1] = 1.0f;
+                r.setProjection(ortho);
+                r.setView(MatrixF{});
+                ren->setViewport(0, 0, w, h);
+            }
+
+            // Right-side dev info panel (clipped to canvas bottom at y=480)
             if (overlayFont) {
                 char buf[256];
                 int ly = 4;
-                // Data directory and init script path
+                const int rightX = 650;
+                const int canvasBottom = 480;
+
+                // dataDir
                 std::string cfgDir = Console::instance().getStringVariable("dataDir", ".");
-                overlayFont->render(("dataDir: " + cfgDir).c_str(), 650, ly, {0.5f, 0.5f, 0.5f, 1}, 1.0f); ly += 14;
+                overlayFont->render(("dataDir: " + cfgDir).c_str(), rightX, ly, {0.5f, 0.5f, 0.5f, 1}, 1.0f); ly += 14;
+
                 // Editable init path
                 static std::string editBuf;
                 static bool pathFocused = false;
@@ -864,22 +867,43 @@ void Engine::run() {
                 static float blink = 0;
                 if (!pathFocused) editBuf = Console::instance().getStringVariable("initScript", "console_start.cs");
                 std::string sp = editBuf;
-                overlayFont->render("init:", 650, ly, {0.5f, 0.8f, 1, 1}, 1.0f);
-                float pathX = 700;
+                overlayFont->render("init:", rightX, ly, {0.5f, 0.8f, 1, 1}, 1.0f);
+                float pathX = (float)(rightX + 50);
                 ColorF pathCol = pathFocused ? ColorF{0,1,0.5f,1} : ColorF{1,1,1,1};
-                overlayFont->render(sp.c_str(), pathX, ly, pathCol, 1.0f);
+                overlayFont->render(sp.c_str(), pathX, (float)ly, pathCol, 1.0f);
                 if (pathFocused) {
                     blink += 0.05f;
                     if ((int)(blink / 0.4f) % 2 == 0)
-                        overlayFont->render("_", pathX + (float)pathCursor * 8.0f, ly, {0,1,0.5f,1}, 1.0f);
+                        overlayFont->render("_", pathX + (float)pathCursor * 8.0f, (float)ly, {0,1,0.5f,1}, 1.0f);
                 }
                 float launchX = pathX + std::max((float)sp.size(), 1.0f) * 8.0f + 10;
                 float launchY = (float)ly;
                 overlayFont->render(" [Launch]", launchX, launchY, {0,1,0.5f,1}, 1.0f); ly += 16;
-                // Launch when Enter pressed or [Launch] clicked
+
+                // Editable args field
+                static std::string argsBuf;
+                static bool argsFocused = false;
+                static int argsCursor = 0;
+                static float argsBlink = 0;
+                int argsY = ly;
+                if (!argsFocused) argsBuf = cmdArgs;
+                overlayFont->render("args:", rightX, ly, {0.5f, 0.8f, 1, 1}, 1.0f);
+                float argsX = (float)(rightX + 50);
+                ColorF argsCol = argsFocused ? ColorF{0,1,0.5f,1} : ColorF{1,1,1,1};
+                overlayFont->render(argsBuf.c_str(), argsX, (float)ly, argsCol, 1.0f);
+                if (argsFocused) {
+                    argsBlink += 0.05f;
+                    if ((int)(argsBlink / 0.4f) % 2 == 0)
+                        overlayFont->render("_", argsX + (float)argsCursor * 8.0f, (float)ly, {0,1,0.5f,1}, 1.0f);
+                }
+                ly += 16;
+
+                // Launch/Enter handling
                 static bool prevLaunchEnter = false, prevLaunchClick = false;
                 static bool prevPathBS = false, prevPathEsc = false, prevPathDel = false;
                 static bool prevPathLeft = false, prevPathRight = false, prevPathHome = false, prevPathEnd = false;
+                static bool prevArgsBS = false, prevArgsEsc = false, prevArgsDel = false;
+                static bool prevArgsLeft = false, prevArgsRight = false, prevArgsHome = false, prevArgsEnd = false;
                 bool launchEnter = plat->input().keysDown[SCANCODE_RETURN];
                 auto doLaunch = [&]() {
                     std::string path = pathFocused ? editBuf : Console::instance().getStringVariable("initScript", "console_start.cs");
@@ -889,7 +913,6 @@ void Engine::run() {
                             Console::instance().printf(LogLevel::Info, "Launching script: %s (%zu bytes)", path.c_str(), sdata.size());
                             scr->ts()->execute(std::string((const char*)sdata.data(), sdata.size()), path);
                             Console::instance().setVariable("initScript", path.c_str());
-                            // Save script path to config
                             std::ofstream of("torch.cfg", std::ios::app);
                             if (of) of << "initScript = " << path << std::endl;
                         } else {
@@ -899,16 +922,20 @@ void Engine::run() {
                 };
                 if (launchEnter && !prevLaunchEnter && !gui->isDialogActive("ConsoleDlg")) doLaunch();
                 prevLaunchEnter = launchEnter;
-                // Click on path to focus it or [Launch] to execute
+
+                // Mouse click handling for path/args/launch
                 if (plat->input().mouseButtons[1] && !prevLaunchClick) {
                     float mx = (float)plat->input().mouseX, my = (float)plat->input().mouseY;
                     if (mx >= launchX && mx <= launchX + 72 && my >= launchY && my <= launchY + 14)
                         doLaunch();
                     else if (mx >= pathX && mx <= pathX + (float)editBuf.size() * 8.0f + 30 && my >= launchY && my <= launchY + 14)
                         pathFocused = !pathFocused;
+                    else if (mx >= argsX && mx <= argsX + (float)argsBuf.size() * 8.0f + 30 && my >= argsY && my <= argsY + 14)
+                        argsFocused = !argsFocused;
                 }
                 prevLaunchClick = plat->input().mouseButtons[1];
-                // Handle text input when path focused
+
+                // Text input for path field
                 if (pathFocused) {
                     const std::string& ti = plat->input().textInput;
                     for (char c : ti) {
@@ -917,36 +944,21 @@ void Engine::run() {
                             pathCursor++;
                         }
                     }
-                    // Backspace
-                    if (plat->input().keysDown[SCANCODE_BACKSPACE] && !prevPathBS) {
-                        if (pathCursor > 0) { editBuf.erase(pathCursor - 1, 1); pathCursor--; }
-                    }
+                    if (plat->input().keysDown[SCANCODE_BACKSPACE] && !prevPathBS) { if (pathCursor > 0) { editBuf.erase(pathCursor - 1, 1); pathCursor--; } }
                     prevPathBS = plat->input().keysDown[SCANCODE_BACKSPACE];
-                    // Delete
-                    if (plat->input().keysDown[SCANCODE_DELETE] && !prevPathDel) {
-                        if (pathCursor < (int)editBuf.size()) editBuf.erase(pathCursor, 1);
-                    }
+                    if (plat->input().keysDown[SCANCODE_DELETE] && !prevPathDel) { if (pathCursor < (int)editBuf.size()) editBuf.erase(pathCursor, 1); }
                     prevPathDel = plat->input().keysDown[SCANCODE_DELETE];
-                    // Left/Right arrows
                     if (plat->input().keysDown[SCANCODE_LEFT] && !prevPathLeft) pathCursor--;
                     if (plat->input().keysDown[SCANCODE_RIGHT] && !prevPathRight) pathCursor++;
                     prevPathLeft = plat->input().keysDown[SCANCODE_LEFT];
                     prevPathRight = plat->input().keysDown[SCANCODE_RIGHT];
-                    // Home/End
                     if (plat->input().keysDown[SCANCODE_HOME] && !prevPathHome) pathCursor = 0;
                     if (plat->input().keysDown[SCANCODE_END] && !prevPathEnd) pathCursor = (int)editBuf.size();
                     prevPathHome = plat->input().keysDown[SCANCODE_HOME];
                     prevPathEnd = plat->input().keysDown[SCANCODE_END];
-                    // Clamp cursor
                     if (pathCursor < 0) pathCursor = 0;
                     if (pathCursor > (int)editBuf.size()) pathCursor = (int)editBuf.size();
-                    // Enter launches
-                    if (launchEnter && !prevLaunchEnter) {
-                        Console::instance().setVariable("initScript", editBuf.c_str());
-                        pathFocused = false;
-                        doLaunch();
-                    }
-                    // Escape cancels editing
+                    if (launchEnter && !prevLaunchEnter) { Console::instance().setVariable("initScript", editBuf.c_str()); pathFocused = false; doLaunch(); }
                     if (plat->input().keysDown[SCANCODE_ESCAPE] && !prevPathEsc) { pathFocused = false; }
                     prevPathEsc = plat->input().keysDown[SCANCODE_ESCAPE];
                 } else {
@@ -955,54 +967,161 @@ void Engine::run() {
                     prevPathHome = prevPathEnd = false;
                     pathCursor = (int)editBuf.size();
                 }
+
+                // Text input for args field
+                if (argsFocused) {
+                    const std::string& ti = plat->input().textInput;
+                    for (char c : ti) {
+                        if (c >= 0x20 && c <= 0x7e && argsBuf.size() < 500) {
+                            argsBuf.insert(argsBuf.begin() + argsCursor, c);
+                            argsCursor++;
+                        }
+                    }
+                    if (plat->input().keysDown[SCANCODE_BACKSPACE] && !prevArgsBS) { if (argsCursor > 0) { argsBuf.erase(argsCursor - 1, 1); argsCursor--; } }
+                    prevArgsBS = plat->input().keysDown[SCANCODE_BACKSPACE];
+                    if (plat->input().keysDown[SCANCODE_DELETE] && !prevArgsDel) { if (argsCursor < (int)argsBuf.size()) argsBuf.erase(argsCursor, 1); }
+                    prevArgsDel = plat->input().keysDown[SCANCODE_DELETE];
+                    if (plat->input().keysDown[SCANCODE_LEFT] && !prevArgsLeft) argsCursor--;
+                    if (plat->input().keysDown[SCANCODE_RIGHT] && !prevArgsRight) argsCursor++;
+                    prevArgsLeft = plat->input().keysDown[SCANCODE_LEFT];
+                    prevArgsRight = plat->input().keysDown[SCANCODE_RIGHT];
+                    if (plat->input().keysDown[SCANCODE_HOME] && !prevArgsHome) argsCursor = 0;
+                    if (plat->input().keysDown[SCANCODE_END] && !prevArgsEnd) argsCursor = (int)argsBuf.size();
+                    prevArgsHome = plat->input().keysDown[SCANCODE_HOME];
+                    prevArgsEnd = plat->input().keysDown[SCANCODE_END];
+                    if (argsCursor < 0) argsCursor = 0;
+                    if (argsCursor > (int)argsBuf.size()) argsCursor = (int)argsBuf.size();
+                    if (plat->input().keysDown[SCANCODE_ESCAPE] && !prevArgsEsc) { argsFocused = false; }
+                    prevArgsEsc = plat->input().keysDown[SCANCODE_ESCAPE];
+                } else {
+                    prevArgsBS = prevArgsEsc = prevArgsDel = false;
+                    prevArgsLeft = prevArgsRight = false;
+                    prevArgsHome = prevArgsEnd = false;
+                    argsCursor = (int)argsBuf.size();
+                }
+
                 ly += 2;
-                overlayFont->render("=== Torch GUI Dev ===", 650, ly, {0.3f, 0.8f, 1, 1}, 1.5f); ly += 18;
+                overlayFont->render("=== Torch GUI Dev ===", rightX, ly, {0.3f, 0.8f, 1, 1}, 1.5f); ly += 18;
                 snprintf(buf, sizeof(buf), "FPS: %d  dt: %.1fms", frameCount, dt * 1000);
-                overlayFont->render(buf, 650, ly, {0.6f, 0.6f, 0.6f, 1}, 1.0f); ly += 16;
+                overlayFont->render(buf, rightX, ly, {0.6f, 0.6f, 0.6f, 1}, 1.0f); ly += 16;
                 snprintf(buf, sizeof(buf), "GUI dialogs: %zu", gui ? gui->dialogCount() : 0);
-                overlayFont->render(buf, 650, ly, {0.6f, 0.6f, 0.6f, 1}, 1.0f); ly += 16;
-                overlayFont->render("F1: overlay  ~: console  Enter:launch  Pause:debug", 650, ly, {0.4f, 0.4f, 0.4f, 1}, 1.0f); ly += 16;
+                overlayFont->render(buf, rightX, ly, {0.6f, 0.6f, 0.6f, 1}, 1.0f); ly += 16;
+                overlayFont->render("F1: overlay  ~: console  Enter:launch", rightX, ly, {0.4f, 0.4f, 0.4f, 1}, 1.0f); ly += 16;
                 ly += 4;
-                overlayFont->render("--- Console Log ---", 650, ly, {0.3f, 0.8f, 1, 1}, 1.0f); ly += 18;
+                overlayFont->render("--- Console Log ---", rightX, ly, {0.3f, 0.8f, 1, 1}, 1.0f); ly += 18;
+                // Console log clipped to canvas bottom
                 auto& log = Console::instance().getLog();
-                int start = std::max(0, (int)log.size() - 40);
-                for (int i = start; i < (int)log.size(); i++, ly += 12) {
-                    ColorF col{0.5f, 0.5f, 0.5f, 0.8f};
-                    const std::string& line = log[i];
-                    if (line.find("[ERROR]") == 0) col = {1, 0.3f, 0.3f, 0.8f};
-                    else if (line.find("[WARN]") == 0) col = {1, 0.8f, 0.3f, 0.8f};
-                    else if (line.find("[INFO]") == 0) col = {0.5f, 0.8f, 1, 0.8f};
-                    overlayFont->render(line.c_str(), 650, ly, col, 1.0f);
+                int maxLines = std::max(0, (canvasBottom - ly - 2) / 12);
+                if (maxLines > 0) {
+                    int start = std::max(0, (int)log.size() - maxLines);
+                    for (int i = start; i < (int)log.size() && ly + 12 <= canvasBottom; i++, ly += 12) {
+                        ColorF col{0.5f, 0.5f, 0.5f, 0.8f};
+                        const std::string& line = log[i];
+                        if (line.find("[ERROR]") == 0) col = {1, 0.3f, 0.3f, 0.8f};
+                        else if (line.find("[WARN]") == 0) col = {1, 0.8f, 0.3f, 0.8f};
+                        else if (line.find("[INFO]") == 0) col = {0.5f, 0.8f, 1, 0.8f};
+                        overlayFont->render(line.c_str(), rightX, ly, col, 1.0f);
+                    }
                 }
             }
 
-            // GUI canvas at fixed 640x480 upper-left (full-window ortho, scissored)
+            // GUI canvas at fixed 640x480 upper-left
             ren->setViewport(0, 0, w, h);
             glEnable(GL_SCISSOR_TEST);
             glScissor(0, h - 480, 640, 480);
-            if (gui && gui->getCanvas())
-                gui->render();
+            if (gui && gui->getCanvas()) gui->render();
             glDisable(GL_SCISSOR_TEST);
 
-            // Border around GUI area (2px bright border) - needs ortho for 640x480 area
-            ren->setViewport(0, 0, w, h);
-            MatrixF borderOrtho;
-            borderOrtho.identity();
-            borderOrtho.m[0][0] = 2.0f / w;
-            borderOrtho.m[1][1] = -2.0f / h;
-            borderOrtho.m[3][0] = -1.0f;
-            borderOrtho.m[3][1] = 1.0f;
-            r.setProjection(borderOrtho);
-            r.setView(MatrixF{});
-            r.drawRectFill({0, 0, 0}, {640, 2, 0}, {0, 1, 0.5f, 1});     // top
-            r.drawRectFill({0, 478, 0}, {640, 480, 0}, {0, 1, 0.5f, 1});  // bottom
-            r.drawRectFill({0, 0, 0}, {2, 480, 0}, {0, 1, 0.5f, 1});     // left
-            r.drawRectFill({638, 0, 0}, {640, 480, 0}, {0, 1, 0.5f, 1});  // right
+            // Border around GUI canvas
+            {
+                MatrixF borderOrtho;
+                borderOrtho.identity();
+                borderOrtho.m[0][0] = 2.0f / w;
+                borderOrtho.m[1][1] = -2.0f / h;
+                borderOrtho.m[3][0] = -1.0f;
+                borderOrtho.m[3][1] = 1.0f;
+                r.setProjection(borderOrtho);
+                r.setView(MatrixF{});
+                r.drawRectFill({0, 0, 0}, {640, 2, 0}, {0, 1, 0.5f, 1});
+                r.drawRectFill({0, 478, 0}, {640, 480, 0}, {0, 1, 0.5f, 1});
+                r.drawRectFill({0, 0, 0}, {2, 480, 0}, {0, 1, 0.5f, 1});
+                r.drawRectFill({638, 0, 0}, {640, 480, 0}, {0, 1, 0.5f, 1});
+            }
 
-            r.endFrame();
+            // ─── Bottom tabbed panel ─────────────────────────────────────
+            {
+                const int tabBarY = 480 + 2;
+                const int tabH = 22;
+                const int panelH = h - tabBarY;
+                if (panelH > tabH) {
+                    // Tab bar
+                    static int activeTab = 0;
+                    const char* tabNames[] = {"Console", "Telnet", "Resources", "Stack Trace"};
+                    const int numTabs = 4;
+                    int tabX = 4;
+                    // Handle tab clicks
+                    if (plat->input().mouseButtons[1]) {
+                        static bool prevTabClick = false;
+                        bool tabClick = plat->input().mouseButtons[1];
+                        if (tabClick && !prevTabClick) {
+                            float mx = (float)plat->input().mouseX, my = (float)plat->input().mouseY;
+                            int tx = tabX;
+                            for (int t = 0; t < numTabs; t++) {
+                                int tw = (int)strlen(tabNames[t]) * 9 + 12;
+                                if (my >= tabBarY && my < tabBarY + tabH && mx >= tx && mx < tx + tw)
+                                    activeTab = t;
+                                tx += tw + 2;
+                            }
+                        }
+                        prevTabClick = tabClick;
+                    }
+                    // Draw tab bar background
+                    r.drawRectFill({0, (float)tabBarY, 0}, {(float)w, (float)(tabBarY + tabH + 4), 0}, {0.1f, 0.1f, 0.12f, 0.9f});
+                    // Draw tabs
+                    int tx = tabX;
+                    for (int t = 0; t < numTabs; t++) {
+                        int tw = (int)strlen(tabNames[t]) * 9 + 12;
+                        ColorF tabCol = (t == activeTab) ? ColorF{0.3f, 0.7f, 1, 0.9f} : ColorF{0.2f, 0.2f, 0.25f, 0.8f};
+                        r.drawRectFill({(float)tx, (float)tabBarY, 0}, {(float)(tx + tw), (float)(tabBarY + tabH), 0}, tabCol);
+                        if (overlayFont)
+                            overlayFont->render(tabNames[t], (float)(tx + 6), (float)(tabBarY + 4), {1,1,1,0.9f}, 1.0f);
+                        tx += tw + 2;
+                    }
+                    // Tab content area
+                    int contentY = tabBarY + tabH + 4;
+                    int contentH = h - contentY - 2;
+                    if (contentH > 10) {
+                        r.drawRectFill({2, (float)contentY, 0}, {(float)(w - 2), (float)(contentY + contentH), 0}, {0.08f, 0.08f, 0.1f, 0.85f});
+                        if (overlayFont) {
+                            if (activeTab == 0) {
+                                // Console tab: show full log
+                                auto& log = Console::instance().getLog();
+                                int start = std::max(0, (int)log.size() - contentH / 12);
+                                int lY = contentY + 2;
+                                for (int i = start; i < (int)log.size() && lY + 12 <= contentY + contentH; i++, lY += 12) {
+                                    ColorF col{0.5f, 0.5f, 0.5f, 0.9f};
+                                    const std::string& line = log[i];
+                                    if (line.find("[ERROR]") == 0) col = {1, 0.3f, 0.3f, 0.9f};
+                                    else if (line.find("[WARN]") == 0) col = {1, 0.8f, 0.3f, 0.9f};
+                                    else if (line.find("[INFO]") == 0) col = {0.5f, 0.8f, 1, 0.9f};
+                                    overlayFont->render(line.c_str(), 6, lY, col, 1.0f);
+                                }
+                            } else if (activeTab == 1) {
+                                overlayFont->render("Telnet console - not connected", 6, contentY + 2, {0.5f,0.5f,0.5f,0.8f}, 1.0f);
+                            } else if (activeTab == 2) {
+                                overlayFont->render("Resource tree - not implemented", 6, contentY + 2, {0.5f,0.5f,0.5f,0.8f}, 1.0f);
+                            } else if (activeTab == 3) {
+                                overlayFont->render("Stack trace - not implemented", 6, contentY + 2, {0.5f,0.5f,0.5f,0.8f}, 1.0f);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (menuState) r.endFrame();
         }
 
-        // TORCH overlay (rendered on top of everything)
+        // TORCH overlay + minimap
         ren->setViewport(0, 0, plat->width(), plat->height());
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
