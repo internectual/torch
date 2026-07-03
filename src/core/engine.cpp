@@ -1113,29 +1113,27 @@ void Engine::run() {
                     for (auto& root : treeRoots) addNode(root, 0);
 
                     // Handle mouse clicks
-                    if (plat->input().mouseButtons[1]) {
+                    {
                         static bool prevTreeClick = false;
-                        if (plat->input().mouseButtons[1] && !prevTreeClick) {
+                        bool treeClick = plat->input().mouseButtons[1];
+                        if (treeClick && !prevTreeClick) {
                             float mx = (float)plat->input().mouseX, my = (float)plat->input().mouseY;
                             int idx = (int)(my - treeY) / itemH;
                             if (mx >= rightX && idx >= 0 && idx + treeScroll < (int)displayList.size() && idx < maxItems) {
                                 auto& entry = displayList[idx + treeScroll];
                                 auto* obj = scr->objects[entry.first];
-                                // Check if clicking on the expand [+] area
                                 int ex = rightX + entry.second * treeIndent;
                                 if (mx >= ex - 12 && mx < ex) {
-                                    // Toggle expand
                                     if (expandedNodes.count(entry.first))
                                         expandedNodes.erase(entry.first);
                                     else
                                         expandedNodes.insert(entry.first);
                                 } else {
-                                    // Select object
                                     selectedObject = entry.first;
                                 }
                             }
                         }
-                        prevTreeClick = plat->input().mouseButtons[1];
+                        prevTreeClick = treeClick;
                     }
 
                     // Scroll with mouse wheel
@@ -1247,7 +1245,7 @@ void Engine::run() {
                     const int numTabs = 4;
                     int tabX = 4;
                     // Handle tab clicks
-                    if (plat->input().mouseButtons[1]) {
+                    {
                         static bool prevTabClick = false;
                         bool tabClick = plat->input().mouseButtons[1];
                         if (tabClick && !prevTabClick) {
