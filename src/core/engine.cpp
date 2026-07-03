@@ -1315,17 +1315,109 @@ void Engine::run() {
                         r.drawRectFill({2, (float)contentY, 0}, {(float)(w - 2), (float)(contentY + contentH), 0}, {0.08f, 0.08f, 0.1f, 0.85f});
                         if (overlayFont) {
                             if (activeTab == 0) {
-                                // Console tab: show full log
+                                // Console tab: input line at bottom, log above
+                                const int inputH = 20;
+                                const int inputY = contentY + contentH - inputH;
+                                // Input line background
+                                r.drawRectFill({2, (float)inputY, 0}, {(float)(w - 2), (float)(contentY + contentH), 0}, {0.15f, 0.15f, 0.17f, 0.9f});
+                                // Input line text
+                                static std::string bottomInput;
+                                static int bottomInputCursor = (int)bottomInput.size();
+                                static bool bottomInputActive = false;
+                                // Click to focus
+                                {
+                                    static bool prevBottomClick = false;
+                                    bool click = plat->input().mouseButtons[1];
+                                    if (click && !prevBottomClick) {
+                                        float mx = (float)plat->input().mouseX, my = (float)plat->input().mouseY;
+                                        bottomInputActive = (my >= inputY && my < inputY + inputH && mx >= 4 && mx < w - 4);
+                                    }
+                                    prevBottomClick = click;
+                                }
+                                if (bottomInputActive) {
+                                    // Text input
+                                    const std::string& ti = plat->input().textInput;
+                                    for (char c : ti) {
+                                        if (c >= 0x20 && c <= 0x7e && bottomInput.size() < 500) {
+                                            bottomInput.insert(bottomInput.begin() + bottomInputCursor, c);
+                                            bottomInputCursor++;
+                                        }
+                                    }
+                                    // Backspace
+                                    static bool prevBS = false;
+                                    if (plat->input().keysDown[SCANCODE_BACKSPACE] && !prevBS && bottomInputCursor > 0) {
+                                        bottomInput.erase(bottomInputCursor - 1, 1);
+                                        bottomInputCursor--;
+                                    }
+                                    prevBS = plat->input().keysDown[SCANCODE_BACKSPACE];
+                                    // Delete
+                                    static bool prevDel = false;
+                                    if (plat->input().keysDown[SCANCODE_DELETE] && !prevDel && bottomInputCursor < (int)bottomInput.size())
+                                        bottomInput.erase(bottomInputCursor, 1);
+                                    prevDel = plat->input().keysDown[SCANCODE_DELETE];
+                                    // Left/Right
+                                    static bool prevLeft = false, prevRight = false;
+                                    if (plat->input().keysDown[SCANCODE_LEFT] && !prevLeft) bottomInputCursor--;
+                                    if (plat->input().keysDown[SCANCODE_RIGHT] && !prevRight) bottomInputCursor++;
+                                    prevLeft = plat->input().keysDown[SCANCODE_LEFT];
+                                    prevRight = plat->input().keysDown[SCANCODE_RIGHT];
+                                    // Home/End
+                                    static bool prevHome = false, prevEnd = false;
+                                    if (plat->input().keysDown[SCANCODE_HOME] && !prevHome) bottomInputCursor = 0;
+                                    if (plat->input().keysDown[SCANCODE_END] && !prevEnd) bottomInputCursor = (int)bottomInput.size();
+                                    prevHome = plat->input().keysDown[SCANCODE_HOME];
+                                    prevEnd = plat->input().keysDown[SCANCODE_END];
+                                    // Clamp
+                                    if (bottomInputCursor < 0) bottomInputCursor = 0;
+                                    if (bottomInputCursor > (int)bottomInput.size()) bottomInputCursor = (int)bottomInput.size();
+                                    // Enter executes
+                                    static bool prevEnter = false;
+                                    if (plat->input().keysDown[SCANCODE_RETURN] && !prevEnter) {
+                                        if (!bottomInput.empty()) {
+                                            std::string cmd = bottomInput;
+                                            bottomInput.clear();
+                                            bottomInputCursor = 0;
+                                            Console::instance().printf(LogLevel::Info, "==> %s", cmd.c_str());
+                                            if (!cmd.empty() && cmd[0] == '@') {
+                                                std::string query = cmd.substr(1);
+                                                while (!query.empty() && query[0] == ' ') query.erase(0, 1);
+                                                if (!query.empty()) {
+                                                    std::ofstream qf("/tmp/torch_ai_query.txt");
+                                                    if (qf) qf << query;
+                                                    Console::instance().printf(LogLevel::Info, "[AI] %s", query.c_str());
+                                                }
+                                            } else {
+                                                Console::instance().execute(cmd.c_str());
+                                            }
+                                        }
+                                    }
+                                    prevEnter = plat->input().keysDown[SCANCODE_RETURN];
+                                    // Cursor blink
+                                    static float blink = 0;
+                                    blink += 0.05f;
+                                    float cursorX = 6 + (float)bottomInputCursor * 8.0f;
+                                    if ((int)(blink / 0.4f) % 2 == 0)
+                                        r.drawRectFill({cursorX, (float)(inputY + 2), 0}, {cursorX + 1, (float)(inputY + inputH - 2), 0}, {0.5f, 1, 0.5f, 0.9f});
+                                }
+                                // Render input text
+                                if (overlayFont) {
+                                    std::string display = "> " + bottomInput;
+                                    overlayFont->render(display.c_str(), 6, inputY + 3, {0.9f, 0.9f, 0.9f, 0.9f}, 1.0f);
+                                }
+                                // Render log above input line
                                 auto& log = Console::instance().getLog();
-                                int start = std::max(0, (int)log.size() - contentH / 12);
-                                int lY = contentY + 2;
-                                for (int i = start; i < (int)log.size() && lY + 12 <= contentY + contentH; i++, lY += 12) {
-                                    ColorF col{0.5f, 0.5f, 0.5f, 0.9f};
-                                    const std::string& line = log[i];
-                                    if (line.find("[ERROR]") == 0) col = {1, 0.3f, 0.3f, 0.9f};
-                                    else if (line.find("[WARN]") == 0) col = {1, 0.8f, 0.3f, 0.9f};
-                                    else if (line.find("[INFO]") == 0) col = {0.5f, 0.8f, 1, 0.9f};
-                                    overlayFont->render(line.c_str(), 6, lY, col, 1.0f);
+                                int logH = contentH - inputH - 2;
+                                if (logH > 0) {
+                                    int start = std::max(0, (int)log.size() - logH / 12);
+                                    int lY = contentY + 2;
+                                    for (int i = start; i < (int)log.size() && lY + 12 <= inputY; i++, lY += 12) {
+                                        ColorF col{0.5f, 0.5f, 0.5f, 0.9f};
+                                        const std::string& line = log[i];
+                                        if (line.find("[ERROR]") == 0) col = {1, 0.3f, 0.3f, 0.9f};
+                                        else if (line.find("[WARN]") == 0) col = {1, 0.8f, 0.3f, 0.9f};
+                                        else if (line.find("[INFO]") == 0) col = {0.5f, 0.8f, 1, 0.9f};
+                                        overlayFont->render(line.c_str(), 6, lY, col, 1.0f);
+                                    }
                                 }
                             } else if (activeTab == 1) {
                                 overlayFont->render("Telnet console - not connected", 6, contentY + 2, {0.5f,0.5f,0.5f,0.8f}, 1.0f);
