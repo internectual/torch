@@ -21,6 +21,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include <ctime>
+#include <climits>
 
 struct Engine::Impl {};
 
@@ -1469,7 +1470,7 @@ void Engine::run() {
                                     overlayFont->render(display.c_str(), 6, inputY + 3, {0.9f, 0.9f, 0.9f, 0.9f}, 1.0f);
                                 }
                                 // Console log: absolute line scroll (sticks only at bottom)
-                                static int consoleScroll = 0; // first visible line
+                                static int consoleScroll = INT_MAX; // first visible line, init to follow
                                 auto& log = Console::instance().getLog();
                                 int logH = contentH - inputH - 2;
                                 if (logH > 0) {
@@ -1505,6 +1506,17 @@ void Engine::run() {
                                         else if (line.find("[WARN]") == 0) col = {1, 0.8f, 0.3f, 0.9f};
                                         else if (line.find("[INFO]") == 0) col = {0.5f, 0.8f, 1, 0.9f};
                                         overlayFont->render(line.c_str(), 6, lY, col, 1.0f);
+                                    }
+                                    // Scroll bar
+                                    if (totalLines > visibleLines) {
+                                        int sbRight = w - 6;
+                                        int sbTop = contentY + 2;
+                                        int sbH = inputY - sbTop;
+                                        float thumbH = (float)sbH * (float)visibleLines / (float)totalLines;
+                                        if (thumbH < 6) thumbH = 6;
+                                        float thumbPos = (float)sbTop + ((float)sbH - thumbH) * (float)consoleScroll / (float)(totalLines - visibleLines);
+                                        r.drawRectFill({(float)(sbRight - 4), (float)sbTop, 0}, {(float)sbRight, (float)(sbTop + sbH), 0}, {0.2f, 0.2f, 0.22f, 0.6f});
+                                        r.drawRectFill({(float)(sbRight - 4), thumbPos, 0}, {(float)sbRight, thumbPos + thumbH, 0}, {0.4f, 0.6f, 0.8f, 0.8f});
                                     }
                                 }
                             } else if (activeTab == 1) {
