@@ -18,6 +18,8 @@
 #include <fstream>
 #include <sys/stat.h>
 #include <sstream>
+#include <unordered_set>
+#include <algorithm>
 
 struct Engine::Impl {};
 
@@ -1012,19 +1014,196 @@ void Engine::run() {
                 overlayFont->render(buf, rightX, ly, {0.6f, 0.6f, 0.6f, 1}, 1.0f); ly += 16;
                 overlayFont->render("F1: overlay  ~: console  Enter:launch", rightX, ly, {0.4f, 0.4f, 0.4f, 1}, 1.0f); ly += 16;
                 ly += 4;
-                overlayFont->render("--- Console Log ---", rightX, ly, {0.3f, 0.8f, 1, 1}, 1.0f); ly += 18;
-                // Console log clipped to canvas bottom
-                auto& log = Console::instance().getLog();
-                int maxLines = std::max(0, (canvasBottom - ly - 2) / 12);
-                if (maxLines > 0) {
-                    int start = std::max(0, (int)log.size() - maxLines);
-                    for (int i = start; i < (int)log.size() && ly + 12 <= canvasBottom; i++, ly += 12) {
-                        ColorF col{0.5f, 0.5f, 0.5f, 0.8f};
-                        const std::string& line = log[i];
-                        if (line.find("[ERROR]") == 0) col = {1, 0.3f, 0.3f, 0.8f};
-                        else if (line.find("[WARN]") == 0) col = {1, 0.8f, 0.3f, 0.8f};
-                        else if (line.find("[INFO]") == 0) col = {0.5f, 0.8f, 1, 0.8f};
-                        overlayFont->render(line.c_str(), rightX, ly, col, 1.0f);
+                // Object tree view — replaces old console log
+                overlayFont->render("--- Object Tree ---", rightX, ly, {0.3f, 0.8f, 1, 1}, 1.0f); ly += 18;
+                {
+                    // Build parent→children map from all script objects
+                    static std::unordered_map<std::string, std::vector<std::string>> treeChildren;
+                    static std::vector<std::string> treeRoots;
+                    static bool treeDirty = true;
+                    if (treeDirty) {
+                        treeChildren.clear();
+                        treeRoots.clear();
+                        // Gather all named objects
+                        std::vector<std::string> allNames;
+                        for (auto& kv : scr->objects)
+                            if (!kv.second->name.empty()) allNames.push_back(kv.second->name);
+                        // Also collect unnamed objects
+                        for (auto& kv : scr->objects) {
+                            // If the object has a parent, link it
+                            auto it = kv.second->internals.find("parent");
+                            if (it != kv.second->internals.end() && !it->second.toString().empty()) {
+                                std::string parentName = it->second.toString();
+                                if (scr->objects.count(parentName))
+                                    treeChildren[parentName].push_back(kv.first);
+                            } else {
+                                // No parent, check if it's a SimGroup or root-level object
+                                if (kv.second->className == "SimGroup" || kv.second->className.find("Sim") == 0)
+                                    treeRoots.push_back(kv.first);
+                            }
+                        }
+                        // Roots that weren't caught: any named object not a child of something else
+                        for (auto& n : allNames) {
+                            auto it = scr->objects.find(n);
+                            if (it == scr->objects.end()) continue;
+                            auto pit = it->second->internals.find("parent");
+                            bool hasParent = (pit != it->second->internals.end() && !pit->second.toString().empty() && scr->objects.count(pit->second.toString()));
+                            if (!hasParent && std::find(treeRoots.begin(), treeRoots.end(), n) == treeRoots.end())
+                                treeRoots.push_back(n);
+                        }
+                        // Let unnamed GuiControls parented to a SimGroup show up via the parent's children field
+                        treeDirty = false;
+                    }
+
+                    static std::unordered_set<std::string> expandedNodes;
+                    static std::string selectedObject;
+                    static int treeScroll = 0;
+                    const int treeIndent = 14;
+
+                    // Draw tree items in available space
+                    int treeY = ly;
+                    int maxTreeH = canvasBottom - treeY - 2;
+                    int itemH = 14;
+                    int maxItems = maxTreeH / itemH;
+
+                    // Build flat display list: roots → expanded children recursively
+                    std::vector<std::pair<std::string, int>> displayList;
+                    std::function<void(const std::string&, int)> addNode = [&](const std::string& nodeName, int depth) {
+                        if ((int)displayList.size() >= treeScroll + maxItems) return;
+                        if (depth > 10) return; // safety
+                        auto it = scr->objects.find(nodeName);
+                        if (it == scr->objects.end()) return;
+                        displayList.push_back({nodeName, depth});
+
+                        bool isSimGroup = (it->second->className == "SimGroup");
+                        bool hasChildren = (treeChildren.count(nodeName) && !treeChildren[nodeName].empty());
+                        if (!hasChildren && isSimGroup) {
+                            // Check if any unnamed objects have this as parent
+                            for (auto& kv : scr->objects) {
+                                if (kv.second->name.empty()) continue;
+                                auto pit = kv.second->internals.find("parent");
+                                if (pit != kv.second->internals.end() && pit->second.toString() == nodeName) {
+                                    hasChildren = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (expandedNodes.count(nodeName) && hasChildren) {
+                            // Show children
+                            if (treeChildren.count(nodeName)) {
+                                for (auto& child : treeChildren[nodeName])
+                                    addNode(child, depth + 1);
+                            }
+                            // Also show SimGroup children via parent field
+                            for (auto& kv : scr->objects) {
+                                if (kv.second->name.empty() || kv.first == nodeName) continue;
+                                auto pit = kv.second->internals.find("parent");
+                                if (pit != kv.second->internals.end() && pit->second.toString() == nodeName) {
+                                    // Only add if not already in treeChildren
+                                    bool already = false;
+                                    if (treeChildren.count(nodeName))
+                                        for (auto& c : treeChildren[nodeName])
+                                            if (c == kv.first) { already = true; break; }
+                                    if (!already) addNode(kv.first, depth + 1);
+                                }
+                            }
+                        }
+                    };
+                    for (auto& root : treeRoots) addNode(root, 0);
+
+                    // Handle mouse clicks
+                    if (plat->input().mouseButtons[1]) {
+                        static bool prevTreeClick = false;
+                        if (plat->input().mouseButtons[1] && !prevTreeClick) {
+                            float mx = (float)plat->input().mouseX, my = (float)plat->input().mouseY;
+                            int idx = (int)(my - treeY) / itemH;
+                            if (mx >= rightX && idx >= 0 && idx + treeScroll < (int)displayList.size() && idx < maxItems) {
+                                auto& entry = displayList[idx + treeScroll];
+                                auto* obj = scr->objects[entry.first];
+                                // Check if clicking on the expand [+] area
+                                int ex = rightX + entry.second * treeIndent;
+                                if (mx >= ex - 12 && mx < ex) {
+                                    // Toggle expand
+                                    if (expandedNodes.count(entry.first))
+                                        expandedNodes.erase(entry.first);
+                                    else
+                                        expandedNodes.insert(entry.first);
+                                } else {
+                                    // Select object
+                                    selectedObject = entry.first;
+                                }
+                            }
+                        }
+                        prevTreeClick = plat->input().mouseButtons[1];
+                    }
+
+                    // Scroll with mouse wheel
+                    static int prevWheel = 0;
+                    int wheel = plat->input().mouseWheel;
+                    if (wheel != prevWheel) {
+                        treeScroll -= (wheel - prevWheel);
+                        if (treeScroll < 0) treeScroll = 0;
+                        int maxScroll = std::max(0, (int)displayList.size() - maxItems);
+                        if (treeScroll > maxScroll) treeScroll = maxScroll;
+                    }
+                    prevWheel = wheel;
+
+                    // Render visible items
+                    for (int i = treeScroll; i < (int)displayList.size() && i < treeScroll + maxItems; i++) {
+                        auto& entry = displayList[i];
+                        auto* obj = scr->objects[entry.first];
+                        if (!obj) continue;
+                        int yPos = treeY + (i - treeScroll) * itemH;
+                        int xPos = rightX + entry.second * treeIndent;
+
+                        // Expand [+] for objects with children
+                        auto* childMap = obj->className == "SimGroup" ? &treeChildren : nullptr;
+                        bool hasKids = (treeChildren.count(entry.first) && !treeChildren[entry.first].empty());
+                        if (!hasKids && obj->className == "SimGroup") {
+                            for (auto& kv : scr->objects) {
+                                if (kv.second->name.empty()) continue;
+                                auto pit = kv.second->internals.find("parent");
+                                if (pit != kv.second->internals.end() && pit->second.toString() == entry.first) {
+                                    hasKids = true; break;
+                                }
+                            }
+                        }
+                        if (hasKids) {
+                            bool isExp = expandedNodes.count(entry.first);
+                            overlayFont->render(isExp ? "[-]" : "[+]", xPos - 14, yPos, {0.5f, 1, 0.5f, 1}, 1.0f);
+                        }
+
+                        // Object name
+                        ColorF objCol = (entry.first == selectedObject) ? ColorF{0.3f, 1, 0.8f, 1} : ColorF{0.8f, 0.8f, 0.8f, 1};
+                        std::string label = obj->name.empty() ? "<unnamed>" : obj->name;
+                        if (!obj->className.empty()) label += " [" + obj->className + "]";
+                        overlayFont->render(label.c_str(), xPos, yPos, objCol, 1.0f);
+                    }
+
+                    // Store selected object name for inspector tab
+                    {
+                        static std::string prevSelected;
+                        static std::vector<std::pair<std::string, std::string>> cachedFields;
+                        if (selectedObject != prevSelected) {
+                            prevSelected = selectedObject;
+                            cachedFields.clear();
+                            auto* obj = selectedObject.empty() ? nullptr : scr->objects[selectedObject];
+                            if (obj) {
+                                cachedFields.push_back({"className", obj->className});
+                                cachedFields.push_back({"name", obj->name});
+                                for (auto& f : obj->internals)
+                                    cachedFields.push_back({f.first, f.second.toString()});
+                                for (auto& f : obj->fields)
+                                    cachedFields.push_back({f.first, f.second.toString()});
+                            }
+                        }
+                        // Make cachedFields accessible to the inspector tab
+                        // Use Console variable as a bridge
+                        if (!selectedObject.empty())
+                            Console::instance().setVariable("__selectedObj", selectedObject.c_str());
+                        else
+                            Console::instance().setVariable("__selectedObj", "");
                     }
                 }
             }
@@ -1052,6 +1231,10 @@ void Engine::run() {
                 r.drawRectFill({638, 0, 0}, {640, 480, 0}, {0, 1, 0.5f, 1});
             }
 
+            // Horizontal separator across full width at canvas bottom
+            r.drawRectFill({0, 479, 0}, {(float)w, 480, 0}, {0, 1, 0.5f, 0.6f});
+            r.drawRectFill({0, 480, 0}, {(float)w, 481, 0}, {0.1f, 0.1f, 0.12f, 0.8f});
+
             // ─── Bottom tabbed panel ─────────────────────────────────────
             {
                 const int tabBarY = 480 + 2;
@@ -1060,7 +1243,7 @@ void Engine::run() {
                 if (panelH > tabH) {
                     // Tab bar
                     static int activeTab = 0;
-                    const char* tabNames[] = {"Console", "Telnet", "Resources", "Stack Trace"};
+                    const char* tabNames[] = {"Console", "Telnet", "Inspector", "Stack Trace"};
                     const int numTabs = 4;
                     int tabX = 4;
                     // Handle tab clicks
@@ -1113,7 +1296,32 @@ void Engine::run() {
                             } else if (activeTab == 1) {
                                 overlayFont->render("Telnet console - not connected", 6, contentY + 2, {0.5f,0.5f,0.5f,0.8f}, 1.0f);
                             } else if (activeTab == 2) {
-                                overlayFont->render("Resource tree - not implemented", 6, contentY + 2, {0.5f,0.5f,0.5f,0.8f}, 1.0f);
+                                // Inspector: show selected object's properties
+                                std::string sel = Console::instance().getStringVariable("__selectedObj", "");
+                                if (sel.empty()) {
+                                    overlayFont->render("Click an object in the tree to inspect it", 6, contentY + 2, {0.5f,0.5f,0.5f,0.8f}, 1.0f);
+                                } else {
+                                    auto it = scr->objects.find(sel);
+                                    if (it == scr->objects.end()) {
+                                        std::string msg = "Object not found: " + sel;
+                                        overlayFont->render(msg.c_str(), 6, contentY + 2, {1,0.3f,0.3f,0.9f}, 1.0f);
+                                    } else {
+                                        auto* obj = it->second;
+                                        int iY = contentY + 2;
+                                        auto drawLine = [&](const std::string& key, const std::string& val) {
+                                            if (iY + 12 > contentY + contentH) return;
+                                            std::string line = key + ": " + val;
+                                            overlayFont->render(line.c_str(), 6, iY, {0.7f,0.7f,0.7f,0.9f}, 1.0f);
+                                            iY += 12;
+                                        };
+                                        drawLine("className", obj->className);
+                                        drawLine("name", obj->name);
+                                        for (auto& f : obj->internals)
+                                            drawLine(f.first, f.second.toString());
+                                        for (auto& f : obj->fields)
+                                            drawLine(f.first, f.second.toString());
+                                    }
+                                }
                             } else if (activeTab == 3) {
                                 overlayFont->render("Stack trace - not implemented", 6, contentY + 2, {0.5f,0.5f,0.5f,0.8f}, 1.0f);
                             }
