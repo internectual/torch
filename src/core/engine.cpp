@@ -20,6 +20,7 @@
 #include <sstream>
 #include <unordered_set>
 #include <algorithm>
+#include <ctime>
 
 struct Engine::Impl {};
 
@@ -673,7 +674,19 @@ void Engine::run() {
                         historyIdx = -1;
                         entry->text.clear();
                         Console::instance().printf(LogLevel::Info, "==> %s", cmd.c_str());
-                        Console::instance().execute(cmd.c_str());
+                        // @ prefix: send to AI via file IPC
+                        if (!cmd.empty() && cmd[0] == '@') {
+                            std::string query = cmd.substr(1);
+                            // Trim leading whitespace
+                            while (!query.empty() && query[0] == ' ') query.erase(0, 1);
+                            if (!query.empty()) {
+                                std::ofstream qf("/tmp/torch_ai_query.txt");
+                                if (qf) qf << query;
+                                Console::instance().printf(LogLevel::Info, "[AI] %s", query.c_str());
+                            }
+                        } else {
+                            Console::instance().execute(cmd.c_str());
+                        }
                     }
                 }
                 prevEnter = plat->input().keysDown[SCANCODE_RETURN];
@@ -853,6 +866,29 @@ void Engine::run() {
                 r.setProjection(ortho);
                 r.setView(MatrixF{});
                 ren->setViewport(0, 0, w, h);
+            }
+
+            // Poll AI response file
+            {
+                struct stat st;
+                static time_t lastRespCheck = 0;
+                time_t now = time(nullptr);
+                if (now != lastRespCheck && stat("/tmp/torch_ai_response.txt", &st) == 0 && st.st_size > 0) {
+                    std::ifstream rf("/tmp/torch_ai_response.txt");
+                    std::string resp;
+                    if (rf) {
+                        std::getline(rf, resp, '\0'); // read all
+                        if (!resp.empty()) {
+                            Console::instance().printf(LogLevel::Info, "[AI] %s", resp.c_str());
+                        }
+                    }
+                    rf.close();
+                    // Remove response file after reading
+                    std::ofstream clr("/tmp/torch_ai_response.txt", std::ios::trunc);
+                    clr.close();
+                    unlink("/tmp/torch_ai_response.txt");
+                }
+                lastRespCheck = now;
             }
 
             // Right-side dev info panel (clipped to canvas bottom at y=480)
