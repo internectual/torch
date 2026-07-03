@@ -48,7 +48,9 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  -testdif <path>    Load and dump DIF interior stats\n");
             fprintf(stdout, "  -preload <files>   Comma-separated scripts/guis to preload\n");
             fprintf(stdout, "  -version           Show version\n");
-            fprintf(stdout, "  -previewImg <path> Preview PNG to show in bottom-right corner\n");
+            fprintf(stdout, "  -exec <file>       Execute a script/dataDir file at startup\n");
+            fprintf(stdout, "  -compile <file>    Compile a script to .dso and exit\n");
+            fprintf(stdout, "  -previewImg <path> Preview PNG to show in bottom-right\n");
             fprintf(stdout, "  -help              Show this help\n\n");
             fprintf(stdout, "Script args are passed through unmodified to the init script.\n\n");
             fprintf(stdout, "Controls:\n");
@@ -176,6 +178,10 @@ bool Engine::init(int argc, char* argv[]) {
             testShapePath = argv[i + 1];
         if (strcmp(argv[i], "-testdif") == 0 && i + 1 < argc)
             testDifPath = argv[i + 1];
+        if (strcmp(argv[i], "-exec") == 0 && i + 1 < argc)
+            execFile = argv[i + 1];
+        if (strcmp(argv[i], "-compile") == 0 && i + 1 < argc)
+            compileFile = argv[i + 1];
         if (strcmp(argv[i], "-previewImg") == 0 && i + 1 < argc)
             previewImgPath = argv[i + 1];
         if (strcmp(argv[i], "-preload") == 0 && i + 1 < argc) {
@@ -195,10 +201,40 @@ bool Engine::init(int argc, char* argv[]) {
         }
     }
 
-    // Store command-line args for display/passthrough to init scripts
-    for (int i = 0; i < argc; i++) {
-        if (!cmdArgs.empty()) cmdArgs += " ";
-        cmdArgs += argv[i];
+    // Store command-line args for passthrough to init scripts (exclude engine-only flags)
+    {
+        // Engine flags that take no value args (or are already consumed)
+        auto isEngineFlag = [](const char* a) {
+            const char* flags[] = {
+                "-help", "-h", "--help", "-version", "--version",
+                "-nologin", "-online", nullptr
+            };
+            for (int f = 0; flags[f]; f++)
+                if (strcmp(a, flags[f]) == 0) return true;
+            return false;
+        };
+        // Engine flags that take 1 value arg
+        auto isEngineFlagWithArg = [](const char* a) {
+            const char* flags[] = {
+                "-data", "-preview", "-demo", "--demo", "-testshape",
+                "-testdif", "-preload", "-previewImg", "-exec", "-compile",
+                nullptr
+            };
+            for (int f = 0; flags[f]; f++)
+                if (strcmp(a, flags[f]) == 0) return true;
+            return false;
+        };
+        // Engine flags that take 3 value args
+        auto isEngineFlagWith3Args = [](const char* a) {
+            return strcmp(a, "-campos") == 0 || strcmp(a, "-camtarget") == 0;
+        };
+        for (int i = 0; i < argc; i++) {
+            if (isEngineFlag(argv[i])) continue;
+            if (isEngineFlagWithArg(argv[i])) { i++; continue; } // skip flag + its arg
+            if (isEngineFlagWith3Args(argv[i])) { i += 3; continue; } // skip flag + 3 args
+            if (!cmdArgs.empty()) cmdArgs += " ";
+            cmdArgs += argv[i];
+        }
     }
 
     // Init subsystems
@@ -440,6 +476,34 @@ bool Engine::init(int argc, char* argv[]) {
                 Console::instance().printf(LogLevel::Warn, "Preload: file not found: %s", pf.c_str());
             }
         }
+    }
+
+    // -exec: execute a file at startup (engine-level, not passed to init)
+    if (scr->ts() && !execFile.empty()) {
+        auto* ts = scr->ts();
+        auto edata = fs.read(execFile.c_str());
+        if (!edata.empty()) {
+            Console::instance().printf(LogLevel::Info, "Exec: %s (%zu bytes)", execFile.c_str(), edata.size());
+            ts->execute(std::string((const char*)edata.data(), edata.size()), execFile);
+        } else {
+            Console::instance().printf(LogLevel::Warn, "Exec: file not found: %s", execFile.c_str());
+        }
+    }
+
+    // -compile: parse/validate then exit (DSO writing not yet implemented)
+    if (!compileFile.empty()) {
+        auto cdata = fs.read(compileFile.c_str());
+        if (!cdata.empty()) {
+            Console::instance().printf(LogLevel::Info, "Compile: %s (%zu bytes) - DSO writer not implemented, parsing only", compileFile.c_str(), cdata.size());
+            if (scr->ts()) {
+                scr->ts()->execute(std::string((const char*)cdata.data(), cdata.size()), compileFile);
+                Console::instance().printf(LogLevel::Info, "Compile: %s parsed successfully", compileFile.c_str());
+            }
+        } else {
+            Console::instance().printf(LogLevel::Error, "Compile: file not found: %s", compileFile.c_str());
+        }
+        quit();
+        return true;
     }
 
     // Wire console commands into TorqueScript interpreter

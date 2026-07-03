@@ -57,6 +57,8 @@ public:
     std::vector<std::string> preloadFiles;
     std::string cmdArgs;
     std::string previewImgPath;
+    std::string execFile;
+    std::string compileFile;
 
 private:
     struct Impl;
