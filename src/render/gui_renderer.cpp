@@ -588,36 +588,178 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
             font->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
         }
-    } else if (cn == "GuiTextCtrl" || cn == "GuiMLTextCtrl") {
+    } else if (cn == "GuiTextCtrl") {
         ColorF tc{1,1,1,1};
         auto* prof = getProfile(ctl->profileName);
-        if (prof) { auto fi = prof->fields.find("fontColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), tc); }
+        if (prof) {
+            auto fi = prof->fields.find("fontColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), tc);
+            font = getProfileFont(prof);
+        }
         if (font && !ctl->text.empty()) {
-            std::string txt = ctl->text;
-            float ch = 12;
+            float ch = (float)font->charHeight;
             float lineY = y + 2;
             size_t pos = 0;
-            while (pos < txt.size()) {
-                size_t nl = txt.find('\n', pos);
-                std::string line = (nl != std::string::npos) ? txt.substr(pos, nl - pos) : txt.substr(pos);
-                float lw = (float)line.size() * ch * 0.7f;
-                if (lw > ctl->extentX - 4) {
-                    size_t brk = line.size();
-                    while (brk > 0 && lw > ctl->extentX - 4) {
-                        brk = line.rfind(' ', brk - 1);
-                        if (brk == std::string::npos) break;
-                        lw = (float)brk * ch * 0.7f;
-                    }
-                    if (brk != std::string::npos && brk > 0) {
-                        font->render(line.substr(0, brk).c_str(), x + 2, lineY, tc, 1.0f);
-                        lineY += ch;
-                        line = line.substr(brk + 1);
-                    }
-                }
+            while (pos < ctl->text.size()) {
+                size_t nl = ctl->text.find('\n', pos);
+                std::string line = (nl != std::string::npos) ? ctl->text.substr(pos, nl - pos) : ctl->text.substr(pos);
                 font->render(line.c_str(), x + 2, lineY, tc, 1.0f);
                 lineY += ch;
-                pos = (nl != std::string::npos) ? nl + 1 : txt.size();
+                pos = (nl != std::string::npos) ? nl + 1 : ctl->text.size();
             }
+        }
+    } else if (cn == "GuiMLTextCtrl") {
+        // Rich text renderer — parses GuiMLTextCtrl markup tags
+        auto* prof = getProfile(ctl->profileName);
+        if (prof) font = getProfileFont(prof);
+        ColorF curColor{1,1,1,1};
+        auto getHexColor = [](const std::string& hex) -> ColorF {
+            if (hex.size() < 6) return {1,1,1,1};
+            auto h2i = [](char c) -> int { if (c>='0'&&c<='9') return c-'0'; if (c>='a'&&c<='f') return c-'a'+10; if (c>='A'&&c<='F') return c-'A'+10; return 0; };
+            int r = h2i(hex[0])*16 + h2i(hex[1]);
+            int g = h2i(hex[2])*16 + h2i(hex[3]);
+            int b = h2i(hex[4])*16 + h2i(hex[5]);
+            return {(float)r/255.0f, (float)g/255.0f, (float)b/255.0f, 1};
+        };
+        enum class Justify { Left, Center, Right };
+        Justify curJust = Justify::Left;
+        struct RichSpan { std::string text; std::string fontName; int fontSize{}; ColorF color{1,1,1,1}; Justify justify{Justify::Left}; bool isLink{}; std::string linkTarget; std::string bitmap; };
+        // Flush current span into list
+        auto flushSpan = [&](std::vector<RichSpan>& s, RichSpan& c) {
+            if (c.text.empty() && c.bitmap.empty()) return;
+            if (!c.bitmap.empty()) { s.push_back(c); c.bitmap.clear(); return; }
+            s.push_back(c);
+            c.text.clear();
+            c.isLink = false;
+            c.linkTarget.clear();
+        };
+        // Parse text into spans
+        auto parseRich = [&](const std::string& src) -> std::vector<RichSpan> {
+            std::vector<RichSpan> spans;
+            RichSpan cur;
+            cur.fontName = font ? font->fontName : "";
+            cur.fontSize = font ? font->fontSize : 12;
+            cur.color = curColor;
+            cur.justify = curJust;
+            size_t i = 0;
+            while (i < src.size()) {
+                if (src[i] == '<') {
+                    size_t ce = src.find('>', i);
+                    if (ce == std::string::npos) { cur.text += src.substr(i); break; }
+                    std::string tag = src.substr(i+1, ce-i-1);
+                    i = ce + 1;
+                    if (tag == "just:center") { flushSpan(spans, cur); cur.justify = Justify::Center; }
+                    else if (tag == "just:left") { flushSpan(spans, cur); cur.justify = Justify::Left; }
+                    else if (tag == "just:right") { flushSpan(spans, cur); cur.justify = Justify::Right; }
+                    else if (tag.substr(0, 5) == "font:") {
+                        flushSpan(spans, cur);
+                        auto rest = tag.substr(5);
+                        auto cl = rest.rfind(':');
+                        if (cl != std::string::npos) { cur.fontName = rest.substr(0, cl); cur.fontSize = atoi(rest.substr(cl+1).c_str()); }
+                    }
+                    else if (tag.substr(0, 6) == "color:") {
+                        flushSpan(spans, cur);
+                        cur.color = getHexColor(tag.substr(6));
+                    }
+                    else if (tag.substr(0, 2) == "a:") {
+                        auto tabPos = tag.find('\t');
+                        if (tabPos == std::string::npos) tabPos = tag.find("\\tab");
+                        if (tabPos != std::string::npos) {
+                            flushSpan(spans, cur);
+                            cur.isLink = true;
+                            cur.linkTarget = tag.substr(tabPos + (tag[tabPos]=='\\'?5:1));
+                        }
+                    }
+                    else if (tag == "/a") { flushSpan(spans, cur); cur.isLink = false; cur.linkTarget.clear(); }
+                    else if (tag.substr(0, 8) == "BITMAP:") {
+                        flushSpan(spans, cur);
+                        RichSpan imgSpan;
+                        imgSpan.bitmap = tag.substr(8);
+                        spans.push_back(imgSpan);
+                    }
+                } else {
+                    if (src[i] == '\t') cur.text += ' ';
+                    else cur.text += src[i];
+                    i++;
+                }
+            }
+            flushSpan(spans, cur);
+            return spans;
+        };
+        auto spans = parseRich(ctl->text);
+        // Render spans
+        float lineY = y + 2;
+        float maxW = ctl->extentX - 4;
+        float penX = x + 2;
+        int lineStartSpan = 0;
+        for (int si = 0; si < (int)spans.size(); ) {
+            // Collect spans for this line
+            float lineW = 0;
+            int sj = si;
+            while (sj < (int)spans.size()) {
+                auto& sp = spans[sj];
+                if (!sp.bitmap.empty()) {
+                    Texture* tex = Engine::instance().renderer().loadTexture(sp.bitmap.c_str());
+                    float bw = tex ? (float)tex->width : 0;
+                    float bh = tex ? (float)tex->height : 0;
+                    if (lineW + bw > maxW) break;
+                    lineW += bw; sj++;
+                    continue;
+                }
+                Font* spf = Engine::instance().renderer().getFont(sp.fontName.c_str(), sp.fontSize);
+                float adv = spf ? spf->measure(sp.text.c_str(), 1.0f).x : (float)sp.text.size() * 8;
+                if (lineW + adv > maxW && lineW > 0) break;
+                // Check for word break
+                auto ws = sp.text.rfind(' ');
+                if (ws != std::string::npos && lineW > 0) {
+                    std::string before = sp.text.substr(0, ws);
+                    float bfW = spf ? spf->measure(before.c_str(), 1.0f).x : (float)before.size() * 8;
+                    if (lineW + bfW > maxW) break;
+                }
+                lineW += adv; sj++;
+            }
+            if (sj == si) sj = si + 1; // at least one span
+            // Determine line width for justification
+            float actualW = 0;
+            for (int k = si; k < sj; k++) {
+                auto& sp = spans[k];
+                if (!sp.bitmap.empty()) {
+                    Texture* tex = Engine::instance().renderer().loadTexture(sp.bitmap.c_str());
+                    actualW += tex ? (float)tex->width : 0;
+                } else {
+                    Font* spf = Engine::instance().renderer().getFont(sp.fontName.c_str(), sp.fontSize);
+                    actualW += spf ? spf->measure(sp.text.c_str(), 1.0f).x : (float)sp.text.size() * 8;
+                }
+            }
+            float lineStartX = x + 2;
+            if (spans[si].justify == Justify::Center) lineStartX = x + (maxW - actualW) * 0.5f;
+            else if (spans[si].justify == Justify::Right) lineStartX = x + maxW - actualW;
+            // Render spans on this line
+            penX = lineStartX;
+            float lineH = (float)font->charHeight;
+            for (int k = si; k < sj; k++) {
+                auto& sp = spans[k];
+                if (!sp.bitmap.empty()) {
+                    Texture* tex = Engine::instance().renderer().loadTexture(sp.bitmap.c_str());
+                    if (tex && tex->loaded) {
+                        float bw = (float)tex->width, bh = (float)tex->height;
+                        Engine::instance().renderer().drawTexturedRectUV({penX, lineY, 0}, {penX+bw, lineY+bh, 0}, tex->id, 0, 0, 1, 1);
+                        penX += bw;
+                    }
+                    continue;
+                }
+                Font* spf = Engine::instance().renderer().getFont(sp.fontName.c_str(), sp.fontSize);
+                if (!spf) spf = font;
+                if (spf) {
+                    float lyOff = 0;
+                    if (spf->charHeight < lineH) lyOff = (lineH - spf->charHeight) * 0.5f;
+                    ColorF col = sp.color;
+                    if (sp.isLink) { col = {0.3f, 0.7f, 1, 1}; }
+                    spf->render(sp.text.c_str(), penX, lineY + lyOff, col, 1.0f);
+                    penX += spf->measure(sp.text.c_str(), 1.0f).x;
+                }
+            }
+            lineY += lineH;
+            si = sj;
         }
     } else if (cn == "GuiBitmapCtrl" || cn == "GuiChunkedBitmapCtrl") {
         std::string bmpPath;
