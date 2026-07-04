@@ -1925,7 +1925,7 @@ bool ScriptEngine::init() {
         static int tabCount = 0;
         int tx = tabCount * 105; // 100 width + 5 gap
         tabCount++;
-        // Create a ScriptObject for the tab
+        // Create a ScriptObject for the tab with command wired for clicks
         auto* obj = new ScriptObject;
         obj->className = "ShellTabButton";
         obj->name = "LaunchTab_" + tabName;
@@ -1934,22 +1934,15 @@ bool ScriptEngine::init() {
         obj->fields["visible"] = VMValue(1);
         obj->fields["position"] = VMValue(std::to_string(tx) + " 0");
         obj->fields["extent"] = VMValue(std::string("100 29"));
+        obj->fields["command"] = VMValue("LaunchTabView.setSelected(\"" + tabName + "\")");
         obj->internals["parent"] = VMValue("LaunchTabView");
         ScriptEngine::instance().objects[obj->name] = obj;
-        // Create GuiControl and add to parent
+        // Create GuiControl — soToGui will wire onClick from command field
         auto& gr = Engine::instance().guiRenderer();
         GuiControl* parentCtl = gr.findControl("LaunchTabView");
         if (parentCtl) {
             GuiControl* tabCtl = gr.soToGui(obj->name, parentCtl);
             if (tabCtl) {
-                std::string myTab = tabName;
-                std::string cmd = "LaunchTabView.setSelected(\"" + myTab + "\");";
-                tabCtl->command = cmd;
-                tabCtl->onClick = [myTab, parentCtl]() { 
-                    Console::instance().printf(LogLevel::Info, "Tab click: '%s' (children=%zu)", 
-                        myTab.c_str(), parentCtl->children.size());
-                    Console::instance().execute(("LaunchTabView.setSelected(\"" + myTab + "\");").c_str());
-                };
                 if (!guiName.empty()) tabCtl->altCommand = guiName;
             }
         }
@@ -1961,7 +1954,16 @@ bool ScriptEngine::init() {
         if (args.size() < 2) return VMValue(0);
         std::string objName = args[0].toString();
         std::string tabName = args[1].toString();
-        Console::instance().printf(LogLevel::Debug, "TS: %s.setSelected('%s')", objName.c_str(), tabName.c_str());
+        // Find the tab control and mark it selected, deselect siblings
+        auto& gr = Engine::instance().guiRenderer();
+        GuiControl* tabView = gr.findControl(objName);
+        if (tabView) {
+            for (auto* child : tabView->children) {
+                bool isTab = (child->text == tabName && child->className == "ShellTabButton");
+                child->selected = isTab;
+                Console::instance().printf(LogLevel::Info, "TS: tab '%s' %s", child->text.c_str(), isTab ? "SELECTED" : "deselected");
+            }
+        }
         return VMValue(1);
     });
 

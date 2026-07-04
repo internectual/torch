@@ -20,6 +20,7 @@ struct GuiControl {
     std::string profileName; // GuiControlProfile name
     bool visible = true;
     bool active = true;
+    bool selected = false;
     std::vector<GuiControl*> children;
     GuiControl* parent = nullptr;
     std::function<void()> onClick;

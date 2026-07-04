@@ -1153,9 +1153,9 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         };
         if (!bmpBase.empty()) loadTex(bmpBase);
         if (!bmp.empty() && !tabTex) loadTex(bmp);
-        // Draw tab shape: solid fill with subtle border, no texture
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
-        // Bottom highlight line (tab-like look)
+        // Selected tab gets a lighter/blue-ish fill
+        ColorF tabFill = ctl->selected ? ColorF{0.35f,0.45f,0.55f,1} : fc;
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, tabFill);
         r.drawRectFill({x, y + ctl->extentY - 2, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.5f,0.5f,0.6f,0.5f});
         if (font && !ctl->text.empty()) {
             float tx2 = x + textOfsX;
