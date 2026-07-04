@@ -1407,6 +1407,7 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
     }
     if (mx >= x && mx < x + ctl->extentX && my >= y && my < y + ctl->extentY) {
         for (auto* child : ctl->children) { auto* h = hitTest(child, mx, my); if (h) return h; }
+        if (ctl->onClick) Console::instance().printf(LogLevel::Info, "HIT: '%s' text='%s' at (%.0f,%.0f)", ctl->className.c_str(), ctl->text.c_str(), x, y);
         return ctl;
     }
     return nullptr;

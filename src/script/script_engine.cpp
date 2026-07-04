@@ -1921,9 +1921,12 @@ bool ScriptEngine::init() {
         std::string guiName = args.size() > 2 ? args[2].toString() : "";
         Console::instance().printf(LogLevel::Debug, "TS: addLaunchTab('%s')", tabName.c_str());
         bool isSpacer = args.size() > 3 && args[3].toBool();
-        // Compute tab position based on existing children
-        static int tabSeq = 0;
-        int tx = tabSeq++ * 105;
+        // Compute tab position
+        int tx = 0;
+        auto* tv = Engine::instance().guiRenderer().findControl("LaunchTabView");
+        if (tv) tx = (int)tv->children.size() * 105;
+        Console::instance().printf(LogLevel::Info, "TS: addLaunchTab('%s') pos=%d tv=%p children=%zu", 
+            tabName.c_str(), tx, (void*)tv, tv ? tv->children.size() : 0);
         // Construct command with tab name baked into the string
         std::string bakedCmd = "LaunchTabView.setSelected(\"" + tabName + "\")";
         Console::instance().printf(LogLevel::Debug, "TS: addTab '%s' cmd='%s'", tabName.c_str(), bakedCmd.c_str());
