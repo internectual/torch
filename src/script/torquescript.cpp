@@ -61,27 +61,32 @@ struct TorqueScript::Impl {
             Console::instance().printf(LogLevel::Debug, "TS: turd compiler not found at %s", compilerScript);
             return false;
         }
-        // Create parent directory
+        // Create parent directory (and intermediate dirs)
+        auto mkdirP = [](const std::string& p) {
+            size_t pos = 0;
+            while ((pos = p.find('/', pos + 1)) != std::string::npos) {
+                std::string sub = p.substr(0, pos);
+                struct stat st; if (stat(sub.c_str(), &st) != 0) mkdir(sub.c_str(), 0755);
+            }
+            struct stat st; if (stat(p.c_str(), &st) != 0) mkdir(p.c_str(), 0755);
+        };
         auto sl = dsoFullPath.rfind('/');
-        if (sl != std::string::npos) {
-            std::string dir = dsoFullPath.substr(0, sl);
-            if (stat(dir.c_str(), &st) != 0) mkdir(dir.c_str(), 0755);
-        }
+        if (sl != std::string::npos) mkdirP(dsoFullPath.substr(0, sl));
         // Write source to temp file, compile, clean up
         std::string tmpPath = dsoFullPath + ".src.tmp";
         {
             FILE* f = fopen(tmpPath.c_str(), "w");
-            if (!f) { Console::instance().printf(LogLevel::Warn, "TS: compileToDSO: fopen failed"); return false; }
+            if (!f) return false;
             fwrite(srcContent.data(), 1, srcContent.size(), f);
             fclose(f);
         }
         std::string cmd = "/home/linuxbrew/.linuxbrew/bin/node " + std::string(compilerScript) + " " + tmpPath + " " + dsoFullPath + " 2>/dev/null";
         int ret = system(cmd.c_str());
-        unlink(tmpPath.c_str());
         if (ret != 0) {
-            Console::instance().printf(LogLevel::Warn, "TS: DSO compilation failed (exit %d)", ret);
+            unlink(tmpPath.c_str());
             return false;
         }
+        unlink(tmpPath.c_str());
         Console::instance().printf(LogLevel::Debug, "TS: compiled DSO: %s", dsoFullPath.c_str());
         return true;
     }
@@ -1277,28 +1282,32 @@ VMValue TorqueScript::Impl::parsePostfix() {
                 std::string objName = val.toString();
                 std::string methodName = member.text;
                 bool called = false;
+                // Method calls pass the object as the first argument (self)
+                std::vector<VMValue> methodArgs;
+                methodArgs.push_back(VMValue(objName));
+                methodArgs.insert(methodArgs.end(), args.begin(), args.end());
                 // Try the bare function name first
                 std::string fullName = methodName;
                 auto fit = functions.find(fullName);
-                if (fit != functions.end()) { val = outer->callFunction(fullName, args); called = true; }
+                if (fit != functions.end()) { val = outer->callFunction(fullName, methodArgs); called = true; }
                 if (!called) {
                     std::string lower = fullName;
                     for (auto& c : lower) c = (char)tolower((unsigned char)c);
                     auto nit = natives.find(lower);
-                    if (nit != natives.end()) { val = nit->second(args); called = true; }
+                    if (nit != natives.end()) { val = nit->second(methodArgs); called = true; }
                 }
                 if (!called) {
                     // Try namespace-qualified: ClassName::method
                     std::string nsFull = objName + "::" + methodName;
                     auto nsFit = functions.find(nsFull);
-                    if (nsFit != functions.end()) { val = outer->callFunction(nsFull, args); called = true; }
+                    if (nsFit != functions.end()) { val = outer->callFunction(nsFull, methodArgs); called = true; }
                 }
                 if (!called) {
                     std::string nsFull = objName + "::" + methodName;
                     std::string nsLower = nsFull;
                     for (auto& c : nsLower) c = (char)tolower((unsigned char)c);
                     auto nsNit = natives.find(nsLower);
-                    if (nsNit != natives.end()) { val = nsNit->second(args); called = true; }
+                    if (nsNit != natives.end()) { val = nsNit->second(methodArgs); called = true; }
                 }
             } else {
                 // Field access

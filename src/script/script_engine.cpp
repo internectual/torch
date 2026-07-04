@@ -1912,6 +1912,28 @@ bool ScriptEngine::init() {
     });
 
     // Missing native function stubs
+    // addLaunchTab(tabName, guiName) — adds a tab to LaunchTabView
+    tsInstance->registerNative("addLaunchTab", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        // args = [objectName, tabName, guiName, isSpacer]
+        std::string tabName = args[1].toString();
+        std::string guiName = args.size() > 2 ? args[2].toString() : "";
+        bool isSpacer = args.size() > 3 && args[3].toBool();
+        // Create a ScriptObject for the tab (like a ShellTabButton)
+        auto* obj = new ScriptObject;
+        obj->className = "ShellTabButton";
+        obj->name = "LaunchTab_" + tabName;
+        obj->fields["text"] = VMValue(tabName);
+        obj->fields["profile"] = VMValue("LaunchTabProfile");
+        obj->fields["visible"] = VMValue(1);
+        obj->fields["position"] = VMValue(std::string("0 0"));
+        obj->fields["extent"] = VMValue(std::string("100 29"));
+        // Link parent to LaunchTabView
+        obj->internals["parent"] = VMValue("LaunchTabView");
+        ScriptEngine::instance().objects[obj->name] = obj;
+        return VMValue(1);
+    });
+
     tsInstance->registerNative("getTaggedString", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(std::string(""));
         return args[0];
