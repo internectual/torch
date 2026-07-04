@@ -12,6 +12,7 @@
 #include <vector>
 #include <glob.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
@@ -109,6 +110,8 @@ bool Engine::init(int argc, char* argv[]) {
 
     // Load config from torch.cfg
     std::string dataDir = ".";
+    std::string outputDir = "";
+    std::string modPath = "base";
     {
         std::ifstream cfg("torch.cfg");
         if (!cfg) {
@@ -134,6 +137,7 @@ bool Engine::init(int argc, char* argv[]) {
                 };
                 trim(key); trim(val);
                 if (key == "dataDir") dataDir = val;
+                if (key == "outputDir") outputDir = val;
                 if (key == "previewImg") previewImgPath = val;
                 if (key == "canvasBg") canvasBgPath = val;
                 if (key == "preload") {
@@ -154,15 +158,36 @@ bool Engine::init(int argc, char* argv[]) {
             }
         }
     }
+    // Expand ~ to $HOME in directory paths
+    auto expandHome = [](std::string& p) {
+        if (!p.empty() && p[0] == '~') {
+            const char* home = getenv("HOME");
+            if (home) p = std::string(home) + p.substr(1);
+        }
+    };
+    expandHome(dataDir);
+    expandHome(outputDir);
     if (dataDir == ".") dataDir = "/home/methodown/t2-linux"; // fallback
     Console::instance().setVariable("dataDir", dataDir.c_str());
+    Console::instance().setVariable("modPath", modPath.c_str());
+    if (outputDir.empty()) {
+        const char* home = getenv("HOME");
+        outputDir = home ? std::string(home) + "/.loki/tribes2" : dataDir;
+    }
+    Console::instance().setVariable("outputDir", outputDir.c_str());
+    // Create outputDir if it doesn't exist
+    { struct stat st; if (stat(outputDir.c_str(), &st) != 0) mkdir(outputDir.c_str(), 0755); }
+    { std::string base = outputDir + "/base"; struct stat st; if (stat(base.c_str(), &st) != 0) mkdir(base.c_str(), 0755); }
 
     // Parse args
     bool noLogin = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-data") == 0 && i + 1 < argc) dataDir = argv[i + 1];
+        if (strcmp(argv[i], "-output") == 0 && i + 1 < argc) outputDir = argv[i + 1];
+        if (strcmp(argv[i], "-mod") == 0 && i + 1 < argc) modPath = argv[i + 1];
         if (strcmp(argv[i], "-online") == 0) Console::instance().setVariable("online", "1");
         if (strcmp(argv[i], "-nologin") == 0) noLogin = true;
+        if (strcmp(argv[i], "-debug") == 0) Console::instance().setLogLevel(LogLevel::Debug);
         if (strcmp(argv[i], "-preview") == 0 && i + 1 < argc) previewMap = argv[i + 1];
         if (strcmp(argv[i], "-campos") == 0 && i + 3 < argc) {
             previewCamPos.x = (float)atof(argv[i + 1]);
@@ -275,6 +300,11 @@ bool Engine::init(int argc, char* argv[]) {
         "/home/methodown/t2-mapper/docs/base",  // extracted assets
         "/home/methodown/torch/glb"           // decompressed GLB files
     };
+    // Add outputDir paths for DSO loading
+    if (!outputDir.empty()) {
+        paths.push_back(outputDir);
+        paths.push_back(outputDir + "/base");
+    }
     filesys->init(paths);
 
     // Mount all game archives
@@ -493,6 +523,9 @@ bool Engine::init(int argc, char* argv[]) {
 
     Console::instance().printf(LogLevel::Info, "Engine initialized successfully");
 
+    // Auto-accept EULA for development (-nologin) flow
+    Console::instance().setVariable("$pref::AcceptedEULA", "1");
+
     // Set up $Game::argc and $Game::argv from command-line args (for console_start.cs)
     if (scr->ts()) {
         auto* ts = scr->ts();
@@ -662,6 +695,32 @@ bool Engine::init(int argc, char* argv[]) {
         }
     } else if (noLogin) {
         Console::instance().printf(LogLevel::Info, "-nologin: dev panel (F1 overlay, ~ console, Pause debug)");
+        // Set before init script so it takes the offline path
+        Console::instance().setVariable("$SkipLogin", "true");
+        Console::instance().setVariable("$pref::SkipIntro", "true");
+        Console::instance().setVariable("$pref::SkipGGIntro", "true");
+        Console::instance().setVariable("$LaunchMode", "Offline");
+        Console::instance().setVariable("$IRCClient::serverCount", "0");
+        // Auto-execute the init script (e.g. console_start.cs) to load game UI
+        if (scr->ts()) {
+            std::string path = Console::instance().getStringVariable("initScript", "console_start.cs");
+            auto sdata = fs.read(path.c_str());
+            if (!sdata.empty()) {
+                Console::instance().printf(LogLevel::Info, "Auto-launching init script: %s (%zu bytes)", path.c_str(), sdata.size());
+                // executeFile handles DSO loading (.cs.dso first, then .cs)
+                if (scr->ts()->executeFile(path).type == VMValue::None) {
+                    scr->ts()->execute(std::string((const char*)sdata.data(), sdata.size()), path);
+                }
+                // Process events + render so the window is responsive during loading
+                plat->processEvents();
+                ren->beginFrame({0.15f, 0.15f, 0.2f, 1.0f});
+                if (gui) gui->render();
+                ren->endFrame();
+                plat->swapBuffers();
+            } else {
+                Console::instance().printf(LogLevel::Warn, "Init script not found: %s", path.c_str());
+            }
+        }
     } else if (demoPath.empty() && previewMap.empty()) {
         Console::instance().printf(LogLevel::Info, "Pushing login dialog");
         gui->pushDialog("LoginDlg");
@@ -1102,6 +1161,7 @@ void Engine::run() {
                         if (!sdata.empty()) {
                             Console::instance().printf(LogLevel::Info, "Launching script: %s (%zu bytes)", path.c_str(), sdata.size());
                             scr->ts()->execute(std::string((const char*)sdata.data(), sdata.size()), path);
+                            gui->refresh();
                             Console::instance().setVariable("initScript", path.c_str());
                             std::ofstream of("torch.cfg", std::ios::app);
                             if (of) of << "initScript = " << path << std::endl;
@@ -1697,6 +1757,7 @@ void Engine::run() {
             char title[128];
             snprintf(title, sizeof(title), "Torch - %d FPS", frameCount);
             plat->setTitle(title);
+            Console::instance().printf(LogLevel::Debug, "Heartbeat: %d FPS, dialogs=%zu", frameCount, gui ? gui->dialogCount() : 0);
             frameCount = 0;
             fpsTimer = 0;
         }

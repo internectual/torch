@@ -44,4 +44,9 @@ cmake --build build -j$(nproc)
 - [x] Console with scroll, history, input, and AI IPC (@ prefix)
 - [x] Dev panel with editable init path, args, log, and tabbed bottom panel
 - [x] Preload system, -exec and -compile CLI flags
+- [x] **DSO cache**: source files compiled to native T2 DSO bytecode via [turd](https://github.com/internectual/turd) compiler (`.cs`, `.gui`, `.mis`)
+- [x] **Event processing during load**: `~` console and Pause overlay work immediately, even while scripts load
+- [x] **Config**: `outputDir` (default `~/.loki/tribes2`), `-mod`, `-output` CLI flags
+- [x] **GUI child controls**: recursive ScriptObject→GuiControl creation for nested `new` in `.gui` files
+- [x] **Generic control text**: labels and text render for unhandled control types via profile font settings
 - [ ] TribesNext RSA authentication

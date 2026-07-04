@@ -3,6 +3,7 @@
 #include "core/console.h"
 #include "core/engine.h"
 #include "script/script_engine.h"
+#include "script/torquescript.h"
 #include <GL/glew.h>
 #include <algorithm>
 #include <unordered_map>
@@ -201,10 +202,13 @@ void GuiRenderer::render() {
     if (!dialogStack.empty()) {
         renderControl(dialogStack.back());
     }
-    // When no dialog is active, render just the canvas background (no children)
+    // Always render debug overlay so user knows the engine is alive
+    r.renderText("TORCH", 10, 10, {0,1,0,1}, 2.0f);
+    r.renderText("~ Console | Pause Debug", 10, 35, {0.8f,0.8f,0.8f,1}, 1.0f);
+    // When no dialog is active, show loading text
     if (dialogStack.empty()) {
-        // Only draw the canvas background, don't render all loaded GUIs
         r.drawBox({{0,0,0}, {1024,768,0}}, {0.15f,0.15f,0.2f,1});
+        r.renderText("Torch - Loading...", 380, 370, {0.6f,0.6f,0.7f,1}, 1.5f);
     }
 
 
@@ -797,11 +801,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             lineY += lineH;
             si = sj;
         }
-    } else if (cn == "GuiBitmapCtrl" || cn == "GuiChunkedBitmapCtrl") {
+    } else if (cn == "GuiBitmapCtrl" || cn == "GuiChunkedBitmapCtrl" || cn == "GuiFadeinBitmapCtrl") {
         std::string bmpPath;
         auto* prof = getProfile(ctl->profileName);
         if (prof) { auto bi = prof->fields.find("bitmap"); if (bi != prof->fields.end()) bmpPath = bi->second.toString(); }
         if (bmpPath.empty()) bmpPath = ctl->bitmap;
+        ColorF bgColor{0.15f, 0.15f, 0.2f, 1};
+        if (prof) { auto bi = prof->fields.find("fillColor"); if (bi != prof->fields.end()) parseColor(bi->second.toString(), bgColor); }
         if (!bmpPath.empty()) {
             auto tryLoad = [&](const std::string& p) -> Texture* {
                 Texture* t = r.loadTexture(p.c_str());
@@ -813,6 +819,16 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             if (!tex) tex = tryLoad("textures/gui/" + bmpPath + ".png");
             if (tex && tex->loaded)
                 r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, tex->id);
+            else
+                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bgColor);
+        } else {
+            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bgColor);
+        }
+        // Fade overlay for GuiFadeinBitmapCtrl
+        if (cn == "GuiFadeinBitmapCtrl") {
+            FadeState* fs = gr->getFadeState(ctl, false);
+            if (fs && fs->currentAlpha < 1.0f)
+                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0,0,0, 1.0f - fs->currentAlpha});
         }
     } else if (cn == "GuiTextEditCtrl" || cn == "ShellTextEditCtrl" ||
                cn == "GuiLoginPasswordCtrl") {
@@ -1252,15 +1268,27 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, scc);
     } else {
         // Generic GuiControl with profile-aware fill
-        ColorF gc{0.2f, 0.2f, 0.25f, 0.3f};
+        ColorF gc{0.2f, 0.2f, 0.25f, 1.0f};
         auto* prof = getProfile(ctl->profileName);
         if (prof) {
             auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), gc);
-            // Check if profile has opaque flag
             auto oi = prof->fields.find("opaque");
             if (oi != prof->fields.end()) { std::string ov = oi->second.toString(); if (ov == "true" || ov == "1") gc.a = 1.0f; }
         }
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, gc);
+        // Draw text if the control has one (for labels, buttons, tabs, etc.)
+        if (!ctl->text.empty()) {
+            ColorF tc{1,1,1,1};
+            float fontSize = 14.0f;
+            Font* font = r.getFont();
+            if (prof) {
+                auto fi = prof->fields.find("fontColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), tc);
+                auto fsi = prof->fields.find("fontSize"); if (fsi != prof->fields.end()) fontSize = (float)fsi->second.toDouble();
+                auto fti = prof->fields.find("fontType"); if (fti != prof->fields.end()) font = r.getFont(fti->second.toString().c_str(), (int)fontSize);
+            }
+            float tx = x + 4, ty = y + (ctl->extentY - fontSize) * 0.5f;
+            if (font) font->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
+        }
     }
 
     // Render children (propagate scroll offset)
@@ -1269,16 +1297,23 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
 }
 
 void GuiRenderer::update(float dt) {
-    (void)dt;
+    updateFades(dt);
     double now = Engine::instance().timer().now();
-    for (auto it = events.begin(); it != events.end(); ) {
-        if (now >= it->triggerTime) {
-            Console::instance().execute(it->command.c_str());
-            it = events.erase(it);
+    // Collect expired events first, then execute after erasing
+    // (execution may add new events, invalidating iterators)
+    std::vector<std::string> toRun;
+    size_t writeIdx = 0;
+    for (size_t i = 0; i < events.size(); i++) {
+        if (now >= events[i].triggerTime) {
+            toRun.push_back(events[i].command);
         } else {
-            ++it;
+            if (writeIdx != i) events[writeIdx] = std::move(events[i]);
+            writeIdx++;
         }
     }
+    events.resize(writeIdx);
+    for (auto& cmd : toRun)
+        Console::instance().execute(cmd.c_str());
 }
 
 void GuiRenderer::addSchedule(double delay, const std::string& command) {
@@ -1286,6 +1321,68 @@ void GuiRenderer::addSchedule(double delay, const std::string& command) {
     ev.triggerTime = Engine::instance().timer().now() + delay;
     ev.command = command;
     events.push_back(ev);
+}
+
+FadeState* GuiRenderer::getFadeState(const GuiControl* ctl, bool createIfMissing) {
+    auto it = fadeStates.find(ctl->name);
+    if (it != fadeStates.end())
+        return &it->second;
+    if (!createIfMissing) return nullptr;
+    FadeState fs;
+    fs.elapsed = 0.0;
+    fs.fadeTime = 2.0;
+    fs.fadeOut = true;
+    fs.done = false;
+    fs.currentAlpha = 0.0;
+    auto r = fadeStates.insert({ctl->name, fs});
+    return &r.first->second;
+}
+
+void GuiRenderer::updateFades(float dt) {
+    // Update all active GuiFadeinBitmapCtrl fade animations
+    for (size_t i = 0; i < dialogStack.size(); i++) {
+        auto* dlg = dialogStack[i];
+        if (!dlg || dlg->className != "GuiFadeinBitmapCtrl") continue;
+        FadeState* fs = getFadeState(dlg, true);
+        if (fs->done) continue;
+        fs->elapsed += dt;
+
+        // Parse fadeTime from control (default 2000 ms)
+        float fadeTime = 2.0f;
+        auto* obj = ScriptEngine::instance().findObject(dlg->name.c_str());
+        if (obj) {
+            auto fi = obj->fields.find("fadeTime");
+            if (fi != obj->fields.end())
+                fadeTime = fi->second.toFloat() / 1000.0f;
+        }
+
+        float halfTime = fadeTime * 0.5f;
+        if (fs->elapsed < halfTime) {
+            // Fade in: 0 -> 1
+            fs->currentAlpha = fs->elapsed / halfTime;
+        } else if (fs->fadeOut && fs->elapsed < fadeTime) {
+            // Fade out: 1 -> 0
+            fs->currentAlpha = 1.0f - (fs->elapsed - halfTime) / halfTime;
+        } else if (fs->elapsed >= fadeTime) {
+            fs->currentAlpha = fs->fadeOut ? 0.0f : 1.0f;
+            fs->done = true;
+            // Set done=true on the script object so TS can detect it
+            if (obj) {
+                obj->fields["done"] = VMValue("1");
+                obj->fields["skip"] = VMValue("1"); // skip AVI intro, go straight to StartLoginProcess
+            }
+        }
+    }
+
+    // Clean up fade states for controls no longer in the stack
+    for (auto it = fadeStates.begin(); it != fadeStates.end(); ) {
+        bool found = false;
+        for (auto* dlg : dialogStack) {
+            if (dlg && dlg->name == it->first) { found = true; break; }
+        }
+        if (found) ++it;
+        else it = fadeStates.erase(it);
+    }
 }
 
 GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
@@ -1311,6 +1408,52 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     return false;
 }
 
+// Create a GuiControl from a ScriptObject (and recursively create children)
+GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
+    auto& objs = ScriptEngine::instance().objects;
+    auto it = objs.find(name);
+    if (it == objs.end() || !(it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className == "GameTSCtrl"))
+        return nullptr;
+    // Already exists as a GuiControl?
+    GuiControl* ctl = findControl(name);
+    if (ctl) return ctl;
+    ctl = new GuiControl;
+    ctl->name = it->second->name;
+    ctl->className = it->second->className;
+    auto parsePair = [&](const std::string& key, float& a, float& b) {
+        auto fi = it->second->fields.find(key);
+        if (fi != it->second->fields.end()) { std::string s = fi->second.toString(); sscanf(s.c_str(), "%f %f", &a, &b); }
+    };
+    parsePair("position", ctl->posX, ctl->posY);
+    parsePair("extent", ctl->extentX, ctl->extentY);
+    auto fi = it->second->fields.find("text"); if (fi != it->second->fields.end()) ctl->text = fi->second.toString();
+    fi = it->second->fields.find("bitmap"); if (fi != it->second->fields.end()) ctl->bitmap = fi->second.toString();
+    fi = it->second->fields.find("command"); if (fi != it->second->fields.end()) ctl->command = fi->second.toString();
+    fi = it->second->fields.find("altCommand"); if (fi != it->second->fields.end()) ctl->altCommand = fi->second.toString();
+    fi = it->second->fields.find("profile"); if (fi != it->second->fields.end()) ctl->profileName = fi->second.toString();
+    fi = it->second->fields.find("visible"); if (fi != it->second->fields.end()) ctl->visible = fi->second.toBool();
+    if (ctl->className == "GuiCanvas") canvas = ctl;
+    bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellBitmapButton" || ctl->className == "ShellToggleButton" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl" || ctl->className == "ShellTextEditCtrl";
+    if (!ctl->command.empty() && isClickable) { std::string cmd = ctl->command; ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); }; }
+    if (parent) {
+        parent->addChild(ctl);
+    } else if (ctl != canvas && canvas) {
+        canvas->addChild(ctl);
+    }
+    if (canvas) {
+        ctl->extentX = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentX : ctl->extentX;
+        ctl->extentY = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentY : ctl->extentY;
+    }
+    // Recursively create children from ScriptObjects with parent == this name
+    for (auto& [n, obj] : objs) {
+        auto pit = obj->internals.find("parent");
+        if (pit != obj->internals.end() && pit->second.toString() == name) {
+            soToGui(n, ctl);
+        }
+    }
+    return ctl;
+}
+
 void GuiRenderer::pushDialog(const std::string& name) {
     GuiControl* ctl = findControl(name);
     if (!ctl) {
@@ -1318,34 +1461,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
         auto& objs = ScriptEngine::instance().objects;
         auto it = objs.find(name);
         if (it != objs.end() && (it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className == "GameTSCtrl")) {
-            ctl = new GuiControl;
-            ctl->name = it->second->name;
-            ctl->className = it->second->className;
-            auto parsePair = [&](const std::string& key, float& a, float& b) {
-                auto fi = it->second->fields.find(key);
-                if (fi != it->second->fields.end()) { std::string s = fi->second.toString(); sscanf(s.c_str(), "%f %f", &a, &b); }
-            };
-            parsePair("position", ctl->posX, ctl->posY);
-            parsePair("extent", ctl->extentX, ctl->extentY);
-            auto fi = it->second->fields.find("text"); if (fi != it->second->fields.end()) ctl->text = fi->second.toString();
-            fi = it->second->fields.find("bitmap"); if (fi != it->second->fields.end()) ctl->bitmap = fi->second.toString();
-            fi = it->second->fields.find("command"); if (fi != it->second->fields.end()) ctl->command = fi->second.toString();
-            fi = it->second->fields.find("altCommand"); if (fi != it->second->fields.end()) ctl->altCommand = fi->second.toString();
-            fi = it->second->fields.find("profile"); if (fi != it->second->fields.end()) ctl->profileName = fi->second.toString();
-            fi = it->second->fields.find("visible"); if (fi != it->second->fields.end()) ctl->visible = fi->second.toBool();
-            if (ctl->className == "GuiCanvas") canvas = ctl;
-            bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellBitmapButton" || ctl->className == "ShellToggleButton" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl" || ctl->className == "ShellTextEditCtrl";
-            if (!ctl->command.empty() && isClickable) { std::string cmd = ctl->command; ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); }; }
-            auto pit = it->second->internals.find("parent");
-            if (pit != it->second->internals.end()) {
-                std::string pname = pit->second.toString();
-                GuiControl* parent = findControl(pname);
-                if (parent) parent->addChild(ctl);
-            } else if (ctl != canvas && canvas) { canvas->addChild(ctl); }
-            if (canvas) {
-                ctl->extentX = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentX : ctl->extentX;
-                ctl->extentY = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentY : ctl->extentY;
-            }
+            ctl = soToGui(name, nullptr);
         }
     }
     if (ctl) {
@@ -1364,6 +1480,22 @@ void GuiRenderer::popDialog(const std::string& name) {
             Console::instance().printf(LogLevel::Debug, "GUI: popDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
             return;
         }
+    }
+}
+
+void GuiRenderer::setContent(const std::string& name) {
+    GuiControl* ctl = soToGui(name, nullptr);
+    if (ctl) {
+        dialogStack.clear();
+        dialogStack.push_back(ctl);
+        // Trigger onAdd callback if the control has one registered
+        if (auto* ts = Engine::instance().script().ts()) {
+            ts->callFunction(name + "::onAdd", {});
+            ts->callFunction(name + "::onWake", {});
+        }
+        Console::instance().printf(LogLevel::Debug, "GUI: setContent %s (stack now %zu)", name.c_str(), dialogStack.size());
+    } else {
+        Console::instance().printf(LogLevel::Warn, "GUI: setContent '%s' not found", name.c_str());
     }
 }
 

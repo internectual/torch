@@ -61,6 +61,7 @@ public:
     void registerNativeFunction(const char* name, NativeFunc fn);
 
     VMValue execute(DSOFile* dso, uint32_t startIp, const std::vector<VMValue>& args);
+    const std::vector<DSOFile*>& loadedScripts() const;
 
 private:
     struct Impl;

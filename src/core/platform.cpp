@@ -42,6 +42,7 @@ bool Platform::init(const PlatformConfig& config) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         return false;
     }
+    SDL_RaiseWindow(impl->window);
 
     impl->glContext = SDL_GL_CreateContext(impl->window);
     if (!impl->glContext) {

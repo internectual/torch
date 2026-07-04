@@ -2,6 +2,7 @@
 #include "render/renderer.h"
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <functional>
 
 struct ScriptObject;
@@ -32,6 +33,14 @@ struct GuiControl {
     void addChild(GuiControl* child);
 };
 
+struct FadeState {
+    double elapsed = 0.0;       // accumulated fade time in seconds
+    float fadeTime = 2.0;       // total fade duration in seconds
+    bool fadeOut = true;        // fade out after fading in
+    bool done = false;          // animation complete
+    float currentAlpha = 0.0;   // current opacity (0=transparent, 1=opaque)
+};
+
 class GuiRenderer {
 public:
     GuiRenderer();
@@ -44,13 +53,16 @@ public:
 
     GuiControl* getCanvas() { return canvas; }
     GuiControl* findControl(const std::string& name);
+    GuiControl* soToGui(const std::string& name, GuiControl* parent);
     void pushDialog(const std::string& name);
     void popDialog(const std::string& name);
+    void setContent(const std::string& name);
     bool isDialogActive(const std::string& name);
     GuiControl* activeDialog() { return dialogStack.empty() ? canvas : dialogStack.back(); }
     void update(float dt); // process scheduled events
     void addSchedule(double delay, const std::string& command);
     size_t dialogCount() const { return dialogStack.size(); }
+    FadeState* getFadeState(const GuiControl* ctl, bool createIfMissing);
 
 private:
     GuiControl* canvas{};
@@ -64,6 +76,10 @@ private:
     std::vector<ScheduledEvent> events;
     void renderControl(GuiControl* ctl);
     GuiControl* hitTest(GuiControl* ctl, int x, int y);
+
+    // Fade animation tracking for GuiFadeinBitmapCtrl
+    std::unordered_map<std::string, FadeState> fadeStates;
+    void updateFades(float dt);
 
     Texture* checkerTex{};
 };

@@ -7,6 +7,8 @@
 #include <stack>
 #include <cstring>
 #include <cstdlib>
+#include <unistd.h>
+#include <sys/stat.h>
 #include <cmath>
 #include <algorithm>
 
@@ -243,6 +245,10 @@ bool VirtualMachine::loadScriptFile(const char* path) {
     return loadScript(data.data(), data.size(), path);
 }
 
+const std::vector<DSOFile*>& VirtualMachine::loadedScripts() const {
+    return impl->loaded;
+}
+
 VMValue VirtualMachine::callFunction(const char* name, const std::vector<VMValue>& args) {
     // Check natives first
     auto nit = impl->natives.find(name);
@@ -258,7 +264,7 @@ VMValue VirtualMachine::callFunction(const char* name, const std::vector<VMValue
         }
     }
 
-    Console::instance().printf(LogLevel::Warn, "VM: function not found: %s", name);
+    Console::instance().printf(LogLevel::Debug, "VM: function not found: %s", name);
     return {};
 }
 
@@ -1104,6 +1110,29 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
+    tsInstance->registerNative("expandFilename", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string path = args[0].toString();
+        if (path.empty()) return VMValue("");
+        // Remove leading "./" if present
+        if (path.size() >= 2 && path[0] == '.' && path[1] == '/')
+            path = path.substr(2);
+        char* resolved = realpath(path.c_str(), nullptr);
+        if (resolved) {
+            std::string result(resolved);
+            free(resolved);
+            return VMValue(result);
+        }
+        // Fallback: prepend working directory
+        char* cwd = getcwd(nullptr, 0);
+        if (cwd) {
+            std::string result = std::string(cwd) + "/" + path;
+            free(cwd);
+            return VMValue(result);
+        }
+        return VMValue(path);
+    });
+
     // Register str functions
     tsInstance->registerNative("strLen", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
@@ -1729,7 +1758,11 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("hideCursor", [](const auto&) -> VMValue {
         return VMValue(1);
     });
-    tsInstance->registerNative("setContent", [](const auto&) -> VMValue {
+    tsInstance->registerNative("setContent", [](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            std::string name = args[0].toString();
+            if (!name.empty()) Engine::instance().guiRenderer().setContent(name);
+        }
         return VMValue(1);
     });
     tsInstance->registerNative("playGui", [](const auto& args) -> VMValue {
@@ -1814,32 +1847,120 @@ bool ScriptEngine::init() {
     }
 
     // Login flow stubs (called by T2 startup scripts)
-    tsInstance->registerNative("CleanUpAndGo", [](const auto&) -> VMValue {
-        Console::instance().printf(LogLevel::Info, "Login complete: CleanUpAndGo");
-        return VMValue(1);
-    });
     tsInstance->registerNative("cleanupAudio", [](const auto&) -> VMValue {
         return VMValue(1);
     });
     tsInstance->registerNative("WONDisableFutureCalls", [](const auto&) -> VMValue {
         return VMValue(1);
     });
-    tsInstance->registerNative("export", [](const auto&) -> VMValue {
+    tsInstance->registerNative("export", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        std::string pattern = args[0].toString();
+        std::string filePath = args[1].toString();
+        bool append = args.size() > 2 && args[2].toBool();
+        // Build full path in outputDir
+        std::string outDir = Console::instance().getStringVariable("outputDir", "");
+        if (outDir.empty()) return VMValue(0);
+        std::string modPath = Console::instance().getStringVariable("modPath", "base");
+        // export always writes to modPath (not base) — output goes to active mod
+        std::string fullPath = outDir + "/" + modPath + "/" + filePath;
+        // Create parent directory
+        auto slash = fullPath.rfind('/');
+        if (slash != std::string::npos) {
+            std::string dir = fullPath.substr(0, slash);
+            struct stat st; if (stat(dir.c_str(), &st) != 0) mkdir(dir.c_str(), 0755);
+        }
+        FILE* f = fopen(fullPath.c_str(), append ? "a" : "w");
+        if (!f) return VMValue(0);
+        // Match and write: simple glob pattern with * suffix matching
+        // Chop trailing * for prefix match
+        std::string prefix = pattern;
+        bool prefixMatch = false;
+        if (!prefix.empty() && prefix.back() == '*') {
+            prefix.pop_back();
+            prefixMatch = true;
+        }
+        Console::instance().forEach([&](const char* name, const Console::ConsoleItem& item) {
+            if (item.type != Console::ConsoleItem::Variable) return;
+            bool match = prefixMatch ? strncmp(name, prefix.c_str(), prefix.size()) == 0 : name == prefix;
+            if (match) {
+                fprintf(f, "%s = \"%s\";\n", name, item.value.c_str());
+            }
+        });
+        fclose(f);
         return VMValue(1);
     });
 
-    // exec() - load and execute from modpath (base/), NOT from dataDir root
+    // exec() - load and execute from modpath, with base fallback
     tsInstance->registerNative("exec", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         std::string path = args[0].toString();
-        // Prepend modpath (base/) - dataDir root scripts use a different engine mechanism
-        std::string basePath = std::string("base/") + path;
+        std::string modPath = Console::instance().getStringVariable("modPath", "base");
         auto* ts = Engine::instance().script().ts();
-        if (ts) ts->executeFile(basePath);
+        if (ts) {
+            // Try modPath first, then base as fallback
+            if (modPath != "base" && ts->executeFile(modPath + "/" + path).type != VMValue::None)
+                return VMValue(1);
+            if (ts->executeFile("base/" + path).type != VMValue::None)
+                return VMValue(1);
+            ts->executeFile(path);
+        }
         return VMValue(1);
     });
     tsInstance->registerNative("addMessageCallback", [](const auto&) -> VMValue {
         return VMValue(1);
+    });
+
+    // Missing native function stubs
+    tsInstance->registerNative("getTaggedString", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(std::string(""));
+        return args[0];
+    });
+
+    tsInstance->registerNative("nameToId", [](const auto&) -> VMValue {
+        return VMValue(0);
+    });
+
+    tsInstance->registerNative("getRecord", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(std::string(""));
+        std::string record = args[0].toString();
+        int idx = args[1].toInt();
+        // Tab-delimited record: get field at index
+        size_t start = 0;
+        for (int i = 0; i < idx && start != std::string::npos; i++) {
+            start = record.find('\t', start);
+            if (start != std::string::npos) start++;
+        }
+        if (start == std::string::npos) return VMValue(std::string(""));
+        size_t end = record.find('\t', start);
+        if (end == std::string::npos) end = record.size();
+        return VMValue(record.substr(start, end - start));
+    });
+
+    tsInstance->registerNative("getRecordCount", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string record = args[0].toString();
+        int count = 1;
+        for (size_t i = 0; i < record.size(); i++) {
+            if (record[i] == '\t') count++;
+        }
+        return VMValue(count);
+    });
+
+    tsInstance->registerNative("videoSetGammaCorrection", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("wonGetAuthInfo", [](const auto&) -> VMValue {
+        return VMValue(std::string(""));
+    });
+
+    tsInstance->registerNative("alxPlay", [](const auto&) -> VMValue {
+        return VMValue(0);
+    });
+
+    tsInstance->registerNative("GetIRCServerList", [](const auto&) -> VMValue {
+        return VMValue(0);
     });
 
     Console::instance().printf(LogLevel::Info, "ScriptEngine initialized with %zu native functions + DTS support", 12);

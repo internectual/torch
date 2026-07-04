@@ -1,4 +1,7 @@
 #include "core/console.h"
+#include "core/engine.h"
+#include "script/script_engine.h"
+#include "script/torquescript.h"
 #include <cstdio>
 #include <cstdarg>
 #include <vector>
@@ -12,6 +15,7 @@ struct Console::Impl {
     std::vector<std::string> log;
     FILE* logFile = nullptr;
     size_t maxLogLines = 500;
+    LogLevel minLevel = LogLevel::Info; // Default: suppress Debug unless -debug flag
 };
 
 Console::Console() : impl(new Impl) {}
@@ -22,7 +26,10 @@ Console& Console::instance() {
     return c;
 }
 
+void Console::setLogLevel(LogLevel level) { impl->minLevel = level; }
+
 void Console::printf(LogLevel level, const char* fmt, ...) {
+    if (level < impl->minLevel) return;
     char buf[4096];
     va_list args;
     va_start(args, fmt);
@@ -164,6 +171,17 @@ void Console::execute(const char* script) {
     } else if (it != impl->items.end() && it->second.type == ConsoleItem::Variable) {
         printf(LogLevel::Info, "%s", it->second.value.c_str());
     } else {
+        // Try executing as a TorqueScript function call
+        auto* ts = Engine::instance().script().ts();
+        if (ts) {
+            std::string tsCmd = cmd + "()";
+            // Parse args from the original script string
+            if (*s == '(') {
+                tsCmd = script;  // use full script string with original args
+            }
+            ts->execute(tsCmd, "console");
+            return;
+        }
         printf(LogLevel::Warn, "Unknown command: %s", cmd.c_str());
     }
 }

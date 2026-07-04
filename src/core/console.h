@@ -16,6 +16,7 @@ public:
 
     static Console& instance();
 
+    void setLogLevel(LogLevel level);
     void printf(LogLevel level, const char* fmt, ...);
     void println(const char* str);
 

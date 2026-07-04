@@ -18,7 +18,7 @@ enum class TSTokenType {
     Plus, Minus, Star, Slash, Percent, At, Dollar, Tilde,
     Eq, EqEq, Neq, Lt, Gt, Le, Ge, StrEq, StrNeq,
     And, Or, Not, BitwiseAnd, BitwiseOr, BitwiseXor,
-    Question,
+    Question, Shl, Shr,
     PlusPlus, MinusMinus,
     PlusEq, MinusEq, StarEq, SlashEq,
     Hash, New, If, Else, For, While, Do, Switch, Case, Default,
@@ -43,11 +43,14 @@ private:
     std::vector<std::unordered_map<std::string, VMValue>> scopes;
 };
 
+struct DSOFunction;
 class TSFunc {
 public:
     std::vector<std::string> params;
     std::string body;
     std::string filename;
+    bool isDSO = false;
+    DSOFunction* dsoFunc = nullptr;
 };
 
 class TorqueScript {
