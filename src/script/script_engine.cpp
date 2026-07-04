@@ -1938,7 +1938,7 @@ bool ScriptEngine::init() {
         obj->fields["profile"] = VMValue("LaunchTabProfile");
         obj->fields["visible"] = VMValue(1);
         obj->fields["position"] = VMValue(std::to_string(tx) + " 0");
-        obj->fields["extent"] = VMValue(std::string("100 29"));
+        obj->fields["extent"] = VMValue(std::string("101 29")); // 101 to avoid canvas extent propagation
         obj->fields["command"] = VMValue(bakedCmd);
         obj->internals["parent"] = VMValue("LaunchTabView");
         ScriptEngine::instance().objects[obj->name] = obj;
