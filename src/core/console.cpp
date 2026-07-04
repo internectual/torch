@@ -64,6 +64,11 @@ void Console::println(const char* str) {
 
 void Console::setVariable(const char* name, const char* value) {
     impl->items[name] = { ConsoleItem::Variable, name, value, nullptr, "" };
+    // Debug: log changes to $PlayingOnline
+    if (strcmp(name, "$PlayingOnline") == 0) {
+        fprintf(stderr, "PLAYINGONLINE=%s\n", value ? value : "null");
+        fflush(stderr);
+    }
 }
 
 void Console::setVariable(const char* name, int32_t value) {
