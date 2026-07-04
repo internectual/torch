@@ -1965,19 +1965,25 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // setSelected(objectName, tabName) — selects a tab in ShellTabGroupCtrl
+    // setSelected(objectName, tabName) — selects a tab, shows its content panel
     tsInstance->registerNative("setSelected", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
         std::string objName = args[0].toString();
         std::string tabName = args[1].toString();
-        // Find the tab control and mark it selected, deselect siblings
         auto& gr = Engine::instance().guiRenderer();
         GuiControl* tabView = gr.findControl(objName);
         if (tabView) {
             for (auto* child : tabView->children) {
                 bool isTab = (child->text == tabName && child->className == "ShellTabButton");
                 child->selected = isTab;
-                Console::instance().printf(LogLevel::Info, "TS: tab '%s' %s", child->text.c_str(), isTab ? "SELECTED" : "deselected");
+                // Show/hide associated content panel (stored in altCommand)
+                if (isTab && !child->altCommand.empty()) {
+                    GuiControl* panel = gr.findControl(child->altCommand);
+                    if (panel) panel->visible = true;
+                } else if (!child->altCommand.empty()) {
+                    GuiControl* panel = gr.findControl(child->altCommand);
+                    if (panel) panel->visible = false;
+                }
             }
         }
         return VMValue(1);
