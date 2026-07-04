@@ -1133,7 +1133,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             }
         }
     } else if (cn == "ShellTabButton" || cn == "GuiTabPageCtrl") {
-        ColorF fc{0.3f,0.3f,0.4f,1}, bc{0.4f,0.4f,0.5f,1}, txc{1,1,1,1};
+        ColorF fc{0.25f,0.25f,0.32f,1}, bc{0.35f,0.35f,0.45f,1}, txc{1,1,1,1};
         std::string bmp, bmpBase;
         float textOfsX = 4, textOfsY = 0;
         auto* prof = getProfile(ctl->profileName);
@@ -1153,13 +1153,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         };
         if (!bmpBase.empty()) loadTex(bmpBase);
         if (!bmp.empty() && !tabTex) loadTex(bmp);
-        if (!tabTex) tabTex = getShellTex(r, "shll_button.png");
-        if (tabTex && tabTex->loaded) {
-            r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, tabTex->id);
-        } else {
-            r.drawRectFill({x-1, y-1, 0}, {x + ctl->extentX + 1, y + ctl->extentY + 1, 0}, bc);
-            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
-        }
+        // Draw tab shape: solid fill with subtle border, no texture
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
+        // Bottom highlight line (tab-like look)
+        r.drawRectFill({x, y + ctl->extentY - 2, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.5f,0.5f,0.6f,0.5f});
         if (font && !ctl->text.empty()) {
             float tx2 = x + textOfsX;
             float ty2 = y + (ctl->extentY - 16) * 0.5f + textOfsY;

@@ -1944,6 +1944,7 @@ bool ScriptEngine::init() {
             if (tabCtl) {
                 std::string cmd = "LaunchTabView.setSelected(\"" + tabName + "\");";
                 tabCtl->command = cmd;
+                tabCtl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); };
                 if (!guiName.empty()) tabCtl->altCommand = guiName;
             }
         }
