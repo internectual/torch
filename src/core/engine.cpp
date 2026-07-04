@@ -701,6 +701,7 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().setVariable("$pref::SkipGGIntro", "true");
         Console::instance().setVariable("$LaunchMode", "Offline");
         Console::instance().setVariable("$IRCClient::serverCount", "0");
+        Console::instance().setVariable("$PlayingOnline", "0");
         // Auto-execute the init script (e.g. console_start.cs) to load game UI
         if (scr->ts()) {
             std::string path = Console::instance().getStringVariable("initScript", "console_start.cs");

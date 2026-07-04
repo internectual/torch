@@ -1504,13 +1504,16 @@ void GuiRenderer::popDialog(const std::string& name) {
 }
 
 void GuiRenderer::setContent(const std::string& name) {
+    Console::instance().printf(LogLevel::Info, "GUI: setContent('%s')", name.c_str());
     GuiControl* ctl = soToGui(name, nullptr);
     if (ctl) {
         dialogStack.clear();
         dialogStack.push_back(ctl);
         // Trigger onAdd callback if the control has one registered
         if (auto* ts = Engine::instance().script().ts()) {
+            Console::instance().printf(LogLevel::Info, "GUI: calling %s::onAdd", name.c_str());
             ts->callFunction(name + "::onAdd", {});
+            Console::instance().printf(LogLevel::Info, "GUI: calling %s::onWake", name.c_str());
             ts->callFunction(name + "::onWake", {});
         }
         Console::instance().printf(LogLevel::Debug, "GUI: setContent %s (stack now %zu)", name.c_str(), dialogStack.size());

@@ -109,12 +109,12 @@ struct TorqueScript::Impl {
         // Store function count
         uint32_t funcCount = 0;
         for (auto& [name, fn] : functions) {
-            if (!fn.isDSO) funcCount++; // count only source-defined functions
+            if (!fn.isDSO && fn.filename == srcPath) funcCount++; // count only functions from this file
         }
         fwrite(&funcCount, 4, 1, f);
         // Store each function name and param count
         for (auto& [name, fn] : functions) {
-            if (fn.isDSO) continue;
+            if (fn.isDSO || fn.filename != srcPath) continue;
             uint32_t nameLen = (uint32_t)name.size();
             fwrite(&nameLen, 4, 1, f);
             fwrite(name.c_str(), 1, nameLen, f);

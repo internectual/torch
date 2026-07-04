@@ -1928,7 +1928,8 @@ bool ScriptEngine::init() {
         if (tabViewCtl) tx = (int)tabViewCtl->children.size() * 105;
         // Construct command with tab name baked into the string
         std::string bakedCmd = "LaunchTabView.setSelected(\"" + tabName + "\")";
-        Console::instance().printf(LogLevel::Debug, "TS: addTab '%s' cmd='%s'", tabName.c_str(), bakedCmd.c_str());
+        std::string playingOnline2 = Console::instance().getStringVariable("$PlayingOnline", "?");
+        Console::instance().printf(LogLevel::Info, "TS: addTab '%s' $PlayingOnline=%s", tabName.c_str(), playingOnline2.c_str());
 
         // Create ScriptObject
         auto* obj = new ScriptObject;
