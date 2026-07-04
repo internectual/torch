@@ -1724,14 +1724,14 @@ bool ScriptEngine::init() {
     // These are registered globally so the dot-notation lookup finds them
     tsInstance->registerNative("pushDialog", [](const auto& args) -> VMValue {
         if (!args.empty()) {
-            std::string name = args[0].toString();
+            std::string name = args.back().toString();
             if (!name.empty()) Engine::instance().guiRenderer().pushDialog(name);
         }
         return VMValue(1);
     });
     tsInstance->registerNative("popDialog", [](const auto& args) -> VMValue {
         if (!args.empty()) {
-            std::string name = args[0].toString();
+            std::string name = args.back().toString();
             Engine::instance().guiRenderer().popDialog(name);
         }
         return VMValue(1);
@@ -1759,8 +1759,10 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("setContent", [](const auto& args) -> VMValue {
+        // May be called directly: setContent("Gui") or as method: Canvas.setContent("Gui")
+        // In method form args = ["Canvas", "Gui"], direct form args = ["Gui"]
         if (!args.empty()) {
-            std::string name = args[0].toString();
+            std::string name = args.back().toString();
             if (!name.empty()) Engine::instance().guiRenderer().setContent(name);
         }
         return VMValue(1);
@@ -1983,6 +1985,27 @@ bool ScriptEngine::init() {
 
     tsInstance->registerNative("GetIRCServerList", [](const auto&) -> VMValue {
         return VMValue(0);
+    });
+
+    // Missing startup function stubs
+    tsInstance->registerNative("setNetPort", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("queryMasterGameTypes", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("cancel", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("cls", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("enableWinConsole", [](const auto& args) -> VMValue {
+        if (!args.empty() && args[0].toBool()) {
+            static bool enabled = false;
+            if (!enabled) { enabled = true; Console::instance().setLogLevel(LogLevel::Debug); }
+        }
+        return VMValue(1);
     });
 
     Console::instance().printf(LogLevel::Info, "ScriptEngine initialized with %zu native functions + DTS support", 12);
