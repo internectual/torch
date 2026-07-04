@@ -1914,25 +1914,48 @@ bool ScriptEngine::init() {
     });
 
     // Missing native function stubs
-    // addLaunchTab(tabName, guiName) — adds a tab to LaunchTabView
+    // addLaunchTab(objectName, tabName, guiName, isSpacer) — adds a tab
     tsInstance->registerNative("addLaunchTab", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
-        // args = [objectName, tabName, guiName, isSpacer]
         std::string tabName = args[1].toString();
         std::string guiName = args.size() > 2 ? args[2].toString() : "";
+        Console::instance().printf(LogLevel::Debug, "TS: addLaunchTab('%s')", tabName.c_str());
         bool isSpacer = args.size() > 3 && args[3].toBool();
-        // Create a ScriptObject for the tab (like a ShellTabButton)
+        // Compute tab position based on existing tab count
+        static int tabCount = 0;
+        int tx = tabCount * 105; // 100 width + 5 gap
+        tabCount++;
+        // Create a ScriptObject for the tab
         auto* obj = new ScriptObject;
         obj->className = "ShellTabButton";
         obj->name = "LaunchTab_" + tabName;
         obj->fields["text"] = VMValue(tabName);
         obj->fields["profile"] = VMValue("LaunchTabProfile");
         obj->fields["visible"] = VMValue(1);
-        obj->fields["position"] = VMValue(std::string("0 0"));
+        obj->fields["position"] = VMValue(std::to_string(tx) + " 0");
         obj->fields["extent"] = VMValue(std::string("100 29"));
-        // Link parent to LaunchTabView
         obj->internals["parent"] = VMValue("LaunchTabView");
         ScriptEngine::instance().objects[obj->name] = obj;
+        // Create GuiControl and add to parent
+        auto& gr = Engine::instance().guiRenderer();
+        GuiControl* parentCtl = gr.findControl("LaunchTabView");
+        if (parentCtl) {
+            GuiControl* tabCtl = gr.soToGui(obj->name, parentCtl);
+            if (tabCtl) {
+                std::string cmd = "LaunchTabView.setSelected(\"" + tabName + "\");";
+                tabCtl->command = cmd;
+                if (!guiName.empty()) tabCtl->altCommand = guiName;
+            }
+        }
+        return VMValue(1);
+    });
+
+    // setSelected(objectName, tabName) — selects a tab in ShellTabGroupCtrl
+    tsInstance->registerNative("setSelected", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        std::string objName = args[0].toString();
+        std::string tabName = args[1].toString();
+        Console::instance().printf(LogLevel::Debug, "TS: %s.setSelected('%s')", objName.c_str(), tabName.c_str());
         return VMValue(1);
     });
 

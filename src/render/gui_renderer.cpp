@@ -1134,15 +1134,25 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
     } else if (cn == "ShellTabButton" || cn == "GuiTabPageCtrl") {
         ColorF fc{0.3f,0.3f,0.4f,1}, bc{0.4f,0.4f,0.5f,1}, txc{1,1,1,1};
-        std::string bmp;
+        std::string bmp, bmpBase;
+        float textOfsX = 4, textOfsY = 0;
         auto* prof = getProfile(ctl->profileName);
         if (prof) {
             auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc);
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), txc);
             auto bi = prof->fields.find("bitmap"); if (bi != prof->fields.end()) bmp = bi->second.toString();
+            auto bbi = prof->fields.find("bitmapBase"); if (bbi != prof->fields.end()) bmpBase = bbi->second.toString();
+            auto toi = prof->fields.find("textOffset"); if (toi != prof->fields.end()) sscanf(toi->second.toString().c_str(), "%f %f", &textOfsX, &textOfsY);
         }
         Texture* tabTex = nullptr;
-        if (!bmp.empty()) { tabTex = r.loadTexture((bmp + ".png").c_str()); if (!tabTex) tabTex = r.loadTexture(("textures/" + bmp + ".png").c_str()); }
+        auto loadTex = [&](const std::string& p) {
+            if (p.empty()) return;
+            tabTex = r.loadTexture((p + ".png").c_str());
+            if (!tabTex) tabTex = r.loadTexture(("textures/" + p + ".png").c_str());
+            if (!tabTex) tabTex = r.loadTexture(("textures/gui/" + p + ".png").c_str());
+        };
+        if (!bmpBase.empty()) loadTex(bmpBase);
+        if (!bmp.empty() && !tabTex) loadTex(bmp);
         if (!tabTex) tabTex = getShellTex(r, "shll_button.png");
         if (tabTex && tabTex->loaded) {
             r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, tabTex->id);
@@ -1150,8 +1160,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             r.drawRectFill({x-1, y-1, 0}, {x + ctl->extentX + 1, y + ctl->extentY + 1, 0}, bc);
             r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
         }
-        if (font && !ctl->text.empty())
-            font->render(ctl->text.c_str(), x + 4, y + (ctl->extentY - 16) * 0.5f, txc, 1.0f);
+        if (font && !ctl->text.empty()) {
+            float tx2 = x + textOfsX;
+            float ty2 = y + (ctl->extentY - 16) * 0.5f + textOfsY;
+            font->render(ctl->text.c_str(), tx2, ty2, txc, 1.0f);
+        }
     } else if (cn == "GuiPopUpMenuCtrl" || cn == "ShellPopupMenu") {
         ColorF fc{0.25f,0.25f,0.3f,1}, txc{0.8f,0.8f,1,1};
         auto* prof = getProfile(ctl->profileName);
