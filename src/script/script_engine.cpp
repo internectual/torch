@@ -1928,8 +1928,11 @@ bool ScriptEngine::init() {
         if (tabViewCtl) tx = (int)tabViewCtl->children.size() * 105;
         // Construct command with tab name baked into the string
         std::string bakedCmd = "LaunchTabView.setSelected(\"" + tabName + "\")";
-        std::string playingOnline2 = Console::instance().getStringVariable("$PlayingOnline", "?");
-        Console::instance().printf(LogLevel::Info, "TS: addTab '%s' $PlayingOnline=%s", tabName.c_str(), playingOnline2.c_str());
+        // Force offline mode when running with -nologin
+        std::string launchMode = Console::instance().getStringVariable("$LaunchMode", "");
+        if (launchMode == "Offline") {
+            Console::instance().setVariable("$PlayingOnline", "0");
+        }
 
         // Create ScriptObject
         auto* obj = new ScriptObject;
