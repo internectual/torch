@@ -179,6 +179,11 @@ bool Engine::init(int argc, char* argv[]) {
     { struct stat st; if (stat(outputDir.c_str(), &st) != 0) mkdir(outputDir.c_str(), 0755); }
     { std::string base = outputDir + "/base"; struct stat st; if (stat(base.c_str(), &st) != 0) mkdir(base.c_str(), 0755); }
 
+    // Set up console.log in outputDir
+    Console::instance().setLogFile((outputDir + "/console.log").c_str());
+    // Expose outputDir to scripts as a console variable
+    Console::instance().setVariable("$ConsoleLogPath", (outputDir + "/console.log").c_str());
+
     // Parse args
     bool noLogin = false;
     for (int i = 1; i < argc; i++) {
@@ -512,6 +517,11 @@ bool Engine::init(int argc, char* argv[]) {
 
     // Init script path management
     Console::instance().setVariable("initScript", "console_start.cs");
+    con->addCommand("log", [](int32_t, const char* const*) {
+        std::string logPath = Console::instance().getStringVariable("$ConsoleLogPath", "console.log");
+        Console::instance().printf(LogLevel::Info, "Console log: %s", logPath.c_str());
+    }, "/log - show the console log file path");
+
     con->addCommand("setScriptPath", [](int32_t argc, const char* const* argv) {
         if (argc > 1) {
             Console::instance().setVariable("initScript", argv[1]);
