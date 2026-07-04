@@ -1943,23 +1943,24 @@ bool ScriptEngine::init() {
         obj->internals["parent"] = VMValue("LaunchTabView");
         ScriptEngine::instance().objects[obj->name] = obj;
 
-        // Create GuiControl
+        // Create GuiControl and pre-create content panel
         auto& gr3 = Engine::instance().guiRenderer();
         if (tabViewCtl) {
             GuiControl* tabCtl = gr3.soToGui(obj->name, tabViewCtl);
             if (tabCtl) {
                 tabCtl->command = bakedCmd;
                 tabCtl->onClick = [bakedCmd]() {
-                    Console::instance().printf(LogLevel::Info, "TabClick: executing '%s'", bakedCmd.c_str());
                     Console::instance().execute(bakedCmd.c_str());
                 };
-                if (!guiName.empty()) tabCtl->altCommand = guiName;
-                // Debug: verify position
-                GuiControl* verify = gr3.findControl(obj->name);
-                Console::instance().printf(LogLevel::Info, "TS: tab '%s' pos=(%.0f,%.0f) ext=(%.0fx%.0f) parent=%s children=%zu", 
-                    tabName.c_str(), tabCtl->posX, tabCtl->posY, tabCtl->extentX, tabCtl->extentY,
-                    tabCtl->parent ? tabCtl->parent->name.c_str() : "none",
-                    tabViewCtl->children.size());
+                // Pre-create the content panel for this tab via soToGui
+                if (!guiName.empty()) {
+                    tabCtl->altCommand = guiName;
+                    GuiControl* panel = gr3.soToGui(guiName, nullptr);
+                    if (panel) {
+                        panel->visible = false; // hidden until selected
+                        Console::instance().printf(LogLevel::Debug, "TS: created panel '%s' for tab '%s'", guiName.c_str(), tabName.c_str());
+                    }
+                }
             }
         }
         return VMValue(1);
