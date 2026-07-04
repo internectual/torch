@@ -2045,6 +2045,9 @@ bool ScriptEngine::init() {
     });
 
     // Missing startup function stubs
+    tsInstance->registerNative("deactivateDirectInput", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
     tsInstance->registerNative("setNetPort", [](const auto&) -> VMValue {
         return VMValue(1);
     });
