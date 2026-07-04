@@ -1921,11 +1921,10 @@ bool ScriptEngine::init() {
         std::string guiName = args.size() > 2 ? args[2].toString() : "";
         Console::instance().printf(LogLevel::Debug, "TS: addLaunchTab('%s')", tabName.c_str());
         bool isSpacer = args.size() > 3 && args[3].toBool();
-        // Compute tab position based on existing tab count
-        static int tabCount = 0;
-        int tx = tabCount * 105; // 100 width + 5 gap
-        tabCount++;
-        // Create a ScriptObject for the tab with command wired for clicks
+        // Compute tab position based on existing children
+        static int tabSeq = 0;
+        int tx = tabSeq++ * 105;
+        // Create a ScriptObject for the tab
         auto* obj = new ScriptObject;
         obj->className = "ShellTabButton";
         obj->name = "LaunchTab_" + tabName;
@@ -1934,10 +1933,12 @@ bool ScriptEngine::init() {
         obj->fields["visible"] = VMValue(1);
         obj->fields["position"] = VMValue(std::to_string(tx) + " 0");
         obj->fields["extent"] = VMValue(std::string("100 29"));
-        obj->fields["command"] = VMValue("LaunchTabView.setSelected(\"" + tabName + "\")");
+        std::string cmdStr = "LaunchTabView.setSelected(\"" + tabName + "\")";
+        Console::instance().printf(LogLevel::Debug, "TS: addTab '%s' pos=%d cmd=%s", tabName.c_str(), tx, cmdStr.c_str());
+        obj->fields["command"] = VMValue(cmdStr);
         obj->internals["parent"] = VMValue("LaunchTabView");
         ScriptEngine::instance().objects[obj->name] = obj;
-        // Create GuiControl — soToGui will wire onClick from command field
+        // Create GuiControl — soToGui wires onClick from command
         auto& gr = Engine::instance().guiRenderer();
         GuiControl* parentCtl = gr.findControl("LaunchTabView");
         if (parentCtl) {
@@ -1945,6 +1946,8 @@ bool ScriptEngine::init() {
             if (tabCtl) {
                 if (!guiName.empty()) tabCtl->altCommand = guiName;
             }
+        } else {
+            Console::instance().printf(LogLevel::Warn, "TS: LaunchTabView not found for tab '%s'", tabName.c_str());
         }
         return VMValue(1);
     });
