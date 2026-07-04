@@ -1942,9 +1942,14 @@ bool ScriptEngine::init() {
         if (parentCtl) {
             GuiControl* tabCtl = gr.soToGui(obj->name, parentCtl);
             if (tabCtl) {
-                std::string cmd = "LaunchTabView.setSelected(\"" + tabName + "\");";
+                std::string myTab = tabName;
+                std::string cmd = "LaunchTabView.setSelected(\"" + myTab + "\");";
                 tabCtl->command = cmd;
-                tabCtl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); };
+                tabCtl->onClick = [myTab, parentCtl]() { 
+                    Console::instance().printf(LogLevel::Info, "Tab click: '%s' (children=%zu)", 
+                        myTab.c_str(), parentCtl->children.size());
+                    Console::instance().execute(("LaunchTabView.setSelected(\"" + myTab + "\");").c_str());
+                };
                 if (!guiName.empty()) tabCtl->altCommand = guiName;
             }
         }

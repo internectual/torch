@@ -1399,9 +1399,13 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
     if (!ctl || !ctl->visible || !ctl->active) return nullptr;
     float x = ctl->posX;
     float y = ctl->posY;
-    if (ctl->parent && ctl->parent != canvas) { x += ctl->parent->posX; y += ctl->parent->posY; }
+    GuiControl* p = ctl->parent;
+    while (p && p != canvas) {
+        x += p->posX;
+        y += p->posY;
+        p = p->parent;
+    }
     if (mx >= x && mx < x + ctl->extentX && my >= y && my < y + ctl->extentY) {
-        // Check children first (top-most)
         for (auto* child : ctl->children) { auto* h = hitTest(child, mx, my); if (h) return h; }
         return ctl;
     }
