@@ -1770,17 +1770,14 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
         // Don't propagate returning/breaking/continuing to outer context
     }
 
-    // Compile .cs/.gui/.mis to .dso for modpath files
+    // Write source-cache DSO for fast loading on next run
     if (isCompilableExt(path) && path.find('/') != std::string::npos) {
         std::string modPath = Console::instance().getStringVariable("modPath", "base");
         std::string outDir = Console::instance().getStringVariable("outputDir", "");
         if (!outDir.empty()) {
             std::string dsoRelPath = modPath + "/" + path + ".dso";
             std::string dsoFullPath = outDir + "/" + dsoRelPath;
-            // Try the turd compiler first; fall back to source cache
-            if (!impl->compileToDSO(source, dsoFullPath)) {
-                impl->writeDSOCache(dsoFullPath, path, source);
-            }
+            impl->writeDSOCache(dsoFullPath, path, source);
         }
     }
 

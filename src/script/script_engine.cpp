@@ -2093,6 +2093,32 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("cls", [](const auto&) -> VMValue {
         return VMValue(1);
     });
+    // Common GUI control method stubs
+    tsInstance->registerNative("addRow", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("clear", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("addTab", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("viewTab", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("viewLastTab", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("closeCurrentTab", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("getSelected", [](const auto&) -> VMValue { return VMValue(0); });
+    tsInstance->registerNative("getSelectedId", [](const auto&) -> VMValue { return VMValue(0); });
+    tsInstance->registerNative("getRowTextById", [](const auto&) -> VMValue { return VMValue(std::string("")); });
+    tsInstance->registerNative("size", [](const auto&) -> VMValue { return VMValue(0); });
+    tsInstance->registerNative("findText", [](const auto&) -> VMValue { return VMValue(0); });
+    tsInstance->registerNative("scrollToTag", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setVisible", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setActive", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("delete", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("getValue", [](const auto&) -> VMValue { return VMValue(std::string("")); });
+    tsInstance->registerNative("setValue", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("addColumn", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setSortColumn", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setSortIncreasing", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("addStyle", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("getRowNumById", [](const auto&) -> VMValue { return VMValue(0); });
+    tsInstance->registerNative("setRowColor", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setRowStyle", [](const auto&) -> VMValue { return VMValue(1); });
+
     tsInstance->registerNative("enableWinConsole", [](const auto& args) -> VMValue {
         if (!args.empty() && args[0].toBool()) {
             static bool enabled = false;

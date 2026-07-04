@@ -513,8 +513,14 @@ var Parser = class {
   parse() {
     const stmts = [];
     while (!this.isAtEnd()) {
-      const s = this.decl();
-      if (s) stmts.push(s);
+      try {
+        const s = this.decl();
+        if (s) stmts.push(s);
+      } catch (e) {
+        while (!this.isAtEnd() && !this.check(62 /* RBracket */) && !this.check(2 /* Function */) && !this.check(75 /* Eof */))
+          this.advance();
+        if (!this.isAtEnd()) this.advance();
+      }
     }
     return stmts;
   }
@@ -538,7 +544,7 @@ var Parser = class {
       }
     }
     this.consume(62 /* RBracket */, "Expected '}' after package body");
-    this.consume(64 /* Semicolon */, "Expected ';' after package block");
+    this.tryConsume(64 /* Semicolon */);
     return new PackageDeclStmt(name, fns);
   }
   functionDecl() {
@@ -648,7 +654,7 @@ var Parser = class {
     this.advance();
     this.consume(59 /* LParen */, "Expected '(' after if");
     const cond = this.expression();
-    this.consume(60 /* RParen */, "Expected ')' after condition");
+    this.tryConsume(60 /* RParen */);
     const body = this.blockStatements();
     let elseBody = null;
     if (this.match(4 /* Else */)) {
@@ -661,7 +667,7 @@ var Parser = class {
     this.advance();
     this.consume(59 /* LParen */, "Expected '(' after while");
     const cond = this.expression();
-    this.consume(60 /* RParen */, "Expected ')' after condition");
+    this.tryConsume(60 /* RParen */);
     const body = this.blockStatements();
     return new LoopStmt(line, cond, null, null, body);
   }
@@ -674,15 +680,15 @@ var Parser = class {
       init = this.stmtExpr();
       if (!init) init = this.expression();
     }
-    this.consume(64 /* Semicolon */, "Expected ';' after for init");
+    this.tryConsume(64 /* Semicolon */);
     const cond = this.expression();
-    this.consume(64 /* Semicolon */, "Expected ';' after for condition");
+    this.tryConsume(64 /* Semicolon */);
     let end = null;
     if (!this.check(60 /* RParen */)) {
       end = this.stmtExpr();
       if (!end) end = this.expression();
     }
-    this.consume(60 /* RParen */, "Expected ')' after for increment");
+    this.tryConsume(60 /* RParen */);
     const body = this.blockStatements();
     return new LoopStmt(line, cond, init, end, body);
   }
@@ -756,7 +762,7 @@ var Parser = class {
       else break;
     }
     this.consume(62 /* RBracket */, "Expected '}' after datablock body");
-    this.consume(64 /* Semicolon */, "Expected ';' after datablock body");
+    this.tryConsume(64 /* Semicolon */);
     const result = new ObjectDeclExpr(
       new ConstantExpr(className),
       parentName,
@@ -778,7 +784,7 @@ var Parser = class {
       }
       this.consume(20 /* Assign */, "Expected '=' after slot name");
       const expr = this.expression();
-      this.consume(64 /* Semicolon */, "Expected ';' after slot assignment");
+      this.tryConsume(64 /* Semicolon */);
       return new SlotAssignExpr(null, arrayIdx, slotName, expr);
     }
     return null;
@@ -795,7 +801,7 @@ var Parser = class {
   expressionStmt() {
     const expr = this.stmtExpr();
     if (expr) {
-      this.consume(64 /* Semicolon */, "Expected ';' after expression");
+      this.tryConsume(64 /* Semicolon */);
     }
     return expr;
   }
@@ -1224,6 +1230,14 @@ var Parser = class {
     if (this.check(type)) return this.advance();
     throw new SyntaxError(message, this.peek());
   }
+  // Optional consume — silently skip if token not present (for lenient T2 parsing)
+  tryConsume(type) {
+    if (this.check(type)) {
+      this.advance();
+      return true;
+    }
+    return false;
+  }
   objectDecl(className, structDecl, consumeTrailingSemicolon) {
     let objectNameExpr = new ConstantExpr(className);
     let parentObject = null;
@@ -1259,7 +1273,7 @@ var Parser = class {
       this.consume(62 /* RBracket */, "Expected '}' after object body");
     }
     if (consumeTrailingSemicolon) {
-      this.consume(64 /* Semicolon */, "Expected ';' after nested object");
+      this.tryConsume(64 /* Semicolon */);
     }
     return new ObjectDeclExpr(
       new ConstantExpr(className),
