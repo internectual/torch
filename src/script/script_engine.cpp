@@ -1924,7 +1924,11 @@ bool ScriptEngine::init() {
         // Compute tab position based on existing children
         static int tabSeq = 0;
         int tx = tabSeq++ * 105;
-        // Create a ScriptObject for the tab
+        // Construct command with tab name baked into the string
+        std::string bakedCmd = "LaunchTabView.setSelected(\"" + tabName + "\")";
+        Console::instance().printf(LogLevel::Debug, "TS: addTab '%s' cmd='%s'", tabName.c_str(), bakedCmd.c_str());
+
+        // Create ScriptObject
         auto* obj = new ScriptObject;
         obj->className = "ShellTabButton";
         obj->name = "LaunchTab_" + tabName;
@@ -1933,21 +1937,24 @@ bool ScriptEngine::init() {
         obj->fields["visible"] = VMValue(1);
         obj->fields["position"] = VMValue(std::to_string(tx) + " 0");
         obj->fields["extent"] = VMValue(std::string("100 29"));
-        std::string cmdStr = "LaunchTabView.setSelected(\"" + tabName + "\")";
-        Console::instance().printf(LogLevel::Debug, "TS: addTab '%s' pos=%d cmd=%s", tabName.c_str(), tx, cmdStr.c_str());
-        obj->fields["command"] = VMValue(cmdStr);
+        obj->fields["command"] = VMValue(bakedCmd);
         obj->internals["parent"] = VMValue("LaunchTabView");
         ScriptEngine::instance().objects[obj->name] = obj;
-        // Create GuiControl — soToGui wires onClick from command
+
+        // Create GuiControl
         auto& gr = Engine::instance().guiRenderer();
-        GuiControl* parentCtl = gr.findControl("LaunchTabView");
-        if (parentCtl) {
-            GuiControl* tabCtl = gr.soToGui(obj->name, parentCtl);
+        GuiControl* tabView = gr.findControl("LaunchTabView");
+        if (tabView) {
+            GuiControl* tabCtl = gr.soToGui(obj->name, tabView);
             if (tabCtl) {
+                // Set command AND onClick explicitly to ensure correct binding
+                tabCtl->command = bakedCmd;
+                tabCtl->onClick = [bakedCmd]() {
+                    Console::instance().printf(LogLevel::Info, "TabClick: executing '%s'", bakedCmd.c_str());
+                    Console::instance().execute(bakedCmd.c_str());
+                };
                 if (!guiName.empty()) tabCtl->altCommand = guiName;
             }
-        } else {
-            Console::instance().printf(LogLevel::Warn, "TS: LaunchTabView not found for tab '%s'", tabName.c_str());
         }
         return VMValue(1);
     });
