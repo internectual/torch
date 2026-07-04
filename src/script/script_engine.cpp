@@ -1921,12 +1921,11 @@ bool ScriptEngine::init() {
         std::string guiName = args.size() > 2 ? args[2].toString() : "";
         Console::instance().printf(LogLevel::Debug, "TS: addLaunchTab('%s')", tabName.c_str());
         bool isSpacer = args.size() > 3 && args[3].toBool();
-        // Compute tab position
+        // Compute tab position from siblings
         int tx = 0;
-        auto* tv = Engine::instance().guiRenderer().findControl("LaunchTabView");
-        if (tv) tx = (int)tv->children.size() * 105;
-        Console::instance().printf(LogLevel::Info, "TS: addLaunchTab('%s') pos=%d tv=%p children=%zu", 
-            tabName.c_str(), tx, (void*)tv, tv ? tv->children.size() : 0);
+        auto& gr2 = Engine::instance().guiRenderer();
+        GuiControl* tabViewCtl = gr2.findControl("LaunchTabView");
+        if (tabViewCtl) tx = (int)tabViewCtl->children.size() * 105;
         // Construct command with tab name baked into the string
         std::string bakedCmd = "LaunchTabView.setSelected(\"" + tabName + "\")";
         Console::instance().printf(LogLevel::Debug, "TS: addTab '%s' cmd='%s'", tabName.c_str(), bakedCmd.c_str());
@@ -1945,18 +1944,22 @@ bool ScriptEngine::init() {
         ScriptEngine::instance().objects[obj->name] = obj;
 
         // Create GuiControl
-        auto& gr = Engine::instance().guiRenderer();
-        GuiControl* tabView = gr.findControl("LaunchTabView");
-        if (tabView) {
-            GuiControl* tabCtl = gr.soToGui(obj->name, tabView);
+        auto& gr3 = Engine::instance().guiRenderer();
+        if (tabViewCtl) {
+            GuiControl* tabCtl = gr3.soToGui(obj->name, tabViewCtl);
             if (tabCtl) {
-                // Set command AND onClick explicitly to ensure correct binding
                 tabCtl->command = bakedCmd;
                 tabCtl->onClick = [bakedCmd]() {
                     Console::instance().printf(LogLevel::Info, "TabClick: executing '%s'", bakedCmd.c_str());
                     Console::instance().execute(bakedCmd.c_str());
                 };
                 if (!guiName.empty()) tabCtl->altCommand = guiName;
+                // Debug: verify position
+                GuiControl* verify = gr3.findControl(obj->name);
+                Console::instance().printf(LogLevel::Info, "TS: tab '%s' pos=(%.0f,%.0f) ext=(%.0fx%.0f) parent=%s children=%zu", 
+                    tabName.c_str(), tabCtl->posX, tabCtl->posY, tabCtl->extentX, tabCtl->extentY,
+                    tabCtl->parent ? tabCtl->parent->name.c_str() : "none",
+                    tabViewCtl->children.size());
             }
         }
         return VMValue(1);
