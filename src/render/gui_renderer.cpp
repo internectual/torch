@@ -1277,27 +1277,32 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (prof) { auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), scc); }
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, scc);
     } else {
-        // Generic GuiControl with profile-aware fill
+        // Generic GuiControl with profile-aware fill and text
         ColorF gc{0.2f, 0.2f, 0.25f, 1.0f};
+        ColorF tc{1,1,1,1};
+        float fontSize = 14.0f;
+        Font* gf = r.getFont();
+        float textOfsX = 4, textOfsY = 0;
+        std::string justify = "left";
         auto* prof = getProfile(ctl->profileName);
         if (prof) {
             auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), gc);
+            auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
+            auto fsi = prof->fields.find("fontSize"); if (fsi != prof->fields.end()) fontSize = (float)fsi->second.toDouble();
+            auto fti = prof->fields.find("fontType"); if (fti != prof->fields.end()) gf = r.getFont(fti->second.toString().c_str(), (int)fontSize);
+            auto toi = prof->fields.find("textOffset"); if (toi != prof->fields.end()) sscanf(toi->second.toString().c_str(), "%f %f", &textOfsX, &textOfsY);
+            auto ji = prof->fields.find("justify"); if (ji != prof->fields.end()) justify = ji->second.toString();
             auto oi = prof->fields.find("opaque");
             if (oi != prof->fields.end()) { std::string ov = oi->second.toString(); if (ov == "true" || ov == "1") gc.a = 1.0f; }
         }
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, gc);
-        // Draw text if the control has one (for labels, buttons, tabs, etc.)
-        if (!ctl->text.empty()) {
-            ColorF tc{1,1,1,1};
-            float fontSize = 14.0f;
-            Font* font = r.getFont();
-            if (prof) {
-                auto fi = prof->fields.find("fontColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), tc);
-                auto fsi = prof->fields.find("fontSize"); if (fsi != prof->fields.end()) fontSize = (float)fsi->second.toDouble();
-                auto fti = prof->fields.find("fontType"); if (fti != prof->fields.end()) font = r.getFont(fti->second.toString().c_str(), (int)fontSize);
-            }
-            float tx = x + 4, ty = y + (ctl->extentY - fontSize) * 0.5f;
-            if (font) font->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
+        if (!ctl->text.empty() && gf) {
+            float tx = x + textOfsX;
+            float ty = y + (ctl->extentY - fontSize) * 0.5f + textOfsY;
+            float tw = gf->measure(ctl->text.c_str()).x;
+            if (justify == "center") tx = x + (ctl->extentX - tw) * 0.5f;
+            else if (justify == "right") tx = x + ctl->extentX - tw - textOfsX;
+            gf->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
         }
     }
 
