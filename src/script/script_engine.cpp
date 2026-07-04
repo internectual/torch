@@ -1952,13 +1952,17 @@ bool ScriptEngine::init() {
                 tabCtl->onClick = [bakedCmd]() {
                     Console::instance().execute(bakedCmd.c_str());
                 };
-                // Pre-create the content panel for this tab via soToGui
+                // Pre-create content panel as a child of the top dialog
                 if (!guiName.empty()) {
                     tabCtl->altCommand = guiName;
-                    GuiControl* panel = gr3.soToGui(guiName, nullptr);
+                    GuiControl* parentDlg = gr3.findControl("LaunchToolbarDlg");
+                    if (!parentDlg) parentDlg = gr3.findControl("LaunchGui");
+                    GuiControl* panel = gr3.soToGui(guiName, parentDlg);
                     if (panel) {
-                        panel->visible = false; // hidden until selected
-                        Console::instance().printf(LogLevel::Debug, "TS: created panel '%s' for tab '%s'", guiName.c_str(), tabName.c_str());
+                        panel->visible = false;
+                        // Position to fill area above toolbar (y=0..436)
+                        panel->posX = 0; panel->posY = 0;
+                        panel->extentX = 640; panel->extentY = 436;
                     }
                 }
             }
@@ -1977,13 +1981,12 @@ bool ScriptEngine::init() {
             for (auto* child : tabView->children) {
                 bool isTab = (child->text == tabName && child->className == "ShellTabButton");
                 child->selected = isTab;
-                // Show/hide associated content panel (stored in altCommand)
-                if (isTab && !child->altCommand.empty()) {
+                // Show/hide content panel (child of LaunchToolbarDlg)
+                if (!child->altCommand.empty()) {
                     GuiControl* panel = gr.findControl(child->altCommand);
-                    if (panel) panel->visible = true;
-                } else if (!child->altCommand.empty()) {
-                    GuiControl* panel = gr.findControl(child->altCommand);
-                    if (panel) panel->visible = false;
+                    if (panel) {
+                        panel->visible = isTab;
+                    }
                 }
             }
         }
