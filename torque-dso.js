@@ -517,8 +517,10 @@ var Parser = class {
         const s = this.decl();
         if (s) stmts.push(s);
       } catch (e) {
-        while (!this.isAtEnd() && !this.check(62 /* RBracket */) && !this.check(2 /* Function */) && !this.check(75 /* Eof */))
+        while (!this.isAtEnd()) {
+          if (this.check(62 /* RBracket */) || this.check(2 /* Function */) || this.check(1 /* Package */) || this.check(75 /* Eof */)) break;
           this.advance();
+        }
         if (!this.isAtEnd()) this.advance();
       }
     }
@@ -2093,7 +2095,7 @@ var Compiler = class {
     const codeSize = this.precompileBlock(stmts, 0) + 1;
     const breakCount = this.breakLineCount;
     const lineBreakPairCount = breakCount * 2;
-    const context = new CompileContext(codeSize * 2 + 100, lineBreakPairCount * 2 + 100);
+    const context = new CompileContext(codeSize * 4 + 1024, lineBreakPairCount * 2 + 1024);
     this.breakLineCount = 0;
     if (stmts.length > 0) this.compileBlock(context, stmts);
     context.codeStream[context.ip++] = this.getOpcodeValue(13 /* Return */);

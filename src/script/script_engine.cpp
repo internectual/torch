@@ -2119,6 +2119,26 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("setRowColor", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("setRowStyle", [](const auto&) -> VMValue { return VMValue(1); });
 
+    // Chat/UI/misc function stubs (method dispatch falls back to natives if no TS function)
+    tsInstance->registerNative("addChat", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("installChatItem", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("startChatMenu", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("endChatMenu", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("ChatRoomMemberList_refresh", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("ChannelBannedList_refresh", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("createFlagTossGauge", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("cancelChatMenu", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setChatPage", [](const auto&) -> VMValue { return VMValue(1); });
+
+    // loadGui is a TS function but also keep a stub so method dispatch finds it
+    tsInstance->registerNative("loadGui", [](const auto&) -> VMValue { return VMValue(1); });
+
+    // EffectProfile is called by audio scripts
+    tsInstance->registerNative("EffectProfile", [](const auto&) -> VMValue { return VMValue(1); });
+
+    // addMaterialMapping is called by material scripts
+    tsInstance->registerNative("addMaterialMapping", [](const auto&) -> VMValue { return VMValue(1); });
+
     tsInstance->registerNative("enableWinConsole", [](const auto& args) -> VMValue {
         if (!args.empty() && args[0].toBool()) {
             static bool enabled = false;

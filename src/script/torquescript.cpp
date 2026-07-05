@@ -1670,7 +1670,8 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
     int savedSrcLine = impl->srcLine;
 
     // Try loading DSO cache before parsing source (.cs, .gui, .mis)
-    if (isCompilableExt(path)) {
+    // Only cache .cs/.mis files — .gui files have no functions
+    if (isCompilableExt(path) && path.substr(path.size()-3) != ".gui") {
         std::string modPath = Console::instance().getStringVariable("modPath", "base");
         std::string outDir = Console::instance().getStringVariable("outputDir", "");
         if (!outDir.empty()) {
@@ -1770,8 +1771,8 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
         // Don't propagate returning/breaking/continuing to outer context
     }
 
-    // Write source-cache DSO for fast loading on next run
-    if (isCompilableExt(path) && path.find('/') != std::string::npos) {
+    // Write source-cache DSO for .cs/.mis files only (.gui files have no functions to cache)
+    if (isCompilableExt(path) && path.find('/') != std::string::npos && path.substr(path.size()-3) != ".gui") {
         std::string modPath = Console::instance().getStringVariable("modPath", "base");
         std::string outDir = Console::instance().getStringVariable("outputDir", "");
         if (!outDir.empty()) {
@@ -1875,9 +1876,9 @@ VMValue TorqueScript::executeFile(const std::string& path) {
     }
     impl->loadingFiles.insert(path);
 
-    // For modpath .cs/.gui/.mis files, try .cs.dso first
+    // For modpath .cs/.mis files, try .cs.dso first (.gui files have no functions)
     // Root-level files (no '/') like console_start.cs skip DSO
-    if (isCompilableExt(path) && path.find('/') != std::string::npos) {
+    if (isCompilableExt(path) && path.find('/') != std::string::npos && path.substr(path.size()-3) != ".gui") {
         std::string dsoPath = path + ".dso";
         auto dsoData = Engine::instance().fs().read(dsoPath.c_str());
         if (dsoData.empty()) {
@@ -1958,7 +1959,7 @@ VMValue TorqueScript::executeFile(const std::string& path) {
     VMValue result = execute(source, path);
 
     // After successful execution, write DSO cache to outputDir/modPath
-    if (isCompilableExt(path) && path.find('/') != std::string::npos) {
+    if (isCompilableExt(path) && path.find('/') != std::string::npos && path.substr(path.size()-3) != ".gui") {
         std::string modPath = Console::instance().getStringVariable("modPath", "base");
         std::string outDir = Console::instance().getStringVariable("outputDir", "");
         if (!outDir.empty()) {

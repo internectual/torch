@@ -1504,7 +1504,6 @@ void GuiRenderer::popDialog(const std::string& name) {
 }
 
 void GuiRenderer::setContent(const std::string& name) {
-    Console::instance().printf(LogLevel::Info, "GUI: setContent('%s')", name.c_str());
     GuiControl* ctl = soToGui(name, nullptr);
     if (ctl) {
         dialogStack.clear();
