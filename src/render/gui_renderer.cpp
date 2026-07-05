@@ -1508,43 +1508,7 @@ void GuiRenderer::setContent(const std::string& name) {
     if (ctl) {
         dialogStack.clear();
         dialogStack.push_back(ctl);
-        // For offline Launch GUI, pre-add offline tabs before script onWake runs
-        if (name == "LaunchGui") {
-            Console::instance().setVariable("$FirstLaunch", ""); // prevent script from also adding tabs
-            Console::instance().setVariable("$PlayingOnline", "0");
-            GuiControl* tabView = findControl("LaunchTabView");
-            if (tabView && tabView->children.empty()) {
-                Console::instance().printf(LogLevel::Info, "GUI: adding offline tabs to LaunchGui");
-                std::string cmd;
-                cmd = "LaunchTabView.setSelected(\"TRAINING\")";
-                auto* obj1 = new ScriptObject;
-                obj1->className = "ShellTabButton"; obj1->name = "LaunchTab_TRAINING";
-                obj1->fields["text"] = VMValue(std::string("TRAINING"));
-                obj1->fields["profile"] = VMValue(std::string("LaunchTabProfile"));
-                obj1->fields["visible"] = VMValue(1);
-                obj1->fields["position"] = VMValue(std::string("0 0"));
-                obj1->fields["extent"] = VMValue(std::string("101 29"));
-                obj1->fields["command"] = VMValue(cmd);
-                obj1->internals["parent"] = VMValue(std::string("LaunchTabView"));
-                ScriptEngine::instance().objects[obj1->name] = obj1;
-                GuiControl* tc1 = soToGui("LaunchTab_TRAINING", tabView);
-                if (tc1) { tc1->command = cmd; tc1->onClick = [cmd](){ Console::instance().execute(cmd.c_str()); }; }
-                cmd = "LaunchTabView.setSelected(\"LAN GAME\")";
-                auto* obj2 = new ScriptObject;
-                obj2->className = "ShellTabButton"; obj2->name = "LaunchTab_LAN_GAME";
-                obj2->fields["text"] = VMValue(std::string("LAN GAME"));
-                obj2->fields["profile"] = VMValue(std::string("LaunchTabProfile"));
-                obj2->fields["visible"] = VMValue(1);
-                obj2->fields["position"] = VMValue(std::string("105 0"));
-                obj2->fields["extent"] = VMValue(std::string("101 29"));
-                obj2->fields["command"] = VMValue(cmd);
-                obj2->internals["parent"] = VMValue(std::string("LaunchTabView"));
-                ScriptEngine::instance().objects[obj2->name] = obj2;
-                GuiControl* tc2 = soToGui("LaunchTab_LAN_GAME", tabView);
-                if (tc2) { tc2->command = cmd; tc2->onClick = [cmd](){ Console::instance().execute(cmd.c_str()); }; }
-            }
-        }
-        // Trigger onAdd/onWake after tab setup
+        // Trigger onAdd/onWake (tabs are added by the script path via OpenLaunchTabs/checkNamesAndAliases)
         if (auto* ts = Engine::instance().script().ts()) {
             ts->callFunction(name + "::onAdd", {});
             ts->callFunction(name + "::onWake", {});

@@ -249,7 +249,7 @@ bool Engine::init(int argc, char* argv[]) {
         auto isEngineFlag = [](const char* a) {
             const char* flags[] = {
                 "-help", "-h", "--help", "-version", "-v", "--version",
-                "-nologin", "-online", nullptr
+                nullptr
             };
             for (int f = 0; flags[f]; f++)
                 if (strcmp(a, flags[f]) == 0) return true;
@@ -705,37 +705,30 @@ bool Engine::init(int argc, char* argv[]) {
         }
     } else if (noLogin) {
         Console::instance().printf(LogLevel::Info, "-nologin: dev panel (F1 overlay, ~ console, Pause debug)");
-        // Set before init script so it takes the offline path
         Console::instance().setVariable("$SkipLogin", "true");
         Console::instance().setVariable("$pref::SkipIntro", "true");
         Console::instance().setVariable("$pref::SkipGGIntro", "true");
         Console::instance().setVariable("$LaunchMode", "Offline");
         Console::instance().setVariable("$IRCClient::serverCount", "0");
         Console::instance().setVariable("$PlayingOnline", "0");
-        // Auto-execute the init script (e.g. console_start.cs) to load game UI
+        Console::instance().setVariable("Engine::noLogin", "1");
+        // Execute init script using the same nested-exec path as script-level exec()
         if (scr->ts()) {
-            std::string path = Console::instance().getStringVariable("initScript", "console_start.cs");
-            auto sdata = fs.read(path.c_str());
-            if (!sdata.empty()) {
-                Console::instance().printf(LogLevel::Info, "Auto-launching init script: %s (%zu bytes)", path.c_str(), sdata.size());
-                // executeFile handles DSO loading (.cs.dso first, then .cs)
-                if (scr->ts()->executeFile(path).type == VMValue::None) {
-                    scr->ts()->execute(std::string((const char*)sdata.data(), sdata.size()), path);
-                }
-                // Process events + render so the window is responsive during loading
-                plat->processEvents();
-                ren->beginFrame({0.15f, 0.15f, 0.2f, 1.0f});
-                if (gui) gui->render();
-                ren->endFrame();
-                plat->swapBuffers();
-            } else {
-                Console::instance().printf(LogLevel::Warn, "Init script not found: %s", path.c_str());
+            std::string initPath = Console::instance().getStringVariable("initScript", "console_start.cs");
+            auto initData = fs.read(initPath.c_str());
+            if (!initData.empty()) {
+                std::string src((const char*)initData.data(), initData.size());
+                scr->ts()->executeNested(src, initPath);
             }
         }
+        plat->processEvents();
+        ren->beginFrame({0.15f, 0.15f, 0.2f, 1.0f});
+        if (gui) gui->render();
+        ren->endFrame();
+        plat->swapBuffers();
     } else if (demoPath.empty() && previewMap.empty()) {
         Console::instance().printf(LogLevel::Info, "Pushing login dialog");
         gui->pushDialog("LoginDlg");
-        // Set RubyEnabled so the login scripts don't block
         Console::instance().setVariable("RubyEnabled", "1");
     }
 

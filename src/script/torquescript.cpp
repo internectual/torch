@@ -197,6 +197,18 @@ void TorqueScript::init() {}
 void TorqueScript::shutdown() {}
 
 void TorqueScript::setGlobal(const std::string& name, const VMValue& val) {
+    const char* noLoginVal = Console::instance().getStringVariable("Engine::noLogin", "");
+    if (name == "$LaunchMode" && val.toString() == "Normal" && strcmp(noLoginVal, "1") == 0) {
+        impl->globals["$LaunchMode"] = VMValue(std::string("Offline"));
+        Console::instance().setVariable("$LaunchMode", "Offline");
+        return;
+    }
+    if (name == "$PlayingOnline" && val.toString() == "1" &&
+        strcmp(Console::instance().getStringVariable("$LaunchMode", ""), "Offline") == 0) {
+        impl->globals["$PlayingOnline"] = VMValue(std::string("0"));
+        Console::instance().setVariable("$PlayingOnline", "0");
+        return;
+    }
     impl->globals[name] = val;
     Console::instance().setVariable(name.c_str(), val.toString().c_str());
 }
@@ -490,9 +502,15 @@ void TorqueScript::Impl::error(const std::string& msg) {
 VMValue TorqueScript::Impl::parseProgram() {
     VMValue result;
     int stmtCount = 0;
+    const int maxStmts = 100000;
     while (peekToken().type != TSTokenType::Eof && running) {
         result = parseStatement();
         stmtCount++;
+        if (stmtCount > maxStmts) {
+            Console::instance().printf(LogLevel::Warn, "TS: parseProgram safety break after %d stmts in '%s'",
+                stmtCount, currentFile.c_str());
+            break;
+        }
         if (returning || breaking || continuing) break;
     }
     Console::instance().printf(LogLevel::Debug, "TS: parseProgram done (%d stmts, returning=%d, breaking=%d, continuing=%d, eof=%d)", 
@@ -644,7 +662,14 @@ VMValue TorqueScript::Impl::parseFor() {
     // Save body start for re-execution and track end for skipping
     size_t bodyStart = tokenPos;
     size_t bodyEnd = tokenPos;
+    int iterCount = 0;
+    const int maxIters = 500000;
     while (running) {
+        if (iterCount++ >= maxIters) {
+            Console::instance().printf(LogLevel::Warn, "TS: parseWhile safety break after %d iters in '%s'",
+                iterCount, currentFile.c_str());
+            break;
+        }
         // Evaluate condition
         if (condStart < condEnd) {
             size_t saved = tokenPos;
@@ -697,6 +722,8 @@ VMValue TorqueScript::Impl::parseWhile() {
 
     loopDepth++;
     VMValue result;
+    int iterCount = 0;
+    const int maxIters = 1000000;
     while (running) {
         // Evaluate condition
         {
@@ -705,6 +732,12 @@ VMValue TorqueScript::Impl::parseWhile() {
             VMValue cond = parseExpression();
             tokenPos = saved;
             if (!cond.toBool()) break;
+        }
+
+        if (iterCount++ >= maxIters) {
+            Console::instance().printf(LogLevel::Warn, "TS: parseWhile safety break after %d iters in '%s'",
+                iterCount, currentFile.c_str());
+            break;
         }
 
         result = parseStatement();
@@ -745,12 +778,20 @@ VMValue TorqueScript::Impl::parseDo() {
 
     // Re-evaluate condition for proper looping
     if (hasWhile) {
+        int iterCount = 0;
+        const int maxIters = 10000000;
         while (true) {
             size_t saved = tokenPos;
             tokenPos = condStart;
             VMValue cond = parseExpression();
             tokenPos = saved;
             if (!cond.toBool()) break;
+
+            if (iterCount++ >= maxIters) {
+                Console::instance().printf(LogLevel::Warn, "TS: parseDo safety break after %d iters in '%s'",
+                    iterCount, currentFile.c_str());
+                break;
+            }
 
             result = parseStatement();
             if (returning) break;
@@ -1782,8 +1823,7 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
         }
     }
 
-    // Restore outer state (discard inner returning/breaking/continuing)
-    impl->execDepth = savedDepth;
+    // Restore outer state (discard inner returning/breaking/continuing)    impl->execDepth = savedDepth;
     impl->srcLine = savedSrcLine;
     impl->currentFile = std::move(savedFile);
     impl->tokens = std::move(savedTokens);

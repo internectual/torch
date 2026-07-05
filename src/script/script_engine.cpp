@@ -1896,16 +1896,15 @@ bool ScriptEngine::init() {
     // exec() - load and execute from modpath, with base fallback
     tsInstance->registerNative("exec", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
-        std::string path = args[0].toString();
-        std::string modPath = Console::instance().getStringVariable("modPath", "base");
-        auto* ts = Engine::instance().script().ts();
-        if (ts) {
-            // Try modPath first, then base as fallback
-            if (modPath != "base" && ts->executeFile(modPath + "/" + path).type != VMValue::None)
-                return VMValue(1);
-            if (ts->executeFile("base/" + path).type != VMValue::None)
-                return VMValue(1);
-            ts->executeFile(path);
+        std::string execPath = args[0].toString();
+        auto& fs = Engine::instance().fs();
+        // Try bare path first
+        auto data = fs.read(execPath.c_str());
+        if (data.empty()) data = fs.read(("base/" + execPath).c_str());
+        if (!data.empty()) {
+            std::string src((const char*)data.data(), data.size());
+            auto* ts = Engine::instance().script().ts();
+            if (ts) { ts->executeNested(src, execPath); }
         }
         return VMValue(1);
     });
@@ -1961,12 +1960,21 @@ bool ScriptEngine::init() {
                     tabCtl->altCommand = guiName;
                     GuiControl* parentDlg = gr3.findControl("LaunchToolbarDlg");
                     if (!parentDlg) parentDlg = gr3.findControl("LaunchGui");
-                    GuiControl* panel = gr3.soToGui(guiName, parentDlg);
+                    GuiControl* panel = gr3.soToGui(guiName, nullptr);
+                    if (!panel) panel = gr3.soToGui(guiName, parentDlg);
                     if (panel) {
+                        // Reparent under toolbar if not already there
+                        if (panel->parent != parentDlg) {
+                            if (panel->parent) {
+                                auto& sib = panel->parent->children;
+                                sib.erase(std::remove(sib.begin(), sib.end(), panel), sib.end());
+                            }
+                            panel->parent = nullptr;
+                            if (parentDlg) parentDlg->addChild(panel);
+                        }
                         panel->visible = false;
-                        // Position to fill area above toolbar (y=0..436)
-                        panel->posX = 0; panel->posY = 0;
-                        panel->extentX = 640; panel->extentY = 436;
+                        panel->posX = 0; panel->posY = 40; // below tab bar
+                        panel->extentX = 640; panel->extentY = 396;
                     }
                 }
             }
@@ -2130,8 +2138,23 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("cancelChatMenu", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("setChatPage", [](const auto&) -> VMValue { return VMValue(1); });
 
-    // loadGui is a TS function but also keep a stub so method dispatch finds it
-    tsInstance->registerNative("loadGui", [](const auto&) -> VMValue { return VMValue(1); });
+    // loadGui — look up and call the TS function (natives take priority over TS functions)
+    tsInstance->registerNative("loadGui", [](const auto& args) -> VMValue {
+        auto* ts = Engine::instance().script().ts();
+        if (ts) {
+            std::string guiName = args.empty() ? "" : args.back().toString();
+            if (!guiName.empty()) {
+                std::string execPath = "gui/" + guiName + ".gui";
+                auto data = Engine::instance().fs().read(execPath.c_str());
+                if (data.empty()) data = Engine::instance().fs().read(("base/" + execPath).c_str());
+                if (!data.empty()) {
+                    std::string src((const char*)data.data(), data.size());
+                    ts->executeNested(src, execPath);
+                }
+            }
+        }
+        return VMValue(1);
+    });
 
     // EffectProfile is called by audio scripts
     tsInstance->registerNative("EffectProfile", [](const auto&) -> VMValue { return VMValue(1); });
