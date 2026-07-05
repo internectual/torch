@@ -151,6 +151,7 @@ int BitStream::readInt(int bitCount) {
         val |= (unsigned int)data[startByte + i] << (i * 8);
     val >>= downShift;
     if (bitCount < 32) val &= (1u << bitCount) - 1;
+    else if (bitCount == 32) val &= 0xFFFFFFFFu;
     return (int)val;
 }
 

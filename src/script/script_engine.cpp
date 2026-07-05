@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <cmath>
 #include <algorithm>
+#include <array>
 
 // === VMValue ===
 int32_t VMValue::toInt() const {
@@ -327,9 +328,10 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
     // Convert vector to stack interface
     struct ExprStack {
         std::vector<VMValue> v;
+        VMValue def;
         void push(const VMValue& x) { v.push_back(x); }
         VMValue pop() { if (v.empty()) return {}; VMValue x = v.back(); v.pop_back(); return x; }
-        VMValue& top() { static VMValue def; if (v.empty()) { def = {}; return def; } return v.back(); }
+        VMValue& top() { if (v.empty()) { def = {}; return def; } return v.back(); }
         bool empty() const { return v.empty(); }
         size_t size() const { return v.size(); }
     };
@@ -1456,11 +1458,59 @@ bool ScriptEngine::init() {
     });
 
     tsInstance->registerNative("stricmp", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(-1);
+        if (args.size() < 2) return VMValue(0);
         std::string a = args[0].toString(), b = args[1].toString();
         for (auto& c : a) c = tolower((unsigned char)c);
         for (auto& c : b) c = tolower((unsigned char)c);
         return VMValue(strcmp(a.c_str(), b.c_str()));
+    });
+
+    tsInstance->registerNative("strpos", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(-1);
+        std::string haystack = args[0].toString();
+        std::string needle = args[1].toString();
+        size_t offset = args.size() > 2 ? std::max(0, args[2].toInt()) : 0;
+        if (offset >= haystack.size()) return VMValue(-1);
+        size_t pos = haystack.find(needle, offset);
+        return VMValue(pos != std::string::npos ? (int32_t)pos : -1);
+    });
+
+    tsInstance->registerNative("getWords", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string s = args[0].toString();
+        int startIdx = args.size() > 1 ? args[1].toInt() : 0;
+        int endIdx = args.size() > 2 ? args[2].toInt() : -1;
+        std::string result;
+        size_t pos = 0;
+        int count = 0;
+        while (pos <= s.size() && count <= endIdx) {
+            size_t start = s.find_first_not_of(" \t\n", pos);
+            if (start == std::string::npos) break;
+            size_t end = s.find_first_of(" \t\n", start);
+            if (end == std::string::npos) end = s.size();
+            if (count >= startIdx && (endIdx < 0 || count <= endIdx)) {
+                if (!result.empty()) result += " ";
+                result += s.substr(start, end - start);
+            }
+            count++;
+            pos = end + 1;
+        }
+        return VMValue(result);
+    });
+
+    tsInstance->registerNative("deleteFile", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        int ret = std::remove(args[0].toString().c_str());
+        return VMValue(ret == 0 ? 1 : 0);
+    });
+
+    tsInstance->registerNative("getSimTime", [](const auto&) -> VMValue {
+        return VMValue((int32_t)(Timer::now() * 1000.0));
+    });
+
+    tsInstance->registerNative("strToPlayerName", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        return VMValue(args[0].toString());
     });
 
     {
@@ -1544,6 +1594,68 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("getMin", [](const auto& args) -> VMValue {
         if (args.size() < 2) return args.empty() ? VMValue(0.0) : args[0];
         return VMValue(std::min(args[0].toDouble(), args[1].toDouble()));
+    });
+
+    // Vector math functions
+    auto parseVec = [](const std::string& s) -> std::array<double, 3> {
+        std::array<double, 3> v = {0,0,0};
+        size_t pos = 0;
+        for (int i = 0; i < 3 && pos < s.size(); i++) {
+            size_t end = s.find_first_of(" \t", pos);
+            if (end == std::string::npos) end = s.size();
+            v[i] = atof(s.substr(pos, end - pos).c_str());
+            pos = end + 1;
+        }
+        return v;
+    };
+    auto fmtVec = [](double x, double y, double z) -> std::string {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%g %g %g", x, y, z);
+        return buf;
+    };
+    tsInstance->registerNative("VectorNormalize", [parseVec, fmtVec](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("0 0 0");
+        auto v = parseVec(args[0].toString());
+        double len = sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+        if (len > 0) { v[0] /= len; v[1] /= len; v[2] /= len; }
+        return VMValue(fmtVec(v[0], v[1], v[2]));
+    });
+    tsInstance->registerNative("VectorScale", [parseVec, fmtVec](const auto& args) -> VMValue {
+        if (args.size() < 2) return args.empty() ? VMValue("0 0 0") : args[0];
+        auto v = parseVec(args[0].toString());
+        double s = args[1].toDouble();
+        return VMValue(fmtVec(v[0]*s, v[1]*s, v[2]*s));
+    });
+    tsInstance->registerNative("VectorAdd", [parseVec, fmtVec](const auto& args) -> VMValue {
+        if (args.size() < 2) return args.empty() ? VMValue("0 0 0") : args[0];
+        auto a = parseVec(args[0].toString());
+        auto b = parseVec(args[1].toString());
+        return VMValue(fmtVec(a[0]+b[0], a[1]+b[1], a[2]+b[2]));
+    });
+    tsInstance->registerNative("VectorSub", [parseVec, fmtVec](const auto& args) -> VMValue {
+        if (args.size() < 2) return args.empty() ? VMValue("0 0 0") : args[0];
+        auto a = parseVec(args[0].toString());
+        auto b = parseVec(args[1].toString());
+        return VMValue(fmtVec(a[0]-b[0], a[1]-b[1], a[2]-b[2]));
+    });
+    tsInstance->registerNative("VectorDot", [parseVec](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0.0);
+        auto a = parseVec(args[0].toString());
+        auto b = parseVec(args[1].toString());
+        return VMValue(a[0]*b[0] + a[1]*b[1] + a[2]*b[2]);
+    });
+    tsInstance->registerNative("VectorCross", [parseVec, fmtVec](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("0 0 0");
+        auto a = parseVec(args[0].toString());
+        auto b = parseVec(args[1].toString());
+        return VMValue(fmtVec(a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]));
+    });
+    tsInstance->registerNative("VectorDist", [parseVec](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0.0);
+        auto a = parseVec(args[0].toString());
+        auto b = parseVec(args[1].toString());
+        double dx = a[0]-b[0], dy = a[1]-b[1], dz = a[2]-b[2];
+        return VMValue(sqrt(dx*dx + dy*dy + dz*dz));
     });
 
     // Register native functions for DSO VM
@@ -1719,6 +1831,29 @@ bool ScriptEngine::init() {
     stubVM("setLogMode");
     stubVM("enableWinConsole");
     stubVMS("setDefaultFov");
+
+    // Also register these on tsInstance so the TorqueScript interpreter can find them
+    auto stubTS = [&](const char* name) {
+        tsInstance->registerNative(name, [](const auto&) { return VMValue(1); });
+    };
+    auto stubTSS = [&](const char* name) {
+        tsInstance->registerNative(name, [](const auto& args) {
+            return args.empty() ? VMValue(1) : args[0];
+        });
+    };
+    stubTS("audioSetDriver");
+    stubTS("audioDetect");
+    stubTS("startAudio");
+    stubTS("setZoomSpeed");
+    stubTS("setShadowDetailLevel");
+    stubTS("setOpenGLTextureCompressionHint");
+    stubTS("setOpenGLSkyMipReduction");
+    stubTS("setOpenGLMipReduction");
+    stubTS("setOpenGLInteriorMipReduction");
+    stubTS("setOpenGLAnisotropy");
+    stubTS("setLogMode");
+    stubTS("enableWinConsole");
+    stubTSS("setDefaultFov");
 
     // GUI Canvas methods (called as Canvas.pushDialog() etc.)
     // These are registered globally so the dot-notation lookup finds them
@@ -2156,11 +2291,67 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
+    // alx* audio stubs
+    tsInstance->registerNative("alxStopAll", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("alxListenerf", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("alxSetChannelVolume", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("alxCreateSource", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("alxGetWaveLen", [](const auto&) -> VMValue { return VMValue(0); });
+    tsInstance->registerNative("alxSourcef", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("alxStop", [](const auto&) -> VMValue { return VMValue(1); });
+
+    // Display notification stubs
+    tsInstance->registerNative("bottomPrint", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("centerPrint", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("clearBottomPrint", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("clearCenterPrint", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("bottomPrintAll", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("centerPrintAll", [](const auto&) -> VMValue { return VMValue(1); });
+
+    // WON/Login stubs
+    tsInstance->registerNative("WONLoginResult", [](const auto&) -> VMValue { return VMValue(0); });
+    tsInstance->registerNative("WONServerLogin", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("WONStartLogin", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("WONStartEmailFetch", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("WONStartCreateAccount", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("WONStartUpdateAccount", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("WONStartLoginInfoFetch", [](const auto&) -> VMValue { return VMValue(1); });
+
+    // Journal stubs
+    tsInstance->registerNative("loadJournal", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("saveJournal", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("playJournal", [](const auto&) -> VMValue { return VMValue(1); });
+
     // EffectProfile is called by audio scripts
     tsInstance->registerNative("EffectProfile", [](const auto&) -> VMValue { return VMValue(1); });
 
     // addMaterialMapping is called by material scripts
     tsInstance->registerNative("addMaterialMapping", [](const auto&) -> VMValue { return VMValue(1); });
+
+    // Networking stubs
+    tsInstance->registerNative("commandToClient", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("commandToServer", [](const auto&) -> VMValue { return VMValue(1); });
+
+    // Container/spatial query stubs
+    tsInstance->registerNative("InitContainerRadiusSearch", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("containerSearchNext", [](const auto&) -> VMValue { return VMValue(0); });
+    tsInstance->registerNative("containerRayCast", [](const auto&) -> VMValue { return VMValue(""); });
+    tsInstance->registerNative("containerSearchCurrDist", [](const auto&) -> VMValue { return VMValue(0.0); });
+    tsInstance->registerNative("containerSearchCurrRadDamageDist", [](const auto&) -> VMValue { return VMValue(0.0); });
+    tsInstance->registerNative("calcExplosionCoverage", [](const auto&) -> VMValue { return VMValue(1.0); });
+
+    // Misc startup stubs
+    tsInstance->registerNative("setModPaths", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setEchoFileLoads", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setPureServer", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("telnetSetParameters", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("addCardProfile", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("addCreditsLine", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("enableImmersion", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("isT2UkBuild", [](const auto&) -> VMValue { return VMValue(0); });
+    tsInstance->registerNative("isKoreanBuild", [](const auto&) -> VMValue { return VMValue(0); });
+    tsInstance->registerNative("videoSetGammaCorrection", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("GetIRCServerList", [](const auto&) -> VMValue { return VMValue(""); });
 
     tsInstance->registerNative("enableWinConsole", [](const auto& args) -> VMValue {
         if (!args.empty() && args[0].toBool()) {

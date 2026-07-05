@@ -1519,8 +1519,8 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 if (item && item->type == Console::ConsoleItem::Command) {
                     std::vector<const char*> argv;
                     argv.push_back(fn.c_str());
+                    std::vector<std::string> argStorage;
                     for (auto& a : args) {
-                        static std::vector<std::string> argStorage;
                         argStorage.push_back(a.toString());
                         argv.push_back(argStorage.back().c_str());
                     }
@@ -1823,7 +1823,8 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
         }
     }
 
-    // Restore outer state (discard inner returning/breaking/continuing)    impl->execDepth = savedDepth;
+    // Restore outer state (discard inner returning/breaking/continuing)
+    impl->execDepth = savedDepth;
     impl->srcLine = savedSrcLine;
     impl->currentFile = std::move(savedFile);
     impl->tokens = std::move(savedTokens);

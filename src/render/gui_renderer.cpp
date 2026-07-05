@@ -23,7 +23,14 @@ void GuiControl::addChild(GuiControl* child) {
 }
 
 GuiRenderer::GuiRenderer() {}
-GuiRenderer::~GuiRenderer() {}
+GuiRenderer::~GuiRenderer() {
+    auto del = [&](auto& self, GuiControl* ctl) -> void {
+        for (auto* child : ctl->children) self(self, child);
+        delete ctl;
+    };
+    if (canvas) del(del, canvas);
+    delete checkerTex;
+}
 
 void GuiRenderer::init() {
     canvas = nullptr;
@@ -173,8 +180,10 @@ void GuiRenderer::refresh() {
                 if (parent) parent->addChild(ctl);
             } else if (ctl != canvas && canvas) { canvas->addChild(ctl); }
             if (canvas) {
-                ctl->extentX = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentX : ctl->extentX;
-                ctl->extentY = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentY : ctl->extentY;
+                bool smallX = ctl->extentX <= 100;
+                bool smallY = ctl->extentY <= 30;
+                ctl->extentX = smallX && smallY ? canvas->extentX : ctl->extentX;
+                ctl->extentY = smallX && smallY ? canvas->extentY : ctl->extentY;
             }
         }
     }
@@ -979,7 +988,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto& src = fillCells && fillCells->size() >= 1 ? (*fillCells)[0] : BmpCell{0,0,fillTex->width,fillTex->height};
             float u0 = (float)src.x/fillTex->width, v0 = (float)src.y/fillTex->height;
             float u1 = (float)(src.x+src.w)/fillTex->width, v1 = (float)(src.y+src.h)/fillTex->height;
-            GLint old; glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, &old);
+            GLint oldS, oldT; glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, &oldS); glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, &oldT);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
             auto* ss = ShaderManager::getSpriteShader(); if (ss) {
                 ss->bind(); ss->setUniform("uProjection",r.projection); ss->setUniform("uView",r.view);
@@ -997,7 +1006,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 glDisable(GL_CULL_FACE);glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,0);
                 glDeleteVertexArrays(1,&vao);glDeleteBuffers(1,&vbo);glDeleteBuffers(1,&ebo);
             }
-            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,old); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,old);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,oldS); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,oldT);
         } else r.drawRectFill({x,y,0},{x+ctl->extentX,y+ctl->extentY,0},fc);
         // Load textures for frame edges and title tab
         const std::vector<BmpCell>* edgeCells = nullptr;
