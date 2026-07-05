@@ -808,52 +808,59 @@ var Parser = class {
     return expr;
   }
   stmtExpr() {
-    const expr = this.expression();
+    let expr = this.expression();
     if (!expr) return null;
-    if (this.match(70 /* Dot */)) {
-      const label = this.consume(53 /* Label */, "Expected label after .");
-      let arrAccess = null;
-      if (this.match(67 /* LeftSquareBracket */)) {
-        arrAccess = this.parseArrayIndex();
-        this.consume(68 /* RightSquareBracket */, "Expected ']' after array index");
-      }
-      if (this.match(20 /* Assign */)) {
-        const rexpr = this.expression();
-        return new SlotAssignExpr(expr, arrAccess, label, rexpr);
-      }
-      if (this.check(73 /* PlusPlus */) || this.check(74 /* MinusMinus */)) {
-        const op = this.advance();
-        return new ParenthesisExpr(new SlotAssignOpExpr(expr, arrAccess, label, null, op));
-      }
-      const assignOpTypes = [
-        21 /* PlusAssign */,
-        22 /* MinusAssign */,
-        23 /* MultiplyAssign */,
-        28 /* DivideAssign */,
-        27 /* ModulusAssign */,
-        25 /* AndAssign */,
-        24 /* OrAssign */,
-        26 /* XorAssign */,
-        29 /* ShiftLeftAssign */,
-        30 /* ShiftRightAssign */
-      ];
-      if (assignOpTypes.includes(this.peek().type)) {
-        const op = this.advance();
-        const rexpr = this.expression();
-        return new SlotAssignOpExpr(expr, arrAccess, label, rexpr, op);
-      }
-      if (this.match(59 /* LParen */)) {
-        const args2 = [expr];
-        if (!this.check(60 /* RParen */)) {
-          args2.push(this.expression());
-          while (this.match(63 /* Comma */)) {
-            args2.push(this.expression());
-          }
+    let handled = true;
+    while (handled) {
+      handled = false;
+      if (this.match(70 /* Dot */)) {
+        handled = true;
+        const label = this.consume(53 /* Label */, "Expected label after .");
+        let arrAccess = null;
+        if (this.match(67 /* LeftSquareBracket */)) {
+          arrAccess = this.parseArrayIndex();
+          this.consume(68 /* RightSquareBracket */, "Expected ']' after array index");
         }
-        this.consume(60 /* RParen */, "Expected ')' after arguments");
-        return new FuncCallExpr(label, null, args2, 1 /* MethodCall */);
+        if (this.match(20 /* Assign */)) {
+          const rexpr = this.expression();
+          return new SlotAssignExpr(expr, arrAccess, label, rexpr);
+        }
+        if (this.check(73 /* PlusPlus */) || this.check(74 /* MinusMinus */)) {
+          const op = this.advance();
+          return new ParenthesisExpr(new SlotAssignOpExpr(expr, arrAccess, label, null, op));
+        }
+        const assignOpTypes = [
+          21 /* PlusAssign */,
+          22 /* MinusAssign */,
+          23 /* MultiplyAssign */,
+          28 /* DivideAssign */,
+          27 /* ModulusAssign */,
+          25 /* AndAssign */,
+          24 /* OrAssign */,
+          26 /* XorAssign */,
+          29 /* ShiftLeftAssign */,
+          30 /* ShiftRightAssign */
+        ];
+        if (assignOpTypes.includes(this.peek().type)) {
+          const op = this.advance();
+          const rexpr = this.expression();
+          return new SlotAssignOpExpr(expr, arrAccess, label, rexpr, op);
+        }
+        if (this.match(59 /* LParen */)) {
+          const args2 = [expr];
+          if (!this.check(60 /* RParen */)) {
+            args2.push(this.expression());
+            while (this.match(63 /* Comma */)) {
+              args2.push(this.expression());
+            }
+          }
+          this.consume(60 /* RParen */, "Expected ')' after arguments");
+          expr = new FuncCallExpr(label, null, args2, 1 /* MethodCall */);
+          continue;
+        }
+        expr = new SlotAccessExpr(expr, arrAccess, label);
+        continue;
       }
-      return expr;
     }
     if (expr instanceof VarExpr) {
       if (this.match(67 /* LeftSquareBracket */)) {
@@ -1148,7 +1155,7 @@ var Parser = class {
       }
       expr = new SlotAccessExpr(expr, arrAccess, label);
     }
-    if (expr instanceof SlotAccessExpr && expr.slotName !== null && this.check(59 /* LParen */)) {
+    while (expr instanceof SlotAccessExpr && expr.slotName !== null && this.check(59 /* LParen */)) {
       this.advance();
       const args2 = [];
       if (!this.check(60 /* RParen */)) {
@@ -1159,7 +1166,16 @@ var Parser = class {
       }
       this.consume(60 /* RParen */, "Expected ')' after arguments");
       expr = new FuncCallExpr(expr.slotName, null, args2, 1 /* MethodCall */, expr.objectExpr);
-      return expr;
+      if (this.check(70 /* Dot */)) {
+        this.advance();
+        const label2 = this.consume(53 /* Label */, "Expected label after .");
+        let arrAccess2 = null;
+        if (this.match(67 /* LeftSquareBracket */)) {
+          arrAccess2 = this.parseArrayIndex();
+          this.consume(68 /* RightSquareBracket */, "Expected ']'");
+        }
+        expr = new SlotAccessExpr(expr, arrAccess2, label2);
+      }
     }
     return expr;
   }
