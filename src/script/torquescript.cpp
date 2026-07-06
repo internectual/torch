@@ -2030,6 +2030,10 @@ VMValue TorqueScript::executeFile(const std::string& path) {
     return result;
 }
 
+bool TorqueScript::hasFunction(const std::string& name) const {
+    return impl->functions.find(name) != impl->functions.end();
+}
+
 VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VMValue>& args) {
     auto it = impl->functions.find(name);
     if (it == impl->functions.end()) {

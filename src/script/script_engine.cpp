@@ -265,7 +265,6 @@ VMValue VirtualMachine::callFunction(const char* name, const std::vector<VMValue
         }
     }
 
-    Console::instance().printf(LogLevel::Debug, "VM: function not found: %s", name);
     return {};
 }
 

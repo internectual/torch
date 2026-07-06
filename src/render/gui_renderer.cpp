@@ -1507,8 +1507,8 @@ void GuiRenderer::setContent(const std::string& name) {
         dialogStack.push_back(ctl);
         // Trigger onAdd/onWake (tabs are added by the script path via OpenLaunchTabs/checkNamesAndAliases)
         if (auto* ts = Engine::instance().script().ts()) {
-            ts->callFunction(name + "::onAdd", {});
-            ts->callFunction(name + "::onWake", {});
+            if (ts->hasFunction(name + "::onAdd")) ts->callFunction(name + "::onAdd", {});
+            if (ts->hasFunction(name + "::onWake")) ts->callFunction(name + "::onWake", {});
         }
         Console::instance().printf(LogLevel::Debug, "GUI: setContent %s (stack now %zu)", name.c_str(), dialogStack.size());
     } else {
