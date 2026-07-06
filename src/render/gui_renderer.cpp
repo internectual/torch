@@ -9,7 +9,6 @@
 #include <unordered_map>
 #include <cstdio>
 #include <cmath>
-#include <cmath>
 
 GuiControl* GuiControl::findChild(const std::string& name) {
     for (auto* c : children) if (c->name == name) return c;
@@ -20,6 +19,43 @@ GuiControl* GuiControl::findChild(const std::string& name) {
 void GuiControl::addChild(GuiControl* child) {
     child->parent = this;
     children.push_back(child);
+}
+
+// Reusable quad batch (avoids per-frame VAO/VBO/EBO creation)
+static uint32_t s_quadVAO{}, s_quadVBO{}, s_quadEBO{};
+static bool s_quadBatchInit = false;
+
+static void initQuadBatch() {
+    struct SV { float x,y,z; float u,v; float r,g,b,a; };
+    glGenVertexArrays(1, &s_quadVAO);
+    glGenBuffers(1, &s_quadVBO);
+    glGenBuffers(1, &s_quadEBO);
+    glBindVertexArray(s_quadVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, s_quadVBO);
+    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(SV),0); glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,sizeof(SV),(void*)12); glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,sizeof(SV),(void*)20); glEnableVertexAttribArray(2);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_quadEBO);
+    glBindVertexArray(0);
+    s_quadBatchInit = true;
+}
+
+static void drawQuadBatch(const void* verts, size_t vertSize, const void* indices, size_t indexSize) {
+    if (!s_quadBatchInit) initQuadBatch();
+    glBindVertexArray(s_quadVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, s_quadVBO);
+    glBufferData(GL_ARRAY_BUFFER, vertSize, verts, GL_STREAM_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_quadEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexSize, indices, GL_STREAM_DRAW);
+    glDisable(GL_CULL_FACE);
+    glDrawElements(GL_TRIANGLES, (GLsizei)(indexSize / sizeof(uint32_t)), GL_UNSIGNED_INT, 0);
+}
+
+static void destroyQuadBatch() {
+    if (s_quadVAO) { glDeleteVertexArrays(1, &s_quadVAO); s_quadVAO = 0; }
+    if (s_quadVBO) { glDeleteBuffers(1, &s_quadVBO); s_quadVBO = 0; }
+    if (s_quadEBO) { glDeleteBuffers(1, &s_quadEBO); s_quadEBO = 0; }
+    s_quadBatchInit = false;
 }
 
 GuiRenderer::GuiRenderer() {}
@@ -339,17 +375,7 @@ static void drawBmpArrayButton(Renderer& r, const Point3F& dstA, const Point3F& 
             {rx,ry+rh,0, u0,v1, 1,1,1,1}, {rx+rw,ry+rh,0, u1,v1, 1,1,1,1}
         };
         uint32_t ids[] = {0,1,2,1,3,2};
-        uint32_t vao, vbo, ebo;
-        glGenVertexArrays(1,&vao); glGenBuffers(1,&vbo); glGenBuffers(1,&ebo);
-        glBindVertexArray(vao);
-        glBindBuffer(GL_ARRAY_BUFFER,vbo); glBufferData(GL_ARRAY_BUFFER,sizeof(verts),verts,GL_STREAM_DRAW);
-        glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(SV),0); glEnableVertexAttribArray(0);
-        glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,sizeof(SV),(void*)12); glEnableVertexAttribArray(1);
-        glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,sizeof(SV),(void*)20); glEnableVertexAttribArray(2);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,ebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER,sizeof(ids),ids,GL_STREAM_DRAW);
-        glDisable(GL_CULL_FACE);
-        glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,0);
-        glDeleteVertexArrays(1,&vao); glDeleteBuffers(1,&vbo); glDeleteBuffers(1,&ebo);
+        drawQuadBatch(verts, sizeof(verts), ids, sizeof(ids));
     };
 
     float dx = dstA.x, dy = dstA.y, dw = dstB.x - dstA.x, dh = dstB.y - dstA.y;
@@ -389,17 +415,7 @@ static void drawBmpArrayButton(Renderer& r, const Point3F& dstA, const Point3F& 
             {dx+lw+mw, dy+th+mh, 0, repeatX, repeatY, 1,1,1,1}
         };
         uint32_t ids[] = {0,1,2,1,3,2};
-        uint32_t vao2, vbo2, ebo2;
-        glGenVertexArrays(1,&vao2); glGenBuffers(1,&vbo2); glGenBuffers(1,&ebo2);
-        glBindVertexArray(vao2);
-        glBindBuffer(GL_ARRAY_BUFFER,vbo2); glBufferData(GL_ARRAY_BUFFER,sizeof(verts),verts,GL_STREAM_DRAW);
-        glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(SV2),0); glEnableVertexAttribArray(0);
-        glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,sizeof(SV2),(void*)12); glEnableVertexAttribArray(1);
-        glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,sizeof(SV2),(void*)20); glEnableVertexAttribArray(2);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,ebo2); glBufferData(GL_ELEMENT_ARRAY_BUFFER,sizeof(ids),ids,GL_STREAM_DRAW);
-        glDisable(GL_CULL_FACE);
-        glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,0);
-        glDeleteVertexArrays(1,&vao2); glDeleteBuffers(1,&vbo2); glDeleteBuffers(1,&ebo2);
+        drawQuadBatch(verts, sizeof(verts), ids, sizeof(ids));
         // Restore wrap
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, oldWrap);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, oldWrap);
@@ -996,15 +1012,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, fillTex->id);
                 struct SV{float x,y,z;float u,v;float r,g,b,a;};
                 SV v[4]={{x,y,0,0,0,1,1,1,1},{x+ctl->extentX,y,0,ctl->extentX/src.w,0,1,1,1,1},{x,y+ctl->extentY,0,0,ctl->extentY/src.h,1,1,1,1},{x+ctl->extentX,y+ctl->extentY,0,ctl->extentX/src.w,ctl->extentY/src.h,1,1,1,1}};
-                uint32_t ids[]={0,1,2,1,3,2},vao,vbo,ebo;
-                glGenVertexArrays(1,&vao);glGenBuffers(1,&vbo);glGenBuffers(1,&ebo);
-                glBindVertexArray(vao);glBindBuffer(GL_ARRAY_BUFFER,vbo);glBufferData(GL_ARRAY_BUFFER,sizeof(v),v,GL_STREAM_DRAW);
-                glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(SV),0);glEnableVertexAttribArray(0);
-                glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,sizeof(SV),(void*)12);glEnableVertexAttribArray(1);
-                glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,sizeof(SV),(void*)20);glEnableVertexAttribArray(2);
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,ebo);glBufferData(GL_ELEMENT_ARRAY_BUFFER,sizeof(ids),ids,GL_STREAM_DRAW);
-                glDisable(GL_CULL_FACE);glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,0);
-                glDeleteVertexArrays(1,&vao);glDeleteBuffers(1,&vbo);glDeleteBuffers(1,&ebo);
+                uint32_t ids[]={0,1,2,1,3,2};
+                drawQuadBatch(v, sizeof(v), ids, sizeof(ids));
             }
             glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,oldS); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,oldT);
         } else r.drawRectFill({x,y,0},{x+ctl->extentX,y+ctl->extentY,0},fc);
@@ -1029,15 +1038,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     struct SV{float x,y,z;float u,v;float r,g,b,a;};
                     float ru=tileX?ew/s.w:u1-u0, rv=tileY?eh/s.h:v1-v0;
                     SV v[4]={{ex,ey,0,0,0,1,1,1,1},{ex+ew,ey,0,ru,0,1,1,1,1},{ex,ey+eh,0,0,rv,1,1,1,1},{ex+ew,ey+eh,0,ru,rv,1,1,1,1}};
-                    uint32_t ids[]={0,1,2,1,3,2},a,b,c;
-                    glGenVertexArrays(1,&a);glGenBuffers(1,&b);glGenBuffers(1,&c);
-                    glBindVertexArray(a);glBindBuffer(GL_ARRAY_BUFFER,b);glBufferData(GL_ARRAY_BUFFER,sizeof(v),v,GL_STREAM_DRAW);
-                    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(SV),0);glEnableVertexAttribArray(0);
-                    glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,sizeof(SV),(void*)12);glEnableVertexAttribArray(1);
-                    glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,sizeof(SV),(void*)20);glEnableVertexAttribArray(2);
-                    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,c);glBufferData(GL_ELEMENT_ARRAY_BUFFER,sizeof(ids),ids,GL_STREAM_DRAW);
-                    glDisable(GL_CULL_FACE);glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,0);
-                    glDeleteVertexArrays(1,&a);glDeleteBuffers(1,&b);glDeleteBuffers(1,&c);
+                    uint32_t ids[]={0,1,2,1,3,2};
+                    drawQuadBatch(v, sizeof(v), ids, sizeof(ids));
                 }
                 glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,ow);
             };
@@ -1070,25 +1072,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);
                         float rp=qw/s.w;
                         SV v[4]={{qx,qy,0,0,v0,1,1,1,1},{qx+qw,qy,0,rp,v0,1,1,1,1},{qx,qy+qh,0,0,v1,1,1,1,1},{qx+qw,qy+qh,0,rp,v1,1,1,1,1}};
-                        uint32_t a,b,c;glGenVertexArrays(1,&a);glGenBuffers(1,&b);glGenBuffers(1,&c);
-                        glBindVertexArray(a);glBindBuffer(GL_ARRAY_BUFFER,b);glBufferData(GL_ARRAY_BUFFER,sizeof(v),v,GL_STREAM_DRAW);
-                        glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(SV),0);glEnableVertexAttribArray(0);
-                        glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,sizeof(SV),(void*)12);glEnableVertexAttribArray(1);
-                        glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,sizeof(SV),(void*)20);glEnableVertexAttribArray(2);
-                        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,c);glBufferData(GL_ELEMENT_ARRAY_BUFFER,sizeof(ids),ids,GL_STREAM_DRAW);
-                        glDisable(GL_CULL_FACE);glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,0);
-                        glDeleteVertexArrays(1,&a);glDeleteBuffers(1,&b);glDeleteBuffers(1,&c);
+                        drawQuadBatch(v, sizeof(v), ids, sizeof(ids));
                         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,ow);
                     } else {
                         SV v[4]={{qx,qy,0,u0,v0,1,1,1,1},{qx+qw,qy,0,u1,v0,1,1,1,1},{qx,qy+qh,0,u0,v1,1,1,1,1},{qx+qw,qy+qh,0,u1,v1,1,1,1,1}};
-                        uint32_t a,b,c;glGenVertexArrays(1,&a);glGenBuffers(1,&b);glGenBuffers(1,&c);
-                        glBindVertexArray(a);glBindBuffer(GL_ARRAY_BUFFER,b);glBufferData(GL_ARRAY_BUFFER,sizeof(v),v,GL_STREAM_DRAW);
-                        glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(SV),0);glEnableVertexAttribArray(0);
-                        glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,sizeof(SV),(void*)12);glEnableVertexAttribArray(1);
-                        glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,sizeof(SV),(void*)20);glEnableVertexAttribArray(2);
-                        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,c);glBufferData(GL_ELEMENT_ARRAY_BUFFER,sizeof(ids),ids,GL_STREAM_DRAW);
-                        glDisable(GL_CULL_FACE);glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,0);
-                        glDeleteVertexArrays(1,&a);glDeleteBuffers(1,&b);glDeleteBuffers(1,&c);
+                        drawQuadBatch(v, sizeof(v), ids, sizeof(ids));
                     }
                 };
                 dq(x+4,ty,lw,bh,cL,false); dq(x+4+lw,ty,midW,bh,cM,true); dq(x+4+lw+midW,ty,rw,bh,cR,false);

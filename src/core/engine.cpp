@@ -8,6 +8,7 @@
 #include "render/dif_loader.h"
 #include "game/hud.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 #include <glob.h>
@@ -24,10 +25,8 @@
 #include <ctime>
 #include <climits>
 
-struct Engine::Impl {};
-
-Engine::Engine() : impl(new Impl) {}
-Engine::~Engine() { delete impl; }
+Engine::Engine() {}
+Engine::~Engine() {}
 
 Engine& Engine::instance() {
     static Engine eng;

@@ -62,9 +62,6 @@ public:
     std::string compileFile;
 
 private:
-    struct Impl;
-    Impl* impl;
-
     Platform* plat{};
     Console* con{};
     Renderer* ren{};

@@ -1255,17 +1255,6 @@ VMValue TorqueScript::Impl::parsePostfix() {
             parseArgumentList(args);
             expect(TSTokenType::RParen);
 
-            // The primary should have given us the function name
-            // We stored it in the last value's string
-            // For now, we handle this differently - the function name is in val.str
-            // But VMValue might not have a function name. Let's handle via the expression flow.
-
-            // Actually, function calls are handled in parsePrimary() where
-            // we detect if the next token is LParen.
-            // This postfix handling won't normally reach here for function calls.
-
-            // Object method call: obj.method(args)
-            // This is handled when the primary is an Ident followed by Dot
             break;
         }
         if (peekToken().type == TSTokenType::LBracket) {
@@ -1699,16 +1688,49 @@ VMValue TorqueScript::Impl::parsePrimary() {
 VMValue TorqueScript::executeNested(const std::string& source, const std::string& path) {
     Console::instance().printf(LogLevel::Debug, "TS: nested enter '%s'", path.c_str());
     // Save outer state
-    std::string savedFile = std::move(impl->currentFile);
-    std::vector<TSToken> savedTokens = std::move(impl->tokens);
-    size_t savedPos = impl->tokenPos;
-    bool savedRunning = impl->running;
-    VMValue savedReturnValue = impl->returnValue;
-    std::string savedLastVarName = std::move(impl->lastVarName);
-    std::string savedLastFieldObj = std::move(impl->lastFieldObj);
-    std::string savedLastFieldName = std::move(impl->lastFieldName);
-    int savedDepth = impl->execDepth;
-    int savedSrcLine = impl->srcLine;
+    struct StateGuard {
+        Impl* impl;
+        std::string savedFile;
+        std::vector<TSToken> savedTokens;
+        size_t savedPos;
+        bool savedRunning;
+        VMValue savedReturnValue;
+        std::string savedLastVarName;
+        std::string savedLastFieldObj;
+        std::string savedLastFieldName;
+        int savedDepth;
+        int savedSrcLine;
+        bool restored = false;
+        ~StateGuard() {
+            if (restored) return;
+            impl->execDepth = savedDepth;
+            impl->srcLine = savedSrcLine;
+            impl->currentFile = std::move(savedFile);
+            impl->tokens = std::move(savedTokens);
+            impl->tokenPos = savedPos;
+            impl->running = savedRunning;
+            impl->returning = false;
+            impl->breaking = false;
+            impl->continuing = false;
+            impl->returnValue = savedReturnValue;
+            impl->lastVarName = std::move(savedLastVarName);
+            impl->lastFieldObj = std::move(savedLastFieldObj);
+            impl->lastFieldName = std::move(savedLastFieldName);
+        }
+    };
+    StateGuard sg{
+        impl,
+        std::move(impl->currentFile),
+        std::move(impl->tokens),
+        impl->tokenPos,
+        impl->running,
+        impl->returnValue,
+        std::move(impl->lastVarName),
+        std::move(impl->lastFieldObj),
+        std::move(impl->lastFieldName),
+        impl->execDepth,
+        impl->srcLine
+    };
 
     // Try loading DSO cache before parsing source (.cs, .gui, .mis)
     // Only cache .cs/.mis files — .gui files have no functions
@@ -1773,19 +1795,20 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
                             // DSO loaded successfully — skip source execution
                             f.close();
                             VMValue dsoResult;
-                            impl->execDepth = savedDepth;
-                            impl->srcLine = savedSrcLine;
-                            impl->currentFile = std::move(savedFile);
-                            impl->tokens = std::move(savedTokens);
-                            impl->tokenPos = savedPos;
-                            impl->running = savedRunning;
+                            sg.restored = true;
+                            impl->execDepth = sg.savedDepth;
+                            impl->srcLine = sg.savedSrcLine;
+                            impl->currentFile = std::move(sg.savedFile);
+                            impl->tokens = std::move(sg.savedTokens);
+                            impl->tokenPos = sg.savedPos;
+                            impl->running = sg.savedRunning;
                             impl->returning = false;
                             impl->breaking = false;
                             impl->continuing = false;
-                            impl->returnValue = savedReturnValue;
-                            impl->lastVarName = std::move(savedLastVarName);
-                            impl->lastFieldObj = std::move(savedLastFieldObj);
-                            impl->lastFieldName = std::move(savedLastFieldName);
+                            impl->returnValue = sg.savedReturnValue;
+                            impl->lastVarName = std::move(sg.savedLastVarName);
+                            impl->lastFieldObj = std::move(sg.savedLastFieldObj);
+                            impl->lastFieldName = std::move(sg.savedLastFieldName);
                             impl->locals.pop();
                             return dsoResult;
                         }
@@ -1796,7 +1819,7 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
     }
 
     // Execute inner
-    impl->execDepth = savedDepth + 1;
+    impl->execDepth = sg.savedDepth + 1;
     impl->currentFile = path;
     impl->running = true;
     impl->returning = false;
@@ -1823,21 +1846,7 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
         }
     }
 
-    // Restore outer state (discard inner returning/breaking/continuing)
-    impl->execDepth = savedDepth;
-    impl->srcLine = savedSrcLine;
-    impl->currentFile = std::move(savedFile);
-    impl->tokens = std::move(savedTokens);
-    impl->tokenPos = savedPos;
-    impl->running = savedRunning;
-    impl->returning = false;
-    impl->breaking = false;
-    impl->continuing = false;
-    impl->returnValue = savedReturnValue;
-    impl->lastVarName = std::move(savedLastVarName);
-    impl->lastFieldObj = std::move(savedLastFieldObj);
-    impl->lastFieldName = std::move(savedLastFieldName);
-
+    sg.restored = true; // prevent double-restore, guard destructor runs after this
     std::string exitPath = path;  // copy before any potential invalidation
     Console::instance().printf(LogLevel::Debug, "TS: nested exit-pre '%s'", exitPath.c_str());
     Console::instance().printf(LogLevel::Debug, "TS: nested exit '%s' (execDepth=%d)", exitPath.c_str(), impl->execDepth);

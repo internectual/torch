@@ -672,64 +672,6 @@ static std::string scanMissionName(const uint8_t* data, size_t size, uint32_t* o
     return "";
 }
 
-// ─── Initial Block readers (protocol v25034) ────────────────
-static std::vector<uint32_t> readScoreEntry(BitStream& bs) __attribute__((unused));
-static std::vector<uint32_t> readScoreEntry(BitStream& bs) {
-    // ScoreEntry: 6× U32 (FUN_00601800)
-    std::vector<uint32_t> e;
-    for (int i = 0; i < 6; i++) e.push_back(bs.readU32());
-    return e;
-}
-
-static std::vector<uint32_t> readDemoValues(BitStream& bs) __attribute__((unused));
-static std::vector<uint32_t> readDemoValues(BitStream& bs) {
-    std::vector<uint32_t> vals;
-    int count = bs.readU32();
-    for (int i = 0; i < count; i++) vals.push_back(bs.readU32());
-    return vals;
-}
-
-static void readComplexTargetManager(BitStream& bs) __attribute__((unused));
-static void readComplexTargetManager(BitStream& bs) {
-    // Sensor group colors: U32 count + entries (each 5× U8)
-    uint32_t sgCount = bs.readU32();
-    for (uint32_t i = 0; i < sgCount; i++) {
-        bs.readU32(); // color
-    }
-    // Targets: U32 count + entries
-    uint32_t tCount = bs.readU32();
-    for (uint32_t i = 0; i < tCount; i++) {
-        /*uint32_t id =*/ bs.readU32();
-        /*uint32_t type =*/ bs.readU32();
-        /*uint32_t color =*/ bs.readU32();
-        bool hasName = bs.readFlag();
-        if (hasName) bs.readString();
-        bool hasPos = bs.readFlag();
-        if (hasPos) { bs.readF32(); bs.readF32(); bs.readF32(); }
-    }
-}
-
-static void readConnectionProtocol(BitStream& bs) __attribute__((unused));
-static void readConnectionProtocol(BitStream& bs) {
-    bs.readU32(); // lastSeqRecvd
-    bs.readU32(); // highestAckedSeq
-    bs.readU32(); // lastSendSeq
-    bs.readU32(); // recvAckMask
-    bs.readU32(); // connectSequence
-    bs.readU32(); // lastRecvAckAck
-    bs.readFlag(); // connectionEstablished
-    bs.readU32(); // nextRecvEventSeq
-}
-
-static void readPathManager(BitStream& bs) __attribute__((unused));
-static void readPathManager(BitStream& bs) {
-    uint32_t count = bs.readU32();
-    for (uint32_t i = 0; i < count; i++) {
-        bs.readFlag(); // has position/path data
-        // Skip path data
-    }
-}
-
 void DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
     BitStream bs(data, size);
     int totalBits = (int)size * 8;
