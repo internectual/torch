@@ -356,58 +356,61 @@ bool Font::loadGFT(const uint8_t* data, size_t size) {
     size_t pngStartOff = charDataOff + charDataSize + 4; // 4 bytes for PNG data length
     if (pngStartOff >= size) return false;
     // Read per-char metrics
-    uint32_t maxW = 0, maxH = 0;
-    for (uint32_t i = 0; i < count && i < 256; i++) {
+    int asciiOff = 32;
+    uint32_t maxW = 0, maxH = 0, maxTotal = 0;
+    for (uint32_t i = 0; i < count && i + asciiOff < 256; i++) {
         const uint8_t* cd = data + charDataOff + i * 9;
-        uint16_t bmIdx; memcpy(&bmIdx, cd, 2);
-        glyphs[i].width = cd[5];   // width
-        glyphs[i].height = cd[6];  // height
-        glyphs[i].xOff = (int8_t)cd[7];  // xOffset
-        glyphs[i].yOff = (int8_t)cd[8];  // yOffset
-        glyphs[i].xAdvance = cd[4]; // xAdvance (byte 4 in the 9-byte struct)
-        if (glyphs[i].width > maxW) maxW = glyphs[i].width;
-        if (glyphs[i].height > maxH) maxH = glyphs[i].height;
+        uint32_t ch = i + asciiOff;
+        glyphs[ch].width = cd[4];
+        glyphs[ch].height = cd[5];
+        glyphs[ch].xOff = (int8_t)cd[6];
+        glyphs[ch].yOff = (int8_t)cd[7];
+        glyphs[ch].xAdvance = cd[8];
+        if (glyphs[ch].width > maxW) maxW = glyphs[ch].width;
+        if (glyphs[ch].height > maxH) maxH = glyphs[ch].height;
+        uint32_t total = (uint32_t)(glyphs[ch].yOff + glyphs[ch].height);
+        if (total > maxTotal) maxTotal = total;
     }
     charWidth = maxW > 0 ? maxW : (int32_t)cw;
-    charHeight = maxH > 0 ? maxH : (int32_t)ch;
+    // Cell height includes yOff + glyph height so baseline is at the cell bottom
+    charHeight = maxTotal > 0 ? (int32_t)maxTotal : (int32_t)ch;
     fontSize = (int32_t)ch;
     proportional = true;
 
-    // Skip bitmapCount (4 bytes) - always 1
+
+    // Skip bitmapCount (4 bytes) - always 1. PNG data follows immediately.
     const uint8_t* pngData = data + pngStartOff;
     size_t pngAvail = size - pngStartOff;
-    // Decode PNG (rest of file)
-    int w, h, chans;
-    unsigned char* pixels = stbi_load_from_memory(pngData, (int)pngAvail, &w, &h, &chans, 4);
+    int tw, th, tc;
+    unsigned char* pixels = stbi_load_from_memory(pngData, (int)pngAvail, &tw, &th, &tc, 4);
     if (!pixels) return false;
-    texWidth = w; texHeight = h;
-    // Create GL texture
+    texWidth = tw; texHeight = th;
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     stbi_image_free(pixels);
-
     // Build UV coordinates for each char from the per-char position data
-    for (uint32_t i = 0; i < count && i < 256; i++) {
+    for (uint32_t i = 0; i < count && i + asciiOff < 256; i++) {
         const uint8_t* cd = data + charDataOff + i * 9;
-        uint16_t bmIdx; memcpy(&bmIdx, cd, 2);
-        uint8_t xo = cd[2], yo = cd[3]; // xOrigin, yOrigin
-        uint8_t gw = cd[5], gh = cd[6];
+        uint32_t ch = i + asciiOff;
+        uint8_t xo = cd[2], yo = cd[3];
+        uint8_t gw = cd[4], gh = cd[5];
         if (gw == 0 || gh == 0) continue;
-        float u0 = (float)xo / w, v0 = (float)yo / h;
-        float u1 = (float)(xo + gw) / w, v1 = (float)(yo + gh) / h;
-        charUV[i][0] = u0; charUV[i][1] = v0;
-        charUV[i][2] = u1; charUV[i][3] = v1;
+        float u0 = (float)xo / texWidth, v0 = (float)yo / texHeight;
+        float u1 = (float)(xo + gw) / texWidth, v1 = (float)(yo + gh) / texHeight;
+        charUV[ch][0] = u0; charUV[ch][1] = v0;
+        charUV[ch][2] = u1; charUV[ch][3] = v1;
     }
     loaded = true;
     return true;
 }
 
-bool Font::loadDefault() {
-    static const int cw = 8, ch = 8;
+bool Font::loadDefault(int size) {
+    if (size <= 0) size = 8;
     static const int cols = 16, rows = 16;
+    int cw = size, ch = size;
     int tw = cols * cw, th = rows * ch;
     std::vector<uint8_t> pixels(tw * th * 4, 0);
 
@@ -416,10 +419,12 @@ bool Font::loadDefault() {
         int cx = (i % cols) * cw;
         int cy = (i / cols) * ch;
         for (int py = 0; py < ch && idx < 95; py++) {
-            uint8_t row = font8x8_basic[idx][py];
+            int srcRow = (size <= 8) ? py : py * 8 / size;
+            uint8_t row = font8x8_basic[idx][srcRow];
             for (int px = 0; px < cw; px++) {
                 int pi = ((cy + py) * tw + (cx + px)) * 4;
-                if (row & (0x80 >> px)) {
+                int sx = (size <= 8) ? px : px * 8 / size;
+                if (row & (0x80 >> sx)) {
                     pixels[pi + 0] = 255;
                     pixels[pi + 1] = 255;
                     pixels[pi + 2] = 255;
@@ -433,6 +438,7 @@ bool Font::loadDefault() {
     texHeight = th;
     charWidth = cw;
     charHeight = ch;
+    proportional = false;
 
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
@@ -447,6 +453,13 @@ bool Font::loadDefault() {
         charUV[i][1] = y * ch_f;
         charUV[i][2] = (x + 1) * cw_f;
         charUV[i][3] = (y + 1) * ch_f;
+    }
+
+    // Initialize glyph metrics for all chars (monospace)
+    for (int i = 0; i < 256; i++) {
+        glyphs[i].width = cw;
+        glyphs[i].height = ch;
+        glyphs[i].xAdvance = cw;
     }
 
     loaded = true;
@@ -539,7 +552,7 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
         float gW = prop ? (float)glyphs[c].width * scale : lh;
         float gH = prop ? (float)glyphs[c].height * scale : lh;
         float gXOff = prop ? (float)glyphs[c].xOff * scale : 0;
-        float gYOff = prop ? (float)glyphs[c].yOff * scale : 0;
+        float gYOff = prop ? (float)(charHeight - glyphs[c].yOff) * scale : 0;
         float adv = prop ? (float)glyphs[c].xAdvance * scale : lh;
 
         float l = penX + gXOff, r2 = l + gW;

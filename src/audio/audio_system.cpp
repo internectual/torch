@@ -64,11 +64,23 @@ void AudioSystem::shutdown() {
 void AudioSystem::update(const Point3F& listenerPos, const Point3F& listenerVel,
                          const Point3F& listenerForward, const Point3F& listenerUp) {
     if (!initialized) return;
-    ALfloat listenerOri[6] = {listenerForward.x, listenerForward.y, listenerForward.z,
+    ALfloat listenerOri[6] = {listenerPos.x, listenerPos.y, listenerPos.z,
                               listenerUp.x, listenerUp.y, listenerUp.z};
     alListener3f(AL_POSITION, listenerPos.x, listenerPos.y, listenerPos.z);
     alListener3f(AL_VELOCITY, listenerVel.x, listenerVel.y, listenerVel.z);
     alListenerfv(AL_ORIENTATION, listenerOri);
+
+    // Clean up one-shot sources that have finished playing
+    for (auto it = impl->sources.begin(); it != impl->sources.end(); ) {
+        SoundSource* src = *it;
+        if (src && !src->looping && !src->isPlaying()) {
+            src->destroy();
+            delete src;
+            it = impl->sources.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 SoundBuffer* AudioSystem::loadSound(const char* path) {
@@ -90,7 +102,8 @@ SoundBuffer* AudioSystem::loadSound(const char* path) {
 SoundSource* AudioSystem::createSource() {
     auto* src = new SoundSource;
     alGenSources(1, &src->source);
-    src->setVolume(1.0f);
+    float effectiveVol = cfg.enabled ? cfg.masterVolume * cfg.sfxVolume : 0.0f;
+    src->setVolume(effectiveVol);
     impl->sources.push_back(src);
     return src;
 }

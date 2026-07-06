@@ -229,6 +229,10 @@ void TorqueScript::registerNative(const std::string& name,
     impl->natives[lower] = std::move(fn);
 }
 
+const std::unordered_map<std::string, std::function<VMValue(const std::vector<VMValue>&)>>& TorqueScript::getNatives() const {
+    return impl->natives;
+}
+
 // === TSLocals ===
 void TSLocals::push() { scopes.push_back({}); }
 void TSLocals::pop() { if (!scopes.empty()) scopes.pop_back(); }
@@ -602,7 +606,6 @@ VMValue TorqueScript::Impl::parseIf() {
     VMValue cond = parseExpression();
     expect(TSTokenType::RParen);
 
-    locals.push();
     VMValue result;
     if (cond.toBool()) {
         result = parseStatement();
@@ -618,7 +621,6 @@ VMValue TorqueScript::Impl::parseIf() {
             result = parseStatement();
         }
     }
-    locals.pop();
     return result;
 }
 
@@ -663,7 +665,7 @@ VMValue TorqueScript::Impl::parseFor() {
     size_t bodyStart = tokenPos;
     size_t bodyEnd = tokenPos;
     int iterCount = 0;
-    const int maxIters = 500000;
+    const int maxIters = 10000000;
     while (running) {
         if (iterCount++ >= maxIters) {
             Console::instance().printf(LogLevel::Warn, "TS: parseWhile safety break after %d iters in '%s'",
@@ -723,7 +725,7 @@ VMValue TorqueScript::Impl::parseWhile() {
     loopDepth++;
     VMValue result;
     int iterCount = 0;
-    const int maxIters = 1000000;
+    const int maxIters = 20000000;
     while (running) {
         // Evaluate condition
         {
@@ -888,8 +890,9 @@ VMValue TorqueScript::Impl::parseFunctionDecl() {
 
     // Build full name (namespace::name or name)
     std::string fullName = nameTok.text;
+    // :: is tokenized as TWO Colon tokens; check for consecutive colons
     if (peekToken().type == TSTokenType::Colon && peekToken(1).type == TSTokenType::Colon) {
-        nextToken(); nextToken();
+        nextToken(); nextToken(); // consume both :
         TSToken methodTok = nextToken();
         fullName = nameTok.text + "::" + methodTok.text;
     }
@@ -899,7 +902,8 @@ VMValue TorqueScript::Impl::parseFunctionDecl() {
     TSFunc func;
     while (peekToken().type != TSTokenType::RParen && peekToken().type != TSTokenType::Eof) {
         TSToken paramTok = nextToken();
-        if (paramTok.type == TSTokenType::Dollar || paramTok.type == TSTokenType::Ident) {
+        if (paramTok.type == TSTokenType::Dollar || paramTok.type == TSTokenType::Ident ||
+            paramTok.type == TSTokenType::This || paramTok.type == TSTokenType::Parent) {
             func.params.push_back(paramTok.text);
         }
         match(TSTokenType::Comma);
@@ -1271,6 +1275,9 @@ VMValue TorqueScript::Impl::parsePostfix() {
             if (!savedVar.empty()) {
                 std::string arrayKey = savedVar + "[" + idx.toString() + "]";
                 lastVarName = arrayKey; // update for assignment write-back
+                // If this was a field access (e.g. %this.gui[i]), update lastFieldName too
+                if (!lastFieldName.empty())
+                    lastFieldName = lastFieldName + "[" + idx.toString() + "]";
                 if (savedVar[0] == '$') {
                     val = outer->getGlobal(arrayKey);
                 } else {
@@ -1520,9 +1527,9 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 return VMValue(0);
             };
 
-            // Check for namespace::method syntax
+            // Check for namespace::method syntax (:: is two Colon tokens)
             if (peekToken().type == TSTokenType::Colon && peekToken(1).type == TSTokenType::Colon) {
-                nextToken(); nextToken();
+                nextToken(); // consume ::
                 std::string methodName = nextToken().text;
                 std::string fullName = name + "::" + methodName;
 
@@ -1552,13 +1559,17 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 return lookupAndCall(name, args);
             }
 
-            // Variable reference: check globals if locals returns default (0 or empty)
+            // Variable reference: check locals then globals
             {
                 VMValue lv = locals.get(name);
                 bool notFound = (lv.type == VMValue::Int && lv.toInt() == 0);
                 if (notFound) {
                     auto git = globals.find(name);
                     if (git != globals.end()) return git->second;
+                    // Undefined $ or % variable returns 0; bare name returns itself as string
+                    if (!name.empty() && name[0] != '$' && name[0] != '%')
+                        return VMValue(name);
+                    return VMValue(0);
                 }
                 return lv;
             }
@@ -1784,7 +1795,10 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
                                     std::string fullName = fn.ns.empty() ? fn.name : fn.ns + "::" + fn.name;
                                     if (impl->functions.find(fullName) == impl->functions.end()) {
                                         TSFunc stub;
+                                        // DSO argNames don't include implicit 'this' for namespaced functions
                                         stub.params = fn.argNames;
+                                        if (!fn.ns.empty() && (stub.params.empty() || stub.params[0] != "this"))
+                                            stub.params.insert(stub.params.begin(), "this");
                                         stub.filename = fn.filename;
                                         stub.isDSO = true;
                                         stub.dsoFunc = &fn;
@@ -2075,7 +2089,7 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
     VMValue result;
     if (func.isDSO && func.dsoFunc) {
         // DSO-compiled function: execute via DSO VM
-        Console::instance().printf(LogLevel::Debug, "TS: calling DSO function '%s'", name.c_str());
+        Console::instance().printf(LogLevel::Debug, "TS: calling DSO function '%s' (%zu args)", name.c_str(), args.size());
         auto& engine = ScriptEngine::instance();
         // Find the DSO file containing this function
         for (auto* dso : engine.vm()->loadedScripts()) {

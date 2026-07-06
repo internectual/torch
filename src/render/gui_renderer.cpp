@@ -422,10 +422,169 @@ static void drawBmpArrayButton(Renderer& r, const Point3F& dstA, const Point3F& 
     }
 }
 
-// Shell texture cache - tries .bm8 first (original T2 format with separator color)
+// Generated shell texture cache (for textures not found in archives)
+static std::unordered_map<std::string, Texture*> g_genShellTex;
+
+static void putPixel(std::vector<uint8_t>& p, int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
+    if (x < 0 || x >= w || y < 0 || y >= h) return;
+    int i = (y * w + x) * 4; p[i] = r; p[i+1] = g; p[i+2] = b; p[i+3] = a;
+}
+static void fillRect(std::vector<uint8_t>& p, int x, int y, int w, int h, int tw, int th, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
+    for (int j = y; j < y + h && j < th; j++) for (int i = x; i < x + w && i < tw; i++) putPixel(p, i, j, tw, th, r, g, b, a);
+}
+static void fillGradV(std::vector<uint8_t>& p, int x, int y, int w, int h, int tw, int th, uint8_t r1, uint8_t g1, uint8_t b1, uint8_t r2, uint8_t g2, uint8_t b2, uint8_t a = 255) {
+    for (int j = y; j < y + h && j < th; j++) {
+        float t = (h > 1) ? (float)(j - y) / (h - 1) : 0;
+        uint8_t rr = (uint8_t)(r1 + (r2 - r1) * t), gg = (uint8_t)(g1 + (g2 - g1) * t), bb = (uint8_t)(b1 + (b2 - b1) * t);
+        for (int i = x; i < x + w && i < tw; i++) putPixel(p, i, j, tw, th, rr, gg, bb, a);
+    }
+}
+static void drawSepLine(std::vector<uint8_t>& p, int x, int y, int w, int h, int tw, int th) {
+    // magenta separator
+    for (int j = y; j < y + h && j < th; j++) for (int i = x; i < x + w && i < tw; i++) putPixel(p, i, j, tw, th, 255, 0, 255);
+}
+
+// Generate a 9-cell (3×3) texture for shell buttons/entries.
+// Layout: 3x3 cells of (cellW×cellH) each, magenta separator lines ONLY between cells.
+// NO outer margins, matching the original T2 bitmap array layout.
+// pixel(0,0) is the first cell's corner (not magenta) so detectBitmapCells
+// uses the cell color as base and magenta inner lines as separators.
+static Texture* gen9SliceTexture(Renderer& r, const char* path,
+    uint8_t r1, uint8_t g1, uint8_t b1, uint8_t r2, uint8_t g2, uint8_t b2,    // normal
+    uint8_t r3, uint8_t g3, uint8_t b3, uint8_t r4, uint8_t g4, uint8_t b4,    // hover
+    uint8_t r5, uint8_t g5, uint8_t b5, uint8_t r6, uint8_t g6, uint8_t b6,    // pressed
+    int cellW = 8, int cellH = 24)
+{
+    const int sep = 2;
+    int mw = cellW * 3 + sep * 2; // C1 | C2 | C3
+    int mh = cellH * 3 + sep * 2; // row1 --- row2 --- row3
+    std::vector<uint8_t> pix(mw * mh * 4, 0);
+    // Fill separator areas (magenta) — only between cells, no outer margins
+    for (int j = 0; j < mh; j++) for (int i = 0; i < mw; i++) {
+        int modW = cellW + sep, modH = cellH + sep;
+        bool onSep = (i % modW >= cellW) || (j % modH >= cellH);
+        if (onSep) putPixel(pix, i, j, mw, mh, 255, 0, 255);
+    }
+    // Fill each cell with gradient + border
+    struct State { uint8_t r1,g1,b1, r2,g2,b2; } states[3] = {
+        {r1,g1,b1, r2,g2,b2},
+        {r3,g3,b3, r4,g4,b4},
+        {r5,g5,b5, r6,g6,b6}
+    };
+    for (int s = 0; s < 3; s++) {
+        int sy = s * (cellH + sep);
+        for (int c = 0; c < 3; c++) {
+            int cx = c * (cellW + sep);
+            fillGradV(pix, cx, sy, cellW, cellH, mw, mh, states[s].r1, states[s].g1, states[s].b1, states[s].r2, states[s].g2, states[s].b2);
+            // 1px highlight/shadow border
+            for (int i = cx; i < cx + cellW; i++) { putPixel(pix, i, sy, mw, mh, 255,255,255,35); putPixel(pix, i, sy+cellH-1, mw, mh, 0,0,0,50); }
+            for (int j = sy; j < sy + cellH; j++) { putPixel(pix, cx, j, mw, mh, 255,255,255,25); putPixel(pix, cx+cellW-1, j, mw, mh, 0,0,0,40); }
+        }
+    }
+    // Pixel(0,0) must be black so detectBitmapCells triggers its magenta fallback
+    putPixel(pix, 0, 0, mw, mh, 0, 0, 0);
+    auto* tex = new Texture;
+    tex->loadRaw(pix.data(), mw, mh, 4);
+    r.addTexture(tex);
+    g_genShellTex[path] = tex;
+    return tex;
+}
+
+// Generate a simple single-tile texture (for dialog fills, scroll tracks)
+static Texture* genTileTexture(Renderer& r, const char* path, int w, int h,
+    uint8_t r1, uint8_t g1, uint8_t b1, uint8_t r2, uint8_t g2, uint8_t b2)
+{
+    std::vector<uint8_t> pix(w * h * 4, 0);
+    fillGradV(pix, 0, 0, w, h, w, h, r1, g1, b1, r2, g2, b2);
+    // Add subtle noise
+    srand(42);
+    for (int i = 0; i < w * h * 4; i += 4) {
+        int n = (rand() % 32) - 16;
+        pix[i] = (uint8_t)std::max(0, std::min(255, (int)pix[i] + n));
+        pix[i+1] = (uint8_t)std::max(0, std::min(255, (int)pix[i+1] + n));
+        pix[i+2] = (uint8_t)std::max(0, std::min(255, (int)pix[i+2] + n));
+    }
+    auto* tex = new Texture;
+    tex->loadRaw(pix.data(), w, h, 4);
+    r.addTexture(tex);
+    g_genShellTex[path] = tex;
+    return tex;
+}
+
+// Generate scrollbar textures (thumb + field as simple bars)
+static Texture* genScrollTexture(Renderer& r, const char* path, bool vert, uint8_t r1, uint8_t g1, uint8_t b1, uint8_t r2, uint8_t g2, uint8_t b2) {
+    int w = vert ? 12 : 64, h = vert ? 64 : 12;
+    std::vector<uint8_t> pix(w * h * 4, 0);
+    fillGradV(pix, 0, 0, w, h, w, h, r1, g1, b1, r2, g2, b2);
+    // Border
+    for (int i = 0; i < w; i++) { putPixel(pix, i, 0, w, h, 255,255,255,30); putPixel(pix, i, h-1, w, h, 0,0,0,40); }
+    for (int j = 0; j < h; j++) { putPixel(pix, 0, j, w, h, 255,255,255,20); putPixel(pix, w-1, j, w, h, 0,0,0,30); }
+    auto* tex = new Texture;
+    tex->loadRaw(pix.data(), w, h, 4);
+    r.addTexture(tex);
+    g_genShellTex[path] = tex;
+    return tex;
+}
+
+static Texture* generateShellTexture(Renderer& r, const char* name) {
+    // Check cache
+    auto it = g_genShellTex.find(name);
+    if (it != g_genShellTex.end()) return it->second;
+
+    std::string n = name;
+    if (n == "shll_button.png") {
+        return gen9SliceTexture(r, name,
+            80,80,100, 60,60,80,   // normal
+            100,120,160, 80,100,140, // hover
+            60,60,80, 45,45,60,     // pressed
+            6, 24);
+    } else if (n == "shll_entryfield.png") {
+        return gen9SliceTexture(r, name,
+            55,55,65, 40,40,50,   // normal (darker, inset look)
+            60,60,70, 45,45,55,   // hover
+            50,50,60, 35,35,45,   // pressed
+            6, 22);
+    } else if (n == "shll_radio.png") {
+        // Simple radio button: 16×16 circle
+        std::vector<uint8_t> pix(16*16*4, 0);
+        for (int j = 0; j < 16; j++) for (int i = 0; i < 16; i++) {
+            float dx = i - 7.5f, dy = j - 7.5f, d = sqrtf(dx*dx + dy*dy);
+            if (d < 7.5f) {
+                float bright = 80 + 40 * (1 - d/7.5f);
+                putPixel(pix, i, j, 16, 16, (uint8_t)bright, (uint8_t)(bright*0.8f), (uint8_t)(bright*0.9f));
+            }
+        }
+        auto* tex = new Texture; tex->loadRaw(pix.data(), 16, 16, 4); r.addTexture(tex); g_genShellTex[name] = tex; return tex;
+    } else if (n == "shll_scroll_vertbar.png") {
+        return genScrollTexture(r, name, true, 100,100,120, 70,70,90);
+    } else if (n == "shll_scroll_vertfield.png") {
+        return genScrollTexture(r, name, true, 45,45,55, 35,35,45);
+    } else if (n == "shll_scroll_horzbar.png") {
+        return genScrollTexture(r, name, false, 100,100,120, 70,70,90);
+    } else if (n == "shll_scroll_horzfield.png") {
+        return genScrollTexture(r, name, false, 45,45,55, 35,35,45);
+    } else if (n == "dlg_fieldfill.png") {
+        return genTileTexture(r, name, 64, 64, 55,55,65, 35,35,45);
+    } else if (n == "dlg_frame_edge.png") {
+        return genTileTexture(r, name, 8, 8, 70,70,85, 50,50,65);
+    } else if (n == "dlg_titletab.png") {
+        return gen9SliceTexture(r, name,
+            100,120,160, 80,100,140,
+            100,120,160, 80,100,140,
+            100,120,160, 80,100,140,
+            6, 28);
+    }
+    return nullptr;
+}
+
+// Shell texture cache - tries .bm8 first, generates procedurally if not found
 static Texture* getShellTex(Renderer& r, const char* name) {
+    // Check generated cache first
+    {
+        auto git = g_genShellTex.find(name);
+        if (git != g_genShellTex.end()) return git->second;
+    }
     std::string base = std::string("textures/gui/") + name;
-    // Try .bm8 first (original T2 format, has proper separator color)
     auto tryExt = [&](const std::string& ext) -> Texture* {
         std::string p = base.substr(0, base.rfind('.')) + ext;
         if (p == base) p = base + ext;
@@ -443,6 +602,8 @@ static Texture* getShellTex(Renderer& r, const char* name) {
     };
     Texture* t = tryExt(".bm8");
     if (!t) t = tryExt(".png");
+    // If not found on disk, generate procedurally
+    if (!t) t = generateShellTexture(r, name);
     return t;
 }
 
@@ -553,7 +714,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
 
     // Button types
     if (cn == "GuiButtonCtrl" || cn == "GuiTextButtonCtrl" ||
-        cn == "ShellBitmapButton" || cn == "GuiBitmapButtonCtrl") {
+        cn == "ShellBitmapButton" || cn == "GuiBitmapButtonCtrl" ||
+        cn == "ShellLaunchMenu") {
         ColorF btnFill{0.25f, 0.25f, 0.35f, 1}, btnBorder{0.5f, 0.5f, 0.6f, 1};
         ColorF btnText{1,1,1,1};
         auto* prof = getProfile(ctl->profileName);
@@ -622,8 +784,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     (float)(cF.x+cF.w-1)/shTex->width, (float)(cF.y+cF.h-1)/shTex->height);
             }
         } else {
+            // Gradient-like button using stacked rects (since shell textures unavailable)
+            ColorF top = btnFill;
+            ColorF bot = {btnFill.r * 0.6f, btnFill.g * 0.6f, btnFill.b * 0.6f, btnFill.a};
+            float half = ctl->extentY * 0.5f;
             r.drawRectFill({x-1, y-1, 0}, {x + ctl->extentX + 1, y + ctl->extentY + 1, 0}, btnBorder);
-            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, btnFill);
+            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + half, 0}, top);
+            r.drawRectFill({x, y + half, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bot);
         }
         if (!ctl->bitmap.empty()) {
             Texture* tex = r.loadTexture(ctl->bitmap.c_str());
@@ -829,7 +996,17 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
     } else if (cn == "GuiBitmapCtrl" || cn == "GuiChunkedBitmapCtrl" || cn == "GuiFadeinBitmapCtrl") {
         std::string bmpPath;
         auto* prof = getProfile(ctl->profileName);
-        if (prof) { auto bi = prof->fields.find("bitmap"); if (bi != prof->fields.end()) bmpPath = bi->second.toString(); }
+        // Support useVariable: bitmap path from a console variable
+        auto* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
+        if (sobj) {
+            auto uv = sobj->fields.find("useVariable");
+            if (uv != sobj->fields.end() && uv->second.toBool()) {
+                auto vi = sobj->fields.find("variable");
+                if (vi != sobj->fields.end())
+                    bmpPath = Console::instance().getStringVariable(vi->second.toString().c_str(), "");
+            }
+        }
+        if (bmpPath.empty() && prof) { auto bi = prof->fields.find("bitmap"); if (bi != prof->fields.end()) bmpPath = bi->second.toString(); }
         if (bmpPath.empty()) bmpPath = ctl->bitmap;
         ColorF bgColor{0.15f, 0.15f, 0.2f, 1};
         if (prof) { auto bi = prof->fields.find("fillColor"); if (bi != prof->fields.end()) parseColor(bi->second.toString(), bgColor); }
@@ -846,6 +1023,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, tex->id);
             else
                 r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bgColor);
+        } else if (strcmp(ctl->name.c_str(), "LaunchGui") == 0) {
+            // LaunchGui background: try menu background, then gradient
+            Texture* bgTex = r.loadTexture("menu/background.png");
+            if (bgTex && bgTex->loaded)
+                r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bgTex->id);
+            else
+                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.08f,0.08f,0.12f,1});
         } else {
             r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bgColor);
         }
@@ -1130,6 +1314,27 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             }
         }
     } else if (cn == "ShellTabButton" || cn == "GuiTabPageCtrl") {
+        // For GuiTabPageCtrl (content pane): only render if it's the selected tab page
+        if (cn == "GuiTabPageCtrl") {
+            // Find parent tab group and check if this page is the active one
+            GuiControl* parent = ctl->parent;
+            bool isSelected = false;
+            if (parent && parent->selectedTab >= 0) {
+                int pageIdx = 0;
+                for (auto* sib : parent->children) {
+                    if (sib->className == "GuiTabPageCtrl") {
+                        if (sib == ctl) {
+                            isSelected = (pageIdx == parent->selectedTab);
+                            break;
+                        }
+                        pageIdx++;
+                    }
+                }
+            }
+            if (!isSelected) {
+                return; // skip children too — page content hidden
+            }
+        }
         ColorF fc{0.25f,0.25f,0.32f,1}, bc{0.35f,0.35f,0.45f,1}, txc{1,1,1,1};
         std::string bmp, bmpBase;
         float textOfsX = 4, textOfsY = 0;
@@ -1150,14 +1355,41 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         };
         if (!bmpBase.empty()) loadTex(bmpBase);
         if (!bmp.empty() && !tabTex) loadTex(bmp);
-        // Selected tab gets a lighter/blue-ish fill
-        ColorF tabFill = ctl->selected ? ColorF{0.35f,0.45f,0.55f,1} : fc;
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, tabFill);
-        r.drawRectFill({x, y + ctl->extentY - 2, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.5f,0.5f,0.6f,0.5f});
-        if (font && !ctl->text.empty()) {
-            float tx2 = x + textOfsX;
-            float ty2 = y + (ctl->extentY - 16) * 0.5f + textOfsY;
-            font->render(ctl->text.c_str(), tx2, ty2, txc, 1.0f);
+        if (cn == "ShellTabButton") {
+            // Tab button: determine selected state from parent tab group
+            bool isSelected = ctl->selected;
+            if (!isSelected && ctl->parent && ctl->parent->selectedTab >= 0) {
+                int btnIdx = 0;
+                for (auto* sib : ctl->parent->children) {
+                    if (sib->className == "ShellTabButton") {
+                        if (sib == ctl) { isSelected = (btnIdx == ctl->parent->selectedTab); break; }
+                        btnIdx++;
+                    }
+                }
+            }
+            // Tab button with 3D-ish look
+            ColorF fill = isSelected ? ColorF{0.35f,0.45f,0.55f,1} : fc;
+            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fill);
+            // Bottom highlight line for selected tab (extends below to overlap pane border)
+            if (isSelected)
+                r.drawRectFill({x, y + ctl->extentY - 1, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.6f,0.7f,0.8f,1});
+            else
+                r.drawRectFill({x, y + ctl->extentY - 1, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.15f,0.15f,0.2f,1});
+            if (font && !ctl->text.empty()) {
+                float tx2 = x + textOfsX;
+                float ty2 = y + (ctl->extentY - (float)font->charHeight) * 0.5f + textOfsY;
+                font->render(ctl->text.c_str(), tx2, ty2, txc, 1.0f);
+            }
+        } else {
+            // GuiTabPageCtrl (selected content pane): draw dark background and content
+            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.12f,0.12f,0.15f,1});
+            // Thin border at top to separate from tab bar
+            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + 1, 0}, {0.3f,0.3f,0.4f,0.5f});
+            if (font && !ctl->text.empty()) {
+                float tx2 = x + textOfsX;
+                float ty2 = y + textOfsY;
+                font->render(ctl->text.c_str(), tx2, ty2, txc, 1.0f);
+            }
         }
     } else if (cn == "GuiPopUpMenuCtrl" || cn == "ShellPopupMenu") {
         ColorF fc{0.25f,0.25f,0.3f,1}, txc{0.8f,0.8f,1,1};
@@ -1361,6 +1593,52 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         auto* prof = getProfile(ctl->profileName);
         if (prof) { auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), scc); }
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, scc);
+    } else if (cn == "ShellTabGroupCtrl" || cn == "GuiTabBookCtrl") {
+        // Tab group: draw tab buttons along the top, then children below
+        const float tabH = 22;
+        // Background for the area below tabs
+        r.drawRectFill({x, y + tabH, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.12f, 0.12f, 0.15f, 1});
+        // Draw each tab button
+        float tabX = x + 2;
+        Font* tabFont = font;
+        auto* prof = getProfile(ctl->profileName);
+        if (prof) tabFont = getProfileFont(prof);
+        for (int ti = 0; ti < (int)ctl->tabs.size(); ti++) {
+            float tw = std::max(60.0f, (float)ctl->tabs[ti].text.size() * 9.0f + 16);
+            bool sel = (ti == ctl->selectedTab);
+            ColorF fill = sel ? ColorF{0.35f,0.45f,0.55f,1} : ColorF{0.2f,0.22f,0.28f,1};
+            r.drawRectFill({tabX, y, 0}, {tabX + tw, y + tabH, 0}, fill);
+            if (sel)
+                r.drawRectFill({tabX, y + tabH - 1, 0}, {tabX + tw, y + tabH, 0}, {0.6f,0.7f,0.8f,1});
+            if (tabFont && !ctl->tabs[ti].text.empty())
+                tabFont->render(ctl->tabs[ti].text.c_str(), tabX + 8, y + 4, {1,1,1,1}, 1.0f);
+            tabX += tw + 1;
+        }
+        // Render children (tab content below tab bar)
+        for (auto* child : ctl->children)
+            renderControlRec(gr, child, canvas, scrollOfsX, scrollOfsY, clip);
+        return; // prevent generic children loop below
+    } else if (cn == "ShellBitmapButton" && ctl->name == "LaunchToolbarCloseButton") {
+        // Close button in LaunchToolbarDlg: draw an X
+        ColorF bg{0.25f,0.25f,0.3f,1};
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bg);
+        // Draw X mark
+        float cx = x + ctl->extentX * 0.5f, cy = y + ctl->extentY * 0.5f;
+        auto drawLine = [&](float x1, float y1, float x2, float y2) {
+            r.drawRectFill({x1, y1, 0}, {x2, y2, 0}, {0.8f,0.8f,0.9f,1});
+        };
+        drawLine(cx-3, cy-3, cx+3, cy+3);
+        drawLine(cx-3, cy+3, cx+3, cy-3);
+        // Border
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + 1, 0}, {0.4f,0.4f,0.5f,0.5f});
+        r.drawRectFill({x, y + ctl->extentY - 1, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.1f,0.1f,0.15f,0.5f});
+    } else if (cn == "GuiControl" && ctl->name == "LaunchToolbarPane") {
+        // Toolbar pane at the bottom of LaunchGui: gradient fill + top border
+        float halfH = ctl->extentY * 0.5f;
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + halfH, 0}, {0.14f,0.14f,0.17f,1});
+        r.drawRectFill({x, y + halfH, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.1f,0.1f,0.12f,1});
+        // Top highlight border
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + 1, 0}, {0.3f,0.3f,0.4f,0.6f});
     } else {
         // Generic GuiControl with profile-aware fill and text
         ColorF gc{0.2f, 0.2f, 0.25f, 1.0f};
@@ -1487,6 +1765,20 @@ void GuiRenderer::updateFades(float dt) {
 
 GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
     if (!ctl || !ctl->visible || !ctl->active) return nullptr;
+    // Skip non-selected tab pages
+    if (ctl->className == "GuiTabPageCtrl") {
+        bool isSelected = false;
+        if (ctl->parent && ctl->parent->selectedTab >= 0) {
+            int pageIdx = 0;
+            for (auto* sib : ctl->parent->children) {
+                if (sib->className == "GuiTabPageCtrl") {
+                    if (sib == ctl) { isSelected = (pageIdx == ctl->parent->selectedTab); break; }
+                    pageIdx++;
+                }
+            }
+        }
+        if (!isSelected) return nullptr;
+    }
     float x = ctl->posX;
     float y = ctl->posY;
     GuiControl* p = ctl->parent;
@@ -1501,6 +1793,22 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
         return ctl;
     }
     return nullptr;
+}
+
+bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
+    auto* target = dialogStack.empty() ? canvas : activeDialog();
+    // Find deepest control under mouse, then walk up to find a scrollable ancestor
+    GuiControl* hit = hitTest(target, x, y);
+    if (!hit) return false;
+    GuiControl* scrollCtrl = hit;
+    while (scrollCtrl) {
+        if (scrollCtrl->className == "GuiScrollCtrl" || scrollCtrl->className == "ShellScrollCtrl") {
+            scrollCtrl->scrollY += (wheelDelta > 0 ? 30 : -30);
+            return true;
+        }
+        scrollCtrl = scrollCtrl->parent;
+    }
+    return false;
 }
 
 bool GuiRenderer::handleInput(int x, int y, bool pressed) {
@@ -1532,6 +1840,33 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             }
         }
         return true;
+    }
+    // ShellLaunchMenu: the LAUNCH button — call LaunchGame() directly
+    if (hit->className == "ShellLaunchMenu") {
+        Console::instance().execute("LaunchGame();");
+        return true;
+    }
+    // Tab group click: determine which tab button was clicked
+    if (hit->className == "ShellTabGroupCtrl" || hit->className == "GuiTabBookCtrl") {
+        // Compute absolute position
+        float ax = hit->posX, ay = hit->posY;
+        for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+        const float tabH = 22;
+        if (y >= ay && y < ay + tabH && x >= ax) {
+            float tabX = ax + 2;
+            for (int ti = 0; ti < (int)hit->tabs.size(); ti++) {
+                float tw = std::max(60.0f, (float)hit->tabs[ti].text.size() * 9.0f + 16);
+                if (x >= tabX && x < tabX + tw) {
+                    hit->selectedTab = ti;
+                    auto* ts = Engine::instance().script().ts();
+                    if (ts && ts->hasFunction(hit->name + "::onSelect"))
+                        ts->callFunction(hit->name + "::onSelect",
+                            {VMValue(ti), VMValue(hit->tabs[ti].text)});
+                    return true;
+                }
+                tabX += tw + 1;
+            }
+        }
     }
     if (hit->onClick) {
         hit->onClick();

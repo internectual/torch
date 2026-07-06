@@ -31,6 +31,11 @@ struct GuiControl {
     float scrollX = 0, scrollY = 0;
     float contentW = 0, contentH = 0; // virtual content size
 
+    // Tab group fields (for ShellTabGroupCtrl/GM_TabView/LaunchTabView)
+    struct Tab { std::string text; bool active; };
+    std::vector<Tab> tabs;
+    int selectedTab = -1;
+
     // GuiServerBrowser fields
     struct ServerBrowserColumn {
         std::string name;
@@ -65,6 +70,7 @@ public:
     void refresh();
     void render();
     bool handleInput(int x, int y, bool pressed);
+    bool handleScroll(int x, int y, int wheelDelta);
 
     GuiControl* getCanvas() { return canvas; }
     GuiControl* findControl(const std::string& name);

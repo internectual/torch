@@ -107,7 +107,7 @@ struct Font {
     int32_t fontSize = 0;
 
     bool load(const uint8_t* data, size_t size);
-    bool loadDefault();
+    bool loadDefault(int size = 8);
     bool loadGFT(const uint8_t* data, size_t size);
     void render(const char* text, float x, float y, const ColorF& color, float scale = 1.0f);
     Point2F measure(const char* text, float scale = 1.0f);
@@ -228,6 +228,7 @@ public:
     Font* getFont() { return defaultFont; }
     Font* getFont(const char* name, int size);
     void addFont(Font* font);
+    void setFontScale(float scale);
     void renderText(const char* text, float x, float y, const ColorF& color, float scale = 1.0f);
 
     TerrainBlock* getTerrain() { return terrain; }

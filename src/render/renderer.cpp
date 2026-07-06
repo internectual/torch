@@ -725,6 +725,13 @@ void Renderer::addFont(Font* font) {
     fontCache[key] = font;
 }
 
+void Renderer::setFontScale(float scale) {
+    for (auto& [key, ft] : fontCache) {
+        if (ft) ft->defaultScale = scale;
+    }
+    if (defaultFont) defaultFont->defaultScale = scale;
+}
+
 bool Renderer::screenshot(const char* path) {
     int w = cfg.width, h = cfg.height;
     std::vector<uint8_t> pixels(w * h * 3);

@@ -282,11 +282,18 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
     // Map passed arguments to local variable names by matching to function declaration
     for (auto& fn : dso->functions) {
         if (fn.startIp == startIp) {
-            for (uint32_t ai = 0; ai < fn.argc && ai < (uint32_t)args.size(); ai++) {
-                std::string localName = "%" + fn.argNames[ai];
-                ctx.locals[localName] = args[ai];
+            // For namespaced functions, %this is the method's target object
+            // (passed as args[0] from the method dispatch, before script-level args)
+            bool isMethod = (!fn.ns.empty());
+            uint32_t argOfs = 0;
+            if (isMethod && args.size() > 0) {
+                ctx.locals["%this"] = args[0];
+                argOfs = 1;
             }
-            // Also store varargs if present
+            for (uint32_t ai = 0; ai < fn.argc && ai + argOfs < (uint32_t)args.size(); ai++) {
+                std::string localName = "%" + fn.argNames[ai];
+                ctx.locals[localName] = args[ai + argOfs];
+            }
             if (fn.hasVarArgs && fn.argc < (uint32_t)args.size()) {
                 std::string varargStr;
                 for (uint32_t ai = fn.argc; ai < (uint32_t)args.size(); ai++) {
@@ -711,25 +718,31 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                     if (ns && ns[0]) fullName = std::string(ns) + "::" + name;
                     else fullName = name;
 
-                    // Check native first
-                    auto nit = impl->natives.find(fullName);
-                    if (nit != impl->natives.end()) {
-                        stack.push(nit->second(callArgs));
-                    } else {
-                        // Look up in loaded DSOs
-                        bool found = false;
+                    // Check native first (try namespaced, then bare name)
+                    // Try native (namespaced first, then bare name fallback)
+                    auto findNative = [&](const std::string& fn) -> bool {
+                        auto low = fn;
+                        for (auto& c : low) c = (char)tolower((unsigned char)c);
+                        auto nit = impl->natives.find(low);
+                        if (nit != impl->natives.end()) { stack.push(nit->second(callArgs)); return true; }
+                        return false;
+                    };
+                    auto findDSO = [&](const std::string& fn) -> bool {
                         for (auto* ds : impl->loaded) {
-                            auto fit = ds->funcMap.find(fullName);
+                            auto fit = ds->funcMap.find(fn);
                             if (fit != ds->funcMap.end()) {
-                                VMValue result = execute(ds, fit->second->startIp, callArgs);
-                                stack.push(result);
-                                found = true;
-                                break;
+                                stack.push(execute(ds, fit->second->startIp, callArgs));
+                                return true;
                             }
                         }
-                        if (!found) {
-                            Console::instance().printf(LogLevel::Debug, "VM: calling unknown func %s", fullName.c_str());
-                            stack.push(VMValue(0));
+                        return false;
+                    };
+                    if (!findNative(fullName)) {
+                        if (!findNative(name)) { // bare name fallback (e.g. "tabCount" from "LaunchTabView::tabCount")
+                            if (!findDSO(fullName) && !findDSO(name)) {
+                                Console::instance().printf(LogLevel::Debug, "VM: calling unknown func %s", fullName.c_str());
+                                stack.push(VMValue(0));
+                            }
                         }
                     }
 
@@ -2046,99 +2059,6 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // Missing native function stubs
-    // addLaunchTab(objectName, tabName, guiName, isSpacer) — adds a tab
-    tsInstance->registerNative("addLaunchTab", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        std::string tabName = args[1].toString();
-        std::string guiName = args.size() > 2 ? args[2].toString() : "";
-        Console::instance().printf(LogLevel::Debug, "TS: addLaunchTab('%s')", tabName.c_str());
-        bool isSpacer = args.size() > 3 && args[3].toBool();
-        // Compute tab position from siblings
-        int tx = 0;
-        auto& gr2 = Engine::instance().guiRenderer();
-        GuiControl* tabViewCtl = gr2.findControl("LaunchTabView");
-        if (tabViewCtl) tx = (int)tabViewCtl->children.size() * 105;
-        // Construct command with tab name baked into the string
-        std::string bakedCmd = "LaunchTabView.setSelected(\"" + tabName + "\")";
-        // Force offline mode when running with -nologin
-        std::string launchMode = Console::instance().getStringVariable("$LaunchMode", "");
-        if (launchMode == "Offline") {
-            Console::instance().setVariable("$PlayingOnline", "0");
-        }
-
-        // Create ScriptObject
-        auto* obj = new ScriptObject;
-        obj->className = "ShellTabButton";
-        obj->name = "LaunchTab_" + tabName;
-        obj->fields["text"] = VMValue(tabName);
-        obj->fields["profile"] = VMValue("LaunchTabProfile");
-        obj->fields["visible"] = VMValue(1);
-        obj->fields["position"] = VMValue(std::to_string(tx) + " 0");
-        obj->fields["extent"] = VMValue(std::string("101 29")); // 101 to avoid canvas extent propagation
-        obj->fields["command"] = VMValue(bakedCmd);
-        obj->internals["parent"] = VMValue("LaunchTabView");
-        ScriptEngine::instance().objects[obj->name] = obj;
-
-        // Create GuiControl and pre-create content panel
-        auto& gr3 = Engine::instance().guiRenderer();
-        if (tabViewCtl) {
-            GuiControl* tabCtl = gr3.soToGui(obj->name, tabViewCtl);
-            if (tabCtl) {
-                tabCtl->command = bakedCmd;
-                tabCtl->onClick = [bakedCmd]() {
-                    Console::instance().execute(bakedCmd.c_str());
-                };
-                // Pre-create content panel as a child of the top dialog
-                if (!guiName.empty()) {
-                    tabCtl->altCommand = guiName;
-                    GuiControl* parentDlg = gr3.findControl("LaunchToolbarDlg");
-                    if (!parentDlg) parentDlg = gr3.findControl("LaunchGui");
-                    GuiControl* panel = gr3.soToGui(guiName, nullptr);
-                    if (!panel) panel = gr3.soToGui(guiName, parentDlg);
-                    if (panel) {
-                        // Reparent under toolbar if not already there
-                        if (panel->parent != parentDlg) {
-                            if (panel->parent) {
-                                auto& sib = panel->parent->children;
-                                sib.erase(std::remove(sib.begin(), sib.end(), panel), sib.end());
-                            }
-                            panel->parent = nullptr;
-                            if (parentDlg) parentDlg->addChild(panel);
-                        }
-                        panel->visible = false;
-                        panel->posX = 0; panel->posY = 40; // below tab bar
-                        panel->extentX = 640; panel->extentY = 396;
-                    }
-                }
-            }
-        }
-        return VMValue(1);
-    });
-
-    // setSelected(objectName, tabName) — selects a tab, shows its content panel
-    tsInstance->registerNative("setSelected", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        std::string objName = args[0].toString();
-        std::string tabName = args[1].toString();
-        auto& gr = Engine::instance().guiRenderer();
-        GuiControl* tabView = gr.findControl(objName);
-        if (tabView) {
-            for (auto* child : tabView->children) {
-                bool isTab = (child->text == tabName && child->className == "ShellTabButton");
-                child->selected = isTab;
-                // Show/hide content panel (child of LaunchToolbarDlg)
-                if (!child->altCommand.empty()) {
-                    GuiControl* panel = gr.findControl(child->altCommand);
-                    if (panel) {
-                        panel->visible = isTab;
-                    }
-                }
-            }
-        }
-        return VMValue(1);
-    });
-
     tsInstance->registerNative("getTaggedString", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(std::string(""));
         return args[0];
@@ -2238,10 +2158,106 @@ bool ScriptEngine::init() {
     // Common GUI control method stubs
     tsInstance->registerNative("addRow", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("clear", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("addTab", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("viewTab", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("viewLastTab", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("closeCurrentTab", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("add", [](const auto&) -> VMValue { return VMValue(1); });
+    auto getOrCreateCtrl = [](const std::string& name) -> GuiControl* {
+        auto& g = Engine::instance().guiRenderer();
+        auto* ctl = g.findControl(name);
+        if (!ctl && ScriptEngine::instance().findObject(name.c_str())) {
+            ctl = g.soToGui(name, nullptr);
+        }
+        return ctl;
+    };
+    tsInstance->registerNative("addTab", [getOrCreateCtrl](const auto& args) -> VMValue {
+        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl && args.size() >= 3) {
+            int id = (int)args[1].toDouble();
+            std::string txt = args[2].toString();
+            if (id >= (int)ctl->tabs.size()) ctl->tabs.resize(id + 1);
+            ctl->tabs[id] = {txt, true};
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("tabCount", [getOrCreateCtrl](const auto& args) -> VMValue {
+        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
+        return VMValue((int)(ctl ? ctl->tabs.size() : 0));
+    });
+    tsInstance->registerNative("getSelectedTab", [getOrCreateCtrl](const auto& args) -> VMValue {
+        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
+        return VMValue(ctl ? ctl->selectedTab : -1);
+    });
+    tsInstance->registerNative("setSelectedByIndex", [getOrCreateCtrl](const auto& args) -> VMValue {
+        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl && args.size() >= 2) {
+            int idx = (int)args[1].toDouble();
+            ctl->selectedTab = idx;
+            if (idx >= 0 && idx < (int)ctl->tabs.size()) {
+                auto* ts = Engine::instance().script().ts();
+                if (ts && ts->hasFunction(ctl->name + "::onSelect"))
+                    ts->callFunction(ctl->name + "::onSelect", {VMValue(idx), VMValue(ctl->tabs[idx].text)});
+            }
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("viewTab", [getOrCreateCtrl](const auto& args) -> VMValue {
+        std::string cname = args.empty() ? "" : args[0].toString();
+        GuiControl* ctl = getOrCreateCtrl(cname);
+        if (!ctl) return VMValue(1);
+        std::string guiName = args.size() > 2 ? args[2].toString() : "";
+        std::string keyStr = args.size() > 3 ? args[3].toString() : "";
+        int tabCount = (int)ctl->tabs.size();
+        int found = -1;
+        if (ScriptObject* obj = ScriptEngine::instance().findObject(cname.c_str())) {
+            for (int i = 0; i < tabCount; i++) {
+                std::string gk = "gui[" + std::to_string(i) + "]";
+                std::string kk = "key[" + std::to_string(i) + "]";
+                auto gi = obj->fields.find(gk);
+                auto ki = obj->fields.find(kk);
+                if (gi != obj->fields.end() && gi->second.toString() == guiName &&
+                    ki != obj->fields.end() && ki->second.toString() == keyStr) {
+                    found = i;
+                    break;
+                }
+            }
+        }
+        if (found < 0) {
+            found = tabCount;
+            if (found >= (int)ctl->tabs.size()) ctl->tabs.resize(found + 1);
+            ctl->tabs[found] = {args.size() > 1 ? args[1].toString() : "", true};
+        }
+        ctl->selectedTab = found;
+        if (found >= 0 && found < (int)ctl->tabs.size()) {
+            auto* ts = Engine::instance().script().ts();
+            if (ts && ts->hasFunction(ctl->name + "::onSelect"))
+                ts->callFunction(ctl->name + "::onSelect", {VMValue(found), VMValue(ctl->tabs[found].text)});
+        }
+        return VMValue(1);
+    });
+    // viewLastTab and closeCurrentTab have script implementations; let them run.
+    tsInstance->registerNative("isTabActive", [getOrCreateCtrl](const auto& args) -> VMValue {
+        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl && args.size() >= 2) {
+            int idx = (int)args[1].toDouble();
+            if (idx >= 0 && idx < (int)ctl->tabs.size()) return VMValue(ctl->tabs[idx].active ? 1 : 0);
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setTabActive", [getOrCreateCtrl](const auto& args) -> VMValue {
+        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl && args.size() >= 3) {
+            int idx = (int)args[1].toDouble();
+            bool act = args[2].toBool();
+            if (idx >= 0 && idx < (int)ctl->tabs.size()) ctl->tabs[idx].active = act;
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("removeTabByIndex", [getOrCreateCtrl](const auto& args) -> VMValue {
+        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl && args.size() >= 2) {
+            int idx = (int)args[1].toDouble();
+            if (idx >= 0 && idx < (int)ctl->tabs.size()) ctl->tabs.erase(ctl->tabs.begin() + idx);
+        }
+        return VMValue(1);
+    });
     tsInstance->registerNative("getSelected", [](const auto&) -> VMValue { return VMValue(0); });
     tsInstance->registerNative("getSelectedId", [](const auto&) -> VMValue { return VMValue(0); });
     tsInstance->registerNative("getRowTextById", [](const auto&) -> VMValue { return VMValue(std::string("")); });
@@ -2407,6 +2423,10 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
+    // Copy all TS-registered natives to DSO VM so DSO functions can find them
+    for (auto& entry : tsInstance->getNatives()) {
+        vmInstance->registerNativeFunction(entry.first.c_str(), entry.second);
+    }
     Console::instance().printf(LogLevel::Info, "ScriptEngine initialized with %zu native functions + DTS support", 12);
     return true;
 }

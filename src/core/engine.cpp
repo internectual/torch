@@ -396,9 +396,12 @@ bool Engine::init(int argc, char* argv[]) {
     ren->config().height = plat->height();
     plat->setResizeCallback([this](int w, int h) { ren->onResize(w, h); });
 
-    // Overlay font
+    // Overlay font — generated at 16px for readability
     overlayFont = new Font;
-    if (overlayFont->loadDefault()) {
+    if (overlayFont->loadDefault(16)) {
+        overlayFontOwned = true;
+        ren->defaultFont = overlayFont;
+    } else if (overlayFont->loadDefault(8)) {
         overlayFontOwned = true;
         ren->defaultFont = overlayFont;
     } else {
@@ -408,15 +411,26 @@ bool Engine::init(int argc, char* argv[]) {
     }
 
     // Load GFT fonts from data directory
+    Font* lucidaFont = nullptr;
     {
         auto fontFiles = {"fonts/Arial_12.gft", "fonts/Arial_13.gft", "fonts/Arial_14.gft",
                           "fonts/Arial_16.gft", "fonts/Arial_18.gft", "fonts/Arial_20.gft",
                           "fonts/Arial Bold_10.gft", "fonts/Arial Bold_12.gft", "fonts/Arial Bold_13.gft",
                           "fonts/Arial Bold_14.gft", "fonts/Arial Bold_16.gft", "fonts/Arial Bold_18.gft",
                           "fonts/Arial Bold_24.gft", "fonts/Arial Bold_32.gft",
-                          "fonts/Verdana_12.gft", "fonts/Verdana_14.gft",
-                          "fonts/Verdana Bold_12.gft", "fonts/Verdana Bold_16.gft",
-                          "fonts/Lucida Console_12.gft", "fonts/Sui Generis_14.gft"};
+                          "fonts/Verdana_10.gft", "fonts/Verdana_12.gft", "fonts/Verdana_13.gft",
+                          "fonts/Verdana_14.gft", "fonts/Verdana_16.gft", "fonts/Verdana_18.gft",
+                          "fonts/Verdana Bold_12.gft", "fonts/Verdana Bold_13.gft", "fonts/Verdana Bold_14.gft",
+                          "fonts/Verdana Bold_16.gft", "fonts/Verdana Bold_24.gft", "fonts/Verdana Bold_36.gft",
+                          "fonts/Verdana Italic_13.gft", "fonts/Verdana Italic_14.gft",
+                          "fonts/Lucida Console_12.gft", "fonts/Sui Generis_14.gft",
+                          "fonts/Univers_12.gft", "fonts/Univers_14.gft", "fonts/Univers_16.gft", "fonts/Univers_18.gft", "fonts/Univers_22.gft",
+                          "fonts/Univers Bold_16.gft", "fonts/Univers Bold_18.gft",
+                          "fonts/Univers Condensed_10.gft", "fonts/Univers Condensed_12.gft", "fonts/Univers Condensed_14.gft",
+                          "fonts/Univers Condensed_16.gft", "fonts/Univers Condensed_18.gft", "fonts/Univers Condensed_20.gft",
+                          "fonts/Univers Condensed_22.gft", "fonts/Univers condensed_28.gft", "fonts/Univers condensed_30.gft",
+                          "fonts/Univers Condensed Bold_20.gft", "fonts/Univers italic_16.gft",
+                          "fonts/times_24.gft", "fonts/times_36.gft"};
         for (const char* f : fontFiles) {
             auto fdata = fs.read(f);
             if (fdata.empty()) continue;
@@ -438,10 +452,29 @@ bool Engine::init(int argc, char* argv[]) {
                     ft->fontSize = ft->charHeight;
                 }
                 ren->addFont(ft);
+                if (ft->fontName == "Lucida Console" && ft->fontSize == 12)
+                    lucidaFont = ft;
                 Console::instance().printf(LogLevel::Info, "Loaded font: %s %d", ft->fontName.c_str(), ft->fontSize);
             } else {
                 delete ft;
             }
+        }
+        // Scale the dev panel overlay font for modern displays; leave game canvas fonts at 1.0
+        float fontScale = std::max(2.0f, (float)plat->height() / 540.0f);
+        Console::instance().printf(LogLevel::Info, "Font scale: %.1f (display %dx%d)", fontScale, plat->width(), plat->height());
+        // Prefer GFT Lucida Console 12; fall back to generated bitmap font
+        if (lucidaFont && lucidaFont->loaded) {
+            if (overlayFont && overlayFontOwned) { delete overlayFont; overlayFontOwned = false; }
+            overlayFont = lucidaFont;
+            overlayFont->defaultScale = fontScale;
+            overlayFontOwned = false;
+            ren->defaultFont = overlayFont;
+            Console::instance().printf(LogLevel::Info, "Dev panel font: Lucida Console 12 @ %.1fx", fontScale);
+        } else if (overlayFont) {
+            overlayFont->defaultScale = fontScale;
+            ren->defaultFont = overlayFont;
+            Console::instance().printf(LogLevel::Info, "Dev panel font: generated %dx%d @ %.1fx",
+                overlayFont->charWidth, overlayFont->charHeight, fontScale);
         }
     }
 
@@ -520,6 +553,19 @@ bool Engine::init(int argc, char* argv[]) {
         std::string logPath = Console::instance().getStringVariable("$ConsoleLogPath", "console.log");
         Console::instance().printf(LogLevel::Info, "Console log: %s", logPath.c_str());
     }, "/log - show the console log file path");
+
+    con->addCommand("playsound", [this](int32_t argc, const char* const* argv) {
+        if (argc > 1 && aud) {
+            auto* buf = aud->loadSound(argv[1]);
+            if (buf) {
+                auto* src = aud->createSource();
+                src->play(buf);
+                Console::instance().printf(LogLevel::Info, "Playing: %s", argv[1]);
+            } else {
+                Console::instance().printf(LogLevel::Warn, "Sound not found: %s", argv[1]);
+            }
+        }
+    }, "/playsound <path> - play a sound file");
 
     con->addCommand("setScriptPath", [](int32_t argc, const char* const* argv) {
         if (argc > 1) {
@@ -945,7 +991,7 @@ void Engine::run() {
             prevPressed = pressed;
         }
 
-        // Mouse wheel: GUI scroll or weapon cycle (outside console check)
+        // Mouse wheel: GUI scroll (position-aware) or weapon cycle
         {
             static float weaponCycleCooldown = 0;
             weaponCycleCooldown -= dt;
@@ -953,18 +999,9 @@ void Engine::run() {
             if (wheel != 0) {
                 bool scrolled = false;
                 if (gui) {
-                    std::function<GuiControl*(GuiControl*)> findScroll = [&](GuiControl* ctl) -> GuiControl* {
-                        if (!ctl) return nullptr;
-                        if (ctl->className == "GuiScrollCtrl" || ctl->className == "ShellScrollCtrl")
-                            return ctl;
-                        for (auto* ch : ctl->children) {
-                            auto* r = findScroll(ch);
-                            if (r) return r;
-                        }
-                        return nullptr;
-                    };
-                    GuiControl* sc = findScroll(gui->activeDialog());
-                    if (sc) { sc->scrollY += (wheel > 0 ? 30 : -30); scrolled = true; }
+                    int mx = plat->input().mouseX;
+                    int my = plat->input().mouseY;
+                    scrolled = gui->handleScroll(mx, my, wheel);
                 }
                 if (!scrolled && weaponCycleCooldown <= 0) {
                     g->player().weaponCycle(wheel > 0 ? 1 : -1);
@@ -1088,21 +1125,36 @@ void Engine::run() {
                 lastRespCheck = now;
             }
 
-            // Ctrl+wheel adjusts font scale for dev panel + bottom tabs
+            // Per-section font scales for ctrl+wheel
+            static float treeFontScale = 1.0f;
+            static float consoleFontScale = 1.0f;
+            static float inspectorFontScale = 1.0f;
+            static int bottomActiveTab = 0; // shared with bottom tab panel below
+            // Ctrl+wheel adjusts font scale for the section under mouse
             {
-                static float sv = 1.0f;
                 int wd = plat->input().mouseWheel;
                 if (wd && (plat->input().keysDown[SCANCODE_LCTRL] || plat->input().keysDown[SCANCODE_RCTRL])) {
-                    sv += wd * 0.1f;
-                    if (sv < 0.5f) sv = 0.5f;
-                    if (sv > 3.0f) sv = 3.0f;
-                    if (overlayFont) overlayFont->defaultScale = sv;
+                    float mx = (float)plat->input().mouseX, my = (float)plat->input().mouseY;
+                    const int tabBarY = 482;
+                    const int rightX = 650;
+                    float* targetScale = nullptr;
+                    if (mx >= rightX && my < 480) {
+                        targetScale = &treeFontScale;
+                    } else if (my >= tabBarY) {
+                        if (bottomActiveTab == 0) targetScale = &consoleFontScale;
+                        else if (bottomActiveTab == 2) targetScale = &inspectorFontScale;
+                    }
+                    if (targetScale) {
+                        *targetScale += wd * 0.1f;
+                        if (*targetScale < 0.5f) *targetScale = 0.5f;
+                        if (*targetScale > 3.0f) *targetScale = 3.0f;
+                    }
                 }
             }
 
             // Right-side dev info panel (clipped to canvas bottom at y=480)
             if (overlayFont) {
-                float sc = overlayFont->defaultScale; // for layout calculations that tracked sc
+                float sc = overlayFont->defaultScale; // match font rendering scale
                 char buf[256];
                 int ly = 4;
                 const int rightX = 650;
@@ -1305,12 +1357,13 @@ void Engine::run() {
                     static std::unordered_set<std::string> expandedNodes;
                     static std::string selectedObject;
                     static int treeScroll = 0;
-                    const int treeIndent = 14;
+                    const float treeScale = overlayFont ? overlayFont->defaultScale : 1.0f;
+                    const int treeIndent = (int)(14 * treeScale);
 
                     // Draw tree items in available space
                     int treeY = ly;
                     int maxTreeH = canvasBottom - treeY - 2;
-                    int itemH = 14;
+                    int itemH = (int)(14 * treeScale);
                     int maxItems = maxTreeH / itemH;
 
                     // Build flat display list: roots → expanded children recursively
@@ -1416,14 +1469,14 @@ void Engine::run() {
                         }
                         if (hasKids) {
                             bool isExp = expandedNodes.count(entry.first);
-                            overlayFont->render(isExp ? "[-]" : "[+]", xPos - 14, yPos, {0.5f, 1, 0.5f, 1}, 1.0f);
+                            overlayFont->render(isExp ? "[-]" : "[+]", xPos - 14, yPos, {0.5f, 1, 0.5f, 1}, treeFontScale);
                         }
 
                         // Object name
                         ColorF objCol = (entry.first == selectedObject) ? ColorF{0.3f, 1, 0.8f, 1} : ColorF{0.8f, 0.8f, 0.8f, 1};
                         std::string label = obj->name.empty() ? "<unnamed>" : obj->name;
                         if (!obj->className.empty()) label += " [" + obj->className + "]";
-                        overlayFont->render(label.c_str(), xPos, yPos, objCol, 1.0f);
+                        overlayFont->render(label.c_str(), xPos, yPos, objCol, treeFontScale);
                     }
 
                     // Store selected object name for inspector tab
@@ -1503,8 +1556,7 @@ void Engine::run() {
                 const int tabH = 22;
                 const int panelH = h - tabBarY;
                 if (panelH > tabH) {
-                    // Tab bar
-                    static int activeTab = 0;
+                    // Tab bar (activeTab shared with ctrl+scroll handler above)
                     const char* tabNames[] = {"Console", "Telnet", "Inspector", "Stack Trace"};
                     const int numTabs = 4;
                     int tabX = 4;
@@ -1518,7 +1570,7 @@ void Engine::run() {
                             for (int t = 0; t < numTabs; t++) {
                                 int tw = (int)strlen(tabNames[t]) * 9 + 12;
                                 if (my >= tabBarY && my < tabBarY + tabH && mx >= tx && mx < tx + tw)
-                                    activeTab = t;
+                                    bottomActiveTab = t;
                                 tx += tw + 2;
                             }
                         }
@@ -1530,7 +1582,7 @@ void Engine::run() {
                     int tx = tabX;
                     for (int t = 0; t < numTabs; t++) {
                         int tw = (int)strlen(tabNames[t]) * 9 + 12;
-                        ColorF tabCol = (t == activeTab) ? ColorF{0.3f, 0.7f, 1, 0.9f} : ColorF{0.2f, 0.2f, 0.25f, 0.8f};
+                        ColorF tabCol = (t == bottomActiveTab) ? ColorF{0.3f, 0.7f, 1, 0.9f} : ColorF{0.2f, 0.2f, 0.25f, 0.8f};
                         r.drawRectFill({(float)tx, (float)tabBarY, 0}, {(float)(tx + tw), (float)(tabBarY + tabH), 0}, tabCol);
                         if (overlayFont)
                             overlayFont->render(tabNames[t], (float)(tx + 6), (float)(tabBarY + 4), {1,1,1,0.9f}, 1.0f);
@@ -1542,7 +1594,7 @@ void Engine::run() {
                     if (contentH > 10) {
                         r.drawRectFill({2, (float)contentY, 0}, {(float)(w - 2), (float)(contentY + contentH), 0}, {0.08f, 0.08f, 0.1f, 0.85f});
                         if (overlayFont) {
-                            if (activeTab == 0) {
+                            if (bottomActiveTab == 0) {
                                 // Console tab: input line at bottom, log above
                                 const int inputH = 20;
                                 const int inputY = contentY + contentH - inputH;
@@ -1630,7 +1682,7 @@ void Engine::run() {
                                 // Render input text
                                 if (overlayFont) {
                                     std::string display = "> " + bottomInput;
-                                    overlayFont->render(display.c_str(), 6, inputY + 3, {0.9f, 0.9f, 0.9f, 0.9f}, 1.0f);
+                                    overlayFont->render(display.c_str(), 6, inputY + 3, {0.9f, 0.9f, 0.9f, 0.9f}, consoleFontScale);
                                 }
                                 // Console log: absolute line scroll (sticks only at bottom)
                                 static int consoleScroll = INT_MAX; // first visible line, init to follow
@@ -1638,7 +1690,9 @@ void Engine::run() {
                                 int logH = contentH - inputH - 2;
                                 if (logH > 0) {
                                     int totalLines = (int)log.size();
-                                    int visibleLines = logH / 12;
+                                    float baseLh = 12.0f * (overlayFont ? overlayFont->defaultScale : 1.0f);
+                                    int lh = std::max(1, (int)(baseLh * consoleFontScale));
+                                    int visibleLines = logH / lh;
                                     int bottomLine = std::max(0, totalLines - visibleLines);
                                     // Scroll keys (only when input not focused)
                                     if (!bottomInputActive) {
@@ -1662,13 +1716,13 @@ void Engine::run() {
                                     if (consoleScroll > bottomLine) consoleScroll = bottomLine;
                                     // Render from consoleScroll
                                     int lY = contentY + 2;
-                                    for (int i = consoleScroll; i < totalLines && lY + 12 <= inputY; i++, lY += 12) {
+                                    for (int i = consoleScroll; i < totalLines && lY + lh <= inputY; i++, lY += lh) {
                                         ColorF col{0.5f, 0.5f, 0.5f, 0.9f};
                                         const std::string& line = log[i];
                                         if (line.find("[ERROR]") == 0) col = {1, 0.3f, 0.3f, 0.9f};
                                         else if (line.find("[WARN]") == 0) col = {1, 0.8f, 0.3f, 0.9f};
                                         else if (line.find("[INFO]") == 0) col = {0.5f, 0.8f, 1, 0.9f};
-                                        overlayFont->render(line.c_str(), 6, lY, col, 1.0f);
+                                        overlayFont->render(line.c_str(), 6, lY, col, consoleFontScale);
                                     }
                                     // Scroll bar
                                     if (totalLines > visibleLines) {
@@ -1682,9 +1736,9 @@ void Engine::run() {
                                         r.drawRectFill({(float)(sbRight - 4), thumbPos, 0}, {(float)sbRight, thumbPos + thumbH, 0}, {0.4f, 0.6f, 0.8f, 0.8f});
                                     }
                                 }
-                            } else if (activeTab == 1) {
+                            } else if (bottomActiveTab == 1) {
                                 overlayFont->render("Telnet console - not connected", 6, contentY + 2, {0.5f,0.5f,0.5f,0.8f}, 1.0f);
-                            } else if (activeTab == 2) {
+                            } else if (bottomActiveTab == 2) {
                                 // Inspector: show selected object's properties
                                 std::string sel = Console::instance().getStringVariable("__selectedObj", "");
                                 if (sel.empty()) {
@@ -1697,11 +1751,13 @@ void Engine::run() {
                                     } else {
                                         auto* obj = it->second;
                                         int iY = contentY + 2;
+                                        float baseILh = 12.0f * (overlayFont ? overlayFont->defaultScale : 1.0f);
+                                        int inspectorLh = (int)(baseILh * inspectorFontScale);
                                         auto drawLine = [&](const std::string& key, const std::string& val) {
-                                            if (iY + 12 > contentY + contentH) return;
+                                            if (iY + inspectorLh > contentY + contentH) return;
                                             std::string line = key + ": " + val;
-                                            overlayFont->render(line.c_str(), 6, iY, {0.7f,0.7f,0.7f,0.9f}, 1.0f);
-                                            iY += 12;
+                                            overlayFont->render(line.c_str(), 6, iY, {0.7f,0.7f,0.7f,0.9f}, inspectorFontScale);
+                                            iY += inspectorLh;
                                         };
                                         drawLine("className", obj->className);
                                         drawLine("name", obj->name);
@@ -1711,7 +1767,7 @@ void Engine::run() {
                                             drawLine(f.first, f.second.toString());
                                     }
                                 }
-                            } else if (activeTab == 3) {
+                            } else if (bottomActiveTab == 3) {
                                 overlayFont->render("Stack trace - not implemented", 6, contentY + 2, {0.5f,0.5f,0.5f,0.8f}, 1.0f);
                             }
                         }

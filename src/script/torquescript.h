@@ -77,6 +77,9 @@ public:
     // Nested exec: save outer state, execute source, restore outer state, return result
     VMValue executeNested(const std::string& source, const std::string& path);
 
+    using NativeFunc = std::function<VMValue(const std::vector<VMValue>&)>;
+    const std::unordered_map<std::string, NativeFunc>& getNatives() const;
+
 private:
     struct Impl;
     Impl* impl;
