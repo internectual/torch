@@ -2331,6 +2331,53 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("commandToClient", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("commandToServer", [](const auto&) -> VMValue { return VMValue(1); });
 
+    // Server browser networking
+    tsInstance->registerNative("queryLanServers", [](const auto& args) -> VMValue {
+        auto& net = Engine::instance().network();
+        net.queryLanServers();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("stopServerQuery", [](const auto&) -> VMValue {
+        auto& net = Engine::instance().network();
+        net.queryLanServers(); // will replace server list, effectively stopping
+        return VMValue(1);
+    });
+    tsInstance->registerNative("queryMasterServer", [](const auto&) -> VMValue {
+        // Master server query stub
+        return VMValue(1);
+    });
+    tsInstance->registerNative("addRow", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("clearList", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("sort", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("refreshSelectedServer", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("insertIPAddress", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("findNextServer", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("getServerInfoString", [](const auto&) -> VMValue {
+        auto& renderer = Engine::instance().guiRenderer();
+        auto* browser = renderer.findControl("GMJ_Browser");
+        if (!browser || browser->sbSelected < 0 || browser->sbSelected >= (int)browser->sbServers.size())
+            return VMValue("");
+        auto& srv = browser->sbServers[browser->sbSelected];
+        char buf[512];
+        snprintf(buf, sizeof(buf), "%s\t%s\t\t%d\t%d\t%d\t%s\t", srv.name.c_str(), srv.addr.toString().c_str(), srv.ping, srv.numPlayers, srv.maxPlayers, srv.gameType.c_str());
+        return VMValue(buf);
+    });
+    tsInstance->registerNative("getServerStatus", [](const auto&) -> VMValue {
+        auto& renderer = Engine::instance().guiRenderer();
+        auto* browser = renderer.findControl("GMJ_Browser");
+        if (!browser || browser->sbSelected < 0 || browser->sbSelected >= (int)browser->sbServers.size())
+            return VMValue("invalid");
+        return VMValue("responded");
+    });
+    tsInstance->registerNative("joinSelectedGame", [](const auto&) -> VMValue {
+        // Stub — the script's JoinSelectedGame handles this via $JoinGameAddress
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setTitle", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setAltColor", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setHeader", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("addServerQueryRow", [](const auto&) -> VMValue { return VMValue(1); });
+
     // Container/spatial query stubs
     tsInstance->registerNative("InitContainerRadiusSearch", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("containerSearchNext", [](const auto&) -> VMValue { return VMValue(0); });

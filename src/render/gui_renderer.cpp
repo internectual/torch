@@ -1268,6 +1268,94 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 r.drawRectFill({x + thumbX, sbY2, 0}, {x + thumbX + thumbW, sbY2 + sbH, 0}, {0.5f, 0.5f, 0.6f, 0.7f});
         }
         return; // Don't do default child rendering below
+    } else if (cn == "GuiServerBrowser") {
+        // Server browser: table with column headers and rows
+        ColorF bg{0.15f,0.15f,0.2f,1}, headerBg{0.25f,0.25f,0.35f,1}, altRow{0.18f,0.18f,0.24f,1};
+        ColorF selBg{0.3f,0.4f,0.6f,1}, tc{0.9f,0.9f,1,1}, headerTc{1,1,1,1};
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bg);
+        float rowH = 18;
+        float headerH = 20;
+        float availW = ctl->extentX;
+        // Sync server list from NetworkManager (avoid O(N^2) — just copy once)
+        if (Engine::instance().timer().now() - ctl->sbLastQueryTime > 0.5) {
+            ctl->sbLastQueryTime = Engine::instance().timer().now();
+            ctl->sbServers = Engine::instance().network().getServerList();
+        }
+        // If no columns defined, set up defaults
+        if (ctl->sbColumns.empty()) {
+            ctl->sbColumns = {
+                {"Name", availW * 0.35f, true},
+                {"Map",  availW * 0.25f, true},
+                {"Type",  availW * 0.15f, true},
+                {"Ping",  availW * 0.1f, true},
+                {"Players",  availW * 0.15f, true}
+            };
+        }
+        // Header row
+        float hx = x;
+        for (size_t ci = 0; ci < ctl->sbColumns.size(); ci++) {
+            float cw = ctl->sbColumns[ci].width;
+            if (ci == ctl->sbColumns.size() - 1) cw = availW - (hx - x); // last fills remainder
+            r.drawRectFill({hx, y, 0}, {hx + cw, y + headerH, 0}, headerBg);
+            if (font) {
+                std::string label = ctl->sbColumns[ci].name;
+                if ((int)ci == ctl->sbSortCol) label += ctl->sbSortInc ? " ▲" : " ▼";
+                font->render(label.c_str(), hx + 3, y + 2, headerTc, 1.0f);
+            }
+            hx += cw;
+        }
+        // Data rows
+        float ry = y + headerH;
+        int visRows = (int)((ctl->extentY - headerH) / rowH);
+        auto& servers = ctl->sbServers;
+        // Sort
+        if (ctl->sbSortCol >= 0) {
+            std::sort(servers.begin(), servers.end(), [&](const auto& a, const auto& b) {
+                auto cmp = [](const std::string& sa, const std::string& sb) -> bool {
+                    // Try numeric comparison first
+                    char* ea, *eb;
+                    double da = strtod(sa.c_str(), &ea);
+                    double db = strtod(sb.c_str(), &eb);
+                    if (*ea == 0 && *eb == 0) return da < db;
+                    return sa < sb;
+                };
+                bool less = false;
+                switch (ctl->sbSortCol) {
+                    case 0: less = cmp(a.name, b.name); break;
+                    case 1: less = cmp(a.map, b.map); break;
+                    case 2: less = cmp(a.gameType, b.gameType); break;
+                    case 3: less = a.ping < b.ping; break;
+                    case 4: less = (a.numPlayers + a.maxPlayers * 1000) < (b.numPlayers + b.maxPlayers * 1000); break;
+                    default: less = a.name < b.name; break;
+                }
+                return ctl->sbSortInc ? less : !less;
+            });
+        }
+        int scrollOff = (int)(ctl->scrollY / rowH);
+        for (int i = scrollOff; i < (int)servers.size() && (i - scrollOff) < visRows; i++, ry += rowH) {
+            bool sel = (i == ctl->sbSelected);
+            r.drawRectFill({x, ry, 0}, {x + availW, ry + rowH, 0}, sel ? selBg : ((i & 1) ? altRow : bg));
+            float rx = x;
+            char buf[256];
+            for (size_t ci = 0; ci < ctl->sbColumns.size(); ci++) {
+                float cw = ctl->sbColumns[ci].width;
+                if (ci == ctl->sbColumns.size() - 1) cw = availW - (rx - x);
+                std::string val;
+                switch (ci) {
+                    case 0: val = servers[i].name; break;
+                    case 1: val = servers[i].map; break;
+                    case 2: val = servers[i].gameType; break;
+                    case 3: snprintf(buf, sizeof(buf), "%d", servers[i].ping); val = buf; break;
+                    case 4: snprintf(buf, sizeof(buf), "%d/%d", servers[i].numPlayers, servers[i].maxPlayers); val = buf; break;
+                    default: val = ""; break;
+                }
+                if (!val.empty() && font)
+                    font->render(val.c_str(), rx + 3, ry + 1, tc, 1.0f);
+                rx += cw;
+            }
+        }
+        // Content height for scroll container
+        ctl->contentH = headerH + servers.size() * rowH;
     } else if (cn == "GuiScrollContentCtrl") {
         ColorF scc{0.15f,0.15f,0.2f,0.3f};
         auto* prof = getProfile(ctl->profileName);
@@ -1418,7 +1506,34 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
 bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     auto* target = dialogStack.empty() ? canvas : activeDialog();
     auto* hit = hitTest(target, x, y);
-    if (hit && hit->onClick && pressed) {
+    if (!hit || !pressed) return false;
+    // GuiServerBrowser: row selection + column header sort
+    if (hit->className == "GuiServerBrowser") {
+        // Compute absolute position of the control
+        float ax = hit->posX, ay = hit->posY;
+        for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+        float rowH = 18, headerH = 20;
+        int row = (int)((y - ay) / rowH);
+        float hx = ax;
+        int col = -1;
+        for (size_t ci = 0; ci < hit->sbColumns.size(); ci++) {
+            hx += hit->sbColumns[ci].width;
+            if (x < hx) { col = ci; break; }
+        }
+        if (row == 0 && col >= 0) {
+            if (col == hit->sbSortCol) hit->sbSortInc = !hit->sbSortInc;
+            else { hit->sbSortCol = col; hit->sbSortInc = true; }
+        } else if (row > 0) {
+            int serverIdx = row - 1;
+            if (serverIdx < (int)hit->sbServers.size()) {
+                hit->sbSelected = serverIdx;
+                ScriptEngine::instance().executeString(
+                    ("GMJ_Browser.onSelect(\"" + hit->sbServers[serverIdx].addr.toString() + "\");").c_str());
+            }
+        }
+        return true;
+    }
+    if (hit->onClick) {
         hit->onClick();
         return true;
     }

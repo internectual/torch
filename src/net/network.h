@@ -16,6 +16,8 @@ enum class PacketType : uint8_t {
     Ping = 0x09,
     Pong = 0x0A,
     Ack = 0x0B,
+    QueryServers = 0x0C,
+    QueryResponse = 0x0D,
 };
 
 struct NetAddress {

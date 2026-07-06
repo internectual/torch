@@ -1,5 +1,6 @@
 #pragma once
 #include "render/renderer.h"
+#include "net/network.h"
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -29,6 +30,19 @@ struct GuiControl {
     // scrollY=0 = at bottom (newest), scrollY=maxScroll = at top (oldest)
     float scrollX = 0, scrollY = 0;
     float contentW = 0, contentH = 0; // virtual content size
+
+    // GuiServerBrowser fields
+    struct ServerBrowserColumn {
+        std::string name;
+        float width;
+        bool sortable;
+    };
+    std::vector<ServerBrowserColumn> sbColumns;
+    std::vector<NetworkManager::ServerInfo> sbServers; // displayed/cached list
+    int sbSortCol = -1;
+    bool sbSortInc = true;
+    int sbSelected = -1;
+    double sbLastQueryTime = 0;
 
     GuiControl* findChild(const std::string& name);
     void addChild(GuiControl* child);
