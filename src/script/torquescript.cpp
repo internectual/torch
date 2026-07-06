@@ -511,7 +511,7 @@ VMValue TorqueScript::Impl::parseProgram() {
         result = parseStatement();
         stmtCount++;
         if (stmtCount > maxStmts) {
-            Console::instance().printf(LogLevel::Warn, "TS: parseProgram safety break after %d stmts in '%s'",
+            Console::instance().printf(LogLevel::Debug, "TS: parseProgram safety break after %d stmts in '%s'",
                 stmtCount, currentFile.c_str());
             break;
         }
@@ -668,7 +668,7 @@ VMValue TorqueScript::Impl::parseFor() {
     const int maxIters = 10000000;
     while (running) {
         if (iterCount++ >= maxIters) {
-            Console::instance().printf(LogLevel::Warn, "TS: parseWhile safety break after %d iters in '%s'",
+            Console::instance().printf(LogLevel::Debug, "TS: parseWhile safety break after %d iters in '%s'",
                 iterCount, currentFile.c_str());
             break;
         }
@@ -725,7 +725,7 @@ VMValue TorqueScript::Impl::parseWhile() {
     loopDepth++;
     VMValue result;
     int iterCount = 0;
-    const int maxIters = 20000000;
+    const int maxIters = 1000000;
     while (running) {
         // Evaluate condition
         {
@@ -737,7 +737,7 @@ VMValue TorqueScript::Impl::parseWhile() {
         }
 
         if (iterCount++ >= maxIters) {
-            Console::instance().printf(LogLevel::Warn, "TS: parseWhile safety break after %d iters in '%s'",
+            Console::instance().printf(LogLevel::Debug, "TS: parseWhile safety break after %d iters in '%s'",
                 iterCount, currentFile.c_str());
             break;
         }
@@ -790,7 +790,7 @@ VMValue TorqueScript::Impl::parseDo() {
             if (!cond.toBool()) break;
 
             if (iterCount++ >= maxIters) {
-                Console::instance().printf(LogLevel::Warn, "TS: parseDo safety break after %d iters in '%s'",
+                Console::instance().printf(LogLevel::Debug, "TS: parseDo safety break after %d iters in '%s'",
                     iterCount, currentFile.c_str());
                 break;
             }
