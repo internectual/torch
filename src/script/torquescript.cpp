@@ -1846,7 +1846,6 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
         }
     }
 
-    sg.restored = true; // prevent double-restore, guard destructor runs after this
     std::string exitPath = path;  // copy before any potential invalidation
     Console::instance().printf(LogLevel::Debug, "TS: nested exit-pre '%s'", exitPath.c_str());
     Console::instance().printf(LogLevel::Debug, "TS: nested exit '%s' (execDepth=%d)", exitPath.c_str(), impl->execDepth);
