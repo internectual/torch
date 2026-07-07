@@ -1915,17 +1915,19 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         // Compute absolute position
         float ax = hit->posX, ay = hit->posY;
         for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
-        const float tabH = 22;
+        const float tabH = 29; // match ShellTabGroupCtrl rendering from GUI file
         if (y >= ay && y < ay + tabH && x >= ax) {
             float tabX = ax + 2;
+            auto* font = Engine::instance().renderer().getFont();
             for (int ti = 0; ti < (int)hit->tabs.size(); ti++) {
-                float tw = std::max(60.0f, (float)hit->tabs[ti].text.size() * 9.0f + 16);
+                float textW = font ? font->measure(hit->tabs[ti].text).x : (float)hit->tabs[ti].text.size() * 9.0f;
+                float tw = std::max(60.0f, textW + 16);
                 if (x >= tabX && x < tabX + tw) {
                     hit->selectedTab = ti;
                     auto* ts = Engine::instance().script().ts();
                     if (ts && ts->hasFunction(hit->name + "::onSelect"))
                         ts->callFunction(hit->name + "::onSelect",
-                            {VMValue(ti), VMValue(hit->tabs[ti].text)});
+                            {VMValue(hit->name), VMValue(ti), VMValue(hit->tabs[ti].text)});
                     return true;
                 }
                 tabX += tw + 1;
