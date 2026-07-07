@@ -821,10 +821,12 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 font = getProfileFont(prof);
             }
             float tx = x + 5;
-            float ty = y + (ctl->extentY - (float)font->charHeight) * 0.5f;
-            float toX, toY;
+            // Vertical centering: use half the font height from baseline
+            float textH = (float)font->charHeight;
+            float ty = y + (ctl->extentY - textH) * 0.5f;
+            float toX = 0, toY = 0;
             if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
-            // Use font measure to horizontally center if profile justifies center
+            // Horizontal centering for justify=center profiles
             if (prof) {
                 auto ji = prof->fields.find("justify");
                 if (ji != prof->fields.end() && ji->second.toString() == "center") {
