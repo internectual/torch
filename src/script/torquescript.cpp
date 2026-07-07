@@ -1019,6 +1019,10 @@ VMValue TorqueScript::Impl::parseAssignment() {
         if (!lastFieldObj.empty() && !lastFieldName.empty()) {
             auto* obj = ScriptEngine::instance().findObject(lastFieldObj.c_str());
             if (obj) obj->fields[lastFieldName] = val;
+        } else if (!targetFieldObj.empty() && !targetFieldName.empty()) {
+            // Fallback: use the saved field target (bracket+field may have lost it)
+            auto* obj = ScriptEngine::instance().findObject(targetFieldObj.c_str());
+            if (obj) obj->fields[targetFieldName] = val;
         } else if (!lastVarName.empty()) {
             if (lastVarName[0] == '$') {
                 outer->setGlobal(lastVarName, val);

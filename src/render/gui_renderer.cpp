@@ -1610,7 +1610,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         r.drawRectFill({x + ctl->extentX - 1, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, frameBorder);
     } else if (cn == "ShellTabGroupCtrl" || cn == "GuiTabBookCtrl") {
         // Tab group: draw tab buttons along the top, then children below
-        const float tabH = 22;
+        const float tabH = 29;
         // Background for the area below tabs
         r.drawRectFill({x, y + tabH, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.12f, 0.12f, 0.15f, 1});
         // Draw each tab button
@@ -1619,14 +1619,17 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         auto* prof = getProfile(ctl->profileName);
         if (prof) tabFont = getProfileFont(prof);
         for (int ti = 0; ti < (int)ctl->tabs.size(); ti++) {
-            float tw = std::max(60.0f, (float)ctl->tabs[ti].text.size() * 9.0f + 16);
+            float textW = tabFont ? tabFont->measure(ctl->tabs[ti].text.c_str()).x : (float)ctl->tabs[ti].text.size() * 9.0f;
+            float tw = std::max(60.0f, textW + 16);
             bool sel = (ti == ctl->selectedTab);
             ColorF fill = sel ? ColorF{0.35f,0.45f,0.55f,1} : ColorF{0.2f,0.22f,0.28f,1};
             r.drawRectFill({tabX, y, 0}, {tabX + tw, y + tabH, 0}, fill);
             if (sel)
                 r.drawRectFill({tabX, y + tabH - 1, 0}, {tabX + tw, y + tabH, 0}, {0.6f,0.7f,0.8f,1});
-            if (tabFont && !ctl->tabs[ti].text.empty())
-                tabFont->render(ctl->tabs[ti].text.c_str(), tabX + 8, y + 4, {1,1,1,1}, 1.0f);
+            if (tabFont && !ctl->tabs[ti].text.empty()) {
+                float ty = y + (tabH - (float)tabFont->charHeight) * 0.5f;
+                tabFont->render(ctl->tabs[ti].text.c_str(), tabX + (tw - textW) * 0.5f, ty, {1,1,1,1}, 1.0f);
+            }
             tabX += tw + 1;
         }
         // Render children (tab content below tab bar)
@@ -1924,10 +1927,25 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                 float tw = std::max(60.0f, textW + 16);
                 if (x >= tabX && x < tabX + tw) {
                     hit->selectedTab = ti;
+                    // Call onSelect script; also directly set content as fallback
                     auto* ts = Engine::instance().script().ts();
                     if (ts && ts->hasFunction(hit->name + "::onSelect"))
                         ts->callFunction(hit->name + "::onSelect",
                             {VMValue(hit->name), VMValue(ti), VMValue(hit->tabs[ti].text)});
+                    // Direct fallback: look up gui name from ScriptObject fields
+                    auto* sobj = ScriptEngine::instance().findObject(hit->name.c_str());
+                    if (sobj) {
+                        std::string gk = "gui[" + std::to_string(ti) + "]";
+                        auto gi = sobj->fields.find(gk);
+                        if (gi != sobj->fields.end()) {
+                            std::string guiName = gi->second.toString();
+                            if (!guiName.empty()) {
+                                auto* guiObj = ScriptEngine::instance().findObject(guiName.c_str());
+                                if (guiObj)
+                                    Engine::instance().guiRenderer().setContent(guiName);
+                            }
+                        }
+                    }
                     return true;
                 }
                 tabX += tw + 1;
