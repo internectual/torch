@@ -460,21 +460,21 @@ bool Engine::init(int argc, char* argv[]) {
             }
         }
         // Scale the dev panel overlay font for modern displays; leave game canvas fonts at 1.0
-        float fontScale = std::max(2.0f, (float)plat->height() / 540.0f);
-        Console::instance().printf(LogLevel::Info, "Font scale: %.1f (display %dx%d)", fontScale, plat->width(), plat->height());
-        // Prefer GFT Lucida Console 12; fall back to generated bitmap font
-        if (lucidaFont && lucidaFont->loaded) {
-            if (overlayFont && overlayFontOwned) { delete overlayFont; overlayFontOwned = false; }
-            overlayFont = lucidaFont;
-            overlayFont->defaultScale = fontScale;
-            overlayFontOwned = false;
+        float fontScale = 1.0f;
+        // Generate a 24px bitmap font for the dev panel (Lucida Console 24 GFT not available)
+        if (overlayFont && overlayFontOwned) { delete overlayFont; overlayFontOwned = false; }
+        overlayFont = new Font;
+        if (overlayFont->loadDefault(24)) {
+            overlayFontOwned = true;
             ren->defaultFont = overlayFont;
-            Console::instance().printf(LogLevel::Info, "Dev panel font: Lucida Console 12 @ %.1fx", fontScale);
-        } else if (overlayFont) {
-            overlayFont->defaultScale = fontScale;
-            ren->defaultFont = overlayFont;
-            Console::instance().printf(LogLevel::Info, "Dev panel font: generated %dx%d @ %.1fx",
-                overlayFont->charWidth, overlayFont->charHeight, fontScale);
+            Console::instance().printf(LogLevel::Info, "Dev panel font: generated 24px bitmap");
+        } else {
+            // Fall back to 16px
+            overlayFont = new Font;
+            if (overlayFont->loadDefault(16)) {
+                overlayFontOwned = true;
+                ren->defaultFont = overlayFont;
+            }
         }
     }
 
