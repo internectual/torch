@@ -1629,13 +1629,16 @@ void Engine::run() {
                     r.drawRectFill({0, (float)tabBarY, 0}, {(float)w, (float)(tabBarY + tabH + 4), 0}, {0.1f, 0.1f, 0.12f, 0.9f});
                     // Draw tabs
                     int tx = tabX;
+                    Font* tabFont = overlayFont ? overlayFont : r.getFont();
+                    float tabFontSize = tabFont ? (float)tabFont->charHeight : 12.0f;
                     for (int t = 0; t < numTabs; t++) {
-                        int tw = (int)strlen(tabNames[t]) * 9 + 12;
+                        float textW = tabFont ? tabFont->measure(tabNames[t]).x : (float)strlen(tabNames[t]) * 9.0f;
+                        float tw = textW + 16;
                         ColorF tabCol = (t == bottomActiveTab) ? ColorF{0.3f, 0.7f, 1, 0.9f} : ColorF{0.2f, 0.2f, 0.25f, 0.8f};
                         r.drawRectFill({(float)tx, (float)tabBarY, 0}, {(float)(tx + tw), (float)(tabBarY + tabH), 0}, tabCol);
-                        if (overlayFont)
-                            overlayFont->render(tabNames[t], (float)(tx + 6), (float)(tabBarY + 4), {1,1,1,0.9f}, 1.0f);
-                        tx += tw + 2;
+                        if (tabFont)
+                            tabFont->render(tabNames[t], (float)(tx + (tw - textW) * 0.5f), (float)(tabBarY + (tabH - tabFontSize) * 0.5f), {1,1,1,0.9f}, 1.0f);
+                        tx += (int)(tw + 2);
                     }
                     // Tab content area
                     int contentY = tabBarY + tabH + 4;
