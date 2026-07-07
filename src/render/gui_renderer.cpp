@@ -1920,7 +1920,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             float tabX = ax + 2;
             auto* font = Engine::instance().renderer().getFont();
             for (int ti = 0; ti < (int)hit->tabs.size(); ti++) {
-                float textW = font ? font->measure(hit->tabs[ti].text).x : (float)hit->tabs[ti].text.size() * 9.0f;
+                float textW = font ? font->measure(hit->tabs[ti].text.c_str()).x : (float)hit->tabs[ti].text.size() * 9.0f;
                 float tw = std::max(60.0f, textW + 16);
                 if (x >= tabX && x < tabX + tw) {
                     hit->selectedTab = ti;
