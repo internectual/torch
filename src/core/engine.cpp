@@ -554,6 +554,20 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().printf(LogLevel::Info, "Console log: %s", logPath.c_str());
     }, "/log - show the console log file path");
 
+    con->addCommand("playweapon", [this](int32_t argc, const char* const* argv) {
+        if (argc > 1 && aud) {
+            std::string path = std::string("audio/fx/weapons/") + argv[1] + ".wav";
+            auto* buf = aud->loadSound(path.c_str());
+            if (buf) {
+                auto* src = aud->createSource();
+                src->play(buf);
+                Console::instance().printf(LogLevel::Info, "Playing: %s", path.c_str());
+            } else {
+                Console::instance().printf(LogLevel::Warn, "Weapon sound not found: %s", path.c_str());
+            }
+        }
+    }, "/playweapon <name> - play a weapon sound (e.g. spinfusor_fire)");
+
     con->addCommand("playsound", [this](int32_t argc, const char* const* argv) {
         if (argc > 1 && aud) {
             auto* buf = aud->loadSound(argv[1]);
