@@ -1659,6 +1659,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // Border
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + 1, 0}, {0.4f,0.4f,0.5f,0.5f});
         r.drawRectFill({x, y + ctl->extentY - 1, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.1f,0.1f,0.15f,0.5f});
+    } else if (cn == "GuiControl" && ctl->name == "LaunchToolbarDlg") {
+        // Transparent overlay — no background, just render children
     } else if (cn == "GuiControl" && ctl->name == "LaunchToolbarPane") {
         // Toolbar pane at the bottom of LaunchGui: gradient fill + top border
         float halfH = ctl->extentY * 0.5f;
