@@ -1598,6 +1598,16 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         auto* prof = getProfile(ctl->profileName);
         if (prof) { auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), scc); }
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, scc);
+    } else if (cn == "ShellTabFrame") {
+        // Tab content frame — draw a bordered area for tab pages
+        ColorF frameBg{0.12f,0.12f,0.15f,1};
+        ColorF frameBorder{0.25f,0.25f,0.32f,1};
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, frameBg);
+        // Thin border
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + 1, 0}, frameBorder);
+        r.drawRectFill({x, y + ctl->extentY - 1, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, frameBorder);
+        r.drawRectFill({x, y, 0}, {x + 1, y + ctl->extentY, 0}, frameBorder);
+        r.drawRectFill({x + ctl->extentX - 1, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, frameBorder);
     } else if (cn == "ShellTabGroupCtrl" || cn == "GuiTabBookCtrl") {
         // Tab group: draw tab buttons along the top, then children below
         const float tabH = 22;
