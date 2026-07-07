@@ -1262,11 +1262,10 @@ VMValue TorqueScript::Impl::parsePostfix() {
             break;
         }
         if (peekToken().type == TSTokenType::LBracket) {
-            std::string varBeforeIndex = lastVarName; // save BEFORE parseExpression overwrites it
+            std::string varBeforeIndex = lastVarName;
             nextToken();
             VMValue idx = parseExpression();
-            std::string savedVar = varBeforeIndex; // use the saved variable name
-            // Handle 2D arrays: arr[i, j] → key "i,j"
+            std::string savedVar = varBeforeIndex;
             while (match(TSTokenType::Comma)) {
                 VMValue idx2 = parseExpression();
                 idx = VMValue(idx.toString() + "," + idx2.toString());
@@ -1274,11 +1273,23 @@ VMValue TorqueScript::Impl::parsePostfix() {
             expect(TSTokenType::RBracket);
             if (!savedVar.empty()) {
                 std::string arrayKey = savedVar + "[" + idx.toString() + "]";
-                lastVarName = arrayKey; // update for assignment write-back
-                // If this was a field access (e.g. %this.gui[i]), update lastFieldName too
+                lastVarName = arrayKey;
                 if (!lastFieldName.empty())
                     lastFieldName = lastFieldName + "[" + idx.toString() + "]";
-                if (savedVar[0] == '$') {
+                if (!lastFieldObj.empty() && !lastFieldName.empty()) {
+                    // obj.field[idx] — read from ScriptObject field
+                    auto* sobj = ScriptEngine::instance().findObject(lastFieldObj.c_str());
+                    if (sobj) {
+                        auto fit = sobj->fields.find(lastFieldName);
+                        val = (fit != sobj->fields.end()) ? fit->second : VMValue(0);
+                        Console::instance().printf(LogLevel::Info, "OBJREAD: '%s'.'%s' = '%s' (%zu fields)",
+                            lastFieldObj.c_str(), lastFieldName.c_str(), val.toString().c_str(), sobj->fields.size());
+                    } else {
+                        Console::instance().printf(LogLevel::Info, "OBJREAD: '%s'.'%s' — object not found!",
+                            lastFieldObj.c_str(), lastFieldName.c_str());
+                        val = VMValue(0);
+                    }
+                } else if (savedVar[0] == '$') {
                     val = outer->getGlobal(arrayKey);
                 } else {
                     val = locals.get(arrayKey);

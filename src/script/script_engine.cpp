@@ -2193,7 +2193,7 @@ bool ScriptEngine::init() {
             if (idx >= 0 && idx < (int)ctl->tabs.size()) {
                 auto* ts = Engine::instance().script().ts();
                 if (ts && ts->hasFunction(ctl->name + "::onSelect"))
-                    ts->callFunction(ctl->name + "::onSelect", {VMValue(idx), VMValue(ctl->tabs[idx].text)});
+                    ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(idx), VMValue(ctl->tabs[idx].text)});
             }
         }
         return VMValue(1);
@@ -2206,29 +2206,57 @@ bool ScriptEngine::init() {
         std::string keyStr = args.size() > 3 ? args[3].toString() : "";
         int tabCount = (int)ctl->tabs.size();
         int found = -1;
+        // Match by guiName against ScriptObject fields first
         if (ScriptObject* obj = ScriptEngine::instance().findObject(cname.c_str())) {
-            for (int i = 0; i < tabCount; i++) {
+            for (int i = 0; i < tabCount && i < 256; i++) {
                 std::string gk = "gui[" + std::to_string(i) + "]";
                 std::string kk = "key[" + std::to_string(i) + "]";
                 auto gi = obj->fields.find(gk);
                 auto ki = obj->fields.find(kk);
                 if (gi != obj->fields.end() && gi->second.toString() == guiName &&
                     ki != obj->fields.end() && ki->second.toString() == keyStr) {
-                    found = i;
-                    break;
+                    found = i; break;
                 }
+                // Also try matching by guiName as the field value alone (without [i] suffix)
+                if (gi == obj->fields.end()) {
+                    auto gi2 = obj->fields.find("gui");
+                    if (gi2 != obj->fields.end() && gi2->second.toString() == guiName) {
+                        found = i; break;
+                    }
+                }
+            }
+        }
+        // Fallback: match by tab text
+        if (found < 0) {
+            std::string text = args.size() > 1 ? args[1].toString() : "";
+            for (int i = 0; i < tabCount; i++) {
+                if (ctl->tabs[i].text == text) { found = i; break; }
             }
         }
         if (found < 0) {
             found = tabCount;
             if (found >= (int)ctl->tabs.size()) ctl->tabs.resize(found + 1);
             ctl->tabs[found] = {args.size() > 1 ? args[1].toString() : "", true};
+            // Store gui[i]/key[i] so future lookups (from onSelect script) can find them
+            if (ScriptObject* obj = ScriptEngine::instance().findObject(cname.c_str())) {
+                obj->fields["gui[" + std::to_string(found) + "]"] = VMValue(guiName);
+                obj->fields["key[" + std::to_string(found) + "]"] = VMValue(keyStr);
+            }
         }
         ctl->selectedTab = found;
+        // Call onSelect script and also directly set content if guiName is valid
         if (found >= 0 && found < (int)ctl->tabs.size()) {
             auto* ts = Engine::instance().script().ts();
             if (ts && ts->hasFunction(ctl->name + "::onSelect"))
-                ts->callFunction(ctl->name + "::onSelect", {VMValue(found), VMValue(ctl->tabs[found].text)});
+                ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(found), VMValue(ctl->tabs[found].text)});
+            // Directly set content if guiName is a valid ScriptObject (bypasses broken script field access)
+            if (!guiName.empty()) {
+                auto* sobj = ScriptEngine::instance().findObject(guiName.c_str());
+                if (sobj) {
+                    Engine::instance().guiRenderer().setContent(guiName);
+                    Console::instance().printf(LogLevel::Info, "viewTab: setContent %s", guiName.c_str());
+                }
+            }
         }
         return VMValue(1);
     });
