@@ -821,8 +821,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 font = getProfileFont(prof);
             }
             float tx = x + 5;
-            // Hardcode LAUNCH text to upper portion of button (56px tall)
-            float ty = y + 4; // 4px from top of button
+            float textH = (float)(font ? font->charHeight : 12);
+            float ty = y + (ctl->extentY - textH) * 0.5f;
             float toX = 0, toY = 0;
             if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
             // Horizontal centering for justify=center profiles

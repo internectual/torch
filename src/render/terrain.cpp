@@ -374,6 +374,9 @@ bool Font::loadGFT(const uint8_t* data, size_t size) {
     charWidth = maxW > 0 ? maxW : (int32_t)cw;
     // Cell height includes yOff + glyph height so baseline is at the cell bottom
     charHeight = maxTotal > 0 ? (int32_t)maxTotal : (int32_t)ch;
+    if (charHeight <= 0) charHeight = (int32_t)ch;
+    if (charHeight <= 0) charHeight = (int32_t)cw;
+    if (charHeight <= 0) charHeight = 12;
     fontSize = (int32_t)ch;
     proportional = true;
 
