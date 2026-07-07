@@ -1655,24 +1655,65 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // Top highlight border
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + 1, 0}, {0.3f,0.3f,0.4f,0.6f});
     } else if (cn.find("Hud") == 0 || cn.find("ShellFieldCtrl") == 0 || cn.find("ShellField") == 0) {
-        // HUD controls: transparent background, render text from profiles
+        // HUD controls: transparent background with specific rendering per type
+        auto* prof = getProfile(ctl->profileName);
         ColorF tc{0.8f,0.8f,0.9f,0.9f};
         float fontSize = 12.0f;
         Font* hf = font;
-        bool opaque = false;
-        auto* prof = getProfile(ctl->profileName);
-        if (prof) {
-            auto fi = prof->fields.find("fontColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), tc);
-            auto fsi = prof->fields.find("fontSize"); if (fsi != prof->fields.end()) fontSize = (float)fsi->second.toDouble();
-            auto fti = prof->fields.find("fontType"); if (fti != prof->fields.end()) hf = r.getFont(fti->second.toString().c_str(), (int)fontSize);
-            auto oi = prof->fields.find("opaque");
-            if (oi != prof->fields.end()) { std::string ov = oi->second.toString(); if (ov == "true" || ov == "1") opaque = true; }
-        }
-        if (opaque)
-            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.1f,0.1f,0.15f,0.6f});
-        if (hf && !ctl->text.empty()) {
-            float tx = x + 4, ty = y + 2;
-            hf->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
+        // HudEnergy/HudDamage/HudHeat/HudBarBaseCtrl: bar display
+        if (cn == "HudEnergy" || cn == "HudDamage" || cn == "HudHeat" || cn == "HudBarBaseCtrl") {
+            ColorF barBg{0.1f,0.1f,0.15f,0.5f};
+            ColorF barFg = cn == "HudEnergy" ? ColorF{0,0.8f,1,0.8f} : cn == "HudDamage" ? ColorF{1,0.2f,0.2f,0.8f} : cn == "HudHeat" ? ColorF{1,0.5f,0,0.8f} : ColorF{0.3f,0.6f,0.3f,0.8f};
+            float barH = ctl->extentY * 0.7f;
+            float barY = y + (ctl->extentY - barH) * 0.5f;
+            r.drawRectFill({x, barY, 0}, {x + ctl->extentX, barY + barH, 0}, barBg);
+            r.drawRectFill({x, barY, 0}, {x + ctl->extentX * 0.5f, barY + barH, 0}, barFg);
+        } else if (cn == "HudCompass") {
+            // Compass: circular in top-center of HUD
+            float cx = x + ctl->extentX * 0.5f, cy = y + ctl->extentY * 0.5f;
+            float radius = std::min(ctl->extentX, ctl->extentY) * 0.4f;
+            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0,0,0,0.3f});
+            // Draw N/S/E/W text
+            if (hf) {
+                hf->render("N", cx - 4, y + 2, {1,0.5f,0.5f,0.9f}, 1.0f);
+                hf->render("S", cx - 4, y + ctl->extentY - 12, {0.5f,0.5f,0.5f,0.9f}, 1.0f);
+            }
+        } else if (cn == "HudClock") {
+            // Clock: top-center of HUD
+            if (hf) {
+                std::string timeStr = "00:00";
+                auto* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
+                if (sobj) {
+                    auto ti = sobj->fields.find("text");
+                    if (ti != sobj->fields.end()) timeStr = ti->second.toString();
+                }
+                float tw = hf->measure(timeStr.c_str()).x;
+                hf->render(timeStr.c_str(), x + (ctl->extentX - tw) * 0.5f, y + 2, {0.5f,1,0.5f,0.9f}, 1.5f);
+            }
+        } else if (cn == "HudPulsingBitmap" || cn == "HudBitmapCtrl") {
+            // Bitmap HUD: semi-transparent background, no fill to let 3D show through
+            if (ctl->text.empty() && ctl->bitmap.empty()) {
+                // Draw a subtle outline so the control area is visible
+                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + 1, 0}, {0.5f,0.5f,0.6f,0.2f});
+                r.drawRectFill({x, y + ctl->extentY - 1, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.5f,0.5f,0.6f,0.2f});
+            }
+        } else {
+            // Generic HUD: transparent background, render text
+            ColorF gc{0.2f,0.2f,0.25f,1};
+            bool opaque = false;
+            if (prof) {
+                auto fi = prof->fields.find("fontColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), tc);
+                auto fsi = prof->fields.find("fontSize"); if (fsi != prof->fields.end()) fontSize = (float)fsi->second.toDouble();
+                auto fti = prof->fields.find("fontType"); if (fti != prof->fields.end()) hf = r.getFont(fti->second.toString().c_str(), (int)fontSize);
+                auto oi = prof->fields.find("opaque");
+                if (oi != prof->fields.end()) { std::string ov = oi->second.toString(); if (ov == "true" || ov == "1") opaque = true; }
+            }
+            if (opaque)
+                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.1f,0.1f,0.15f,0.6f});
+            if (hf && !ctl->text.empty()) {
+                float tx = x + 4, ty = y + 2;
+                hf->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
+            }
         }
     } else {
         // Generic GuiControl with profile-aware fill and text
