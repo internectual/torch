@@ -461,35 +461,14 @@ bool Engine::init(int argc, char* argv[]) {
         }
         // Scale the dev panel overlay font for modern displays; leave game canvas fonts at 1.0
         float fontScale = 1.0f;
-        // Use a large GFT font for the dev panel
-        struct { const char* name; int size; } fontPrefs[] = {
-            {"Arial Bold", 24}, {"Arial Bold", 20}, {"Arial Bold", 18},
-            {"Verdana Bold", 24}, {"Verdana Bold", 18}, {"Verdana", 18},
-            {"Arial", 20}, {"Arial", 18},
-            {"Univers", 22}, {"Univers", 18},
-            {"Univers Condensed", 22}, {"Univers Condensed", 20},
-            {"Sui Generis", 22}, {"Sui Generis", 20},
-            {"Times", 24},
-            {"Arial Bold", 16}, {"Arial", 16},
-            {"Verdana", 16}, {"Univers", 16},
-            {"Verdana Bold", 16}, {"Verdana Bold", 14},
-            {"Arial", 14},
-            {}
-        };
-        Font* chosen = nullptr;
-        for (int fi = 0; fontPrefs[fi].name; fi++) {
-            chosen = ren->getFont(fontPrefs[fi].name, fontPrefs[fi].size);
-            if (chosen && chosen->loaded && chosen != ren->defaultFont) break;
-            chosen = nullptr;
-        }
-        if (chosen) {
+        // Use Lucida Console 12 — the only available monospace GFT
+        if (lucidaFont && lucidaFont->loaded) {
             if (overlayFont && overlayFontOwned) { delete overlayFont; overlayFontOwned = false; }
-            overlayFont = chosen;
+            overlayFont = lucidaFont;
             overlayFont->defaultScale = 1.0f;
             overlayFontOwned = false;
             ren->defaultFont = overlayFont;
-            Console::instance().printf(LogLevel::Info, "Dev panel font: %s %d",
-                overlayFont->fontName.c_str(), overlayFont->fontSize);
+            Console::instance().printf(LogLevel::Info, "Dev panel font: Lucida Console 12");
         }
     }
 
