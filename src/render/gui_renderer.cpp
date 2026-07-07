@@ -820,19 +820,9 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
                 font = getProfileFont(prof);
             }
-            float tx = x + 5;
-            float textH = (float)(font ? font->charHeight : 12);
-            float ty = y + (ctl->extentY - textH) * 0.5f;
-            float toX = 0, toY = 0;
+            float tx = x + 5, ty = y + (ctl->extentY - (float)font->charHeight) * 0.5f;
+            float toX, toY;
             if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
-            // Horizontal centering for justify=center profiles
-            if (prof) {
-                auto ji = prof->fields.find("justify");
-                if (ji != prof->fields.end() && ji->second.toString() == "center") {
-                    float tw = font->measure(ctl->text.c_str()).x;
-                    tx = x + (ctl->extentX - tw) * 0.5f;
-                }
-            }
             font->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
         }
     } else if (cn == "GuiTextCtrl") {
