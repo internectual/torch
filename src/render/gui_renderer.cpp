@@ -1841,20 +1841,8 @@ void GuiRenderer::updateFades(float dt) {
 
 GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
     if (!ctl || !ctl->visible || !ctl->active) return nullptr;
-    // Skip non-selected tab pages
-    if (ctl->className == "GuiTabPageCtrl") {
-        bool isSelected = false;
-        if (ctl->parent && ctl->parent->selectedTab >= 0) {
-            int pageIdx = 0;
-            for (auto* sib : ctl->parent->children) {
-                if (sib->className == "GuiTabPageCtrl") {
-                    if (sib == ctl) { isSelected = (pageIdx == ctl->parent->selectedTab); break; }
-                    pageIdx++;
-                }
-            }
-        }
-        if (!isSelected) return nullptr;
-    }
+    // Tab pages never intercept clicks — pass through to parent tab group
+    if (ctl->className == "GuiTabPageCtrl") return nullptr;
     float x = ctl->posX;
     float y = ctl->posY;
     GuiControl* p = ctl->parent;
