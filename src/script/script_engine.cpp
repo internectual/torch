@@ -2255,6 +2255,11 @@ bool ScriptEngine::init() {
                 if (sobj) {
                     Engine::instance().guiRenderer().setContent(guiName);
                     Console::instance().printf(LogLevel::Info, "viewTab: setContent %s", guiName.c_str());
+                    // If this is the game GUI, start the game
+                    if (guiName == "GameGui" || guiName == "TrainingGui") {
+                        Console::instance().printf(LogLevel::Info, "viewTab: starting local game");
+                        Engine::instance().game().startLocalGame();
+                    }
                 }
             }
         }
