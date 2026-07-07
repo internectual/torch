@@ -2159,6 +2159,8 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("addRow", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("clear", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("add", [](const auto&) -> VMValue { return VMValue(1); });
+    // Bridge for passing gui name from addLaunchTab to addTab (script's field+bracket fails)
+    static std::unordered_map<std::string, std::string> g_pendingTabGuis;
     auto getOrCreateCtrl = [](const std::string& name) -> GuiControl* {
         auto& g = Engine::instance().guiRenderer();
         auto* ctl = g.findControl(name);
@@ -2253,6 +2255,16 @@ bool ScriptEngine::init() {
             }
         }
         ctl->selectedTab = found;
+        // Show/hide GuiTabPageCtrl children matching the selected tab
+        if (found >= 0) {
+            int pageIdx = 0;
+            for (auto* sib : ctl->children) {
+                if (sib->className == "GuiTabPageCtrl") {
+                    sib->visible = (pageIdx == found);
+                    pageIdx++;
+                }
+            }
+        }
         // Call onSelect script and also directly set content if guiName is valid
         if (found >= 0 && found < (int)ctl->tabs.size()) {
             auto* ts = Engine::instance().script().ts();
