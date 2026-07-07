@@ -567,6 +567,19 @@ bool Engine::init(int argc, char* argv[]) {
         }
     }, "/playsound <path> - play a sound file");
 
+    con->addCommand("queryLan", [this](int32_t, const char* const*) {
+        if (net) net->queryLanServers();
+        Console::instance().printf(LogLevel::Info, "Querying LAN servers...");
+    }, "/queryLan - broadcast LAN server query");
+
+    con->addCommand("showBrowser", [](int32_t, const char* const*) {
+        auto& gui = Engine::instance().guiRenderer();
+        if (gui.findControl("FindServerDlg")) {
+            gui.pushDialog("FindServerDlg");
+            Engine::instance().network().queryLanServers();
+        }
+    }, "/showBrowser - show the server browser dialog");
+
     con->addCommand("setScriptPath", [](int32_t argc, const char* const* argv) {
         if (argc > 1) {
             Console::instance().setVariable("initScript", argv[1]);
@@ -972,6 +985,8 @@ void Engine::run() {
 
         // Update subsystems
         net->update();
+        // Update active game connection (receive packets, handle timeouts)
+        if (g && g->activeConnection()) g->activeConnection()->update();
         g->gameServer().update();
         scr->vm()->setVariable("time", (float)now);
 

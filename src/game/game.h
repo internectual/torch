@@ -244,6 +244,7 @@ public:
 
     State state() const { return gameState; }
     void setState(State s) { gameState = s; }
+    Connection* activeConnection() const { return activeConn; }
     void togglePauseGame() { gamePaused = !gamePaused; }
     bool isGamePaused() const { return gamePaused; }
 
