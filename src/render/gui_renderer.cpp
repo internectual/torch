@@ -700,7 +700,12 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
 
     // For GuiCanvas, just use full screen
     if (cn == "GuiCanvas") {
-        r.drawBox({{0,0,0}, {1024,768,0}}, {0.15f,0.15f,0.2f,1});
+        // Check if PlayGui (GameTSCtrl) is a child — if so, skip background so 3D scene shows through
+        bool has3D = false;
+        for (auto* ch : ctl->children)
+            if (ch->className == "GameTSCtrl" || ch->className == "GuiTSCtrl") { has3D = true; break; }
+        if (!has3D)
+            r.drawBox({{0,0,0}, {1024,768,0}}, {0.15f,0.15f,0.2f,1});
         for (auto* child : ctl->children) renderControlRec(gr, child, canvas, 0, 0, nullptr);
         return;
     }
