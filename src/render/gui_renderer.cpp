@@ -820,9 +820,18 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
                 font = getProfileFont(prof);
             }
-            float tx = x + 5, ty = y + (ctl->extentY - (float)font->charHeight) * 0.5f;
+            float tx = x + 5;
+            float ty = y + (ctl->extentY - (float)font->charHeight) * 0.5f;
             float toX, toY;
             if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
+            // Use font measure to horizontally center if profile justifies center
+            if (prof) {
+                auto ji = prof->fields.find("justify");
+                if (ji != prof->fields.end() && ji->second.toString() == "center") {
+                    float tw = font->measure(ctl->text.c_str()).x;
+                    tx = x + (ctl->extentX - tw) * 0.5f;
+                }
+            }
             font->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
         }
     } else if (cn == "GuiTextCtrl") {
@@ -1013,15 +1022,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         if (bmpPath.empty() && prof) { auto bi = prof->fields.find("bitmap"); if (bi != prof->fields.end()) bmpPath = bi->second.toString(); }
         if (bmpPath.empty()) bmpPath = ctl->bitmap;
-        // Show tab content indicator for TrainingGui and GameGui
-        if (ctl->name == "TrainingGui" || ctl->name == "GameGui") {
-            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.05f, 0.05f, 0.1f, 1});
-            if (font) {
-                ColorF col = ctl->name == "TrainingGui" ? ColorF{0.3f,0.8f,0.5f,1} : ColorF{0.5f,0.8f,1,1};
-                font->render(ctl->name.c_str(), x + 20, y + 20, col, 2.0f);
-            }
-            return;
-        }
         ColorF bgColor{0.15f, 0.15f, 0.2f, 1};
         if (prof) { auto bi = prof->fields.find("fillColor"); if (bi != prof->fields.end()) parseColor(bi->second.toString(), bgColor); }
         if (!bmpPath.empty()) {
