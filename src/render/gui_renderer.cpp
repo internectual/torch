@@ -1940,6 +1940,16 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                     if (ts && ts->hasFunction(hit->name + "::onSelect"))
                         ts->callFunction(hit->name + "::onSelect",
                             {VMValue(hit->name), VMValue(ti), VMValue(hit->tabs[ti].text)});
+                    // Fallback: set content directly using stored gui[i] field
+                    if (ScriptObject* sobj = ScriptEngine::instance().findObject(hit->name.c_str())) {
+                        std::string gk = "gui[" + std::to_string(ti) + "]";
+                        auto gi = sobj->fields.find(gk);
+                        if (gi != sobj->fields.end()) {
+                            std::string gn = gi->second.toString();
+                            if (!gn.empty() && ScriptEngine::instance().findObject(gn.c_str()))
+                                Engine::instance().guiRenderer().setContent(gn);
+                        }
+                    }
                     return true;
                 }
                 tabX += tw + 1;

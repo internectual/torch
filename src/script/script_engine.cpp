@@ -2176,14 +2176,18 @@ bool ScriptEngine::init() {
             std::string txt = args[2].toString();
             if (id >= (int)ctl->tabs.size()) ctl->tabs.resize(id + 1);
             ctl->tabs[id] = {txt, true};
-            // Ensure gui[i] and key[i] fields exist on the ScriptObject (script's field+bracket may fail)
-            if (ScriptObject* obj = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
+            // Store gui[i]/key[i] derived from tab text
+            if (ScriptObject* sobj = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
                 std::string gk = "gui[" + std::to_string(id) + "]";
-                if (obj->fields.find(gk) == obj->fields.end())
-                    obj->fields[gk] = VMValue("");
-                std::string kk = "key[" + std::to_string(id) + "]";
-                if (obj->fields.find(kk) == obj->fields.end())
-                    obj->fields[kk] = VMValue("0");
+                if (sobj->fields.find(gk) == sobj->fields.end()) {
+                    std::string guiName = txt;
+                    // Map launch tab text to gui name: "TRAINING" -> "TrainingGui", "LAN GAME" -> "GameGui"
+                    if (txt == "TRAINING") guiName = "TrainingGui";
+                    else if (txt == "LAN GAME") guiName = "GameGui";
+                    else if (txt == "GAME") guiName = "GameGui";
+                    sobj->fields[gk] = VMValue(guiName);
+                    sobj->fields["key[" + std::to_string(id) + "]"] = VMValue("0");
+                }
             }
         }
         return VMValue(1);
