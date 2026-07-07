@@ -243,9 +243,9 @@ void GuiRenderer::render() {
     r.setProjection(ortho);
     r.setView(MatrixF{});
 
-    // Render active dialog (top of stack)
-    if (!dialogStack.empty()) {
-        renderControl(dialogStack.back());
+    // Render all dialogs: first is content, subsequent are overlays
+    for (auto* dlg : dialogStack) {
+        renderControl(dlg);
     }
     // Always render debug overlay so user knows the engine is alive
     r.renderText("TORCH", 10, 10, {0,1,0,1}, 2.0f);
