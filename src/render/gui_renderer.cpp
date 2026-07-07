@@ -821,9 +821,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 font = getProfileFont(prof);
             }
             float tx = x + 5;
-            // Vertical centering: use half the font height from baseline
+            // Vertical centering: account for gYOff=(charHeight-yOff) in Font::render
             float textH = (float)font->charHeight;
-            float ty = y + (ctl->extentY - textH) * 0.5f;
+            float estimatedYOff = 8.0f; // typical GFT yOff for most fonts
+            float ty = y + (ctl->extentY - textH) * 0.5f - (textH - estimatedYOff) * 0.5f;
             float toX = 0, toY = 0;
             if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
             // Horizontal centering for justify=center profiles
