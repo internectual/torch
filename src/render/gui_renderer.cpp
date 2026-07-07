@@ -1654,6 +1654,26 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         r.drawRectFill({x, y + halfH, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.1f,0.1f,0.12f,1});
         // Top highlight border
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + 1, 0}, {0.3f,0.3f,0.4f,0.6f});
+    } else if (cn.find("Hud") == 0 || cn.find("ShellFieldCtrl") == 0 || cn.find("ShellField") == 0) {
+        // HUD controls: transparent background, render text from profiles
+        ColorF tc{0.8f,0.8f,0.9f,0.9f};
+        float fontSize = 12.0f;
+        Font* hf = font;
+        bool opaque = false;
+        auto* prof = getProfile(ctl->profileName);
+        if (prof) {
+            auto fi = prof->fields.find("fontColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), tc);
+            auto fsi = prof->fields.find("fontSize"); if (fsi != prof->fields.end()) fontSize = (float)fsi->second.toDouble();
+            auto fti = prof->fields.find("fontType"); if (fti != prof->fields.end()) hf = r.getFont(fti->second.toString().c_str(), (int)fontSize);
+            auto oi = prof->fields.find("opaque");
+            if (oi != prof->fields.end()) { std::string ov = oi->second.toString(); if (ov == "true" || ov == "1") opaque = true; }
+        }
+        if (opaque)
+            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.1f,0.1f,0.15f,0.6f});
+        if (hf && !ctl->text.empty()) {
+            float tx = x + 4, ty = y + 2;
+            hf->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
+        }
     } else {
         // Generic GuiControl with profile-aware fill and text
         ColorF gc{0.2f, 0.2f, 0.25f, 1.0f};
