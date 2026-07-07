@@ -1076,6 +1076,11 @@ void Engine::run() {
         }
 
         // ─── Dev panel (always rendered) ───────────────────────────────────
+        // Disable the game's built-in menu when TS GUI dialogs are active
+        if (gui && gui->dialogCount() > 0)
+            g->menu().setActive(false);
+        else
+            g->menu().setActive(true);
         g->menu().update(dt);
         plat->setRelativeMouse(false);
         plat->showMouse(true);

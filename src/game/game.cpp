@@ -2332,6 +2332,11 @@ void Game::startLocalGame(const char* map) {
         // Spawn practice bots
         w->spawnBots(6);
 
+        // Clear TS GUI dialogs and switch to in-game view
+        auto& gui = Engine::instance().guiRenderer();
+        gui.setContent("PlayGui");
+        gui.pushDialog("PlayGui");
+
         // Start ambient audio
         auto& audio = Engine::instance().audio();
         if (audio.config().enabled) {
