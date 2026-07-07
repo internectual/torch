@@ -812,18 +812,20 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             if (tex && tex->loaded)
                 r.drawTexturedRect({x+2,y+2,0}, {x+ctl->extentX-2,y+ctl->extentY-2,0}, tex->id);
         }
-        if (font && !ctl->text.empty()) {
+        if (!ctl->text.empty()) {
             ColorF tc{1,1,1,1};
+            Font* renderFont = font;
             auto* prof = getProfile(ctl->profileName);
             if (prof) {
                 auto fci = prof->fields.find("fontColor");
                 if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
-                font = getProfileFont(prof);
+                renderFont = getProfileFont(prof);
             }
-            float tx = x + 5, ty = y + (ctl->extentY - (float)font->charHeight) * 0.5f;
+            if (!renderFont) renderFont = r.getFont();
+            float tx = x + 5, ty = y + (ctl->extentY - (float)renderFont->charHeight) * 0.5f;
             float toX, toY;
             if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
-            font->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
+            renderFont->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
         }
     } else if (cn == "GuiTextCtrl") {
         ColorF tc{1,1,1,1};
