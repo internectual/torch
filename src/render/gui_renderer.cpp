@@ -1927,23 +1927,27 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                 float tw = std::max(60.0f, textW + 16);
                 if (x >= tabX && x < tabX + tw) {
                     hit->selectedTab = ti;
-                    // Call onSelect script; also directly set content as fallback
+                    // Determine which GUI to show based on tab text
+                    const std::string& tabText = hit->tabs[ti].text;
+                    std::string guiName;
+                    if (tabText == "TRAINING") guiName = "TrainingGui";
+                    else if (tabText == "LAN GAME") guiName = "GameGui";
+                    else if (tabText == "GAME") guiName = "GameGui";
+                    // Call onSelect script
                     auto* ts = Engine::instance().script().ts();
                     if (ts && ts->hasFunction(hit->name + "::onSelect"))
                         ts->callFunction(hit->name + "::onSelect",
                             {VMValue(hit->name), VMValue(ti), VMValue(hit->tabs[ti].text)});
-                    // Direct fallback: look up gui name from ScriptObject fields
-                    auto* sobj = ScriptEngine::instance().findObject(hit->name.c_str());
-                    if (sobj) {
-                        std::string gk = "gui[" + std::to_string(ti) + "]";
-                        auto gi = sobj->fields.find(gk);
-                        if (gi != sobj->fields.end()) {
-                            std::string guiName = gi->second.toString();
-                            if (!guiName.empty()) {
-                                auto* guiObj = ScriptEngine::instance().findObject(guiName.c_str());
-                                if (guiObj)
-                                    Engine::instance().guiRenderer().setContent(guiName);
+                    // Directly set content regardless of script success
+                    if (!guiName.empty()) {
+                        auto* sobj = ScriptEngine::instance().findObject(guiName.c_str());
+                        if (sobj) {
+                            // Ensure gui[key] field is set so future script calls find it
+                            if (ScriptObject* lobj = ScriptEngine::instance().findObject(hit->name.c_str())) {
+                                lobj->fields["gui[" + std::to_string(ti) + "]"] = VMValue(guiName);
+                                lobj->fields["key[" + std::to_string(ti) + "]"] = VMValue("0");
                             }
+                            Engine::instance().guiRenderer().setContent(guiName);
                         }
                     }
                     return true;
