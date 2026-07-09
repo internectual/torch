@@ -392,7 +392,36 @@ void HUD::renderScoreboard(Game* game) {
         }
     }
 
-    // Fallback: local player only (default behavior)
+    // Live game: show all ghosts with kills/deaths from server
+    if (game->isConnected()) {
+        auto indices = game->getLiveGhostIndices();
+        row = 0;
+        for (auto idx : indices) {
+            if (row >= maxRows) break;
+            auto* g = game->getLiveGhost(idx);
+            if (!g || g->className != "Player") continue;
+            float ry = by + 80 + row * 22;
+            ColorF nameCol = (g->teamId == 1) ? ColorF{1,0.3f,0.3f,0.9f} :
+                             (g->teamId == 2) ? ColorF{0.3f,0.4f,1,0.9f} :
+                             ColorF{0.8f,0.8f,1,0.9f};
+            snprintf(buf, sizeof(buf), "%s", g->playerName.empty() ? "Player" : g->playerName.c_str());
+            if (font) font->render(buf, colX[0], ry, nameCol, 2.0f);
+            const char* teamName = g->teamId == 1 ? "Red" : g->teamId == 2 ? "Blue" : "N/A";
+            if (font) font->render(teamName, colX[1], ry, nameCol, 2.0f);
+            snprintf(buf, sizeof(buf), "%d", g->kills);
+            if (font) font->render(buf, colX[2], ry, {1,1,0,0.9f}, 2.0f);
+            snprintf(buf, sizeof(buf), "%d", g->deaths);
+            if (font) font->render(buf, colX[3], ry, {1,0.5f,0.2f,0.9f}, 2.0f);
+            snprintf(buf, sizeof(buf), "%.0f", g->health);
+            if (font) font->render(buf, colX[4], ry, {0,1,0,0.9f}, 2.0f);
+            row++;
+        }
+        if (row == 0 && font)
+            font->render("No live players", colX[0], by + 80, {0.5f,0.5f,0.5f,1}, 2.0f);
+        return;
+    }
+
+    // Fallback: local player only (single-player / demo)
     row = 0;
     auto& p = game->player();
     snprintf(buf, sizeof(buf), "%s", game->config().playerName.c_str());
@@ -464,6 +493,47 @@ void Menu::update(float dt) {
         }
     } else if (currentScreen == ServerBrowser) {
         if (esc && !prevEsc) { currentScreen = Main; selectedItem = 0; }
+        // Refresh list
+        static double lastRefresh = 0;
+        if (Engine::instance().timer().now() - lastRefresh > 2.0) {
+            lastRefresh = Engine::instance().timer().now();
+            Engine::instance().network().queryLanServers();
+            // Convert network servers to menu entries
+            servers.clear();
+            for (auto& s : Engine::instance().network().getServerList()) {
+                ServerEntry e;
+                e.name = s.name.empty() ? "Unnamed Server" : s.name;
+                e.map = s.map;
+                e.gameType = s.gameType;
+                e.players = s.numPlayers;
+                e.maxPlayers = s.maxPlayers;
+                e.ping = s.ping;
+                servers.push_back(e);
+            }
+        }
+        // Navigate list
+        int count = (int)servers.size();
+        if (count > 0) {
+            if (up && !prevUp) selServer = (selServer - 1 + count) % count;
+            if (down && !prevDown) selServer = (selServer + 1) % count;
+            if (enter && !prevEnter) {
+                // Connect to selected server
+                auto netServers = Engine::instance().network().getServerList();
+                if (selServer >= 0 && selServer < (int)netServers.size()) {
+                    auto& addr = netServers[selServer].addr;
+                    std::string addrStr = addr.toString();
+                    // Format is "ip:port" or "host:port"
+                    auto colon = addrStr.find(':');
+                    if (colon != std::string::npos) {
+                        std::string host = addrStr.substr(0, colon);
+                        uint16_t port = (uint16_t)atoi(addrStr.c_str() + colon + 1);
+                        Console::instance().printf(LogLevel::Info, "Connecting to %s:%d", host.c_str(), port);
+                        Engine::instance().game().connectToServer(host.c_str(), port);
+                        setActive(false);
+                    }
+                }
+            }
+        }
     } else if (currentScreen == Settings) {
         if (esc && !prevEsc) { currentScreen = Main; selectedItem = 2; }
     } else if (currentScreen == Controls) {

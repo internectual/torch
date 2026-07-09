@@ -471,6 +471,25 @@ void DemoParser::readGhostStartBlock(BitStream& bs, bool useIBTracker) {
         created, initialBlock.ghostingSequence, initialBlock.controlObjectGhostIndex);
 }
 
+void DemoParser::readDataBlocks(BitStream& bs) {
+    initialBlock.dataBlockCount = (int)bs.readU32();
+    Console::instance().printf(LogLevel::Debug, "DataBlocks: %d blocks", initialBlock.dataBlockCount);
+    for (int i = 0; i < initialBlock.dataBlockCount && !bs.isError(); i++) {
+        DataBlockHeader hdr;
+        hdr.classId  = bs.readU32();
+        hdr.objectId = bs.readU32();
+        hdr.index    = bs.readU32();
+        hdr.total    = bs.readU32();
+        hdr.dataBitsStart = bs.getCurPos();
+        initialBlock.dataBlockHeaders.push_back(hdr);
+        // Skip payload: read flag bits until end of this datablock's data
+        // Each datablock payload is self-describing — we skip by reading the
+        // top-level struct fields. Without class-specific parsers we conservatively
+        // skip all remaining bits in the initial block after headers.
+    }
+    Console::instance().printf(LogLevel::Debug, "DataBlocks: %zu headers read", initialBlock.dataBlockHeaders.size());
+}
+
 // Forward declaration
 static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const Vec3& cp, GhostEntry* entry);
 
@@ -722,8 +741,12 @@ void DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
         }
     }
 
-    // Skip the rest (datablocks, connection state, etc.) — we
-    // can't consume datablock payloads without full parsers.
+    // ─── Data blocks ────────────────────────────────
+    // Read headers even if we skip payloads
+    readDataBlocks(bs);
+
+    // Skip the rest (connection state, scores, target manager, etc.) — we
+    // still can't consume datablock payloads without full class parsers.
     bs.setCurPos(totalBits);
 
     // 2. Try the C++ heuristic scan
@@ -1124,6 +1147,10 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents)
         } else if (ev.classId == T2Demo::NetEventClassFirst + 1) { // CRCChallengeResponseEvent
             bs.readU32(); bs.readU32(); bs.readU32();
         } else if (ev.classId == T2Demo::NetEventClassFirst + 19) { // SimDataBlockEvent
+            int objId  = bs.readInt(T2Demo::SimDBEventObjectIdBits); (void)objId;
+            int clsId  = bs.readInt(T2Demo::SimDBEventClassIdBits); (void)clsId;
+            int idx    = bs.readInt(T2Demo::SimDBEventIndexBits); (void)idx;
+            int total_ = bs.readInt(T2Demo::SimDBEventTotalBits); (void)total_;
         } else if (ev.classId == T2Demo::NetEventClassFirst + 17 ||
                    ev.classId == T2Demo::NetEventClassFirst + 18) {
             ev.audioProfileId = bs.readRangedU32(0, 1024);

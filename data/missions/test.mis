@@ -1,0 +1,165 @@
+// Torch Sample Mission
+// Deathmatch / Team Deathmatch / CTF
+
+new TerrainBlock (MissionTerrain) {
+   position = "0 0 0";
+   rotation = "1 0 0 0";
+   squareSize = "10";
+   terrainFile = "test.ter";
+};
+
+new Sky (MissionSky) {
+   position = "0 0 0";
+   rotation = "1 0 0 0";
+   materialList = "materials/test.mat";
+};
+
+new Sun (MissionSun) {
+   position = "0 300 0";
+   rotation = "1 0 0 0";
+   color = "1 1 0.8";
+   ambient = "0.3 0.3 0.4";
+};
+
+// ─── Spawn Points ────────────────────────────────────────────────
+
+new SpawnSphere (RedSpawn) {
+   position = "-20 2 -10";
+   rotation = "0 0 0";
+   radius = "3";
+   team = "0";
+};
+
+new SpawnSphere (BlueSpawn) {
+   position = "20 2 10";
+   rotation = "0 0 0";
+   radius = "3";
+   team = "1";
+};
+
+new SpawnSphere (FFASpawn1) {
+   position = "0 2 20";
+   rotation = "0 0 0";
+   radius = "3";
+};
+
+new SpawnSphere (FFASpawn2) {
+   position = "0 2 -20";
+   rotation = "0 0 0";
+   radius = "3";
+};
+
+new SpawnSphere (FFASpawn3) {
+   position = "-15 2 15";
+   rotation = "0 0 0";
+   radius = "3";
+};
+
+new SpawnSphere (FFASpawn4) {
+   position = "15 2 -15";
+   rotation = "0 0 0";
+   radius = "3";
+};
+
+// ─── Pickup Items ─────────────────────────────────────────────────
+
+new Item (HealthPack1) {
+   position = "-8 2 8";
+   rotation = "0 0 0";
+   datablock = "HealthPatch";
+};
+
+new Item (HealthPack2) {
+   position = "8 2 -8";
+   rotation = "0 0 0";
+   datablock = "HealthPatch";
+};
+
+new Item (EnergyPack1) {
+   position = "8 2 8";
+   rotation = "0 0 0";
+   datablock = "EnergyPack";
+};
+
+new Item (EnergyPack2) {
+   position = "-8 2 -8";
+   rotation = "0 0 0";
+   datablock = "EnergyPack";
+};
+
+new Item (AmmoPack1) {
+   position = "-20 2 0";
+   rotation = "0 0 0";
+   datablock = "AmmoPack";
+};
+
+new Item (AmmoPack2) {
+   position = "20 2 0";
+   rotation = "0 0 0";
+   datablock = "AmmoPack";
+};
+
+// ─── CTF Flags ────────────────────────────────────────────────────
+
+new Item (RedFlag) {
+   position = "-25 2 -15";
+   rotation = "0 0 0";
+   datablock = "RedFlag";
+};
+
+new Item (BlueFlag) {
+   position = "25 2 15";
+   rotation = "0 0 0";
+   datablock = "BlueFlag";
+};
+
+// ─── Vehicles ─────────────────────────────────────────────────────
+
+new WheeledVehicle (GroundVehicle) {
+   position = "0 2 0";
+   rotation = "0 0 0";
+};
+
+new FlyingVehicle (AirVehicle) {
+   position = "0 6 -10";
+   rotation = "0 0 0";
+};
+
+new HoverVehicle (HoverVehicle) {
+   position = "0 4 10";
+   rotation = "0 0 0";
+};
+
+// ─── Turrets & Static Objects ────────────────────────────────────
+
+new Turret (SentryTurret) {
+   position = "-15 2 -15";
+   rotation = "0 0 0";
+};
+
+new Camera (WatchCam) {
+   position = "0 8 0";
+   rotation = "0 0 0";
+};
+
+new BeaconObject (NavBeacon) {
+   position = "10 2 10";
+   rotation = "0 0 0";
+};
+
+new Debris (Rubble1) {
+   position = "-5 0 -5";
+   rotation = "0 0 0";
+};
+
+new Debris (Rubble2) {
+   position = "5 0 5";
+   rotation = "0 0 0";
+};
+
+// ─── Markers ──────────────────────────────────────────────────────
+
+new WayPoint (GoalMarker) {
+   position = "0 2 30";
+   rotation = "0 0 0";
+};

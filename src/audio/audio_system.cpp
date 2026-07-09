@@ -208,7 +208,7 @@ bool SoundBuffer::loadOgg(const uint8_t* data, size_t size) {
         return want;
     };
     cb.seek_func = [](void* datasource, ogg_int64_t offset, int whence) -> int {
-        auto* m = (MemFile*)datasource;
+        auto* m = (MemFile*)datasource; (void)m;
         // Can't seek in memory without original start - return error
         (void)offset; (void)whence;
         return -1;

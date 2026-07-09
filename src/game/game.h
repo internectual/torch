@@ -109,6 +109,9 @@ public:
     ~World();
 
     bool load(const char* mapName);
+    // Terrain-only load (no shapes/materials) — safe for headless dedicated servers
+    // that only need authoritative ground heights for collision.
+    bool loadTerrain(const char* mapName);
     void update(float dt);
     void render(const Point3F& cameraPos);
 
@@ -300,6 +303,11 @@ public:
     int getDemoBlocksTotal() const { return demoBlocksTotal; }
     DTSShape* getOrLoadDemoShape(const std::string& className, const std::string& skinName = "");
 
+    // Live ghost accessors for HUD/scoreboard
+    bool isConnected() const { return activeConn && activeConn->isConnected(); }
+    std::vector<int> getLiveGhostIndices() const { return liveGhosts.getAllIndices(); }
+    const GhostEntry* getLiveGhost(int idx) const { return liveGhosts.getGhost(idx); }
+
 private:
     GameConfig cfg;
     Player* pl{};
@@ -360,7 +368,31 @@ private:
     std::vector<Point3F> demoPath;
     int demoPathCount = 0;
 
+    // Live spectator
+    bool liveSpectateInit = false;
+    bool liveSpectateRespawned = false;
+
+    // Editor mode
+    bool editorActive = false;
+    int editorPlaceClass = 31; // classId to place
+
     // Projectile trail system
     struct TrailPoint { float x, y, z; float life; };
     std::map<int, std::vector<TrailPoint>> demoTrails;
+
+    // Live network ghost tracking
+    GhostTracker liveGhosts;
+    // Received datablock tracking: classId → list of datablocks with payload
+    struct ReceivedDatablock {
+        T2Protocol::DatablockHeader hdr;
+        std::vector<uint8_t> payload;
+    };
+    std::map<uint32_t, std::vector<ReceivedDatablock>> receivedDatablocks;
+    const std::vector<ReceivedDatablock>* getDatablocksForClass(uint32_t classId) const {
+        auto it = receivedDatablocks.find(classId);
+        return it != receivedDatablocks.end() ? &it->second : nullptr;
+    }
+    // Ghost index assigned by server for this client's player
+    uint32_t serverPlayerGhostIndex = 0;
+    bool serverPlayerGhostSynced = false;
 };

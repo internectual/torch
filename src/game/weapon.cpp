@@ -10,12 +10,16 @@
 #define SND(path) "audio/fx/weapons/" path ".wav"
 
 const WeaponData gWeaponTable[] = {
-    WEAPON("Spinfusor",    ProjectileType::Disc,    0.8f,  1.5f, 60.0f, 50.0f,  5.0f,  40, 5.0f, false, false, SND("spinfusor_fire"), SND("spinfusor_impact")),
-    WEAPON("Blaster",      ProjectileType::Bolt,    0.2f,  0.0f, 20.0f, 80.0f,  3.0f,  -1, 2.0f, true,  false, SND("blaster_fire"),        SND("blaster_impact")),
-    WEAPON("Chaingun",     ProjectileType::Hitscan, 0.08f, 2.0f, 10.0f,  0.0f,  0.0f, 200, 0.0f, true,  false, SND("chaingun_fire"),      nullptr),
-    WEAPON("GrenadeLauncher", ProjectileType::Grenade, 0.6f, 1.2f, 80.0f, 25.0f, 10.0f,  15, 6.0f, false, false, SND("grenadelauncher_fire"),       SND("grenade_explode")),
-    WEAPON("SniperRifle",  ProjectileType::Hitscan, 0.5f,  2.5f, 100.0f, 0.0f,  0.0f,  10, 0.0f, false, false, SND("sniper_fire"),          nullptr),
-    WEAPON("Mortar",       ProjectileType::Mortar,  1.0f,  2.0f, 120.0f, 30.0f, 15.0f,  10, 7.0f, false, false, SND("mortar_fire"),          SND("mortar_explode")),
+    WEAPON("Spinfusor",    ProjectileType::Disc,    0.8f,  1.5f, 60.0f, 50.0f,  5.0f,  40, 5.0f, false, false, SND("spinfusor/spinfusor_fire"), SND("spinfusor/spinfusor_impact")),
+    WEAPON("Blaster",      ProjectileType::Bolt,    0.2f,  0.0f, 20.0f, 80.0f,  3.0f,  -1, 2.0f, true,  false, SND("blaster/blaster_fire"),        SND("blaster/blaster_impact")),
+    WEAPON("Chaingun",     ProjectileType::Hitscan, 0.08f, 2.0f, 10.0f,  0.0f,  0.0f, 200, 0.0f, true,  false, SND("chaingun/chaingun_fire"),      nullptr),
+    WEAPON("GrenadeLauncher", ProjectileType::Grenade, 0.6f, 1.2f, 80.0f, 25.0f, 10.0f,  15, 6.0f, false, false, SND("grenade_launcher/grenade_launcher_fire"), SND("grenade_launcher/grenade_explosion")),
+    WEAPON("SniperRifle",  ProjectileType::Hitscan, 0.5f,  2.5f, 100.0f, 0.0f,  0.0f,  10, 0.0f, false, false, SND("sniper_rifle/sniper_rifle_fire"), nullptr),
+    WEAPON("Mortar",       ProjectileType::Mortar,  1.2f,  2.5f, 150.0f, 35.0f, 20.0f,   8, 8.0f, false, false, SND("mortar/mortar_fire"),          SND("mortar/mortar_explosion")),
+    WEAPON("PlasmaGun",    ProjectileType::Bolt,    0.4f,  1.0f, 35.0f, 30.0f,  4.0f,  30, 4.0f, true,  false, SND("plasma_gun/plasma_gun_fire"),  SND("plasma_gun/plasma_gun_impact")),
+    WEAPON("Shocklance",   ProjectileType::Hitscan, 0.6f,  0.0f, 90.0f,  0.0f,  0.0f,  -1, 0.0f, false, true,  SND("shocklance/shocklance_fire"),  nullptr),
+    WEAPON("RepairTool",   ProjectileType::Bolt,    0.3f,  0.0f, -15.0f,30.0f,  2.0f,  -1, 2.0f, true,  false, SND("repair_tool/repair_tool_fire"), nullptr),
+    WEAPON("ELF",          ProjectileType::Bolt,    0.5f,  1.5f,  5.0f, 35.0f,  0.0f,  20, 3.0f, false, false, SND("elf/elf_fire"),               SND("elf/elf_impact")),
 };
 
 const int gWeaponCount = sizeof(gWeaponTable) / sizeof(gWeaponTable[0]);

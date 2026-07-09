@@ -13,6 +13,65 @@
 #include <vector>
 #include <glob.h>
 #include <sys/file.h>
+#include <map>
+
+// ─── Key Bindings ─────────────────────────────────────────────────
+static std::map<std::string, int> s_bindings = {
+    {"forward", 26}, {"backward", 22}, {"left", 4}, {"right", 7},
+    {"jump", 44}, {"jet", 44}, {"fire", -1}, {"altfire", -3},
+    {"zoom", -2}, {"reload", 21}, {"scoreboard", 43},
+    {"f1", 58}, {"f2", 59}, {"f3", 60}, {"f4", 61},
+    {"chat", 40}, {"console", 53},
+};
+
+static std::map<int, const char*> s_scancodeNames = {
+    {4, "A"}, {7, "D"}, {22, "S"}, {26, "W"},
+    {20, "Q"}, {8, "E"}, {21, "R"}, {23, "T"},
+    {44, "SPACE"}, {40, "ENTER"}, {53, "GRAVE"},
+    {43, "TAB"}, {58, "F1"}, {59, "F2"}, {60, "F3"}, {61, "F4"},
+    {-1, "MOUSE1"}, {-2, "MOUSE2"}, {-3, "MOUSE3"},
+};
+
+int Engine::getBind(const char* action) const {
+    auto it = s_bindings.find(action);
+    return it != s_bindings.end() ? it->second : -1;
+}
+
+void Engine::setBind(const char* action, int scancode) {
+    s_bindings[action] = scancode;
+}
+
+const char* Engine::scancodeName(int scancode) const {
+    auto it = s_scancodeNames.find(scancode);
+    return it != s_scancodeNames.end() ? it->second : "?";
+}
+
+int Engine::nameToScancode(const char* name) const {
+    for (auto& [sc, n] : s_scancodeNames)
+        if (strcasecmp(name, n) == 0) return sc;
+    // Try as number
+    char* end;
+    long n = strtol(name, &end, 10);
+    if (*end == 0) return (int)n;
+    return -1;
+}
+
+void Engine::saveBinds() {
+    FILE* f = fopen("bindings.cfg", "w");
+    if (!f) return;
+    for (auto& [action, sc] : s_bindings)
+        fprintf(f, "bind \"%s\" %d\n", action.c_str(), sc);
+    fclose(f);
+}
+
+void Engine::loadBinds() {
+    FILE* f = fopen("bindings.cfg", "r");
+    if (!f) return;
+    char action[64]; int sc;
+    while (fscanf(f, "bind \"%63[^\"]\" %d", action, &sc) == 2)
+        s_bindings[action] = sc;
+    fclose(f);
+}
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -120,14 +179,19 @@ bool Engine::init(int argc, char* argv[]) {
     std::string dataDir = ".";
     std::string outputDir = "";
     std::string modPath = "base";
+    std::string exeDir = ".";
+    if (argc > 0) {
+        std::string exePath = argv[0];
+        auto sl = exePath.rfind('/');
+        if (sl != std::string::npos)
+            exeDir = exePath.substr(0, sl);
+    }
     {
         std::ifstream cfg("torch.cfg");
         if (!cfg) {
             // Try next to the executable
-            std::string exePath = argc > 0 ? argv[0] : "";
-            auto sl = exePath.rfind('/');
-            if (sl != std::string::npos)
-                cfg.open(exePath.substr(0, sl + 1) + "torch.cfg");
+            std::string cfgPath = exeDir + "/torch.cfg";
+            cfg.open(cfgPath);
         }
         if (cfg) {
             std::string line;
@@ -175,7 +239,7 @@ bool Engine::init(int argc, char* argv[]) {
     };
     expandHome(dataDir);
     expandHome(outputDir);
-    if (dataDir == ".") dataDir = "/home/methodown/t2-linux"; // fallback
+    if (dataDir == ".") dataDir = exeDir + "/data";
     Console::instance().setVariable("dataDir", dataDir.c_str());
     Console::instance().setVariable("modPath", modPath.c_str());
     if (outputDir.empty()) {
@@ -307,11 +371,9 @@ bool Engine::init(int argc, char* argv[]) {
     pconfig.height = Console::instance().getIntVariable("videoHeight", 1080);
     if (!plat->init(pconfig)) { releaseLock(); return false; }
 
-    // File System - add T2 data paths
+    // File System - add data paths relative to executable
     std::vector<std::string> paths = {
-        dataDir, dataDir + "/base", "./base", "./data",
-        "/home/methodown/t2-mapper/docs/base",  // extracted assets
-        "/home/methodown/torch/glb"           // decompressed GLB files
+        dataDir, dataDir + "/base", exeDir + "/base", exeDir + "/data"
     };
     // Add outputDir paths for DSO loading
     if (!outputDir.empty()) {
@@ -469,7 +531,7 @@ bool Engine::init(int argc, char* argv[]) {
             }
         }
         // Scale the dev panel overlay font for modern displays; leave game canvas fonts at 1.0
-        float fontScale = 1.0f;
+        float fontScale = 1.0f; (void)fontScale;
         // Use Lucida Console 12 — the only available monospace GFT
         if (lucidaFont && lucidaFont->loaded) {
             if (overlayFont && overlayFontOwned) { delete overlayFont; overlayFontOwned = false; }
@@ -588,6 +650,26 @@ bool Engine::init(int argc, char* argv[]) {
         if (net) net->queryLanServers();
         Console::instance().printf(LogLevel::Info, "Querying LAN servers...");
     }, "/queryLan - broadcast LAN server query");
+
+    con->addCommand("bind", [this](int32_t argc, const char* const* argv) {
+        if (argc < 3) { Console::instance().printf(LogLevel::Warn, "Usage: bind <action> <key>"); return; }
+        int sc = nameToScancode(argv[2]);
+        if (sc < 0) { Console::instance().printf(LogLevel::Warn, "Unknown key: %s", argv[2]); return; }
+        setBind(argv[1], sc);
+        saveBinds();
+        Console::instance().printf(LogLevel::Info, "Bound '%s' to %s (%d)", argv[1], scancodeName(sc), sc);
+    }, "bind <action> <key> - Bind a key to an action (e.g. bind forward W)");
+
+    con->addCommand("listbinds", [this](int32_t, const char* const*) {
+        Console::instance().printf(LogLevel::Info, "Key bindings:");
+        for (auto& [action, sc] : s_bindings)
+            Console::instance().printf(LogLevel::Info, "  %s = %s (%d)", action.c_str(), scancodeName(sc), sc);
+    }, "listbinds - Show all key bindings");
+
+    con->addCommand("colorblind", [this](int32_t, const char* const*) {
+        colorBlindMode = !colorBlindMode;
+        Console::instance().printf(LogLevel::Info, "Color-blind mode: %s", colorBlindMode ? "ON" : "OFF");
+    }, "colorblind - Toggle color-blind friendly palette");
 
     con->addCommand("showBrowser", [](int32_t, const char* const*) {
         auto& gui = Engine::instance().guiRenderer();
@@ -817,6 +899,9 @@ bool Engine::init(int argc, char* argv[]) {
         g->playDemo(demoPath.c_str());
     }
 
+    // Load key bindings
+    loadBinds();
+
     return true;
 }
 
@@ -1011,14 +1096,13 @@ void Engine::run() {
         if (gui) gui->update(dt);
 
         // GUI mouse input
-        bool guiHandled = false;
         if (gui && gui->getCanvas()) {
             int mx = plat->input().mouseX;
             int my = plat->input().mouseY;
             bool pressed = plat->input().mouseButtons[1] != 0;
             static bool prevPressed = false;
             if (pressed && !prevPressed) {
-                guiHandled = gui->handleInput(mx, my, true);
+                gui->handleInput(mx, my, true);
             }
             prevPressed = pressed;
         }
@@ -1055,19 +1139,19 @@ void Engine::run() {
                 Game::InputMove input;
                 auto& keys = plat->input().keysDown;
                 auto& mButtons = plat->input().mouseButtons;
-                input.forward = keys[SCANCODE_W] != 0;
-                input.backward = keys[SCANCODE_S] != 0;
-                input.left = keys[SCANCODE_A] != 0;
-                input.right = keys[SCANCODE_D] != 0;
-                input.jump = keys[SCANCODE_SPACE] != 0;
-                input.jet = keys[SCANCODE_SPACE] != 0;
-                input.freeCam = keys[SCANCODE_F1] != 0;
-                input.orbitCam = keys[SCANCODE_F2] != 0;
+                input.forward = keys[s_bindings["forward"]] != 0;
+                input.backward = keys[s_bindings["backward"]] != 0;
+                input.left = keys[s_bindings["left"]] != 0;
+                input.right = keys[s_bindings["right"]] != 0;
+                input.jump = keys[s_bindings["jump"]] != 0;
+                input.jet = keys[s_bindings["jet"]] != 0;
+                input.freeCam = keys[s_bindings["f1"]] != 0;
+                input.orbitCam = keys[s_bindings["f2"]] != 0;
                 input.fire = mButtons[1] != 0;
                 input.altFire = mButtons[3] != 0;
                 input.zoom = mButtons[2] != 0;
-                input.reload = keys[SCANCODE_R] != 0;
-                input.showScoreboard = keys[SCANCODE_TAB] != 0;
+                input.reload = keys[s_bindings["reload"]] != 0;
+                input.showScoreboard = keys[s_bindings["scoreboard"]] != 0;
                 input.demoPause = keys[SCANCODE_P] != 0;
                 input.demoStepFrame = keys[SCANCODE_PERIOD] != 0;
                 input.demoShowEvents = keys[SCANCODE_E] != 0;
@@ -1098,8 +1182,7 @@ void Engine::run() {
                 double t2 = Timer::now();
                 if (t1 - lastTiming >= 5.0) {
                     lastTiming = t1;
-                    Console::instance().printf(LogLevel::Debug, "TIMING: update=%.1fms render=%.1fms total=%.1fms",
-                        (t1-t0)*1000, (t2-t1)*1000, (t2-t0)*1000);
+                    //Console::instance().printf(LogLevel::Debug, "TIMING: update=%.1fms render=%.1fms total=%.1fms", (t1-t0)*1000, (t2-t1)*1000, (t2-t0)*1000);
                 }
             }
             // Preview mode
@@ -1464,7 +1547,7 @@ void Engine::run() {
                             int idx = (int)(my - treeY) / itemH;
                             if (mx >= rightX && idx >= 0 && idx + treeScroll < (int)displayList.size() && idx < maxItems) {
                                 auto& entry = displayList[idx + treeScroll];
-                                auto* obj = scr->objects[entry.first];
+                                auto* obj = scr->objects[entry.first]; (void)obj;
                                 int ex = rightX + entry.second * treeIndent;
                                 if (mx >= ex - 12 && mx < ex) {
                                     if (expandedNodes.count(entry.first))
@@ -1499,7 +1582,6 @@ void Engine::run() {
                         int xPos = rightX + entry.second * treeIndent;
 
                         // Expand [+] for objects with children
-                        auto* childMap = obj->className == "SimGroup" ? &treeChildren : nullptr;
                         bool hasKids = (treeChildren.count(entry.first) && !treeChildren[entry.first].empty());
                         if (!hasKids && obj->className == "SimGroup") {
                             for (auto& kv : scr->objects) {
@@ -1679,7 +1761,7 @@ void Engine::run() {
                     if (bottomActiveTab >= 0 && bottomActiveTab < numTabs) {
                         int hx = tabPositions[bottomActiveTab];
                         float hw = tabWidths[bottomActiveTab];
-                        Console::instance().printf(LogLevel::Debug, "TABHL: active=%d hx=%d hw=%.0f", bottomActiveTab, hx, hw);
+                        //Console::instance().printf(LogLevel::Debug, "TABHL: active=%d hx=%d hw=%.0f", bottomActiveTab, hx, hw);
                         r.drawRectFill({(float)hx, (float)tabBarY, 0}, {(float)(hx + hw), (float)(tabBarY + tabH + 2), 0}, {0.35f,0.38f,0.55f,1});
                     }
                     // Draw tab backgrounds (non-active tabs cover the highlight, active tab's yellow shows through)
@@ -1928,7 +2010,7 @@ void Engine::run() {
             char title[128];
             snprintf(title, sizeof(title), "Torch - %d FPS tab=%d", frameCount, g_debugTab);
             plat->setTitle(title);
-            Console::instance().printf(LogLevel::Debug, "Heartbeat: %d FPS, dialogs=%zu", frameCount, gui ? gui->dialogCount() : 0);
+            //Console::instance().printf(LogLevel::Debug, "Heartbeat: %d FPS, dialogs=%zu", frameCount, gui ? gui->dialogCount() : 0);
             frameCount = 0;
             fpsTimer = 0;
         }

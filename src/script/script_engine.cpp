@@ -2225,7 +2225,11 @@ bool ScriptEngine::init() {
         struct stat st; if (stat(dir.c_str(), &st) != 0) { std::string cmd = "mkdir -p " + dir; system(cmd.c_str()); }
         std::string tmpPath = dsoPath + ".src.tmp";
         { FILE* f = fopen(tmpPath.c_str(), "w"); if (f) { fwrite(src.data(), 1, src.size(), f); fclose(f); } }
-        std::string cmd = "/home/linuxbrew/.linuxbrew/bin/node /home/methodown/torch/torque-dso.js " + tmpPath + " " + dsoPath + " 2>/dev/null";
+        std::string cmd = Console::instance().getStringVariable("nodePath");
+        if (cmd.empty()) cmd = "node";
+        std::string compilerScript = Console::instance().getStringVariable("compilerScript");
+        if (compilerScript.empty()) compilerScript = "torque-dso.js";
+        cmd += " " + compilerScript + " " + tmpPath + " " + dsoPath + " 2>/dev/null";
         int ret = system(cmd.c_str());
         unlink(tmpPath.c_str());
         if (ret != 0) {
@@ -2496,6 +2500,12 @@ bool ScriptEngine::init() {
             std::string objName = args[0].toString();
             auto* obj = ScriptEngine::instance().findObject(objName.c_str());
             if (obj) {
+                // Don't delete GUI objects — they're managed by C++ renderer
+                if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 ||
+                    obj->className.find("Sim") == 0 || objName.find("Profile") != std::string::npos) {
+                    Console::instance().printf(LogLevel::Debug, "delete: skipped GUI object '%s' (class=%s)", objName.c_str(), obj->className.c_str());
+                    return VMValue(1);
+                }
                 Console::instance().printf(LogLevel::Debug, "delete: removing ScriptObject '%s'", objName.c_str());
                 ScriptEngine::instance().objects.erase(objName);
                 delete obj;
@@ -3073,7 +3083,7 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("enableWinConsole", [](const auto& args) -> VMValue {
         if (!args.empty() && args[0].toBool()) {
             static bool enabled = false;
-            if (!enabled) { enabled = true; Console::instance().setLogLevel(LogLevel::Debug); }
+            if (!enabled) { enabled = true; }
         }
         return VMValue(1);
     });

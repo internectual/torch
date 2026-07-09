@@ -185,7 +185,7 @@ static std::string getProp(const std::vector<MisProp>& props, const std::string&
 }
 
 // Find first object of a given class
-static MisObject* findObject(std::vector<MisObject>& objects, const std::string& className) {
+inline MisObject* findObject(std::vector<MisObject>& objects, const std::string& className) {
     for (auto& obj : objects) {
         if (obj.className == className) return &obj;
     }

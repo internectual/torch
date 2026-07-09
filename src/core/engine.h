@@ -61,6 +61,17 @@ public:
     std::string execFile;
     std::string compileFile;
 
+    // Key bindings
+    int getBind(const char* action) const;
+    void setBind(const char* action, int scancode);
+    const char* scancodeName(int scancode) const;
+    int nameToScancode(const char* name) const;
+    void saveBinds();
+    void loadBinds();
+
+    // Color-blind mode
+    bool colorBlindMode = false;
+
 private:
     Platform* plat{};
     Console* con{};

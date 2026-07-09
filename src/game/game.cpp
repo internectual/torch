@@ -18,6 +18,69 @@
 #include <cctype>
 #include <fstream>
 #include <cstdlib>
+
+// ─── Sound helpers ────────────────────────────────────────────────
+static void playChatBeep() {
+    static SoundBuffer* beepBuf = nullptr;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        // Generate a 440Hz sine wave beep as WAV
+        int sampleRate = 22050;
+        int duration = 150; // ms
+        int numSamples = sampleRate * duration / 1000;
+        int dataSize = numSamples * 2; // 16-bit mono
+        // Build WAV header
+        struct WavHeader {
+            char riff[4] = {'R','I','F','F'};
+            uint32_t fileSize;
+            char wave[4] = {'W','A','V','E'};
+            char fmt[4] = {'f','m','t',' '};
+            uint32_t fmtSize = 16;
+            uint16_t audioFmt = 1; // PCM
+            uint16_t channels = 1;
+            uint32_t sampleRate;
+            uint32_t byteRate;
+            uint16_t blockAlign = 2;
+            uint16_t bitsPerSample = 16;
+            char dataHdr[4] = {'d','a','t','a'};
+            uint32_t dataSize;
+        };
+        WavHeader hdr;
+        hdr.sampleRate = sampleRate;
+        hdr.byteRate = sampleRate * 2;
+        hdr.dataSize = dataSize;
+        hdr.fileSize = 36 + dataSize;
+        std::vector<uint8_t> wav(sizeof(hdr) + dataSize);
+        memcpy(wav.data(), &hdr, sizeof(hdr));
+        // Generate sine wave samples
+        int16_t* samples = (int16_t*)(wav.data() + sizeof(hdr));
+        for (int i = 0; i < numSamples; i++) {
+            float t = (float)i / sampleRate;
+            float env = 1.0f - (float)i / numSamples; // fade out
+            samples[i] = (int16_t)(sinf(t * 440.0f * 6.28318f) * 8000.0f * env);
+        }
+        // Apply fade-in
+        for (int i = 0; i < 200 && i < numSamples; i++)
+            samples[i] = (int16_t)(samples[i] * ((float)i / 200.0f));
+
+        beepBuf = new SoundBuffer;
+        if (!beepBuf->loadWav(wav.data(), wav.size())) {
+            delete beepBuf;
+            beepBuf = nullptr;
+        }
+    }
+    if (!beepBuf) return;
+    auto& audio = Engine::instance().audio();
+    // Reuse a single source for all chat beeps instead of leaking one per call.
+    static SoundSource* beepSrc = nullptr;
+    if (!beepSrc) beepSrc = audio.createSource();
+    if (beepSrc) {
+        beepSrc->setVolume(0.3f);
+        beepSrc->stop();
+        beepSrc->play(beepBuf);
+    }
+}
 #include <unistd.h>
 #include <algorithm>
 #include <unordered_map>
@@ -283,24 +346,7 @@ bool World::load(const char* mapName) {
     std::string misData = fs.readText(misPath.c_str());
 
     if (misData.empty()) {
-        // Fallback: read directly from known data directories
-        static const char* misDirs[] = {
-            "/home/methodown/t2-linux/base/missions/",
-            "/home/methodown/t2-mapper/docs/base/missions/",
-            nullptr
-        };
-        for (int d = 0; misDirs[d]; d++) {
-            std::string fp = std::string(misDirs[d]) + mapName + ".mis";
-            std::ifstream f(fp.c_str());
-            if (f) {
-                misData.assign((std::istreambuf_iterator<char>(f)), {});
-                if (!misData.empty()) break;
-            }
-        }
-    }
-
-    if (misData.empty()) {
-        // Try alternative VL2 path
+        // Try alternative case
         misPath = std::string("Missions/") + mapName + ".mis";
         misData = fs.readText(misPath.c_str());
     }
@@ -786,6 +832,56 @@ bool World::load(const char* mapName) {
     return true;
 }
 
+bool World::loadTerrain(const char* mapName) {
+    // Headless terrain-only loader: parse the mission, find the TerrainBlock, and
+    // load just the heightfield. Avoids shape/material/GL loading so a dedicated
+    // server can register an authoritative ground-height callback.
+    auto& fs = Engine::instance().fs();
+    std::string misPath = std::string("missions/") + mapName + ".mis";
+    std::string misData = fs.readText(misPath.c_str());
+    if (misData.empty()) {
+        misPath = std::string("Missions/") + mapName + ".mis";
+        misData = fs.readText(misPath.c_str());
+    }
+    if (misData.empty()) return false;
+
+    auto objects = parseMisFile(misData);
+    MisObject* terrainObj = findObject(objects, "TerrainBlock");
+    if (!terrainObj) return false;
+
+    std::string terrainFile = getProp(terrainObj->props, "terrainfile");
+    std::string sqStr = getProp(terrainObj->props, "squaresize");
+    if (!sqStr.empty()) terrainBlock.squareSize = (float)std::atof(sqStr.c_str());
+    std::string posStr = getProp(terrainObj->props, "position");
+    if (!posStr.empty()) {
+        float px, py, pz;
+        if (sscanf(posStr.c_str(), "%f %f %f", &px, &py, &pz) == 3)
+            terrainBlock.worldOffset = {px, py, pz};
+    }
+
+    std::vector<std::string> terPaths = {
+        terrainFile,
+        "missions/" + terrainFile,
+        "terrains/" + terrainFile,
+        terrainFile + ".ter",
+        "missions/" + terrainFile + ".ter",
+        "terrains/" + terrainFile + ".ter"
+    };
+    for (auto& tp : terPaths) {
+        auto terData = fs.read(tp.c_str());
+        if (!terData.empty()) { terrainBlock.load(terData.data(), terData.size()); break; }
+    }
+    if (!terrainBlock.loaded) {
+        std::string tryPath = terrainFile;
+        if (tryPath.size() < 4 || tryPath.substr(tryPath.size() - 4) != ".ter") tryPath += ".ter";
+        auto terData = fs.read(tryPath.c_str());
+        if (!terData.empty()) terrainBlock.load(terData.data(), terData.size());
+    }
+    if (terrainBlock.loaded)
+        Console::instance().printf(LogLevel::Info, "Server terrain loaded from '%s'", mapName);
+    return terrainBlock.loaded;
+}
+
 void World::update(float dt) {
     // Update item pickups
     for (auto& item : items) {
@@ -956,7 +1052,7 @@ void World::update(float dt) {
         if (b.alive) {
             float dx = ppos.x - b.pos.x;
             float dz = ppos.z - b.pos.z;
-            float distToPlayer = sqrtf(dx*dx + dz*dz);
+            float distToPlayer = sqrtf(dx*dx + dz*dz); (void)distToPlayer;
             float timeSinceHit = dt > 0 ? (Engine::instance().game().gameTime() - b.lastHitTime) : 999.0f;
 
             if (timeSinceHit < 2.0f && b.health < 70) {
@@ -1136,7 +1232,6 @@ void World::render(const Point3F& cameraPos) {
     }
 
     // Render bots
-    auto& game = Engine::instance().game();
     auto* shader = ShaderManager::getDefaultShader();
     if (shader) shader->bind();
     for (auto& b : bots) {
@@ -1311,8 +1406,31 @@ bool Game::init() {
 
     con.addCommand("startServer", [this](int32_t argc, const char* const* argv) {
         uint16_t port = (argc > 1) ? (uint16_t)atoi(argv[1]) : 28000;
+        if (argc > 2) {
+            Console::instance().setVariable("sv_mission", argv[2]);
+        }
+        // Wire terrain height callback for server-side collision
+        server.setHeightCallback(+[](float x, float z, void* ctx) -> float {
+            return static_cast<World*>(ctx)->getHeight(x, z);
+        }, &w);
         server.start(port);
-    });
+    }, "startServer [port] [mission] - Start a game server on the given port");
+
+    con.addCommand("CreateServer", [this](int32_t argc, const char* const* argv) {
+        // T2 script compatibility: CreateServer <mission> <type>
+        const char* mission = (argc > 1) ? argv[1] : "test";
+        startLocalGame(mission);
+    }, "CreateServer <mission> [type] - Start a local server with mission");
+
+    con.addCommand("loadMission", [this](int32_t argc, const char* const* argv) {
+        if (argc < 2) return;
+        startLocalGame(argv[1]);
+    }, "loadMission <name> - Load and start a mission");
+
+    con.addCommand("startMission", [this](int32_t, const char* const*) {
+        if (gameState == Loading || gameState == Playing) return;
+        startLocalGame();
+    }, "startMission - Start the selected mission");
 
     con.addCommand("playdemo", [this](int32_t argc, const char* const* argv) {
         if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: playdemo <path>"); return; }
@@ -1356,6 +1474,73 @@ bool Game::init() {
                 Console::instance().printf(LogLevel::Info, "    %s (%.1fs)", a.name.c_str(), a.duration);
         }
     }, "testshape <path> - Load and display a DTS/GLB shape");
+
+    con.addCommand("sv_ghosts", [this](int32_t, const char* const*) {
+        Console::instance().printf(LogLevel::Info, "Total server ghosts: %zu", server.ghostCount());
+    }, "sv_ghosts - List server ghost count");
+
+    con.addCommand("sv_spawn", [this](int32_t argc, const char* const* argv) {
+        if (argc < 4) { Console::instance().printf(LogLevel::Warn, "Usage: sv_spawn <classId> <x> <y> [z]"); return; }
+        int classId = atoi(argv[1]);
+        float x = (float)atof(argv[2]);
+        float y = (float)atof(argv[3]);
+        float z = (argc > 4) ? (float)atof(argv[4]) : 2.0f;
+        uint32_t idx = server.spawnGhost(classId, x, y, z);
+        if (idx > 0)
+            Console::instance().printf(LogLevel::Info, "Spawned ghost idx=%u class=%d at (%.1f, %.1f, %.1f)",
+                (unsigned)idx, classId, x, y, z);
+    }, "sv_spawn <classId> <x> <y> [z] - Spawn a ghost on the server");
+
+    con.addCommand("sv_removeghost", [this](int32_t argc, const char* const* argv) {
+        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: sv_removeghost <index>"); return; }
+        uint32_t idx = (uint32_t)atoi(argv[1]);
+        if (server.removeGhost(idx))
+            Console::instance().printf(LogLevel::Info, "Removed ghost idx=%u", (unsigned)idx);
+        else
+            Console::instance().printf(LogLevel::Warn, "Ghost idx=%u not found", (unsigned)idx);
+    }, "sv_removeghost <index> - Remove a ghost on the server");
+
+    con.addCommand("sv_addbot", [this](int32_t, const char* const*) {
+        server.spawnBot();
+        Console::instance().printf(LogLevel::Info, "Bot spawned");
+    }, "sv_addbot - Spawn an AI bot on the server");
+
+    con.addCommand("kick", [this](int32_t argc, const char* const* argv) {
+        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: kick <clientId>"); return; }
+        server.kickClient(atoi(argv[1]));
+    }, "kick <clientId> - Kick a client by index");
+
+    con.addCommand("ban", [this](int32_t argc, const char* const* argv) {
+        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: ban <clientId>"); return; }
+        server.banClient(atoi(argv[1]));
+    }, "ban <clientId> - Ban a client by IP");
+
+    con.addCommand("unbanall", [this](int32_t, const char* const*) {
+        server.clearBans();
+    }, "unbanall - Clear the ban list");
+
+    con.addCommand("sv_map", [this](int32_t argc, const char* const* argv) {
+        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: sv_map <mission>"); return; }
+        server.changeMap(argv[1]);
+    }, "sv_map <mission> - Change the current mission");
+
+    con.addCommand("sv_gamemode", [this](int32_t argc, const char* const* argv) {
+        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: sv_gamemode <0|1> (0=DM, 1=TDM)"); return; }
+        server.setGameMode(atoi(argv[1]));
+    }, "sv_gamemode <0|1> - Set game mode (0=Deathmatch, 1=Team Deathmatch)");
+
+    con.addCommand("sv_nat", [this](int32_t, const char* const*) {
+        Console::instance().printf(LogLevel::Info, "NAT relay: see server console");
+    }, "sv_nat - Show NAT relay info");
+
+    con.addCommand("record", [this](int32_t argc, const char* const* argv) {
+        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: record <path>"); return; }
+        server.startRecording(argv[1]);
+    }, "record <path> - Start recording server state to file");
+
+    con.addCommand("stoprecord", [this](int32_t, const char* const*) {
+        server.stopRecording();
+    }, "stoprecord - Stop recording");
 
     return true;
 }
@@ -1667,6 +1852,59 @@ void Game::update(float dt) {
         }
         prevF2 = currentInput.orbitCam;
 
+        // F3 toggle for editor mode
+        auto& plat = Engine::instance().platform();
+        static bool prevF3 = false;
+        bool f3Down = plat.input().keysDown[SCANCODE_F3];
+        if (f3Down && !prevF3) {
+            editorActive = !editorActive;
+            if (editorActive) {
+                freeCamActive = true;
+                Console::instance().printf(LogLevel::Info, "Editor mode %s", editorActive ? "ON" : "OFF");
+            }
+        }
+        prevF3 = f3Down;
+
+        // Editor: place ghost on left click, cycle class on scroll
+        if (editorActive && freeCamActive) {
+            static bool prevClick = false;
+            bool click = plat.input().mouseButtons[0];
+            if (click && !prevClick) {
+                // Place a ghost at the camera's target position
+                float dist = 20.0f;
+                Point3F dir = {freeCamTarget.x - freeCamPos.x, freeCamTarget.y - freeCamPos.y, freeCamTarget.z - freeCamPos.z};
+                float len = sqrtf(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
+                if (len > 0.001f) { dir.x /= len; dir.y /= len; dir.z /= len; }
+                Point3F placePos = {freeCamPos.x + dir.x * dist, freeCamPos.y + dir.y * dist, freeCamPos.z + dir.z * dist};
+                server.spawnGhost(editorPlaceClass, placePos.x, placePos.y, placePos.z);
+                Console::instance().printf(LogLevel::Info, "Placed ghost class=%d at (%.1f,%.1f,%.1f)",
+                    editorPlaceClass, placePos.x, placePos.y, placePos.z);
+            }
+            prevClick = click;
+            // Right click to remove nearest ghost
+            static bool prevRight = false;
+            bool right = plat.input().mouseButtons[1];
+            if (right && !prevRight) {
+                // Remove last spawned ghost
+                if (server.ghostCount() > 0) {
+                    // Simple approach: remove ghosts in reverse order via command
+                    Console::instance().printf(LogLevel::Info, "Right-click: remove ghost. Use 'sv_removeghost <idx>'");
+                }
+            }
+            prevRight = right;
+            // Scroll wheel to cycle class
+            static float prevScroll = 0;
+            float scroll = plat.input().mouseWheel;
+            if (scroll != prevScroll) {
+                int delta = (scroll > prevScroll) ? 1 : -1;
+                editorPlaceClass += delta;
+                if (editorPlaceClass < 0) editorPlaceClass = 62;
+                if (editorPlaceClass > 62) editorPlaceClass = 0;
+                Console::instance().printf(LogLevel::Info, "Editor: placing class %d", editorPlaceClass);
+            }
+            prevScroll = scroll;
+        }
+
         if (freeCamActive) {
             // Move free camera using WASD + mouse
             float camSpeed = 50.0f * dt;
@@ -1713,6 +1951,66 @@ void Game::update(float dt) {
                 pl->fireWeapon(true);
             }
 
+            // ─── Chat input ──────────────────────────────────────
+            if (cfg.online && activeConn && activeConn->state() >= Connection::Connected) {
+                static bool chatActive = false;
+                static std::string chatBuf;
+                auto& plat = Engine::instance().platform();
+                bool enterDown = plat.input().keysDown[SCANCODE_RETURN];
+                bool escDown = plat.input().keysDown[SCANCODE_ESCAPE];
+                if (!chatActive) {
+                    static bool prevEnter = false;
+                    if (enterDown && !prevEnter) {
+                        chatActive = true;
+                        chatBuf.clear();
+                        plat.startTextInput();
+                        plat.setRelativeMouse(false);
+                        plat.showMouse(true);
+                    }
+                    prevEnter = enterDown;
+                } else {
+                    const std::string& ti = plat.input().textInput;
+                    for (char c : ti) {
+                        if (c >= 0x20 && c <= 0x7e && chatBuf.size() < 200)
+                            chatBuf += c;
+                    }
+                    static bool prevEnter = false;
+                    if (enterDown && !prevEnter && !chatBuf.empty()) {
+                        // Send chat message
+                        T2Protocol::ChatMessage chat;
+                        snprintf(chat.sender, sizeof(chat.sender), "Player");
+                        snprintf(chat.text, sizeof(chat.text), "%s", chatBuf.c_str());
+                        uint8_t buf[512];
+                        size_t len = T2Protocol::encodeChat(buf, sizeof(buf), chat);
+                        if (len > 0) activeConn->sendGamePacket(buf, len, false);
+                        chatBuf.clear();
+                        chatActive = false;
+                        plat.stopTextInput();
+                        plat.setRelativeMouse(true);
+                        plat.showMouse(false);
+                    }
+                    prevEnter = enterDown;
+                    static bool prevEsc = false;
+                    if (escDown && !prevEsc) {
+                        chatActive = false;
+                        chatBuf.clear();
+                        plat.stopTextInput();
+                        plat.setRelativeMouse(true);
+                        plat.showMouse(false);
+                    }
+                    prevEsc = escDown;
+                    // Backspace
+                    static bool prevBS = false;
+                    if (plat.input().keysDown[SCANCODE_BACKSPACE] && !prevBS && !chatBuf.empty())
+                        chatBuf.pop_back();
+                    prevBS = plat.input().keysDown[SCANCODE_BACKSPACE];
+                    // Render chat buffer as overlay text
+                    if (!chatBuf.empty()) {
+                        hud->showMessage(chatBuf.c_str(), ColorF{1,1,1,1});
+                    }
+                }
+            }
+
             // Client-side prediction: store move and send to server
             if (cfg.online && activeConn && activeConn->state() >= Connection::Connected) {
                 uint32_t thisSeq = ++moveSeq;
@@ -1732,7 +2030,10 @@ void Game::update(float dt) {
                 moveMsg.flags = (currentInput.forward ? 1 : 0) |
                                 (currentInput.jump ? 2 : 0) |
                                 (currentInput.jet ? 4 : 0) |
-                                (currentInput.fire ? 8 : 0);
+                                (currentInput.fire ? 8 : 0) |
+                                (currentInput.reload ? 16 : 0) |
+                                (currentInput.left ? 32 : 0) |
+                                (currentInput.right ? 64 : 0);
                 moveMsg.lookX = currentInput.lookDelta.x;
                 moveMsg.lookY = currentInput.lookDelta.y;
                 moveMsg.seq = thisSeq;
@@ -1773,13 +2074,81 @@ void Game::update(float dt) {
             audio.update(camPos, pl->velocity(), forward, up);
         }
     } else if (gameState == Dead) {
-        // Respawn after delay
-        static float deathTimer = 0;
-        deathTimer += dt;
-        if (deathTimer > 3.0f) {
-            deathTimer = 0;
-            pl->respawn();
-            setState(Playing);
+        // Spectator mode when online
+        if (cfg.online && activeConn && activeConn->isConnected()) {
+            if (!liveSpectateInit) {
+                liveSpectateInit = true;
+                freeCamActive = false;
+                // Find first live ghost to spectate
+                auto indices = liveGhosts.getAllIndices();
+                if (!indices.empty()) {
+                    spectateGhostIndex = indices[0];
+                    // If it's our own ghost, skip to next
+                    if ((uint32_t)spectateGhostIndex == serverPlayerGhostIndex && indices.size() > 1)
+                        spectateGhostIndex = indices[1];
+                }
+            }
+            // Cycle ghosts with right mouse / R key
+            static bool prevCycle = false;
+            bool cycleNow = currentInput.fire || currentInput.reload;
+            if (cycleNow && !prevCycle) {
+                auto indices = liveGhosts.getAllIndices();
+                if (!indices.empty()) {
+                    int cur = 0;
+                    for (size_t i = 0; i < indices.size(); i++)
+                        if (indices[i] == spectateGhostIndex) { cur = (int)i; break; }
+                    cur = (cur + 1) % (int)indices.size();
+                    spectateGhostIndex = indices[cur];
+                    // Skip our own ghost
+                    if ((uint32_t)spectateGhostIndex == serverPlayerGhostIndex && indices.size() > 1) {
+                        cur = (cur + 1) % (int)indices.size();
+                        spectateGhostIndex = indices[cur];
+                    }
+                }
+            }
+            prevCycle = cycleNow;
+
+            // Toggle free cam
+            static bool prevFree = false;
+            if (currentInput.freeCam && !prevFree) {
+                freeCamActive = !freeCamActive;
+                if (freeCamActive) {
+                    freeCamPos = {0, 10, 0};
+                    freeCamTarget = {0, 10, -1};
+                    freeCamRot = {0, 0, 0};
+                }
+            }
+            prevFree = currentInput.freeCam;
+
+            // Free cam movement
+            if (freeCamActive) {
+                float pitch = freeCamRot.x, yaw = freeCamRot.z;
+                pitch -= currentInput.lookDelta.x;
+                if (pitch > 1.5f) pitch = 1.5f;
+                if (pitch < -1.5f) pitch = -1.5f;
+                yaw -= currentInput.lookDelta.y;
+                freeCamRot = {pitch, 0, yaw};
+                float camSpeed = 30.0f * dt;
+                Point3F fwd = {sinf(yaw)*cosf(pitch), sinf(pitch), cosf(yaw)*cosf(pitch)};
+                Point3F right = {cosf(yaw), 0, -sinf(yaw)};
+                if (currentInput.forward) { freeCamPos.x += fwd.x*camSpeed; freeCamPos.y += fwd.y*camSpeed; freeCamPos.z += fwd.z*camSpeed; }
+                if (currentInput.backward) { freeCamPos.x -= fwd.x*camSpeed; freeCamPos.y -= fwd.y*camSpeed; freeCamPos.z -= fwd.z*camSpeed; }
+                if (currentInput.left) { freeCamPos.x -= right.x*camSpeed; freeCamPos.z -= right.z*camSpeed; }
+                if (currentInput.right) { freeCamPos.x += right.x*camSpeed; freeCamPos.z += right.z*camSpeed; }
+                if (currentInput.jump) freeCamPos.y += camSpeed;
+                if (currentInput.jet) freeCamPos.y -= camSpeed;
+                freeCamTarget = {freeCamPos.x + fwd.x, freeCamPos.y + fwd.y, freeCamPos.z + fwd.z};
+            }
+        } else {
+            // Offline: auto-respawn after delay
+            static float deathTimer = 0;
+            deathTimer += dt;
+            if (deathTimer > 3.0f) {
+                deathTimer = 0;
+                liveSpectateInit = false;
+                pl->respawn();
+                setState(Playing);
+            }
         }
     }
 }
@@ -1821,6 +2190,26 @@ void Game::render(float dt) {
             camPos.y = orbitCenter.y + orbitHeight;
             camTarget = orbitCenter;
             camTarget.y += 10.0f; // look slightly above center
+        } else if (!demoPlaying && cfg.online && gameState == Dead && liveGhosts.size() > 0) {
+            // Live spectator: follow spectated ghost
+            if (!liveGhosts.hasGhost(spectateGhostIndex)) {
+                auto idxs = liveGhosts.getAllIndices();
+                if (!idxs.empty()) spectateGhostIndex = idxs[0];
+            }
+            const GhostEntry* g = liveGhosts.getGhost(spectateGhostIndex);
+            if (g && (g->position.x != 0 || g->position.y != 0 || g->position.z != 0)) {
+                if (freeCamActive) {
+                    camPos = freeCamPos;
+                    camTarget = freeCamTarget;
+                } else {
+                    camPos = {g->position.x, g->position.y + 4.0f, g->position.z - 6.0f};
+                    camTarget = Point3F{g->position.x, g->position.y, g->position.z};
+                    camTarget.y += 2.0f;
+                }
+            } else {
+                camPos = freeCamActive ? freeCamPos : Point3F{0, 10, 0};
+                camTarget = freeCamActive ? freeCamTarget : Point3F{0, 10, -1};
+            }
         } else if (demoMoveBlend < 1.0f) {
             float t = demoMoveBlend;
             camPos.x = demoPrevCameraPos.x + (demoCameraPos.x - demoPrevCameraPos.x) * t;
@@ -1921,6 +2310,21 @@ void Game::render(float dt) {
     if (pl && !freeCamActive && !demoPlaying && !testShapeLoaded) pl->render();
 
     if (hud && gameState == Playing) hud->render(this);
+
+    // Connection status overlay
+    if (cfg.online && activeConn && activeConn->isConnected() && liveGhosts.size() == 0) {
+        auto* font = r.getFont();
+        if (font) font->render("Receiving game data...", 20, 100, {1, 1, 0, 1}, 2.0f);
+    }
+    if (gameState == Dead && cfg.online) {
+        auto* font = r.getFont();
+        if (font) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "SPECTATOR [%s]", freeCamActive ? "Free Cam" : "Follow");
+            font->render(buf, 20, 20, {0, 1, 1, 1}, 2.0f);
+            font->render("Fire/Reload: Cycle  F1: Free Cam", 20, 45, {0.5f, 0.8f, 1, 1}, 1.5f);
+        }
+    }
 
     // Render test shape (loaded via testshape command)
     if (testShapeLoaded && testShape.loaded) {
@@ -2241,6 +2645,117 @@ void Game::render(float dt) {
         }
     }
 
+    // Render live network ghosts (multiplayer)
+    if (!demoPlaying && liveGhosts.size() > 0 && activeConn && activeConn->isConnected()) {
+        auto* defShader = ShaderManager::getDefaultShader();
+        if (defShader) defShader->bind();
+
+        std::vector<int> indices = liveGhosts.getAllIndices();
+        for (int idx : indices) {
+            // Skip our own player ghost (we render locally via pl->render)
+            if (serverPlayerGhostSynced && (uint32_t)idx == serverPlayerGhostIndex) continue;
+            GhostEntry* g = liveGhosts.getMutableGhost(idx);
+            if (!g) continue;
+            Vec3 p = g->position;
+            if (p.x == 0 && p.y == 0 && p.z == 0) continue;
+            if (!isRenderableGhostClass(g->className)) continue;
+
+            // Smooth interpolation
+            Vec3 rp = p;
+            if (!g->hasRendered) {
+                g->renderPos = p;
+                g->renderRotation = g->rotation;
+                g->prevPosition = p;
+                g->hasRendered = true;
+            } else {
+                float lerpFactor = 1.0f - expf(-12.0f * dt);
+                g->renderPos.x += (p.x - g->renderPos.x) * lerpFactor;
+                g->renderPos.y += (p.y - g->renderPos.y) * lerpFactor;
+                g->renderPos.z += (p.z - g->renderPos.z) * lerpFactor;
+
+                // Interpolate rotation
+                if (g->hasRotation) {
+                    Vec4 target = g->rotation;
+                    float dot = g->renderRotation.x * target.x +
+                                g->renderRotation.y * target.y +
+                                g->renderRotation.z * target.z +
+                                g->renderRotation.w * target.w;
+                    if (dot < 0) { target.x = -target.x; target.y = -target.y; target.z = -target.z; target.w = -target.w; }
+                    g->renderRotation.x += (target.x - g->renderRotation.x) * lerpFactor;
+                    g->renderRotation.y += (target.y - g->renderRotation.y) * lerpFactor;
+                    g->renderRotation.z += (target.z - g->renderRotation.z) * lerpFactor;
+                    g->renderRotation.w += (target.w - g->renderRotation.w) * lerpFactor;
+                    float invLen = 1.0f / sqrtf(g->renderRotation.x * g->renderRotation.x +
+                                                 g->renderRotation.y * g->renderRotation.y +
+                                                 g->renderRotation.z * g->renderRotation.z +
+                                                 g->renderRotation.w * g->renderRotation.w);
+                    g->renderRotation.x *= invLen; g->renderRotation.y *= invLen;
+                    g->renderRotation.z *= invLen; g->renderRotation.w *= invLen;
+                }
+            }
+            rp = g->renderPos;
+
+            // Try to load a shape for this ghost class
+            if (!g->shape) {
+                g->shape = getOrLoadDemoShape(g->className, g->skinName);
+            }
+
+            if (g->shape && g->shape->loaded) {
+                MatrixF model;
+                if (g->hasRotation) {
+                    QuatF q(g->renderRotation.x, g->renderRotation.y, g->renderRotation.z, g->renderRotation.w);
+                    model = q.toMatrix();
+                }
+                model.setTranslation({rp.x, rp.y, rp.z});
+                g->shape->render(0);
+            } else {
+                // Fallback box
+                float size = 0.8f;
+                Box3F box;
+                box.min = {rp.x - size, rp.y - size, rp.z - size};
+                box.max = {rp.x + size, rp.y + size, rp.z + size};
+                float rcol = 0.3f + 0.7f * ((g->classId * 37) % 255) / 255.0f;
+                float gcol = 0.3f + 0.7f * ((g->classId * 73) % 255) / 255.0f;
+                float bcol = 0.3f + 0.7f * ((g->classId * 131) % 255) / 255.0f;
+                r.drawBox(box, {rcol, gcol, bcol, 1.0f});
+            }
+        }
+
+        // Spectator HUD for live ghosts
+        if (!demoPlaying && activeConn && activeConn->isConnected() && liveGhosts.size() > 0) {
+            auto* font = r.getFont();
+            if (font) {
+                std::vector<int> hudIndices = liveGhosts.getAllIndices();
+                int screenW = 1024, screenH = 768;
+                for (int idx : hudIndices) {
+                    if (serverPlayerGhostSynced && (uint32_t)idx == serverPlayerGhostIndex) continue;
+                    const GhostEntry* g = liveGhosts.getGhost(idx);
+                    if (!g) continue;
+                    if (g->position.x == 0 && g->position.y == 0 && g->position.z == 0) continue;
+                    if (!isRenderableGhostClass(g->className)) continue;
+                    Point3F above = {g->renderPos.x, g->renderPos.y + 2.5f, g->renderPos.z};
+                    Point3F screen = worldToScreen(above, r.viewMatrix(), r.projectionMatrix(), screenW, screenH);
+                    if (screen.x < 0 || screen.x > screenW || screen.y < 0 || screen.y > screenH) continue;
+                    ColorF col{1, 1, 1, 1};
+                    std::string label = g->className;
+                    font->render(label.c_str(), screen.x - 30, screen.y - 20, col, 1.2f);
+                    float barW = 50, barH = 6;
+                    float bx = screen.x - barW/2;
+                    float by = screen.y + 2;
+                    r.drawBox({{bx-1, by-1, 0}, {bx+barW+1, by+barH+1, 0}}, {0, 0, 0, 0.6f});
+                    float healthFrac = (g->health > 0) ? (g->health / 100.0f) : 1.0f;
+                    ColorF healthCol = healthFrac > 0.5f ? ColorF{0, 1, 0, 0.8f} :
+                                      healthFrac > 0.25f ? ColorF{1, 1, 0, 0.8f} : ColorF{1, 0, 0, 0.8f};
+                    r.drawBox({{bx, by, 0}, {bx + barW * healthFrac, by + barH, 0}}, healthCol);
+                    float ey2 = by + barH + 1;
+                    float energyFrac = (g->energy > 0) ? (g->energy / 100.0f) : 1.0f;
+                    r.drawBox({{bx-1, ey2-1, 0}, {bx+barW+1, ey2+barH+1, 0}}, {0, 0, 0, 0.6f});
+                    r.drawBox({{bx, ey2, 0}, {bx + barW * energyFrac, ey2 + barH, 0}}, {0.3f, 0.5f, 1, 0.8f});
+                }
+            }
+        }
+    }
+
     // 3D demo path trail
     if (demoPlaying && demoPathCount > 1) {
         // Full path in dim green
@@ -2372,6 +2887,8 @@ void Game::connectToServer(const char* host, uint16_t port) {
     cfg.online = true;
 
     Console::instance().printf(LogLevel::Info, "Connecting to %s:%d...", host, port);
+    // Show connecting message
+    if (hud) hud->showMessage("Connecting...", ColorF{1, 1, 0, 1});
 
     auto& net = Engine::instance().network();
     activeConn = net.createConnection();
@@ -2379,8 +2896,20 @@ void Game::connectToServer(const char* host, uint16_t port) {
         activeConn->setConnectCallback([this](bool success) {
             if (success) {
                 Console::instance().printf(LogLevel::Info, "Connected!");
+                // Send player name to server
+                std::string nameCmd = std::string("sv_name ") + cfg.playerName;
+                uint8_t buf[256];
+                buf[0] = T2Protocol::GDT_Command;
+                uint16_t nl = (uint16_t)nameCmd.size();
+                buf[1] = (uint8_t)(nl & 0xFF);
+                buf[2] = (uint8_t)(nl >> 8);
+                memcpy(buf + 3, nameCmd.data(), nl);
+                activeConn->sendGamePacket(buf, 3 + nl, false);
             } else {
                 Console::instance().printf(LogLevel::Info, "Connection failed");
+                liveSpectateInit = false;
+                spectateGhostIndex = -1;
+                liveGhosts.clear();
                 setState(MenuScreen);
             }
         });
@@ -2402,7 +2931,185 @@ void Game::connectToServer(const char* host, uint16_t port) {
                     }
                     return;
                 }
-                T2Protocol::UpdateMessage update;
+
+                // Handle datablock packets
+                if (data[0] == T2Protocol::GDT_Datablock) {
+                    T2Protocol::DatablockHeader hdr;
+                    const uint8_t* payload;
+                    size_t payloadLen;
+                    if (T2Protocol::decodeDatablock(data, size, hdr, payload, payloadLen)) {
+                        ReceivedDatablock rdb;
+                        rdb.hdr = hdr;
+                        rdb.payload.assign(payload, payload + payloadLen);
+                        receivedDatablocks[hdr.classId].push_back(std::move(rdb));
+                        Console::instance().printf(LogLevel::Debug,
+                            "Received datablock: class=%u obj=%u idx=%u/%u (%zu bytes)",
+                            (unsigned)hdr.classId, (unsigned)hdr.objectId,
+                            (unsigned)hdr.index, (unsigned)hdr.total, payloadLen);
+                    }
+                    return;
+                }
+
+                // Handle chat messages
+                if (data[0] == T2Protocol::GDT_ChatMessage) {
+                    T2Protocol::ChatMessage chat;
+                    if (T2Protocol::decodeChat(data, size, chat)) {
+                        Console::instance().printf(LogLevel::Info, "[CHAT] %s: %s", chat.sender, chat.text);
+                        playChatBeep();
+                    }
+                    return;
+                }
+
+                // Handle game state packets
+                if (data[0] == T2Protocol::GDT_GameState) {
+                    T2Protocol::GameStateMessage gs;
+                    if (T2Protocol::decodeGameState(data, size, gs)) {
+                        serverPlayerGhostIndex = gs.controlObjectGhostIndex;
+                        serverPlayerGhostSynced = true;
+                        Console::instance().printf(LogLevel::Info,
+                            "GameState: control ghost idx=%u", (unsigned)gs.controlObjectGhostIndex);
+                    }
+                    return;
+                }
+
+                // Handle ghost packets (server batches multiple ghosts into one datagram — loop over them)
+                if (data[0] == T2Protocol::GDT_Ghost || data[0] == T2Protocol::GDT_GhostAlways) {
+                    const uint8_t* gp = data;
+                    size_t grem = size;
+                    while (grem > 0 && (gp[0] == T2Protocol::GDT_Ghost || gp[0] == T2Protocol::GDT_GhostAlways)) {
+                        T2Protocol::GhostMessage gm;
+                        if (!T2Protocol::decodeGhostHeader(gp, grem, gm)) break;
+                        size_t hdrSize = 1 + 4 + 1 + 4; // GDT + index + type + classId
+                        const uint8_t* ghostPayload = gp + hdrSize;
+                        size_t ghostPayloadLen = (grem > hdrSize) ? grem - hdrSize : 0;
+
+                        if (gm.type == T2Protocol::Ghost_Delete) {
+                            liveGhosts.deleteGhost((int)gm.index);
+                            Console::instance().printf(LogLevel::Debug, "Ghost delete idx=%u", (unsigned)gm.index);
+                        } else if (gm.type == T2Protocol::Ghost_Create) {
+                            if (!liveGhosts.hasGhost((int)gm.index)) {
+                                std::string cn;
+                                if (gm.classId >= 0 && gm.classId < T2Demo::NetObjectClassCount)
+                                    cn = T2Demo::NetObjectClassNames[gm.classId];
+                                else
+                                    cn = "Class" + std::to_string(gm.classId);
+                                liveGhosts.createGhost((int)gm.index, gm.classId, cn);
+                                // Look up datablock and apply config
+                                auto dbs = getDatablocksForClass((uint32_t)gm.classId);
+                                if (dbs && !dbs->empty()) {
+                                    auto* ge = liveGhosts.getMutableGhost((int)gm.index);
+                                    if (ge) {
+                                        const auto& payload = dbs->front().payload;
+                                        if (payload.size() >= 6) {
+                                            float hp;
+                                            memcpy(&hp, payload.data(), 4);
+                                            ge->maxHealth = hp;
+                                            uint16_t nameLen;
+                                            memcpy(&nameLen, payload.data() + 4, 2);
+                                            if (nameLen > 0 && (size_t)(6 + nameLen) <= payload.size()) {
+                                                ge->shapeName.assign((const char*)payload.data() + 6, nameLen);
+                                            }
+                                        }
+                                    }
+                                }
+                                // Read position from payload
+                                if (ghostPayloadLen >= 24) {
+                                    float px, py, pz, rx, rz, hp;
+                                    uint32_t p = 0;
+                                    memcpy(&px, ghostPayload + p, 4); p += 4;
+                                    memcpy(&py, ghostPayload + p, 4); p += 4;
+                                    memcpy(&pz, ghostPayload + p, 4); p += 4;
+                                    memcpy(&rx, ghostPayload + p, 4); p += 4;
+                                    memcpy(&rz, ghostPayload + p, 4); p += 4;
+                                    memcpy(&hp, ghostPayload + p, 4); p += 4;
+                                    auto* ge = liveGhosts.getMutableGhost((int)gm.index);
+                                    if (ge) {
+                                        ge->position = {px, py, pz};
+                                        float halfYaw = rz * 0.5f;
+                                        float halfPitch = rx * 0.5f;
+                                        float cy = cosf(halfYaw), sy = sinf(halfYaw);
+                                        float cp = cosf(halfPitch), sp = sinf(halfPitch);
+                                        ge->rotation = {sp * cy, cp * sy, sp * sy, cp * cy};
+                                        ge->hasRotation = true;
+                                        ge->health = hp;
+                                        // Parse kills/deaths/team/name (payload: 24=pos, 8=k/d, 4=team, name)
+                                        if (ghostPayloadLen >= 36) {
+                                            float fk, fd, fteam;
+                                            memcpy(&fk, ghostPayload + p, 4); p += 4;
+                                            memcpy(&fd, ghostPayload + p, 4); p += 4;
+                                            memcpy(&fteam, ghostPayload + p, 4); p += 4;
+                                            ge->kills = (int32_t)fk;
+                                            ge->deaths = (int32_t)fd;
+                                            ge->teamId = (int32_t)fteam;
+                                            // Parse player name if present (null-terminated, bounded)
+                                            if (ghostPayloadLen > p && ghostPayload[p] != 0) {
+                                                size_t maxName = ghostPayloadLen - p;
+                                                size_t nl = 0;
+                                                while (nl < maxName && ghostPayload[p + nl] != 0) nl++;
+                                                ge->playerName.assign((const char*)ghostPayload + p, nl);
+                                            }
+                                        }
+                                    }
+                                }
+                                Console::instance().printf(LogLevel::Debug,
+                                    "Ghost create idx=%u class=%d (%s)", (unsigned)gm.index, gm.classId, cn.c_str());
+                            }
+                        } else if (gm.type == T2Protocol::Ghost_Update) {
+                            auto* ge = liveGhosts.getMutableGhost((int)gm.index);
+                            if (ge && ghostPayloadLen >= 24) {
+                                float px, py, pz, rx, rz, hp;
+                                uint32_t p = 0;
+                                memcpy(&px, ghostPayload + p, 4); p += 4;
+                                memcpy(&py, ghostPayload + p, 4); p += 4;
+                                memcpy(&pz, ghostPayload + p, 4); p += 4;
+                                memcpy(&rx, ghostPayload + p, 4); p += 4;
+                                memcpy(&rz, ghostPayload + p, 4); p += 4;
+                                memcpy(&hp, ghostPayload + p, 4); p += 4;
+                                ge->position = {px, py, pz};
+                                float halfYaw = rz * 0.5f;
+                                float halfPitch = rx * 0.5f;
+                                float cy = cosf(halfYaw), sy = sinf(halfYaw);
+                                float cp = cosf(halfPitch), sp = sinf(halfPitch);
+                                ge->rotation = {sp * cy, cp * sy, sp * sy, cp * cy};
+                                 ge->hasRotation = true;
+                                 ge->health = hp;
+                                 // Parse kills/deaths/team/name
+                                 if (ghostPayloadLen >= 36) {
+                                     float fk, fd, fteam;
+                                     memcpy(&fk, ghostPayload + p, 4); p += 4;
+                                     memcpy(&fd, ghostPayload + p, 4); p += 4;
+                                     memcpy(&fteam, ghostPayload + p, 4); p += 4;
+                                      ge->kills = (int32_t)fk;
+                                      ge->deaths = (int32_t)fd;
+                                      ge->teamId = (int32_t)fteam;
+                                      if (ghostPayloadLen > p && ghostPayload[p] != 0) {
+                                          size_t maxName = ghostPayloadLen - p;
+                                          size_t nl = 0;
+                                          while (nl < maxName && ghostPayload[p + nl] != 0) nl++;
+                                          ge->playerName.assign((const char*)ghostPayload + p, nl);
+                                      }
+                                  }
+                             }
+                         }
+                         // Advance to the next ghost in the batch (variable-length null-terminated name).
+                         size_t consumed = hdrSize;
+                         if (gm.type != T2Protocol::Ghost_Delete && ghostPayloadLen >= 36) {
+                             size_t avail = ghostPayloadLen - 36;
+                             const uint8_t* np = ghostPayload + 36;
+                             size_t nl = 0;
+                             while (nl < avail && np[nl] != 0) nl++;
+                             consumed += 36 + (nl < avail ? nl + 1 : avail);
+                         } else {
+                             consumed += ghostPayloadLen;
+                         }
+                         if (consumed > grem) break;
+                         gp += consumed;
+                         grem -= consumed;
+                     }
+                     return;
+                     }
+
+                     T2Protocol::UpdateMessage update;
                 if (T2Protocol::decodeUpdate(data, size, update)) {
                     // Reconcile: set to server state then replay pending moves
                     Point3F serverPos = {update.posX, update.posY, update.posZ};

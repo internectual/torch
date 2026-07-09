@@ -370,9 +370,13 @@ struct GhostEntry {
     bool hasRendered{};
     bool skinApplied{};
     float health{100.0f};
+    float maxHealth{100.0f};
     float energy{100.0f};
+    int32_t kills{};
+    int32_t deaths{};
     std::string playerName;
     int teamId{-1};
+    std::string shapeName; // from datablock
 };
 
 class GhostTracker {

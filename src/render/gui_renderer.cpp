@@ -2164,6 +2164,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                         ts->callFunction(hit->name + "::onSelect",
                             {VMValue(hit->name), VMValue(ti), VMValue(hit->tabs[ti].text)});
                     // C++ fallback: only for main LaunchTabView (not nested tab groups like GM_TabView)
+                    // The script's viewTab uses text-based lookup which fails. Use numeric index instead.
                     if (hit->name == "LaunchTabView") {
                         auto* sobj = ScriptEngine::instance().findObject(hit->name.c_str());
                         if (sobj) {
@@ -2175,7 +2176,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                                     Engine::instance().guiRenderer().setContent(guiName);
                                     if (!Engine::instance().guiRenderer().isDialogActive("LaunchToolbarDlg"))
                                         Engine::instance().guiRenderer().pushDialog("LaunchToolbarDlg");
-    }
+                                }
                             }
                         }
                     }
@@ -2404,8 +2405,6 @@ void GuiRenderer::setContent(const std::string& name) {
         if (auto* ts = Engine::instance().script().ts()) {
             if (ts->hasFunction(name + "::onWake")) ts->callFunction(name + "::onWake", {});
         }
-        if (!dialogStack.empty() && dialogStack.back()->name == name)
-            Console::instance().printf(LogLevel::Debug, "GUI: setContent %s (stack now %zu)", name.c_str(), dialogStack.size());
     } else {
         Console::instance().printf(LogLevel::Warn, "GUI: setContent '%s' not found", name.c_str());
     }

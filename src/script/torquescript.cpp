@@ -55,10 +55,21 @@ struct TorqueScript::Impl {
 
     // Compile .cs to .dso using the turd compiler (Node.js)
     bool compileToDSO(const std::string& srcContent, const std::string& dsoFullPath) {
-        const char* compilerScript = "/home/methodown/torch/torque-dso.js";
+        // Look for the compiler script in the data directory
+        std::string compilerScript = Console::instance().getStringVariable("compilerScript");
+        if (compilerScript.empty()) {
+            // Try default locations relative to CWD
+            for (auto* p : {"./torque-dso.js", "../torque-dso.js", "data/torque-dso.js"}) {
+                struct stat st;
+                if (stat(p, &st) == 0) { compilerScript = p; break; }
+            }
+        }
+        // Node.js path
+        std::string nodeBin = Console::instance().getStringVariable("nodePath");
+        if (nodeBin.empty()) nodeBin = "node";
         struct stat st;
-        if (stat(compilerScript, &st) != 0) {
-            Console::instance().printf(LogLevel::Debug, "TS: turd compiler not found at %s", compilerScript);
+        if (compilerScript.empty() || stat(compilerScript.c_str(), &st) != 0) {
+            Console::instance().printf(LogLevel::Debug, "TS: turd compiler not found");
             return false;
         }
         // Create parent directory (and intermediate dirs)
@@ -80,7 +91,7 @@ struct TorqueScript::Impl {
             fwrite(srcContent.data(), 1, srcContent.size(), f);
             fclose(f);
         }
-        std::string cmd = "/home/linuxbrew/.linuxbrew/bin/node " + std::string(compilerScript) + " " + tmpPath + " " + dsoFullPath + " 2>/dev/null";
+        std::string cmd = nodeBin + " " + compilerScript + " " + tmpPath + " " + dsoFullPath + " 2>/dev/null";
         int ret = system(cmd.c_str());
         if (ret != 0) {
             unlink(tmpPath.c_str());
