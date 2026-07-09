@@ -1367,10 +1367,6 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    tsInstance->registerNative("enableWinConsole", [](const auto& args) -> VMValue {
-        return VMValue(1);
-    });
-
     tsInstance->registerNative("strchr", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(-1);
         std::string s = args[0].toString();
@@ -1456,18 +1452,6 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("setRandomSeed", [](const auto& args) -> VMValue {
         if (!args.empty()) srand((unsigned int)args[0].toInt());
         return VMValue(1);
-    });
-
-    tsInstance->registerNative("enableWinConsole", [](const auto&) -> VMValue {
-        return VMValue(1);
-    });
-
-    tsInstance->registerNative("fileExt", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue("");
-        std::string path = args[0].toString();
-        size_t dot = path.rfind('.');
-        if (dot == std::string::npos) return VMValue("");
-        return VMValue(path.substr(dot + 1));
     });
 
     tsInstance->registerNative("fileBase", [](const auto& args) -> VMValue {
@@ -2017,9 +2001,6 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("Hide", [](const auto& args) -> VMValue {
         return VMValue(1);
     });
-    tsInstance->registerNative("setVisible", [](const auto& args) -> VMValue {
-        return VMValue(1);
-    });
     tsInstance->registerNative("isActive", [](const auto&) -> VMValue {
         return VMValue(1);
     });
@@ -2037,7 +2018,7 @@ bool ScriptEngine::init() {
         if (args.empty()) return VMValue("");
         std::string path = args[0].toString();
         auto dot = path.rfind('.');
-        if (dot != std::string::npos) return VMValue(path.substr(dot));
+        if (dot != std::string::npos) return VMValue(path.substr(dot + 1));
         return VMValue("");
     });
     tsInstance->registerNative("getFileName", [](const auto& args) -> VMValue {
@@ -2188,10 +2169,6 @@ bool ScriptEngine::init() {
         return VMValue(count);
     });
 
-    tsInstance->registerNative("videoSetGammaCorrection", [](const auto&) -> VMValue {
-        return VMValue(1);
-    });
-
     tsInstance->registerNative("wonGetAuthInfo", [](const auto&) -> VMValue {
         return VMValue(std::string(""));
     });
@@ -2287,20 +2264,6 @@ bool ScriptEngine::init() {
             ctl = g.soToGui(name, nullptr);
         return ctl;
     };
-    tsInstance->registerNative("addRow", [getListCtrl](const auto& args) -> VMValue {
-        std::string cname = args.empty() ? "" : args[0].toString();
-        auto* ctl = getListCtrl(cname);
-        if (ctl && args.size() >= 3) {
-            int id = args[1].toInt();
-            std::string txt = args[2].toString();
-            if (id >= (int)ctl->listRows.size()) ctl->listRows.resize(id + 1);
-            ctl->listRows[id] = txt;
-            Console::instance().printf(LogLevel::Debug, "addRow: ctl='%s' id=%d txt='%s' rows=%zu", cname.c_str(), id, txt.c_str(), ctl->listRows.size());
-        } else {
-            Console::instance().printf(LogLevel::Debug, "addRow: FAIL ctl=%p cname='%s' args=%zu", (void*)ctl, cname.c_str(), args.size());
-        }
-        return VMValue(1);
-    });
     tsInstance->registerNative("clear", [getListCtrl](const auto& args) -> VMValue {
         std::string cname = args.empty() ? "" : args[0].toString();
         auto* ctl = getListCtrl(cname);
@@ -2492,7 +2455,20 @@ bool ScriptEngine::init() {
             if (ctl->listRows[i] == search) return VMValue(i);
         return VMValue(-1);
     });
-    tsInstance->registerNative("scrollToTag", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("scrollToTag", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl && args.size() >= 2) {
+            std::string tag = args[1].toString();
+            for (size_t i = 0; i < ctl->listRows.size(); i++) {
+                if (ctl->listRows[i].find(tag) != std::string::npos) {
+                    ctl->selectedRow = (int)i;
+                    ctl->scrollY = (float)i * 20.0f;
+                    break;
+                }
+            }
+        }
+        return VMValue(1);
+    });
     tsInstance->registerNative("setVisible", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() >= 2) {
             auto* ctl = getListCtrl(args[0].toString());
@@ -2543,6 +2519,16 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("repaint", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("getRowNumById", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (!ctl || args.size() < 2) return VMValue(-1);
+        int id = args[1].toInt();
+        for (int i = 0; i < (int)ctl->listRows.size(); i++)
+            if (i == id) return VMValue(i);
+        return VMValue(-1);
+    });
+    tsInstance->registerNative("setRowColor", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setRowStyle", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("setText", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() >= 2) {
             auto* ctl = getListCtrl(args[0].toString());
@@ -2581,16 +2567,37 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // Chat/UI/misc function stubs (method dispatch falls back to natives if no TS function)
-    tsInstance->registerNative("addChat", [](const auto&) -> VMValue { return VMValue(1); });
+    // Chat system — store chat messages for HUD rendering
+    static std::vector<std::string> s_chatMessages;
+    tsInstance->registerNative("addChat", [](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            std::string msg = args[0].toString() + ": " + args[1].toString();
+            s_chatMessages.push_back(msg);
+            if (s_chatMessages.size() > 100) s_chatMessages.erase(s_chatMessages.begin());
+            Console::instance().setVariable("HUD::lastChat", msg.c_str());
+        }
+        return VMValue(1);
+    });
     tsInstance->registerNative("installChatItem", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("startChatMenu", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("endChatMenu", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("startChatMenu", [](const auto&) -> VMValue {
+        Console::instance().setVariable("HUD::chatOpen", "1");
+        return VMValue(1);
+    });
+    tsInstance->registerNative("endChatMenu", [](const auto&) -> VMValue {
+        Console::instance().setVariable("HUD::chatOpen", "0");
+        return VMValue(1);
+    });
     tsInstance->registerNative("ChatRoomMemberList_refresh", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("ChannelBannedList_refresh", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("createFlagTossGauge", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("cancelChatMenu", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("setChatPage", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("cancelChatMenu", [](const auto&) -> VMValue {
+        Console::instance().setVariable("HUD::chatOpen", "0");
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setChatPage", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().setVariable("HUD::chatPage", args[0].toString().c_str());
+        return VMValue(1);
+    });
 
     // loadGui — look up and call the TS function (natives take priority over TS functions)
     tsInstance->registerNative("loadGui", [](const auto& args) -> VMValue {
@@ -2727,10 +2734,19 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("WONStartUpdateAccount", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("WONStartLoginInfoFetch", [](const auto&) -> VMValue { return VMValue(1); });
 
-    // Journal stubs
-    tsInstance->registerNative("loadJournal", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("saveJournal", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("playJournal", [](const auto&) -> VMValue { return VMValue(1); });
+    // Journal stubs — journal files store demo/input replay data
+    tsInstance->registerNative("loadJournal", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().printf(LogLevel::Info, "loadJournal: %s", args[0].toString().c_str());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("saveJournal", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().printf(LogLevel::Info, "saveJournal: %s", args[0].toString().c_str());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("playJournal", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().printf(LogLevel::Info, "playJournal: %s", args[0].toString().c_str());
+        return VMValue(1);
+    });
 
     // EffectProfile is called by audio scripts
     tsInstance->registerNative("EffectProfile", [](const auto&) -> VMValue { return VMValue(1); });
@@ -2907,8 +2923,6 @@ bool ScriptEngine::init() {
         if (!args.empty()) Console::instance().setVariable("pref::gammaCorrection", args[0].toString().c_str());
         return VMValue(1);
     });
-    tsInstance->registerNative("GetIRCServerList", [](const auto&) -> VMValue { return VMValue(""); });
-
     tsInstance->registerNative("enableWinConsole", [](const auto& args) -> VMValue {
         if (!args.empty() && args[0].toBool()) {
             static bool enabled = false;
