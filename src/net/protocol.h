@@ -2,6 +2,7 @@
 #include "net/network.h"
 #include <cstdint>
 #include <vector>
+#include <cstring>
 
 // ─── Torch Network Protocol ──────────────────────────────────────────
 //
@@ -214,6 +215,102 @@ namespace T2Protocol {
 
     size_t encodeChat(uint8_t* buf, size_t bufSize, const ChatMessage& msg);
     bool decodeChat(const uint8_t* data, size_t size, ChatMessage& msg);
+
+    // ─── Inline codec implementations ──────────────────────────
+    // Defined inline (rather than in protocol.cpp) so the wire decoders can be
+    // exercised by a libFuzzer harness without linking GameServer/Engine.
+
+    inline bool decodeDatablock(const uint8_t* data, size_t size,
+                                DatablockHeader& hdr,
+                                const uint8_t*& payload, size_t& payloadLen) {
+        if (size < 1 + 4*4 || data[0] != GDT_Datablock) return false;
+        uint32_t pos = 1;
+        memcpy(&hdr.classId,  data + pos, 4); pos += 4;
+        memcpy(&hdr.objectId, data + pos, 4); pos += 4;
+        memcpy(&hdr.index,    data + pos, 4); pos += 4;
+        memcpy(&hdr.total,    data + pos, 4); pos += 4;
+        payload = data + pos;
+        payloadLen = size - pos;
+        return true;
+    }
+
+    inline size_t encodeGhostHeader(uint8_t* buf, size_t bufSize, const GhostMessage& msg) {
+        size_t needed = 1 + 4 + 1 + 4;
+        if (bufSize < needed) return 0;
+        buf[0] = GDT_Ghost;
+        uint32_t pos = 1;
+        memcpy(buf + pos, &msg.index,   4); pos += 4;
+        buf[pos++] = (uint8_t)msg.type;
+        int32_t cid = msg.type == Ghost_Create ? msg.classId : 0;
+        memcpy(buf + pos, &cid, 4); pos += 4;
+        return pos;
+    }
+
+    inline bool decodeGhostHeader(const uint8_t* data, size_t size, GhostMessage& msg) {
+        if (size < 1 + 4 + 1 + 4) return false;
+        if (data[0] != GDT_Ghost && data[0] != GDT_GhostAlways) return false;
+        uint32_t pos = 1;
+        memcpy(&msg.index, data + pos, 4); pos += 4;
+        msg.type = (GhostUpdateType)data[pos++];
+        int32_t cid = 0;
+        memcpy(&cid, data + pos, 4); pos += 4;
+        msg.classId = msg.type == Ghost_Create ? cid : -1;
+        return true;
+    }
+
+    inline size_t encodeGameState(uint8_t* buf, size_t bufSize, const GameStateMessage& msg) {
+        if (bufSize < 1 + 4 + 4 + 1 + 4 + 4) return 0;
+        uint32_t pos = 0;
+        buf[pos++] = GDT_GameState;
+        memcpy(buf + pos, &msg.controlObjectGhostIndex, 4); pos += 4;
+        memcpy(buf + pos, &msg.energy, 4); pos += 4;
+        buf[pos++] = msg.flags;
+        memcpy(buf + pos, &msg.gameMode, 4); pos += 4;
+        memcpy(buf + pos, &msg.scoreLimit, 4); pos += 4;
+        return pos;
+    }
+
+    inline bool decodeGameState(const uint8_t* data, size_t size, GameStateMessage& msg) {
+        if (size < 1 + 4 + 4 + 1 + 4 + 4 || data[0] != GDT_GameState) return false;
+        uint32_t pos = 1;
+        memcpy(&msg.controlObjectGhostIndex, data + pos, 4); pos += 4;
+        memcpy(&msg.energy, data + pos, 4); pos += 4;
+        msg.flags = data[pos++];
+        memcpy(&msg.gameMode, data + pos, 4); pos += 4;
+        memcpy(&msg.scoreLimit, data + pos, 4); pos += 4;
+        return true;
+    }
+
+    inline size_t encodeChat(uint8_t* buf, size_t bufSize, const ChatMessage& msg) {
+        size_t needed = 1 + 1 + strlen(msg.sender) + 2 + strlen(msg.text);
+        if (bufSize < needed) return 0;
+        uint32_t pos = 0;
+        buf[pos++] = GDT_ChatMessage;
+        uint8_t slen = (uint8_t)strlen(msg.sender);
+        buf[pos++] = slen;
+        memcpy(buf + pos, msg.sender, slen); pos += slen;
+        uint16_t tlen = (uint16_t)strlen(msg.text);
+        memcpy(buf + pos, &tlen, 2); pos += 2;
+        memcpy(buf + pos, msg.text, tlen); pos += tlen;
+        return pos;
+    }
+
+    inline bool decodeChat(const uint8_t* data, size_t size, ChatMessage& msg) {
+        if (size < 4 || data[0] != GDT_ChatMessage) return false;
+        uint32_t pos = 1;
+        uint8_t slen = data[pos++];
+        if (slen > (uint8_t)(sizeof(msg.sender) - 1)) slen = (uint8_t)(sizeof(msg.sender) - 1);
+        if (pos + slen + 2 > size) return false;
+        memset(msg.sender, 0, sizeof(msg.sender));
+        if (slen > 0) { memcpy(msg.sender, data + pos, slen); } pos += slen;
+        uint16_t tlen;
+        memcpy(&tlen, data + pos, 2); pos += 2;
+        if (tlen > (uint16_t)(sizeof(msg.text) - 1)) tlen = (uint16_t)(sizeof(msg.text) - 1);
+        if (pos + tlen > size) return false;
+        memset(msg.text, 0, sizeof(msg.text));
+        if (tlen > 0) memcpy(msg.text, data + pos, tlen);
+        return true;
+    }
 };
 
 // ─── Game Server ──────────────────────────────────────────────────

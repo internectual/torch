@@ -23,3 +23,11 @@ clang++ -std=c++20 -O1 -g \
   -o "$FUZZ/fuzz_loaders" -lpthread -lz
 
 echo "BUILD OK -> $FUZZ/fuzz_loaders"
+
+echo "=== building fuzz_net (network protocol decoders) ==="
+clang++ -std=c++20 -O1 -g -fsanitize=fuzzer,address,undefined \
+  -DGLEW_STATIC -I "$SRC" \
+  "$FUZZ/fuzz_net.cpp" \
+  "$FUZZ/console_stub.cpp" \
+  -o "$FUZZ/fuzz_net" -lpthread
+echo "BUILD OK -> $FUZZ/fuzz_net"
