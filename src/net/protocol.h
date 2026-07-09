@@ -153,7 +153,7 @@ namespace T2Protocol {
         uint32_t lastMoveSeq;
     };
 
-    bool encodeMove(uint8_t* buf, size_t bufSize, const MoveMessage& msg);
+    size_t encodeMove(uint8_t* buf, size_t bufSize, const MoveMessage& msg);
     bool decodeMove(const uint8_t* data, size_t size, MoveMessage& msg);
     bool encodeUpdate(uint8_t* buf, size_t bufSize, const UpdateMessage& msg);
     bool decodeUpdate(const uint8_t* data, size_t size, UpdateMessage& msg);
@@ -212,7 +212,7 @@ namespace T2Protocol {
         char text[256]{};
     };
 
-    bool encodeChat(uint8_t* buf, size_t bufSize, const ChatMessage& msg);
+    size_t encodeChat(uint8_t* buf, size_t bufSize, const ChatMessage& msg);
     bool decodeChat(const uint8_t* data, size_t size, ChatMessage& msg);
 };
 

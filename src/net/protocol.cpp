@@ -12,6 +12,7 @@
 #include <map>
 #include <set>
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <sys/time.h>
 #include <chrono>
@@ -36,14 +37,15 @@ uint16_t T2Protocol::calculateChecksum(const uint8_t* data, size_t size) {
 
 bool T2Protocol::verifyChecksum(const uint8_t* data, size_t size) {
     if (size < 2) return false;
-    uint16_t stored = *(uint16_t*)(data + size - 2);
+    uint16_t stored = 0;
+    memcpy(&stored, data + size - 2, 2);
     return calculateChecksum(data, size - 2) == stored;
 }
 
 // ─── Move Message ─────────────────────────────────────────────────
 
-bool T2Protocol::encodeMove(uint8_t* buf, size_t bufSize, const MoveMessage& msg) {
-    if (bufSize < 34) return false;
+size_t T2Protocol::encodeMove(uint8_t* buf, size_t bufSize, const MoveMessage& msg) {
+    if (bufSize < 34) return 0;
     uint32_t pos = 0;
     buf[pos++] = GDT_Move;
     memcpy(buf + pos, &msg.posX, 4); pos += 4;
@@ -55,7 +57,7 @@ bool T2Protocol::encodeMove(uint8_t* buf, size_t bufSize, const MoveMessage& msg
     memcpy(buf + pos, &msg.lookX, 4); pos += 4;
     memcpy(buf + pos, &msg.lookY, 4); pos += 4;
     memcpy(buf + pos, &msg.seq, 4); pos += 4;
-    return true;
+    return pos;
 }
 
 bool T2Protocol::decodeMove(const uint8_t* data, size_t size, MoveMessage& msg) {
@@ -76,7 +78,7 @@ bool T2Protocol::decodeMove(const uint8_t* data, size_t size, MoveMessage& msg) 
 // ─── Update Message ───────────────────────────────────────────────
 
 bool T2Protocol::encodeUpdate(uint8_t* buf, size_t bufSize, const UpdateMessage& msg) {
-    if (bufSize < 49) return false;
+    if (bufSize < 40) return false;
     uint32_t pos = 0;
     buf[pos++] = GDT_Update;
     memcpy(buf + pos, &msg.posX, 4); pos += 4;
@@ -97,7 +99,7 @@ bool T2Protocol::encodeUpdate(uint8_t* buf, size_t bufSize, const UpdateMessage&
 }
 
 bool T2Protocol::decodeUpdate(const uint8_t* data, size_t size, UpdateMessage& msg) {
-    if (size < 49 || data[0] != GDT_Update) return false;
+    if (size < 40 || data[0] != GDT_Update) return false;
     uint32_t pos = 1;
     memcpy(&msg.posX, data + pos, 4); pos += 4;
     memcpy(&msg.posY, data + pos, 4); pos += 4;
@@ -202,9 +204,9 @@ bool T2Protocol::decodeGameState(const uint8_t* data, size_t size, GameStateMess
 
 // ─── Chat Message ─────────────────────────────────────────────────
 
-bool T2Protocol::encodeChat(uint8_t* buf, size_t bufSize, const ChatMessage& msg) {
+size_t T2Protocol::encodeChat(uint8_t* buf, size_t bufSize, const ChatMessage& msg) {
     size_t needed = 1 + 1 + strlen(msg.sender) + 2 + strlen(msg.text);
-    if (bufSize < needed) return false;
+    if (bufSize < needed) return 0;
     uint32_t pos = 0;
     buf[pos++] = GDT_ChatMessage;
     uint8_t slen = (uint8_t)strlen(msg.sender);
@@ -213,7 +215,7 @@ bool T2Protocol::encodeChat(uint8_t* buf, size_t bufSize, const ChatMessage& msg
     uint16_t tlen = (uint16_t)strlen(msg.text);
     memcpy(buf + pos, &tlen, 2); pos += 2;
     memcpy(buf + pos, msg.text, tlen); pos += tlen;
-    return true;
+    return pos;
 }
 
 bool T2Protocol::decodeChat(const uint8_t* data, size_t size, ChatMessage& msg) {
@@ -1117,6 +1119,7 @@ void GameServer::update() {
 
             auto& client = impl->clients[ci];
             client.lastReceive = now;
+            if (!client.active) continue; // ignore GameData from inactive slots
 
             // Check for GDT_Command
             if (payloadLen > 0 && payload[0] == T2Protocol::GDT_Command && payloadLen >= 3) {
@@ -1125,7 +1128,7 @@ void GameServer::update() {
                     std::string cmd((const char*)payload + 3, cmdLen);
                     // Handle sv_name specially (set player name for this client)
                     if (cmd.rfind("sv_name ", 0) == 0 && cmd.size() > 8) {
-                        client.playerName = cmd.substr(8);
+                        client.playerName = cmd.substr(8, 255);
                         Console::instance().printf(LogLevel::Info, "Client %d set name: %s", ci, client.playerName.c_str());
                     } else {
                         Console::instance().execute(cmd.c_str());
@@ -1143,12 +1146,13 @@ void GameServer::update() {
                     whdr.type = (uint8_t)PacketType::GameData;
                     whdr.checksum = 0;
                     uint8_t chatBuf[512];
-                    T2Protocol::encodeChat(chatBuf, sizeof(chatBuf), chat);
-                    std::vector<uint8_t> pkt(sizeof(WireHeader) + 4 + strlen(chat.sender) + strlen(chat.text));
-                    memcpy(pkt.data(), &whdr, sizeof(WireHeader));
-                    memcpy(pkt.data() + sizeof(WireHeader), chatBuf, pkt.size() - sizeof(WireHeader));
-                    for (auto& c : impl->clients)
-                        if (c.active && !c.isBot) impl->sendTo(c.addr, pkt.data(), pkt.size());
+                    if (T2Protocol::encodeChat(chatBuf, sizeof(chatBuf), chat)) {
+                        std::vector<uint8_t> pkt(sizeof(WireHeader) + 4 + strlen(chat.sender) + strlen(chat.text));
+                        memcpy(pkt.data(), &whdr, sizeof(WireHeader));
+                        memcpy(pkt.data() + sizeof(WireHeader), chatBuf, pkt.size() - sizeof(WireHeader));
+                        for (auto& c : impl->clients)
+                            if (c.active && !c.isBot) impl->sendTo(c.addr, pkt.data(), pkt.size());
+                    }
                     Console::instance().printf(LogLevel::Info, "[CHAT] %s: %s", chat.sender, chat.text);
                 }
                 continue;
@@ -1269,8 +1273,9 @@ void GameServer::update() {
                 whdr.type = (uint8_t)PacketType::GameData;
                 whdr.checksum = 0;
                 memcpy(upBuf, &whdr, sizeof(WireHeader));
-                T2Protocol::encodeUpdate(upBuf + sizeof(WireHeader), sizeof(upBuf) - sizeof(WireHeader), update);
-                impl->sendTo(from, upBuf, sizeof(WireHeader) + 49);
+                // Update message is exactly 40 bytes; only send if encode succeeded.
+                if (T2Protocol::encodeUpdate(upBuf + sizeof(WireHeader), sizeof(upBuf) - sizeof(WireHeader), update))
+                    impl->sendTo(from, upBuf, sizeof(WireHeader) + 40);
             }
         }
 
@@ -1287,6 +1292,7 @@ void GameServer::update() {
         uint8_t qbuf[256];
         int qn = recvfrom(impl->querySock, qbuf, sizeof(qbuf), 0, (sockaddr*)&qfrom, &qfromLen);
         if (qn > 0) {
+            if (qn >= (int)sizeof(qbuf)) qn = (int)sizeof(qbuf) - 1;
             qbuf[qn] = 0;
             std::string reply;
             auto jsonEscape = [](const std::string& s) {
@@ -1892,7 +1898,7 @@ void GameServer::update() {
                                 T2Protocol::ChatMessage kf{};
                                 std::string txt = killer.playerName + " fragged " + client.playerName;
                                 strncpy(kf.sender, "[KILL]", sizeof(kf.sender) - 1);
-                                strncpy(kf.text, txt.c_str(), sizeof(kf.text) - 1);
+                                snprintf(kf.text, sizeof(kf.text), "%s", txt.c_str());
                                 uint8_t kfBuf[512];
                                 if (T2Protocol::encodeChat(kfBuf, sizeof(kfBuf), kf)) {
                                     WireHeader whdr{};
@@ -1939,8 +1945,7 @@ void GameServer::update() {
             impl->recFile.write((const char*)&sg.health, 4);
         }
     }
-    // Clean up inactive projectiles and broadcast ghost deletes
-    for (auto& sp : impl->projectiles) if (!sp.active) impl->broadcastGhostDelete(sp.ghostIndex, -1);
+    // Clean up inactive projectiles (their ghost deletes are sent with the other ghosts below)
     impl->projectiles.erase(std::remove_if(impl->projectiles.begin(), impl->projectiles.end(),
         [](auto& sp) { return !sp.active; }), impl->projectiles.end());
     for (auto it = impl->serverGhosts.begin(); it != impl->serverGhosts.end(); ) {
@@ -1953,20 +1958,21 @@ void GameServer::update() {
         bool disconnected = !cl.active || (now - cl.lastReceive) > 30.0;
         if (disconnected) {
             // Clean up the player's ghost once (idempotent via playerGhostIndex reset).
-            if (cl.playerGhostIndex > 0) {
-                impl->broadcastGhostDelete(cl.playerGhostIndex, (int)ci);
+            uint32_t oldG = cl.playerGhostIndex;
+            if (oldG > 0) {
+                impl->broadcastGhostDelete(oldG, (int)ci);
                 for (auto it = impl->serverGhosts.begin(); it != impl->serverGhosts.end(); ++it) {
-                    if (it->index == cl.playerGhostIndex) {
+                    if (it->index == oldG) {
                         impl->serverGhosts.erase(it);
                         break;
                     }
                 }
-                cl.playerGhostIndex = 0;
             }
             // Drop per-client state maps keyed by this player's ghost index.
-            impl->vehUsePrev.erase(cl.playerGhostIndex);
-            impl->botLastFire.erase(cl.playerGhostIndex);
-            impl->botStates.erase(cl.playerGhostIndex);
+            impl->vehUsePrev.erase(oldG);
+            impl->botLastFire.erase(oldG);
+            impl->botStates.erase(oldG);
+            cl.playerGhostIndex = 0;
             cl.active = false; // keep the slot so other clients' stored indices stay valid
             ci++;
             continue;

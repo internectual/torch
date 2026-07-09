@@ -1641,11 +1641,11 @@ void Game::update(float dt) {
                 demoStepRequest = false;
             } else if (demoFastForward || currentInput.jet) {
                 demoJetHeld = currentInput.jet;
-                blocksThisFrame = (int)(demoBlocksTotal * dt / demoTotalTime);
+                blocksThisFrame = (int)(demoBlocksTotal * dt / (demoTotalTime > 0 ? demoTotalTime : 1.0f));
             } else {
                 demoJetHeld = false;
                 // Match real-time: catch up to target position
-                int targetDone = (int)(demoTime / demoTotalTime * demoBlocksTotal);
+                int targetDone = (int)(demoTime / (demoTotalTime > 0 ? demoTotalTime : 1.0f) * demoBlocksTotal);
                 blocksThisFrame = targetDone - demoBlocksDone;
             }
             if (blocksThisFrame < 1) blocksThisFrame = 1;
@@ -2039,9 +2039,8 @@ void Game::update(float dt) {
                 moveMsg.seq = thisSeq;
 
                 uint8_t buf[64];
-                buf[0] = T2Protocol::GDT_Move;
-                T2Protocol::encodeMove(buf + 1, sizeof(buf) - 1, moveMsg);
-                activeConn->sendGamePacket(buf, 38, false);
+                size_t moveLen = T2Protocol::encodeMove(buf, sizeof(buf), moveMsg);
+                if (moveLen > 0) activeConn->sendGamePacket(buf, (int)moveLen, false);
             }
 
             // Reload
@@ -3534,7 +3533,7 @@ void Game::playDemo(const char* path) {
     demoTime = 0;
     demoEventLog.clear();
     int totalBlocks = demoParser->getBlockCount();
-    demoTotalTime = totalBlocks / 250.0f;
+    demoTotalTime = totalBlocks > 0 ? totalBlocks / 250.0f : 1.0f;
     demoBlocksTotal = totalBlocks;
     demoBlocksDone = 0;
     demoFastForward = false; // real-time when invoked from console

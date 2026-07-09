@@ -10,6 +10,17 @@
 #include <cstdlib>
 #include <cmath>
 
+// GLB safety caps
+static const int kMaxGLB = 1 << 20;            // 1M elements per accessor/array
+static const int kMaxJSONDepth = 256;
+static const size_t kMaxJSONArray = 1u << 20;
+static inline int clampGLBCount(int v) {
+    if (v < 0) return 0;
+    if (v > kMaxGLB) return kMaxGLB;
+    return v;
+}
+
+
 // ─── Minimal JSON parser ───────────────────────────────────────────
 
 enum class JType { Null, Bool, Num, Str, Arr, Obj };
@@ -41,7 +52,7 @@ static void skipWS(const char*& p) {
     while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) ++p;
 }
 
-static JVal parseVal(const char*& p);
+static JVal parseVal(const char*& p, int depth = 0);
 
 static std::string parseStr(const char*& p) {
     std::string r;
@@ -79,14 +90,15 @@ static std::string parseStr(const char*& p) {
     return r;
 }
 
-static JVal parseArr(const char*& p) {
+static JVal parseArr(const char*& p, int depth) {
     JVal v; v.t = JType::Arr;
     if (*p != '[') return v;
     ++p;
     skipWS(p);
     if (*p == ']') { ++p; return v; }
     while (true) {
-        v.a.push_back(parseVal(p));
+        if (v.a.size() >= kMaxJSONArray) parseVal(p, depth + 1); // cap stored, still consume
+        else v.a.push_back(parseVal(p, depth + 1));
         skipWS(p);
         if (*p == ']') { ++p; return v; }
         if (*p == ',') ++p;
@@ -94,7 +106,7 @@ static JVal parseArr(const char*& p) {
     }
 }
 
-static JVal parseObj(const char*& p) {
+static JVal parseObj(const char*& p, int depth) {
     JVal v; v.t = JType::Obj;
     if (*p != '{') return v;
     ++p;
@@ -106,18 +118,19 @@ static JVal parseObj(const char*& p) {
         skipWS(p);
         if (*p == ':') ++p;
         skipWS(p);
-        v.o[key] = parseVal(p);
+        v.o[key] = parseVal(p, depth + 1);
         skipWS(p);
         if (*p == '}') { ++p; return v; }
         if (*p == ',') ++p;
     }
 }
 
-static JVal parseVal(const char*& p) {
+static JVal parseVal(const char*& p, int depth) {
     skipWS(p);
     if (!*p) return JVal();
-    if (*p == '{') return parseObj(p);
-    if (*p == '[') return parseArr(p);
+    if (depth > kMaxJSONDepth) return JVal();
+    if (*p == '{') return parseObj(p, depth + 1);
+    if (*p == '[') return parseArr(p, depth + 1);
     if (*p == '"') { JVal v; v.t = JType::Str; v.s = parseStr(p); return v; }
     if (*p == 't' || *p == 'f') {
         JVal v; v.t = JType::Bool;
@@ -304,7 +317,7 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
     const JVal& matArr = root["materials"];
     struct MatInfo { int texIndex = -1; int emissiveIndex = -1; float metallic = 0; float roughness = 0.5f; float baseColorR = 1, baseColorG = 1, baseColorB = 1, baseColorA = 1; };
     std::vector<MatInfo> matInfos;
-    result.materials.resize(matArr.size());
+    result.materials.resize(std::min((size_t)matArr.size(), (size_t)kMaxGLB));
     for (size_t i = 0; i < matArr.size(); i++) {
         MatInfo mi;
         const JVal& pbr = matArr[i]["pbrMetallicRoughness"];
@@ -443,8 +456,8 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
             GLBBufferView& posBV = bufViews[posA.bufferView];
             GLBBufferView& idxBV = bufViews[idxA.bufferView];
 
-            int vertexCount = posA.count;
-            int indexCount = idxA.count;
+            int vertexCount = clampGLBCount(posA.count);
+            int indexCount = clampGLBCount(idxA.count);
             int vertStride = posBV.byteStride > 0 ? posBV.byteStride : (componentSize(posA.componentType) * componentCount(posA.type));
             int idxStride = componentSize(idxA.componentType);
             int idxCompType = idxA.componentType;
@@ -550,16 +563,20 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
         int compSz = componentSize(acc.componentType);
         int compCnt = componentCount(acc.type);
         if (compSz <= 0 || compCnt <= 0) return {};
-        int total = acc.count * compCnt;
-        std::vector<float> vals(total);
+        if (acc.count <= 0 || acc.count > kMaxGLB) return {};
         int stride = bv.byteStride > 0 ? bv.byteStride : compSz * compCnt;
+        if (stride <= 0) return {};
+        int total = acc.count * compCnt;
+        if (total / compCnt != acc.count) return {}; // overflow guard
+        std::vector<float> vals(total);
         for (int i = 0; i < acc.count; i++) {
-            const uint8_t* src = binData + bv.byteOffset + acc.byteOffset + i * stride;
+            size_t srcOff = (size_t)bv.byteOffset + (size_t)acc.byteOffset + (size_t)i * stride;
             for (int j = 0; j < compCnt; j++) {
-                uint32_t raw;
-                memcpy(&raw, src + j * compSz, 4);
-                float f;
-                memcpy(&f, &raw, 4);
+                size_t need = srcOff + (size_t)(j + 1) * compSz;
+                if (need > binLen) return vals; // truncated accessor
+                uint32_t raw = 0;
+                memcpy(&raw, binData + srcOff + (size_t)j * compSz, compSz);
+                float f; memcpy(&f, &raw, 4);
                 vals[i * compCnt + j] = f;
             }
         }

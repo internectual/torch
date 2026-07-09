@@ -7,6 +7,15 @@
 #include <cmath>
 #include <algorithm>
 
+// DTS element-count sanity caps (prevent bad_alloc / parse hangs on hostile files)
+static const int32_t kMaxDTSCount = 1 << 16;
+static inline int32_t capCount(int32_t v) {
+    if (v < 0) return 0;
+    if (v > kMaxDTSCount) return kMaxDTSCount;
+    return v;
+}
+
+
 struct DTSBuf {
     const uint32_t* buf32 = nullptr;
     const uint16_t* buf16 = nullptr;
@@ -16,12 +25,24 @@ struct DTSBuf {
     int guard = 0;
     bool corrupted = false;
 
-    uint32_t readU32() { return buf32[pos32++]; }
+    uint32_t readU32() {
+        if (pos32 >= size32) { corrupted = true; return 0; }
+        return buf32[pos32++];
+    }
     int32_t  readS32() { return (int32_t)readU32(); }
-    float    readF32() { float f; memcpy(&f, &buf32[pos32++], 4); return f; }
-    uint16_t readU16() { return buf16[pos16++]; }
+    float    readF32() {
+        if (pos32 >= size32) { corrupted = true; return 0; }
+        float f; memcpy(&f, &buf32[pos32++], 4); return f;
+    }
+    uint16_t readU16() {
+        if (pos16 >= size16) { corrupted = true; return 0; }
+        return buf16[pos16++];
+    }
     int16_t  readS16() { return (int16_t)readU16(); }
-    uint8_t  readU8()  { return buf8[pos8++]; }
+    uint8_t  readU8()  {
+        if (pos8 >= size8) { corrupted = true; return 0; }
+        return buf8[pos8++];
+    }
     Point3F readPoint3F() {
         float x = readF32(), y = readF32(), z = readF32();
         return {x, z, y};
@@ -36,6 +57,7 @@ struct DTSBuf {
         uint8_t  g8  = readU8();
         if ((int)g32 != guard || (int)g16 != guard || (int8_t)g8 != (int8_t)guard) {
             static int guardWarnCount = 0;
+            corrupted = true;
             if (guardWarnCount < 5)
                 Console::instance().printf(LogLevel::Warn,
                     "DTS: GUARD mismatch at %d (got %u/%u/%u) - continuing", guard, g32, g16, g8);
@@ -76,15 +98,15 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     buf.buf8  = (const uint8_t*)(data + 16 + sz32b + sz16b);
     buf.size32 = sz32b / 4; buf.size16 = sz16b / 2; buf.size8 = sz8b;
 
-    int32_t numNodes = buf.readS32(), numObjects = buf.readS32(), numDecals = buf.readS32();
-    int32_t numSubShapes = buf.readS32(), numIFLs = buf.readS32();
-    int32_t numNodeRot = buf.readS32(), numNodeTrans = buf.readS32();
-    int32_t numNodeUScale = buf.readS32(), numNodeAScale = buf.readS32(), numNodeArbScale = buf.readS32();
-    int32_t numObjStates = buf.readS32(), numDecalStates = buf.readS32(), numTriggers = buf.readS32();
-    int32_t numDetails = buf.readS32(), numMeshes = buf.readS32();
-    int32_t numSkins = (ver < 23) ? buf.readS32() : 0; (void)numSkins;
-    int32_t numNames = buf.readS32();
-    buf.readS32(); buf.readS32(); // smallestVisSize, smallestVisDL
+    int32_t numNodes = capCount(buf.readS32()), numObjects = capCount(buf.readS32()), numDecals = capCount(buf.readS32());
+    int32_t numSubShapes = capCount(buf.readS32()), numIFLs = capCount(buf.readS32());
+    int32_t numNodeRot = capCount(buf.readS32()), numNodeTrans = capCount(buf.readS32());
+    int32_t numNodeUScale = capCount(buf.readS32()), numNodeAScale = capCount(buf.readS32()), numNodeArbScale = capCount(buf.readS32());
+    int32_t numObjStates = capCount(buf.readS32()), numDecalStates = capCount(buf.readS32()), numTriggers = capCount(buf.readS32());
+    int32_t numDetails = capCount(buf.readS32()), numMeshes = capCount(buf.readS32());
+    int32_t numSkins = (ver < 23) ? capCount(buf.readS32()) : 0; (void)numSkins;
+    int32_t numNames = capCount(buf.readS32());
+    capCount(buf.readS32()); capCount(buf.readS32()); // smallestVisSize, smallestVisDL
     Console::instance().printf(LogLevel::Debug, "DTS: nodes=%d objects=%d meshes=%d details=%d",
         numNodes, numObjects, numMeshes, numDetails);
     buf.checkGuard(); // 0
@@ -92,23 +114,23 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     buf.checkGuard(); // 1
     struct DNode { int32_t ni,pi,fo,fc,ns; };
     std::vector<DNode> dtsNodes(numNodes);
-    for (int i = 0; i < numNodes; i++) { dtsNodes[i] = {buf.readS32(),buf.readS32(),buf.readS32(),buf.readS32(),buf.readS32()}; }
+    for (int i = 0; i < numNodes; i++) { dtsNodes[i] = {capCount(buf.readS32()),capCount(buf.readS32()),capCount(buf.readS32()),capCount(buf.readS32()),capCount(buf.readS32())}; }
     buf.checkGuard(); // 2
     struct DObj { int32_t ni,nm,sm,no,ns,fd; };
     std::vector<DObj> dtsObjects(numObjects);
-    for (int i = 0; i < numObjects; i++) { dtsObjects[i] = {buf.readS32(),buf.readS32(),buf.readS32(),buf.readS32(),buf.readS32(),buf.readS32()}; }
+    for (int i = 0; i < numObjects; i++) { dtsObjects[i] = {capCount(buf.readS32()),capCount(buf.readS32()),capCount(buf.readS32()),capCount(buf.readS32()),capCount(buf.readS32()),capCount(buf.readS32())}; }
     buf.checkGuard(); // 3
-    for (int i = 0; i < numDecals; i++) for (int j = 0; j < 5; j++) buf.readS32();
+    for (int i = 0; i < numDecals; i++) for (int j = 0; j < 5; j++) capCount(buf.readS32());
     buf.checkGuard(); // 4
-    for (int i = 0; i < numIFLs; i++) for (int j = 0; j < 5; j++) buf.readS32();
+    for (int i = 0; i < numIFLs; i++) for (int j = 0; j < 5; j++) capCount(buf.readS32());
     buf.checkGuard(); // 5
-    for (int i = 0; i < numSubShapes; i++) buf.readS32();
-    for (int i = 0; i < numSubShapes; i++) buf.readS32();
-    for (int i = 0; i < numSubShapes; i++) buf.readS32();
+    for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
+    for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
+    for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
     buf.checkGuard(); // 6
-    for (int i = 0; i < numSubShapes; i++) buf.readS32();
-    for (int i = 0; i < numSubShapes; i++) buf.readS32();
-    for (int i = 0; i < numSubShapes; i++) buf.readS32();
+    for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
+    for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
+    for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
     buf.checkGuard(); // 7
     for (int i = 0; i < numNodes; i++) buf.readQuat16();
     for (int i = 0; i < numNodes; i++) buf.readPoint3F();
@@ -120,16 +142,16 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     for (int i = 0; i < numNodeArbScale; i++) { buf.readF32(); buf.readF32(); buf.readF32(); }
     for (int i = 0; i < numNodeArbScale; i++) buf.readQuat16();
     buf.checkGuard(); // 9
-    for (int i = 0; i < numObjStates; i++) { buf.readF32(); buf.readS32(); buf.readS32(); }
+    for (int i = 0; i < numObjStates; i++) { buf.readF32(); capCount(buf.readS32()); capCount(buf.readS32()); }
     buf.checkGuard(); // 10
-    for (int i = 0; i < numDecalStates; i++) buf.readS32();
+    for (int i = 0; i < numDecalStates; i++) capCount(buf.readS32());
     buf.checkGuard(); // 11
     for (int i = 0; i < numTriggers; i++) { buf.readU32(); buf.readF32(); }
     buf.checkGuard(); // 12
     for (int i = 0; i < numDetails; i++) {
-        buf.readS32(); buf.readS32(); buf.readS32();
+        capCount(buf.readS32()); capCount(buf.readS32()); capCount(buf.readS32());
         buf.readF32(); buf.readF32(); buf.readF32();
-        buf.readS32();
+        capCount(buf.readS32());
     }
     buf.checkGuard(); // 13
 
@@ -149,10 +171,10 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         if (buf.pos32 >= buf.size32 && m > 100) break;
         uint32_t meshType = buf.readU32();
         if (meshType == DTSMesh_Decal) {
-            int32_t sz = buf.readS32();
+            int32_t sz = capCount(buf.readS32());
             if (sz > 10000 || sz < 0) sz = 0;
-            for (int i = 0; i < sz; i++) { buf.readS16(); buf.readS16(); buf.readS32(); }
-            sz = buf.readS32();
+            for (int i = 0; i < sz; i++) { buf.readS16(); buf.readS16(); capCount(buf.readS32()); }
+            sz = capCount(buf.readS32());
             if (sz > 100000 || sz < 0) sz = 0;
             for (int i = 0; i < sz; i++) buf.readU16();
             continue;
@@ -163,14 +185,14 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         buf.checkGuard(); // START
         // Past the last valid mesh guard (389), skip further Standard matches
         if (buf.guard > 395) break;
-        int32_t numFrames = buf.readS32();
+        int32_t numFrames = capCount(buf.readS32());
         if (numFrames > 100 || numFrames < 1) numFrames = 1;
-        int32_t numMatFrames = buf.readS32();
+        int32_t numMatFrames = capCount(buf.readS32());
         if (numMatFrames > 100 || numMatFrames < 1) numMatFrames = 1;
-        int32_t parentMesh = buf.readS32();
+        int32_t parentMesh = capCount(buf.readS32());
         bool shareData = (parentMesh >= 0);
         buf.readPoint3F(); buf.readPoint3F(); buf.readPoint3F(); buf.readF32(); // bounds, center, radius
-        int32_t numVerts = buf.readS32();
+        int32_t numVerts = capCount(buf.readS32());
         if (numVerts > 10000 || numVerts < 0) { numVerts = 0; }
         if (!shareData) {
             meshVerts[m].resize(numVerts * numFrames);
@@ -182,7 +204,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             int cc = std::min(numVerts * numFrames, (int)meshVerts[parentMesh].size());
             meshVerts[m].assign(meshVerts[parentMesh].begin(), meshVerts[parentMesh].begin() + cc);
         }
-        int32_t numTVerts = buf.readS32();
+        int32_t numTVerts = capCount(buf.readS32());
         if (numTVerts > 10000 || numTVerts < 0) { numTVerts = 0; }
         if (!shareData) {
             meshTVerts[m].resize(numTVerts * numMatFrames);
@@ -203,20 +225,20 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             int cc = std::min(numVerts, (int)meshNorms[parentMesh].size());
             meshNorms[m].assign(meshNorms[parentMesh].begin(), meshNorms[parentMesh].begin() + cc);
         }
-        int32_t numPrimitives = buf.readS32();
+        int32_t numPrimitives = capCount(buf.readS32());
         if (numPrimitives > 10000 || numPrimitives < 0) { numPrimitives = 0; }
         struct Prim { int32_t start, numElements, matIndex; };
         std::vector<Prim> prims(numPrimitives);
         for (int i = 0; i < numPrimitives; i++) { prims[i].start = buf.readS16(); prims[i].numElements = buf.readS16(); }
         for (int i = 0; i < numPrimitives; i++) { prims[i].matIndex = 0; buf.readU32(); }
-        int32_t numIndices = buf.readS32();
+        int32_t numIndices = capCount(buf.readS32());
         if (numIndices > 100000 || numIndices < 0) { numIndices = 0; }
         std::vector<uint32_t> indices(numIndices);
         for (int i = 0; i < numIndices; i++) indices[i] = buf.readU16();
-        int32_t numMerge = buf.readS32();
+        int32_t numMerge = capCount(buf.readS32());
         if (numMerge > 10000 || numMerge < 0) { numMerge = 0; }
         for (int i = 0; i < numMerge; i++) buf.readS16();
-        int32_t vertsPerFrame = buf.readS32(); (void)vertsPerFrame;
+        int32_t vertsPerFrame = capCount(buf.readS32()); (void)vertsPerFrame;
         uint32_t flags = buf.readU32(); (void)flags;
         buf.checkGuard(); // END
         if (buf.corrupted) break;
@@ -254,7 +276,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         // Skin data (placeholder - not used for non-skin meshes)
         SkinInfo skin;
         if (meshType == DTSMesh_Skin) {
-            int32_t sz = buf.readS32();
+            int32_t sz = capCount(buf.readS32());
             if (sz > 10000 || sz < 0) sz = 0;
             if (!shareData) {
                 skinInitVerts[m].resize(sz);
@@ -263,26 +285,26 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                 for (int i = 0; i < sz; i++) skinInitNorms[m][i] = buf.readPoint3F();
                 for (int i = 0; i < sz; i++) buf.readU8();
             }
-            sz = buf.readS32();
+            sz = capCount(buf.readS32());
             if (sz > 10000 || sz < 0) sz = 0;
             if (!shareData) {
                 skinInitTransforms[m].resize(sz);
                 for (int i = 0; i < sz; i++) { for (int j = 0; j < 16; j++) buf.readF32(); }
             }
-            sz = buf.readS32();
+            sz = capCount(buf.readS32());
             if (sz > 100000 || sz < 0) sz = 0;
             if (!shareData) {
-                for (int i = 0; i < sz; i++) buf.readS32(); // vertexIndex
+                for (int i = 0; i < sz; i++) capCount(buf.readS32()); // vertexIndex
                 skinBoneIndices[m].resize(sz);
-                for (int i = 0; i < sz; i++) skinBoneIndices[m][i] = buf.readS32();
+                for (int i = 0; i < sz; i++) skinBoneIndices[m][i] = capCount(buf.readS32());
                 skinBoneWeights[m].resize(sz);
                 for (int i = 0; i < sz; i++) skinBoneWeights[m][i] = buf.readF32();
             }
-            sz = buf.readS32();
+            sz = capCount(buf.readS32());
             if (sz > 10000 || sz < 0) sz = 0;
             if (!shareData) {
                 skinNodeIndices[m].resize(sz);
-                for (int i = 0; i < sz; i++) skinNodeIndices[m][i] = buf.readS32();
+                for (int i = 0; i < sz; i++) skinNodeIndices[m][i] = capCount(buf.readS32());
             }
             buf.checkGuard(); // skin end
         }
@@ -314,14 +336,14 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     auto prS16 = [&]() -> int16_t { if (postRem < 2) { postRem = 0; return 0; } int16_t v; memcpy(&v, post, 2); post+=2; postRem-=2; return v; };
     auto prF32 = [&]() -> float { if (postRem < 4) { postRem = 0; return 0; } float v; memcpy(&v, post, 4); post+=4; postRem-=4; return v; };
 
-    int32_t numSeqs = prS32();
+    int32_t numSeqs = capCount(prS32());
     for (int s = 0; s < numSeqs; s++) {
-        int32_t nameIdx = prS32(); uint32_t flags = (uint32_t)prS32();
-        prS32(); // numKFrames
+        int32_t nameIdx = capCount(prS32()); uint32_t flags = (uint32_t)capCount(prS32());
+        capCount(prS32()); // numKFrames
         float dur; memcpy(&dur, post, 4); post+=4; postRem-=4; // duration
-        for (int j = 0; j < 9; j++) prS32(); // base indices
+        for (int j = 0; j < 9; j++) capCount(prS32()); // base indices
         // Skip BitSets (8 inline bitsets)
-        auto skipBitSet = [&]() { prS32(); int nw = prS32(); if (nw > 0 && nw < 256) for (int i = 0; i < nw && postRem >= 4; i++) prS32(); };
+        auto skipBitSet = [&]() { capCount(prS32()); int nw = capCount(prS32()); if (nw > 0 && nw < 256) for (int i = 0; i < nw && postRem >= 4; i++) capCount(prS32()); };
         for (int b = 0; b < 8 && postRem >= 4; b++) skipBitSet();
 
         DTSShape::Animation anim;
@@ -334,13 +356,13 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     // Materials
     if (postRem >= 1) {
         post++; postRem--; // stream type
-        int32_t numMats = prS32();
+        int32_t numMats = capCount(prS32());
         result.materialNames.resize(numMats);
         for (int i = 0; i < numMats; i++) result.materialNames[i] = prStr();
         for (int i = 0; i < numMats; i++) {
-            prS32(); prS32(); prS32(); prS32(); // matFlags, reflectance, bump, detail
-            prS32(); // dummy (v25+)
-            prS32(); // detailScale (float as S32)
+            capCount(prS32()); capCount(prS32()); capCount(prS32()); capCount(prS32()); // matFlags, reflectance, bump, detail
+            capCount(prS32()); // dummy (v25+)
+            capCount(prS32()); // detailScale (float as S32)
         }
     }
 
@@ -416,7 +438,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     result.defaultTransforms.resize(numNodes);
     for (int i = 0; i < numNodes; i++) result.defaultTransforms[i].identity();
 
-    result.loaded = true;
+    result.loaded = !buf.corrupted;
     Console::instance().printf(LogLevel::Info,
         "DTS: loaded '%s' (%zu meshes, %zu textures, %zu nodes, %zu anims)",
         name, result.meshes.size(), result.textures.size(), result.nodes.size(), result.animations.size());

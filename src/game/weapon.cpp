@@ -104,16 +104,14 @@ bool checkProjectileCollision(Projectile& p, float& groundHeight) {
     float th = world.getHeight(p.pos.x, p.pos.z);
     if (p.pos.y <= th && p.vel.y < 0) {
         p.pos.y = th;
-        p.hasImpacted = true;
-
         if (p.type == ProjectileType::Grenade && p.bounceCount < 3) {
             p.vel.y = -p.vel.y * 0.5f;
             p.vel.x *= 0.7f;
             p.vel.z *= 0.7f;
             p.bounceCount++;
-            if (p.vel.y < 2.0f) p.hasImpacted = true;
-            return false;
+            return false; // still bouncing, not yet impacted
         }
+        p.hasImpacted = true;
         return true;
     }
 

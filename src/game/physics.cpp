@@ -25,9 +25,10 @@ void Physics::update(Player* player, float dt, const Game::InputMove& input) {
     if (input.left)     { moveDir.x -= cosYaw * speed; moveDir.z += sinYaw * speed; }
     if (input.right)    { moveDir.x += cosYaw * speed; moveDir.z -= sinYaw * speed; }
 
-    // Apply movement
-    vel.x += (moveDir.x - vel.x) * dt * 10.0f;
-    vel.z += (moveDir.z - vel.z) * dt * 10.0f;
+    // Apply movement (clamp smoothing so a long frame can't overshoot)
+    float smooth = dt * 10.0f; if (smooth > 1.0f) smooth = 1.0f;
+    vel.x += (moveDir.x - vel.x) * smooth;
+    vel.z += (moveDir.z - vel.z) * smooth;
 
     // Ground detection with interior collision
     float groundHeight = Engine::instance().game().world().getHeight(pos.x, pos.z);
@@ -52,11 +53,12 @@ void Physics::update(Player* player, float dt, const Game::InputMove& input) {
     // Gravity
     if (!onGround) {
         vel.y += gravity * dt;
-        vel.x *= airFriction;
-        vel.z *= airFriction;
+        // Frame-rate-independent friction (normalized to 60 Hz)
+        vel.x *= std::pow(airFriction, dt * 60.0f);
+        vel.z *= std::pow(airFriction, dt * 60.0f);
     } else {
-        vel.x *= friction;
-        vel.z *= friction;
+        vel.x *= std::pow(friction, dt * 60.0f);
+        vel.z *= std::pow(friction, dt * 60.0f);
     }
 
     // Update position

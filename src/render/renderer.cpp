@@ -558,14 +558,17 @@ bool Texture::decodeBM8(const uint8_t* data, size_t size,
     if (w == 0 || h == 0 || w > 4096 || h > 4096) return false;
     if (flags != 1 && flags < 3) return false;
 
-    uint32_t paletteSize = 1024;
-    if (flags != 1) paletteSize += (flags - 1) * 4;
+    uint32_t paletteSize;
+    if (flags == 1) paletteSize = 1024;
+    else if (flags >= 3 && flags <= 257) paletteSize = 1024 + (flags - 1) * 4;
+    else return false;
+    if (size < 32 + paletteSize) return false;
     uint32_t pixelOffset = 32 + paletteSize;
     uint32_t pixelCount = w * h;
     if (pixelOffset + pixelCount > size) return false;
 
     uint8_t palette[1024];
-    memcpy(palette, data + 32, 1024);
+    memcpy(palette, data + 32, paletteSize > 1024 ? 1024 : paletteSize);
 
     outPixels.resize(pixelCount * 4);
     for (uint32_t i = 0; i < pixelCount; i++) {
@@ -623,6 +626,7 @@ bool Shader::load(const char* vertSrc, const char* fragSrc) {
             char log[1024];
             glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
             Console::instance().printf(LogLevel::Error, "Shader compile error: %s", log);
+            glDeleteShader(shader);
             return 0;
         }
         return shader;
@@ -630,7 +634,11 @@ bool Shader::load(const char* vertSrc, const char* fragSrc) {
 
     uint32_t vs = compile(GL_VERTEX_SHADER, vertSrc);
     uint32_t fs = compile(GL_FRAGMENT_SHADER, fragSrc);
-    if (!vs || !fs) return false;
+    if (!vs || !fs) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return false;
+    }
 
     id = glCreateProgram();
     glAttachShader(id, vs);
@@ -643,6 +651,10 @@ bool Shader::load(const char* vertSrc, const char* fragSrc) {
         char log[1024];
         glGetProgramInfoLog(id, sizeof(log), nullptr, log);
         Console::instance().printf(LogLevel::Error, "Shader link error: %s", log);
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+        glDeleteProgram(id);
+        id = 0;
         return false;
     }
 

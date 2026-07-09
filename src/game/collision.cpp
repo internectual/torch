@@ -76,11 +76,53 @@ void CollisionGrid::build(const std::vector<CollisionTri>& tris, float gridSize,
     }
 }
 
+namespace {
+// True if (x,z) lies inside the XZ-projection of triangle t.
+bool pointInTriXZ(float x, float z, const CollisionTri& t) {
+    auto cross = [](float ax, float az, float bx, float bz, float cx, float cz) {
+        return (ax - cx) * (bz - cz) - (bx - cx) * (az - cz);
+    };
+    float d1 = cross(x, z, t.v0.x, t.v0.z, t.v1.x, t.v1.z);
+    float d2 = cross(x, z, t.v1.x, t.v1.z, t.v2.x, t.v2.z);
+    float d3 = cross(x, z, t.v2.x, t.v2.z, t.v0.x, t.v0.z);
+    bool hasNeg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+    bool hasPos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+    return !(hasNeg && hasPos);
+}
+}
+
 bool CollisionGrid::raycast(const std::vector<CollisionTri>& tris, const Point3F& origin,
     const Point3F& dir, float maxDist, float& outT, Point3F& outPos, Point3F& outNormal, int* outTriIdx) const
 {
     if (resX == 0 || resZ == 0) return false;
-    if (fabs(dir.x) < 1e-10f && fabs(dir.z) < 1e-10f) return false;
+    // Vertical (straight up/down) ray: only the column cell at (x,z) can intersect.
+    if (fabs(dir.x) < 1e-10f && fabs(dir.z) < 1e-10f) {
+        int ix = (int)((origin.x - minX) / cellW);
+        int iz = (int)((origin.z - minZ) / cellH);
+        if (ix < 0 || iz < 0 || ix >= resX || iz >= resZ) return false;
+        float bestT = maxDist;
+        bool hit = false;
+        Point3F bestNorm{}; int bestIdx = -1;
+        for (int ti : cells[iz * resX + ix]) {
+            const auto& tri = tris[ti];
+            float denom = tri.normal.y * dir.y;
+            if (fabs(denom) < 1e-8f) continue;
+            float tPlane = (tri.normal.x * (tri.v0.x - origin.x)
+                          + tri.normal.y * (tri.v0.y - origin.y)
+                          + tri.normal.z * (tri.v0.z - origin.z)) / denom;
+            if (tPlane < 0 || tPlane > maxDist) continue;
+            if (!pointInTriXZ(origin.x, origin.z, tri)) continue;
+            if (tPlane < bestT) { bestT = tPlane; hit = true; bestNorm = tri.normal; bestIdx = ti; }
+        }
+        if (hit) {
+            outT = bestT;
+            outPos = { origin.x, origin.y + dir.y * bestT, origin.z };
+            outNormal = bestNorm;
+            if (outTriIdx) *outTriIdx = bestIdx;
+            return true;
+        }
+        return false;
+    }
 
     float bestT = maxDist;
     bool hit = false;

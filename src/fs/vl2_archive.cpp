@@ -45,9 +45,9 @@ bool Vl2Archive::open(const char* path) {
     while (impl->file.read(sig, 4)) {
         if (memcmp(sig, "PK\3\4", 4) != 0) break;
 
-        uint16_t version, flags, compression, modTime, modDate;
-        uint32_t crc, compressedSize, uncompressedSize;
-        uint16_t nameLen, extraLen;
+        uint16_t version = 0, flags = 0, compression = 0, modTime = 0, modDate = 0;
+        uint32_t crc = 0, compressedSize = 0, uncompressedSize = 0;
+        uint16_t nameLen = 0, extraLen = 0;
 
         impl->file.read((char*)&version, 2);
         impl->file.read((char*)&flags, 2);
@@ -92,13 +92,26 @@ bool Vl2Archive::readFile(const char* path, std::vector<uint8_t>& data) {
         if (it == impl->entries.end()) return false;
     }
     const auto& e = it->second;
-    impl->file.seekg(e.offset);
+    // Determine total file size to validate entry bounds.
+    impl->file.clear();
+    impl->file.seekg(0, std::ios::end);
+    std::streamoff fileSize = impl->file.tellg();
+    impl->file.seekg(e.offset, std::ios::beg);
+
+    const size_t MAX_UNCOMP = 1u << 28; // 256 MB sanity cap
+    if (e.uncompressedSize > MAX_UNCOMP) return false;
+
     if (e.compression == 0) {
+        if ((std::streamoff)e.offset + (std::streamoff)e.uncompressedSize > fileSize) return false;
         data.resize(e.uncompressedSize);
         impl->file.read((char*)data.data(), e.uncompressedSize);
+        if (!impl->file) return false;
     } else if (e.compression == 8) {
+        if (e.compressedSize > MAX_UNCOMP) return false;
+        if ((std::streamoff)e.offset + (std::streamoff)e.compressedSize > fileSize) return false;
         std::vector<uint8_t> compressed(e.compressedSize);
         impl->file.read((char*)compressed.data(), e.compressedSize);
+        if (!impl->file) return false;
         data.resize(e.uncompressedSize);
         z_stream strm{};
         inflateInit2(&strm, -MAX_WBITS);
@@ -106,8 +119,11 @@ bool Vl2Archive::readFile(const char* path, std::vector<uint8_t>& data) {
         strm.avail_in = e.compressedSize;
         strm.next_out = data.data();
         strm.avail_out = e.uncompressedSize;
-        inflate(&strm, Z_FINISH);
+        int zr = inflate(&strm, Z_FINISH);
         inflateEnd(&strm);
+        if (zr != Z_STREAM_END) return false;
+    } else {
+        return false;
     }
     return true;
 }

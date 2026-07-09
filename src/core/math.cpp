@@ -94,11 +94,19 @@ void MatrixF::orthographic(float left, float right, float bottom, float top, flo
 void MatrixF::lookAt(const Point3F& eye, const Point3F& center, const Point3F& up) {
     Point3F f = { center.x - eye.x, center.y - eye.y, center.z - eye.z };
     float flen = std::sqrt(f.x * f.x + f.y * f.y + f.z * f.z);
+    if (flen < 1e-6f) { f = { 0, 0, -1 }; flen = 1.0f; }
     f.x /= flen; f.y /= flen; f.z /= flen;
 
     Point3F s = { f.y * up.z - f.z * up.y, f.z * up.x - f.x * up.z, f.x * up.y - f.y * up.x };
     float slen = std::sqrt(s.x * s.x + s.y * s.y + s.z * s.z);
+    if (slen < 1e-6f) { s = { 1, 0, 0 }; slen = 1.0f; }
     s.x /= slen; s.y /= slen; s.z /= slen;
+    // Re-orthogonalize s against f (in case the fallback was parallel to f).
+    float sd = s.x * f.x + s.y * f.y + s.z * f.z;
+    s.x -= f.x * sd; s.y -= f.y * sd; s.z -= f.z * sd;
+    float slen2 = std::sqrt(s.x * s.x + s.y * s.y + s.z * s.z);
+    if (slen2 > 1e-6f) { s.x /= slen2; s.y /= slen2; s.z /= slen2; }
+    else { s = { 0, 1, 0 }; }
 
     Point3F u = { s.y * f.z - s.z * f.y, s.z * f.x - s.x * f.z, s.x * f.y - s.y * f.x };
 

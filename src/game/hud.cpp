@@ -382,7 +382,7 @@ void HUD::renderScoreboard(Game* game) {
                 if (font) font->render(buf, colX[3], ry, {1, 0.5f, 0.2f, 0.9f}, 2.0f);
                 ColorF hc = dmgPct > 66 ? ColorF{0,1,0,0.9f} : dmgPct > 33 ? ColorF{1,1,0,0.9f} : ColorF{1,0,0,0.9f};
                 snprintf(buf, sizeof(buf), "%.0f%%", dmgPct);
-                if (font) font->render(buf, colX[3], ry, hc, 2.0f);
+                if (font) font->render(buf, colX[4], ry, hc, 2.0f);
                 row++;
             }
             if (row == 0 && font) {

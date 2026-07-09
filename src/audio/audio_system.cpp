@@ -174,6 +174,11 @@ bool SoundBuffer::loadWav(const uint8_t* data, size_t size) {
     uint32_t dataSize = *(uint32_t*)(ptr + 4);
     ptr += 8;
 
+    // Clamp to the bytes actually present in the buffer (attacker-controlled dataSize).
+    size_t avail = (data + size > ptr) ? (size_t)(data + size - ptr) : 0;
+    if (dataSize > avail) dataSize = (uint32_t)avail;
+    if (dataSize == 0) return false;
+
     ALenum alFormat;
     if (channels == 1 && bitsPerSample == 8) alFormat = AL_FORMAT_MONO8;
     else if (channels == 1 && bitsPerSample == 16) alFormat = AL_FORMAT_MONO16;

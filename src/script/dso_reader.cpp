@@ -27,7 +27,9 @@ std::string DSOReader::readString(const uint8_t*& ptr, size_t& remaining, uint32
     const uint8_t* start = ptr;
     while (ptr < start + remaining && *ptr) { ptr++; len++; if (maxLen && len >= maxLen) break; }
     std::string s((const char*)start, len);
-    if (remaining > 0) { ptr++; remaining -= (len + 1); }  // skip null
+    // Advance past the trailing NUL without underflowing `remaining`.
+    if (len + 1 <= remaining) { ptr++; remaining -= (len + 1); }
+    else { ptr += remaining; remaining = 0; }
     return s;
 }
 
@@ -57,9 +59,12 @@ bool DSOReader::readStringTable(const uint8_t*& ptr, size_t& remaining, std::vec
 
 bool DSOReader::readFloatTable(const uint8_t*& ptr, size_t& remaining, std::vector<double>& out) {
     uint32_t count = readU32(ptr, remaining);
-    out.reserve(count);
-    for (uint32_t i = 0; i < count; i++)
+    size_t cap = count; if (cap > (1u << 20)) cap = (1u << 20);
+    out.reserve(cap);
+    for (uint32_t i = 0; i < count; i++) {
+        if (remaining < 8) break; // truncated; stop consuming
         out.push_back(readF64(ptr, remaining));
+    }
     return true;
 }
 
@@ -67,21 +72,26 @@ bool DSOReader::readCodeStream(const uint8_t*& ptr, size_t& remaining, uint32_t&
     outCodeSize = readU32(ptr, remaining);
     outLineBreakCount = readU32(ptr, remaining);
     out.codeSize = outCodeSize;
-    out.code.reserve(outCodeSize);
+    // Reserve at most a sane cap; the decode loop below is bounded by `remaining`.
+    size_t cap = outCodeSize; if (cap > (1u << 26)) cap = (1u << 26);
+    out.code.reserve(cap);
 
-    for (uint32_t i = 0; i < outCodeSize; i++) {
-        uint8_t op = (remaining > 0) ? *ptr : 0xFF;
+    for (uint32_t i = 0; i < outCodeSize && remaining > 0; i++) {
+        uint8_t op = *ptr++; remaining--;
         out.code.push_back(op);
         if (op == 0xFF) {
-            ptr++; remaining--;
+            // Extended opcode: read u32 little-endian, bounded by remaining.
             if (remaining >= 4) {
-                for (int j = 0; j < 4; j++) {
-                    out.code.push_back(*ptr++);
-                    remaining--;
-                }
+                uint32_t ext = 0;
+                for (int j = 0; j < 4; j++) { ext |= ((uint32_t)*ptr++) << (8 * j); remaining--; }
+                out.code.push_back((uint8_t)(ext & 0xFF));
+                out.code.push_back((uint8_t)((ext >> 8) & 0xFF));
+                out.code.push_back((uint8_t)((ext >> 16) & 0xFF));
+                out.code.push_back((uint8_t)((ext >> 24) & 0xFF));
+            } else {
+                for (int j = 0; j < 4; j++) out.code.push_back(0);
+                break; // not enough data
             }
-        } else {
-            ptr++; remaining--;
         }
     }
 
@@ -98,9 +108,12 @@ bool DSOReader::readCodeStream(const uint8_t*& ptr, size_t& remaining, uint32_t&
 bool DSOReader::readIdentTable(const uint8_t*& ptr, size_t& remaining, DSOFile& out) {
     uint32_t count = readU32(ptr, remaining);
     for (uint32_t i = 0; i < count; i++) {
+        if (remaining < 4) break; // truncated; stop consuming
         uint32_t strIdx = readU32(ptr, remaining);
+        if (remaining < 4) break;
         uint32_t posCount = readU32(ptr, remaining);
         for (uint32_t j = 0; j < posCount; j++) {
+            if (remaining < 4) break;
             uint32_t ip = readU32(ptr, remaining);
             out.identTable[ip] = strIdx;
         }

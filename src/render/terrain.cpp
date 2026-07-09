@@ -100,7 +100,12 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
     if (!data || size < 4) {
         // Generate procedural terrain
         Console::instance().printf(LogLevel::Info, "Terrain: generating procedural terrain");
-        heights.resize(size >= 4 ? reinterpret_cast<const uint32_t*>(data)[0] * reinterpret_cast<const uint32_t*>(data)[0] : 256 * 256, 0.0f);
+        uint32_t dim = 256;
+        if (data && size >= 4) {
+            uint32_t n = reinterpret_cast<const uint32_t*>(data)[0];
+            if (n > 0 && n < 8192) dim = n; // sanity bound to avoid bad_alloc
+        }
+        heights.resize((size_t)dim * dim, 0.0f);
         uint32_t s = (uint32_t)std::sqrt((float)heights.size());
         if (s > 0) this->size = s;
         for (int32_t z = 0; z < this->size; z++)

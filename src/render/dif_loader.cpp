@@ -40,6 +40,11 @@ static float readF32(const uint8_t*& ptr, size_t& rem) {
     return v;
 }
 
+// Sanity cap on attacker-controlled element counts to prevent bad_alloc / hangs.
+static const uint32_t kMaxDIFCount = 1u << 20; // 1M elements per array
+static const uint32_t kMaxDetailLevels = 64;
+static inline uint32_t capU32(uint32_t v) { return v > kMaxDIFCount ? kMaxDIFCount : v; }
+
 // ─── Helper: triangle fan → indexed triangles ──────────────────
 
 struct TriFan {
@@ -233,7 +238,7 @@ struct DIFInterior {
 // ─── Read a single Interior (detail level) ──────────────────────
 
 static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
-    uint32_t fileVersion = readU32(ptr, rem);
+    uint32_t fileVersion = capU32(readU32(ptr, rem));
     if (fileVersion != 0) {
         Console::instance().printf(LogLevel::Warn, "DIF: unexpected Interior version %u (expected 0)", fileVersion);
         return false;
@@ -247,11 +252,11 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
 
     out.hasAlarmState = readU8(ptr, rem) != 0;
 
-    uint32_t numLightStateEntries = readU32(ptr, rem);
+    uint32_t numLightStateEntries = capU32(readU32(ptr, rem));
     (void)numLightStateEntries;
 
     // ── Planes (indexed encoding) ──
-    uint32_t uniqueNormalCount = readU32(ptr, rem);
+    uint32_t uniqueNormalCount = capU32(readU32(ptr, rem));
     out.uniqueNormals.reserve(uniqueNormalCount * 3);
     for (uint32_t i = 0; i < uniqueNormalCount; i++) {
         out.uniqueNormals.push_back(readF32(ptr, rem));
@@ -259,7 +264,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
         out.uniqueNormals.push_back(readF32(ptr, rem));
     }
 
-    uint32_t planeCount = readU32(ptr, rem);
+    uint32_t planeCount = capU32(readU32(ptr, rem));
     out.planeNormalIndices.reserve(planeCount);
     out.planeD.reserve(planeCount);
     for (uint32_t i = 0; i < planeCount; i++) {
@@ -268,7 +273,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     }
 
     // ── Points (Point3F only, no fog coord) ──
-    uint32_t pointCount = readU32(ptr, rem);
+    uint32_t pointCount = capU32(readU32(ptr, rem));
     out.points.reserve(pointCount * 3);
     for (uint32_t i = 0; i < pointCount; i++) {
         float x = readF32(ptr, rem);
@@ -280,20 +285,20 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     }
 
     // ── Point visibility ──
-    uint32_t pointVisCount = readU32(ptr, rem);
+    uint32_t pointVisCount = capU32(readU32(ptr, rem));
     out.pointVisibility.resize(pointVisCount);
     for (uint32_t i = 0; i < pointVisCount; i++)
         out.pointVisibility[i] = readU8(ptr, rem);
 
     // ── TexGen planes ──
-    uint32_t texGenCount = readU32(ptr, rem);
+    uint32_t texGenCount = capU32(readU32(ptr, rem));
     out.texGenEqs.reserve(texGenCount * 8);
     for (uint32_t i = 0; i < texGenCount; i++) {
         for (int j = 0; j < 8; j++) out.texGenEqs.push_back(readF32(ptr, rem));
     }
 
     // ── BSP nodes ──
-    uint32_t nodeCount = readU32(ptr, rem);
+    uint32_t nodeCount = capU32(readU32(ptr, rem));
     out.bspNodes.resize(nodeCount);
     for (uint32_t i = 0; i < nodeCount; i++) {
         out.bspNodes[i].planeIndex = readU16(ptr, rem);
@@ -302,7 +307,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     }
 
     // ── BSP solid leaves ──
-    uint32_t leafCount = readU32(ptr, rem);
+    uint32_t leafCount = capU32(readU32(ptr, rem));
     out.bspSolidLeaves.resize(leafCount);
     for (uint32_t i = 0; i < leafCount; i++) {
         out.bspSolidLeaves[i].surfaceIndex = readU32(ptr, rem);
@@ -316,7 +321,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
         Console::instance().printf(LogLevel::Warn, "DIF: unexpected MaterialList version %u", mlVersion);
     }
     (void)mlVersion;
-    uint32_t matCount = readU32(ptr, rem);
+    uint32_t matCount = capU32(readU32(ptr, rem));
     out.matNames.reserve(matCount);
     for (uint32_t i = 0; i < matCount; i++) {
         uint8_t strLen = readU8(ptr, rem);
@@ -329,14 +334,14 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     }
 
     // ── Windings ──
-    uint32_t windingCount = readU32(ptr, rem);
+    uint32_t windingCount = capU32(readU32(ptr, rem));
     out.windings.reserve(windingCount);
     for (uint32_t i = 0; i < windingCount; i++) {
         out.windings.push_back(readU32(ptr, rem));
     }
 
     // ── Winding indices (TriFans) ──
-    uint32_t fanCount = readU32(ptr, rem);
+    uint32_t fanCount = capU32(readU32(ptr, rem));
     out.windingIndices.resize(fanCount);
     for (uint32_t i = 0; i < fanCount; i++) {
         out.windingIndices[i].windingStart = readU32(ptr, rem);
@@ -344,7 +349,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     }
 
     // ── Zones ──
-    uint32_t zoneCount = readU32(ptr, rem);
+    uint32_t zoneCount = capU32(readU32(ptr, rem));
     out.zones.resize(zoneCount);
     for (uint32_t i = 0; i < zoneCount; i++) {
         out.zones[i].portalStart = readU16(ptr, rem);
@@ -355,21 +360,21 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     }
 
     // ── Zone surfaces ──
-    uint32_t zoneSurfaceCount = readU32(ptr, rem);
+    uint32_t zoneSurfaceCount = capU32(readU32(ptr, rem));
     out.zoneSurfaces.resize(zoneSurfaceCount);
     for (uint32_t i = 0; i < zoneSurfaceCount; i++) {
         out.zoneSurfaces[i] = readU16(ptr, rem);
     }
 
     // ── Zone portal list ──
-    uint32_t zonePortalCount = readU32(ptr, rem);
+    uint32_t zonePortalCount = capU32(readU32(ptr, rem));
     out.zonePortalList.resize(zonePortalCount);
     for (uint32_t i = 0; i < zonePortalCount; i++) {
         out.zonePortalList[i] = readU16(ptr, rem);
     }
 
     // ── Portals ──
-    uint32_t portalCount = readU32(ptr, rem);
+    uint32_t portalCount = capU32(readU32(ptr, rem));
     out.portals.resize(portalCount);
     for (uint32_t i = 0; i < portalCount; i++) {
         out.portals[i].planeIndex = readU16(ptr, rem);
@@ -380,7 +385,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     }
 
     // ── Surfaces ──
-    uint32_t surfaceCount = readU32(ptr, rem);
+    uint32_t surfaceCount = capU32(readU32(ptr, rem));
     out.surfaces.resize(surfaceCount);
     for (uint32_t i = 0; i < surfaceCount; i++) {
         auto& s = out.surfaces[i];
@@ -405,21 +410,21 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     }
 
     // ── Normal lightmap indices (always read) ──
-    uint32_t normalLMapCount = readU32(ptr, rem);
+    uint32_t normalLMapCount = capU32(readU32(ptr, rem));
     out.normalLMapIndices.resize(normalLMapCount);
     for (uint32_t i = 0; i < normalLMapCount; i++) {
         out.normalLMapIndices[i] = readU8(ptr, rem);
     }
 
     // ── Alarm lightmap indices (always read) ──
-    uint32_t alarmLMapCount = readU32(ptr, rem);
+    uint32_t alarmLMapCount = capU32(readU32(ptr, rem));
     out.alarmLMapIndices.resize(alarmLMapCount);
     for (uint32_t i = 0; i < alarmLMapCount; i++) {
         out.alarmLMapIndices[i] = readU8(ptr, rem);
     }
 
     // ── Null surfaces ──
-    uint32_t nullSurfaceCount = readU32(ptr, rem);
+    uint32_t nullSurfaceCount = capU32(readU32(ptr, rem));
     out.nullSurfaces.resize(nullSurfaceCount);
     for (uint32_t i = 0; i < nullSurfaceCount; i++) {
         auto& ns = out.nullSurfaces[i];
@@ -432,7 +437,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     // ── Lightmaps ──
     // PNG data is stored raw (no size prefix), self-delimiting via IEND chunk
     // PNG chunk lengths are big-endian
-    uint32_t lightmapCount = readU32(ptr, rem);
+    uint32_t lightmapCount = capU32(readU32(ptr, rem));
     out.lightmapEntries.resize(lightmapCount);
     static const uint8_t s_pngMagic[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
     for (uint32_t i = 0; i < lightmapCount; i++) {
@@ -466,20 +471,20 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     }
 
     // ── Solid leaf surfaces ──
-    uint32_t slsCount = readU32(ptr, rem);
+    uint32_t slsCount = capU32(readU32(ptr, rem));
     out.solidLeafSurfaces.resize(slsCount);
     for (uint32_t i = 0; i < slsCount; i++) {
         out.solidLeafSurfaces[i] = readU32(ptr, rem);
     }
 
     // ── Animated lights ──
-    uint32_t animLightCount = readU32(ptr, rem);
+    uint32_t animLightCount = capU32(readU32(ptr, rem));
     for (uint32_t i = 0; i < animLightCount; i++) {
         readU32(ptr, rem); readU32(ptr, rem); readU16(ptr, rem); readU16(ptr, rem); readU32(ptr, rem);
     }
 
     // ── Light states ──
-    uint32_t lightStateCount = readU32(ptr, rem);
+    uint32_t lightStateCount = capU32(readU32(ptr, rem));
     for (uint32_t i = 0; i < lightStateCount; i++) {
         readU8(ptr, rem); readU8(ptr, rem); readU8(ptr, rem); // RGB
         readU32(ptr, rem); // activeTime
@@ -488,7 +493,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     }
 
     // ── State data ──
-    uint32_t stateDataCount = readU32(ptr, rem);
+    uint32_t stateDataCount = capU32(readU32(ptr, rem));
     for (uint32_t i = 0; i < stateDataCount; i++) {
         readU32(ptr, rem); // surfaceIndex
         readU32(ptr, rem); // mapIndex
@@ -510,9 +515,9 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     // InteriorSubObject::readISO reads U32 key, then tag-dependent data.
     // MirrorSubObject (key=0): adds U32 dl, U32 zone, F32 alpha, U32 sc, U32 ss, 3xF32
     // Other keys: only the U32 key is consumed (readISO returns NULL)
-    uint32_t subObjectCount = readU32(ptr, rem);
+    uint32_t subObjectCount = capU32(readU32(ptr, rem));
     for (uint32_t i = 0; i < subObjectCount; i++) {
-        uint32_t key = readU32(ptr, rem);
+        uint32_t key = capU32(readU32(ptr, rem));
         if (key == 0) { // MirrorSubObjectKey
             readU32(ptr, rem); readU32(ptr, rem); readF32(ptr, rem);
             readU32(ptr, rem); readU32(ptr, rem);
@@ -521,7 +526,7 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     }
 
     // ── Convex hulls (52 bytes each, no padding between fields) ──
-    uint32_t hullCount = readU32(ptr, rem);
+    uint32_t hullCount = capU32(readU32(ptr, rem));
     out.hulls.resize(hullCount);
     for (uint32_t i = 0; i < hullCount; i++) {
         auto& h = out.hulls[i];
@@ -538,12 +543,12 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
         readU32(ptr, rem);             // polyListStringStart
     }
 
-    auto readVecU8 = [&]() { uint32_t n = readU32(ptr, rem); size_t nb = n; if (nb > rem) nb = rem; ptr += nb; rem -= nb; };
-    auto readVecU16 = [&](std::vector<uint16_t>& v) { uint32_t n = readU32(ptr, rem); v.resize(n); for (uint32_t i = 0; i < n && rem >= 2; i++) v[i] = readU16(ptr, rem); };
-    auto readVecU32 = [&](std::vector<uint32_t>& v) { uint32_t n = readU32(ptr, rem); v.resize(n); for (uint32_t i = 0; i < n && rem >= 4; i++) v[i] = readU32(ptr, rem); };
+    auto readVecU8 = [&]() { uint32_t n = capU32(readU32(ptr, rem)); size_t nb = n; if (nb > rem) nb = rem; ptr += nb; rem -= nb; };
+    auto readVecU16 = [&](std::vector<uint16_t>& v) { uint32_t n = capU32(readU32(ptr, rem)); v.resize(n); for (uint32_t i = 0; i < n && rem >= 2; i++) v[i] = readU16(ptr, rem); };
+    auto readVecU32 = [&](std::vector<uint32_t>& v) { uint32_t n = capU32(readU32(ptr, rem)); v.resize(n); for (uint32_t i = 0; i < n && rem >= 4; i++) v[i] = readU32(ptr, rem); };
     auto skipVecU8 = readVecU8;
-    auto skipVecU16 = [&]() { uint32_t n = readU32(ptr, rem); size_t nb = (size_t)n * 2; if (nb > rem) nb = rem; ptr += nb; rem -= nb; };
-    auto skipVecU32 = [&]() { uint32_t n = readU32(ptr, rem); size_t nb = (size_t)n * 4; if (nb > rem) nb = rem; ptr += nb; rem -= nb; };
+    auto skipVecU16 = [&]() { uint32_t n = capU32(readU32(ptr, rem)); size_t nb = (size_t)n * 2; if (nb > rem) nb = rem; ptr += nb; rem -= nb; };
+    auto skipVecU32 = [&]() { uint32_t n = capU32(readU32(ptr, rem)); size_t nb = (size_t)n * 4; if (nb > rem) nb = rem; ptr += nb; rem -= nb; };
 
     readVecU8();                    // hullEmitStrings
     readVecU32(out.hullIndices);    // hullIndices
@@ -829,7 +834,7 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
     const uint8_t* ptr = data;
     size_t rem = size;
 
-    uint32_t fileVersion = readU32(ptr, rem);
+    uint32_t fileVersion = capU32(readU32(ptr, rem));
     if (fileVersion != 44) {
         Console::instance().printf(LogLevel::Warn, "DIF: unsupported version %u (expected 44) for '%s'", fileVersion, name);
         return result;
@@ -845,7 +850,8 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
         }
     }
 
-    uint32_t numDetailLevels = readU32(ptr, rem);
+    uint32_t numDetailLevels = capU32(readU32(ptr, rem));
+    if (numDetailLevels > kMaxDetailLevels) numDetailLevels = kMaxDetailLevels;
 
     size_t prevRem = rem;
     std::vector<DIFInterior> interiors(numDetailLevels);
