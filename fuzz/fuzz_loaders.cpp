@@ -21,6 +21,7 @@
 #include "render/glb_loader.h"
 #include "script/dso_reader.h"
 #include "fs/vol_archive.h"
+#include "fs/vl2_archive.h"
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     if (size == 0) return 0;
@@ -72,6 +73,32 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
                 for (const auto& nm : names) {
                     std::vector<uint8_t> out;
                     vol.readFile(nm.c_str(), out);
+                }
+            }
+            unlink(tmpl);
+        }
+    }
+
+    // VL2 archive (zlib-backed): same file-based approach. inflate() on
+    // untrusted compressed bytes is exactly what fuzzing is good at.
+    {
+        char tmpl[] = "/tmp/torch_fuzz_vl2_XXXXXX";
+        int fd = mkstemp(tmpl);
+        if (fd >= 0) {
+            size_t off = 0;
+            while (off < size) {
+                ssize_t n = write(fd, data + off, size - off);
+                if (n <= 0) break;
+                off += (size_t)n;
+            }
+            close(fd);
+            Vl2Archive vl2;
+            if (vl2.open(tmpl)) {
+                std::vector<std::string> names;
+                vl2.listFiles("*", names);
+                for (const auto& nm : names) {
+                    std::vector<uint8_t> out;
+                    vl2.readFile(nm.c_str(), out);
                 }
             }
             unlink(tmpl);

@@ -17,8 +17,9 @@ clang++ -std=c++20 -O1 -g \
   "$SRC/render/glb_loader.cpp" \
   "$SRC/script/dso_reader.cpp" \
   "$SRC/fs/vol_archive.cpp" \
+  "$SRC/fs/vl2_archive.cpp" \
   "$SRC/fs/file_system.cpp" \
   "$SRC/core/math.cpp" \
-  -o "$FUZZ/fuzz_loaders" -lpthread
+  -o "$FUZZ/fuzz_loaders" -lpthread -lz
 
 echo "BUILD OK -> $FUZZ/fuzz_loaders"
