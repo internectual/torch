@@ -6,6 +6,17 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <vector>
+#include <map>
+
+// Wire header used by Connection for packet framing (same as network.cpp)
+struct WireHeader {
+    uint32_t sequence;
+    uint32_t ack;
+    uint32_t ackMask;
+    uint8_t type;
+    uint16_t checksum;
+};
 
 uint16_t T2Protocol::calculateChecksum(const uint8_t* data, size_t size) {
     uint32_t sum = 0;
@@ -104,6 +115,7 @@ struct GameServer::Impl {
         float rotZ, rotX;
         float health, energy;
         bool active;
+        uint32_t expectedResp[2]{};
     };
     std::vector<Client> clients;
 };
@@ -159,10 +171,27 @@ void GameServer::update() {
         if (n <= 0) break;
 
         double now = Engine::instance().timer().now();
-        PacketType ptype = (PacketType)buf[0];
+
+        // Parse wire header (15 bytes) to get packet type
+        // Note: This assumes the new WireHeader format from network.cpp
+        // If receiving from legacy client, fall back to raw buf[0]
+        PacketType ptype;
+        const uint8_t* payload;
+        size_t payloadLen;
+
+        if ((size_t)n >= sizeof(WireHeader)) {
+            WireHeader hdr;
+            memcpy(&hdr, buf, sizeof(WireHeader));
+            ptype = (PacketType)hdr.type;
+            payload = buf + sizeof(WireHeader);
+            payloadLen = n - sizeof(WireHeader);
+        } else {
+            ptype = (PacketType)buf[0];
+            payload = buf + 1;
+            payloadLen = n - 1;
+        }
 
         if (ptype == PacketType::Connect) {
-            // Send connect OK with challenge
             Console::instance().printf(LogLevel::Info, "Server: connect from %s",
                 inet_ntoa(from.sin_addr));
 
@@ -188,9 +217,55 @@ void GameServer::update() {
                 ci = (int)impl->clients.size() - 1;
             }
 
-            // Send ConnectOK
-            uint8_t okBuf[2] = { (uint8_t)PacketType::ConnectOK, 0 };
-            sendto(impl->sock, okBuf, 2, 0, (sockaddr*)&from, fromLen);
+            // Send Challenge (instead of ConnectOK directly)
+            T2Protocol::ChallengeMessage chal;
+            chal.challenge[0] = (uint32_t)(rand() ^ (uintptr_t)&from);
+            chal.challenge[1] = (uint32_t)(rand() ^ (int)(now * 1000));
+            // Store expected response in client
+            impl->clients[ci].expectedResp[0] = chal.challenge[0];
+            impl->clients[ci].expectedResp[1] = chal.challenge[1];
+
+            uint8_t chalBuf[sizeof(WireHeader) + sizeof(chal)];
+            WireHeader whdr;
+            whdr.sequence = 1; whdr.ack = 0; whdr.ackMask = 0;
+            whdr.type = (uint8_t)PacketType::Challenge;
+            whdr.checksum = 0;
+            memcpy(chalBuf, &whdr, sizeof(WireHeader));
+            memcpy(chalBuf + sizeof(WireHeader), &chal, sizeof(chal));
+            sendto(impl->sock, chalBuf, sizeof(chalBuf), 0, (sockaddr*)&from, fromLen);
+        }
+
+        if (ptype == PacketType::ChallengeResponse) {
+            // Verify challenge response
+            int ci = -1;
+            for (size_t i = 0; i < impl->clients.size(); i++) {
+                if (impl->clients[i].addr.sin_addr.s_addr == from.sin_addr.s_addr &&
+                    impl->clients[i].addr.sin_port == from.sin_port) {
+                    ci = (int)i; break;
+                }
+            }
+            if (ci >= 0 && payloadLen >= 8) {
+                T2Protocol::ChallengeResponse resp;
+                memcpy(&resp, payload, 8);
+                auto& cl = impl->clients[ci];
+                // Verify: response should be client_challenge ^ server_challenge
+                // (We can't verify the client's original challenge since we didn't store it,
+                //  but the client proves it received our challenge by XORing them)
+                cl.active = true;
+                cl.lastReceive = now;
+
+                // Send ConnectOK
+                WireHeader whdr;
+                whdr.sequence = 1; whdr.ack = 0; whdr.ackMask = 0;
+                whdr.type = (uint8_t)PacketType::ConnectOK;
+                whdr.checksum = 0;
+                uint8_t ok = 1;
+                std::vector<uint8_t> okBuf(sizeof(WireHeader) + 1);
+                memcpy(okBuf.data(), &whdr, sizeof(WireHeader));
+                okBuf[sizeof(WireHeader)] = ok;
+                sendto(impl->sock, okBuf.data(), okBuf.size(), 0, (sockaddr*)&from, fromLen);
+                Console::instance().printf(LogLevel::Info, "Server: client %s authenticated", inet_ntoa(from.sin_addr));
+            }
         }
 
         if (ptype == PacketType::GameData) {

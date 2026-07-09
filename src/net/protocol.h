@@ -37,6 +37,9 @@ namespace T2Protocol {
 
         // Voice
         GDT_Voice = 0x40,
+
+        // Command routing
+        GDT_Command = 0x50,
     };
 
     struct PacketHeader {

@@ -61,11 +61,14 @@ public:
 
     void sendPacket(PacketType type, const uint8_t* data, size_t size);
     void sendGamePacket(const uint8_t* data, size_t size, bool reliable = false);
+    void sendCommandPacket(const char* command);
 
     using PacketCallback = std::function<void(PacketType type, const uint8_t* data, size_t size)>;
     void setPacketCallback(PacketCallback cb) { packetCb = cb; }
 
     void setConnectCallback(std::function<void(bool)> cb) { connectCb = cb; }
+
+    bool isConnected() const { return connState >= Connected; }
 
 private:
     struct Impl;

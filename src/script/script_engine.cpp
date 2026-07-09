@@ -2831,9 +2831,16 @@ bool ScriptEngine::init() {
         for (size_t i = 2; i < args.size(); i++)
             cmd += " " + args[i].toString();
         Console::instance().printf(LogLevel::Debug, "commandToClient: %s", cmd.c_str());
-        auto* ts = Engine::instance().script().ts();
-        if (ts && ts->hasFunction(func))
-            ts->callFunction(func, {});
+        // Send over wire if connected (server to client)
+        auto* conn = Engine::instance().game().activeConnection();
+        if (conn && conn->isConnected()) {
+            conn->sendCommandPacket(cmd.c_str());
+        } else {
+            // Local fallback: execute directly
+            auto* ts = Engine::instance().script().ts();
+            if (ts && ts->hasFunction(func))
+                ts->callFunction(func, {});
+        }
         return VMValue(1);
     });
     tsInstance->registerNative("commandToServer", [](const auto& args) -> VMValue {
@@ -2844,8 +2851,14 @@ bool ScriptEngine::init() {
         for (size_t i = 1; i < args.size(); i++)
             cmd += " " + args[i].toString();
         Console::instance().printf(LogLevel::Debug, "commandToServer: %s", cmd.c_str());
-        // Execute locally since server is local
-        Console::instance().execute(cmd.c_str());
+        // Send over wire if connected (client to server)
+        auto* conn = Engine::instance().game().activeConnection();
+        if (conn && conn->isConnected()) {
+            conn->sendCommandPacket(cmd.c_str());
+        } else {
+            // Local fallback: execute directly
+            Console::instance().execute(cmd.c_str());
+        }
         return VMValue(1);
     });
 

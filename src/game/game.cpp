@@ -2385,6 +2385,16 @@ void Game::connectToServer(const char* host, uint16_t port) {
                 Console::instance().printf(LogLevel::Info, "Connection established, entering game");
                 startLocalGame();
             } else if (type == PacketType::GameData && size > 0) {
+                // Check for command packet
+                if (data[0] == T2Protocol::GDT_Command && size >= 3) {
+                    uint16_t cmdLen = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
+                    if (cmdLen > 0 && (size_t)(3 + cmdLen) <= size) {
+                        std::string cmd((const char*)data + 3, cmdLen);
+                        Console::instance().printf(LogLevel::Debug, "Net received command: %s", cmd.c_str());
+                        Console::instance().execute(cmd.c_str());
+                    }
+                    return;
+                }
                 T2Protocol::UpdateMessage update;
                 if (T2Protocol::decodeUpdate(data, size, update)) {
                     // Apply server update to local player
@@ -2392,7 +2402,6 @@ void Game::connectToServer(const char* host, uint16_t port) {
                     if (pl) {
                         pl->setPosition(serverPos);
                         pl->setRotation({update.rotX, 0, update.rotZ});
-                        // Health and energy are authoritative from server
                     }
                 }
             }
