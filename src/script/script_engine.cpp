@@ -2491,7 +2491,18 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
-    tsInstance->registerNative("delete", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("delete", [](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            std::string objName = args[0].toString();
+            auto* obj = ScriptEngine::instance().findObject(objName.c_str());
+            if (obj) {
+                Console::instance().printf(LogLevel::Debug, "delete: removing ScriptObject '%s'", objName.c_str());
+                ScriptEngine::instance().objects.erase(objName);
+                delete obj;
+            }
+        }
+        return VMValue(1);
+    });
     tsInstance->registerNative("setValue", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() >= 2) {
             auto* ctl = getListCtrl(args[0].toString());
@@ -2518,7 +2529,10 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
-    tsInstance->registerNative("repaint", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("repaint", [](const auto&) -> VMValue {
+        Engine::instance().guiRenderer().refresh();
+        return VMValue(1);
+    });
     tsInstance->registerNative("getRowNumById", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
         if (!ctl || args.size() < 2) return VMValue(-1);
@@ -2527,8 +2541,28 @@ bool ScriptEngine::init() {
             if (i == id) return VMValue(i);
         return VMValue(-1);
     });
-    tsInstance->registerNative("setRowColor", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("setRowStyle", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setRowColor", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 3) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) {
+                int row = args[1].toInt();
+                std::string color = args[2].toString();
+                Console::instance().printf(LogLevel::Debug, "setRowColor: ctl='%s' row=%d color='%s'", args[0].toString().c_str(), row, color.c_str());
+            }
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setRowStyle", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 3) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) {
+                int row = args[1].toInt();
+                std::string style = args[2].toString();
+                Console::instance().printf(LogLevel::Debug, "setRowStyle: ctl='%s' row=%d style='%s'", args[0].toString().c_str(), row, style.c_str());
+            }
+        }
+        return VMValue(1);
+    });
     tsInstance->registerNative("setText", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() >= 2) {
             auto* ctl = getListCtrl(args[0].toString());
@@ -2536,7 +2570,10 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
-    tsInstance->registerNative("cancelServerQuery", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("cancelServerQuery", [](const auto&) -> VMValue {
+        Console::instance().printf(LogLevel::Debug, "cancelServerQuery");
+        return VMValue(1);
+    });
     tsInstance->registerNative("localConnect", [](const auto& args) -> VMValue {
         std::string mission = args.empty() ? "" : args[0].toString();
         Console::instance().printf(LogLevel::Info, "localConnect: starting local game '%s'", mission.c_str());
@@ -2578,7 +2615,13 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
-    tsInstance->registerNative("installChatItem", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("installChatItem", [](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            Console::instance().printf(LogLevel::Debug, "installChatItem: %s = %s", args[0].toString().c_str(), args[1].toString().c_str());
+            Console::instance().setVariable(("HUD::chatItem::" + args[0].toString()).c_str(), args[1].toString().c_str());
+        }
+        return VMValue(1);
+    });
     tsInstance->registerNative("startChatMenu", [](const auto&) -> VMValue {
         Console::instance().setVariable("HUD::chatOpen", "1");
         return VMValue(1);
@@ -2587,9 +2630,18 @@ bool ScriptEngine::init() {
         Console::instance().setVariable("HUD::chatOpen", "0");
         return VMValue(1);
     });
-    tsInstance->registerNative("ChatRoomMemberList_refresh", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("ChannelBannedList_refresh", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("createFlagTossGauge", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("ChatRoomMemberList_refresh", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().printf(LogLevel::Debug, "ChatRoomMemberList_refresh: %s", args[0].toString().c_str());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("ChannelBannedList_refresh", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().printf(LogLevel::Debug, "ChannelBannedList_refresh: %s", args[0].toString().c_str());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("createFlagTossGauge", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().printf(LogLevel::Debug, "createFlagTossGauge: %s", args[0].toString().c_str());
+        return VMValue(1);
+    });
     tsInstance->registerNative("cancelChatMenu", [](const auto&) -> VMValue {
         Console::instance().setVariable("HUD::chatOpen", "0");
         return VMValue(1);
@@ -2749,10 +2801,26 @@ bool ScriptEngine::init() {
     });
 
     // EffectProfile is called by audio scripts
-    tsInstance->registerNative("EffectProfile", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("EffectProfile", [](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            std::string name = args[0].toString();
+            std::string props = args[1].toString();
+            Console::instance().printf(LogLevel::Debug, "EffectProfile: %s = %s", name.c_str(), props.c_str());
+            Console::instance().setVariable(("SFX::" + name).c_str(), props.c_str());
+        }
+        return VMValue(1);
+    });
 
     // addMaterialMapping is called by material scripts
-    tsInstance->registerNative("addMaterialMapping", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("addMaterialMapping", [](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            std::string material = args[0].toString();
+            std::string sound = args[1].toString();
+            Console::instance().printf(LogLevel::Debug, "addMaterialMapping: %s -> %s", material.c_str(), sound.c_str());
+            Console::instance().setVariable(("MaterialMap::" + material).c_str(), sound.c_str());
+        }
+        return VMValue(1);
+    });
 
     // Networking: route commands through the game's connection
     tsInstance->registerNative("commandToClient", [](const auto& args) -> VMValue {
@@ -2843,9 +2911,19 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
-    tsInstance->registerNative("refreshSelectedServer", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("insertIPAddress", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("findNextServer", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("refreshSelectedServer", [](const auto&) -> VMValue {
+        Console::instance().printf(LogLevel::Debug, "refreshSelectedServer");
+        return VMValue(1);
+    });
+    tsInstance->registerNative("insertIPAddress", [](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            Console::instance().setVariable("HUD::serverAddress", args[0].toString().c_str());
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("findNextServer", [](const auto&) -> VMValue {
+        return VMValue(0);
+    });
     tsInstance->registerNative("getServerInfoString", [](const auto&) -> VMValue {
         auto& renderer = Engine::instance().guiRenderer();
         auto* browser = renderer.findControl("GMJ_Browser");
@@ -2876,10 +2954,43 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
-    tsInstance->registerNative("setTitle", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("setAltColor", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("setHeader", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("addServerQueryRow", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setTitle", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) {
+                ctl->text = args[1].toString();
+                Console::instance().printf(LogLevel::Debug, "setTitle: ctl='%s' title='%s'", args[0].toString().c_str(), ctl->text.c_str());
+            }
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setAltColor", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl && args.size() >= 2) {
+                Console::instance().printf(LogLevel::Debug, "setAltColor: ctl='%s' color='%s'", args[0].toString().c_str(), args[1].toString().c_str());
+            }
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setHeader", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) {
+                ctl->text = args[1].toString();
+                Console::instance().printf(LogLevel::Debug, "setHeader: ctl='%s' header='%s'", args[0].toString().c_str(), args[1].toString().c_str());
+            }
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("addServerQueryRow", [](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            std::string addr = args[0].toString();
+            std::string info = args[1].toString();
+            Console::instance().printf(LogLevel::Debug, "addServerQueryRow: addr='%s' info='%s'", addr.c_str(), info.c_str());
+        }
+        return VMValue(1);
+    });
 
     // Container/spatial query stubs (basic implementations)
     static struct { int nextIdx; bool active; } s_containerSearch = {0, false};
@@ -2912,11 +3023,34 @@ bool ScriptEngine::init() {
         if (!args.empty()) Console::instance().setVariable("echoFileLoads", args[0].toInt() ? "1" : "0");
         return VMValue(1);
     });
-    tsInstance->registerNative("setPureServer", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("telnetSetParameters", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("addCardProfile", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("addCreditsLine", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("enableImmersion", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setPureServer", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().setVariable("pref::pureServer", args[0].toInt() ? "1" : "0");
+        return VMValue(1);
+    });
+    tsInstance->registerNative("telnetSetParameters", [](const auto& args) -> VMValue {
+        if (args.size() >= 3) {
+            Console::instance().setVariable("Telnet::listenPort", args[0].toString().c_str());
+            Console::instance().setVariable("Telnet::listenPassword", args[1].toString().c_str());
+            Console::instance().setVariable("Telnet::region", args[2].toString().c_str());
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("addCardProfile", [](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            Console::instance().printf(LogLevel::Debug, "addCardProfile: %s", args[0].toString().c_str());
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("addCreditsLine", [](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            Console::instance().printf(LogLevel::Debug, "addCreditsLine: %s", args[0].toString().c_str());
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("enableImmersion", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().setVariable("pref::immersion", args[0].toInt() ? "1" : "0");
+        return VMValue(1);
+    });
     tsInstance->registerNative("isT2UkBuild", [](const auto&) -> VMValue { return VMValue(0); });
     tsInstance->registerNative("isKoreanBuild", [](const auto&) -> VMValue { return VMValue(0); });
     tsInstance->registerNative("videoSetGammaCorrection", [](const auto& args) -> VMValue {
