@@ -1901,8 +1901,14 @@ bool ScriptEngine::init() {
         });
     };
     stubVM("audioSetDriver");
-    stubVM("audioDetect");
-    stubVM("startAudio");
+    vmInstance->registerNativeFunction("audioDetect", [](const auto&) -> VMValue {
+        return VMValue(Engine::instance().audio().isInitialized() ? 1 : 0);
+    });
+    vmInstance->registerNativeFunction("startAudio", [](const auto&) -> VMValue {
+        auto& audio = Engine::instance().audio();
+        if (!audio.isInitialized()) audio.init();
+        return VMValue(1);
+    });
     stubVM("setZoomSpeed");
     stubVM("setShadowDetailLevel");
     stubVM("setOpenGLTextureCompressionHint");
@@ -1924,8 +1930,14 @@ bool ScriptEngine::init() {
         });
     };
     stubTS("audioSetDriver");
-    stubTS("audioDetect");
-    stubTS("startAudio");
+    tsInstance->registerNative("audioDetect", [](const auto&) -> VMValue {
+        return VMValue(Engine::instance().audio().isInitialized() ? 1 : 0);
+    });
+    tsInstance->registerNative("startAudio", [](const auto&) -> VMValue {
+        auto& audio = Engine::instance().audio();
+        if (!audio.isInitialized()) audio.init();
+        return VMValue(1);
+    });
     stubTS("setZoomSpeed");
     stubTS("setShadowDetailLevel");
     stubTS("setOpenGLTextureCompressionHint");
@@ -2118,7 +2130,12 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
-    tsInstance->registerNative("addMessageCallback", [](const auto&) -> VMValue {
+    tsInstance->registerNative("addMessageCallback", [](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            std::string msgType = args[0].toString();
+            std::string callback = args[1].toString();
+            Console::instance().printf(LogLevel::Debug, "addMessageCallback: type='%s' callback='%s'", msgType.c_str(), callback.c_str());
+        }
         return VMValue(1);
     });
 
@@ -2165,7 +2182,33 @@ bool ScriptEngine::init() {
         return VMValue(std::string(""));
     });
 
-    tsInstance->registerNative("alxPlay", [](const auto&) -> VMValue {
+    // Track named audio sources (name -> source mapping for alxCreateSource)
+    static std::unordered_map<std::string, SoundSource*> s_audioSources;
+
+    tsInstance->registerNative("alxPlay", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string name = args[0].toString();
+        // Try creating a one-shot source from sound/Name.wav or sound/Name.ogg
+        auto& audio = Engine::instance().audio();
+        auto loadAndPlay = [&](const std::string& path) -> bool {
+            SoundBuffer* buf = audio.loadSound(path.c_str());
+            if (!buf) return false;
+            SoundSource* src = audio.createSource();
+            if (!src) return false;
+            src->play(buf);
+            return true;
+        };
+        // Map T2 sound names to files
+        std::string path = "sound/" + name + ".wav";
+        if (loadAndPlay(path)) return VMValue(1);
+        path = "sound/" + name + ".ogg";
+        if (loadAndPlay(path)) return VMValue(1);
+        // Try lowercase variants
+        for (auto& c : name) c = (char)tolower((unsigned char)c);
+        path = "sound/" + name + ".wav";
+        if (loadAndPlay(path)) return VMValue(1);
+        path = "sound/" + name + ".ogg";
+        if (loadAndPlay(path)) return VMValue(1);
         return VMValue(0);
     });
 
@@ -2206,7 +2249,11 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("deactivateDirectInput", [](const auto&) -> VMValue {
         return VMValue(1);
     });
-    tsInstance->registerNative("setNetPort", [](const auto&) -> VMValue {
+    tsInstance->registerNative("setNetPort", [](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            Console::instance().setVariable("Pref::Net::Port", args[0].toInt());
+            Console::instance().printf(LogLevel::Debug, "setNetPort: %d", args[0].toInt());
+        }
         return VMValue(1);
     });
     tsInstance->registerNative("queryMasterGameTypes", [](const auto&) -> VMValue {
@@ -2411,9 +2458,26 @@ bool ScriptEngine::init() {
         if (ctl && args.size() >= 2) ctl->selectedRow = args[1].toInt();
         return VMValue(1);
     });
-    tsInstance->registerNative("getRowTextById", [](const auto&) -> VMValue { return VMValue(std::string("")); });
-    tsInstance->registerNative("size", [](const auto&) -> VMValue { return VMValue(0); });
-    tsInstance->registerNative("findText", [](const auto&) -> VMValue { return VMValue(0); });
+    tsInstance->registerNative("getRowTextById", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (!ctl || args.size() < 2) return VMValue(std::string(""));
+        int id = args[1].toInt();
+        if (id >= 0 && id < (int)ctl->listRows.size())
+            return VMValue(ctl->listRows[id]);
+        return VMValue(std::string(""));
+    });
+    tsInstance->registerNative("size", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        return VMValue((int32_t)(ctl ? (int32_t)ctl->listRows.size() : 0));
+    });
+    tsInstance->registerNative("findText", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (!ctl || args.size() < 2) return VMValue(0);
+        std::string search = args[1].toString();
+        for (int i = 0; i < (int)ctl->listRows.size(); i++)
+            if (ctl->listRows[i] == search) return VMValue(i);
+        return VMValue(-1);
+    });
     tsInstance->registerNative("scrollToTag", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("setVisible", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() >= 2) {
@@ -2473,7 +2537,10 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("cancelServerQuery", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("localConnect", [](const auto&) -> VMValue {
+    tsInstance->registerNative("localConnect", [](const auto& args) -> VMValue {
+        std::string mission = args.empty() ? "" : args[0].toString();
+        Console::instance().printf(LogLevel::Info, "localConnect: starting local game '%s'", mission.c_str());
+        Engine::instance().game().startLocalGame(mission.empty() ? nullptr : mission.c_str());
         return VMValue(1);
     });
     tsInstance->registerNative("addColumn", [](const auto&) -> VMValue { return VMValue(1); });
@@ -2513,14 +2580,78 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // alx* audio stubs
-    tsInstance->registerNative("alxStopAll", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("alxListenerf", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("alxSetChannelVolume", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("alxCreateSource", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("alxGetWaveLen", [](const auto&) -> VMValue { return VMValue(0); });
-    tsInstance->registerNative("alxSourcef", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("alxStop", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("alxStopAll", [](const auto&) -> VMValue {
+        Engine::instance().audio().stopAll();
+        s_audioSources.clear();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxListenerf", [](const auto&) -> VMValue {
+        // Listener float params — T2 sets these, we can ignore for now
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxSetChannelVolume", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(1);
+        std::string channel = args[0].toString();
+        float vol = (float)args[1].toDouble();
+        auto& cfg = Engine::instance().audio().config();
+        if (channel == "Master") cfg.masterVolume = vol;
+        else if (channel == "SFX" || channel == "SoundEffects") cfg.sfxVolume = vol;
+        else if (channel == "Music") cfg.musicVolume = vol;
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxCreateSource", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        std::string name = args[0].toString();
+        std::string soundName = args[1].toString();
+        auto& audio = Engine::instance().audio();
+        SoundBuffer* buf = nullptr;
+        auto tryLoad = [&](const std::string& path) {
+            buf = audio.loadSound(path.c_str());
+            return buf != nullptr;
+        };
+        std::string path = "sound/" + soundName + ".wav";
+        if (!tryLoad(path)) { path = "sound/" + soundName + ".ogg"; tryLoad(path); }
+        if (!buf) {
+            for (auto& c : soundName) c = (char)tolower((unsigned char)c);
+            path = "sound/" + soundName + ".wav";
+            if (!tryLoad(path)) { path = "sound/" + soundName + ".ogg"; tryLoad(path); }
+        }
+        if (!buf) return VMValue(0);
+        SoundSource* src = audio.createSource();
+        if (!src) return VMValue(0);
+        src->play(buf);
+        src->stop(); // created but not playing yet
+        s_audioSources[name] = src;
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxGetWaveLen", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string name = args[0].toString();
+        auto it = s_audioSources.find(name);
+        if (it == s_audioSources.end()) return VMValue(0);
+        // Return 1000 as a default reasonable length (T2 stubs often return this)
+        return VMValue(1000.0);
+    });
+    tsInstance->registerNative("alxSourcef", [](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(1);
+        std::string name = args[0].toString();
+        std::string param = args[1].toString();
+        float val = (float)args[2].toDouble();
+        auto it = s_audioSources.find(name);
+        if (it == s_audioSources.end()) return VMValue(1);
+        auto* src = it->second;
+        if (param == "volume") src->setVolume(val);
+        else if (param == "pitch") src->setPitch(val);
+        else if (param == "looping") src->setLooping(val != 0);
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxStop", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(1);
+        std::string name = args[0].toString();
+        auto it = s_audioSources.find(name);
+        if (it != s_audioSources.end()) it->second->stop();
+        return VMValue(1);
+    });
 
     // Display notification stubs
     tsInstance->registerNative("bottomPrint", [](const auto&) -> VMValue { return VMValue(1); });
@@ -2550,9 +2681,32 @@ bool ScriptEngine::init() {
     // addMaterialMapping is called by material scripts
     tsInstance->registerNative("addMaterialMapping", [](const auto&) -> VMValue { return VMValue(1); });
 
-    // Networking stubs
-    tsInstance->registerNative("commandToClient", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("commandToServer", [](const auto&) -> VMValue { return VMValue(1); });
+    // Networking: route commands through the game's connection
+    tsInstance->registerNative("commandToClient", [](const auto& args) -> VMValue {
+        // commandToClient(client, funcName, arg1, arg2, ...)
+        if (args.size() < 2) return VMValue(0);
+        std::string func = args[1].toString();
+        std::string cmd = func;
+        for (size_t i = 2; i < args.size(); i++)
+            cmd += " " + args[i].toString();
+        Console::instance().printf(LogLevel::Debug, "commandToClient: %s", cmd.c_str());
+        auto* ts = Engine::instance().script().ts();
+        if (ts && ts->hasFunction(func))
+            ts->callFunction(func, {});
+        return VMValue(1);
+    });
+    tsInstance->registerNative("commandToServer", [](const auto& args) -> VMValue {
+        // commandToServer(funcName, arg1, arg2, ...)
+        if (args.empty()) return VMValue(0);
+        std::string func = args[0].toString();
+        std::string cmd = func;
+        for (size_t i = 1; i < args.size(); i++)
+            cmd += " " + args[i].toString();
+        Console::instance().printf(LogLevel::Debug, "commandToServer: %s", cmd.c_str());
+        // Execute locally since server is local
+        Console::instance().execute(cmd.c_str());
+        return VMValue(1);
+    });
 
     // Server browser networking
     tsInstance->registerNative("queryLanServers", [](const auto& args) -> VMValue {
@@ -2640,10 +2794,21 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("setHeader", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("addServerQueryRow", [](const auto&) -> VMValue { return VMValue(1); });
 
-    // Container/spatial query stubs
-    tsInstance->registerNative("InitContainerRadiusSearch", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("containerSearchNext", [](const auto&) -> VMValue { return VMValue(0); });
-    tsInstance->registerNative("containerRayCast", [](const auto&) -> VMValue { return VMValue(""); });
+    // Container/spatial query stubs (basic implementations)
+    static struct { int nextIdx; bool active; } s_containerSearch = {0, false};
+    tsInstance->registerNative("InitContainerRadiusSearch", [](const auto&) -> VMValue {
+        s_containerSearch = {0, true};
+        return VMValue(1);
+    });
+    tsInstance->registerNative("containerSearchNext", [](const auto&) -> VMValue {
+        if (!s_containerSearch.active) return VMValue(0);
+        if (s_containerSearch.nextIdx == 0) { s_containerSearch.nextIdx++; return VMValue("Player"); }
+        s_containerSearch.active = false;
+        return VMValue(0);
+    });
+    tsInstance->registerNative("containerRayCast", [](const auto&) -> VMValue {
+        return VMValue("");
+    });
     tsInstance->registerNative("containerSearchCurrDist", [](const auto&) -> VMValue { return VMValue(0.0); });
     tsInstance->registerNative("containerSearchCurrRadDamageDist", [](const auto&) -> VMValue { return VMValue(0.0); });
     tsInstance->registerNative("calcExplosionCoverage", [](const auto&) -> VMValue { return VMValue(1.0); });

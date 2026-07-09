@@ -60,6 +60,7 @@ public:
     void releaseSource(SoundSource* source);
 
     AudioConfig& config() { return cfg; }
+    bool isInitialized() const { return initialized; }
 
     void stopAll();
     void pauseAll();
