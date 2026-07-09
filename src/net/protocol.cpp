@@ -34,7 +34,7 @@ bool T2Protocol::verifyChecksum(const uint8_t* data, size_t size) {
 // ─── Move Message ─────────────────────────────────────────────────
 
 bool T2Protocol::encodeMove(uint8_t* buf, size_t bufSize, const MoveMessage& msg) {
-    if (bufSize < 33) return false;
+    if (bufSize < 34) return false;
     uint32_t pos = 0;
     buf[pos++] = GDT_Move;
     memcpy(buf + pos, &msg.posX, 4); pos += 4;
@@ -45,11 +45,12 @@ bool T2Protocol::encodeMove(uint8_t* buf, size_t bufSize, const MoveMessage& msg
     buf[pos++] = msg.flags;
     memcpy(buf + pos, &msg.lookX, 4); pos += 4;
     memcpy(buf + pos, &msg.lookY, 4); pos += 4;
+    memcpy(buf + pos, &msg.seq, 4); pos += 4;
     return true;
 }
 
 bool T2Protocol::decodeMove(const uint8_t* data, size_t size, MoveMessage& msg) {
-    if (size < 33 || data[0] != GDT_Move) return false;
+    if (size < 34 || data[0] != GDT_Move) return false;
     uint32_t pos = 1;
     memcpy(&msg.posX, data + pos, 4); pos += 4;
     memcpy(&msg.posY, data + pos, 4); pos += 4;
@@ -59,13 +60,14 @@ bool T2Protocol::decodeMove(const uint8_t* data, size_t size, MoveMessage& msg) 
     msg.flags = data[pos++];
     memcpy(&msg.lookX, data + pos, 4); pos += 4;
     memcpy(&msg.lookY, data + pos, 4); pos += 4;
+    memcpy(&msg.seq, data + pos, 4); pos += 4;
     return true;
 }
 
 // ─── Update Message ───────────────────────────────────────────────
 
 bool T2Protocol::encodeUpdate(uint8_t* buf, size_t bufSize, const UpdateMessage& msg) {
-    if (bufSize < 45) return false;
+    if (bufSize < 49) return false;
     uint32_t pos = 0;
     buf[pos++] = GDT_Update;
     memcpy(buf + pos, &msg.posX, 4); pos += 4;
@@ -79,11 +81,12 @@ bool T2Protocol::encodeUpdate(uint8_t* buf, size_t bufSize, const UpdateMessage&
     buf[pos++] = (uint8_t)(msg.health * 2);
     buf[pos++] = (uint8_t)(msg.energy * 2);
     buf[pos++] = msg.flags;
+    memcpy(buf + pos, &msg.lastMoveSeq, 4); pos += 4;
     return true;
 }
 
 bool T2Protocol::decodeUpdate(const uint8_t* data, size_t size, UpdateMessage& msg) {
-    if (size < 45 || data[0] != GDT_Update) return false;
+    if (size < 49 || data[0] != GDT_Update) return false;
     uint32_t pos = 1;
     memcpy(&msg.posX, data + pos, 4); pos += 4;
     memcpy(&msg.posY, data + pos, 4); pos += 4;
@@ -96,6 +99,7 @@ bool T2Protocol::decodeUpdate(const uint8_t* data, size_t size, UpdateMessage& m
     msg.health = data[pos++] / 2.0f;
     msg.energy = data[pos++] / 2.0f;
     msg.flags = data[pos++];
+    memcpy(&msg.lastMoveSeq, data + pos, 4); pos += 4;
     return true;
 }
 
@@ -282,7 +286,8 @@ void GameServer::update() {
             client.lastReceive = now;
 
             T2Protocol::MoveMessage move;
-            if (T2Protocol::decodeMove(buf + 1, n - 1, move)) {
+            // payload points past WireHeader (or legacy single byte); decode from there
+            if (payloadLen > 0 && T2Protocol::decodeMove(payload, payloadLen, move)) {
                 client.lastMove = move;
                 client.posX = move.posX;
                 client.posY = move.posY;
@@ -290,22 +295,29 @@ void GameServer::update() {
                 client.rotZ = move.rotZ;
                 client.rotX = move.rotX;
 
-                // Send update back
+                // Send update back with the move's seq echoed
                 T2Protocol::UpdateMessage update;
                 update.posX = client.posX;
                 update.posY = client.posY;
                 update.posZ = client.posZ;
                 update.rotZ = client.rotZ;
                 update.rotX = client.rotX;
-                update.velX = 0; update.velY = 0; update.velZ = 0;
+                update.velX = 0;
+                update.velY = 0;
+                update.velZ = 0;
                 update.health = client.health;
                 update.energy = client.energy;
                 update.flags = 0;
+                update.lastMoveSeq = move.seq;
 
                 uint8_t upBuf[64];
-                upBuf[0] = (uint8_t)PacketType::GameData;
-                T2Protocol::encodeUpdate(upBuf + 1, sizeof(upBuf) - 1, update);
-                size_t upLen = 46;
+                WireHeader whdr;
+                whdr.sequence = 1; whdr.ack = 0; whdr.ackMask = 0;
+                whdr.type = (uint8_t)PacketType::GameData;
+                whdr.checksum = 0;
+                memcpy(upBuf, &whdr, sizeof(WireHeader));
+                T2Protocol::encodeUpdate(upBuf + sizeof(WireHeader), sizeof(upBuf) - sizeof(WireHeader), update);
+                size_t upLen = sizeof(WireHeader) + 49;
                 sendto(impl->sock, upBuf, upLen, 0, (sockaddr*)&from, fromLen);
             }
         }

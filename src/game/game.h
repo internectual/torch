@@ -9,6 +9,7 @@
 #include "game/hud.h"
 #include <vector>
 #include <string>
+#include <deque>
 #include <unordered_map>
 
 class Menu;
@@ -263,6 +264,17 @@ public:
 
     void applyInput(const InputMove& input);
     GameServer& gameServer() { return server; }
+
+    // Client-side prediction
+    struct StoredMove {
+        uint32_t seq;
+        InputMove input;
+        float dt;
+    };
+    uint32_t moveSeq = 0;
+    std::deque<StoredMove> pendingMoves;
+    void reconcile(const Point3F& serverPos, const Point3F& serverVel, uint32_t lastProcessedSeq);
+
     bool scoreboardShown() const { return showScoreboard; }
     bool isDemoPlaying() const { return demoPlaying; }
     bool isDemoPaused() const { return demoPaused; }

@@ -1713,8 +1713,14 @@ void Game::update(float dt) {
                 pl->fireWeapon(true);
             }
 
-            // Send move to server if connected
+            // Client-side prediction: store move and send to server
             if (cfg.online && activeConn && activeConn->state() >= Connection::Connected) {
+                uint32_t thisSeq = ++moveSeq;
+                // Store input for later reconciliation
+                pendingMoves.push_back({thisSeq, currentInput, dt});
+                if (pendingMoves.size() > 128)
+                    pendingMoves.pop_front();
+
                 T2Protocol::MoveMessage moveMsg;
                 Point3F ppos = pl->position();
                 Point3F prot = pl->rotation();
@@ -1729,11 +1735,12 @@ void Game::update(float dt) {
                                 (currentInput.fire ? 8 : 0);
                 moveMsg.lookX = currentInput.lookDelta.x;
                 moveMsg.lookY = currentInput.lookDelta.y;
+                moveMsg.seq = thisSeq;
 
                 uint8_t buf[64];
                 buf[0] = T2Protocol::GDT_Move;
                 T2Protocol::encodeMove(buf + 1, sizeof(buf) - 1, moveMsg);
-                activeConn->sendGamePacket(buf, 34, false);
+                activeConn->sendGamePacket(buf, 38, false);
             }
 
             // Reload
@@ -2397,15 +2404,35 @@ void Game::connectToServer(const char* host, uint16_t port) {
                 }
                 T2Protocol::UpdateMessage update;
                 if (T2Protocol::decodeUpdate(data, size, update)) {
-                    // Apply server update to local player
+                    // Reconcile: set to server state then replay pending moves
                     Point3F serverPos = {update.posX, update.posY, update.posZ};
+                    Point3F serverVel = {update.velX, update.velY, update.velZ};
                     if (pl) {
-                        pl->setPosition(serverPos);
+                        reconcile(serverPos, serverVel, update.lastMoveSeq);
                         pl->setRotation({update.rotX, 0, update.rotZ});
                     }
                 }
             }
         });
+    }
+}
+
+void Game::reconcile(const Point3F& serverPos, const Point3F& serverVel, uint32_t lastProcessedSeq) {
+    if (!pl) return;
+
+    // Pop all moves that were processed by server
+    while (!pendingMoves.empty() && pendingMoves.front().seq <= lastProcessedSeq)
+        pendingMoves.pop_front();
+
+    // Set player to authoritative server state
+    pl->setPosition(serverPos);
+    pl->setVelocity(serverVel);
+
+    // Re-apply pending moves to stay ahead of server
+    Physics physics;
+    for (auto& move : pendingMoves) {
+        // Reconstruct InputMove from stored data
+        physics.update(pl, move.dt, move.input);
     }
 }
 

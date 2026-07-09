@@ -102,6 +102,7 @@ namespace T2Protocol {
         float rotZ, rotX;
         uint8_t flags;
         float lookX, lookY;
+        uint32_t seq;
     };
 
     struct UpdateMessage {
@@ -110,6 +111,7 @@ namespace T2Protocol {
         float velX, velY, velZ;
         float health, energy;
         uint8_t flags;
+        uint32_t lastMoveSeq;
     };
 
     bool encodeMove(uint8_t* buf, size_t bufSize, const MoveMessage& msg);
