@@ -9,14 +9,14 @@ DSOReader::DSOReader() {}
 
 uint32_t DSOReader::readU32(const uint8_t*& ptr, size_t& remaining) {
     if (remaining < 4) return 0;
-    uint32_t v = *(const uint32_t*)ptr;
+    uint32_t v; memcpy(&v, ptr, 4);
     ptr += 4; remaining -= 4;
     return v;
 }
 
 double DSOReader::readF64(const uint8_t*& ptr, size_t& remaining) {
     if (remaining < 8) return 0;
-    double v = *(const double*)ptr;
+    double v; memcpy(&v, ptr, 8);
     ptr += 8; remaining -= 8;
     return v;
 }
@@ -40,7 +40,7 @@ uint32_t DSOReader::readOpcodeSlot(const uint8_t*& ptr, size_t& remaining) {
     if (op == 0xFF) {
         // Extended opcode: read u32
         if (remaining < 4) return 0xFF;
-        op = *(const uint32_t*)ptr;
+        uint32_t ext; memcpy(&ext, ptr, 4); op = ext;
         ptr += 4; remaining -= 4;
     }
     return op;

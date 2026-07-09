@@ -52,6 +52,36 @@ static void skipWS(const char*& p) {
     while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) ++p;
 }
 
+static void skipValue(const char*& p) {
+    skipWS(p);
+    if (!*p) return;
+    char c = *p;
+    if (c == '{' || c == '[') {
+        int d = 0;
+        while (*p) {
+            if (*p == '\"') {
+                ++p;
+                while (*p && *p != '\"') { if (*p == '\\') ++p; ++p; }
+                if (*p) ++p;
+                continue;
+            }
+            if (*p == '{' || *p == '[') ++d;
+            else if (*p == '}' || *p == ']') { --d; if (d == 0) { ++p; return; } }
+            ++p;
+        }
+        return;
+    }
+    if (c == '\"') {
+        ++p;
+        while (*p && *p != '\"') { if (*p == '\\') ++p; ++p; }
+        if (*p) ++p;
+        return;
+    }
+    // scalar (number / true / false / null / garbage): scan to next structural char
+    while (*p && *p != ',' && *p != '}' && *p != ']' && *p != ':' &&
+           *p != ' ' && *p != '\n' && *p != '\t' && *p != '\r') ++p;
+}
+
 static JVal parseVal(const char*& p, int depth = 0);
 
 static std::string parseStr(const char*& p) {
@@ -97,7 +127,8 @@ static JVal parseArr(const char*& p, int depth) {
     skipWS(p);
     if (*p == ']') { ++p; return v; }
     while (true) {
-        if (v.a.size() >= kMaxJSONArray) parseVal(p, depth + 1); // cap stored, still consume
+        if (!*p) return v; // end of input: stop (prevents infinite loop)
+        if (v.a.size() >= kMaxJSONArray) skipValue(p); // cap stored, still consume
         else v.a.push_back(parseVal(p, depth + 1));
         skipWS(p);
         if (*p == ']') { ++p; return v; }
@@ -113,6 +144,7 @@ static JVal parseObj(const char*& p, int depth) {
     skipWS(p);
     if (*p == '}') { ++p; return v; }
     while (true) {
+        if (!*p) return v; // end of input: stop (prevents infinite loop)
         skipWS(p);
         std::string key = parseStr(p);
         skipWS(p);
@@ -128,7 +160,7 @@ static JVal parseObj(const char*& p, int depth) {
 static JVal parseVal(const char*& p, int depth) {
     skipWS(p);
     if (!*p) return JVal();
-    if (depth > kMaxJSONDepth) return JVal();
+    if (depth > kMaxJSONDepth) { skipValue(p); return JVal(); }
     if (*p == '{') return parseObj(p, depth + 1);
     if (*p == '[') return parseArr(p, depth + 1);
     if (*p == '"') { JVal v; v.t = JType::Str; v.s = parseStr(p); return v; }
@@ -147,11 +179,16 @@ static JVal parseVal(const char*& p, int depth) {
     char* end = nullptr;
     v.n = std::strtod(p, &end);
     if (end > p) p = end;
+    else if (*p) ++p; // no conversion: skip the offending char so we always make progress
     return v;
 }
 
 static JVal parseJSON(const uint8_t* data, size_t size) {
     std::string s((const char*)data, size);
+    // Slack NULs so escape-sequence look-ahead (e.g. \uXXXX reads p[1..4]) and
+    // true/false/null pointer advances stay inside the allocation instead of
+    // reading past the end of the JSON chunk.
+    s.append(16, '\0');
     const char* p = s.c_str();
     return parseVal(p);
 }

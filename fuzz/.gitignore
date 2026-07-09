@@ -1,0 +1,4 @@
+# libFuzzer build artifact
+fuzz_loaders
+# seed corpus (large; generated locally, GLB models copied from glb/shapes)
+corpus/
