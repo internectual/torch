@@ -1909,16 +1909,23 @@ bool ScriptEngine::init() {
         if (!audio.isInitialized()) audio.init();
         return VMValue(1);
     });
-    stubVM("setZoomSpeed");
-    stubVM("setShadowDetailLevel");
-    stubVM("setOpenGLTextureCompressionHint");
-    stubVM("setOpenGLSkyMipReduction");
-    stubVM("setOpenGLMipReduction");
-    stubVM("setOpenGLInteriorMipReduction");
-    stubVM("setOpenGLAnisotropy");
-    stubVM("setLogMode");
-    stubVM("enableWinConsole");
-    stubVMS("setDefaultFov");
+    // Render/settings stubs that store values
+    auto prefVM = [&](const char* name, const char* prefKey) {
+        vmInstance->registerNativeFunction(name, [prefKey](const auto& args) {
+            if (!args.empty()) Console::instance().setVariable(prefKey, args[0].toString().c_str());
+            return VMValue(1);
+        });
+    };
+    prefVM("setZoomSpeed", "$pref::zoomSpeed");
+    prefVM("setShadowDetailLevel", "$pref::shadowDetail");
+    prefVM("setOpenGLTextureCompressionHint", "$pref::OpenGL::textureCompressionHint");
+    prefVM("setOpenGLSkyMipReduction", "$pref::OpenGL::skyMipReduction");
+    prefVM("setOpenGLMipReduction", "$pref::OpenGL::mipReduction");
+    prefVM("setOpenGLInteriorMipReduction", "$pref::OpenGL::interiorMipReduction");
+    prefVM("setOpenGLAnisotropy", "$pref::OpenGL::anisotropy");
+    prefVM("setLogMode", "$pref::logMode");
+    prefVM("enableWinConsole", "$pref::winConsole");
+    prefVM("setDefaultFov", "$pref::defaultFov");
 
     // Also register these on tsInstance so the TorqueScript interpreter can find them
     auto stubTS = [&](const char* name) {
@@ -1938,16 +1945,22 @@ bool ScriptEngine::init() {
         if (!audio.isInitialized()) audio.init();
         return VMValue(1);
     });
-    stubTS("setZoomSpeed");
-    stubTS("setShadowDetailLevel");
-    stubTS("setOpenGLTextureCompressionHint");
-    stubTS("setOpenGLSkyMipReduction");
-    stubTS("setOpenGLMipReduction");
-    stubTS("setOpenGLInteriorMipReduction");
-    stubTS("setOpenGLAnisotropy");
-    stubTS("setLogMode");
-    stubTS("enableWinConsole");
-    stubTSS("setDefaultFov");
+    auto prefTS = [&](const char* name, const char* prefKey) {
+        tsInstance->registerNative(name, [prefKey](const auto& args) {
+            if (!args.empty()) Console::instance().setVariable(prefKey, args[0].toString().c_str());
+            return VMValue(1);
+        });
+    };
+    prefTS("setZoomSpeed", "$pref::zoomSpeed");
+    prefTS("setShadowDetailLevel", "$pref::shadowDetail");
+    prefTS("setOpenGLTextureCompressionHint", "$pref::OpenGL::textureCompressionHint");
+    prefTS("setOpenGLSkyMipReduction", "$pref::OpenGL::skyMipReduction");
+    prefTS("setOpenGLMipReduction", "$pref::OpenGL::mipReduction");
+    prefTS("setOpenGLInteriorMipReduction", "$pref::OpenGL::interiorMipReduction");
+    prefTS("setOpenGLAnisotropy", "$pref::OpenGL::anisotropy");
+    prefTS("setLogMode", "$pref::logMode");
+    prefTS("enableWinConsole", "$pref::winConsole");
+    prefTS("setDefaultFov", "$pref::defaultFov");
 
     // GUI Canvas methods (called as Canvas.pushDialog() etc.)
     // These are registered globally so the dot-notation lookup finds them
@@ -2070,8 +2083,9 @@ bool ScriptEngine::init() {
         });
     }
 
-    // Login flow stubs (called by T2 startup scripts)
     tsInstance->registerNative("cleanupAudio", [](const auto&) -> VMValue {
+        auto& audio = Engine::instance().audio();
+        if (audio.isInitialized()) audio.shutdown();
         return VMValue(1);
     });
     tsInstance->registerNative("WONDisableFutureCalls", [](const auto&) -> VMValue {
@@ -2543,13 +2557,29 @@ bool ScriptEngine::init() {
         Engine::instance().game().startLocalGame(mission.empty() ? nullptr : mission.c_str());
         return VMValue(1);
     });
-    tsInstance->registerNative("addColumn", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("setSortColumn", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("setSortIncreasing", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("addStyle", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("getRowNumById", [](const auto&) -> VMValue { return VMValue(0); });
-    tsInstance->registerNative("setRowColor", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("setRowStyle", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("addColumn", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl && args.size() >= 3) {
+            std::string colName = args[1].toString();
+            float colWidth = (float)args[2].toDouble();
+            ctl->sbColumns.push_back({colName, colWidth, true});
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setSortColumn", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl && args.size() >= 2) {
+            std::string colName = args[1].toString();
+            for (size_t i = 0; i < ctl->sbColumns.size(); i++)
+                if (ctl->sbColumns[i].name == colName) { ctl->sbSortCol = (int)i; break; }
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setSortIncreasing", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl && args.size() >= 2) ctl->sbSortInc = args[1].toBool();
+        return VMValue(1);
+    });
 
     // Chat/UI/misc function stubs (method dispatch falls back to natives if no TS function)
     tsInstance->registerNative("addChat", [](const auto&) -> VMValue { return VMValue(1); });
@@ -2653,17 +2683,44 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // Display notification stubs
-    tsInstance->registerNative("bottomPrint", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("centerPrint", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("clearBottomPrint", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("clearCenterPrint", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("bottomPrintAll", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("centerPrintAll", [](const auto&) -> VMValue { return VMValue(1); });
+    // Display notifications — store messages in console variables for HUD to render
+    tsInstance->registerNative("bottomPrint", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().setVariable("HUD::bottomPrint", args[0].toString().c_str());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("centerPrint", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().setVariable("HUD::centerPrint", args[0].toString().c_str());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("clearBottomPrint", [](const auto&) -> VMValue {
+        Console::instance().setVariable("HUD::bottomPrint", "");
+        return VMValue(1);
+    });
+    tsInstance->registerNative("clearCenterPrint", [](const auto&) -> VMValue {
+        Console::instance().setVariable("HUD::centerPrint", "");
+        return VMValue(1);
+    });
+    tsInstance->registerNative("bottomPrintAll", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().setVariable("HUD::bottomPrint", args[0].toString().c_str());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("centerPrintAll", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().setVariable("HUD::centerPrint", args[0].toString().c_str());
+        return VMValue(1);
+    });
 
-    // WON/Login stubs
-    tsInstance->registerNative("WONLoginResult", [](const auto&) -> VMValue { return VMValue(0); });
-    tsInstance->registerNative("WONServerLogin", [](const auto&) -> VMValue { return VMValue(1); });
+    // WON/Login stubs — store login info so login flow can proceed
+    tsInstance->registerNative("WONLoginResult", [](const auto& args) -> VMValue {
+        Console::instance().setVariable("WON::loginResult", args.empty() ? "0" : args[0].toString().c_str());
+        return VMValue(0);
+    });
+    tsInstance->registerNative("WONServerLogin", [](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            Console::instance().setVariable("WON::username", args[0].toString().c_str());
+            Console::instance().setVariable("WON::password", args[1].toString().c_str());
+        }
+        return VMValue(1);
+    });
     tsInstance->registerNative("WONStartLogin", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("WONStartEmailFetch", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("WONStartCreateAccount", [](const auto&) -> VMValue { return VMValue(1); });
@@ -2715,12 +2772,17 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("stopServerQuery", [](const auto&) -> VMValue {
-        auto& net = Engine::instance().network();
-        net.queryLanServers(); // will replace server list, effectively stopping
         return VMValue(1);
     });
-    tsInstance->registerNative("queryMasterServer", [](const auto&) -> VMValue {
-        // Master server query stub
+    tsInstance->registerNative("queryMasterServer", [](const auto& args) -> VMValue {
+        std::string masterUrl = args.empty() ? "" : args[0].toString();
+        if (!masterUrl.empty()) {
+            Console::instance().printf(LogLevel::Info, "queryMasterServer: %s", masterUrl.c_str());
+            Engine::instance().network().queryMasterServer(masterUrl.c_str());
+        } else {
+            // Default TribesNext master
+            Engine::instance().network().queryMasterServer("tribesnext.com:28001");
+        }
         return VMValue(1);
     });
     tsInstance->registerNative("addRow", [getListCtrl](const auto& args) -> VMValue {
@@ -2786,7 +2848,16 @@ bool ScriptEngine::init() {
         return VMValue("responded");
     });
     tsInstance->registerNative("joinSelectedGame", [](const auto&) -> VMValue {
-        // Stub — the script's JoinSelectedGame handles this via $JoinGameAddress
+        std::string addr = Console::instance().getStringVariable("JoinGameAddress", "");
+        if (!addr.empty()) {
+            Console::instance().printf(LogLevel::Info, "joinSelectedGame: connecting to %s", addr.c_str());
+            auto colon = addr.rfind(':');
+            if (colon != std::string::npos) {
+                std::string host = addr.substr(0, colon);
+                int port = atoi(addr.substr(colon + 1).c_str());
+                Engine::instance().game().connectToServer(host.c_str(), (uint16_t)port);
+            }
+        }
         return VMValue(1);
     });
     tsInstance->registerNative("setTitle", [](const auto&) -> VMValue { return VMValue(1); });
@@ -2814,8 +2885,17 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("calcExplosionCoverage", [](const auto&) -> VMValue { return VMValue(1.0); });
 
     // Misc startup stubs
-    tsInstance->registerNative("setModPaths", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("setEchoFileLoads", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setModPaths", [](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            Console::instance().setVariable("modPath", args[0].toString().c_str());
+            Console::instance().printf(LogLevel::Info, "setModPaths: %s", args[0].toString().c_str());
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setEchoFileLoads", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().setVariable("echoFileLoads", args[0].toInt() ? "1" : "0");
+        return VMValue(1);
+    });
     tsInstance->registerNative("setPureServer", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("telnetSetParameters", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("addCardProfile", [](const auto&) -> VMValue { return VMValue(1); });
@@ -2823,7 +2903,10 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("enableImmersion", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("isT2UkBuild", [](const auto&) -> VMValue { return VMValue(0); });
     tsInstance->registerNative("isKoreanBuild", [](const auto&) -> VMValue { return VMValue(0); });
-    tsInstance->registerNative("videoSetGammaCorrection", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("videoSetGammaCorrection", [](const auto& args) -> VMValue {
+        if (!args.empty()) Console::instance().setVariable("pref::gammaCorrection", args[0].toString().c_str());
+        return VMValue(1);
+    });
     tsInstance->registerNative("GetIRCServerList", [](const auto&) -> VMValue { return VMValue(""); });
 
     tsInstance->registerNative("enableWinConsole", [](const auto& args) -> VMValue {
