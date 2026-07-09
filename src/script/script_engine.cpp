@@ -2309,6 +2309,7 @@ bool ScriptEngine::init() {
         auto* ctl = getOrCreateCtrl(cname);
         if (ctl && args.size() >= 3) {
             int id = (int)args[1].toDouble();
+            if (id < 0 || id > 65535) return VMValue(1); // reject absurd indices (alloc/overflow guard)
             std::string txt = args[2].toString();
             if (id >= (int)ctl->tabs.size()) ctl->tabs.resize(id + 1);
             ctl->tabs[id] = {txt, true};
@@ -2897,6 +2898,7 @@ bool ScriptEngine::init() {
         auto* ctl = getListCtrl(cname);
         if (ctl && args.size() >= 3) {
             int id = args[1].toInt();
+            if (id < 0 || id > 65535) return VMValue(1); // reject absurd indices (alloc/overflow guard)
             std::string txt = args[2].toString();
             if (id >= (int)ctl->listRows.size()) ctl->listRows.resize(id + 1);
             ctl->listRows[id] = txt;

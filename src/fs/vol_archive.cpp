@@ -17,6 +17,7 @@ struct VolArchive::Impl {
     std::ifstream file;
     std::unordered_map<std::string, VolEntry> entries;
     std::string path;
+    std::streamoff fileSize = 0;
 };
 
 VolArchive::VolArchive() : impl(new Impl) {}
@@ -37,6 +38,12 @@ bool VolArchive::open(const char* path) {
         return false;
     }
 
+    // Record total file size so per-entry size can be clamped to the file.
+    impl->file.clear();
+    impl->file.seekg(0, std::ios::end);
+    impl->fileSize = impl->file.tellg();
+    impl->file.seekg(4, std::ios::beg);
+
     uint32_t version = 0, numEntries = 0;
     impl->file.read((char*)&version, 4);
     impl->file.read((char*)&numEntries, 4);
@@ -48,6 +55,10 @@ bool VolArchive::open(const char* path) {
         impl->file.read((char*)&ent.crc, 4);
         impl->file.read((char*)&ent.offset, 4);
         impl->file.read((char*)&ent.size, 4);
+        // Clamp size against the file so readFile() cannot allocate absurd amounts.
+        if (ent.offset > (uint32_t)impl->fileSize) ent.size = 0;
+        else if ((uint64_t)ent.offset + (uint64_t)ent.size > (uint64_t)impl->fileSize)
+            ent.size = (uint32_t)((uint64_t)impl->fileSize - (uint64_t)ent.offset);
         uint8_t nameLen = 0;
         impl->file.read((char*)&nameLen, 1);
         if (!impl->file) break;
