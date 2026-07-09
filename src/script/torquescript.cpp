@@ -721,6 +721,7 @@ VMValue TorqueScript::Impl::parseWhile() {
     size_t condStart = tokenPos;
     parseExpression();
     expect(TSTokenType::RParen);
+    size_t bodyStart = tokenPos; // body token range
 
     loopDepth++;
     VMValue result;
@@ -742,6 +743,7 @@ VMValue TorqueScript::Impl::parseWhile() {
             break;
         }
 
+        tokenPos = bodyStart;
         result = parseStatement();
         if (returning) break;
         if (breaking) { breaking = false; break; }
@@ -1267,11 +1269,19 @@ VMValue TorqueScript::Impl::parsePostfix() {
         }
         if (peekToken().type == TSTokenType::LBracket) {
             std::string varBeforeIndex = lastVarName;
+            std::string savedFieldObj = lastFieldObj;
+            std::string savedFieldName = lastFieldName;
             nextToken();
             VMValue idx = parseExpression();
+            lastFieldObj = savedFieldObj;
+            lastFieldName = savedFieldName;
             std::string savedVar = varBeforeIndex;
             while (match(TSTokenType::Comma)) {
+                std::string savedFieldObj2 = lastFieldObj;
+                std::string savedFieldName2 = lastFieldName;
                 VMValue idx2 = parseExpression();
+                lastFieldObj = savedFieldObj2;
+                lastFieldName = savedFieldName2;
                 idx = VMValue(idx.toString() + "," + idx2.toString());
             }
             expect(TSTokenType::RBracket);
@@ -1286,11 +1296,7 @@ VMValue TorqueScript::Impl::parsePostfix() {
                     if (sobj) {
                         auto fit = sobj->fields.find(lastFieldName);
                         val = (fit != sobj->fields.end()) ? fit->second : VMValue(0);
-                        Console::instance().printf(LogLevel::Info, "OBJREAD: '%s'.'%s' = '%s' (%zu fields)",
-                            lastFieldObj.c_str(), lastFieldName.c_str(), val.toString().c_str(), sobj->fields.size());
                     } else {
-                        Console::instance().printf(LogLevel::Info, "OBJREAD: '%s'.'%s' — object not found!",
-                            lastFieldObj.c_str(), lastFieldName.c_str());
                         val = VMValue(0);
                     }
                 } else if (savedVar[0] == '$') {
@@ -1360,6 +1366,9 @@ VMValue TorqueScript::Impl::parsePostfix() {
                     for (auto& c : nsLower) c = (char)tolower((unsigned char)c);
                     auto nsNit = natives.find(nsLower);
                     if (nsNit != natives.end()) { val = nsNit->second(methodArgs); called = true; }
+                }
+                if (!called) {
+                    val = VMValue(0);
                 }
             } else {
                 // Field access

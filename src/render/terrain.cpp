@@ -506,6 +506,12 @@ bool Font::load(const uint8_t* data, size_t size) {
 void Font::render(const char* text, float x, float y, const ColorF& color, float scale) {
     if (!loaded || !text) return;
     scale *= defaultScale;
+    // Enforce minimum brightness so text is always readable on dark backgrounds
+    ColorF col = color;
+    if (col.r + col.g + col.b < 0.3f) col = {1,1,1,1};
+
+    // Flush any pending sprite batch before we bind our own shader/projection
+    Engine::instance().renderer().flushSpriteBatch();
 
     auto* shader = ShaderManager::getSpriteShader();
     if (!shader || !shader->loaded) return;
@@ -539,7 +545,6 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
 
     struct SpriteVert { float x, y, z; float u, v; float r, g, b, a; };
     std::vector<SpriteVert> verts;
-    std::vector<uint32_t> idxs;
 
     float penX = x;
     float penY = y;
@@ -560,43 +565,45 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
 
         float l = penX + gXOff, r2 = l + gW;
         float t = penY + gYOff, b2 = t + gH;
-        float ra = color.r, ga = color.g, ba = color.b, aa = color.a;
+        float ra = col.r, ga = col.g, ba = col.b, aa = col.a;
 
-        uint32_t base = (uint32_t)verts.size();
-        verts.push_back({l, t, 0, charUV[c][0], charUV[c][1], ra, ga, ba, aa});
-        verts.push_back({r2, t, 0, charUV[c][2], charUV[c][1], ra, ga, ba, aa});
-        verts.push_back({l, b2, 0, charUV[c][0], charUV[c][3], ra, ga, ba, aa});
-        verts.push_back({r2, b2, 0, charUV[c][2], charUV[c][3], ra, ga, ba, aa});
-        idxs.insert(idxs.end(), {base, base+1, base+2, base+1, base+3, base+2});
+        // Half-texel offset to prevent UV bleeding
+        float du = 0.5f / texWidth, dv = 0.5f / texHeight;
+        float u0 = charUV[c][0] + du, v0 = charUV[c][1] + dv;
+        float u1 = charUV[c][2] - du, v1 = charUV[c][3] - dv;
+
+        // 6 vertices per glyph (2 triangles, no index buffer)
+        verts.push_back({l, t, 0, u0, v0, ra, ga, ba, aa});
+        verts.push_back({r2, t, 0, u1, v0, ra, ga, ba, aa});
+        verts.push_back({l, b2, 0, u0, v1, ra, ga, ba, aa});
+        verts.push_back({r2, t, 0, u1, v0, ra, ga, ba, aa});
+        verts.push_back({r2, b2, 0, u1, v1, ra, ga, ba, aa});
+        verts.push_back({l, b2, 0, u0, v1, ra, ga, ba, aa});
         penX += adv;
     }
 
     if (verts.empty()) return;
 
-    uint32_t vao, vbo, ebo;
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
-    glGenBuffers(1, &ebo);
+    if (!fontVAO) {
+        glGenVertexArrays(1, &fontVAO);
+        glGenBuffers(1, &fontVBO);
+        glBindVertexArray(fontVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, fontVBO);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)(3*sizeof(float)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)(5*sizeof(float)));
+        glEnableVertexAttribArray(2);
+    }
 
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(SpriteVert), verts.data(), GL_STREAM_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)(3*sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)(5*sizeof(float)));
-    glEnableVertexAttribArray(2);
+    glBindVertexArray(fontVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, fontVBO);
+    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(SpriteVert), verts.data(), GL_DYNAMIC_DRAW);
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, idxs.size() * sizeof(uint32_t), idxs.data(), GL_STREAM_DRAW);
     glDisable(GL_CULL_FACE);
-    glDrawElements(GL_TRIANGLES, (GLsizei)idxs.size(), GL_UNSIGNED_INT, 0);
+    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)verts.size());
     glEnable(GL_CULL_FACE);
-
-    glDeleteVertexArrays(1, &vao);
-    glDeleteBuffers(1, &vbo);
-    glDeleteBuffers(1, &ebo);
 }
 
 Point2F Font::measure(const char* text, float scale) {

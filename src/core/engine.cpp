@@ -25,6 +25,15 @@
 #include <ctime>
 #include <climits>
 
+// Object Tree state (file-scope for click handling access)
+static std::unordered_set<std::string> g_expandedNodes;
+static std::string g_selectedObject;
+static int g_treeScroll = 0;
+static bool g_treeDirty = true;
+static std::vector<std::pair<std::string, int>> g_displayList;
+static int g_treeY = 0;
+static int g_debugTab = 0;
+
 Engine::Engine() {}
 Engine::~Engine() {}
 
@@ -80,7 +89,7 @@ bool Engine::init(int argc, char* argv[]) {
         }
     }
 
-    Console::instance().printf(LogLevel::Info, "Torch v0.1.0");
+    Console::instance().printf(LogLevel::Info, "Torch v0.1.0 (built " __DATE__ " " __TIME__ ")");
 
     // Single-instance lock
     lockFd = open("/tmp/torch.lock", O_CREAT | O_RDWR, 0644);
@@ -1014,6 +1023,11 @@ void Engine::run() {
             prevPressed = pressed;
         }
 
+        // GUI keyboard input (text fields) — skip when console is active
+        if (gui && !gui->isDialogActive("ConsoleDlg")) {
+            gui->handleKeyboard();
+        }
+
         // Mouse wheel: GUI scroll (position-aware) or weapon cycle
         {
             static float weaponCycleCooldown = 0;
@@ -1347,8 +1361,7 @@ void Engine::run() {
                     // Build parent→children map from all script objects
                     static std::unordered_map<std::string, std::vector<std::string>> treeChildren;
                     static std::vector<std::string> treeRoots;
-                    static bool treeDirty = true;
-                    if (treeDirty) {
+                    if (g_treeDirty) {
                         treeChildren.clear();
                         treeRoots.clear();
                         // Gather all named objects
@@ -1379,23 +1392,25 @@ void Engine::run() {
                                 treeRoots.push_back(n);
                         }
                         // Let unnamed GuiControls parented to a SimGroup show up via the parent's children field
-                        treeDirty = false;
+                        g_treeDirty = false;
                     }
 
-                    static std::unordered_set<std::string> expandedNodes;
-                    static std::string selectedObject;
-                    static int treeScroll = 0;
-                    const float treeScale = overlayFont ? overlayFont->defaultScale : 1.0f;
+                    std::unordered_set<std::string>& expandedNodes = g_expandedNodes;
+                    std::string& selectedObject = g_selectedObject;
+                    int& treeScroll = g_treeScroll;
+
+                    const float treeScale = treeFontScale * (overlayFont ? overlayFont->defaultScale : 1.0f);
                     const int treeIndent = (int)(14 * treeScale);
 
                     // Draw tree items in available space
+                    g_treeY = ly;
                     int treeY = ly;
                     int maxTreeH = canvasBottom - treeY - 2;
                     int itemH = (int)(14 * treeScale);
                     int maxItems = maxTreeH / itemH;
 
                     // Build flat display list: roots → expanded children recursively
-                    std::vector<std::pair<std::string, int>> displayList;
+                    std::vector<std::pair<std::string, int>>& displayList = g_displayList;
                     std::function<void(const std::string&, int)> addNode = [&](const std::string& nodeName, int depth) {
                         if ((int)displayList.size() >= treeScroll + maxItems) return;
                         if (depth > 10) return; // safety
@@ -1558,6 +1573,11 @@ void Engine::run() {
             if (gui && gui->getCanvas()) gui->render();
             glDisable(GL_SCISSOR_TEST);
 
+            // Ensure proper GL state for 2D rendering (GUI may have changed it)
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glEnable(GL_BLEND);
+
             // Border around GUI canvas
             {
                 MatrixF borderOrtho;
@@ -1568,14 +1588,14 @@ void Engine::run() {
                 borderOrtho.m[3][1] = 1.0f;
                 r.setProjection(borderOrtho);
                 r.setView(MatrixF{});
-                r.drawRectFill({0, 0, 0}, {640, 2, 0}, {0, 1, 0.5f, 1});
-                r.drawRectFill({0, 478, 0}, {640, 480, 0}, {0, 1, 0.5f, 1});
-                r.drawRectFill({0, 0, 0}, {2, 480, 0}, {0, 1, 0.5f, 1});
-                r.drawRectFill({638, 0, 0}, {640, 480, 0}, {0, 1, 0.5f, 1});
+                r.drawRectFill({0, 0, 0}, {640, 2, 0}, {1, 1, 0.5f, 1});
+                r.drawRectFill({0, 478, 0}, {640, 480, 0}, {1, 1, 0.5f, 1});
+                r.drawRectFill({0, 0, 0}, {2, 480, 0}, {1, 1, 0.5f, 1});
+                r.drawRectFill({638, 0, 0}, {640, 480, 0}, {1, 1, 0.5f, 1});
             }
 
             // Horizontal separator across full width at canvas bottom
-            r.drawRectFill({0, 479, 0}, {(float)w, 480, 0}, {0, 1, 0.5f, 0.6f});
+            r.drawRectFill({0, 479, 0}, {(float)w, 480, 0}, {0.3f, 0.6f, 1, 0.6f});
             r.drawRectFill({0, 480, 0}, {(float)w, 481, 0}, {0.1f, 0.1f, 0.12f, 0.8f});
 
             // ─── Bottom tabbed panel ─────────────────────────────────────
@@ -1594,30 +1614,91 @@ void Engine::run() {
                         bool tabClick = plat->input().mouseButtons[1];
                         if (tabClick && !prevTabClick) {
                             float mx = (float)plat->input().mouseX, my = (float)plat->input().mouseY;
+                            // Tab clicks for bottom panel
+                            Font* tabF = overlayFont ? overlayFont : r.getFont();
                             int tx = tabX;
                             for (int t = 0; t < numTabs; t++) {
-                                int tw = (int)strlen(tabNames[t]) * 9 + 12;
-                                if (my >= tabBarY && my < tabBarY + tabH && mx >= tx && mx < tx + tw)
+                                float textW = tabF ? tabF->measure(tabNames[t], 1.0f).x : (float)strlen(tabNames[t]) * 9.0f;
+                                int tw = (int)textW + 16;
+                                if (my >= tabBarY && my < tabBarY + tabH && mx >= tx && mx < tx + tw) {
                                     bottomActiveTab = t;
-                                tx += tw + 2;
+                                    Console::instance().printf(LogLevel::Debug, "TAB: click tab=%d '%s'", t, tabNames[t]);
+                                }
+                                tx += tw + 1;
+                            }
+                            // Object Tree click handling (right panel, x >= 650)
+                            if (mx >= 650.0f && my < 480.0f && g_treeY > 0) {
+                                int treeY = g_treeY;
+                                float ts = treeFontScale * (overlayFont ? overlayFont->defaultScale : 1.0f);
+                                int itemH = (int)(14 * ts);
+                                int relY = (int)(my - treeY);
+                                if (relY >= 0) {
+                                    int itemIdx = relY / itemH + g_treeScroll;
+                                    if (itemIdx >= 0 && itemIdx < (int)g_displayList.size()) {
+                                        auto& entry = g_displayList[itemIdx];
+                                        int depth = entry.second;
+                                        int itemX = 650 + depth * (int)(14 * ts); // matches xPos in rendering
+                                        // Measure actual width of "[+]" at current scale
+                                        float bracketW = overlayFont ? overlayFont->measure("[+]", ts).x : 14.0f;
+                                        Console::instance().printf(LogLevel::Debug, "TREE: click item='%s' depth=%d itemX=%d mx=%.0f my=%.0f ts=%.2f bw=%.0f", entry.first.c_str(), depth, itemX, mx, my, ts, bracketW);
+                                        // Check click on [+] / [-] — bracket rendered at (xPos-14, yPos) with measured width
+                                        float bracketLeft = (float)itemX - 14.0f;
+                                        if (mx >= bracketLeft - 6.0f && mx < bracketLeft + bracketW + 6.0f) {
+                                            Console::instance().printf(LogLevel::Debug, "TREE: toggle expand '%s'", entry.first.c_str());
+                                            if (g_expandedNodes.count(entry.first))
+                                                g_expandedNodes.erase(entry.first);
+                                            else
+                                                g_expandedNodes.insert(entry.first);
+                                            g_treeDirty = true;
+                                        } else {
+                                            Console::instance().printf(LogLevel::Debug, "TREE: select '%s'", entry.first.c_str());
+                                            g_selectedObject = entry.first;
+                                        }
+                                    }
+                                }
                             }
                         }
                         prevTabClick = tabClick;
                     }
                     // Draw tab bar background
                     r.drawRectFill({0, (float)tabBarY, 0}, {(float)w, (float)(tabBarY + tabH + 4), 0}, {0.1f, 0.1f, 0.12f, 0.9f});
-                    // Draw tabs
+                    // Compute tab positions (must be done before any Font::render calls)
                     int tx = tabX;
                     Font* tabFont = overlayFont ? overlayFont : r.getFont();
                     float tabFontSize = tabFont ? (float)tabFont->charHeight : 12.0f;
+                    int tabPositions[4] = {0};
+                    float tabWidths[4] = {0};
                     for (int t = 0; t < numTabs; t++) {
+                        tabPositions[t] = tx;
                         float textW = tabFont ? tabFont->measure(tabNames[t]).x : (float)strlen(tabNames[t]) * 9.0f;
                         float tw = textW + 16;
-                        ColorF tabCol = (t == bottomActiveTab) ? ColorF{0.3f, 0.7f, 1, 0.9f} : ColorF{0.2f, 0.2f, 0.25f, 0.8f};
-                        r.drawRectFill({(float)tx, (float)tabBarY, 0}, {(float)(tx + tw), (float)(tabBarY + tabH), 0}, tabCol);
-                        if (tabFont)
-                            tabFont->render(tabNames[t], (float)(tx + (tw - textW) * 0.5f), (float)(tabBarY + (tabH - tabFontSize) * 0.5f), {1,1,1,0.9f}, 1.0f);
+                        tabWidths[t] = tw;
                         tx += (int)(tw + 2);
+                    }
+                    // Draw active tab highlight FIRST (before any Font::render)
+                    if (bottomActiveTab >= 0 && bottomActiveTab < numTabs) {
+                        int hx = tabPositions[bottomActiveTab];
+                        float hw = tabWidths[bottomActiveTab];
+                        Console::instance().printf(LogLevel::Debug, "TABHL: active=%d hx=%d hw=%.0f", bottomActiveTab, hx, hw);
+                        r.drawRectFill({(float)hx, (float)tabBarY, 0}, {(float)(hx + hw), (float)(tabBarY + tabH + 2), 0}, {0.35f,0.38f,0.55f,1});
+                    }
+                    // Draw tab backgrounds (non-active tabs cover the highlight, active tab's yellow shows through)
+                    for (int t = 0; t < numTabs; t++) {
+                        int tw = (int)tabWidths[t];
+                        if (t != bottomActiveTab)
+                            r.drawRectFill({(float)tabPositions[t], (float)tabBarY, 0}, {(float)(tabPositions[t] + tw), (float)(tabBarY + tabH), 0}, {0.2f, 0.2f, 0.25f, 0.8f});
+                    }
+                    // Draw tab labels (after all rects)
+                    for (int t = 0; t < numTabs; t++) {
+                        int xPos = tabPositions[t];
+                        int tw = (int)tabWidths[t];
+                        bool isAct = (t == bottomActiveTab);
+                        if (isAct) g_debugTab = bottomActiveTab;
+                        if (tabFont) {
+                            float lw = tabFont->measure(tabNames[t], 1.0f).x + 16;
+                            ColorF txtCol = isAct ? ColorF{1,1,1,1} : ColorF{1,1,1,0.9f};
+                            tabFont->render(tabNames[t], (float)(xPos + (tw - lw) * 0.5f + 2), (float)(tabBarY + (tabH - tabFontSize) * 0.5f), txtCol, 1.0f);
+                        }
                     }
                     // Tab content area
                     int contentY = tabBarY + tabH + 4;
@@ -1845,7 +1926,7 @@ void Engine::run() {
         fpsTimer += dt;
         if (fpsTimer >= 1.0f) {
             char title[128];
-            snprintf(title, sizeof(title), "Torch - %d FPS", frameCount);
+            snprintf(title, sizeof(title), "Torch - %d FPS tab=%d", frameCount, g_debugTab);
             plat->setTitle(title);
             Console::instance().printf(LogLevel::Debug, "Heartbeat: %d FPS, dialogs=%zu", frameCount, gui ? gui->dialogCount() : 0);
             frameCount = 0;

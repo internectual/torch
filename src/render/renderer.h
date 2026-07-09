@@ -106,6 +106,8 @@ struct Font {
     std::string fontName;
     int32_t fontSize = 0;
 
+    uint32_t fontVAO = 0, fontVBO = 0, fontEBO = 0;
+
     bool load(const uint8_t* data, size_t size);
     bool loadDefault(int size = 8);
     bool loadGFT(const uint8_t* data, size_t size);
@@ -219,6 +221,7 @@ public:
     void drawSprite(const Point3F& pos, float size, const ColorF& color, uint32_t texture = 0);
     void drawTexturedRect(const Point3F& a, const Point3F& b, uint32_t texture);
     void drawTexturedRectUV(const Point3F& a, const Point3F& b, uint32_t texture, float u0, float v0, float u1, float v1);
+    void flushSpriteBatch();
 
     Texture* loadTexture(const char* path);
     Shader* loadShader(const char* vertPath, const char* fragPath);
@@ -279,4 +282,18 @@ private:
 
     // Font cache
     std::unordered_map<std::string, Font*> fontCache;
+
+    void initSpriteVAO();
+    void spriteBatchAdd(float* verts, uint32_t texId);
+    void spriteBatchFlush();
+
+    // Sprite batch accumulator
+    std::vector<float> spriteBatchBuf;
+    uint32_t spriteBatchTex = UINT32_MAX;
+    int spriteBatchCount = 0;
+    static constexpr int SPRITE_BATCH_MAX = 512; // max rects per batch
+
+    // Persistent 2D sprite/line rendering (created once to avoid per-frame glGen/glDelete)
+    uint32_t spriteVAO = 0, spriteVBO = 0, spriteEBO = 0;
+    uint32_t lineVAO = 0, lineVBO = 0;
 };

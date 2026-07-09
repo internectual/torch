@@ -1006,8 +1006,9 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
             // ── Array field access ──
             case (uint32_t)DSOOpcode::OP_SETCURFIELD_ARRAY: {
                 if (!stack.empty()) {
-                    frame->curFieldName = stack.top().toString();
+                    std::string idx = stack.top().toString();
                     stack.pop();
+                    frame->curFieldName = frame->curFieldName + "[" + idx + "]";
                 }
                 break;
             }
@@ -1469,6 +1470,75 @@ bool ScriptEngine::init() {
         return VMValue(path.substr(dot + 1));
     });
 
+    tsInstance->registerNative("fileBase", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string path = args[0].toString();
+        size_t slash = path.rfind('/');
+        if (slash == std::string::npos) slash = path.rfind('\\');
+        if (slash == std::string::npos) slash = 0; else slash++;
+        size_t dot = path.rfind('.');
+        if (dot == std::string::npos || dot < slash) dot = path.size();
+        return VMValue(path.substr(slash, dot - slash));
+    });
+
+    tsInstance->registerNative("openForRead", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string objName = args[0].toString();
+        std::string path = args.size() > 1 ? args[1].toString() : "";
+        auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
+        if (!sobj) return VMValue(0);
+        std::vector<uint8_t> data;
+        if (!Engine::instance().fs().readFile(path.c_str(), data)) return VMValue(0);
+        sobj->internals["__fo_data"] = VMValue(std::string(data.begin(), data.end()));
+        sobj->internals["__fo_pos"] = VMValue(0);
+        return VMValue(1);
+    });
+    tsInstance->registerNative("isEOF", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(1);
+        std::string objName = args[0].toString();
+        auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
+        if (!sobj) return VMValue(1);
+        auto dit = sobj->internals.find("__fo_data");
+        if (dit == sobj->internals.end()) return VMValue(1);
+        auto pit = sobj->internals.find("__fo_pos");
+        if (pit == sobj->internals.end()) return VMValue(1);
+        return VMValue((int32_t)(pit->second.toInt() >= (int32_t)dit->second.str.size()));
+    });
+    tsInstance->registerNative("readLine", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string objName = args[0].toString();
+        auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
+        if (!sobj) return VMValue("");
+        auto dit = sobj->internals.find("__fo_data");
+        if (dit == sobj->internals.end()) return VMValue("");
+        auto pit = sobj->internals.find("__fo_pos");
+        if (pit == sobj->internals.end()) return VMValue("");
+        std::string& data = dit->second.str;
+        int32_t& pos = pit->second.i;
+        if (pos >= (int32_t)data.size()) return VMValue("");
+        size_t end = data.find('\n', pos);
+        std::string line;
+        if (end == std::string::npos) {
+            line = data.substr(pos);
+            pos = (int32_t)data.size();
+        } else {
+            line = data.substr(pos, end - pos);
+            pos = (int32_t)(end + 1);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+        }
+        return VMValue(line);
+    });
+    tsInstance->registerNative("close", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(1);
+        std::string objName = args[0].toString();
+        auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
+        if (sobj) {
+            sobj->internals.erase("__fo_data");
+            sobj->internals.erase("__fo_pos");
+        }
+        return VMValue(1);
+    });
+
     tsInstance->registerNative("stricmp", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
         std::string a = args[0].toString(), b = args[1].toString();
@@ -1895,9 +1965,6 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
-    tsInstance->registerNative("getValue", [](const auto&) -> VMValue { return VMValue(std::string("")); });
-    tsInstance->registerNative("setValue", [](const auto&) -> VMValue { return VMValue(1); });
-
     // Console history
     tsInstance->registerNative("showCursor", [](const auto&) -> VMValue {
         return VMValue(1);
@@ -1979,11 +2046,7 @@ bool ScriptEngine::init() {
             s_fileIdx = 0;
             if (args.empty()) return VMValue("");
             std::string pattern = args[0].toString();
-            // Strip "*" prefix/suffix for listFiles matching
-            std::string clean = pattern;
-            if (clean.size() > 1 && clean[0] == '*') clean = clean.substr(1);
-            if (clean.size() > 1 && clean.back() == '*') clean.pop_back();
-            Engine::instance().fs().listFiles(clean.c_str(), s_fileList);
+            Engine::instance().fs().listFiles(pattern.c_str(), s_fileList);
             Console::instance().printf(LogLevel::Debug, "findFirstFile(\"%s\"): found %zu files, first=\"%s\"", pattern.c_str(), s_fileList.size(), s_fileList.empty() ? "" : s_fileList[0].c_str());
             // Sort to match T2 behavior
             std::sort(s_fileList.begin(), s_fileList.end());
@@ -2156,9 +2219,53 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     // Common GUI control method stubs
-    tsInstance->registerNative("addRow", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("clear", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("add", [](const auto&) -> VMValue { return VMValue(1); });
+    auto getListCtrl = [](const std::string& name) -> GuiControl* {
+        auto& g = Engine::instance().guiRenderer();
+        auto* ctl = g.findControl(name);
+        if (!ctl && ScriptEngine::instance().findObject(name.c_str()))
+            ctl = g.soToGui(name, nullptr);
+        return ctl;
+    };
+    tsInstance->registerNative("addRow", [getListCtrl](const auto& args) -> VMValue {
+        std::string cname = args.empty() ? "" : args[0].toString();
+        auto* ctl = getListCtrl(cname);
+        if (ctl && args.size() >= 3) {
+            int id = args[1].toInt();
+            std::string txt = args[2].toString();
+            if (id >= (int)ctl->listRows.size()) ctl->listRows.resize(id + 1);
+            ctl->listRows[id] = txt;
+            Console::instance().printf(LogLevel::Debug, "addRow: ctl='%s' id=%d txt='%s' rows=%zu", cname.c_str(), id, txt.c_str(), ctl->listRows.size());
+        } else {
+            Console::instance().printf(LogLevel::Debug, "addRow: FAIL ctl=%p cname='%s' args=%zu", (void*)ctl, cname.c_str(), args.size());
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("clear", [getListCtrl](const auto& args) -> VMValue {
+        std::string cname = args.empty() ? "" : args[0].toString();
+        auto* ctl = getListCtrl(cname);
+        if (ctl) {
+            ctl->listRows.clear();
+            ctl->selectedRow = -1;
+            ctl->menuItems.clear();
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("add", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(1);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl) return VMValue(1);
+        int id = (int)args[1].toDouble();
+        std::string txt = args[2].toString();
+        ctl->menuItems.push_back({id, txt, false});
+        return VMValue(1);
+    });
+    tsInstance->registerNative("addSeparator", [getListCtrl](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(1);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl) return VMValue(1);
+        ctl->menuItems.push_back({0, "", true});
+        return VMValue(1);
+    });
     // Bridge for passing gui name from addLaunchTab to addTab (script's field+bracket fails)
     static std::unordered_map<std::string, std::string> g_pendingTabGuis;
     auto getOrCreateCtrl = [](const std::string& name) -> GuiControl* {
@@ -2170,18 +2277,18 @@ bool ScriptEngine::init() {
         return ctl;
     };
     tsInstance->registerNative("addTab", [getOrCreateCtrl](const auto& args) -> VMValue {
-        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
+        std::string cname = args.empty() ? "" : args[0].toString();
+        auto* ctl = getOrCreateCtrl(cname);
         if (ctl && args.size() >= 3) {
             int id = (int)args[1].toDouble();
             std::string txt = args[2].toString();
             if (id >= (int)ctl->tabs.size()) ctl->tabs.resize(id + 1);
             ctl->tabs[id] = {txt, true};
-            // Store gui[i]/key[i] derived from tab text
+            // Store gui[i]/key[i] derived from tab text (only if script hasn't already stored them)
             if (ScriptObject* sobj = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
                 std::string gk = "gui[" + std::to_string(id) + "]";
                 if (sobj->fields.find(gk) == sobj->fields.end()) {
                     std::string guiName = txt;
-                    // Map launch tab text to gui name: "TRAINING" -> "TrainingGui", "LAN GAME" -> "GameGui"
                     if (txt == "TRAINING") guiName = "TrainingGui";
                     else if (txt == "LAN GAME") guiName = "GameGui";
                     else if (txt == "GAME") guiName = "GameGui";
@@ -2213,78 +2320,47 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
-    tsInstance->registerNative("viewTab", [getOrCreateCtrl](const auto& args) -> VMValue {
-        std::string cname = args.empty() ? "" : args[0].toString();
-        GuiControl* ctl = getOrCreateCtrl(cname);
-        if (!ctl) return VMValue(1);
-        std::string guiName = args.size() > 2 ? args[2].toString() : "";
-        std::string keyStr = args.size() > 3 ? args[3].toString() : "";
-        int tabCount = (int)ctl->tabs.size();
-        int found = -1;
-        // Match by guiName against ScriptObject fields first
-        if (ScriptObject* obj = ScriptEngine::instance().findObject(cname.c_str())) {
-            for (int i = 0; i < tabCount && i < 256; i++) {
-                std::string gk = "gui[" + std::to_string(i) + "]";
-                std::string kk = "key[" + std::to_string(i) + "]";
-                auto gi = obj->fields.find(gk);
-                auto ki = obj->fields.find(kk);
-                if (gi != obj->fields.end() && gi->second.toString() == guiName &&
-                    ki != obj->fields.end() && ki->second.toString() == keyStr) {
-                    found = i; break;
-                }
-                // Also try matching by guiName as the field value alone (without [i] suffix)
-                if (gi == obj->fields.end()) {
-                    auto gi2 = obj->fields.find("gui");
-                    if (gi2 != obj->fields.end() && gi2->second.toString() == guiName) {
-                        found = i; break;
+
+    // viewTab: handle both calling conventions (text index and direct GUI name)
+    tsInstance->registerNative("viewTab", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(1);
+        std::string text = args[1].toString();
+        std::string guiFromArg = args.size() > 2 ? args[2].toString() : "";
+        std::string cname = args[0].toString();
+        // OpenLaunchTabs calls viewTab("", TrainingGui, 0) — use guiFromArg directly
+        if (text.empty() && !guiFromArg.empty()) {
+            Engine::instance().guiRenderer().setContent(guiFromArg);
+            return VMValue(1);
+        }
+        // Find the tab by text and look up its gui[i] field
+        GuiControl* ctl = Engine::instance().guiRenderer().findControl(cname);
+        if (ctl) {
+            for (int i = 0; i < (int)ctl->tabs.size(); i++) {
+                if (ctl->tabs[i].text == text) {
+                    auto* sobj = ScriptEngine::instance().findObject(cname.c_str());
+                    if (sobj) {
+                        std::string gk = "gui[" + std::to_string(i) + "]";
+                        auto gi = sobj->fields.find(gk);
+                        if (gi != sobj->fields.end() && !gi->second.toString().empty()) {
+                            Engine::instance().guiRenderer().setContent(gi->second.toString());
+                            return VMValue(1);
+                        }
                     }
+                    // Fallback: use text as GUI name
+                    Engine::instance().guiRenderer().setContent(text);
+                    return VMValue(1);
                 }
             }
         }
-        // Fallback: match by tab text
-        if (found < 0) {
-            std::string text = args.size() > 1 ? args[1].toString() : "";
-            for (int i = 0; i < tabCount; i++) {
-                if (ctl->tabs[i].text == text) { found = i; break; }
-            }
-        }
-        if (found < 0) {
-            found = tabCount;
-            if (found >= (int)ctl->tabs.size()) ctl->tabs.resize(found + 1);
-            ctl->tabs[found] = {args.size() > 1 ? args[1].toString() : "", true};
-            // Store gui[i]/key[i] so future lookups (from onSelect script) can find them
-            if (ScriptObject* obj = ScriptEngine::instance().findObject(cname.c_str())) {
-                obj->fields["gui[" + std::to_string(found) + "]"] = VMValue(guiName);
-                obj->fields["key[" + std::to_string(found) + "]"] = VMValue(keyStr);
-            }
-        }
-        ctl->selectedTab = found;
-        // Show/hide GuiTabPageCtrl children matching the selected tab
-        if (found >= 0) {
-            int pageIdx = 0;
-            for (auto* sib : ctl->children) {
-                if (sib->className == "GuiTabPageCtrl") {
-                    sib->visible = (pageIdx == found);
-                    pageIdx++;
-                }
-            }
-        }
-        // Call onSelect script and also directly set content if guiName is valid
-        if (found >= 0 && found < (int)ctl->tabs.size()) {
-            auto* ts = Engine::instance().script().ts();
-            if (ts && ts->hasFunction(ctl->name + "::onSelect"))
-                ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(found), VMValue(ctl->tabs[found].text)});
-            // Directly set content if guiName is a valid ScriptObject (bypasses broken script field access)
-            if (!guiName.empty()) {
-                auto* sobj = ScriptEngine::instance().findObject(guiName.c_str());
-                if (sobj) {
-                    Engine::instance().guiRenderer().setContent(guiName);
-                    Console::instance().printf(LogLevel::Info, "viewTab: setContent %s", guiName.c_str());
-                }
-            }
+        // Last resort: use text directly as a GUI name (with mapping)
+        if (!text.empty()) {
+            std::string mappedName = text;
+            if (text == "GAME") mappedName = "GameGui";
+            Engine::instance().guiRenderer().setContent(mappedName);
         }
         return VMValue(1);
     });
+
     // viewLastTab and closeCurrentTab have script implementations; let them run.
     tsInstance->registerNative("isTabActive", [getOrCreateCtrl](const auto& args) -> VMValue {
         auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
@@ -2311,17 +2387,95 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
-    tsInstance->registerNative("getSelected", [](const auto&) -> VMValue { return VMValue(0); });
-    tsInstance->registerNative("getSelectedId", [](const auto&) -> VMValue { return VMValue(0); });
+    tsInstance->registerNative("getSelected", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        return VMValue(ctl ? ctl->selectedRow : 0);
+    });
+    tsInstance->registerNative("getSelectedId", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (!ctl) return VMValue(0);
+        return VMValue(ctl->selectedRow);
+    });
+    tsInstance->registerNative("getValue", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl) {
+            if (ctl->className == "GuiRadioCtrl" || ctl->className == "ShellRadioButton" || ctl->className == "GuiCheckBoxCtrl")
+                return VMValue((double)(ctl->checked ? 1 : 0));
+            if (ctl->selectedRow >= 0 && ctl->selectedRow < (int)ctl->listRows.size())
+                return VMValue(ctl->listRows[ctl->selectedRow]);
+        }
+        return VMValue(std::string(""));
+    });
+    tsInstance->registerNative("setSelectedRow", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl && args.size() >= 2) ctl->selectedRow = args[1].toInt();
+        return VMValue(1);
+    });
     tsInstance->registerNative("getRowTextById", [](const auto&) -> VMValue { return VMValue(std::string("")); });
     tsInstance->registerNative("size", [](const auto&) -> VMValue { return VMValue(0); });
     tsInstance->registerNative("findText", [](const auto&) -> VMValue { return VMValue(0); });
     tsInstance->registerNative("scrollToTag", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("setVisible", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("setActive", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setVisible", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) {
+                bool show = args[1].toInt() != 0;
+                ctl->visible = show;
+                // When hiding a WARRIOR SETUP pane, pop the NewWarriorDlg dialog
+                if (!show && ctl->name == "GM_WarriorPane") {
+                    if (Engine::instance().guiRenderer().isDialogActive("NewWarriorDlg"))
+                        Engine::instance().guiRenderer().popDialog("NewWarriorDlg");
+                }
+            }
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setActive", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) ctl->active = args[1].toInt() != 0;
+        }
+        return VMValue(1);
+    });
     tsInstance->registerNative("delete", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("getValue", [](const auto&) -> VMValue { return VMValue(std::string("")); });
-    tsInstance->registerNative("setValue", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setValue", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) {
+                if (ctl->className == "GuiRadioCtrl" || ctl->className == "ShellRadioButton" || ctl->className == "GuiCheckBoxCtrl")
+                    ctl->checked = args[1].toBool();
+                else
+                    ctl->text = args[1].toString();
+            }
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("scrollToTop", [getListCtrl](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) ctl->scrollY = 0;
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setBitmap", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) ctl->bitmap = args[1].toString();
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("repaint", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("setText", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) ctl->text = args[1].toString();
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("cancelServerQuery", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("localConnect", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
     tsInstance->registerNative("addColumn", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("setSortColumn", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("setSortIncreasing", [](const auto&) -> VMValue { return VMValue(1); });
@@ -2415,9 +2569,48 @@ bool ScriptEngine::init() {
         // Master server query stub
         return VMValue(1);
     });
-    tsInstance->registerNative("addRow", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("clearList", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("sort", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("addRow", [getListCtrl](const auto& args) -> VMValue {
+        std::string cname = args.empty() ? "" : args[0].toString();
+        auto* ctl = getListCtrl(cname);
+        if (ctl && args.size() >= 3) {
+            int id = args[1].toInt();
+            std::string txt = args[2].toString();
+            if (id >= (int)ctl->listRows.size()) ctl->listRows.resize(id + 1);
+            ctl->listRows[id] = txt;
+            Console::instance().printf(LogLevel::Debug, "addRow2: ctl='%s' id=%d txt='%s' rows=%zu", cname.c_str(), id, txt.c_str(), ctl->listRows.size());
+        } else {
+            Console::instance().printf(LogLevel::Debug, "addRow2: FAIL ctl=%p cname='%s' args=%zu", (void*)ctl, cname.c_str(), args.size());
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("clearList", [getListCtrl](const auto& args) -> VMValue {
+        std::string cname = args.empty() ? "" : args[0].toString();
+        auto* ctl = getListCtrl(cname);
+        if (ctl) { ctl->listRows.clear(); ctl->selectedRow = -1; Console::instance().printf(LogLevel::Debug, "clearList: ctl='%s' ok", cname.c_str()); }
+        else Console::instance().printf(LogLevel::Debug, "clearList: FAIL ctl=NULL cname='%s'", cname.c_str());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("sort", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl && !ctl->listRows.empty()) {
+            int col = args.size() > 1 ? args[1].toInt() : 0;
+            std::sort(ctl->listRows.begin(), ctl->listRows.end(),
+                [col](const std::string& a, const std::string& b) {
+                    auto getField = [](const std::string& s, int f) -> std::string {
+                        size_t start = 0;
+                        for (int i = 0; i < f; i++) {
+                            size_t tab = s.find('\t', start);
+                            if (tab == std::string::npos) return "";
+                            start = tab + 1;
+                        }
+                        size_t end = s.find('\t', start);
+                        return s.substr(start, end - start);
+                    };
+                    return getField(a, col) < getField(b, col);
+                });
+        }
+        return VMValue(1);
+    });
     tsInstance->registerNative("refreshSelectedServer", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("insertIPAddress", [](const auto&) -> VMValue { return VMValue(1); });
     tsInstance->registerNative("findNextServer", [](const auto&) -> VMValue { return VMValue(1); });

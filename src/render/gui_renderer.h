@@ -5,6 +5,7 @@
 #include <vector>
 #include <unordered_map>
 #include <functional>
+#include <set>
 
 struct ScriptObject;
 
@@ -22,6 +23,9 @@ struct GuiControl {
     bool visible = true;
     bool active = true;
     bool selected = false;
+    bool checked = false;
+    int groupNum = 0;
+    int cursorPos = 0; // caret position for text edit controls
     std::vector<GuiControl*> children;
     GuiControl* parent = nullptr;
     std::function<void()> onClick;
@@ -35,6 +39,15 @@ struct GuiControl {
     struct Tab { std::string text; bool active; };
     std::vector<Tab> tabs;
     int selectedTab = -1;
+
+    // ShellTextList / GuiListBoxCtrl fields
+    std::vector<std::string> listRows;
+    int selectedRow = -1;
+
+    // ShellLaunchMenu popup fields
+    struct MenuItem { int id; std::string text; bool isSeparator; };
+    std::vector<MenuItem> menuItems;
+    bool menuOpen = false;
 
     // GuiServerBrowser fields
     struct ServerBrowserColumn {
@@ -75,18 +88,23 @@ public:
     GuiControl* getCanvas() { return canvas; }
     GuiControl* findControl(const std::string& name);
     GuiControl* soToGui(const std::string& name, GuiControl* parent);
+    void callOnAddOnce(GuiControl* ctl);
     void pushDialog(const std::string& name);
     void popDialog(const std::string& name);
     void setContent(const std::string& name);
+    void handleKeyboard(); // process keyboard input for focused text control
     bool isDialogActive(const std::string& name);
     GuiControl* activeDialog() { return dialogStack.empty() ? canvas : dialogStack.back(); }
     void update(float dt); // process scheduled events
     void addSchedule(double delay, const std::string& command);
     size_t dialogCount() const { return dialogStack.size(); }
+    GuiControl* getFocused() const { return focusedCtrl; }
+    void setFocused(GuiControl* c) { focusedCtrl = c; }
     FadeState* getFadeState(const GuiControl* ctl, bool createIfMissing);
 
 private:
     GuiControl* canvas{};
+    GuiControl* focusedCtrl = nullptr;
     std::vector<GuiControl*> dialogStack;
 
     // Scheduler
@@ -103,4 +121,5 @@ private:
     void updateFades(float dt);
 
     Texture* checkerTex{};
+    std::set<std::string> onAddCalled; // track which controls have received onAdd
 };

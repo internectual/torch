@@ -47,8 +47,8 @@ bool Renderer::init(void* window) {
     impl->glewInit = true;
     initialized = true;
 
-    Console::instance().printf(LogLevel::Info, "Renderer: OpenGL %s, GLEW %s",
-        glGetString(GL_VERSION), glewGetString(GLEW_VERSION));
+    Console::instance().printf(LogLevel::Info, "Renderer: OpenGL %s, GLEW %s, Renderer: %s",
+        glGetString(GL_VERSION), glewGetString(GLEW_VERSION), glGetString(GL_RENDERER));
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
@@ -223,18 +223,20 @@ void Renderer::drawLine(const Point3F& a, const Point3F& b, const ColorF& color)
     ls->setUniform("uView", view);
     ls->setUniform("uColor", Point3F{color.r, color.g, color.b});
 
+    if (!lineVAO) {
+        glGenVertexArrays(1, &lineVAO);
+        glGenBuffers(1, &lineVBO);
+        glBindVertexArray(lineVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, lineVBO);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), 0);
+        glEnableVertexAttribArray(0);
+    }
+
     float verts[] = {a.x, a.y, a.z, b.x, b.y, b.z};
-    uint32_t vao, vbo;
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, 6 * sizeof(float), verts, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), 0);
-    glEnableVertexAttribArray(0);
+    glBindVertexArray(lineVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, lineVBO);
+    glBufferData(GL_ARRAY_BUFFER, 6 * sizeof(float), verts, GL_DYNAMIC_DRAW);
     glDrawArrays(GL_LINES, 0, 2);
-    glDeleteVertexArrays(1, &vao);
-    glDeleteBuffers(1, &vbo);
 
     stats.drawCalls++;
 }
@@ -282,114 +284,108 @@ void Renderer::drawBox(const Box3F& box, const ColorF& color) {
         drawLine(verts[e[0]], verts[e[1]], color);
 }
 
-void Renderer::drawRectFill(const Point3F& a, const Point3F& b, const ColorF& color) {
-    // Interleaved: pos.xy, uv (unused), color
-    float verts[] = {
-        a.x, a.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
-        b.x, a.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
-        a.x, b.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
-        b.x, b.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
-    };
-    uint32_t idxs[] = {0, 1, 2, 1, 3, 2};
-
-    uint32_t vao, vbo, ebo;
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
-    glGenBuffers(1, &ebo);
-
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-
-    // aPos (3 floats)
+void Renderer::initSpriteVAO() {
+    if (spriteVAO) return;
+    glGenVertexArrays(1, &spriteVAO);
+    glGenBuffers(1, &spriteVBO);
+    glBindVertexArray(spriteVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, spriteVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 54, nullptr, GL_DYNAMIC_DRAW);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
-    // aUV (2 floats)
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
-    // aColor (4 floats)
     glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)(5 * sizeof(float)));
     glEnableVertexAttribArray(2);
+}
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idxs), idxs, GL_STATIC_DRAW);
+void Renderer::spriteBatchAdd(float* verts, uint32_t texId) {
+    if (texId != spriteBatchTex && spriteBatchCount > 0) {
+        spriteBatchFlush();
+    }
+    spriteBatchTex = texId;
+    spriteBatchBuf.insert(spriteBatchBuf.end(), verts, verts + 54);
+    spriteBatchCount++;
+    if (spriteBatchCount >= SPRITE_BATCH_MAX) {
+        spriteBatchFlush();
+    }
+}
+
+void Renderer::spriteBatchFlush() {
+    if (spriteBatchCount == 0) return;
+    initSpriteVAO();
 
     auto* ss = ShaderManager::getSpriteShader();
     if (ss) {
         ss->bind();
         ss->setUniform("uProjection", projection);
         ss->setUniform("uView", view);
+    }
+    if (spriteBatchTex == UINT32_MAX) {
         ss->setUniform("uUseTexture", false);
+    } else {
+        ss->setUniform("uUseTexture", int32_t(1));
+        ss->setUniform("uTexture", int32_t(0));
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, spriteBatchTex);
     }
 
-    glDisable(GL_CULL_FACE);
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-    glEnable(GL_CULL_FACE);
-
-    glDeleteVertexArrays(1, &vao);
-    glDeleteBuffers(1, &vbo);
-    glDeleteBuffers(1, &ebo);
+    glBindVertexArray(spriteVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, spriteVBO);
+    glBufferData(GL_ARRAY_BUFFER, spriteBatchBuf.size() * sizeof(float), spriteBatchBuf.data(), GL_DYNAMIC_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(spriteBatchBuf.size() / 9));
 
     stats.drawCalls++;
+    spriteBatchBuf.clear();
+    spriteBatchCount = 0;
+    spriteBatchTex = UINT32_MAX;
 }
 
+void Renderer::flushSpriteBatch() {
+    spriteBatchFlush();
+}
+
+void Renderer::drawRectFill(const Point3F& a, const Point3F& b, const ColorF& color) {
+    float verts[] = {
+        a.x, a.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
+        b.x, a.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
+        a.x, b.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
+        b.x, a.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
+        b.x, b.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
+        a.x, b.y, a.z,  0,0,  color.r, color.g, color.b, color.a,
+    };
+    spriteBatchAdd(verts, UINT32_MAX);
+}
 void Renderer::drawTexturedRect(const Point3F& a, const Point3F& b, uint32_t texId) {
     float verts[] = {
         a.x, a.y, a.z,  0,0,  1,1,1,1,
         b.x, a.y, a.z,  1,0,  1,1,1,1,
         a.x, b.y, a.z,  0,1,  1,1,1,1,
+        b.x, a.y, a.z,  1,0,  1,1,1,1,
         b.x, b.y, a.z,  1,1,  1,1,1,1,
+        a.x, b.y, a.z,  0,1,  1,1,1,1,
     };
-    uint32_t idxs[] = {0,1,2,1,3,2};
-    uint32_t vao, vbo, ebo;
-    glGenVertexArrays(1, &vao); glGenBuffers(1, &vbo); glGenBuffers(1, &ebo);
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo); glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,9*sizeof(float),(void*)0); glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,9*sizeof(float),(void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,9*sizeof(float),(void*)(5*sizeof(float))); glEnableVertexAttribArray(2);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idxs), idxs, GL_STATIC_DRAW);
-    auto* ss = ShaderManager::getSpriteShader();
-    if (ss) {
-        ss->bind();
-        ss->setUniform("uProjection", projection);
-        ss->setUniform("uView", view);
-        ss->setUniform("uUseTexture", int32_t(1));
-        ss->setUniform("uTexture", int32_t(0));
-    }
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texId);
-    glDisable(GL_CULL_FACE);
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-    glEnable(GL_CULL_FACE);
-    glDeleteVertexArrays(1, &vao); glDeleteBuffers(1, &vbo); glDeleteBuffers(1, &ebo);
-    stats.drawCalls++;
+    spriteBatchAdd(verts, texId);
 }
 
 void Renderer::drawTexturedRectUV(const Point3F& a, const Point3F& b, uint32_t texId, float u0, float v0, float u1, float v1) {
-    float verts[] = {a.x,a.y,a.z, u0,v0, 1,1,1,1, b.x,a.y,a.z, u1,v0, 1,1,1,1, a.x,b.y,a.z, u0,v1, 1,1,1,1, b.x,b.y,a.z, u1,v1, 1,1,1,1};
-    uint32_t idxs[] = {0,1,2,1,3,2};
-    uint32_t vao, vbo, ebo;
-    glGenVertexArrays(1,&vao); glGenBuffers(1,&vbo); glGenBuffers(1,&ebo);
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER,vbo); glBufferData(GL_ARRAY_BUFFER,sizeof(verts),verts,GL_STATIC_DRAW);
-    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,9*sizeof(float),(void*)0); glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,9*sizeof(float),(void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2,4,GL_FLOAT,GL_FALSE,9*sizeof(float),(void*)(5*sizeof(float))); glEnableVertexAttribArray(2);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,ebo); glBufferData(GL_ELEMENT_ARRAY_BUFFER,sizeof(idxs),idxs,GL_STATIC_DRAW);
-    auto* ss = ShaderManager::getSpriteShader();
-    if (ss) { ss->bind(); ss->setUniform("uProjection",projection); ss->setUniform("uView",view);
-        ss->setUniform("uUseTexture",int32_t(1)); ss->setUniform("uTexture",int32_t(0)); }
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, texId);
-    glDisable(GL_CULL_FACE); glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,0); glEnable(GL_CULL_FACE);
-    glDeleteVertexArrays(1,&vao); glDeleteBuffers(1,&vbo); glDeleteBuffers(1,&ebo);
-    stats.drawCalls++;
+    float verts[] = {
+        a.x,a.y,a.z, u0,v0, 1,1,1,1,
+        b.x,a.y,a.z, u1,v0, 1,1,1,1,
+        a.x,b.y,a.z, u0,v1, 1,1,1,1,
+        b.x,a.y,a.z, u1,v0, 1,1,1,1,
+        b.x,b.y,a.z, u1,v1, 1,1,1,1,
+        a.x,b.y,a.z, u0,v1, 1,1,1,1,
+    };
+    spriteBatchAdd(verts, texId);
 }
 
 void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color, uint32_t texture) {
+    spriteBatchFlush();
+    initSpriteVAO();
+
     auto* shader = ShaderManager::getSpriteShader();
     if (!shader) return;
-    shader->bind();
 
     // Billboarding: extract right/up from view matrix
     const float* v = view.data();
@@ -397,33 +393,15 @@ void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color, u
     Point3F up = {v[1], v[5], v[9]};     // second column
     float s = size * 0.5f;
 
-    struct SpriteVert { float x, y, z; float u, v; float r, g, b, a; };
-    SpriteVert verts[4] = {
-        {pos.x + (-right.x + up.x) * s, pos.y + (-right.y + up.y) * s, pos.z + (-right.z + up.z) * s, 0, 0, color.r, color.g, color.b, color.a},
-        {pos.x + (right.x + up.x) * s,  pos.y + (right.y + up.y) * s,  pos.z + (right.z + up.z) * s,  1, 0, color.r, color.g, color.b, color.a},
-        {pos.x + (right.x - up.x) * s,  pos.y + (right.y - up.y) * s,  pos.z + (right.z - up.z) * s,  1, 1, color.r, color.g, color.b, color.a},
-        {pos.x + (-right.x - up.x) * s, pos.y + (-right.y - up.y) * s, pos.z + (-right.z - up.z) * s, 0, 1, color.r, color.g, color.b, color.a},
+    float f[] = {
+        pos.x + (-right.x + up.x) * s, pos.y + (-right.y + up.y) * s, pos.z + (-right.z + up.z) * s,  0,0, color.r,color.g,color.b,color.a,
+        pos.x + (right.x + up.x) * s,  pos.y + (right.y + up.y) * s,  pos.z + (right.z + up.z) * s,   1,0, color.r,color.g,color.b,color.a,
+        pos.x + (right.x - up.x) * s,  pos.y + (right.y - up.y) * s,  pos.z + (right.z - up.z) * s,   1,1, color.r,color.g,color.b,color.a,
+        pos.x + (right.x - up.x) * s,  pos.y + (right.y - up.y) * s,  pos.z + (right.z - up.z) * s,   1,1, color.r,color.g,color.b,color.a,
+        pos.x + (-right.x - up.x) * s, pos.y + (-right.y - up.y) * s, pos.z + (-right.z - up.z) * s,  0,1, color.r,color.g,color.b,color.a,
+        pos.x + (-right.x + up.x) * s, pos.y + (-right.y + up.y) * s, pos.z + (-right.z + up.z) * s,  0,0, color.r,color.g,color.b,color.a,
     };
-    uint16_t idxs[6] = {0, 1, 2, 0, 2, 3};
-
-    GLuint vao, vbo, ebo;
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
-    glGenBuffers(1, &ebo);
-
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STREAM_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(idxs), idxs, GL_STREAM_DRAW);
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)(3*sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(SpriteVert), (void*)(5*sizeof(float)));
-    glEnableVertexAttribArray(2);
-
+    shader->bind();
     shader->setUniform("uProjection", projection);
     shader->setUniform("uUseTexture", (int32_t)(texture ? 1 : 0));
     if (texture) {
@@ -432,17 +410,19 @@ void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color, u
         shader->setUniform("uTexture", (int32_t)0);
     }
 
+    glBindVertexArray(spriteVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, spriteVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(f), f, GL_DYNAMIC_DRAW);
+
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
 
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, 0);
+    glDisable(GL_CULL_FACE);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glEnable(GL_CULL_FACE);
 
     glDepthMask(GL_TRUE);
-
-    glDeleteVertexArrays(1, &vao);
-    glDeleteBuffers(1, &vbo);
-    glDeleteBuffers(1, &ebo);
 
     stats.drawCalls++;
     stats.triangles += 2;
@@ -454,6 +434,8 @@ Texture* Renderer::loadTexture(const char* path) {
 
     auto data = Engine::instance().fs().read(path);
     if (data.empty()) {
+        // Cache nullptr so we don't re-read every frame
+        impl->textures[path] = nullptr;
         return nullptr;
     }
 

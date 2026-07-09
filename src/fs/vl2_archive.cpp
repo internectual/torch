@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <vector>
 #include <zlib.h>
+#include <fnmatch.h>
 
 struct Entry {
     uint32_t offset;
@@ -120,6 +121,6 @@ bool Vl2Archive::fileExists(const char* path) const {
 
 void Vl2Archive::listFiles(const char* pattern, std::vector<std::string>& out) const {
     for (auto& [name, _] : impl->entries)
-        if (!pattern || name.find(pattern) != std::string::npos)
+        if (!pattern || fnmatch(pattern, name.c_str(), 0) == 0)
             out.push_back(name);
 }

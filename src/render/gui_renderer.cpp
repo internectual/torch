@@ -148,16 +148,17 @@ void GuiRenderer::init() {
     // Second pass: link parent-child relationships
     for (auto& [name, obj] : objs) {
         if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl") {
-            auto ctl = controlMap[name];
+            auto ctl = controlMap.find(name);
+            if (ctl == controlMap.end()) continue;
             auto pit = obj->internals.find("parent");
             if (pit != obj->internals.end()) {
                 std::string pname = pit->second.toString();
                 auto pc = controlMap.find(pname);
                 if (pc != controlMap.end()) {
-                    pc->second->addChild(ctl);
+                    pc->second->addChild(ctl->second);
                 }
-            } else if (ctl != canvas && canvas) {
-                canvas->addChild(ctl);
+            } else if (ctl->second != canvas && canvas) {
+                canvas->addChild(ctl->second);
             }
         }
     }
@@ -225,9 +226,13 @@ void GuiRenderer::refresh() {
     }
 }
 
+
+
 void GuiRenderer::render() {
     if (!canvas) return;
     auto& r = Engine::instance().renderer();
+
+
 
     // Save projection and view, set orthographic for GUI
     MatrixF savedProj = r.projectionMatrix();
@@ -267,12 +272,17 @@ struct ClipRect { float x, y, w, h; };
 struct BmpCell { int x, y, w, h; };
 
 // Profile lookup from loaded scripts
+static std::unordered_map<std::string, ScriptObject*> s_profileCache;
 static ScriptObject* getProfile(const std::string& name) {
+    auto cit = s_profileCache.find(name);
+    if (cit != s_profileCache.end()) return cit->second;
     auto& objs = ScriptEngine::instance().objects;
     auto it = objs.find(name);
+    ScriptObject* result = nullptr;
     if (it != objs.end() && it->second->className == "GuiControlProfile")
-        return it->second;
-    return nullptr;
+        result = it->second;
+    s_profileCache[name] = result;
+    return result;
 }
 
 // Get font from profile's fontType/fontSize
@@ -308,6 +318,7 @@ static bool parseColor(const std::string& s, ColorF& out) {
     }
     return false;
 }
+
 
 // Bitmap array cell detection: scan texture for separator color (pixel 0,0 or magenta as fallback)
 static std::vector<BmpCell> detectBitmapCells(const uint8_t* rgba, int w, int h) {
@@ -586,8 +597,8 @@ static Texture* getShellTex(Renderer& r, const char* name) {
     }
     std::string base = std::string("textures/gui/") + name;
     auto tryExt = [&](const std::string& ext) -> Texture* {
-        std::string p = base.substr(0, base.rfind('.')) + ext;
-        if (p == base) p = base + ext;
+        std::string stem = base.substr(0, base.rfind('.'));
+        std::string p = stem + ext;
         Texture* t = r.loadTexture(p.c_str());
         if (!t) {
             std::string alt = p;
@@ -634,6 +645,11 @@ static Texture* getShellTexWithCells(Renderer& r, const char* name, const std::v
     outCells = nullptr;
     Texture* tex = getShellTex(r, name);
     if (!tex || !tex->loaded) return nullptr;
+    // Check cell cache first to avoid expensive glGetTexImage readback
+    {
+        auto cit = g_cellCache.find(tex->id);
+        if (cit != g_cellCache.end()) { outCells = &cit->second; return tex; }
+    }
     int tw = tex->width, th = tex->height;
     std::vector<uint8_t> pixels(tw * th * 4);
     glBindTexture(GL_TEXTURE_2D, tex->id);
@@ -705,7 +721,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         for (auto* ch : ctl->children)
             if (ch->className == "GameTSCtrl" || ch->className == "GuiTSCtrl") { has3D = true; break; }
         if (!has3D)
-            r.drawBox({{0,0,0}, {1024,768,0}}, {0.15f,0.15f,0.2f,1});
+            r.drawRectFill({0,0,0}, {1024,768,0}, {0.15f,0.15f,0.2f,1});
         for (auto* child : ctl->children) renderControlRec(gr, child, canvas, 0, 0, nullptr);
         return;
     }
@@ -761,11 +777,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // For state S: Left=cells[S], Mid=cells[3+S], Right=cells[6+S] (states in columns, pieces in rows)
         const std::vector<BmpCell>* bmpCells = nullptr;
         Texture* shTex = getShellTexWithCells(r, "shll_button.png", bmpCells);
-        if (shTex && bmpCells && bmpCells->size() >= 3) {
+        if (shTex && bmpCells && bmpCells->size() >= 9) {
             int state = 0; // 0=normal, 1=highlight, 2=pressed
-            auto& cL = (*bmpCells)[state];         // left cap for this state
-            auto& cF = (*bmpCells)[3 + state];     // fill/middle for this state
-            auto& cR = (*bmpCells)[6 + state];     // right cap for this state
+            auto& cL = (*bmpCells)[state * 3 + 0]; // left cap for this state
+            auto& cF = (*bmpCells)[state * 3 + 1]; // fill/middle for this state
+            auto& cR = (*bmpCells)[state * 3 + 2]; // right cap for this state
             auto* ss = ShaderManager::getSpriteShader();
             if (ss) {
                 ss->bind(); ss->setUniform("uProjection",r.projection); ss->setUniform("uView",r.view);
@@ -792,10 +808,15 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             // Gradient-like button using stacked rects (since shell textures unavailable)
             ColorF top = btnFill;
             ColorF bot = {btnFill.r * 0.6f, btnFill.g * 0.6f, btnFill.b * 0.6f, btnFill.a};
-            float half = ctl->extentY * 0.5f;
-            r.drawRectFill({x-1, y-1, 0}, {x + ctl->extentX + 1, y + ctl->extentY + 1, 0}, btnBorder);
-            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + half, 0}, top);
-            r.drawRectFill({x, y + half, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bot);
+            // Constrain visual height to parent bounds so button doesn't overflow toolbar
+            float visH = ctl->extentY;
+            if (ctl->parent && ctl->parent->extentY > 0 && ctl->parent->extentY < visH)
+                visH = ctl->parent->extentY;
+            float visY = y + (ctl->extentY - visH) * 0.5f;
+            float half = visH * 0.5f;
+            r.drawRectFill({x-1, visY-1, 0}, {x + ctl->extentX + 1, visY + visH + 1, 0}, btnBorder);
+            r.drawRectFill({x, visY, 0}, {x + ctl->extentX, visY + half, 0}, top);
+            r.drawRectFill({x, visY + half, 0}, {x + ctl->extentX, visY + visH, 0}, bot);
         }
         if (!ctl->bitmap.empty()) {
             Texture* tex = r.loadTexture(ctl->bitmap.c_str());
@@ -814,19 +835,56 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         if (!ctl->text.empty()) {
             ColorF tc{1,1,1,1};
+            Font* bf = font;
+            float textOfsX = 4, textOfsY = 0;
+            std::string justify = "left";
             auto* prof = getProfile(ctl->profileName);
             if (prof) {
                 auto fci = prof->fields.find("fontColor");
-                if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
+                if (fci != prof->fields.end()) {
+                    parseColor(fci->second.toString(), tc);
+                    if (tc.r + tc.g + tc.b < 0.3f) tc = {1,1,1,1};
+                }
+                bf = getProfileFont(prof);
+                getTextOffset(prof, textOfsX, textOfsY);
+                auto ji = prof->fields.find("justify");
+                if (ji != prof->fields.end()) justify = ji->second.toString();
             }
-            float tx = x + 5, ty = y + (ctl->extentY - 12.0f) * 0.5f;
-            r.renderText(ctl->text.c_str(), tx, ty, tc, 1.5f);
+            if (!bf) bf = font;
+            float tx = x + textOfsX;
+            float ty = y + textOfsY;
+            float tw = bf->measure(ctl->text.c_str()).x;
+            if (justify == "center") tx = x + (ctl->extentX - tw) * 0.5f;
+            else if (justify == "right") tx = x + ctl->extentX - tw - textOfsX;
+            bf->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
+        }
+        // Popup menu for ShellLaunchMenu
+        if (ctl->menuOpen && !ctl->menuItems.empty()) {
+            float popX = x;
+            float popY = y - (float)ctl->menuItems.size() * 20.0f - 4; // render above button
+            float popW = 180, lineH = 20;
+            float popH = lineH * (float)ctl->menuItems.size();
+            r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.15f,0.15f,0.2f,0.95f});
+            float iy = popY;
+            for (auto& item : ctl->menuItems) {
+                if (item.isSeparator) {
+                    r.drawRectFill({popX + 4, iy + lineH*0.5f, 0}, {popX + popW - 4, iy + lineH*0.5f + 1, 0}, {0.4f,0.4f,0.5f,0.8f});
+                } else if (font) {
+                    font->render(item.text.c_str(), popX + 6, iy + 2, {0.8f,0.9f,1,1}, 1.0f);
+                }
+                iy += lineH;
+            }
         }
     } else if (cn == "GuiTextCtrl") {
         ColorF tc{1,1,1,1};
         auto* prof = getProfile(ctl->profileName);
         if (prof) {
-            auto fi = prof->fields.find("fontColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), tc);
+            auto fci = prof->fields.find("fontColor");
+            if (fci != prof->fields.end()) {
+                parseColor(fci->second.toString(), tc);
+                // Skip profile fontColor if too dark for our dark backgrounds
+                if (tc.r + tc.g + tc.b < 0.3f) tc = {1,1,1,1};
+            }
             font = getProfileFont(prof);
         }
         if (font && !ctl->text.empty()) {
@@ -910,6 +968,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                         imgSpan.bitmap = tag.substr(8);
                         spans.push_back(imgSpan);
                     }
+                } else if (src[i] == '\n') {
+                    flushSpan(spans, cur);
+                    // Add an explicit line break by pushing a zero-width marker
+                    spans.push_back({"\n", "", 0, {0,0,0,0}, Justify::Left, false, "", ""});
+                    i++;
                 } else {
                     if (src[i] == '\t') cur.text += ' ';
                     else cur.text += src[i];
@@ -931,6 +994,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             int sj = si;
             while (sj < (int)spans.size()) {
                 auto& sp = spans[sj];
+                // Force line break on \n marker
+                if (sp.text == "\n") { sj++; break; }
                 if (!sp.bitmap.empty()) {
                     Texture* tex = Engine::instance().renderer().loadTexture(sp.bitmap.c_str());
                     float bw = tex ? (float)tex->width : 0;
@@ -1080,16 +1145,57 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (font) {
             std::string display = ctl->text.empty() ? "..." : ctl->text;
             font->render(display.c_str(), x + 3, y + 2, tc, 1.0f);
+            // Cursor when focused
+            if (ctl == gr->getFocused()) {
+                float preW = font->measure(ctl->text.substr(0, ctl->cursorPos).c_str()).x;
+                float cy = y + 2;
+                float ch = (float)font->charHeight;
+                r.drawRectFill({x + 3 + preW, cy, 0}, {x + 4 + preW, cy + ch, 0}, {1,1,1,1});
+            }
         }
     } else if (cn == "GuiListBoxCtrl" || cn == "ShellTextList" || cn == "GuiTextListCtrl") {
-        ColorF fc{0.2f,0.2f,0.25f,1}, tc{0.8f,0.8f,1,1};
+        ColorF fc{0.15f,0.15f,0.2f,1}, tc{0.9f,0.9f,1,1}, selFc{0.3f,0.3f,0.5f,1}, selTc{1,1,1,1};
         auto* prof = getProfile(ctl->profileName);
-        if (prof) { auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc); }
+        if (prof) {
+            auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc);
+            auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
+            auto sfi = prof->fields.find("selectionColor"); if (sfi != prof->fields.end()) parseColor(sfi->second.toString(), selFc);
+        }
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
-        if (font && !ctl->text.empty()) {
-            auto* prof2 = getProfile(ctl->profileName);
-            if (prof2) { auto fi = prof2->fields.find("fontColor"); if (fi != prof2->fields.end()) parseColor(fi->second.toString(), tc); }
-            font->render(ctl->text.c_str(), x + 3, y + 2, tc, 1.0f);
+        // Find scroll offset from parent ShellScrollCtrl
+        float listScrollY = 0, listScrollX = 0;
+        GuiControl* sp = ctl->parent;
+        while (sp) {
+            if (sp->className == "GuiScrollCtrl" || sp->className == "ShellScrollCtrl") {
+                listScrollY = sp->scrollY;
+                listScrollX = sp->scrollX;
+                break;
+            }
+            sp = sp->parent;
+        }
+        // Get font height
+        float lineH = font ? font->charHeight + 2 : 14;
+        // Get enumerate setting from ScriptObject
+        bool enumerate = false;
+        ScriptObject* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
+        if (sobj) {
+            auto ei = sobj->internals.find("enumerate");
+            if (ei == sobj->internals.end()) ei = sobj->fields.find("enumerate");
+            if (ei != sobj->internals.end()) enumerate = ei->second.toInt() != 0;
+        }
+        // Draw visible rows
+        int visibleRows = (int)(ctl->extentY / lineH) + 1;
+        int totalRows = (int)ctl->listRows.size();
+        int scrollRow = (int)(listScrollY / lineH);
+        float rowY = y - fmodf(listScrollY, lineH);
+        for (int i = scrollRow; i < totalRows && (i - scrollRow) < visibleRows; i++, rowY += lineH) {
+            bool isSel = (i == ctl->selectedRow);
+            if (isSel) {
+                r.drawRectFill({x, rowY, 0}, {x + ctl->extentX, rowY + lineH, 0}, selFc);
+                font->render(ctl->listRows[i].c_str(), x + 3, rowY + 1, selTc, 1.0f);
+            } else {
+                font->render(ctl->listRows[i].c_str(), x + 3, rowY + 1, tc, 1.0f);
+            }
         }
     } else if (cn == "GuiCheckBoxCtrl" || cn == "GuiRadioCtrl" ||
                cn == "ShellToggleButton" || cn == "ShellRadioButton") {
@@ -1104,10 +1210,14 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         Texture* cbTex = nullptr;
         if (!bmp.empty()) { cbTex = r.loadTexture((bmp + ".png").c_str()); if (!cbTex) cbTex = r.loadTexture(("textures/" + bmp + ".png").c_str()); }
         if (!cbTex) cbTex = getShellTex(r, "shll_radio.png");
-        if (cbTex && cbTex->loaded)
+        if (cbTex && cbTex->loaded) {
             r.drawTexturedRect({x, y, 0}, {x + sz, y + sz, 0}, cbTex->id);
-        else
-            r.drawRectFill({x, y, 0}, {x + sz, y + sz, 0}, fc);
+            if (ctl->checked)
+                r.drawRectFill({x + 4, y + 4, 0}, {x + sz - 4, y + sz - 4, 0}, {0.3f,0.5f,0.8f,0.8f});
+        } else {
+            ColorF bg = ctl->checked ? ColorF{0.3f,0.5f,0.8f,1} : fc;
+            r.drawRectFill({x, y, 0}, {x + sz, y + sz, 0}, bg);
+        }
         if (font && !ctl->text.empty())
             font->render(ctl->text.c_str(), x + sz + 4, y + 2, tc, 1.0f);
     } else if (cn == "GuiSliderCtrl" || cn == "ShellSliderCtrl") {
@@ -1178,7 +1288,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         auto* prof = getProfile(ctl->profileName);
         if (prof) {
             auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc);
-            auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), txc);
+            // Don't use profile fontColor for panes — it's designed for the original game's lighter title bars
         }
         if (fc.a < 1.0f) fc.a = 1.0f; // force opaque
         // Opaque dark background behind everything
@@ -1394,16 +1504,35 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             }
         }
     } else if (cn == "GuiPopUpMenuCtrl" || cn == "ShellPopupMenu") {
-        ColorF fc{0.25f,0.25f,0.3f,1}, txc{0.8f,0.8f,1,1};
+        ColorF fc{0.25f,0.25f,0.3f,1}, txc{0.6f,0.9f,1,1};
         auto* prof = getProfile(ctl->profileName);
         if (prof) {
             auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc);
-            auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), txc);
+            // Ignore profile fontColor (usually dark/black in original game profiles)
         }
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
         r.drawRectFill({x + ctl->extentX - 16, y + 4, 0}, {x + ctl->extentX - 4, y + ctl->extentY - 4, 0}, {0.5f,0.5f,0.6f,1});
         if (font && !ctl->text.empty())
             font->render(ctl->text.c_str(), x + 4, y + 2, txc, 1.0f);
+        // Dropdown list when open
+        if (ctl->menuOpen && !ctl->menuItems.empty()) {
+            float popX = x;
+            float popY = y + ctl->extentY;
+            float popW = ctl->extentX, lineH = 20;
+            float popH = lineH * (float)ctl->menuItems.size();
+            r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.15f,0.15f,0.2f,0.95f});
+            float iy = popY;
+            for (auto& item : ctl->menuItems) {
+                if (item.isSeparator) {
+                    r.drawRectFill({popX + 4, iy + lineH*0.5f, 0}, {popX + popW - 4, iy + lineH*0.5f + 1, 0}, {0.4f,0.4f,0.5f,0.8f});
+                } else if (font) {
+                    bool sel = (item.text == ctl->text);
+                    ColorF ic = sel ? ColorF{0.3f,0.5f,0.8f,0.9f} : ColorF{0.8f,0.9f,1,1};
+                    font->render(item.text.c_str(), popX + 6, iy + 2, ic, 1.0f);
+                }
+                iy += lineH;
+            }
+        }
     } else if (cn == "GuiScrollCtrl" || cn == "ShellScrollCtrl") {
         ColorF sc{0.18f,0.18f,0.22f,1};
         auto* prof = getProfile(ctl->profileName);
@@ -1855,16 +1984,23 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
     }
     if (mx >= x && mx < x + ctl->extentX && my >= y && my < y + ctl->extentY) {
         for (auto* child : ctl->children) { auto* h = hitTest(child, mx, my); if (h) return h; }
-        if (ctl->onClick) Console::instance().printf(LogLevel::Debug, "HIT: click=(%d,%d) '%s'", mx, my, ctl->text.c_str());
         return ctl;
     }
     return nullptr;
 }
 
 bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
-    auto* target = dialogStack.empty() ? canvas : activeDialog();
-    // Find deepest control under mouse, then walk up to find a scrollable ancestor
-    GuiControl* hit = hitTest(target, x, y);
+    // Check all dialogs from top to bottom
+    GuiControl* hit = nullptr;
+    for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it) {
+        hit = hitTest(*it, x, y);
+        if (!hit) continue;
+        if (hit == *it && hit->onClick == nullptr) {
+            bool isScrollable = hit->className == "GuiScrollCtrl" || hit->className == "ShellScrollCtrl";
+            if (!isScrollable) { hit = nullptr; continue; }
+        }
+        break;
+    }
     if (!hit) return false;
     GuiControl* scrollCtrl = hit;
     while (scrollCtrl) {
@@ -1878,9 +2014,24 @@ bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
 }
 
 bool GuiRenderer::handleInput(int x, int y, bool pressed) {
-    auto* target = dialogStack.empty() ? canvas : activeDialog();
-    auto* hit = hitTest(target, x, y);
-    if (!hit || !pressed) return false;
+    if (!pressed) return false;
+    GuiControl* hit = nullptr;
+    // Check all dialogs from top to bottom so clicks pass through transparent overlays
+    for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it) {
+        hit = hitTest(*it, x, y);
+        if (!hit) continue;
+        // If hit is a dialog root (no clickable class) with no onClick, skip to next
+        if (hit == *it && hit->onClick == nullptr) {
+            bool isClickable = hit->className == "ShellLaunchMenu" || hit->className == "ShellPopupMenu" ||
+                hit->className == "GuiPopUpMenuCtrl" || hit->className == "ShellTabGroupCtrl" ||
+                hit->className == "GuiTabBookCtrl" || hit->className == "ShellTextList" ||
+                hit->className == "GuiListBoxCtrl" || hit->className == "GuiTextListCtrl" ||
+                hit->className == "GuiServerBrowser" || hit->className.find("Button") != std::string::npos;
+            if (!isClickable) { hit = nullptr; continue; }
+        }
+        break;
+    }
+    if (!hit) return false;
     // GuiServerBrowser: row selection + column header sort
     if (hit->className == "GuiServerBrowser") {
         // Compute absolute position of the control
@@ -1907,9 +2058,79 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         }
         return true;
     }
-    // ShellLaunchMenu: the LAUNCH button — call LaunchGame() directly
+    // ShellTextList / GuiListBoxCtrl: row selection
+    if (hit->className == "ShellTextList" || hit->className == "GuiListBoxCtrl" || hit->className == "GuiTextListCtrl") {
+        float ax = hit->posX, ay = hit->posY;
+        for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+        // Get scroll offset
+        float scrollY = 0;
+        GuiControl* sp = hit->parent;
+        while (sp) {
+            if (sp->className == "GuiScrollCtrl" || sp->className == "ShellScrollCtrl") {
+                scrollY = sp->scrollY;
+                break;
+            }
+            sp = sp->parent;
+        }
+        auto* font = Engine::instance().renderer().getFont();
+        float lineH = font ? font->charHeight + 2 : 14;
+        int row = (int)((y - ay + scrollY) / lineH);
+        if (row >= 0 && row < (int)hit->listRows.size()) {
+            hit->selectedRow = row;
+            // Call onSelect if defined
+            auto* ts = Engine::instance().script().ts();
+            std::string selName = hit->name + "::onSelect";
+            if (ts && ts->hasFunction(selName))
+                ts->callFunction(selName, {VMValue(hit->name), VMValue(row), VMValue(hit->listRows[row])});
+        }
+        return true;
+    }
+    // ShellLaunchMenu: toggle popup menu or select item
     if (hit->className == "ShellLaunchMenu") {
-        Console::instance().execute("LaunchGame();");
+        if (hit->menuOpen) {
+            // Check if click is on a popup item
+            float ax = hit->posX, ay = hit->posY;
+            for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+            float popX = ax;
+            float popY = ay - (float)hit->menuItems.size() * 20.0f - 4;
+            float popW = 180, lineH = 20;
+            if (x >= popX && x < popX + popW && y >= popY && y < popY + lineH * (float)hit->menuItems.size()) {
+                int idx = (int)((y - popY) / lineH);
+                if (idx >= 0 && idx < (int)hit->menuItems.size() && !hit->menuItems[idx].isSeparator) {
+                    auto* ts = Engine::instance().script().ts();
+                    if (ts && ts->hasFunction(hit->name + "::onSelect"))
+                        ts->callFunction(hit->name + "::onSelect",
+                            {VMValue(hit->name), VMValue(hit->menuItems[idx].id), VMValue(hit->menuItems[idx].text)});
+                }
+            }
+            hit->menuOpen = false;
+        } else {
+            hit->menuOpen = true;
+        }
+        return true;
+    }
+    // ShellPopupMenu / GuiPopUpMenuCtrl: toggle dropdown or select item
+    if (hit->className == "ShellPopupMenu" || hit->className == "GuiPopUpMenuCtrl") {
+        if (hit->menuOpen) {
+            float ax = hit->posX, ay = hit->posY;
+            for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+            float popX = ax;
+            float popY = ay + hit->extentY;
+            float popW = hit->extentX, lineH = 20;
+            if (x >= popX && x < popX + popW && y >= popY && y < popY + lineH * (float)hit->menuItems.size()) {
+                int idx = (int)((y - popY) / lineH);
+                if (idx >= 0 && idx < (int)hit->menuItems.size() && !hit->menuItems[idx].isSeparator) {
+                    hit->text = hit->menuItems[idx].text;
+                    auto* ts = Engine::instance().script().ts();
+                    if (ts && ts->hasFunction(hit->name + "::onSelect"))
+                        ts->callFunction(hit->name + "::onSelect",
+                            {VMValue(hit->name), VMValue(hit->menuItems[idx].id), VMValue(hit->menuItems[idx].text)});
+                }
+            }
+            hit->menuOpen = false;
+        } else {
+            hit->menuOpen = true;
+        }
         return true;
     }
     // Tab group click: determine which tab button was clicked
@@ -1917,7 +2138,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         // Compute absolute position
         float ax = hit->posX, ay = hit->posY;
         for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
-        const float tabH = 29; // match ShellTabGroupCtrl rendering from GUI file
+        const float tabH = 29;
         if (y >= ay && y < ay + tabH && x >= ax) {
             float tabX = ax + 2;
             auto* font = Engine::instance().renderer().getFont();
@@ -1934,19 +2155,28 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                             pageIdx++;
                         }
                     }
-                    // Call onSelect script
+                    // Call onSelect script (handles setContent via %this.gui[%tab])
+                    // The script's gui[] is stored by numeric index (gui[0], gui[1], etc.)
+                    // but the script's viewTab uses text as index (gui["TRAINING"]) which fails.
+                    // So we also set content directly from C++ using the stored numeric field.
                     auto* ts = Engine::instance().script().ts();
                     if (ts && ts->hasFunction(hit->name + "::onSelect"))
                         ts->callFunction(hit->name + "::onSelect",
                             {VMValue(hit->name), VMValue(ti), VMValue(hit->tabs[ti].text)});
-                    // Fallback: set content directly using stored gui[i] field
-                    if (ScriptObject* sobj = ScriptEngine::instance().findObject(hit->name.c_str())) {
-                        std::string gk = "gui[" + std::to_string(ti) + "]";
-                        auto gi = sobj->fields.find(gk);
-                        if (gi != sobj->fields.end()) {
-                            std::string gn = gi->second.toString();
-                            if (!gn.empty() && ScriptEngine::instance().findObject(gn.c_str()))
-                                Engine::instance().guiRenderer().setContent(gn);
+                    // C++ fallback: only for main LaunchTabView (not nested tab groups like GM_TabView)
+                    if (hit->name == "LaunchTabView") {
+                        auto* sobj = ScriptEngine::instance().findObject(hit->name.c_str());
+                        if (sobj) {
+                            std::string gk = "gui[" + std::to_string(ti) + "]";
+                            auto gi = sobj->fields.find(gk);
+                            if (gi != sobj->fields.end()) {
+                                std::string guiName = gi->second.toString();
+                                if (!guiName.empty()) {
+                                    Engine::instance().guiRenderer().setContent(guiName);
+                                    if (!Engine::instance().guiRenderer().isDialogActive("LaunchToolbarDlg"))
+                                        Engine::instance().guiRenderer().pushDialog("LaunchToolbarDlg");
+    }
+                            }
                         }
                     }
                     return true;
@@ -1955,11 +2185,89 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             }
         }
     }
+    // Text edit: set focusedCtrl for keyboard input
+    if (hit->className == "GuiTextEditCtrl" || hit->className == "ShellTextEditCtrl") {
+        focusedCtrl = hit;
+        return true;
+    }
+
+    // Click on non-text control clears focus
+    if (focusedCtrl) focusedCtrl = nullptr;
+
+    // Radio button / checkbox: handle group mutual exclusion before onClick
+    if (hit->className == "GuiRadioCtrl" || hit->className == "ShellRadioButton") {
+        if (hit->groupNum != 0) {
+            // Uncheck siblings with same groupNum, then check this one
+            auto* p = hit->parent;
+            if (p) {
+                for (auto* sib : p->children) {
+                    if (sib != hit && sib->groupNum == hit->groupNum)
+                        sib->checked = false;
+                }
+            }
+        }
+        hit->checked = true;
+    }
     if (hit->onClick) {
         hit->onClick();
         return true;
     }
     return false;
+}
+
+void GuiRenderer::handleKeyboard() {
+    if (!focusedCtrl) return;
+    // Check if focused control is still valid (still in the tree)
+    bool found = false;
+    for (auto* d : dialogStack) {
+        if (d == focusedCtrl || d->findChild(focusedCtrl->name)) { found = true; break; }
+        // Also check children recursively
+        std::vector<GuiControl*> stack = d->children;
+        while (!stack.empty()) {
+            auto* c = stack.back(); stack.pop_back();
+            if (c == focusedCtrl) { found = true; break; }
+            for (auto* ch : c->children) stack.push_back(ch);
+        }
+        if (found) break;
+    }
+    if (!found) { focusedCtrl = nullptr; return; }
+
+    auto& input = Engine::instance().platform().input();
+    const std::string& ti = input.textInput;
+    if (!ti.empty()) {
+        for (char c : ti) {
+            if (c >= 0x20 && c <= 0x7e && focusedCtrl->text.size() < 200) {
+                focusedCtrl->text.insert(focusedCtrl->cursorPos, 1, c);
+                focusedCtrl->cursorPos++;
+            }
+        }
+    }
+
+    static bool prevBS = false, prevEnter = false, prevEsc = false;
+    if (input.keysDown[SCANCODE_BACKSPACE] && !prevBS) {
+        if (focusedCtrl->cursorPos > 0 && !focusedCtrl->text.empty()) {
+            focusedCtrl->text.erase(focusedCtrl->cursorPos - 1, 1);
+            focusedCtrl->cursorPos--;
+        }
+    }
+    prevBS = input.keysDown[SCANCODE_BACKSPACE];
+
+    if (input.keysDown[SCANCODE_RETURN] && !prevEnter) {
+        // Fire command (Enter handler), then fall back to altCommand, then onClick
+        if (!focusedCtrl->command.empty()) {
+            Console::instance().execute(focusedCtrl->command.c_str());
+        } else if (!focusedCtrl->altCommand.empty()) {
+            Console::instance().execute(focusedCtrl->altCommand.c_str());
+        } else if (focusedCtrl->onClick) {
+            focusedCtrl->onClick();
+        }
+    }
+    prevEnter = input.keysDown[SCANCODE_RETURN];
+
+    if (input.keysDown[SCANCODE_ESCAPE] && !prevEsc) {
+        focusedCtrl = nullptr;
+    }
+    prevEsc = input.keysDown[SCANCODE_ESCAPE];
 }
 
 // Create a GuiControl from a ScriptObject (and recursively create children)
@@ -1970,7 +2278,14 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
         return nullptr;
     // Already exists as a GuiControl?
     GuiControl* ctl = findControl(name);
-    if (ctl) return ctl;
+    if (ctl) {
+        if (parent && ctl->parent == canvas) {
+            auto& cv = canvas->children;
+            cv.erase(std::remove(cv.begin(), cv.end(), ctl), cv.end());
+            parent->addChild(ctl);
+        }
+        return ctl;
+    }
     ctl = new GuiControl;
     ctl->name = it->second->name;
     ctl->className = it->second->className;
@@ -1986,9 +2301,41 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     fi = it->second->fields.find("altCommand"); if (fi != it->second->fields.end()) ctl->altCommand = fi->second.toString();
     fi = it->second->fields.find("profile"); if (fi != it->second->fields.end()) ctl->profileName = fi->second.toString();
     fi = it->second->fields.find("visible"); if (fi != it->second->fields.end()) ctl->visible = fi->second.toBool();
+    fi = it->second->fields.find("groupNum"); if (fi != it->second->fields.end()) ctl->groupNum = (int)fi->second.toDouble();
+    fi = it->second->fields.find("sel"); if (fi != it->second->fields.end()) ctl->checked = fi->second.toBool();
     if (ctl->className == "GuiCanvas") canvas = ctl;
     bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellBitmapButton" || ctl->className == "ShellToggleButton" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl" || ctl->className == "ShellTextEditCtrl";
-    if (!ctl->command.empty() && isClickable) { std::string cmd = ctl->command; ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); }; }
+    if (!ctl->command.empty() && isClickable) {
+        std::string cmd = ctl->command;
+        // Intercept training START button to use C++ startLocalGame instead of script CreateServer path
+        if (cmd.find("TrainingGui.startTraining") != std::string::npos) {
+            ctl->onClick = []() {
+                auto& g = Engine::instance().guiRenderer();
+                auto* list = g.findControl("TrainingMissionList");
+                if (list && list->selectedRow >= 0 && list->selectedRow < (int)list->listRows.size()) {
+                    std::string row = list->listRows[list->selectedRow];
+                    size_t tab = row.find('\t');
+                    std::string mission = (tab != std::string::npos) ? row.substr(tab + 1) : row;
+                    Console::instance().printf(LogLevel::Info, "Training: starting mission '%s'", mission.c_str());
+                    Engine::instance().game().startLocalGame(mission.c_str());
+                } else {
+                    Console::instance().printf(LogLevel::Warn, "Training: no mission selected, starting default");
+                    Engine::instance().game().startLocalGame();
+                }
+            };
+        } else {
+            ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); };
+        }
+    }
+    // Recursively create children from ScriptObjects with parent == this name
+    // NOTE: children must be created BEFORE adding to parent/canvas, so that
+    // findControl doesn't find this control prematurely during child creation.
+    for (auto& [n, obj] : objs) {
+        auto pit = obj->internals.find("parent");
+        if (pit != obj->internals.end() && pit->second.toString() == name) {
+            soToGui(n, ctl);
+        }
+    }
     if (parent) {
         parent->addChild(ctl);
     } else if (ctl != canvas && canvas) {
@@ -1997,13 +2344,6 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     if (canvas) {
         ctl->extentX = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentX : ctl->extentX;
         ctl->extentY = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentY : ctl->extentY;
-    }
-    // Recursively create children from ScriptObjects with parent == this name
-    for (auto& [n, obj] : objs) {
-        auto pit = obj->internals.find("parent");
-        if (pit != obj->internals.end() && pit->second.toString() == name) {
-            soToGui(n, ctl);
-        }
     }
     return ctl;
 }
@@ -2018,11 +2358,19 @@ void GuiRenderer::pushDialog(const std::string& name) {
             ctl = soToGui(name, nullptr);
         }
     }
-    if (ctl) {
-        ctl->visible = true;
-        dialogStack.push_back(ctl);
-        Console::instance().printf(LogLevel::Debug, "GUI: pushDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
-    } else {
+        if (ctl) {
+            ctl->visible = true;
+            dialogStack.push_back(ctl);
+        callOnAddOnce(ctl);
+            // Trigger onWake so script functions like LaunchToolbarDlg::onWake populate menus
+            if (auto* ts = Engine::instance().script().ts()) {
+                if (ts->hasFunction(name + "::onWake")) {
+                    Console::instance().printf(LogLevel::Debug, "GUI: pushDialog calling onWake '%s'", name.c_str());
+                    ts->callFunction(name + "::onWake", {});
+                }
+            }
+            Console::instance().printf(LogLevel::Debug, "GUI: pushDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
+        } else {
         Console::instance().printf(LogLevel::Warn, "GUI: pushDialog '%s' not found", name.c_str());
     }
 }
@@ -2037,17 +2385,27 @@ void GuiRenderer::popDialog(const std::string& name) {
     }
 }
 
+void GuiRenderer::callOnAddOnce(GuiControl* ctl) {
+    if (!ctl || onAddCalled.count(ctl->name)) return;
+    onAddCalled.insert(ctl->name);
+    auto* ts = Engine::instance().script().ts();
+    if (ts && ts->hasFunction(ctl->name + "::onAdd"))
+        ts->callFunction(ctl->name + "::onAdd", {});
+    for (auto* ch : ctl->children)
+        callOnAddOnce(ch);
+}
+
 void GuiRenderer::setContent(const std::string& name) {
     GuiControl* ctl = soToGui(name, nullptr);
     if (ctl) {
         dialogStack.clear();
         dialogStack.push_back(ctl);
-        // Trigger onAdd/onWake (tabs are added by the script path via OpenLaunchTabs/checkNamesAndAliases)
+        callOnAddOnce(ctl);
         if (auto* ts = Engine::instance().script().ts()) {
-            if (ts->hasFunction(name + "::onAdd")) ts->callFunction(name + "::onAdd", {});
             if (ts->hasFunction(name + "::onWake")) ts->callFunction(name + "::onWake", {});
         }
-        Console::instance().printf(LogLevel::Debug, "GUI: setContent %s (stack now %zu)", name.c_str(), dialogStack.size());
+        if (!dialogStack.empty() && dialogStack.back()->name == name)
+            Console::instance().printf(LogLevel::Debug, "GUI: setContent %s (stack now %zu)", name.c_str(), dialogStack.size());
     } else {
         Console::instance().printf(LogLevel::Warn, "GUI: setContent '%s' not found", name.c_str());
     }

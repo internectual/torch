@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sys/stat.h>
+#include <fnmatch.h>
 
 namespace fs = std::filesystem;
 
@@ -81,7 +82,7 @@ void FileSystem::listFiles(const char* pattern, std::vector<std::string>& out) c
             for (auto& e : fs::recursive_directory_iterator(p)) {
                 if (e.is_regular_file()) {
                     auto rp = e.path().string().substr(p.length() + 1);
-                    if (!pattern || rp.find(pattern) != std::string::npos)
+                    if (!pattern || fnmatch(pattern, rp.c_str(), 0) == 0)
                         out.push_back(rp);
                 }
             }
