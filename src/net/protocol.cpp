@@ -87,8 +87,10 @@ bool T2Protocol::encodeUpdate(uint8_t* buf, size_t bufSize, const UpdateMessage&
     memcpy(buf + pos, &msg.velX, 4); pos += 4;
     memcpy(buf + pos, &msg.velY, 4); pos += 4;
     memcpy(buf + pos, &msg.velZ, 4); pos += 4;
-    buf[pos++] = (uint8_t)(msg.health * 2);
-    buf[pos++] = (uint8_t)(msg.energy * 2);
+    float hc = msg.health; if (hc < 0) hc = 0; else if (hc > 100) hc = 100;
+    float ec = msg.energy; if (ec < 0) ec = 0; else if (ec > 100) ec = 100;
+    buf[pos++] = (uint8_t)(hc * 2);
+    buf[pos++] = (uint8_t)(ec * 2);
     buf[pos++] = msg.flags;
     memcpy(buf + pos, &msg.lastMoveSeq, 4); pos += 4;
     return true;
@@ -281,6 +283,7 @@ struct GameServer::Impl {
         int flagCarried = 0;
         double lastFireTime = 0;            // per-client projectile spawn cadence
         double acLastFire = 0;              // per-client anti-cheat fire timestamp
+        double respawnAt = 0;               // >0 while waiting to respawn after death
         std::map<uint32_t, double> ghostFirstSent; // ghost idx -> time first sent as Create
         bool active;
         bool isBot = false;
@@ -325,6 +328,14 @@ struct GameServer::Impl {
         int32_t ownerCi{-1}; // which client fired it
         bool active{true};
     };
+    // Per-weapon damage/splash profile (0 = default disc; 1 = sniper, etc.)
+    struct WeaponProfile { float damage; float splash; };
+    static WeaponProfile weaponProfile(int id) {
+        switch (id) {
+            case 1: return {80.0f, 1.0f};   // sniper-style: high damage, tiny splash
+            default: return {30.0f, 3.0f};  // disc: moderate damage, splash radius
+        }
+    }
     std::vector<ServerProjectile> projectiles;
 
     // Spawn points loaded from mission
@@ -1161,6 +1172,8 @@ void GameServer::update() {
                 client.rotZ = move.rotZ;
                 client.rotX = move.rotX;
 
+                // Dead players don't process movement input (frozen until respawn)
+                if (client.respawnAt <= 0) {
                 // Compute velocity from input flags based on client orientation
                 float forward = 0, strafe = 0;
                 if (move.flags & 1) forward += 1.0f;
@@ -1188,10 +1201,11 @@ void GameServer::update() {
                     client.energy += 5.0f * 0.05f;
                     if (client.energy > 100) client.energy = 100;
                 }
+                }
 
                 // Handle fire input: spawn a projectile ghost (per-client cadence)
                 double now = Engine::instance().timer().now();
-                if ((move.flags & 8) && (now - client.lastFireTime) > 0.35) {
+                if (client.respawnAt <= 0 && (move.flags & 8) && (now - client.lastFireTime) > 0.35) {
                     client.lastFireTime = now;
                     float pitch = client.rotX;
                     float pyaw = client.rotZ;
@@ -1210,6 +1224,8 @@ void GameServer::update() {
                     sp.velY = client.velY + dirY * projSpeed;
                     sp.velZ = client.velZ + dirZ * projSpeed;
                     sp.ownerCi = (int)ci;
+                    auto wp = Impl::weaponProfile(0);
+                    sp.damage = wp.damage; sp.splashRadius = wp.splash;
                     impl->projectiles.push_back(sp);
 
                     // Spawn visual ghost for this projectile
@@ -1355,13 +1371,15 @@ void GameServer::update() {
         cl.velX *= (1.0f - friction * simDt);
         cl.velZ *= (1.0f - friction * simDt);
 
-        // Push simulated position into player ghost
+        // Push simulated position + vitals into player ghost
         if (cl.playerGhostIndex > 0) {
             for (auto& sg : impl->serverGhosts) {
                 if (sg.index == cl.playerGhostIndex) {
                     sg.posX = cl.posX;
                     sg.posY = cl.posY;
                     sg.posZ = cl.posZ;
+                    sg.health = cl.health;
+                    sg.energy = cl.energy;
                     break;
                 }
             }
@@ -1381,34 +1399,36 @@ void GameServer::update() {
             }
         }
 
-        // Death check & respawn
-        if (cl.health <= 0) {
-            cl.health = 100;
-            cl.energy = 100;
-            // Find a spawn point
+        // Death check & respawn (with delay so death is meaningful)
+        double tnow = Engine::instance().timer().now();
+        const float RESPAWN_DELAY = 3.0f;
+        if (cl.health <= 0 && cl.respawnAt <= 0) {
+            // Just died: freeze in place, schedule respawn. kills/deaths are
+            // already credited at hit time; pin health to 0 so clients show death.
+            cl.health = 0;
+            cl.velX = cl.velY = cl.velZ = 0;
+            cl.respawnAt = tnow + RESPAWN_DELAY;
+            for (auto& sg : impl->serverGhosts)
+                if (sg.index == cl.playerGhostIndex) { sg.health = 0; break; }
+            Console::instance().printf(LogLevel::Info, "Client %d died (respawning in %.1fs)", (int)(&cl - &impl->clients[0]), RESPAWN_DELAY);
+        }
+        if (cl.respawnAt > 0 && tnow >= cl.respawnAt) {
+            cl.health = 100; cl.energy = 100;
+            cl.respawnAt = 0;
+            cl.velX = cl.velY = cl.velZ = 0;
             if (!impl->spawnPoints.empty()) {
                 size_t idx = (size_t)(rand() % impl->spawnPoints.size());
-                auto& sp = impl->spawnPoints[idx];
-                cl.posX = sp.x; cl.posY = sp.y; cl.posZ = sp.z;
-                cl.velX = 0; cl.velY = 0; cl.velZ = 0;
-                // Update ghost position
-                for (auto& sg : impl->serverGhosts) {
-                    if (sg.index == cl.playerGhostIndex) {
-                        sg.posX = sp.x; sg.posY = sp.y; sg.posZ = sp.z;
-                        sg.health = 100;
-                        break;
-                    }
-                }
+                auto& rsp = impl->spawnPoints[idx];
+                cl.posX = rsp.x; cl.posY = rsp.y; cl.posZ = rsp.z;
                 Console::instance().printf(LogLevel::Info, "Client %d respawned at spawn %zu", (int)(&cl - &impl->clients[0]), idx);
             } else {
-                // Fallback: respawn at origin
                 cl.posX = 0; cl.posY = 5; cl.posZ = 0;
-                for (auto& sg : impl->serverGhosts) {
-                    if (sg.index == cl.playerGhostIndex) {
-                        sg.posX = 0; sg.posY = 5; sg.posZ = 0;
-                        sg.health = 100;
-                        break;
-                    }
+            }
+            for (auto& sg : impl->serverGhosts) {
+                if (sg.index == cl.playerGhostIndex) {
+                    sg.posX = cl.posX; sg.posY = cl.posY; sg.posZ = cl.posZ;
+                    sg.health = 100; sg.energy = 100;
+                    break;
                 }
             }
         }
@@ -1726,6 +1746,8 @@ void GameServer::update() {
                         sp.posX = bot.posX + dirX * 2.0f; sp.posY = bot.posY + 1.5f; sp.posZ = bot.posZ + dirZ * 2.0f;
                         sp.velX = bot.velX + dirX * 40.0f; sp.velY = bot.velY + dirY * 40.0f; sp.velZ = bot.velZ + dirZ * 40.0f;
                         sp.ownerCi = (int)(&bot - &impl->clients[0]);
+                        auto bwp = Impl::weaponProfile(0);
+                        sp.damage = bwp.damage; sp.splashRadius = bwp.splash;
                         impl->projectiles.push_back(sp);
                         Impl::ServerGhost pghost;
                         pghost.index = sp.ghostIndex; pghost.classId = 33;
@@ -1804,7 +1826,12 @@ void GameServer::update() {
             sp.active = false;
             if (projGhost) projGhost->active = false;
             for (auto& client : impl->clients) {
-                if (!client.active) continue;
+                if (!client.active || client.respawnAt > 0) continue;
+                if (sp.ownerCi >= 0 && sp.ownerCi < (int)impl->clients.size()) {
+                    auto& own = impl->clients[sp.ownerCi];
+                    if (impl->gameMode == 1 && own.teamId == client.teamId && client.teamId != 0)
+                        continue; // friendly fire: no splash damage
+                }
                 float dx = client.posX - sp.posX, dy = client.posY - sp.posY, dz = client.posZ - sp.posZ;
                 float dist2 = dx*dx + dy*dy + dz*dz;
                 if (dist2 < sp.splashRadius * sp.splashRadius && dist2 > 0.01f) {
@@ -1821,7 +1848,7 @@ void GameServer::update() {
         // Hit a player? (with lag compensation: check rewind position too)
         bool impacted = false;
         for (auto& client : impl->clients) {
-            if (!client.active) continue;
+            if (!client.active || client.respawnAt > 0) continue;
             if (sp.ownerCi >= 0 && &client == &impl->clients[sp.ownerCi]) continue;
             // Current position check
             float dx = client.posX - sp.posX, dz = client.posZ - sp.posZ;
@@ -1839,12 +1866,16 @@ void GameServer::update() {
                 float dy = client.posY - sp.posY;
                 if (dy > -2.0f && dy < 2.0f) {
                     sp.active = false; if (projGhost) projGhost->active = false;
-                    client.health -= sp.damage;
-                    // Track kills/deaths with game mode
+                    bool friendlyFire = false;
                     if (sp.ownerCi >= 0 && sp.ownerCi < (int)impl->clients.size()) {
                         auto& killer = impl->clients[sp.ownerCi];
-                        bool friendlyFire = (impl->gameMode == 1 && killer.teamId == client.teamId && client.teamId != 0);
-                        if (!friendlyFire) {
+                        friendlyFire = (impl->gameMode == 1 && killer.teamId == client.teamId && client.teamId != 0);
+                    }
+                    if (!friendlyFire) {
+                        client.health -= sp.damage;
+                        // Track kills/deaths with game mode
+                        if (sp.ownerCi >= 0 && sp.ownerCi < (int)impl->clients.size()) {
+                            auto& killer = impl->clients[sp.ownerCi];
                             killer.kills++;
                             client.deaths++;
                             if (impl->gameMode == 1) {
@@ -1856,11 +1887,29 @@ void GameServer::update() {
                                 Console::instance().printf(LogLevel::Info, "Player %d wins with %d kills!",
                                     sp.ownerCi, killer.kills);
                             }
+                            // Kill feed (E)
+                            {
+                                T2Protocol::ChatMessage kf{};
+                                std::string txt = killer.playerName + " fragged " + client.playerName;
+                                strncpy(kf.sender, "[KILL]", sizeof(kf.sender) - 1);
+                                strncpy(kf.text, txt.c_str(), sizeof(kf.text) - 1);
+                                uint8_t kfBuf[512];
+                                if (T2Protocol::encodeChat(kfBuf, sizeof(kfBuf), kf)) {
+                                    WireHeader whdr{};
+                                    whdr.sequence = 1; whdr.ack = 0; whdr.ackMask = 0;
+                                    whdr.type = (uint8_t)PacketType::GameData; whdr.checksum = 0;
+                                    std::vector<uint8_t> pkt(sizeof(WireHeader) + 4 + strlen(kf.sender) + 2 + strlen(kf.text));
+                                    memcpy(pkt.data(), &whdr, sizeof(WireHeader));
+                                    memcpy(pkt.data() + sizeof(WireHeader), kfBuf, pkt.size() - sizeof(WireHeader));
+                                    for (auto& c : impl->clients)
+                                        if (c.active && !c.isBot) impl->sendTo(c.addr, pkt.data(), pkt.size());
+                                }
+                            }
                         }
                     }
                     float dist = sqrtf(dx*dx + dz*dz);
-                    if (dist > 0.01f) { client.velX += (dx/dist)*8.0f; client.velZ += (dz/dist)*8.0f; client.velY += 4.0f; }
-                    Console::instance().printf(LogLevel::Debug, "Projectile %u hit! health=%.0f", (unsigned)sp.ghostIndex, client.health);
+                    if (dist > 0.01f && !friendlyFire) { client.velX += (dx/dist)*8.0f; client.velZ += (dz/dist)*8.0f; client.velY += 4.0f; }
+                    Console::instance().printf(LogLevel::Debug, "Projectile %u hit! health=%.0f ff=%d", (unsigned)sp.ghostIndex, client.health, (int)friendlyFire);
                     impacted = true; break;
                 }
             }
