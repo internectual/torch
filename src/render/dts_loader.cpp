@@ -269,9 +269,9 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             md.vertices.push_back(v);
         }
         for (auto& p : prims) {
-            if (p.numElements < 3) continue;
+            if (p.numElements < 3 || p.numElements > 10000) continue;
+            if (p.start < 0 || p.start >= (int)indices.size()) continue;
             int32_t type = p.matIndex & (3 << 30); // bits 30-31
-            int32_t matIdx = p.matIndex & 0x0FFFFFFF;
             if (type == (2 << 30)) {
                 // Triangle fan: center vertex is first, fan out
                 for (int i = 1; i + 1 < p.numElements; i++) {
@@ -306,6 +306,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                     }
                 }
             }
+            if (md.indices.size() > 1000000) break; // safety cap
         }
         md.materialIdx = 0;
         md.nodeIndex = -1;
