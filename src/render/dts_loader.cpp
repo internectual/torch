@@ -116,6 +116,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     }
     int32_t numObjStates = capCount(buf.readS32()), numDecalStates = capCount(buf.readS32()), numTriggers = capCount(buf.readS32());
     int32_t numDetails = capCount(buf.readS32()), numMeshes = capCount(buf.readS32());
+    if (numMeshes > 10000) numMeshes = 10000;
     int32_t numSkins = (ver < 23) ? capCount(buf.readS32()) : 0; (void)numSkins;
     int32_t numNames = capCount(buf.readS32());
     capCount(buf.readS32()); capCount(buf.readS32()); // smallestVisSize, smallestVisDL
@@ -209,6 +210,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         buf.readPoint3F(); buf.readPoint3F(); buf.readPoint3F(); buf.readF32(); // bounds, center, radius
         int32_t numVerts = capCount(buf.readS32());
         if (numVerts > 10000 || numVerts < 0) { numVerts = 0; }
+        // Cap total vertices per mesh to prevent bad_alloc from garbage data
+        if (numVerts * numFrames > 100000) { numFrames = 1; if (numVerts > 100000) numVerts = 100000; }
         if (!shareData) {
             meshVerts[m].resize(numVerts * numFrames);
             for (int i = 0; i < numVerts; i++) meshVerts[m][i] = buf.readPoint3F();
