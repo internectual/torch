@@ -245,7 +245,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         struct Prim { int32_t start, numElements, matIndex; };
         std::vector<Prim> prims(numPrimitives);
         for (int i = 0; i < numPrimitives; i++) { prims[i].start = buf.readS16(); prims[i].numElements = buf.readS16(); }
-        for (int i = 0; i < numPrimitives; i++) { prims[i].matIndex = 0; buf.readU32(); }
+        for (int i = 0; i < numPrimitives; i++) { prims[i].matIndex = buf.readS32(); }
         int32_t numIndices = capCount(buf.readS32());
         if (numIndices > 100000 || numIndices < 0) { numIndices = 0; }
         std::vector<uint32_t> indices(numIndices);
@@ -270,12 +270,42 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         }
         for (auto& p : prims) {
             if (p.numElements < 3) continue;
-                for (int i = 0; i + 2 < p.numElements; i += 3)
-                if (p.start + i + 2 < (int)indices.size()) {
-                    md.indices.push_back(indices[p.start + i]);
-                    md.indices.push_back(indices[p.start + i + 1]);
-                    md.indices.push_back(indices[p.start + i + 2]);
+            int32_t type = p.matIndex & (3 << 30); // bits 30-31
+            int32_t matIdx = p.matIndex & 0x0FFFFFFF;
+            if (type == (2 << 30)) {
+                // Triangle fan: center vertex is first, fan out
+                for (int i = 1; i + 1 < p.numElements; i++) {
+                    if (p.start + i + 1 < (int)indices.size()) {
+                        md.indices.push_back(indices[p.start]);
+                        md.indices.push_back(indices[p.start + i]);
+                        md.indices.push_back(indices[p.start + i + 1]);
+                    }
                 }
+            } else if (type == (1 << 30)) {
+                // Triangle strip: alternating winding
+                for (int i = 0; i + 2 < p.numElements; i++) {
+                    if (p.start + i + 2 < (int)indices.size()) {
+                        if (i & 1) {
+                            md.indices.push_back(indices[p.start + i + 1]);
+                            md.indices.push_back(indices[p.start + i]);
+                            md.indices.push_back(indices[p.start + i + 2]);
+                        } else {
+                            md.indices.push_back(indices[p.start + i]);
+                            md.indices.push_back(indices[p.start + i + 1]);
+                            md.indices.push_back(indices[p.start + i + 2]);
+                        }
+                    }
+                }
+            } else {
+                // Triangle list (default)
+                for (int i = 0; i + 2 < p.numElements; i += 3) {
+                    if (p.start + i + 2 < (int)indices.size()) {
+                        md.indices.push_back(indices[p.start + i]);
+                        md.indices.push_back(indices[p.start + i + 1]);
+                        md.indices.push_back(indices[p.start + i + 2]);
+                    }
+                }
+            }
         }
         md.materialIdx = 0;
         md.nodeIndex = -1;
