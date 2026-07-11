@@ -195,8 +195,6 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             for (int i = 0; i < sz; i++) buf.readU16();
             continue;
         }
-        if (meshType != DTSMesh_Standard && meshType != DTSMesh_Skin && meshType != DTSMesh_Sorted)
-            continue;
 
         buf.checkGuard(); // START
         // Safety: break if guard exceeds max possible (14 pre-mesh + 2 per mesh + margin)
