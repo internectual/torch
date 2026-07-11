@@ -518,6 +518,7 @@ void MeshData::updateGPU() {
 }
 
 void MeshData::render() {
+    if (vertices.empty() || indices.empty()) return;
     if (!uploaded) upload();
     glBindVertexArray(vao);
     glDrawElements(GL_TRIANGLES, (GLsizei)indices.size(), GL_UNSIGNED_INT, 0);
