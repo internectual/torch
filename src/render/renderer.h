@@ -13,6 +13,7 @@ struct SkinInfo {
     std::vector<int32_t> boneIndices;
     std::vector<float> boneWeights;
     std::vector<int32_t> nodeIndices;
+    std::vector<int32_t> vertexIndices;
 };
 
 struct RenderConfig {
@@ -44,6 +45,7 @@ struct MeshData {
     int32_t nodeIndex = -1;     // DTS node index (-1 = no node)
     bool uploaded = false;
     void upload();
+    void updateGPU();
     void render();
     void destroy();
 };
@@ -145,7 +147,8 @@ struct DTSShape {
     };
     std::vector<Animation> animations;
     std::vector<SkinInfo> skins; // parallel to meshes
-    std::vector<MatrixF> defaultTransforms; // per-node bind pose transforms
+    std::vector<MatrixF> defaultTransforms; // per-node bind pose world transforms
+    std::vector<MatrixF> defaultLocalTransforms; // per-node bind pose local transforms
     std::vector<std::string> materialNames; // original material names (for skin overrides)
     std::vector<Texture> materialTextures;
     std::vector<uint32_t> materialFlags; // parallel to materialTextures

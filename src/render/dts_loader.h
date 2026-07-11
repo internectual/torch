@@ -15,7 +15,8 @@ struct DTSLoadResult {
     std::vector<DTSShape::DetailLevel> details;
     std::vector<DTSShape::Animation> animations;
     std::vector<DTSShape::Node> nodes;
-    std::vector<MatrixF> defaultTransforms; // per-node default (bind pose) transforms
+    std::vector<MatrixF> defaultTransforms; // per-node default (bind pose) world transforms
+    std::vector<MatrixF> defaultLocalTransforms; // per-node default (bind pose) local transforms
     bool loaded = false;
 };
 

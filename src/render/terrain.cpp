@@ -530,8 +530,8 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
     ortho.identity();
     ortho.m[0][0] = 2.0f / w;
     ortho.m[1][1] = -2.0f / h;
-    ortho.m[3][0] = -1.0f;
-    ortho.m[3][1] = 1.0f;
+    ortho.m[0][3] = -1.0f;
+    ortho.m[1][3] = 1.0f;
 
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
@@ -838,13 +838,6 @@ bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
 bool DTSShape::load(const uint8_t* data, size_t size) {
     if (!data || size < 12) return false;
 
-    // Check if this is actually a GLB file
-    uint32_t magic = *(const uint32_t*)data;
-    if (magic == 0x46546C67) {
-        Console::instance().printf(LogLevel::Debug, "  detected GLB format, using GLB loader");
-        return loadGLB(data, size);
-    }
-
     // DIF interiors: version 44 at offset 0 (or isInterior flag is set)
     uint32_t version = *(const uint32_t*)data;
     if (isInterior || version == 44) {
@@ -871,6 +864,7 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
         meshes = std::move(dtsResult.meshes);
         skins = std::move(dtsResult.skins);
         defaultTransforms = std::move(dtsResult.defaultTransforms);
+        defaultLocalTransforms = std::move(dtsResult.defaultLocalTransforms);
         materialTextures = std::move(dtsResult.textures);
         materialFlags = std::move(dtsResult.materialFlags);
         lightmaps = std::move(dtsResult.lightmaps);
@@ -891,8 +885,7 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
         return true;
     }
 
-    // Fallback to GLB
-    return loadGLB(data, size);
+    return false;
 }
 
 bool DTSShape::applySkin(const std::string& skinName) {
@@ -964,12 +957,11 @@ void DTSShape::render(int32_t detailLevel) {
     shader->setUniform("uView", r.view);
     shader->setUniform("uCamPos", r.cameraPos);
 
-    // Apply default transforms for skinned meshes (bind pose)
-    for (size_t si = 0; si < skins.size() && si < meshes.size(); si++) {
-        if (skins[si].hasSkin) {
-            updateSkinnedMesh(meshes[si], skins[si], defaultTransforms, defaultTransforms);
-        }
-    }
+    // Bind-pose node world transforms (defaultTransforms are already composed world matrices)
+    // NOTE: Callers are responsible for including the Z-up->Y-up conversion matrix (Math::czUpToYUp())
+    // in their model matrix at the correct position: ry * rx * C * sc * tr
+    const std::vector<MatrixF>& nodeWorld = defaultTransforms;
+    const MatrixF baseModel = r.modelMatrix();
 
     if (isInterior) {
         glCullFace(GL_FRONT);
@@ -978,7 +970,17 @@ void DTSShape::render(int32_t detailLevel) {
         glCullFace(GL_BACK);
     }
 
-    for (auto& mesh : meshes) {
+    for (size_t mi = 0; mi < meshes.size(); mi++) {
+        MeshData& mesh = meshes[mi];
+        if (mi < skins.size() && skins[mi].hasSkin) {
+            updateSkinnedMesh(mesh, skins[mi], nodeWorld, defaultTransforms);
+            r.setModel(baseModel);
+        } else {
+            MatrixF fm = baseModel;
+            if (mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)nodeWorld.size())
+                fm = baseModel * nodeWorld[mesh.nodeIndex];
+            r.setModel(fm);
+        }
         uint32_t flags = 0;
         if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialTextures.size()) {
             auto& tex = materialTextures[mesh.materialIndex];
@@ -1048,10 +1050,6 @@ void DTSShape::render(int32_t detailLevel) {
 void DTSShape::renderAnimation(const char* animName, float time) {
     if (!loaded) return;
 
-    auto& r = Engine::instance().renderer();
-    auto* shader = ShaderManager::getDefaultShader();
-    if (shader) shader->bind();
-
     // Find animation
     int animIndex = -1;
     for (size_t i = 0; i < animations.size(); i++) {
@@ -1061,11 +1059,26 @@ void DTSShape::renderAnimation(const char* animName, float time) {
         }
     }
 
+    // If no animation found or no keyframes, fall back to static render
+    if (animIndex < 0 || animations[animIndex].keyframes.empty()) {
+        render(0);
+        return;
+    }
+
+    auto& r = Engine::instance().renderer();
+    auto* shader = ShaderManager::getDefaultShader();
+    if (shader) shader->bind();
+
     size_t nodeCount = std::max(nodes.size(), (size_t)1);
     std::vector<MatrixF> nodeLocal(nodeCount);
-    for (auto& m : nodeLocal) m.identity();
+    for (size_t i = 0; i < nodeCount; i++) {
+        if (i < defaultLocalTransforms.size())
+            nodeLocal[i] = defaultLocalTransforms[i];
+        else
+            nodeLocal[i].identity();
+    }
 
-    if (animIndex >= 0 && !animations[animIndex].keyframes.empty()) {
+    {
         auto& anim = animations[animIndex];
 
         float t = time;
@@ -1153,13 +1166,19 @@ void DTSShape::renderAnimation(const char* animName, float time) {
         glCullFace(GL_BACK);
     }
 
-    for (auto& mesh : meshes) {
+    for (size_t mi = 0; mi < meshes.size(); mi++) {
+        MeshData& mesh = meshes[mi];
         // Compute final model matrix
         MatrixF finalModel = baseModel;
         if (mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)nodeCount)
             finalModel = baseModel * nodeWorld[mesh.nodeIndex];
 
-        r.setModel(finalModel);
+        if (mi < skins.size() && skins[mi].hasSkin) {
+            updateSkinnedMesh(mesh, skins[mi], nodeWorld, defaultTransforms);
+            r.setModel(baseModel);
+        } else {
+            r.setModel(finalModel);
+        }
 
         uint32_t flags = 0;
         if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialTextures.size()) {

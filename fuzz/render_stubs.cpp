@@ -9,6 +9,7 @@
 void MeshData::upload() {}
 void MeshData::render() {}
 void MeshData::destroy() {}
+void MeshData::updateGPU() {}
 
 void Texture::load(const uint8_t* /*data*/, size_t /*size*/) {}
 bool Texture::loadBM8(const uint8_t* /*data*/, size_t /*size*/) { return false; }

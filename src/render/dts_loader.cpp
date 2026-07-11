@@ -51,13 +51,13 @@ struct DTSBuf {
         int16_t x = readS16(), y = readS16(), z = readS16(), w = readS16();
         return {(float)x/32767.f, (float)z/32767.f, (float)y/32767.f, (float)w/32767.f};
     }
+    // allocShape*(n) does NOT advance input; copyToShape*(n) advances input by n; get*(n) advances input by n
     void checkGuard() {
         uint32_t g32 = readU32();
         uint16_t g16 = readU16();
         uint8_t  g8  = readU8();
         if ((int)g32 != guard || (int)g16 != guard || (int8_t)g8 != (int8_t)guard) {
             static int guardWarnCount = 0;
-            corrupted = true;
             if (guardWarnCount < 5)
                 Console::instance().printf(LogLevel::Warn,
                     "DTS: GUARD mismatch at %d (got %u/%u/%u) - continuing", guard, g32, g16, g8);
@@ -80,6 +80,9 @@ static bool hasExt(const std::string& s, const char* ext) {
 
 bool updateSkinnedMesh(MeshData&, SkinInfo&, const std::vector<MatrixF>&, const std::vector<MatrixF>&) { return false; }
 
+// v15-v18: placeholder that returns empty (old format not yet ported)
+static DTSLoadResult loadDTSOld(const uint8_t*, size_t, const char*) { return {}; }
+
 DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     DTSLoadResult result;
     if (!data || size < 16) return result;
@@ -87,8 +90,9 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     int32_t szAll = *(const int32_t*)(data+4);
     int32_t s16   = *(const int32_t*)(data+8);
     int32_t s8    = *(const int32_t*)(data+12);
-    if (ver < 20 || ver > 30 || szAll <= 0 || s16 <= 0 || s8 <= 0 || s8 > szAll || s16 > s8)
+    if (ver < 15 || ver > 30 || szAll <= 0 || s16 <= 0 || s8 <= 0 || s8 > szAll || s16 > s8)
         return result;
+    if (ver < 19) return loadDTSOld(data, size, name);
     Console::instance().printf(LogLevel::Debug, "DTS: '%s' v%u (%zu bytes)", name, ver, size);
     size_t sz32b = (size_t)s16 * 4, sz16b = (size_t)(s8 - s16) * 4, sz8b = (size_t)(szAll - s8) * 4;
     if (16 + sz32b + sz16b + sz8b > size) return result;
@@ -100,8 +104,16 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
 
     int32_t numNodes = capCount(buf.readS32()), numObjects = capCount(buf.readS32()), numDecals = capCount(buf.readS32());
     int32_t numSubShapes = capCount(buf.readS32()), numIFLs = capCount(buf.readS32());
-    int32_t numNodeRot = capCount(buf.readS32()), numNodeTrans = capCount(buf.readS32());
-    int32_t numNodeUScale = capCount(buf.readS32()), numNodeAScale = capCount(buf.readS32()), numNodeArbScale = capCount(buf.readS32());
+    int32_t numNodeRot, numNodeTrans, numNodeUScale, numNodeAScale, numNodeArbScale;
+    if (ver < 22) {
+        int32_t combined = capCount(buf.readS32()) - numNodes;
+        if (combined < 0) combined = 0;
+        numNodeRot = numNodeTrans = combined;
+        numNodeUScale = numNodeAScale = numNodeArbScale = 0;
+    } else {
+        numNodeRot = capCount(buf.readS32()); numNodeTrans = capCount(buf.readS32());
+        numNodeUScale = capCount(buf.readS32()); numNodeAScale = capCount(buf.readS32()); numNodeArbScale = capCount(buf.readS32());
+    }
     int32_t numObjStates = capCount(buf.readS32()), numDecalStates = capCount(buf.readS32()), numTriggers = capCount(buf.readS32());
     int32_t numDetails = capCount(buf.readS32()), numMeshes = capCount(buf.readS32());
     int32_t numSkins = (ver < 23) ? capCount(buf.readS32()) : 0; (void)numSkins;
@@ -132,8 +144,10 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
     for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
     buf.checkGuard(); // 7
-    for (int i = 0; i < numNodes; i++) buf.readQuat16();
-    for (int i = 0; i < numNodes; i++) buf.readPoint3F();
+    std::vector<QuatF> defRot(numNodes);
+    std::vector<Point3F> defTrans(numNodes);
+    for (int i = 0; i < numNodes; i++) defRot[i] = buf.readQuat16();
+    for (int i = 0; i < numNodes; i++) defTrans[i] = buf.readPoint3F();
     buf.checkGuard(); // 8
     for (int i = 0; i < numNodeRot; i++) buf.readQuat16();
     for (int i = 0; i < numNodeTrans; i++) buf.readPoint3F();
@@ -141,7 +155,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     for (int i = 0; i < numNodeAScale; i++) { buf.readF32(); buf.readF32(); buf.readF32(); }
     for (int i = 0; i < numNodeArbScale; i++) { buf.readF32(); buf.readF32(); buf.readF32(); }
     for (int i = 0; i < numNodeArbScale; i++) buf.readQuat16();
-    buf.checkGuard(); // 9
+    if (ver >= 22) buf.checkGuard(); // 9 (only exists for v > 21)
+    // v < 22: ground transforms adjustment (no-op for our parser)
     for (int i = 0; i < numObjStates; i++) { buf.readF32(); capCount(buf.readS32()); capCount(buf.readS32()); }
     buf.checkGuard(); // 10
     for (int i = 0; i < numDecalStates; i++) capCount(buf.readS32());
@@ -183,13 +198,13 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             continue;
 
         buf.checkGuard(); // START
-        // Past the last valid mesh guard (389), skip further Standard matches
-        if (buf.guard > 395) break;
+        // Safety: break if guard exceeds max possible (14 pre-mesh + 2 per mesh + margin)
+        if (buf.guard > 14 + 2 * numMeshes + 100) break;
         int32_t numFrames = capCount(buf.readS32());
         if (numFrames > 100 || numFrames < 1) numFrames = 1;
         int32_t numMatFrames = capCount(buf.readS32());
         if (numMatFrames > 100 || numMatFrames < 1) numMatFrames = 1;
-        int32_t parentMesh = capCount(buf.readS32());
+        int32_t parentMesh = buf.readS32(); // -1 means no parent (don't capCount)
         bool shareData = (parentMesh >= 0);
         buf.readPoint3F(); buf.readPoint3F(); buf.readPoint3F(); buf.readF32(); // bounds, center, radius
         int32_t numVerts = capCount(buf.readS32());
@@ -255,7 +270,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         }
         for (auto& p : prims) {
             if (p.numElements < 3) continue;
-            for (int i = 0; i < p.numElements; i += 3)
+                for (int i = 0; i + 2 < p.numElements; i += 3)
                 if (p.start + i + 2 < (int)indices.size()) {
                     md.indices.push_back(indices[p.start + i]);
                     md.indices.push_back(indices[p.start + i + 1]);
@@ -432,13 +447,19 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     }
 
     // ─── Build default transforms ─────────────────────────────────────
-    // Read default node translations and rotations from the buffer.
-    // These were already consumed during parsing. We need to re-read them.
-    // Since we don't have the data cached, we'll compute identity transforms for now.
     result.defaultTransforms.resize(numNodes);
-    for (int i = 0; i < numNodes; i++) result.defaultTransforms[i].identity();
+    result.defaultLocalTransforms.resize(numNodes);
+    for (int i = 0; i < numNodes; i++) {
+        MatrixF rot = defRot[i].toMatrix();
+        MatrixF t; t.identity(); t.setTranslation(defTrans[i]);
+        MatrixF local = t * rot;
+        result.defaultLocalTransforms[i] = local;
+        int p = dtsNodes[i].pi;
+        if (p >= 0 && p < i) result.defaultTransforms[i] = result.defaultTransforms[p] * local;
+        else result.defaultTransforms[i] = local;
+    }
 
-    result.loaded = !buf.corrupted;
+    result.loaded = !result.meshes.empty() && !result.nodes.empty();
     Console::instance().printf(LogLevel::Info,
         "DTS: loaded '%s' (%zu meshes, %zu textures, %zu nodes, %zu anims)",
         name, result.meshes.size(), result.textures.size(), result.nodes.size(), result.animations.size());

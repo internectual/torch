@@ -243,8 +243,8 @@ void GuiRenderer::render() {
     ortho.identity();
     ortho.m[0][0] = 2.0f / w;
     ortho.m[1][1] = -2.0f / h;
-    ortho.m[3][0] = -1.0f;
-    ortho.m[3][1] = 1.0f;
+    ortho.m[0][3] = -1.0f;
+    ortho.m[1][3] = 1.0f;
     r.setProjection(ortho);
     r.setView(MatrixF{});
 

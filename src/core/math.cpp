@@ -1,6 +1,7 @@
 #include "core/math.h"
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
 void MatrixF::identity() {
     std::memset(m, 0, sizeof(m));
@@ -29,6 +30,33 @@ Point3F MatrixF::transformNormal(const Point3F& n) const {
         m[1][0] * n.x + m[1][1] * n.y + m[1][2] * n.z,
         m[2][0] * n.x + m[2][1] * n.y + m[2][2] * n.z
     };
+}
+
+MatrixF MatrixF::inverse() const {
+    float A[4][8];
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) A[i][j] = m[i][j];
+        for (int j = 0; j < 4; j++) A[i][4 + j] = (i == j) ? 1.0f : 0.0f;
+    }
+    for (int col = 0; col < 4; col++) {
+        int piv = col;
+        for (int r = col + 1; r < 4; r++)
+            if (std::fabs(A[r][col]) > std::fabs(A[piv][col])) piv = r;
+        if (std::fabs(A[piv][col]) < 1e-8f) { MatrixF id; return id; }
+        if (piv != col) for (int j = 0; j < 8; j++) std::swap(A[col][j], A[piv][j]);
+        float d = A[col][col];
+        for (int j = 0; j < 8; j++) A[col][j] /= d;
+        for (int r = 0; r < 4; r++) {
+            if (r == col) continue;
+            float f = A[r][col];
+            if (f == 0.0f) continue;
+            for (int j = 0; j < 8; j++) A[r][j] -= f * A[col][j];
+        }
+    }
+    MatrixF res;
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) res.m[i][j] = A[i][4 + j];
+    return res;
 }
 
 void MatrixF::setRotationX(float a) {
@@ -62,7 +90,7 @@ void MatrixF::setRotationAxis(const Point3F& axis, float angle) {
 }
 
 void MatrixF::setTranslation(const Point3F& t) {
-    m[3][0] = t.x; m[3][1] = t.y; m[3][2] = t.z;
+    m[0][3] = t.x; m[1][3] = t.y; m[2][3] = t.z;
 }
 
 void MatrixF::setScale(const Point3F& s) {
@@ -76,8 +104,8 @@ void MatrixF::perspective(float fov, float aspect, float near, float far) {
     m[0][0] = f / aspect;
     m[1][1] = f;
     m[2][2] = (far + near) / (near - far);
-    m[2][3] = -1.0f;
-    m[3][2] = 2.0f * far * near / (near - far);
+    m[2][3] = 2.0f * far * near / (near - far);
+    m[3][2] = -1.0f;
 }
 
 void MatrixF::orthographic(float left, float right, float bottom, float top, float near, float far) {
@@ -85,9 +113,9 @@ void MatrixF::orthographic(float left, float right, float bottom, float top, flo
     m[0][0] = 2.0f / (right - left);
     m[1][1] = 2.0f / (top - bottom);
     m[2][2] = -2.0f / (far - near);
-    m[3][0] = -(right + left) / (right - left);
-    m[3][1] = -(top + bottom) / (top - bottom);
-    m[3][2] = -(far + near) / (far - near);
+    m[0][3] = -(right + left) / (right - left);
+    m[1][3] = -(top + bottom) / (top - bottom);
+    m[2][3] = -(far + near) / (far - near);
     m[3][3] = 1.0f;
 }
 
@@ -110,13 +138,10 @@ void MatrixF::lookAt(const Point3F& eye, const Point3F& center, const Point3F& u
 
     Point3F u = { s.y * f.z - s.z * f.y, s.z * f.x - s.x * f.z, s.x * f.y - s.y * f.x };
 
-    m[0][0] = s.x; m[0][1] = s.y; m[0][2] = s.z; m[0][3] = 0;
-    m[1][0] = u.x; m[1][1] = u.y; m[1][2] = u.z; m[1][3] = 0;
-    m[2][0] = -f.x; m[2][1] = -f.y; m[2][2] = -f.z; m[2][3] = 0;
-    m[3][0] = -(s.x * eye.x + s.y * eye.y + s.z * eye.z);
-    m[3][1] = -(u.x * eye.x + u.y * eye.y + u.z * eye.z);
-    m[3][2] = f.x * eye.x + f.y * eye.y + f.z * eye.z;
-    m[3][3] = 1;
+    m[0][0] = s.x; m[0][1] = s.y; m[0][2] = s.z; m[0][3] = -(s.x * eye.x + s.y * eye.y + s.z * eye.z);
+    m[1][0] = u.x; m[1][1] = u.y; m[1][2] = u.z; m[1][3] = -(u.x * eye.x + u.y * eye.y + u.z * eye.z);
+    m[2][0] = -f.x; m[2][1] = -f.y; m[2][2] = -f.z; m[2][3] = f.x * eye.x + f.y * eye.y + f.z * eye.z;
+    m[3][0] = 0; m[3][1] = 0; m[3][2] = 0; m[3][3] = 1;
 }
 
 MatrixF QuatF::toMatrix() const {

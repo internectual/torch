@@ -54,6 +54,7 @@ public:
 
     std::string testShapePath;
     std::string testDifPath;
+    bool shapeViewerMode = false;
     std::vector<std::string> preloadFiles;
     std::string cmdArgs;
     std::string previewImgPath;
@@ -77,6 +78,7 @@ private:
     Console* con{};
     Renderer* ren{};
     AudioSystem* aud{};
+public: // TEST HARNESS: temporarily public so dts_one can install an empty FS
     FileSystem* filesys{};
     ScriptEngine* scr{};
     NetworkManager* net{};

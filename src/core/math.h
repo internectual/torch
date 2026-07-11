@@ -17,6 +17,7 @@ struct MatrixF {
     MatrixF() { identity(); }
     void identity();
     MatrixF operator*(const MatrixF& o) const;
+    MatrixF inverse() const;
     Point3F transform(const Point3F& p) const;
     Point3F transformNormal(const Point3F& n) const;
     void setRotationX(float a);
@@ -77,5 +78,17 @@ namespace Math {
         float ka = sinf((1-t)*theta) / sinTheta;
         float kb = sinf(t*theta) / sinTheta * sign;
         return {a.x*ka + b.x*kb, a.y*ka + b.y*kb, a.z*ka + b.z*kb, a.w*ka + b.w*kb};
+    }
+
+    // Z-up (T2) to Y-up (OpenGL) conversion matrix.
+    // Maps (x,y,z) -> (x, z, -y).
+    // det = +1 (rotation, no handedness flip).
+    inline MatrixF czUpToYUp() {
+        MatrixF c;
+        c.m[0][0] = 1; c.m[0][1] = 0; c.m[0][2] = 0;  c.m[0][3] = 0;
+        c.m[1][0] = 0; c.m[1][1] = 0; c.m[1][2] = 1;  c.m[1][3] = 0;
+        c.m[2][0] = 0; c.m[2][1] =-1; c.m[2][2] = 0;  c.m[2][3] = 0;
+        c.m[3][0] = 0; c.m[3][1] = 0; c.m[3][2] = 0;  c.m[3][3] = 1;
+        return c;
     }
 }

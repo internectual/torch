@@ -194,7 +194,8 @@ void Player::render() {
         Point3F ax = {0, 1, 0};
         model.setRotationAxis(ax, -rot.z);
         model.setTranslation(pos);
-        r.setModel(model);
+        // DTS shapes are Z-up; C converts to Y-up before the Y-up world transform
+        r.setModel(model * Math::czUpToYUp());
 
         // Map animation state to animation name
         const char* animNames[] = { "stand", "run", "jump", "jet", "death" };
@@ -1150,7 +1151,7 @@ void World::render(const Point3F& cameraPos) {
                 }
             }
             model.setTranslation(obj.pos);
-            r.setModel(model);
+            r.setModel(model * Math::czUpToYUp());
             if (!obj.animName.empty())
                 obj.shape->renderAnimation(obj.animName.c_str(), obj.animTime);
             else
@@ -1257,7 +1258,7 @@ void World::render(const Point3F& cameraPos) {
             Point3F ax = {0, 1, 0};
             model.setRotationAxis(ax, b.moveYaw);
             model.setTranslation(b.pos);
-            Engine::instance().renderer().setModel(model);
+            Engine::instance().renderer().setModel(model * Math::czUpToYUp());
             shader->setUniform("uUseTexture", (int32_t)0);
             shader->setUniform("uUseLightmap", (int32_t)0);
             b.shape->render(0);
@@ -1474,6 +1475,21 @@ bool Game::init() {
                 Console::instance().printf(LogLevel::Info, "    %s (%.1fs)", a.name.c_str(), a.duration);
         }
     }, "testshape <path> - Load and display a DTS/GLB shape");
+
+    // ── Shape Viewer ─────────────────────────────────────────────────────
+    con.addCommand("shapeviewer", [this](int32_t, const char* const*) {
+        enterShapeViewer();
+    }, "shapeviewer - Browse all .dts shapes from the data paths");
+
+    con.addCommand("sv_next", [this](int32_t, const char* const*) {
+        if (!shapeViewerActive) { Console::instance().printf(LogLevel::Warn, "shapeviewer not active"); return; }
+        shapeViewerNext();
+    }, "sv_next - Next shape in shape viewer");
+
+    con.addCommand("sv_prev", [this](int32_t, const char* const*) {
+        if (!shapeViewerActive) { Console::instance().printf(LogLevel::Warn, "shapeviewer not active"); return; }
+        shapeViewerPrev();
+    }, "sv_prev - Previous shape in shape viewer");
 
     con.addCommand("sv_ghosts", [this](int32_t, const char* const*) {
         Console::instance().printf(LogLevel::Info, "Total server ghosts: %zu", server.ghostCount());
@@ -2153,7 +2169,7 @@ void Game::update(float dt) {
 }
 
 void Game::render(float dt) {
-    if (gameState != Playing && gameState != Dead && !testShapeLoaded) return;
+    if (gameState != Playing && gameState != Dead && !testShapeLoaded && !shapeViewerActive) return;
 
     auto& eng = Engine::instance();
     auto& r = eng.renderer();
@@ -2235,7 +2251,8 @@ void Game::render(float dt) {
     Point3F finalCam = {camPos.x + shakeOffset.x, camPos.y + shakeOffset.y, camPos.z + shakeOffset.z};
     r.setCamera(finalCam, camTarget, {0, 1, 0});
 
-    // Shadow pass
+    // Shadow pass and scene rendering — skip in shape viewer / test shape mode
+    if (!shapeViewerActive && !testShapeLoaded) {
         if (r.shadowEnabled()) {
             // Compute scene bounds from terrain
             Point3F sceneCenter = {0, 0, 0};
@@ -2275,8 +2292,9 @@ void Game::render(float dt) {
                 if (b.shape && b.shape->loaded) {
                     MatrixF model;
                     model.setTranslation(b.pos);
-                    MatrixF mvp = r.lightViewProj() * model;
+                    MatrixF mvp = r.lightViewProj() * model * Math::czUpToYUp();
                     shadowShader->setUniform("uLightMVP", mvp);
+                    r.setModel(model * Math::czUpToYUp());
                     b.shape->render(0);
                 }
             }
@@ -2307,6 +2325,7 @@ void Game::render(float dt) {
 
     w->render(camPos);
     if (pl && !freeCamActive && !demoPlaying && !testShapeLoaded) pl->render();
+    } // end if (!shapeViewerActive && !testShapeLoaded)
 
     if (hud && gameState == Playing) hud->render(this);
 
@@ -2330,19 +2349,42 @@ void Game::render(float dt) {
         auto* defShader = ShaderManager::getDefaultShader();
         defShader->bind();
         auto& plat = Engine::instance().platform();
-        static float viewYaw = 0, viewPitch = 0;
+
+        // Compute model bounds once to frame the camera
+        static bool boundsInit = false;
+        static Point3F center{0,0,0};
+        static float fitScale = 1.0f;
+        if (!boundsInit) {
+            Point3F mn{1e9f,1e9f,1e9f}, mx{-1e9f,-1e9f,-1e9f};
+            for (auto& m : testShape.meshes)
+                for (auto& v : m.vertices) {
+                    if (v.pos.x < mn.x) mn.x = v.pos.x; if (v.pos.y < mn.y) mn.y = v.pos.y; if (v.pos.z < mn.z) mn.z = v.pos.z;
+                    if (v.pos.x > mx.x) mx.x = v.pos.x; if (v.pos.y > mx.y) mx.y = v.pos.y; if (v.pos.z > mx.z) mx.z = v.pos.z;
+                }
+            center = {(mn.x+mx.x)*0.5f, (mn.y+mx.y)*0.5f, (mn.z+mx.z)*0.5f};
+            float dx = mx.x-mn.x, dy = mx.y-mn.y, dz = mx.z-mn.z;
+            float radius = 0.5f * std::sqrt(dx*dx+dy*dy+dz*dz);
+            fitScale = (radius > 1e-3f) ? (1.0f / radius) : 1.0f;
+            boundsInit = true;
+        }
+
+        static float viewYaw = 0.6f, viewPitch = 0.25f;
         if (plat.input().mouseButtons[1]) {
             viewYaw   += plat.input().mouseDeltaX * 0.005f;
             viewPitch += plat.input().mouseDeltaY * 0.005f;
             if (viewPitch > 1.5f) viewPitch = 1.5f;
             if (viewPitch < -1.5f) viewPitch = -1.5f;
         }
-        MatrixF model;
         MatrixF ry; ry.setRotationY(viewYaw);
         MatrixF rx; rx.setRotationX(viewPitch);
-        model = ry * rx * model;
-        model.setTranslation({0, 6, 8});
+        MatrixF sc; sc.setScale({fitScale, fitScale, fitScale});
+        MatrixF tr; tr.setTranslation({-center.x, -center.y, -center.z});
+        MatrixF model = ry * rx * Math::czUpToYUp() * sc * tr;
         r.setModel(model);
+
+        // Framing camera looking at the (now origin-centered, unit-radius) model
+        r.setCamera({0, 0, 2.6f}, {0, 0, 0}, {0, 1, 0});
+
         bool animated = false;
         if (!testShape.animations.empty()) {
             static float animTime = 0;
@@ -2352,6 +2394,83 @@ void Game::render(float dt) {
             animated = true;
         }
         if (!animated) testShape.render(0);
+    }
+
+    // Render shape viewer (shapeviewer command)
+    if (shapeViewerActive && shapeViewerShape.loaded) {
+        auto* defShader = ShaderManager::getDefaultShader();
+        defShader->bind();
+        auto& plat = Engine::instance().platform();
+
+        // Compute model bounds to frame the camera (reset when shape changes)
+        // For skeletal models, transform vertices through node world transforms
+        if (!shapeViewerBoundsInit) {
+            Point3F mn{1e9f,1e9f,1e9f}, mx{-1e9f,-1e9f,-1e9f};
+            const auto& nodeWorld = shapeViewerShape.defaultTransforms;
+            for (size_t mi = 0; mi < shapeViewerShape.meshes.size(); mi++) {
+                auto& m = shapeViewerShape.meshes[mi];
+                // Get the node world transform for this mesh
+                MatrixF nodeXform;
+                nodeXform.identity();
+                if (m.nodeIndex >= 0 && m.nodeIndex < (int)nodeWorld.size())
+                    nodeXform = nodeWorld[m.nodeIndex];
+                // Sample a fraction of vertices for bounds (avoid scanning all)
+                int step = std::max(1, (int)m.vertices.size() / 16);
+                for (size_t vi = 0; vi < m.vertices.size(); vi += step) {
+                    Point3F wp = nodeXform.transform(m.vertices[vi].pos);
+                    if (wp.x < mn.x) mn.x = wp.x; if (wp.y < mn.y) mn.y = wp.y; if (wp.z < mn.z) mn.z = wp.z;
+                    if (wp.x > mx.x) mx.x = wp.x; if (wp.y > mx.y) mx.y = wp.y; if (wp.z > mx.z) mx.z = wp.z;
+                }
+            }
+            shapeViewerCenter = {(mn.x+mx.x)*0.5f, (mn.y+mx.y)*0.5f, (mn.z+mx.z)*0.5f};
+            float dx = mx.x-mn.x, dy = mx.y-mn.y, dz = mx.z-mn.z;
+            float radius = 0.5f * std::sqrt(dx*dx+dy*dy+dz*dz);
+            shapeViewerFitScale = (radius > 1e-3f) ? (1.0f / radius) : 1.0f;
+            shapeViewerBoundsInit = true;
+        }
+
+        // Mouse orbit (left button)
+        if (plat.input().mouseButtons[1]) {
+            shapeViewerYaw   += plat.input().mouseDeltaX * 0.005f;
+            shapeViewerPitch += plat.input().mouseDeltaY * 0.005f;
+            if (shapeViewerPitch > 1.5f) shapeViewerPitch = 1.5f;
+            if (shapeViewerPitch < -1.5f) shapeViewerPitch = -1.5f;
+        }
+        MatrixF ry; ry.setRotationY(shapeViewerYaw);
+        MatrixF rx; rx.setRotationX(shapeViewerPitch);
+        MatrixF sc; sc.setScale({shapeViewerFitScale, shapeViewerFitScale, shapeViewerFitScale});
+        MatrixF tr; tr.setTranslation({-shapeViewerCenter.x, -shapeViewerCenter.y, -shapeViewerCenter.z});
+        // Orbit in Y-up: ry*rx rotate in Y-up, then C converts Z-up->Y-up, then sc*tr center/scale in Z-up
+        MatrixF model = ry * rx * Math::czUpToYUp() * sc * tr;
+        r.setModel(model);
+
+        r.setCamera({0, 0, 2.6f}, {0, 0, 0}, {0, 1, 0});
+
+        bool animated = false;
+        if (!shapeViewerShape.animations.empty()) {
+            shapeViewerAnimTime += dt;
+            const auto& anim = shapeViewerShape.animations[0];
+            shapeViewerShape.renderAnimation(anim.name.c_str(), fmodf(shapeViewerAnimTime, anim.duration));
+            animated = true;
+        }
+        if (!animated) shapeViewerShape.render(0);
+
+        // HUD overlay
+        auto* font = r.getFont();
+        if (font) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "[%d/%zu] %s", shapeViewerIndex + 1, shapeViewerFiles.size(),
+                shapeViewerFiles[shapeViewerIndex].c_str());
+            font->render(buf, 20, 20, {1, 1, 0, 1}, 1.5f);
+
+            if (!shapeViewerShape.animations.empty()) {
+                const auto& anim = shapeViewerShape.animations[0];
+                snprintf(buf, sizeof(buf), "Anim: %s (%.1fs)", anim.name.c_str(), anim.duration);
+                font->render(buf, 20, 45, {0.7f, 0.9f, 1, 1}, 1.2f);
+            }
+            snprintf(buf, sizeof(buf), "Left/Right: cycle  Mouse: orbit  Esc: exit");
+            font->render(buf, 20, 65, {0.5f, 0.7f, 0.8f, 1}, 1.0f);
+        }
     }
 
     // Render demo ghost objects as 3D shapes
@@ -2461,7 +2580,7 @@ void Game::render(float dt) {
                     model.identity();
                 }
                 model.setTranslation({rp.x, rp.y, rp.z});
-                r.setModel(model);
+                r.setModel(model * Math::czUpToYUp());
 
                 // Apply skin-based tint color for player ghosts
                 {
@@ -2706,6 +2825,7 @@ void Game::render(float dt) {
                     model = q.toMatrix();
                 }
                 model.setTranslation({rp.x, rp.y, rp.z});
+                r.setModel(model * Math::czUpToYUp());
                 g->shape->render(0);
             } else {
                 // Fallback box
@@ -3593,4 +3713,112 @@ void Game::applyInput(const InputMove& input) {
         }
     }
     prevReload = input.reload;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Shape Viewer — browse all .dts shapes from the data paths
+// ═══════════════════════════════════════════════════════════════════════════
+
+#include <filesystem>
+namespace fs = std::filesystem;
+
+void Game::enterShapeViewer() {
+    shapeViewerFiles.clear();
+    shapeViewerIndex = 0;
+    shapeViewerActive = true;
+    shapeViewerYaw = 0.6f;
+    shapeViewerPitch = 0.25f;
+    shapeViewerAnimTime = 0;
+
+    // Scan all mounted archives for .dts files
+    auto& fsys = Engine::instance().fs();
+    std::vector<std::string> allFiles;
+    fsys.listFiles(nullptr, allFiles);  // nullptr = list all files
+
+    for (auto& f : allFiles) {
+        if (f.size() > 4 && f.rfind(".dts") == f.size() - 4) {
+            shapeViewerFiles.push_back(f);
+        }
+    }
+
+    // Also scan the filesystem data directories directly
+    for (auto& baseDir : {"t2-linux/base", "base"}) {
+        std::error_code ec;
+        if (!fs::is_directory(baseDir, ec)) continue;
+        for (auto& entry : fs::recursive_directory_iterator(baseDir, fs::directory_options::skip_permission_denied, ec)) {
+            if (!entry.is_regular_file()) continue;
+            auto& p = entry.path();
+            if (p.extension() == ".dts") {
+                std::string rel = p.string();
+                for (auto& prefix : {"t2-linux/base/", "base/"}) {
+                    auto pos = rel.find(prefix);
+                    if (pos != std::string::npos) {
+                        rel = rel.substr(pos + strlen(prefix));
+                        break;
+                    }
+                }
+                // Deduplicate
+                bool dup = false;
+                for (auto& existing : shapeViewerFiles)
+                    if (existing == rel) { dup = true; break; }
+                if (!dup) shapeViewerFiles.push_back(rel);
+            }
+        }
+    }
+
+    // Sort and deduplicate
+    std::sort(shapeViewerFiles.begin(), shapeViewerFiles.end());
+    shapeViewerFiles.erase(std::unique(shapeViewerFiles.begin(), shapeViewerFiles.end()), shapeViewerFiles.end());
+
+    Console::instance().printf(LogLevel::Info, "Shape Viewer: found %zu .dts files", shapeViewerFiles.size());
+
+    // Start on bioderm if found
+    for (int i = 0; i < (int)shapeViewerFiles.size(); i++) {
+        if (shapeViewerFiles[i].find("bioderm") != std::string::npos) {
+            shapeViewerIndex = i;
+            break;
+        }
+    }
+
+    shapeViewerLoadCurrent();
+}
+
+void Game::shapeViewerNext() {
+    if (shapeViewerFiles.empty()) return;
+    shapeViewerIndex = (shapeViewerIndex + 1) % (int)shapeViewerFiles.size();
+    shapeViewerLoadCurrent();
+}
+
+void Game::shapeViewerPrev() {
+    if (shapeViewerFiles.empty()) return;
+    shapeViewerIndex = (shapeViewerIndex - 1 + (int)shapeViewerFiles.size()) % (int)shapeViewerFiles.size();
+    shapeViewerLoadCurrent();
+}
+
+void Game::shapeViewerLoadCurrent() {
+    if (shapeViewerFiles.empty()) return;
+    auto& fsys = Engine::instance().fs();
+    const std::string& path = shapeViewerFiles[shapeViewerIndex];
+
+    auto data = fsys.read(path.c_str());
+    if (data.empty()) {
+        Console::instance().printf(LogLevel::Warn, "Shape Viewer: cannot read '%s'", path.c_str());
+        return;
+    }
+
+    shapeViewerShape = DTSShape{};
+    shapeViewerShape.name = path;
+    if (!shapeViewerShape.load(data.data(), data.size())) {
+        Console::instance().printf(LogLevel::Warn, "Shape Viewer: failed to load '%s'", path.c_str());
+        return;
+    }
+
+    shapeViewerAnimTime = 0;
+    // Reset bounds for camera framing
+    shapeViewerBoundsInit = false;
+
+    Console::instance().printf(LogLevel::Info, "Shape Viewer [%d/%zu]: '%s' (%zu meshes, %zu nodes, %zu anims)",
+        shapeViewerIndex + 1, (int)shapeViewerFiles.size(), path.c_str(),
+        shapeViewerShape.meshes.size(), shapeViewerShape.nodes.size(),
+        shapeViewerShape.animations.size());
 }

@@ -510,6 +510,13 @@ void MeshData::upload() {
     uploaded = true;
 }
 
+void MeshData::updateGPU() {
+    if (!uploaded) { upload(); return; }
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, vertices.size() * sizeof(Vertex), vertices.data());
+}
+
 void MeshData::render() {
     if (!uploaded) upload();
     glBindVertexArray(vao);
@@ -693,7 +700,7 @@ void Shader::setUniform(const char* name, const Point3F& v) {
 }
 
 void Shader::setUniform(const char* name, const MatrixF& m) {
-    glUniformMatrix4fv(getUniformLoc(name), 1, GL_FALSE, m.data());
+    glUniformMatrix4fv(getUniformLoc(name), 1, GL_TRUE, m.data());
 }
 
 void Shader::setUniform(const char* name, int32_t v) {

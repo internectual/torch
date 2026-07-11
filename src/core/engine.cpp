@@ -284,6 +284,8 @@ bool Engine::init(int argc, char* argv[]) {
             testShapePath = argv[i + 1];
         if (strcmp(argv[i], "-testdif") == 0 && i + 1 < argc)
             testDifPath = argv[i + 1];
+        if (strcmp(argv[i], "-shapeviewer") == 0 || strcmp(argv[i], "-sv") == 0)
+            shapeViewerMode = true;
         if ((strcmp(argv[i], "-exec") == 0 || strcmp(argv[i], "-e") == 0) && i + 1 < argc)
             execFile = argv[i + 1];
         if ((strcmp(argv[i], "-init") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) {
@@ -321,6 +323,7 @@ bool Engine::init(int argc, char* argv[]) {
         auto isEngineFlag = [](const char* a) {
             const char* flags[] = {
                 "-help", "-h", "--help", "-version", "-v", "--version",
+                "-shapeviewer", "-sv",
                 nullptr
             };
             for (int f = 0; flags[f]; f++)
@@ -894,6 +897,20 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().execute(("testshape(" + testShapePath + ")").c_str());
     }
 
+    // -shapeviewer: launch shape browser
+    if (shapeViewerMode) {
+        noLogin = true;
+        Console::instance().setVariable("$SkipLogin", "true");
+        Console::instance().setVariable("$pref::SkipIntro", "true");
+        Console::instance().setVariable("$pref::SkipGGIntro", "true");
+        Console::instance().setVariable("$LaunchMode", "Offline");
+        Console::instance().setVariable("$PlayingOnline", "0");
+        Console::instance().setVariable("Engine::noLogin", "1");
+        Console::instance().printf(LogLevel::Info, "Shape Viewer mode");
+        // Defer shapeviewer command to after game init
+        g->enterShapeViewer();
+    }
+
     // -demo mode: load the demo (playback happens in the render loop)
     if (!demoPath.empty()) {
         g->playDemo(demoPath.c_str());
@@ -943,9 +960,27 @@ void Engine::run() {
         if (!gui->isDialogActive("ConsoleDlg")) {
             static bool prevEsc = false;
             bool escDown = plat->input().keysDown[SCANCODE_ESCAPE];
-            if (escDown && !prevEsc && g->state() != Game::MenuScreen)
+            if (escDown && !prevEsc && g->isShapeViewerActive()) {
+                // Exit shape viewer
+                g->shapeViewerActive = false;
+                g->shapeViewerShape = DTSShape{};
+                Console::instance().printf(LogLevel::Info, "Shape Viewer: closed");
+            } else if (escDown && !prevEsc && g->state() != Game::MenuScreen) {
                 g->togglePauseGame();
+            }
             prevEsc = escDown;
+
+            // Shape viewer: left/right arrows to cycle shapes
+            if (g->isShapeViewerActive()) {
+                static bool prevLeft = false, prevRight = false;
+                bool leftDown = plat->input().keysDown[SCANCODE_LEFT];
+                bool rightDown = plat->input().keysDown[SCANCODE_RIGHT];
+                if (leftDown && !prevLeft) g->shapeViewerPrev();
+                if (rightDown && !prevRight) g->shapeViewerNext();
+                prevLeft = leftDown;
+                prevRight = rightDown;
+            }
+
             // Q during pause quits to desktop
             static bool prevQ = false;
             bool qDown = plat->input().keysDown[SCANCODE_Q];
@@ -1131,8 +1166,8 @@ void Engine::run() {
             }
         }
 
-        // Game update + 3D render (if playing / test shape)
-        bool isPlaying = (g->state() != Game::MenuScreen || g->isTestShapeLoaded());
+        // Game update + 3D render (if playing / test shape / shape viewer)
+        bool isPlaying = (g->state() != Game::MenuScreen || g->isTestShapeLoaded() || g->isShapeViewerActive());
         if (isPlaying) {
             if (!gui->isDialogActive("ConsoleDlg") && !g->isGamePaused()) {
                 // Read input
@@ -1179,6 +1214,17 @@ void Engine::run() {
                 g->update(dt);
                 double t1 = Timer::now();
                 g->render(dt);  // 3D render with own beginFrame/endFrame
+                // Shape preview: capture the test shape to a PNG (once)
+                {
+                    static bool shapePreviewSaved = false;
+                    if (g->isTestShapeLoaded() && !shapePreviewSaved) {
+                        char path[256];
+                        snprintf(path, sizeof(path), "shape_preview.png");
+                        if (ren->screenshot(path)) Console::instance().printf(LogLevel::Info, "Shape preview saved: %s", path);
+                        else Console::instance().printf(LogLevel::Error, "Shape preview failed");
+                        shapePreviewSaved = true;
+                    }
+                }
                 double t2 = Timer::now();
                 if (t1 - lastTiming >= 5.0) {
                     lastTiming = t1;
@@ -1194,6 +1240,9 @@ void Engine::run() {
                 previewDone = true; quit();
             }
         }
+
+        // Skip the 2D GUI/dev-panel pass for shape preview or shape viewer
+        if (g->isTestShapeLoaded() || g->isShapeViewerActive()) { plat->swapBuffers(); continue; }
 
         // ─── Dev panel (always rendered) ───────────────────────────────────
         // Disable the game's built-in menu when TS GUI dialogs are active
@@ -1220,8 +1269,8 @@ void Engine::run() {
                 ortho.identity();
                 ortho.m[0][0] = 2.0f / w;
                 ortho.m[1][1] = -2.0f / h;
-                ortho.m[3][0] = -1.0f;
-                ortho.m[3][1] = 1.0f;
+                ortho.m[0][3] = -1.0f;
+                ortho.m[1][3] = 1.0f;
                 r.setProjection(ortho);
                 r.setView(MatrixF{});
                 ren->setViewport(0, 0, w, h);
@@ -1666,8 +1715,8 @@ void Engine::run() {
                 borderOrtho.identity();
                 borderOrtho.m[0][0] = 2.0f / w;
                 borderOrtho.m[1][1] = -2.0f / h;
-                borderOrtho.m[3][0] = -1.0f;
-                borderOrtho.m[3][1] = 1.0f;
+                borderOrtho.m[0][3] = -1.0f;
+                borderOrtho.m[1][3] = 1.0f;
                 r.setProjection(borderOrtho);
                 r.setView(MatrixF{});
                 r.drawRectFill({0, 0, 0}, {640, 2, 0}, {1, 1, 0.5f, 1});
@@ -2124,8 +2173,8 @@ void Engine::renderMinimap() {
     ortho.identity();
     ortho.m[0][0] = 2.0f / mapSize;
     ortho.m[1][1] = -2.0f / mapSize; // flip Y so top = north
-    ortho.m[3][0] = -1.0f - (2.0f * ox / mapSize);
-    ortho.m[3][1] = 1.0f + (2.0f * oy / mapSize);
+    ortho.m[0][3] = -1.0f - (2.0f * ox / mapSize);
+    ortho.m[1][3] = 1.0f + (2.0f * oy / mapSize);
 
     // Background: dark rectangle (draw as 2 triangles via line shader approximation)
     auto* ls = ShaderManager::getLineShader();

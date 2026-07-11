@@ -308,6 +308,23 @@ public:
     std::vector<int> getLiveGhostIndices() const { return liveGhosts.getAllIndices(); }
     const GhostEntry* getLiveGhost(int idx) const { return liveGhosts.getGhost(idx); }
 
+    // Shape viewer mode
+    bool shapeViewerActive = false;
+    std::vector<std::string> shapeViewerFiles;
+    int shapeViewerIndex = 0;
+    DTSShape shapeViewerShape;
+    float shapeViewerYaw = 0.6f;
+    float shapeViewerPitch = 0.25f;
+    float shapeViewerAnimTime = 0;
+    bool shapeViewerBoundsInit = false;
+    Point3F shapeViewerCenter{0,0,0};
+    float shapeViewerFitScale = 1.0f;
+    void enterShapeViewer();
+    void shapeViewerNext();
+    void shapeViewerPrev();
+    void shapeViewerLoadCurrent();
+    bool isShapeViewerActive() const { return shapeViewerActive; }
+
 private:
     GameConfig cfg;
     Player* pl{};
