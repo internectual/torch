@@ -859,6 +859,7 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
     }
 
     // Try native DTS loading
+    try {
     DTSLoadResult dtsResult = loadDTS(data, size, name.c_str());
     if (dtsResult.loaded) {
         meshes = std::move(dtsResult.meshes);
@@ -886,6 +887,10 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
     }
 
     return false;
+    } catch (...) {
+        Console::instance().printf(LogLevel::Warn, "DTS: exception loading '%s' - skipping", name.c_str());
+        return false;
+    }
 }
 
 bool DTSShape::applySkin(const std::string& skinName) {
@@ -950,6 +955,7 @@ bool DTSShape::applySkin(const std::string& skinName) {
 }
 
 void DTSShape::render(int32_t detailLevel) {
+    try {
     auto* shader = ShaderManager::getDefaultShader();
     if (shader) shader->bind();
     auto& r = Engine::instance().renderer();
@@ -1045,6 +1051,7 @@ void DTSShape::render(int32_t detailLevel) {
 
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
+    } catch (...) {}
 }
 
 void DTSShape::renderAnimation(const char* animName, float time) {
