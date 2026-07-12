@@ -1148,9 +1148,9 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             } else {
                 // Preserve default translation
                 if (ni < defaultLocalTransforms.size())
-                    local.setTranslation({defaultLocalTransforms[ni].m[3][0],
-                                          defaultLocalTransforms[ni].m[3][1],
-                                          defaultLocalTransforms[ni].m[3][2]});
+                    local.setTranslation({defaultLocalTransforms[ni].m[0][3],
+                                          defaultLocalTransforms[ni].m[1][3],
+                                          defaultLocalTransforms[ni].m[2][3]});
             }
 
             if (animRot) {
@@ -1161,7 +1161,7 @@ void DTSShape::renderAnimation(const char* animName, float time) {
                 MatrixF rotMat = rot.toMatrix();
                 MatrixF tMat;
                 tMat.identity();
-                Point3F trans = {local.m[3][0], local.m[3][1], local.m[3][2]};
+                Point3F trans = {local.m[0][3], local.m[1][3], local.m[2][3]};
                 tMat.setTranslation(trans);
                 local = tMat * rotMat;
             } else {
@@ -1169,7 +1169,7 @@ void DTSShape::renderAnimation(const char* animName, float time) {
                 if (ni < defaultLocalTransforms.size()) {
                     // Extract rotation from default local
                     MatrixF defLocal = defaultLocalTransforms[ni];
-                    Point3F defTrans = {defLocal.m[3][0], defLocal.m[3][1], defLocal.m[3][2]};
+                    Point3F defTrans = {defLocal.m[0][3], defLocal.m[1][3], defLocal.m[2][3]};
                     local.setTranslation(defTrans);
                     // Copy rotation columns (first 3 columns) from default
                     for (int c = 0; c < 3; c++)
@@ -1190,7 +1190,7 @@ void DTSShape::renderAnimation(const char* animName, float time) {
                 MatrixF sMat;
                 sMat.identity();
                 sMat.setScale(scale);
-                Point3F curTrans = {local.m[3][0], local.m[3][1], local.m[3][2]};
+                Point3F curTrans = {local.m[0][3], local.m[1][3], local.m[2][3]};
                 local = local * sMat;
                 local.setTranslation(curTrans);
             }
