@@ -1079,14 +1079,17 @@ void DTSShape::renderAnimation(const char* animName, float time) {
     auto* shader = ShaderManager::getDefaultShader();
     if (shader) shader->bind();
 
+    // Start with precomputed world transforms (same as render())
     size_t nodeCount = std::max(nodes.size(), (size_t)1);
-    std::vector<MatrixF> nodeLocal(nodeCount);
-    for (size_t i = 0; i < nodeCount; i++) {
-        if (i < defaultLocalTransforms.size())
-            nodeLocal[i] = defaultLocalTransforms[i];
-        else
-            nodeLocal[i].identity();
+    std::vector<MatrixF> nodeWorld = defaultTransforms;
+    if (nodeWorld.empty()) {
+        // Fallback if defaultTransforms not available
+        nodeWorld.resize(nodeCount);
+        for (size_t i = 0; i < nodeCount; i++) nodeWorld[i].identity();
     }
+
+    // Track which nodes need subtree recomputation
+    std::vector<bool> dirty(nodeCount, false);
 
     {
         auto& anim = animations[animIndex];
@@ -1129,9 +1132,9 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             bool animRot = (ka && ka->hasRotation) || (kb && kb->hasRotation);
             bool animScale = (ka && ka->hasScale) || (kb && kb->hasScale);
 
-            // Start with the default local transform
-            MatrixF result = nodeLocal[ni];
-
+            // Decompose the existing world transform to get local components
+            // For simplicity, rebuild local from scratch when any component is animated
+            MatrixF local;
             if (animTrans) {
                 Point3F trans;
                 if (ka && !kb) trans = ka->translation;
@@ -1141,7 +1144,13 @@ void DTSShape::renderAnimation(const char* animName, float time) {
                     Math::lerp(ka->translation.y, kb->translation.y, lerpT),
                     Math::lerp(ka->translation.z, kb->translation.z, lerpT)
                 };
-                result.setTranslation(trans);
+                local.setTranslation(trans);
+            } else {
+                // Preserve default translation
+                if (ni < defaultLocalTransforms.size())
+                    local.setTranslation({defaultLocalTransforms[ni].m[3][0],
+                                          defaultLocalTransforms[ni].m[3][1],
+                                          defaultLocalTransforms[ni].m[3][2]});
             }
 
             if (animRot) {
@@ -1149,14 +1158,24 @@ void DTSShape::renderAnimation(const char* animName, float time) {
                 if (ka && !kb) rot = ka->rotation;
                 else if (!ka && kb) rot = kb->rotation;
                 else rot = Math::quatSlerp(ka->rotation, kb->rotation, lerpT);
-
-                // Extract current translation, apply new rotation, restore translation
-                Point3F curTrans = {result.m[3][0], result.m[3][1], result.m[3][2]};
                 MatrixF rotMat = rot.toMatrix();
                 MatrixF tMat;
                 tMat.identity();
-                tMat.setTranslation(curTrans);
-                result = tMat * rotMat;
+                Point3F trans = {local.m[3][0], local.m[3][1], local.m[3][2]};
+                tMat.setTranslation(trans);
+                local = tMat * rotMat;
+            } else {
+                // Preserve default rotation
+                if (ni < defaultLocalTransforms.size()) {
+                    // Extract rotation from default local
+                    MatrixF defLocal = defaultLocalTransforms[ni];
+                    Point3F defTrans = {defLocal.m[3][0], defLocal.m[3][1], defLocal.m[3][2]};
+                    local.setTranslation(defTrans);
+                    // Copy rotation columns (first 3 columns) from default
+                    for (int c = 0; c < 3; c++)
+                        for (int r = 0; r < 3; r++)
+                            local.m[c][r] = defLocal.m[c][r];
+                }
             }
 
             if (animScale) {
@@ -1171,24 +1190,41 @@ void DTSShape::renderAnimation(const char* animName, float time) {
                 MatrixF sMat;
                 sMat.identity();
                 sMat.setScale(scale);
-                // Apply scale: result = result * scale
-                Point3F curTrans = {result.m[3][0], result.m[3][1], result.m[3][2]};
-                result = result * sMat;
-                result.setTranslation(curTrans);
+                Point3F curTrans = {local.m[3][0], local.m[3][1], local.m[3][2]};
+                local = local * sMat;
+                local.setTranslation(curTrans);
             }
 
-            nodeLocal[ni] = result;
-        }
-    }
+            // Compute new world transform
+            int parent = (ni < nodes.size()) ? nodes[ni].parentIndex : -1;
+            if (parent >= 0 && parent < (int)ni)
+                nodeWorld[ni] = nodeWorld[parent] * local;
+            else
+                nodeWorld[ni] = local;
 
-    // Build world transforms through hierarchy
-    std::vector<MatrixF> nodeWorld(nodeCount);
-    for (size_t ni = 0; ni < nodeCount; ni++) {
-        int parent = (ni < nodes.size()) ? nodes[ni].parentIndex : -1;
-        if (parent >= 0 && parent < (int)ni)
-            nodeWorld[ni] = nodeWorld[parent] * nodeLocal[ni];
-        else
-            nodeWorld[ni] = nodeLocal[ni];
+            dirty[ni] = true;
+        }
+
+        // Propagate dirty flags to children (a modified parent affects child world transforms)
+        // Process in topological order (parents before children)
+        for (size_t ni = 0; ni < nodeCount; ni++) {
+            if (dirty[ni]) {
+                // Mark all children as needing recomputation
+                for (size_t ci = ni + 1; ci < nodeCount; ci++) {
+                    int ciParent = (ci < nodes.size()) ? nodes[ci].parentIndex : -1;
+                    if (ciParent == (int)ni) {
+                        dirty[ci] = true;
+                        // Recompute child world transform
+                        MatrixF childLocal;
+                        if (ci < defaultLocalTransforms.size())
+                            childLocal = defaultLocalTransforms[ci];
+                        else
+                            childLocal.identity();
+                        nodeWorld[ci] = nodeWorld[ni] * childLocal;
+                    }
+                }
+            }
+        }
     }
 
     // Compute mesh visibility from object keyframes
