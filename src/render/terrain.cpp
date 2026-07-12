@@ -968,6 +968,9 @@ void DTSShape::render(int32_t detailLevel) {
     shader->setUniform("uView", r.view);
     shader->setUniform("uCamPos", r.cameraPos);
 
+    // Disable shadows for DTS shapes (no shadow map set up)
+    if (shader) shader->setUniform("uShadowStrength", 0.0f);
+
     // Bind-pose node world transforms (defaultTransforms are already composed world matrices)
     // NOTE: Callers are responsible for including the Z-up->Y-up conversion matrix (Math::czUpToYUp())
     // in their model matrix at the correct position: ry * rx * C * sc * tr

@@ -131,7 +131,7 @@ void main() {
 
         vec3 specular = D * G * F / (4.0 * NdotV * NdotL + 0.0001);
 
-        vec3 lit = (diffuse + specular) * (0.3 + 0.7 * NdotL * shadowFactor);
+        vec3 lit = (diffuse + specular) * (0.5 + 0.5 * NdotL * shadowFactor);
         if (uUseEnvMap) {
             vec3 V = normalize(uCamPos - vWorldPos);
             vec3 R = reflect(-V, N);
