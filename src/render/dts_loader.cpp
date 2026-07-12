@@ -1018,26 +1018,29 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             accumBaseScale += scaleCount * numKFrames;
 
             // For each animated node, create keyframes
+            // Initialize defaults from the node's default local transform
+            // so unanimated components (translation/rotation/scale) keep their bind pose
             for (int j = 0; j < rotCount && j < (int)rotMatters.size(); j++) {
                 int32_t nodeIdx = rotMatters[j];
                 for (int k = 0; k < numKFrames; k++) {
                     DTSShape::Keyframe kf;
                     kf.time = (numKFrames > 1) ? (float)k / (float)(numKFrames - 1) * dur : 0.0f;
                     kf.nodeIndex = nodeIdx;
+                    kf.hasRotation = true;
+                    kf.hasTranslation = false;
+                    kf.hasScale = false;
+                    kf.rotation = {0, 0, 0, 1};
+                    kf.translation = {0, 0, 0};
+                    kf.scale = {1, 1, 1};
                     int32_t idx = baseRot + j * numKFrames + k;
                     if (idx >= 0 && idx < (int)nodeRotations.size())
                         kf.rotation = nodeRotations[idx];
-                    else
-                        kf.rotation = {0, 0, 0, 1};
-                    kf.translation = {0, 0, 0};
-                    kf.scale = {1, 1, 1};
                     anim.keyframes.push_back(kf);
                 }
             }
             for (int j = 0; j < transCount && j < (int)transMatters.size(); j++) {
                 int32_t nodeIdx = transMatters[j];
                 for (int k = 0; k < numKFrames; k++) {
-                    // Find existing keyframe for this node+time, or create new
                     float t = (numKFrames > 1) ? (float)k / (float)(numKFrames - 1) * dur : 0.0f;
                     DTSShape::Keyframe* kf = nullptr;
                     for (auto& f : anim.keyframes) {
@@ -1049,9 +1052,13 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                         newKf.nodeIndex = nodeIdx;
                         newKf.rotation = {0, 0, 0, 1};
                         newKf.scale = {1, 1, 1};
+                        newKf.hasRotation = false;
+                        newKf.hasTranslation = true;
+                        newKf.hasScale = false;
                         anim.keyframes.push_back(newKf);
                         kf = &anim.keyframes.back();
                     }
+                    kf->hasTranslation = true;
                     int32_t idx = baseTrans + j * numKFrames + k;
                     if (idx >= 0 && idx < (int)nodeTranslations.size())
                         kf->translation = nodeTranslations[idx];

@@ -1124,35 +1124,60 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             if (ka && kb && kb->time != ka->time)
                 lerpT = (t - ka->time) / (kb->time - ka->time);
 
-            Point3F trans;
-            if (ka && !kb) trans = ka->translation;
-            else if (!ka && kb) trans = kb->translation;
-            else trans = {
-                Math::lerp(ka->translation.x, kb->translation.x, lerpT),
-                Math::lerp(ka->translation.y, kb->translation.y, lerpT),
-                Math::lerp(ka->translation.z, kb->translation.z, lerpT)
-            };
+            // Determine which components are animated
+            bool animTrans = (ka && ka->hasTranslation) || (kb && kb->hasTranslation);
+            bool animRot = (ka && ka->hasRotation) || (kb && kb->hasRotation);
+            bool animScale = (ka && ka->hasScale) || (kb && kb->hasScale);
 
-            QuatF rot;
-            if (ka && !kb) rot = ka->rotation;
-            else if (!ka && kb) rot = kb->rotation;
-            else {
-                rot = Math::quatSlerp(ka->rotation, kb->rotation, lerpT);
+            // Start with the default local transform
+            MatrixF result = nodeLocal[ni];
+
+            if (animTrans) {
+                Point3F trans;
+                if (ka && !kb) trans = ka->translation;
+                else if (!ka && kb) trans = kb->translation;
+                else trans = {
+                    Math::lerp(ka->translation.x, kb->translation.x, lerpT),
+                    Math::lerp(ka->translation.y, kb->translation.y, lerpT),
+                    Math::lerp(ka->translation.z, kb->translation.z, lerpT)
+                };
+                result.setTranslation(trans);
             }
 
-            Point3F scale;
-            if (ka && !kb) scale = ka->scale;
-            else if (!ka && kb) scale = kb->scale;
-            else scale = {
-                Math::lerp(ka->scale.x, kb->scale.x, lerpT),
-                Math::lerp(ka->scale.y, kb->scale.y, lerpT),
-                Math::lerp(ka->scale.z, kb->scale.z, lerpT)
-            };
+            if (animRot) {
+                QuatF rot;
+                if (ka && !kb) rot = ka->rotation;
+                else if (!ka && kb) rot = kb->rotation;
+                else rot = Math::quatSlerp(ka->rotation, kb->rotation, lerpT);
 
-            MatrixF tMat, sMat;
-            tMat.setTranslation(trans);
-            sMat.setScale(scale);
-            nodeLocal[ni] = tMat * rot.toMatrix() * sMat;
+                // Extract current translation, apply new rotation, restore translation
+                Point3F curTrans = {result.m[3][0], result.m[3][1], result.m[3][2]};
+                MatrixF rotMat = rot.toMatrix();
+                MatrixF tMat;
+                tMat.identity();
+                tMat.setTranslation(curTrans);
+                result = tMat * rotMat;
+            }
+
+            if (animScale) {
+                Point3F scale;
+                if (ka && !kb) scale = ka->scale;
+                else if (!ka && kb) scale = kb->scale;
+                else scale = {
+                    Math::lerp(ka->scale.x, kb->scale.x, lerpT),
+                    Math::lerp(ka->scale.y, kb->scale.y, lerpT),
+                    Math::lerp(ka->scale.z, kb->scale.z, lerpT)
+                };
+                MatrixF sMat;
+                sMat.identity();
+                sMat.setScale(scale);
+                // Apply scale: result = result * scale
+                Point3F curTrans = {result.m[3][0], result.m[3][1], result.m[3][2]};
+                result = result * sMat;
+                result.setTranslation(curTrans);
+            }
+
+            nodeLocal[ni] = result;
         }
     }
 

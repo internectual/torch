@@ -138,6 +138,9 @@ struct DTSShape {
         Point3F translation;
         QuatF rotation;
         Point3F scale;
+        bool hasTranslation = true;
+        bool hasRotation = true;
+        bool hasScale = true;
     };
     struct ObjectKeyframe {
         int32_t objectIndex;
