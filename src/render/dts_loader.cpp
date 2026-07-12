@@ -766,7 +766,6 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                 md.nodeIndex = dtsObjects[oi].no; break;
             }
         }
-        md.upload();
         result.meshes.push_back(std::move(md));
 
         // Skin data (placeholder - not used for non-skin meshes)
@@ -831,16 +830,34 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     };
     auto prS16 = [&]() -> int16_t { if (postRem < 2) { postRem = 0; return 0; } int16_t v; memcpy(&v, post, 2); post+=2; postRem-=2; return v; };
     auto prF32 = [&]() -> float { if (postRem < 4) { postRem = 0; return 0; } float v; memcpy(&v, post, 4); post+=4; postRem-=4; return v; };
+    auto prU8 = [&]() -> uint8_t { if (postRem < 1) { postRem = 0; return 0; } uint8_t v = *post++; postRem--; return v; };
 
     int32_t numSeqs = capCount(prS32());
     for (int s = 0; s < numSeqs; s++) {
-        int32_t nameIdx = capCount(prS32()); uint32_t flags = (uint32_t)capCount(prS32());
+        // Sequence::read(s, readNameIndex=true)
+        int32_t nameIdx = capCount(prS32());
+        uint32_t flags = 0;
+        if (ver > 21) flags = (uint32_t)capCount(prS32());
         capCount(prS32()); // numKFrames
-        float dur; memcpy(&dur, post, 4); post+=4; postRem-=4; // duration
-        for (int j = 0; j < 9; j++) capCount(prS32()); // base indices
-        // Skip BitSets (8 inline bitsets)
-        auto skipBitSet = [&]() { capCount(prS32()); int nw = capCount(prS32()); if (nw > 0 && nw < 256) for (int i = 0; i < nw && postRem >= 4; i++) capCount(prS32()); };
-        for (int b = 0; b < 8 && postRem >= 4; b++) skipBitSet();
+        float dur = prF32();
+        if (ver < 22) { prU8(); prU8(); prU8(); } // blend, cyclic, makePath bools
+        capCount(prS32()); // priority
+        capCount(prS32()); // firstGroundFrame
+        capCount(prS32()); // numGroundFrames
+        if (ver > 21) { for (int j = 0; j < 5; j++) capCount(prS32()); } // base states
+        else if (ver >= 17) { for (int j = 0; j < 3; j++) capCount(prS32()); } // base states
+        if (ver > 8) { capCount(prS32()); capCount(prS32()); } // firstTrigger, numTriggers
+        if (ver > 7) prF32(); // toolBegin
+        // TSIntegerSets
+        auto skipIntSet = [&]() { capCount(prS32()); int nw = capCount(prS32()); if (nw > 0 && nw < 256) for (int i = 0; i < nw && postRem >= 4; i++) capCount(prS32()); };
+        skipIntSet(); // rotationMatters
+        if (ver >= 22) { skipIntSet(); skipIntSet(); } // translationMatters, scaleMatters
+        if (ver > 10) skipIntSet(); // decalMatters
+        if (ver > 5) skipIntSet(); // iflMatters
+        skipIntSet(); // visMatters
+        skipIntSet(); // frameMatters
+        skipIntSet(); // matFrameMatters
+        if (ver < 17) skipIntSet(); // nodeTransformStatic (obsolete)
 
         DTSShape::Animation anim;
         anim.name = (nameIdx >= 0 && nameIdx < (int)names.size()) ? names[nameIdx] : "seq" + std::to_string(s);
@@ -871,6 +888,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     auto& fs = Engine::instance().fs();
     static const char* texExts[] = {".png", ".bm8", ".jpg", ".jpeg", ".gif", ".bmp", ".tga", ".dds"};
 
+    try {
     for (size_t i = 0; i < result.materialNames.size(); i++) {
         if (result.materialNames[i].empty()) continue;
         std::string lower = result.materialNames[i];
@@ -894,6 +912,9 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                 }
             }
         nextTex:;
+    }
+    } catch (const std::bad_alloc&) {
+        Console::instance().printf(LogLevel::Warn, "DTS: OOM loading textures for '%s' (%zu materials)", name, result.materialNames.size());
     }
     result.materialLightmapIndex.assign(result.materialNames.size(), -1);
 

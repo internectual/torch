@@ -887,8 +887,11 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
     }
 
     return false;
+    } catch (const std::exception& e) {
+        Console::instance().printf(LogLevel::Warn, "DTS: exception loading '%s': %s", name.c_str(), e.what());
+        return false;
     } catch (...) {
-        Console::instance().printf(LogLevel::Warn, "DTS: exception loading '%s' - skipping", name.c_str());
+        Console::instance().printf(LogLevel::Warn, "DTS: unknown exception loading '%s' - skipping", name.c_str());
         return false;
     }
 }
