@@ -1078,90 +1078,11 @@ void DTSShape::renderAnimation(const char* animName, float time) {
 
     size_t nodeCount = std::max(nodes.size(), (size_t)1);
 
-    // T2 approach: work with rotation/translation arrays directly
-    // Extract default rotations and translations from defaultLocalTransforms
-    std::vector<QuatF> curRotations(nodeCount);
-    std::vector<Point3F> curTranslations(nodeCount);
-    for (size_t i = 0; i < nodeCount && i < defaultLocalTransforms.size(); i++) {
-        curTranslations[i] = {defaultLocalTransforms[i].m[0][3],
-                              defaultLocalTransforms[i].m[1][3],
-                              defaultLocalTransforms[i].m[2][3]};
-        curRotations[i] = QuatF::fromMatrix(defaultLocalTransforms[i]);
-    }
+    // Use precomputed world transforms directly — same as render()
+    const std::vector<MatrixF>& nodeWorld = defaultTransforms;
+    const MatrixF& baseModel = r.modelMatrix();
 
-    // Override with interpolated keyframe values (matching T2's animateNodes)
-    {
-        auto& anim = animations[animIndex];
-        float t = time;
-        if (anim.looping && anim.duration > 0)
-            t = fmodf(time, anim.duration);
-        else if (t > anim.duration)
-            t = anim.duration;
-
-        for (size_t ni = 0; ni < nodeCount; ni++) {
-            int kfA = -1, kfB = -1;
-            for (size_t ki = 0; ki < anim.keyframes.size(); ki++) {
-                auto& kf = anim.keyframes[ki];
-                if (kf.nodeIndex != (int)ni) continue;
-                if (kf.time <= t && (kfA < 0 || kf.time > anim.keyframes[kfA].time))
-                    kfA = (int)ki;
-                if (kf.time >= t && (kfB < 0 || kf.time < anim.keyframes[kfB].time))
-                    kfB = (int)ki;
-            }
-            if (kfA < 0 && kfB < 0) continue;
-
-            auto* ka = (kfA >= 0) ? &anim.keyframes[kfA] : nullptr;
-            auto* kb = (kfB >= 0) ? &anim.keyframes[kfB] : nullptr;
-            if (ka && kb && ka->time == kb->time) kb = nullptr;
-
-            float lt = 0;
-            if (ka && kb && kb->time != ka->time)
-                lt = (t - ka->time) / (kb->time - ka->time);
-
-            // Override rotation if animated
-            if ((ka && ka->hasRotation) || (kb && kb->hasRotation)) {
-                if (ka && kb && ka->hasRotation && kb->hasRotation)
-                    curRotations[ni] = Math::quatSlerp(ka->rotation, kb->rotation, lt);
-                else if (ka && ka->hasRotation)
-                    curRotations[ni] = ka->rotation;
-                else
-                    curRotations[ni] = kb->rotation;
-            }
-
-            // Override translation if animated
-            if ((ka && ka->hasTranslation) || (kb && kb->hasTranslation)) {
-                if (ka && kb && ka->hasTranslation && kb->hasTranslation)
-                    curTranslations[ni] = { Math::lerp(ka->translation.x, kb->translation.x, lt),
-                                           Math::lerp(ka->translation.y, kb->translation.y, lt),
-                                           Math::lerp(ka->translation.z, kb->translation.z, lt) };
-                else if (ka && ka->hasTranslation)
-                    curTranslations[ni] = ka->translation;
-                else
-                    curTranslations[ni] = kb->translation;
-            }
-        }
-    }
-
-    // Build local transforms from rotation+translation (matching T2's setMatrix)
-    // and compute world transforms in a single forward pass
-    std::vector<MatrixF> nodeWorld(nodeCount);
-    for (size_t ni = 0; ni < nodeCount; ni++) {
-        // Build local: rotation + translation (T2's setMatrix approach)
-        MatrixF local;
-        local = curRotations[ni].toMatrix();
-        local.m[0][3] = curTranslations[ni].x;
-        local.m[1][3] = curTranslations[ni].y;
-        local.m[2][3] = curTranslations[ni].z;
-
-        // Walk hierarchy
-        int parent = (ni < nodes.size()) ? nodes[ni].parentIndex : -1;
-        if (parent >= 0 && parent < (int)ni)
-            nodeWorld[ni] = nodeWorld[parent] * local;
-        else
-            nodeWorld[ni] = local;
-    }
-
-    // Compute mesh visibility from object keyframes
+    // Compute mesh visibility from object keyframes only
     std::vector<float> meshVis(meshes.size(), 1.0f);
     {
         auto& anim = animations[animIndex];
@@ -1203,9 +1124,7 @@ void DTSShape::renderAnimation(const char* animName, float time) {
         }
     }
 
-    // Render meshes
-    const MatrixF& baseModel = r.modelMatrix();
-
+    // Render meshes — identical to render() but with visibility check
     if (isInterior) {
         glCullFace(GL_FRONT);
     } else {
@@ -1289,7 +1208,6 @@ void DTSShape::renderAnimation(const char* animName, float time) {
         r.stats.triangles += (int32_t)(mesh.indices.size() / 3);
     }
 
-    // Restore base model
     r.setModel(baseModel);
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
