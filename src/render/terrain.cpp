@@ -1165,6 +1165,16 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             }
 
             nodeLocal[ni] = local;
+
+            // Debug: print first few animated nodes
+            static int debugCount = 0;
+            if (debugCount < 5) {
+                fprintf(stderr, "anim node %zu: parent=%d local=[%.3f %.3f %.3f %.3f] [%.3f %.3f %.3f %.3f]\n",
+                    ni, (int)((ni < nodes.size()) ? nodes[ni].parentIndex : -1),
+                    local.m[0][0], local.m[0][1], local.m[0][2], local.m[0][3],
+                    local.m[1][0], local.m[1][1], local.m[1][2], local.m[1][3]);
+                debugCount++;
+            }
         }
     }
 
