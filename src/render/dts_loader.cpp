@@ -1220,6 +1220,14 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             result.nodes[i].name = "node" + std::to_string(i);
     }
 
+    // ─── Store object-to-mesh mapping ─────────────────────────────────
+    result.objectStartMesh.resize(numObjects);
+    result.objectNumMeshes.resize(numObjects);
+    for (int i = 0; i < numObjects; i++) {
+        result.objectStartMesh[i] = dtsObjects[i].sm;
+        result.objectNumMeshes[i] = dtsObjects[i].nm;
+    }
+
     // ─── Build detail levels ──────────────────────────────────────────
     // Details were already read from the buffer but not stored.
     // Re-read them from the file data.

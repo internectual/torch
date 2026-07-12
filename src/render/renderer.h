@@ -158,6 +158,8 @@ struct DTSShape {
     };
     std::vector<Animation> animations;
     std::vector<SkinInfo> skins; // parallel to meshes
+    std::vector<int32_t> objectStartMesh; // per-object: first mesh index
+    std::vector<int32_t> objectNumMeshes; // per-object: number of meshes
     std::vector<MatrixF> defaultTransforms; // per-node bind pose world transforms
     std::vector<MatrixF> defaultLocalTransforms; // per-node bind pose local transforms
     std::vector<std::string> materialNames; // original material names (for skin overrides)

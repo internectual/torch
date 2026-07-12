@@ -17,6 +17,8 @@ struct DTSLoadResult {
     std::vector<DTSShape::Node> nodes;
     std::vector<MatrixF> defaultTransforms; // per-node default (bind pose) world transforms
     std::vector<MatrixF> defaultLocalTransforms; // per-node default (bind pose) local transforms
+    std::vector<int32_t> objectStartMesh; // per-object: first mesh index
+    std::vector<int32_t> objectNumMeshes; // per-object: number of meshes
     bool loaded = false;
 };
 

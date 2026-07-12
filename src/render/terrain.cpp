@@ -874,6 +874,8 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
         details = dtsResult.details;
         animations = dtsResult.animations;
         nodes = dtsResult.nodes;
+        objectStartMesh = std::move(dtsResult.objectStartMesh);
+        objectNumMeshes = std::move(dtsResult.objectNumMeshes);
 
         if (details.empty()) {
             DTSShape::DetailLevel dl;
@@ -1262,11 +1264,13 @@ void DTSShape::renderAnimation(const char* animName, float time) {
                         break;
                     }
                 }
-                // Apply visibility to matching mesh(es)
-                // Object index maps to mesh via dtsObjects — but we don't have that here.
-                // Use a simple mapping: object index corresponds to the mesh that belongs to it.
-                // For now, if objIdx matches a mesh's node hierarchy, apply vis.
-                meshVis[objIdx] = visVal;
+                // Apply visibility to matching mesh(es) via object-to-mesh mapping
+                if (objIdx >= 0 && objIdx < (int)objectStartMesh.size()) {
+                    int start = objectStartMesh[objIdx];
+                    int count = objectNumMeshes[objIdx];
+                    for (int mi = start; mi < start + count && mi < (int)meshVis.size(); mi++)
+                        meshVis[mi] = visVal;
+                }
             }
         }
     }
