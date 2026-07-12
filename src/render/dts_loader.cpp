@@ -80,8 +80,403 @@ static bool hasExt(const std::string& s, const char* ext) {
 
 bool updateSkinnedMesh(MeshData&, SkinInfo&, const std::vector<MatrixF>&, const std::vector<MatrixF>&) { return false; }
 
-// v15-v18: placeholder that returns empty (old format not yet ported)
-static DTSLoadResult loadDTSOld(const uint8_t*, size_t, const char*) { return {}; }
+// v15-v18 old format: read directly from stream (no 3-buffer header)
+static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* name) {
+    DTSLoadResult result;
+    if (!data || size < 4) return result;
+    try {
+    size_t pos = 0;
+    auto rS32 = [&]() -> int32_t { if (pos+4 > size) return 0; int32_t v; memcpy(&v, data+pos, 4); pos+=4; return v; };
+    auto rU32 = [&]() -> uint32_t { if (pos+4 > size) return 0; uint32_t v; memcpy(&v, data+pos, 4); pos+=4; return v; };
+    auto rF32 = [&]() -> float { if (pos+4 > size) return 0; float v; memcpy(&v, data+pos, 4); pos+=4; return v; };
+    auto rS16 = [&]() -> int16_t { if (pos+2 > size) return 0; int16_t v; memcpy(&v, data+pos, 2); pos+=2; return v; };
+    auto rU16 = [&]() -> uint16_t { if (pos+2 > size) return 0; uint16_t v; memcpy(&v, data+pos, 2); pos+=2; return v; };
+    auto rU8 = [&]() -> uint8_t { if (pos >= size) return 0; return data[pos++]; };
+    auto skip = [&](size_t n) { pos = (pos + n <= size) ? pos + n : size; };
+    auto eof = [&]() { return pos >= size; };
+
+    uint16_t ver16 = rU16();
+    uint16_t verPad = rU16(); // padding/flags in old format
+    int ver = (int)ver16;
+    if (ver < 15 || ver > 18) return result;
+
+    // DebugGuard (S32, S16, S8)
+    pos += 4 + 2 + 1; // guard
+
+    // Bounds
+    float radius = rF32(), tubeRadius = rF32();
+    float cx = rF32(), cy = rF32(), cz = rF32();
+    float bminx = rF32(), bminy = rF32(), bminz = rF32();
+    float bmaxx = rF32(), bmaxy = rF32(), bmaxz = rF32();
+    pos += 4 + 2 + 1; // guard
+
+    // Nodes
+    int32_t numNodes = rS32();
+    struct OldNode { int32_t ni, pi; };
+    std::vector<OldNode> nodes(numNodes);
+    for (int i = 0; i < numNodes; i++) {
+        nodes[i].ni = rS32();
+        nodes[i].pi = rS32();
+        if (ver < 17) rU8(); // obsolete bool
+        skip(3 * 4); // 3 computed S32 slots
+    }
+    pos += 4 + 2 + 1; // guard
+
+    // Objects
+    int32_t numObjects = rS32();
+    struct OldObj { int32_t ni, nm, sm, no; };
+    std::vector<OldObj> objs(numObjects);
+    for (int i = 0; i < numObjects; i++) {
+        objs[i].ni = rS32(); objs[i].nm = rS32(); objs[i].sm = rS32(); objs[i].no = rS32();
+        skip(2 * 4); // 2 computed S32 slots
+    }
+    pos += 4 + 2 + 1; // guard
+
+    // Decals
+    int32_t numDecals = rS32();
+    for (int i = 0; i < numDecals; i++) { skip(4 * 4); skip(1 * 4); } // 4 read + 1 computed
+    pos += 4 + 2 + 1; // guard
+
+    // IFL materials
+    int32_t numIFLs = rS32();
+    for (int i = 0; i < numIFLs; i++) { skip(2 * 4); skip(3 * 4); } // 2 read + 3 computed
+    pos += 4 + 2 + 1; // guard
+
+    // Sub-shapes
+    int32_t numSubShapes = rS32();
+    std::vector<int32_t> subFirstNode(numSubShapes), subFirstObj(numSubShapes), subFirstDecal(numSubShapes);
+    for (int i = 0; i < numSubShapes; i++) subFirstNode[i] = rS32();
+    rS32(); // tossed
+    for (int i = 0; i < numSubShapes; i++) subFirstObj[i] = rS32();
+    rS32(); // tossed
+    for (int i = 0; i < numSubShapes; i++) subFirstDecal[i] = rS32();
+    pos += 4 + 2 + 1; // guard
+    pos += 4 + 2 + 1; // guard x2
+
+    // Mesh index list (v15 only)
+    if (ver < 16) { int32_t sz = rS32(); skip(sz * 4); }
+
+    // Keyframes (v15-v16 only)
+    if (ver < 17) { int32_t sz = rS32(); skip(sz * 3 * 4); }
+
+    // Node states (rotations in S16, translations in S32)
+    int32_t numNodeStates = rS32();
+    std::vector<QuatF> defRot(numNodeStates);
+    std::vector<Point3F> defTrans(numNodeStates);
+    for (int i = 0; i < numNodeStates; i++) {
+        int16_t rx = rS16(), ry = rS16(), rz = rS16(), rw = rS16();
+        defRot[i] = {(float)rx/32767.f, (float)ry/32767.f, (float)rz/32767.f, (float)rw/32767.f};
+        defTrans[i] = {rF32(), rF32(), rF32()};
+    }
+    pos += 4 + 2 + 1; // guard
+
+    // Object states
+    int32_t numObjStates = rS32();
+    for (int i = 0; i < numObjStates; i++) { rF32(); rS32(); rS32(); }
+    pos += 4 + 2 + 1; // guard
+
+    // Decal states
+    int32_t numDecalStates = rS32();
+    for (int i = 0; i < numDecalStates; i++) rS32();
+    pos += 4 + 2 + 1; // guard
+
+    // Triggers
+    int32_t numTriggers = rS32();
+    for (int i = 0; i < numTriggers; i++) { rU32(); rF32(); }
+    pos += 4 + 2 + 1; // guard
+
+    // Details
+    int32_t numDetails = rS32();
+    struct OldDetail { int32_t nameIdx, sub, objDetail; float sz; };
+    std::vector<OldDetail> details(numDetails);
+    for (int i = 0; i < numDetails; i++) {
+        details[i].nameIdx = rS32(); details[i].sub = rS32(); details[i].objDetail = rS32(); details[i].sz = rF32();
+        skip(3 * 4); // computed
+    }
+    pos += 4 + 2 + 1; // guard
+
+    // Sequences (simplified — just skip the data)
+    int32_t numSeqs = rS32();
+    for (int s = 0; s < numSeqs; s++) {
+        if (ver >= 17) {
+            rS32(); // flags
+            rS32(); // numKeyframes
+            rF32(); // duration
+            rU8(); rU8(); rU8(); // blend, cyclic, makePath (booleans)
+            rS32(); // priority
+            rS32(); rS32(); rS32(); rS32(); rS32(); rS32(); // groundFrame, base, etc.
+            rF32(); // toolBegin
+            // Bitsets: rotationMatters, objectMembership, decalMatters, iflMatters, visMatters, frameMatters, matFrameMatters, nodeTransformStatic
+            for (int b = 0; b < 8; b++) {
+                rS32(); // size
+                int32_t nw = rS32();
+                skip(nw * 4);
+            }
+        } else {
+            rS32(); rS32(); // startKeyframe, endKeyframe
+            rF32(); // duration
+            rU8(); rU8(); rU8(); // blend, cyclic, makePath
+            rS32(); // priority
+            rS32(); rS32(); rS32(); rS32(); rS32(); rS32(); // groundFrame, base, etc.
+            // Bitsets (version-dependent count)
+            for (int b = 0; b < 8; b++) {
+                rS32(); int32_t nw = rS32(); skip(nw * 4);
+            }
+        }
+    }
+
+    // Meshes
+    int32_t numMeshes = rS32();
+    for (int m = 0; m < numMeshes && m < 10000; m++) {
+        if (eof()) break;
+        int32_t meshType = rS32();
+        if (meshType == 4) continue; // Null mesh
+
+        // Mesh guard
+        pos += 4 + 2 + 1;
+        int32_t numFrames = rS32();
+        if (numFrames < 1 || numFrames > 100) numFrames = 1;
+        rS32(); // numMatFrames (read as second S32 of the pair)
+        rS32(); // parentMesh (old format always -1)
+
+        // bounds filler (10 S32s)
+        skip(10 * 4);
+
+        int32_t numVerts = rS32();
+        if (numVerts < 0 || numVerts > 100000) numVerts = 0;
+        std::vector<Point3F> verts(numVerts);
+        for (int i = 0; i < numVerts; i++) verts[i] = {rF32(), rF32(), rF32()};
+
+        int32_t numTVerts = rS32();
+        if (numTVerts < 0 || numTVerts > 100000) numTVerts = 0;
+        std::vector<Point2F> tverts(numTVerts);
+        for (int i = 0; i < numTVerts; i++) tverts[i] = {rF32(), rF32()};
+
+        int32_t numNorms = rS32();
+        if (numNorms < 0 || numNorms > 100000) numNorms = 0;
+        std::vector<Point3F> norms(numNorms);
+        for (int i = 0; i < numNorms; i++) norms[i] = {rF32(), rF32(), rF32()};
+
+        int32_t numPrims = rS32();
+        if (numPrims < 0 || numPrims > 10000) numPrims = 0;
+        // Read primitives
+        std::vector<int32_t> primStart(numPrims), primNumElems(numPrims), primMatIdx(numPrims);
+        if (ver < 18) {
+            for (int i = 0; i < numPrims; i++) { primStart[i] = (int16_t)rS32(); primNumElems[i] = (int16_t)rS32(); }
+            for (int i = 0; i < numPrims; i++) primMatIdx[i] = rS32();
+        } else {
+            for (int i = 0; i < numPrims; i++) { primStart[i] = rS16(); primNumElems[i] = rS16(); }
+            for (int i = 0; i < numPrims; i++) primMatIdx[i] = rS32();
+        }
+
+        // Read indices
+        int32_t numIndices = rS32();
+        if (numIndices < 0 || numIndices > 100000) numIndices = 0;
+        std::vector<uint32_t> indices(numIndices);
+        if (ver < 18) {
+            for (int i = 0; i < numIndices; i++) indices[i] = (uint16_t)rU32();
+        } else {
+            for (int i = 0; i < numIndices; i++) indices[i] = (uint16_t)rU16();
+        }
+
+        rS32(); // mergeIndices count (always 0 in old format)
+        rS32(); // vertsPerFrame
+        rS32(); // flags
+
+        // Mesh guard end
+        pos += 4 + 2 + 1;
+
+        // Build MeshData
+        MeshData md;
+        int nodeIdx = -1;
+        for (int oi = 0; oi < numObjects; oi++) {
+            if (m >= objs[oi].sm && m < objs[oi].sm + objs[oi].nm) {
+                nodeIdx = objs[oi].no; break;
+            }
+        }
+        for (int vi = 0; vi < numVerts; vi++) {
+            Vertex v;
+            v.pos = (vi < (int)verts.size()) ? verts[vi] : Point3F{0,0,0};
+            v.normal = (vi < (int)norms.size()) ? norms[vi] : Point3F{0,1,0};
+            v.uv = (vi < (int)tverts.size()) ? tverts[vi] : Point2F{0,0};
+            v.color = {1,1,1,1};
+            md.vertices.push_back(v);
+        }
+        for (int pi = 0; pi < numPrims; pi++) {
+            if (primNumElems[pi] < 3) continue;
+            int32_t type = primMatIdx[pi] & (3 << 30);
+            if (type == (1 << 30)) {
+                // Strip
+                for (int i = 0; i + 2 < primNumElems[pi]; i++) {
+                    int s = primStart[pi];
+                    if (s + i + 2 < (int)indices.size()) {
+                        if (i & 1) { md.indices.push_back(indices[s+i+1]); md.indices.push_back(indices[s+i]); md.indices.push_back(indices[s+i+2]); }
+                        else { md.indices.push_back(indices[s+i]); md.indices.push_back(indices[s+i+1]); md.indices.push_back(indices[s+i+2]); }
+                    }
+                }
+            } else if (type == (2 << 30)) {
+                // Fan
+                for (int i = 1; i + 1 < primNumElems[pi]; i++) {
+                    int s = primStart[pi];
+                    if (s + i + 1 < (int)indices.size()) { md.indices.push_back(indices[s]); md.indices.push_back(indices[s+i]); md.indices.push_back(indices[s+i+1]); }
+                }
+            } else {
+                // List
+                for (int i = 0; i + 2 < primNumElems[pi]; i += 3) {
+                    int s = primStart[pi];
+                    if (s + i + 2 < (int)indices.size()) { md.indices.push_back(indices[s+i]); md.indices.push_back(indices[s+i+1]); md.indices.push_back(indices[s+i+2]); }
+                }
+            }
+            if (md.indices.size() > 1000000) break;
+        }
+        md.materialIdx = 0;
+        md.nodeIndex = nodeIdx;
+        if (!md.vertices.empty() && !md.indices.empty()) {
+            result.meshes.push_back(std::move(md));
+        }
+
+        // Skin mesh extension
+        if (meshType == 1) {
+            int32_t sz = rS32(); if (sz < 0 || sz > 10000) sz = 0;
+            skip(sz * 3 * 4); // initialVerts
+            sz = rS32(); if (sz < 0 || sz > 10000) sz = 0;
+            skip(sz * 3 * 4); // initialNorms
+            sz = rS32(); if (sz < 0 || sz > 10000) sz = 0;
+            skip(sz * 16 * 4); // transforms
+            sz = rS32(); if (sz < 0 || sz > 10000) sz = 0;
+            skip(sz * 4); // vertexIndex
+            sz = rS32(); if (sz < 0 || sz > 10000) sz = 0;
+            skip(sz * 4); // boneIndex
+            skip(sz * 4); // weights (reserved slot)
+            sz = rS32(); if (sz < 0 || sz > 10000) sz = 0;
+            skip(sz * 4); // nodeIndex
+            sz = rS32(); if (sz < 0 || sz > 10000) sz = 0;
+            skip(sz * 4); // weight values
+            pos += 4 + 2 + 1; // guard
+        }
+        // Sorted mesh extension
+        if (meshType == 3) {
+            int32_t sz = rS32(); if (sz < 0 || sz > 10000) sz = 0; skip(sz * 8 * 4); // clusters
+            sz = rS32(); if (sz < 0 || sz > 10000) sz = 0; skip(sz * 4); // startCluster
+            sz = rS32(); if (sz < 0 || sz > 10000) sz = 0; skip(sz * 4); // firstVerts
+            sz = rS32(); if (sz < 0 || sz > 10000) sz = 0; skip(sz * 4); // numVerts
+            sz = rS32(); if (sz < 0 || sz > 10000) sz = 0; skip(sz * 4); // firstTVerts
+            rU8(); // alwaysWriteZ
+            pos += 4 + 2 + 1; // guard
+        }
+        // Decal mesh extension
+        if (meshType == 2) {
+            int32_t sz = rS32(); if (sz < 0 || sz > 10000) sz = 0; skip(sz * 4); // startPrim
+            if (ver >= 17) {
+                sz = rS32(); skip(sz * 4); // startTVerts (obsolete)
+                sz = rS32(); skip(sz * 4); // tvertIndex (obsolete)
+            }
+            rS32(); // materialIndex
+            pos += 4 + 2 + 1; // guard
+        }
+    }
+
+    // Names
+    pos += 4 + 2 + 1; // guard
+    int32_t numNames = rS32();
+    std::vector<std::string> names(numNames);
+    for (int i = 0; i < numNames; i++) {
+        int32_t sz = rS32();
+        if (sz > 0 && sz < 1000 && pos + sz <= size) {
+            names[i] = std::string((const char*)data + pos, sz);
+            pos += sz;
+        }
+    }
+    pos += 4 + 2 + 1; // guard
+
+    // Materials
+    int32_t gotList = rS32();
+    if (gotList != 0) {
+        // Read material list (simplified: just read name count and names)
+        int32_t numMats = rS32();
+        result.materialNames.resize(numMats);
+        for (int i = 0; i < numMats; i++) {
+            int32_t sz = rS32();
+            if (sz > 0 && sz < 1000 && pos + sz <= size) {
+                result.materialNames[i] = std::string((const char*)data + pos, sz);
+                pos += sz;
+            }
+        }
+        // Material flags and other fields
+        for (int i = 0; i < numMats; i++) {
+            rS32(); rS32(); rS32(); rS32(); // flags, reflectance, bump, detail
+        }
+    }
+
+    // Skins (just skip)
+    int32_t numSkins = rS32();
+    for (int i = 0; i < numSkins; i++) {
+        // Read as a standard mesh but don't add to result
+        pos += 4 + 2 + 1; // guard
+        rS32(); rS32(); rS32(); // frames, matframes, parentMesh
+        skip(10 * 4); // bounds filler
+        int32_t nv = rS32(); if (nv < 0 || nv > 100000) nv = 0;
+        skip(nv * 3 * 4); // verts
+        nv = rS32(); if (nv < 0 || nv > 100000) nv = 0;
+        skip(nv * 2 * 4); // tverts
+        nv = rS32(); if (nv < 0 || nv > 100000) nv = 0;
+        skip(nv * 3 * 4); // norms
+        nv = rS32(); if (nv < 0 || nv > 10000) nv = 0;
+        skip(nv * 3 * 4); // prims (2 S16 + 1 S32 each, approximated as 3 S32)
+        nv = rS32(); if (nv < 0 || nv > 100000) nv = 0;
+        if (ver < 18) skip(nv * 4); else skip(nv * 2);
+        rS32(); rS32(); rS32(); // merge, vertsPerFrame, flags
+        pos += 4 + 2 + 1; // guard end
+    }
+    pos += 4 + 2 + 1; // final guard
+
+    // Build nodes
+    result.nodes.resize(numNodes);
+    for (int i = 0; i < numNodes; i++) {
+        result.nodes[i].parentIndex = nodes[i].pi;
+        if (nodes[i].ni >= 0 && nodes[i].ni < (int)names.size())
+            result.nodes[i].name = names[nodes[i].ni];
+        else
+            result.nodes[i].name = "node" + std::to_string(i);
+    }
+
+    // Build detail levels
+    for (int i = 0; i < numDetails; i++) {
+        DTSShape::DetailLevel dl;
+        dl.size = details[i].sz;
+        dl.meshIndex = details[i].objDetail;
+        result.details.push_back(dl);
+    }
+
+    // Build default transforms
+    int nNodes = std::max(numNodes, 1);
+    result.defaultTransforms.resize(nNodes);
+    result.defaultLocalTransforms.resize(nNodes);
+    for (int i = 0; i < nNodes; i++) {
+        int si = std::min(i, (int)defRot.size() - 1);
+        // Validate quaternion before converting
+        float qlen = defRot[si].x*defRot[si].x + defRot[si].y*defRot[si].y + 
+                     defRot[si].z*defRot[si].z + defRot[si].w*defRot[si].w;
+        if (qlen < 0.01f || qlen > 100.0f || std::isnan(qlen)) {
+            defRot[si] = {0, 0, 0, 1}; // identity
+            defTrans[si] = {0, 0, 0};
+        }
+        MatrixF rot = defRot[si].toMatrix();
+        MatrixF t; t.identity(); t.setTranslation(defTrans[si]);
+        MatrixF local = t * rot;
+        result.defaultLocalTransforms[i] = local;
+        int p = (i < numNodes) ? nodes[i].pi : -1;
+        if (p >= 0 && p < i) result.defaultTransforms[i] = result.defaultTransforms[p] * local;
+        else result.defaultTransforms[i] = local;
+    }
+
+    result.loaded = !result.meshes.empty();
+    Console::instance().printf(LogLevel::Info,
+        "DTS-OLD: loaded '%s' (%zu meshes, %zu textures, %zu nodes)",
+        name, result.meshes.size(), result.textures.size(), result.nodes.size());
+    return result;
+    } catch (...) { return result; }
+}
 
 DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     DTSLoadResult result;
@@ -90,9 +485,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     int32_t szAll = *(const int32_t*)(data+4);
     int32_t s16   = *(const int32_t*)(data+8);
     int32_t s8    = *(const int32_t*)(data+12);
-    if (ver < 15 || ver > 30 || szAll <= 0 || s16 <= 0 || s8 <= 0 || s8 > szAll || s16 > s8)
+    if (ver < 19 || ver > 30 || szAll <= 0 || s16 <= 0 || s8 <= 0 || s8 > szAll || s16 > s8)
         return result;
-    if (ver < 19) return loadDTSOld(data, size, name);
     Console::instance().printf(LogLevel::Debug, "DTS: '%s' v%u (%zu bytes)", name, ver, size);
     size_t sz32b = (size_t)s16 * 4, sz16b = (size_t)(s8 - s16) * 4, sz8b = (size_t)(szAll - s8) * 4;
     if (16 + sz32b + sz16b + sz8b > size) return result;
