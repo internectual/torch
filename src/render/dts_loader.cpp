@@ -843,13 +843,6 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             if (md.indices.size() > 1000000) break; // safety cap
         }
         md.materialIdx = 0;
-        // Extract material index from first valid primitive (lower 30 bits of matIndex)
-        for (auto& p : prims) {
-            if (p.numElements >= 3 && p.start >= 0 && p.start < (int)indices.size()) {
-                md.materialIdx = p.matIndex & 0x3FFFFFFF;
-                break;
-            }
-        }
         md.nodeIndex = -1;
         // Assign nodeIndex from owning object
         for (int oi = 0; oi < numObjects; oi++) {
