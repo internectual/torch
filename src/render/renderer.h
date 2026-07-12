@@ -139,11 +139,19 @@ struct DTSShape {
         QuatF rotation;
         Point3F scale;
     };
+    struct ObjectKeyframe {
+        int32_t objectIndex;
+        float time;
+        float vis;           // 0.0 = invisible, 1.0 = visible
+        int32_t frameIndex;  // mesh frame index
+        int32_t matFrameIndex; // material frame index
+    };
     struct Animation {
         std::string name;
         float duration;
         bool looping = false;
         std::vector<Keyframe> keyframes;
+        std::vector<ObjectKeyframe> objectKeyframes; // vis/frame animation
     };
     std::vector<Animation> animations;
     std::vector<SkinInfo> skins; // parallel to meshes

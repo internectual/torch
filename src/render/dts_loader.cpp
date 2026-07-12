@@ -69,7 +69,7 @@ struct DTSBuf {
 };
 
 enum : uint32_t {
-    DTSMesh_Standard = 0, DTSMesh_Decal = 2, DTSMesh_Skin = 4, DTSMesh_Sorted = 5,
+    DTSMesh_Standard = 0, DTSMesh_Skin = 1, DTSMesh_Decal = 2, DTSMesh_Sorted = 3, DTSMesh_Null = 4,
 };
 
 static const char* skipExts[] = {".lbioderm", ".ifl", ".iflod", ".dml", ".mis"};
@@ -79,7 +79,69 @@ static bool hasExt(const std::string& s, const char* ext) {
     return p != std::string::npos && p + strlen(ext) == s.size();
 }
 
-bool updateSkinnedMesh(MeshData&, SkinInfo&, const std::vector<MatrixF>&, const std::vector<MatrixF>&) { return false; }
+bool updateSkinnedMesh(MeshData& mesh, SkinInfo& skin,
+                       const std::vector<MatrixF>& nodeWorld,
+                       const std::vector<MatrixF>& defaultTransforms) {
+    if (!skin.hasSkin || mesh.vertices.empty()) return false;
+    if (skin.vertexIndices.empty() || skin.initialPositions.empty()) return false;
+
+    // Zero out positions and normals
+    for (auto& v : mesh.vertices) {
+        v.pos = {0, 0, 0};
+        v.normal = {0, 0, 0};
+    }
+
+    // For each skin vertex entry, blend bone transform using initial (bind-pose) data
+    for (size_t i = 0; i < skin.vertexIndices.size(); i++) {
+        int32_t vertIdx = skin.vertexIndices[i];
+        if (vertIdx < 0 || vertIdx >= (int)mesh.vertices.size()) continue;
+        if (i >= skin.initialPositions.size()) break;
+
+        int32_t boneIdx = (i < skin.boneIndices.size()) ? skin.boneIndices[i] : 0;
+        int32_t nodeIdx = (i < skin.nodeIndices.size()) ? skin.nodeIndices[i] : 0;
+        float weight = (i < skin.boneWeights.size()) ? skin.boneWeights[i] : 1.0f;
+
+        if (weight < 0.001f) continue;
+
+        // Compute bone transform: nodeWorld * initialTransform
+        MatrixF boneTransform;
+        if (nodeIdx >= 0 && nodeIdx < (int)nodeWorld.size())
+            boneTransform = nodeWorld[nodeIdx];
+        else
+            boneTransform.identity();
+
+        if (boneIdx >= 0 && boneIdx < (int)skin.initialTransforms.size())
+            boneTransform = boneTransform * skin.initialTransforms[boneIdx];
+
+        // Get bind-pose position and normal from skin data
+        Point3F bindPos = skin.initialPositions[i];
+        Point3F bindNrm = (i < skin.initialNormals.size()) ? skin.initialNormals[i] : Point3F{0,0,1};
+
+        // Transform and accumulate
+        Point3F transformedPos = boneTransform.transform(bindPos);
+        Point3F transformedNrm = boneTransform.transformNormal(bindNrm);
+
+        mesh.vertices[vertIdx].pos.x += weight * transformedPos.x;
+        mesh.vertices[vertIdx].pos.y += weight * transformedPos.y;
+        mesh.vertices[vertIdx].pos.z += weight * transformedPos.z;
+        mesh.vertices[vertIdx].normal.x += weight * transformedNrm.x;
+        mesh.vertices[vertIdx].normal.y += weight * transformedNrm.y;
+        mesh.vertices[vertIdx].normal.z += weight * transformedNrm.z;
+    }
+
+    // Normalize normals
+    for (auto& v : mesh.vertices) {
+        float len = sqrtf(v.normal.x*v.normal.x + v.normal.y*v.normal.y + v.normal.z*v.normal.z);
+        if (len > 0.001f) {
+            v.normal.x /= len;
+            v.normal.y /= len;
+            v.normal.z /= len;
+        }
+    }
+
+    mesh.updateGPU();
+    return true;
+}
 
 // v15-v18 old format: read directly from sequential stream (no 3-buffer header).
 // DebugGuard() values are synthetic — written to output buffer, NOT present in input.
@@ -354,7 +416,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         md.materialIdx = 0;
         md.nodeIndex = nodeIdx;
         if (!md.vertices.empty() && !md.indices.empty()) {
-            result.meshes.push_back(std::move(md));
+        result.meshes.push_back(std::move(md));
         }
     }
 
@@ -562,12 +624,16 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     for (int i = 0; i < numNodes; i++) defRot[i] = buf.readQuat16();
     for (int i = 0; i < numNodes; i++) defTrans[i] = buf.readPoint3F();
     buf.checkGuard(); // 8
-    for (int i = 0; i < numNodeRot; i++) buf.readQuat16();
-    for (int i = 0; i < numNodeTrans; i++) buf.readPoint3F();
-    for (int i = 0; i < numNodeUScale; i++) buf.readF32();
-    for (int i = 0; i < numNodeAScale; i++) { buf.readF32(); buf.readF32(); buf.readF32(); }
-    for (int i = 0; i < numNodeArbScale; i++) { buf.readF32(); buf.readF32(); buf.readF32(); }
-    for (int i = 0; i < numNodeArbScale; i++) buf.readQuat16();
+    std::vector<QuatF> nodeRotations(numNodeRot);
+    std::vector<Point3F> nodeTranslations(numNodeTrans);
+    std::vector<float> nodeUScales(numNodeUScale);
+    std::vector<Point3F> nodeAScales(numNodeAScale);       // scale factors (3 F32 each)
+    std::vector<QuatF> nodeAScaleRots(numNodeArbScale);    // scale rotations (Quat16 each)
+    for (int i = 0; i < numNodeRot; i++) nodeRotations[i] = buf.readQuat16();
+    for (int i = 0; i < numNodeTrans; i++) nodeTranslations[i] = buf.readPoint3F();
+    for (int i = 0; i < numNodeUScale; i++) nodeUScales[i] = buf.readF32();
+    for (int i = 0; i < numNodeAScale; i++) { Point3F s; s.x = buf.readF32(); s.y = buf.readF32(); s.z = buf.readF32(); nodeAScales[i] = s; }
+    for (int i = 0; i < numNodeArbScale; i++) nodeAScaleRots[i] = buf.readQuat16();
     if (ver >= 22) buf.checkGuard(); // 9 (only exists for v > 21)
     // v > 23: ground transforms stored separately (restores what v22/v23 accidentally dropped)
     if (ver > 23) {
@@ -577,7 +643,14 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         buf.checkGuard();
     }
     // v < 22: ground transforms adjustment (no-op for our parser)
-    for (int i = 0; i < numObjStates; i++) { buf.readF32(); capCount(buf.readS32()); capCount(buf.readS32()); }
+    // Object states (vis, frameIndex, matFrameIndex per object per frame)
+    struct ObjState { float vis; int32_t frameIndex; int32_t matFrameIndex; };
+    std::vector<ObjState> objStates(numObjStates);
+    for (int i = 0; i < numObjStates; i++) {
+        objStates[i].vis = buf.readF32();
+        objStates[i].frameIndex = capCount(buf.readS32());
+        objStates[i].matFrameIndex = capCount(buf.readS32());
+    }
     buf.checkGuard(); // 10
     for (int i = 0; i < numDecalStates; i++) capCount(buf.readS32());
     buf.checkGuard(); // 11
@@ -594,18 +667,13 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     std::vector<std::vector<Point3F>> meshVerts(numMeshes);
     std::vector<std::vector<Point2F>> meshTVerts(numMeshes);
     std::vector<std::vector<Point3F>> meshNorms(numMeshes);
-    std::vector<std::vector<Point3F>> skinInitVerts(numMeshes);
-    std::vector<std::vector<Point3F>> skinInitNorms(numMeshes);
-    std::vector<std::vector<MatrixF>> skinInitTransforms(numMeshes);
-    std::vector<std::vector<int32_t>> skinBoneIndices(numMeshes);
-    std::vector<std::vector<float>> skinBoneWeights(numMeshes);
-    std::vector<std::vector<int32_t>> skinNodeIndices(numMeshes);
 
     for (int m = 0; m < numMeshes; m++) {
         // If we've gone past the real meshes (buffer exhausted), stop
         if (buf.pos32 >= buf.size32 && m > 100) break;
-        uint32_t meshType = buf.readU32();
-        if (meshType == 4) continue; // NullMeshType: only type consumed, no data
+        uint32_t meshTypeRaw = buf.readU32();
+        uint32_t meshType = meshTypeRaw & 0x7; // TypeMask = Standard|Skin|Decal|Sorted|Null = 7
+        if (meshType == DTSMesh_Null) continue; // NullMeshType: only type consumed, no data
         if (meshType == DTSMesh_Decal) {
             // T2 TSDecalMesh::assemble for v>=19:
             // guard (v<20 only), primitives (sz*2 S16 + sz S32), indices (sz S16),
@@ -778,44 +846,60 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         }
         result.meshes.push_back(std::move(md));
 
-        // Skin data (placeholder - not used for non-skin meshes)
+        // Skin data
         SkinInfo skin;
         if (meshType == DTSMesh_Skin) {
-            int32_t sz = capCount(buf.readS32());
+            // Counts are ALWAYS in stream. Data is ONLY in stream when parentMesh < 0.
+            // When parentMesh >= 0, data is shared from parent (not in stream at all).
+            int32_t sz = capCount(buf.readS32()); // initialVerts count
             if (sz > 10000 || sz < 0) sz = 0;
             if (!shareData) {
-                skinInitVerts[m].resize(sz);
-                for (int i = 0; i < sz; i++) skinInitVerts[m][i] = buf.readPoint3F();
-                skinInitNorms[m].resize(sz);
-                for (int i = 0; i < sz; i++) skinInitNorms[m][i] = buf.readPoint3F();
-                for (int i = 0; i < sz; i++) buf.readU8();
+                std::vector<Point3F> initV(sz), initN(sz);
+                for (int i = 0; i < sz; i++) initV[i] = buf.readPoint3F();
+                for (int i = 0; i < sz; i++) initN[i] = buf.readPoint3F();
+                for (int i = 0; i < sz; i++) buf.readU8(); // encoded normals
+                sz = capCount(buf.readS32()); // initTransforms count
+                if (sz > 10000 || sz < 0) sz = 0;
+                std::vector<MatrixF> initT(sz);
+                for (int i = 0; i < sz; i++) {
+                    float cols[4][4];
+                    for (int r = 0; r < 4; r++)
+                        for (int c = 0; c < 4; c++)
+                            cols[c][r] = buf.readF32();
+                    memcpy(initT[i].m, cols, sizeof(float)*16);
+                }
+                sz = capCount(buf.readS32()); // vertexIndex count
+                if (sz > 100000 || sz < 0) sz = 0;
+                std::vector<int32_t> vertIdx(sz), boneIdx(sz);
+                std::vector<float> boneWt(sz);
+                for (int i = 0; i < sz; i++) vertIdx[i] = capCount(buf.readS32());
+                for (int i = 0; i < sz; i++) boneIdx[i] = capCount(buf.readS32());
+                for (int i = 0; i < sz; i++) boneWt[i] = buf.readF32();
+                sz = capCount(buf.readS32()); // nodeIndex count
+                if (sz > 10000 || sz < 0) sz = 0;
+                std::vector<int32_t> nodeIdx(sz);
+                for (int i = 0; i < sz; i++) nodeIdx[i] = capCount(buf.readS32());
+                buf.checkGuard(); // skin end
+                skin.hasSkin = true;
+                skin.initialPositions = std::move(initV);
+                skin.initialNormals = std::move(initN);
+                skin.initialTransforms = std::move(initT);
+                skin.vertexIndices = std::move(vertIdx);
+                skin.boneIndices = std::move(boneIdx);
+                skin.boneWeights = std::move(boneWt);
+                skin.nodeIndices = std::move(nodeIdx);
+            } else {
+                // Data is shared from parent — only counts are in stream, not data
+                sz = capCount(buf.readS32()); // initTransforms count
+                sz = capCount(buf.readS32()); // vertexIndex count
+                sz = capCount(buf.readS32()); // nodeIndex count
+                buf.checkGuard(); // skin end
+                if (parentMesh >= 0 && parentMesh < (int)result.skins.size())
+                    skin = result.skins[parentMesh];
             }
-            sz = capCount(buf.readS32());
-            if (sz > 10000 || sz < 0) sz = 0;
-            if (!shareData) {
-                skinInitTransforms[m].resize(sz);
-                for (int i = 0; i < sz; i++) { for (int j = 0; j < 16; j++) buf.readF32(); }
-            }
-            sz = capCount(buf.readS32());
-            if (sz > 100000 || sz < 0) sz = 0;
-            if (!shareData) {
-                for (int i = 0; i < sz; i++) capCount(buf.readS32()); // vertexIndex
-                skinBoneIndices[m].resize(sz);
-                for (int i = 0; i < sz; i++) skinBoneIndices[m][i] = capCount(buf.readS32());
-                skinBoneWeights[m].resize(sz);
-                for (int i = 0; i < sz; i++) skinBoneWeights[m][i] = buf.readF32();
-            }
-            sz = capCount(buf.readS32());
-            if (sz > 10000 || sz < 0) sz = 0;
-            if (!shareData) {
-                skinNodeIndices[m].resize(sz);
-                for (int i = 0; i < sz; i++) skinNodeIndices[m][i] = capCount(buf.readS32());
-            }
-            buf.checkGuard(); // skin end
         }
         result.skins.push_back(std::move(skin));
     }
-
     // ─── Names (from 8-bit buffer) ───────────────────────────────────
     std::vector<std::string> names(numNames);
     for (int i = 0; i < numNames && buf.pos8 < buf.size8; i++) {
@@ -842,37 +926,216 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     auto prF32 = [&]() -> float { if (postRem < 4) { postRem = 0; return 0; } float v; memcpy(&v, post, 4); post+=4; postRem-=4; return v; };
     auto prU8 = [&]() -> uint8_t { if (postRem < 1) { postRem = 0; return 0; } uint8_t v = *post++; postRem--; return v; };
 
+    // Read a TSIntegerSet into a vector of set bit indices
+    auto readIntSet = [&]() -> std::vector<int32_t> {
+        std::vector<int32_t> bits;
+        capCount(prS32()); // numInts (unused, number of S32 words)
+        int32_t nw = capCount(prS32()); // sz = number of bytes
+        if (nw > 0 && nw < 256 && (size_t)(nw * 4) <= postRem) {
+            for (int w = 0; w < nw; w++) {
+                int32_t word;
+                memcpy(&word, post, 4);
+                post += 4; postRem -= 4;
+                for (int b = 0; b < 32; b++) {
+                    if (word & (1 << b))
+                        bits.push_back(w * 32 + b);
+                }
+            }
+        } else {
+            // Skip corrupted data
+            if (nw > 0 && nw < 1024) {
+                post += nw;
+                if (postRem >= (size_t)nw) postRem -= nw; else postRem = 0;
+            }
+        }
+        return bits;
+    };
+
+    // Read a TSIntegerSet but skip its data
+    auto skipIntSet = [&]() {
+        capCount(prS32());
+        int32_t nw = capCount(prS32());
+        if (nw > 0 && nw < 256) {
+            size_t bytes = (size_t)nw * 4;
+            if (bytes <= postRem) { post += bytes; postRem -= bytes; }
+        }
+    };
+
     int32_t numSeqs = capCount(prS32());
+    // Accumulate base offsets across sequences (T2 appends keyframes sequentially)
+    int32_t accumBaseRot = 0, accumBaseTrans = 0, accumBaseScale = 0;
     for (int s = 0; s < numSeqs; s++) {
         // Sequence::read(s, readNameIndex=true)
         int32_t nameIdx = capCount(prS32());
         uint32_t flags = 0;
         if (ver > 21) flags = (uint32_t)capCount(prS32());
-        capCount(prS32()); // numKFrames
+        int32_t numKFrames = capCount(prS32());
         float dur = prF32();
         if (ver < 22) { prU8(); prU8(); prU8(); } // blend, cyclic, makePath bools
         capCount(prS32()); // priority
         capCount(prS32()); // firstGroundFrame
         capCount(prS32()); // numGroundFrames
-        if (ver > 21) { for (int j = 0; j < 5; j++) capCount(prS32()); } // base states
-        else if (ver >= 17) { for (int j = 0; j < 3; j++) capCount(prS32()); } // base states
+        int32_t baseObjState = 0;
+        if (ver > 21) {
+            baseObjState = capCount(prS32()); // baseObjectState
+            for (int j = 1; j < 5; j++) capCount(prS32()); // baseDecalState, baseGroundState, baseIFLState, baseScale
+        } else if (ver >= 17) {
+            baseObjState = capCount(prS32()); // baseObjectState
+            for (int j = 1; j < 3; j++) capCount(prS32()); // baseDecalState, baseGroundState
+        }
         if (ver > 8) { capCount(prS32()); capCount(prS32()); } // firstTrigger, numTriggers
         if (ver > 7) prF32(); // toolBegin
-        // TSIntegerSets
-        auto skipIntSet = [&]() { capCount(prS32()); int nw = capCount(prS32()); if (nw > 0 && nw < 256) for (int i = 0; i < nw && postRem >= 4; i++) capCount(prS32()); };
-        skipIntSet(); // rotationMatters
-        if (ver >= 22) { skipIntSet(); skipIntSet(); } // translationMatters, scaleMatters
+
+        // Read matters sets
+        std::vector<int32_t> rotMatters, transMatters, scaleMatters;
+        rotMatters = readIntSet();
+        if (ver >= 22) { transMatters = readIntSet(); scaleMatters = readIntSet(); }
+        else { skipIntSet(); skipIntSet(); }
         if (ver > 10) skipIntSet(); // decalMatters
         if (ver > 5) skipIntSet(); // iflMatters
-        skipIntSet(); // visMatters
-        skipIntSet(); // frameMatters
-        skipIntSet(); // matFrameMatters
+        std::vector<int32_t> visMatters = readIntSet();
+        std::vector<int32_t> frameMatters = readIntSet();
+        std::vector<int32_t> matFrameMatters = readIntSet();
         if (ver < 17) skipIntSet(); // nodeTransformStatic (obsolete)
 
+        // Build Animation
         DTSShape::Animation anim;
         anim.name = (nameIdx >= 0 && nameIdx < (int)names.size()) ? names[nameIdx] : "seq" + std::to_string(s);
         anim.duration = dur;
         anim.looping = (flags & 1) != 0;
+
+        if (numKFrames > 0 && dur > 0.0f) {
+            int32_t baseRot = accumBaseRot;
+            int32_t baseTrans = accumBaseTrans;
+            int32_t baseScale = accumBaseScale;
+
+            int32_t rotCount = (int32_t)rotMatters.size();
+            int32_t transCount = (ver >= 22) ? (int32_t)transMatters.size() : rotCount;
+            int32_t scaleCount = (ver >= 22) ? (int32_t)scaleMatters.size() : 0;
+
+            accumBaseRot += rotCount * numKFrames;
+            accumBaseTrans += transCount * numKFrames;
+            accumBaseScale += scaleCount * numKFrames;
+
+            // For each animated node, create keyframes
+            for (int j = 0; j < rotCount && j < (int)rotMatters.size(); j++) {
+                int32_t nodeIdx = rotMatters[j];
+                for (int k = 0; k < numKFrames; k++) {
+                    DTSShape::Keyframe kf;
+                    kf.time = (numKFrames > 1) ? (float)k / (float)(numKFrames - 1) * dur : 0.0f;
+                    kf.nodeIndex = nodeIdx;
+                    int32_t idx = baseRot + j * numKFrames + k;
+                    if (idx >= 0 && idx < (int)nodeRotations.size())
+                        kf.rotation = nodeRotations[idx];
+                    else
+                        kf.rotation = {0, 0, 0, 1};
+                    kf.translation = {0, 0, 0};
+                    kf.scale = {1, 1, 1};
+                    anim.keyframes.push_back(kf);
+                }
+            }
+            for (int j = 0; j < transCount && j < (int)transMatters.size(); j++) {
+                int32_t nodeIdx = transMatters[j];
+                for (int k = 0; k < numKFrames; k++) {
+                    // Find existing keyframe for this node+time, or create new
+                    float t = (numKFrames > 1) ? (float)k / (float)(numKFrames - 1) * dur : 0.0f;
+                    DTSShape::Keyframe* kf = nullptr;
+                    for (auto& f : anim.keyframes) {
+                        if (f.nodeIndex == nodeIdx && std::abs(f.time - t) < 0.0001f) { kf = &f; break; }
+                    }
+                    if (!kf) {
+                        DTSShape::Keyframe newKf;
+                        newKf.time = t;
+                        newKf.nodeIndex = nodeIdx;
+                        newKf.rotation = {0, 0, 0, 1};
+                        newKf.scale = {1, 1, 1};
+                        anim.keyframes.push_back(newKf);
+                        kf = &anim.keyframes.back();
+                    }
+                    int32_t idx = baseTrans + j * numKFrames + k;
+                    if (idx >= 0 && idx < (int)nodeTranslations.size())
+                        kf->translation = nodeTranslations[idx];
+                }
+            }
+            for (int j = 0; j < scaleCount && j < (int)scaleMatters.size(); j++) {
+                int32_t nodeIdx = scaleMatters[j];
+                for (int k = 0; k < numKFrames; k++) {
+                    float t = (numKFrames > 1) ? (float)k / (float)(numKFrames - 1) * dur : 0.0f;
+                    DTSShape::Keyframe* kf = nullptr;
+                    for (auto& f : anim.keyframes) {
+                        if (f.nodeIndex == nodeIdx && std::abs(f.time - t) < 0.0001f) { kf = &f; break; }
+                    }
+                    if (!kf) {
+                        DTSShape::Keyframe newKf;
+                        newKf.time = t;
+                        newKf.nodeIndex = nodeIdx;
+                        newKf.rotation = {0, 0, 0, 1};
+                        newKf.translation = {0, 0, 0};
+                        anim.keyframes.push_back(newKf);
+                        kf = &anim.keyframes.back();
+                    }
+                    int32_t idx = baseScale + j * numKFrames + k;
+                    if (idx >= 0 && idx < (int)nodeUScales.size()) {
+                        float s = nodeUScales[idx];
+                        kf->scale = {s, s, s};
+                    } else if (idx >= 0 && idx < (int)nodeAScales.size()) {
+                        kf->scale = nodeAScales[idx];
+                    }
+                }
+            }
+
+            // Sort keyframes by time for efficient lookup
+            std::sort(anim.keyframes.begin(), anim.keyframes.end(),
+                [](const DTSShape::Keyframe& a, const DTSShape::Keyframe& b) {
+                    if (a.nodeIndex != b.nodeIndex) return a.nodeIndex < b.nodeIndex;
+                    return a.time < b.time;
+                });
+        }
+
+        // Generate object keyframes for vis/frame animation
+        if (numKFrames > 0 && dur > 0.0f && (!visMatters.empty() || !frameMatters.empty() || !matFrameMatters.empty())) {
+            for (int j = 0; j < (int)visMatters.size(); j++) {
+                int32_t objIdx = visMatters[j];
+                for (int k = 0; k < numKFrames; k++) {
+                    int32_t stateIdx = baseObjState + j * numKFrames + k;
+                    if (stateIdx < 0 || stateIdx >= (int)objStates.size()) continue;
+                    DTSShape::ObjectKeyframe okf;
+                    okf.objectIndex = objIdx;
+                    okf.time = (numKFrames > 1) ? (float)k / (float)(numKFrames - 1) * dur : 0.0f;
+                    okf.vis = objStates[stateIdx].vis;
+                    okf.frameIndex = objStates[stateIdx].frameIndex;
+                    okf.matFrameIndex = objStates[stateIdx].matFrameIndex;
+                    anim.objectKeyframes.push_back(okf);
+                }
+            }
+            // Also add frameMatters objects that aren't already in visMatters
+            for (int j = 0; j < (int)frameMatters.size(); j++) {
+                int32_t objIdx = frameMatters[j];
+                bool alreadyAdded = false;
+                for (int v = 0; v < (int)visMatters.size(); v++) {
+                    if (visMatters[v] == objIdx) { alreadyAdded = true; break; }
+                }
+                if (alreadyAdded) continue;
+                for (int k = 0; k < numKFrames; k++) {
+                    int32_t stateIdx = baseObjState + j * numKFrames + k;
+                    if (stateIdx < 0 || stateIdx >= (int)objStates.size()) continue;
+                    DTSShape::ObjectKeyframe okf;
+                    okf.objectIndex = objIdx;
+                    okf.time = (numKFrames > 1) ? (float)k / (float)(numKFrames - 1) * dur : 0.0f;
+                    okf.vis = objStates[stateIdx].vis;
+                    okf.frameIndex = objStates[stateIdx].frameIndex;
+                    okf.matFrameIndex = objStates[stateIdx].matFrameIndex;
+                    anim.objectKeyframes.push_back(okf);
+                }
+            }
+            // Sort object keyframes by object index then time
+            std::sort(anim.objectKeyframes.begin(), anim.objectKeyframes.end(),
+                [](const DTSShape::ObjectKeyframe& a, const DTSShape::ObjectKeyframe& b) {
+                    if (a.objectIndex != b.objectIndex) return a.objectIndex < b.objectIndex;
+                    return a.time < b.time;
+                });
+        }
+
         result.animations.push_back(anim);
     }
 

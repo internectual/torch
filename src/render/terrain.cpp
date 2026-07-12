@@ -1069,8 +1069,8 @@ void DTSShape::renderAnimation(const char* animName, float time) {
         }
     }
 
-    // If no animation found or no keyframes, fall back to static render
-    if (animIndex < 0 || animations[animIndex].keyframes.empty()) {
+    // If no animation found or no keyframes at all, fall back to static render
+    if (animIndex < 0 || (animations[animIndex].keyframes.empty() && animations[animIndex].objectKeyframes.empty())) {
         render(0);
         return;
     }
@@ -1166,6 +1166,53 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             nodeWorld[ni] = nodeLocal[ni];
     }
 
+    // Compute mesh visibility from object keyframes
+    std::vector<float> meshVis(meshes.size(), 1.0f);
+    {
+        auto& anim = animations[animIndex];
+        if (!anim.objectKeyframes.empty()) {
+            float t = time;
+            if (anim.looping && anim.duration > 0)
+                t = fmodf(time, anim.duration);
+            else if (t > anim.duration)
+                t = anim.duration;
+
+            // Group objectKeyframes by objectIndex, find bracketing keyframes for each
+            size_t ki = 0;
+            while (ki < anim.objectKeyframes.size()) {
+                int32_t objIdx = anim.objectKeyframes[ki].objectIndex;
+                // Find all keyframes for this object
+                size_t start = ki;
+                while (ki < anim.objectKeyframes.size() && anim.objectKeyframes[ki].objectIndex == objIdx)
+                    ki++;
+
+                // Find bracketing keyframes
+                float visVal = 1.0f;
+                for (size_t k = start; k < ki; k++) {
+                    if (anim.objectKeyframes[k].time <= t) {
+                        visVal = anim.objectKeyframes[k].vis;
+                    }
+                    if (anim.objectKeyframes[k].time >= t && k > start) {
+                        float prevT = anim.objectKeyframes[k-1].time;
+                        float nextT = anim.objectKeyframes[k].time;
+                        float prevVis = anim.objectKeyframes[k-1].vis;
+                        float nextVis = anim.objectKeyframes[k].vis;
+                        if (nextT > prevT)
+                            visVal = prevVis + (nextVis - prevVis) * (t - prevT) / (nextT - prevT);
+                        else
+                            visVal = nextVis;
+                        break;
+                    }
+                }
+                // Apply visibility to matching mesh(es)
+                // Object index maps to mesh via dtsObjects — but we don't have that here.
+                // Use a simple mapping: object index corresponds to the mesh that belongs to it.
+                // For now, if objIdx matches a mesh's node hierarchy, apply vis.
+                meshVis[objIdx] = visVal;
+            }
+        }
+    }
+
     // Render meshes
     const MatrixF& baseModel = r.modelMatrix();
 
@@ -1177,6 +1224,9 @@ void DTSShape::renderAnimation(const char* animName, float time) {
     }
 
     for (size_t mi = 0; mi < meshes.size(); mi++) {
+        // Skip invisible meshes based on vis animation
+        if (mi < meshVis.size() && meshVis[mi] < 0.01f) continue;
+
         MeshData& mesh = meshes[mi];
         // Compute final model matrix
         MatrixF finalModel = baseModel;
