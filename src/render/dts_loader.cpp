@@ -601,7 +601,13 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     buf.checkGuard(); // 1
     struct DNode { int32_t ni,pi,fo,fc,ns; };
     std::vector<DNode> dtsNodes(numNodes);
-    for (int i = 0; i < numNodes; i++) { dtsNodes[i] = {capCount(buf.readS32()),capCount(buf.readS32()),capCount(buf.readS32()),capCount(buf.readS32()),capCount(buf.readS32())}; }
+    for (int i = 0; i < numNodes; i++) {
+        dtsNodes[i].ni = capCount(buf.readS32());
+        dtsNodes[i].pi = buf.readS32(); // parentIndex: -1 for root nodes, don't capCount
+        dtsNodes[i].fo = capCount(buf.readS32());
+        dtsNodes[i].fc = capCount(buf.readS32());
+        dtsNodes[i].ns = capCount(buf.readS32());
+    }
     buf.checkGuard(); // 2
     struct DObj { int32_t ni,nm,sm,no,ns,fd; };
     std::vector<DObj> dtsObjects(numObjects);
