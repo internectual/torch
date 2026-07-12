@@ -1083,13 +1083,14 @@ void DTSShape::renderAnimation(const char* animName, float time) {
 
     size_t nodeCount = std::max(nodes.size(), (size_t)1);
 
-    // Step 1: Compute animated local transforms (start from defaults)
-    std::vector<MatrixF> nodeLocal(nodeCount);
-    for (size_t i = 0; i < nodeCount; i++) {
-        nodeLocal[i] = (i < defaultLocalTransforms.size()) ? defaultLocalTransforms[i] : MatrixF();
+    // Start with precomputed world transforms (same as render())
+    std::vector<MatrixF> nodeWorld = defaultTransforms;
+    if (nodeWorld.empty()) {
+        nodeWorld.resize(nodeCount);
+        for (size_t i = 0; i < nodeCount; i++) nodeWorld[i].identity();
     }
 
-    // Step 2: Apply keyframe values to override default local transforms
+    // Apply keyframe values — modify world transforms directly
     {
         auto& anim = animations[animIndex];
         float t = time;
@@ -1118,63 +1119,71 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             if (ka && kb && kb->time != ka->time)
                 lt = (t - ka->time) / (kb->time - ka->time);
 
-            // Extract current local transform components
-            Point3F curTrans = {nodeLocal[ni].m[0][3], nodeLocal[ni].m[1][3], nodeLocal[ni].m[2][3]};
-            QuatF curRot = QuatF::fromMatrix(nodeLocal[ni]);
-            Point3F curScale(1,1,1);
+            // Interpolate keyframe values
+            Point3F interpTrans = {0,0,0};
+            QuatF interpRot(0,0,0,1);
+            bool hasTrans = false, hasRot = false;
 
-            // Override with keyframe values
             if (ka && ka->hasTranslation) {
+                hasTrans = true;
                 if (kb && kb->hasTranslation)
-                    curTrans = { Math::lerp(ka->translation.x, kb->translation.x, lt),
-                                 Math::lerp(ka->translation.y, kb->translation.y, lt),
-                                 Math::lerp(ka->translation.z, kb->translation.z, lt) };
+                    interpTrans = { Math::lerp(ka->translation.x, kb->translation.x, lt),
+                                   Math::lerp(ka->translation.y, kb->translation.y, lt),
+                                   Math::lerp(ka->translation.z, kb->translation.z, lt) };
                 else
-                    curTrans = ka->translation;
+                    interpTrans = ka->translation;
             } else if (kb && kb->hasTranslation) {
-                curTrans = kb->translation;
+                hasTrans = true;
+                interpTrans = kb->translation;
             }
 
             if (ka && ka->hasRotation) {
+                hasRot = true;
                 if (kb && kb->hasRotation)
-                    curRot = Math::quatSlerp(ka->rotation, kb->rotation, lt);
+                    interpRot = Math::quatSlerp(ka->rotation, kb->rotation, lt);
                 else
-                    curRot = ka->rotation;
+                    interpRot = ka->rotation;
             } else if (kb && kb->hasRotation) {
-                curRot = kb->rotation;
+                hasRot = true;
+                interpRot = kb->rotation;
             }
 
-            if (ka && ka->hasScale) {
-                if (kb && kb->hasScale)
-                    curScale = { Math::lerp(ka->scale.x, kb->scale.x, lt),
-                                 Math::lerp(ka->scale.y, kb->scale.y, lt),
-                                 Math::lerp(ka->scale.z, kb->scale.z, lt) };
-                else
-                    curScale = ka->scale;
-            } else if (kb && kb->hasScale) {
-                curScale = kb->scale;
+            if (!hasTrans && !hasRot) continue;
+
+            // Build local transform from interpolated values
+            // Start with the default local transform (preserves any components not animated)
+            MatrixF local = (ni < defaultLocalTransforms.size()) ? defaultLocalTransforms[ni] : MatrixF();
+
+            if (hasRot) {
+                // Replace rotation in the local transform
+                Point3F trans = {local.m[0][3], local.m[1][3], local.m[2][3]};
+                MatrixF rMat = interpRot.toMatrix();
+                MatrixF tMat;
+                tMat.identity();
+                tMat.setTranslation(trans);
+                local = tMat * rMat;
             }
 
-            // Rebuild local transform from components
-            MatrixF tMat;
-            tMat.identity();
-            tMat.setTranslation(curTrans);
-            MatrixF rMat = curRot.toMatrix();
-            MatrixF sMat;
-            sMat.identity();
-            sMat.setScale(curScale);
-            nodeLocal[ni] = tMat * rMat * sMat;
+            if (hasTrans) {
+                local.setTranslation(interpTrans);
+            }
+
+            // Recompute world transform for this node and descendants
+            int parent = (ni < nodes.size()) ? nodes[ni].parentIndex : -1;
+            if (parent >= 0 && parent < (int)ni)
+                nodeWorld[ni] = nodeWorld[parent] * local;
+            else
+                nodeWorld[ni] = local;
+
+            // Update all descendants
+            for (size_t ci = ni + 1; ci < nodeCount; ci++) {
+                int ciParent = (ci < nodes.size()) ? nodes[ci].parentIndex : -1;
+                if (ciParent == (int)ni) {
+                    MatrixF childLocal = (ci < defaultLocalTransforms.size()) ? defaultLocalTransforms[ci] : MatrixF();
+                    nodeWorld[ci] = nodeWorld[ni] * childLocal;
+                }
+            }
         }
-    }
-
-    // Step 3: Compute world transforms through hierarchy
-    std::vector<MatrixF> nodeWorld(nodeCount);
-    for (size_t ni = 0; ni < nodeCount; ni++) {
-        int parent = (ni < nodes.size()) ? nodes[ni].parentIndex : -1;
-        if (parent >= 0 && parent < (int)ni)
-            nodeWorld[ni] = nodeWorld[parent] * nodeLocal[ni];
-        else
-            nodeWorld[ni] = nodeLocal[ni];
     }
 
     // Step 4: Compute mesh visibility from object keyframes
