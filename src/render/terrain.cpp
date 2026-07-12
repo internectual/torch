@@ -1083,14 +1083,12 @@ void DTSShape::renderAnimation(const char* animName, float time) {
 
     size_t nodeCount = std::max(nodes.size(), (size_t)1);
 
-    // Start with precomputed world transforms (same as render())
-    std::vector<MatrixF> nodeWorld = defaultTransforms;
-    if (nodeWorld.empty()) {
-        nodeWorld.resize(nodeCount);
-        for (size_t i = 0; i < nodeCount; i++) nodeWorld[i].identity();
-    }
+    // Start with default local transforms
+    std::vector<MatrixF> nodeLocal(nodeCount);
+    for (size_t i = 0; i < nodeCount; i++)
+        nodeLocal[i] = (i < defaultLocalTransforms.size()) ? defaultLocalTransforms[i] : MatrixF();
 
-    // Apply keyframe values — modify world transforms directly
+    // Apply keyframe values to nodeLocal
     {
         auto& anim = animations[animIndex];
         float t = time;
@@ -1150,12 +1148,10 @@ void DTSShape::renderAnimation(const char* animName, float time) {
 
             if (!hasTrans && !hasRot) continue;
 
-            // Build local transform from interpolated values
-            // Start with the default local transform (preserves any components not animated)
+            // Rebuild local: start with default, replace animated components
             MatrixF local = (ni < defaultLocalTransforms.size()) ? defaultLocalTransforms[ni] : MatrixF();
 
             if (hasRot) {
-                // Replace rotation in the local transform
                 Point3F trans = {local.m[0][3], local.m[1][3], local.m[2][3]};
                 MatrixF rMat = interpRot.toMatrix();
                 MatrixF tMat;
@@ -1168,22 +1164,18 @@ void DTSShape::renderAnimation(const char* animName, float time) {
                 local.setTranslation(interpTrans);
             }
 
-            // Recompute world transform for this node and descendants
-            int parent = (ni < nodes.size()) ? nodes[ni].parentIndex : -1;
-            if (parent >= 0 && parent < (int)ni)
-                nodeWorld[ni] = nodeWorld[parent] * local;
-            else
-                nodeWorld[ni] = local;
-
-            // Update all descendants
-            for (size_t ci = ni + 1; ci < nodeCount; ci++) {
-                int ciParent = (ci < nodes.size()) ? nodes[ci].parentIndex : -1;
-                if (ciParent == (int)ni) {
-                    MatrixF childLocal = (ci < defaultLocalTransforms.size()) ? defaultLocalTransforms[ci] : MatrixF();
-                    nodeWorld[ci] = nodeWorld[ni] * childLocal;
-                }
-            }
+            nodeLocal[ni] = local;
         }
+    }
+
+    // Recompute ALL world transforms through hierarchy (single forward pass)
+    std::vector<MatrixF> nodeWorld(nodeCount);
+    for (size_t ni = 0; ni < nodeCount; ni++) {
+        int parent = (ni < nodes.size()) ? nodes[ni].parentIndex : -1;
+        if (parent >= 0 && parent < (int)ni)
+            nodeWorld[ni] = nodeWorld[parent] * nodeLocal[ni];
+        else
+            nodeWorld[ni] = nodeLocal[ni];
     }
 
     // Step 4: Compute mesh visibility from object keyframes
