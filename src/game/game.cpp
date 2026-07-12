@@ -2438,7 +2438,14 @@ void Game::render(float dt) {
 
         r.setCamera({0, 0, 2.6f}, {0, 0, 0}, {0, 1, 0});
 
-        shapeViewerShape.render(0);
+        bool animated = false;
+        if (!shapeViewerShape.animations.empty()) {
+            shapeViewerAnimTime += dt;
+            const auto& anim = shapeViewerShape.animations[0];
+            shapeViewerShape.renderAnimation(anim.name.c_str(), fmodf(shapeViewerAnimTime, anim.duration));
+            animated = true;
+        }
+        if (!animated) shapeViewerShape.render(0);
 
         // HUD overlay
         auto* font = r.getFont();
