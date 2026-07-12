@@ -37,6 +37,7 @@ struct QuatF {
     QuatF() = default;
     QuatF(float x, float y, float z, float w) : x(x), y(y), z(z), w(w) {}
     MatrixF toMatrix() const;
+    static QuatF fromMatrix(const MatrixF& m);
     static QuatF fromEuler(const Point3F& euler);
 };
 

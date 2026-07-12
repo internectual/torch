@@ -1081,152 +1081,103 @@ void DTSShape::renderAnimation(const char* animName, float time) {
     auto* shader = ShaderManager::getDefaultShader();
     if (shader) shader->bind();
 
-    // Start with precomputed world transforms (same as render())
     size_t nodeCount = std::max(nodes.size(), (size_t)1);
-    std::vector<MatrixF> nodeWorld = defaultTransforms;
-    if (nodeWorld.empty()) {
-        // Fallback if defaultTransforms not available
-        nodeWorld.resize(nodeCount);
-        for (size_t i = 0; i < nodeCount; i++) nodeWorld[i].identity();
+
+    // Step 1: Compute animated local transforms (start from defaults)
+    std::vector<MatrixF> nodeLocal(nodeCount);
+    for (size_t i = 0; i < nodeCount; i++) {
+        nodeLocal[i] = (i < defaultLocalTransforms.size()) ? defaultLocalTransforms[i] : MatrixF();
     }
 
-    // Track which nodes need subtree recomputation
-    std::vector<bool> dirty(nodeCount, false);
-
+    // Step 2: Apply keyframe values to override default local transforms
     {
         auto& anim = animations[animIndex];
-
         float t = time;
         if (anim.looping && anim.duration > 0)
             t = fmodf(time, anim.duration);
         else if (t > anim.duration)
             t = anim.duration;
 
-        // For each node, find bracketing keyframes and interpolate
         for (size_t ni = 0; ni < nodeCount; ni++) {
             int kfA = -1, kfB = -1;
             for (size_t ki = 0; ki < anim.keyframes.size(); ki++) {
                 auto& kf = anim.keyframes[ki];
                 if (kf.nodeIndex != (int)ni) continue;
-                if (kf.time <= t) {
-                    if (kfA < 0 || kf.time > anim.keyframes[kfA].time)
-                        kfA = (int)ki;
-                }
-                if (kf.time >= t) {
-                    if (kfB < 0 || kf.time < anim.keyframes[kfB].time)
-                        kfB = (int)ki;
-                }
+                if (kf.time <= t && (kfA < 0 || kf.time > anim.keyframes[kfA].time))
+                    kfA = (int)ki;
+                if (kf.time >= t && (kfB < 0 || kf.time < anim.keyframes[kfB].time))
+                    kfB = (int)ki;
             }
-
             if (kfA < 0 && kfB < 0) continue;
 
             auto* ka = (kfA >= 0) ? &anim.keyframes[kfA] : nullptr;
             auto* kb = (kfB >= 0) ? &anim.keyframes[kfB] : nullptr;
-
             if (ka && kb && ka->time == kb->time) kb = nullptr;
 
-            float lerpT = 0;
+            float lt = 0;
             if (ka && kb && kb->time != ka->time)
-                lerpT = (t - ka->time) / (kb->time - ka->time);
+                lt = (t - ka->time) / (kb->time - ka->time);
 
-            // Determine which components are animated
-            bool animTrans = (ka && ka->hasTranslation) || (kb && kb->hasTranslation);
-            bool animRot = (ka && ka->hasRotation) || (kb && kb->hasRotation);
-            bool animScale = (ka && ka->hasScale) || (kb && kb->hasScale);
+            // Extract current local transform components
+            Point3F curTrans = {nodeLocal[ni].m[0][3], nodeLocal[ni].m[1][3], nodeLocal[ni].m[2][3]};
+            QuatF curRot = QuatF::fromMatrix(nodeLocal[ni]);
+            Point3F curScale(1,1,1);
 
-            // Decompose the existing world transform to get local components
-            // For simplicity, rebuild local from scratch when any component is animated
-            MatrixF local;
-            if (animTrans) {
-                Point3F trans;
-                if (ka && !kb) trans = ka->translation;
-                else if (!ka && kb) trans = kb->translation;
-                else trans = {
-                    Math::lerp(ka->translation.x, kb->translation.x, lerpT),
-                    Math::lerp(ka->translation.y, kb->translation.y, lerpT),
-                    Math::lerp(ka->translation.z, kb->translation.z, lerpT)
-                };
-                local.setTranslation(trans);
-            } else {
-                // Preserve default translation
-                if (ni < defaultLocalTransforms.size())
-                    local.setTranslation({defaultLocalTransforms[ni].m[0][3],
-                                          defaultLocalTransforms[ni].m[1][3],
-                                          defaultLocalTransforms[ni].m[2][3]});
-            }
-
-            if (animRot) {
-                QuatF rot;
-                if (ka && !kb) rot = ka->rotation;
-                else if (!ka && kb) rot = kb->rotation;
-                else rot = Math::quatSlerp(ka->rotation, kb->rotation, lerpT);
-                MatrixF rotMat = rot.toMatrix();
-                MatrixF tMat;
-                tMat.identity();
-                Point3F trans = {local.m[0][3], local.m[1][3], local.m[2][3]};
-                tMat.setTranslation(trans);
-                local = tMat * rotMat;
-            } else {
-                // Preserve default rotation
-                if (ni < defaultLocalTransforms.size()) {
-                    // Extract rotation from default local
-                    MatrixF defLocal = defaultLocalTransforms[ni];
-                    Point3F defTrans = {defLocal.m[0][3], defLocal.m[1][3], defLocal.m[2][3]};
-                    local.setTranslation(defTrans);
-                    // Copy rotation columns (first 3 columns) from default
-                    for (int c = 0; c < 3; c++)
-                        for (int r = 0; r < 3; r++)
-                            local.m[c][r] = defLocal.m[c][r];
-                }
-            }
-
-            if (animScale) {
-                Point3F scale;
-                if (ka && !kb) scale = ka->scale;
-                else if (!ka && kb) scale = kb->scale;
-                else scale = {
-                    Math::lerp(ka->scale.x, kb->scale.x, lerpT),
-                    Math::lerp(ka->scale.y, kb->scale.y, lerpT),
-                    Math::lerp(ka->scale.z, kb->scale.z, lerpT)
-                };
-                MatrixF sMat;
-                sMat.identity();
-                sMat.setScale(scale);
-                Point3F curTrans = {local.m[0][3], local.m[1][3], local.m[2][3]};
-                local = local * sMat;
-                local.setTranslation(curTrans);
-            }
-
-            // Compute new world transform
-            int parent = (ni < nodes.size()) ? nodes[ni].parentIndex : -1;
-            if (parent >= 0 && parent < (int)ni)
-                nodeWorld[ni] = nodeWorld[parent] * local;
-            else
-                nodeWorld[ni] = local;
-
-            dirty[ni] = true;
-        }
-
-        // Recompute all descendants of dirty nodes.
-        // DTS guarantees parents have lower indices than children,
-        // so a single forward pass handles arbitrary depth chains.
-        for (size_t ni = 0; ni < nodeCount; ni++) {
-            if (!dirty[ni]) continue;
-            for (size_t ci = ni + 1; ci < nodeCount; ci++) {
-                int ciParent = (ci < nodes.size()) ? nodes[ci].parentIndex : -1;
-                if (ciParent != (int)ni) continue;
-                dirty[ci] = true;
-                MatrixF childLocal;
-                if (ci < defaultLocalTransforms.size())
-                    childLocal = defaultLocalTransforms[ci];
+            // Override with keyframe values
+            if (ka && ka->hasTranslation) {
+                if (kb && kb->hasTranslation)
+                    curTrans = { Math::lerp(ka->translation.x, kb->translation.x, lt),
+                                 Math::lerp(ka->translation.y, kb->translation.y, lt),
+                                 Math::lerp(ka->translation.z, kb->translation.z, lt) };
                 else
-                    childLocal.identity();
-                nodeWorld[ci] = nodeWorld[ni] * childLocal;
+                    curTrans = ka->translation;
+            } else if (kb && kb->hasTranslation) {
+                curTrans = kb->translation;
             }
+
+            if (ka && ka->hasRotation) {
+                if (kb && kb->hasRotation)
+                    curRot = Math::quatSlerp(ka->rotation, kb->rotation, lt);
+                else
+                    curRot = ka->rotation;
+            } else if (kb && kb->hasRotation) {
+                curRot = kb->rotation;
+            }
+
+            if (ka && ka->hasScale) {
+                if (kb && kb->hasScale)
+                    curScale = { Math::lerp(ka->scale.x, kb->scale.x, lt),
+                                 Math::lerp(ka->scale.y, kb->scale.y, lt),
+                                 Math::lerp(ka->scale.z, kb->scale.z, lt) };
+                else
+                    curScale = ka->scale;
+            } else if (kb && kb->hasScale) {
+                curScale = kb->scale;
+            }
+
+            // Rebuild local transform from components
+            MatrixF tMat;
+            tMat.identity();
+            tMat.setTranslation(curTrans);
+            MatrixF rMat = curRot.toMatrix();
+            MatrixF sMat;
+            sMat.identity();
+            sMat.setScale(curScale);
+            nodeLocal[ni] = tMat * rMat * sMat;
         }
     }
 
-    // Compute mesh visibility from object keyframes
+    // Step 3: Compute world transforms through hierarchy
+    std::vector<MatrixF> nodeWorld(nodeCount);
+    for (size_t ni = 0; ni < nodeCount; ni++) {
+        int parent = (ni < nodes.size()) ? nodes[ni].parentIndex : -1;
+        if (parent >= 0 && parent < (int)ni)
+            nodeWorld[ni] = nodeWorld[parent] * nodeLocal[ni];
+        else
+            nodeWorld[ni] = nodeLocal[ni];
+    }
+
+    // Step 4: Compute mesh visibility from object keyframes
     std::vector<float> meshVis(meshes.size(), 1.0f);
     {
         auto& anim = animations[animIndex];
@@ -1237,34 +1188,27 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             else if (t > anim.duration)
                 t = anim.duration;
 
-            // Group objectKeyframes by objectIndex, find bracketing keyframes for each
             size_t ki = 0;
             while (ki < anim.objectKeyframes.size()) {
                 int32_t objIdx = anim.objectKeyframes[ki].objectIndex;
-                // Find all keyframes for this object
                 size_t start = ki;
                 while (ki < anim.objectKeyframes.size() && anim.objectKeyframes[ki].objectIndex == objIdx)
                     ki++;
 
-                // Find bracketing keyframes
                 float visVal = 1.0f;
                 for (size_t k = start; k < ki; k++) {
-                    if (anim.objectKeyframes[k].time <= t) {
+                    if (anim.objectKeyframes[k].time <= t)
                         visVal = anim.objectKeyframes[k].vis;
-                    }
                     if (anim.objectKeyframes[k].time >= t && k > start) {
                         float prevT = anim.objectKeyframes[k-1].time;
                         float nextT = anim.objectKeyframes[k].time;
                         float prevVis = anim.objectKeyframes[k-1].vis;
                         float nextVis = anim.objectKeyframes[k].vis;
-                        if (nextT > prevT)
-                            visVal = prevVis + (nextVis - prevVis) * (t - prevT) / (nextT - prevT);
-                        else
-                            visVal = nextVis;
+                        visVal = (nextT > prevT) ?
+                            prevVis + (nextVis - prevVis) * (t - prevT) / (nextT - prevT) : nextVis;
                         break;
                     }
                 }
-                // Apply visibility to matching mesh(es) via object-to-mesh mapping
                 if (objIdx >= 0 && objIdx < (int)objectStartMesh.size()) {
                     int start = objectStartMesh[objIdx];
                     int count = objectNumMeshes[objIdx];

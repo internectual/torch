@@ -155,6 +155,37 @@ MatrixF QuatF::toMatrix() const {
     return m;
 }
 
+QuatF QuatF::fromMatrix(const MatrixF& m) {
+    float trace = m.m[0][0] + m.m[1][1] + m.m[2][2];
+    QuatF q;
+    if (trace > 0) {
+        float s = 0.5f / std::sqrt(trace + 1.0f);
+        q.w = 0.25f / s;
+        q.x = (m.m[2][1] - m.m[1][2]) * s;
+        q.y = (m.m[0][2] - m.m[2][0]) * s;
+        q.z = (m.m[1][0] - m.m[0][1]) * s;
+    } else if (m.m[0][0] > m.m[1][1] && m.m[0][0] > m.m[2][2]) {
+        float s = 2.0f * std::sqrt(1.0f + m.m[0][0] - m.m[1][1] - m.m[2][2]);
+        q.w = (m.m[2][1] - m.m[1][2]) / s;
+        q.x = 0.25f * s;
+        q.y = (m.m[0][1] + m.m[1][0]) / s;
+        q.z = (m.m[0][2] + m.m[2][0]) / s;
+    } else if (m.m[1][1] > m.m[2][2]) {
+        float s = 2.0f * std::sqrt(1.0f + m.m[1][1] - m.m[0][0] - m.m[2][2]);
+        q.w = (m.m[0][2] - m.m[2][0]) / s;
+        q.x = (m.m[0][1] + m.m[1][0]) / s;
+        q.y = 0.25f * s;
+        q.z = (m.m[1][2] + m.m[2][1]) / s;
+    } else {
+        float s = 2.0f * std::sqrt(1.0f + m.m[2][2] - m.m[0][0] - m.m[1][1]);
+        q.w = (m.m[1][0] - m.m[0][1]) / s;
+        q.x = (m.m[0][2] + m.m[2][0]) / s;
+        q.y = (m.m[1][2] + m.m[2][1]) / s;
+        q.z = 0.25f * s;
+    }
+    return q;
+}
+
 QuatF QuatF::fromEuler(const Point3F& e) {
     float cx = std::cos(e.x * 0.5f), sx = std::sin(e.x * 0.5f);
     float cy = std::cos(e.y * 0.5f), sy = std::sin(e.y * 0.5f);
