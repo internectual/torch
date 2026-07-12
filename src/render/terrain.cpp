@@ -1069,8 +1069,8 @@ void DTSShape::renderAnimation(const char* animName, float time) {
         }
     }
 
-    // If no animation found or no keyframes at all, fall back to static render
-    if (animIndex < 0 || (animations[animIndex].keyframes.empty() && animations[animIndex].objectKeyframes.empty())) {
+    // If no animation found, no bone keyframes, or only object keyframes, use static render
+    if (animIndex < 0 || animations[animIndex].keyframes.empty()) {
         render(0);
         return;
     }
