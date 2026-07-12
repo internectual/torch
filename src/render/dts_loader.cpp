@@ -45,11 +45,11 @@ struct DTSBuf {
     }
     Point3F readPoint3F() {
         float x = readF32(), y = readF32(), z = readF32();
-        return {x, z, y};
+        return {x, y, z};
     }
     QuatF readQuat16() {
         int16_t x = readS16(), y = readS16(), z = readS16(), w = readS16();
-        return {(float)x/32767.f, (float)z/32767.f, (float)y/32767.f, (float)w/32767.f};
+        return {(float)x/32767.f, (float)y/32767.f, (float)z/32767.f, (float)w/32767.f};
     }
     // allocShape*(n) does NOT advance input; copyToShape*(n) advances input by n; get*(n) advances input by n
     void checkGuard() {
@@ -837,6 +837,13 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             if (md.indices.size() > 1000000) break; // safety cap
         }
         md.materialIdx = 0;
+        // Extract material index from first valid primitive (lower 30 bits of matIndex)
+        for (auto& p : prims) {
+            if (p.numElements >= 3 && p.start >= 0 && p.start < (int)indices.size()) {
+                md.materialIdx = p.matIndex & 0x3FFFFFFF;
+                break;
+            }
+        }
         md.nodeIndex = -1;
         // Assign nodeIndex from owning object
         for (int oi = 0; oi < numObjects; oi++) {
