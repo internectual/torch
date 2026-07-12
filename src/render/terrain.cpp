@@ -1205,24 +1205,21 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             dirty[ni] = true;
         }
 
-        // Propagate dirty flags to children (a modified parent affects child world transforms)
-        // Process in topological order (parents before children)
+        // Recompute all descendants of dirty nodes.
+        // DTS guarantees parents have lower indices than children,
+        // so a single forward pass handles arbitrary depth chains.
         for (size_t ni = 0; ni < nodeCount; ni++) {
-            if (dirty[ni]) {
-                // Mark all children as needing recomputation
-                for (size_t ci = ni + 1; ci < nodeCount; ci++) {
-                    int ciParent = (ci < nodes.size()) ? nodes[ci].parentIndex : -1;
-                    if (ciParent == (int)ni) {
-                        dirty[ci] = true;
-                        // Recompute child world transform
-                        MatrixF childLocal;
-                        if (ci < defaultLocalTransforms.size())
-                            childLocal = defaultLocalTransforms[ci];
-                        else
-                            childLocal.identity();
-                        nodeWorld[ci] = nodeWorld[ni] * childLocal;
-                    }
-                }
+            if (!dirty[ni]) continue;
+            for (size_t ci = ni + 1; ci < nodeCount; ci++) {
+                int ciParent = (ci < nodes.size()) ? nodes[ci].parentIndex : -1;
+                if (ciParent != (int)ni) continue;
+                dirty[ci] = true;
+                MatrixF childLocal;
+                if (ci < defaultLocalTransforms.size())
+                    childLocal = defaultLocalTransforms[ci];
+                else
+                    childLocal.identity();
+                nodeWorld[ci] = nodeWorld[ni] * childLocal;
             }
         }
     }
