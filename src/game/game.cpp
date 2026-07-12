@@ -2385,15 +2385,9 @@ void Game::render(float dt) {
         // Framing camera looking at the (now origin-centered, unit-radius) model
         r.setCamera({0, 0, 2.6f}, {0, 0, 0}, {0, 1, 0});
 
-        bool animated = false;
-        if (!testShape.animations.empty()) {
-            static float animTime = 0;
-            animTime += dt;
-            const auto& anim = testShape.animations[0];
-            testShape.renderAnimation(anim.name.c_str(), fmodf(animTime, anim.duration));
-            animated = true;
-        }
-        if (!animated) testShape.render(0);
+        // TODO: renderAnimation recomputes world transforms differently from defaultTransforms
+        // For now, always use static render to confirm geometry is correct
+        testShape.render(0);
     }
 
     // Render shape viewer (shapeviewer command)
@@ -2446,14 +2440,9 @@ void Game::render(float dt) {
 
         r.setCamera({0, 0, 2.6f}, {0, 0, 0}, {0, 1, 0});
 
-        bool animated = false;
-        if (!shapeViewerShape.animations.empty()) {
-            shapeViewerAnimTime += dt;
-            const auto& anim = shapeViewerShape.animations[0];
-            shapeViewerShape.renderAnimation(anim.name.c_str(), fmodf(shapeViewerAnimTime, anim.duration));
-            animated = true;
-        }
-        if (!animated) shapeViewerShape.render(0);
+        // TODO: renderAnimation recomputes world transforms differently from defaultTransforms
+        // For now, always use static render to confirm geometry is correct
+        shapeViewerShape.render(0);
 
         // HUD overlay
         auto* font = r.getFont();

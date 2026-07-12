@@ -45,11 +45,11 @@ struct DTSBuf {
     }
     Point3F readPoint3F() {
         float x = readF32(), y = readF32(), z = readF32();
-        return {x, y, z};
+        return {x, z, y};
     }
     QuatF readQuat16() {
         int16_t x = readS16(), y = readS16(), z = readS16(), w = readS16();
-        return {(float)x/32767.f, (float)y/32767.f, (float)z/32767.f, (float)w/32767.f};
+        return {(float)x/32767.f, (float)z/32767.f, (float)y/32767.f, (float)w/32767.f};
     }
     // allocShape*(n) does NOT advance input; copyToShape*(n) advances input by n; get*(n) advances input by n
     void checkGuard() {
