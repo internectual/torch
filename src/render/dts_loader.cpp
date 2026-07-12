@@ -65,6 +65,7 @@ struct DTSBuf {
         }
         guard++;
     }
+    void alignS16() { if (pos16 & 1) pos16++; }
 };
 
 enum : uint32_t {
@@ -523,6 +524,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         numNodeRot = capCount(buf.readS32()); numNodeTrans = capCount(buf.readS32());
         numNodeUScale = capCount(buf.readS32()); numNodeAScale = capCount(buf.readS32()); numNodeArbScale = capCount(buf.readS32());
     }
+    int32_t numGroundFrames = 0;
+    if (ver > 23) numGroundFrames = capCount(buf.readS32());
     int32_t numObjStates = capCount(buf.readS32()), numDecalStates = capCount(buf.readS32()), numTriggers = capCount(buf.readS32());
     int32_t numDetails = capCount(buf.readS32()), numMeshes = capCount(buf.readS32());
     if (numMeshes > 10000) numMeshes = 10000;
@@ -566,6 +569,13 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     for (int i = 0; i < numNodeArbScale; i++) { buf.readF32(); buf.readF32(); buf.readF32(); }
     for (int i = 0; i < numNodeArbScale; i++) buf.readQuat16();
     if (ver >= 22) buf.checkGuard(); // 9 (only exists for v > 21)
+    // v > 23: ground transforms stored separately (restores what v22/v23 accidentally dropped)
+    if (ver > 23) {
+        for (int i = 0; i < numGroundFrames; i++) buf.readPoint3F(); // groundTranslations
+        for (int i = 0; i < numGroundFrames; i++) buf.readQuat16(); // groundRotations
+        buf.alignS16();
+        buf.checkGuard();
+    }
     // v < 22: ground transforms adjustment (no-op for our parser)
     for (int i = 0; i < numObjStates; i++) { buf.readF32(); capCount(buf.readS32()); capCount(buf.readS32()); }
     buf.checkGuard(); // 10
