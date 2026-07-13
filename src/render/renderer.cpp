@@ -636,7 +636,7 @@ bool Texture::loadBM8(const uint8_t* data, size_t size) {
             if (rgba[i + 3] == 0) zeroAlpha++;
         }
         alphaZeroRatio = total > 0 ? (float)((double)zeroAlpha / (double)total) : 0.0f;
-        hasAlpha = alphaZeroRatio > 0.05f;
+        hasAlpha = alphaZeroRatio > 0.6f;
     }
     return loaded;
 }

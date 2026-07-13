@@ -969,12 +969,8 @@ void DTSShape::render(int32_t detailLevel) {
     shader->setUniform("uView", r.view);
     shader->setUniform("uCamPos", r.cameraPos);
 
-    // Disable shadows for DTS shapes (no shadow map set up)
     if (shader) shader->setUniform("uShadowStrength", 0.0f);
 
-    // Bind-pose node world transforms (defaultTransforms are already composed world matrices)
-    // NOTE: Callers are responsible for including the Z-up->Y-up conversion matrix (Math::czUpToYUp())
-    // in their model matrix at the correct position: ry * rx * C * sc * tr
     const std::vector<MatrixF>& nodeWorld = defaultTransforms;
     const MatrixF baseModel = r.modelMatrix();
 
@@ -984,6 +980,10 @@ void DTSShape::render(int32_t detailLevel) {
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
     }
+
+    // Reset GL state
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
 
     for (size_t mi = 0; mi < meshes.size(); mi++) {
         MeshData& mesh = meshes[mi];
@@ -1010,11 +1010,11 @@ void DTSShape::render(int32_t detailLevel) {
         } else {
             if (shader) shader->setUniform("uUseTexture", (int32_t)0);
         }
-        // Alpha test: only for materials flagged Translucent or Additive
+        // T2 always forces Translucent on all materials — blending always enabled
+        // Alpha test: only for materials with Translucent flag (palette alpha matters only for these)
         bool alphaTest = (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0;
         if (shader) shader->setUniform("uAlphaTest", (int32_t)alphaTest);
 
-        // Bind lightmap if material uses one
         int lmIdx = (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
             ? materialLightmapIndex[mesh.materialIdx] : -1;
         if (lmIdx >= 0 && lmIdx < (int)lightmaps.size() && lightmaps[lmIdx].loaded) {
@@ -1025,7 +1025,7 @@ void DTSShape::render(int32_t detailLevel) {
             if (shader) shader->setUniform("uUseLightmap", (int32_t)0);
         }
 
-        // Set blend mode based on material flags
+        // Blend mode
         if (flags & MatFlag_Additive) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
@@ -1041,7 +1041,6 @@ void DTSShape::render(int32_t detailLevel) {
 
         if (shader) shader->setUniform("uSelfIlluminated", (int32_t)((flags & MatFlag_SelfIlluminating) ? 1 : 0));
 
-        // Set PBR metallic/roughness per-material
         float metallic = 0.0f, roughness = 0.5f;
         if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialMetallic.size()) {
             metallic = materialMetallic[mesh.materialIndex];
@@ -1050,17 +1049,18 @@ void DTSShape::render(int32_t detailLevel) {
         if (shader) shader->setUniform("uMetallic", metallic);
         if (shader) shader->setUniform("uRoughness", roughness);
 
-        // Enable env map for materials that don't have NeverEnvMap
         bool useEnvMap = false;
         auto& ren = Engine::instance().renderer();
-        if (ren.sky && ren.sky->emap.loaded && !(flags & MatFlag_NeverEnvMap)) {
+        if (ren.sky && ren.sky->emap.loaded && !(flags & MatFlag_NeverEnvMap))
             useEnvMap = true;
-        }
         if (shader) shader->setUniform("uUseEnvMap", (int32_t)(useEnvMap ? 1 : 0));
 
         mesh.render();
     }
 
+    // Restore GL state
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
     } catch (...) {}
@@ -1271,6 +1271,10 @@ void DTSShape::renderAnimation(const char* animName, float time) {
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
 
+    // Reset GL state
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+
     for (size_t mi = 0; mi < meshes.size(); mi++) {
         MeshData& mesh = meshes[mi];
 
@@ -1329,6 +1333,7 @@ void DTSShape::renderAnimation(const char* animName, float time) {
         } else {
             if (shader) shader->setUniform("uUseTexture", (int32_t)0);
         }
+        // Alpha test: only for materials flagged Translucent or Additive
         bool alphaTest = (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0;
         if (shader) shader->setUniform("uAlphaTest", (int32_t)alphaTest);
 
@@ -1376,6 +1381,8 @@ void DTSShape::renderAnimation(const char* animName, float time) {
         mesh.render();
     }
 
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
 }
