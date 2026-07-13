@@ -970,13 +970,21 @@ void Engine::run() {
             }
             prevEsc = escDown;
 
-            // Shape viewer: left/right arrows to cycle shapes
+            // Shape viewer: left/right arrows to cycle shapes (hold to repeat)
             if (g->isShapeViewerActive()) {
                 static bool prevLeft = false, prevRight = false;
+                static double leftRepeat = 0, rightRepeat = 0;
+                constexpr double kInitialDelay = 0.35;
+                constexpr double kRepeatRate  = 0.06;
                 bool leftDown = plat->input().keysDown[SCANCODE_LEFT];
                 bool rightDown = plat->input().keysDown[SCANCODE_RIGHT];
-                if (leftDown && !prevLeft) g->shapeViewerPrev();
-                if (rightDown && !prevRight) g->shapeViewerNext();
+                double now = plat->time();
+                if (leftDown && !prevLeft) { g->shapeViewerPrev(); leftRepeat = now + kInitialDelay; }
+                else if (leftDown && now >= leftRepeat) { g->shapeViewerPrev(); leftRepeat = now + kRepeatRate; }
+                if (rightDown && !prevRight) { g->shapeViewerNext(); rightRepeat = now + kInitialDelay; }
+                else if (rightDown && now >= rightRepeat) { g->shapeViewerNext(); rightRepeat = now + kRepeatRate; }
+                if (!leftDown) leftRepeat = 0;
+                if (!rightDown) rightRepeat = 0;
                 prevLeft = leftDown;
                 prevRight = rightDown;
             }

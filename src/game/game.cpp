@@ -3813,4 +3813,13 @@ void Game::shapeViewerLoadCurrent() {
         shapeViewerIndex + 1, (int)shapeViewerFiles.size(), path.c_str(),
         shapeViewerShape.meshes.size(), shapeViewerShape.nodes.size(),
         shapeViewerShape.animations.size());
+
+    // Diagnostic: report bone keyframe counts
+    for (size_t ai = 0; ai < shapeViewerShape.animations.size(); ai++) {
+        auto& a = shapeViewerShape.animations[ai];
+        if (!a.keyframes.empty()) {
+            Console::instance().printf(LogLevel::Info, "  anim[%zu] '%s': %zu BONE keyframes, %zu obj keyframes",
+                ai, a.name.c_str(), a.keyframes.size(), a.objectKeyframes.size());
+        }
+    }
 }

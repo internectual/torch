@@ -532,6 +532,17 @@ void MeshData::destroy() {
     uploaded = false;
 }
 
+void MeshData::remapUVs(int32_t matFrame, const std::vector<Point2F>& tverts) {
+    if (numTVertsPerFrame <= 0 || vertices.empty()) return;
+    int32_t offset = matFrame * numTVertsPerFrame;
+    for (size_t i = 0; i < vertices.size(); i++) {
+        int32_t ti = (int32_t)i + offset;
+        if (ti >= 0 && ti < (int32_t)tverts.size())
+            vertices[i].uv = tverts[ti];
+    }
+    if (uploaded) updateGPU();
+}
+
 // Texture
 void Texture::load(const uint8_t* data, size_t size) {
     int w, h, channels;
@@ -554,30 +565,51 @@ void Texture::load(const uint8_t* data, size_t size) {
         return;
     }
     loadRaw(pixels, w, h, 4);
+    if (loaded) {
+        for (size_t i = 3; i < (size_t)(w * h * 4); i += 4)
+            if (pixels[i] < 250) { hasAlpha = true; break; }
+    }
     stbi_image_free(pixels);
 }
 
 bool Texture::decodeBM8(const uint8_t* data, size_t size,
                          std::vector<uint8_t>& outPixels,
                          int32_t& outW, int32_t& outH) {
-    if (size < 32) return false;
-    uint32_t hdr[8];
-    memcpy(hdr, data, 32);
-    uint32_t w = hdr[1], h = hdr[2], flags = hdr[4];
+    // T2 BM8 format (from bitmapBm8.cc):
+    //   U32 byteSize        - total pixel data size (all mip levels)
+    //   U32 width
+    //   U32 height
+    //   U32 bytesPerPixel   - 1 for palettized
+    //   U32 numMipLevels
+    //   U32 mipLevelOffsets[numMipLevels]
+    //   GPalette: U32 version + U32 type + ColorI[256] (1024 bytes RGBA)
+    //   U8 pixelData[byteSize]
+    if (size < 20) return false;
+    uint32_t byteSize, w, h, bytesPerPixel, numMipLevels;
+    memcpy(&byteSize, data + 0, 4);
+    memcpy(&w, data + 4, 4);
+    memcpy(&h, data + 8, 4);
+    memcpy(&bytesPerPixel, data + 12, 4);
+    memcpy(&numMipLevels, data + 16, 4);
     if (w == 0 || h == 0 || w > 4096 || h > 4096) return false;
-    if (flags != 1 && flags < 3) return false;
+    if (bytesPerPixel != 1) return false; // only palettized supported
 
-    uint32_t paletteSize;
-    if (flags == 1) paletteSize = 1024;
-    else if (flags >= 3 && flags <= 257) paletteSize = 1024 + (flags - 1) * 4;
-    else return false;
-    if (size < 32 + paletteSize) return false;
-    uint32_t pixelOffset = 32 + paletteSize;
-    uint32_t pixelCount = w * h;
-    if (pixelOffset + pixelCount > size) return false;
+    uint32_t mipOffsetsStart = 20;
+    uint32_t mipDataStart = mipOffsetsStart + numMipLevels * 4;
+    if (mipDataStart + 1032 > size) return false; // need palette (version+type+colors)
+
+    // Skip GPalette version (U32) and type (U32)
+    uint32_t paletteStart = mipDataStart + 8;
+    if (paletteStart + 1024 > size) return false;
+
+    uint32_t pixelOffset = paletteStart + 1024;
+    if (pixelOffset + byteSize > size) return false;
 
     uint8_t palette[1024];
-    memcpy(palette, data + 32, paletteSize > 1024 ? 1024 : paletteSize);
+    memcpy(palette, data + paletteStart, 1024);
+
+    uint32_t pixelCount = w * h;
+    if (pixelCount > byteSize) pixelCount = byteSize;
 
     outPixels.resize(pixelCount * 4);
     for (uint32_t i = 0; i < pixelCount; i++) {
@@ -597,6 +629,15 @@ bool Texture::loadBM8(const uint8_t* data, size_t size) {
     int32_t w, h;
     if (!decodeBM8(data, size, rgba, w, h)) return false;
     loadRaw(rgba.data(), w, h, 4);
+    if (loaded) {
+        int64_t total = 0, zeroAlpha = 0;
+        for (size_t i = 0; i < rgba.size(); i += 4) {
+            total++;
+            if (rgba[i + 3] == 0) zeroAlpha++;
+        }
+        alphaZeroRatio = total > 0 ? (float)((double)zeroAlpha / (double)total) : 0.0f;
+        hasAlpha = alphaZeroRatio > 0.05f;
+    }
     return loaded;
 }
 

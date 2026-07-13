@@ -19,6 +19,7 @@ struct DTSLoadResult {
     std::vector<MatrixF> defaultLocalTransforms; // per-node default (bind pose) local transforms
     std::vector<int32_t> objectStartMesh; // per-object: first mesh index
     std::vector<int32_t> objectNumMeshes; // per-object: number of meshes
+    std::vector<std::vector<Point2F>> meshTVerts; // per-mesh: all tvert data (numTVerts * numMatFrames)
     bool loaded = false;
 };
 

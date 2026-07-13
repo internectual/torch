@@ -68,6 +68,7 @@ uniform float uShadowStrength = 0.5;
 
 uniform float uMetallic = 0.0;
 uniform float uRoughness = 0.5;
+uniform bool uAlphaTest = false;
 
 out vec4 FragColor;
 
@@ -116,7 +117,7 @@ void main() {
         vec3 F0 = mix(vec3(0.04), col.rgb, metallic);
 
         // Diffuse (Lambertian)
-        vec3 diffuse = col.rgb * (1.0 - metallic) * (1.0 / 3.14159);
+        vec3 diffuse = col.rgb * (1.0 - metallic) / 3.14159;
 
         // Specular: D (GGX), G (Smith-Schlick), F (Schlick)
         float alpha = roughness * roughness;
@@ -131,7 +132,7 @@ void main() {
 
         vec3 specular = D * G * F / (4.0 * NdotV * NdotL + 0.0001);
 
-        vec3 lit = (diffuse + specular) * (0.5 + 0.5 * NdotL * shadowFactor);
+        vec3 lit = (diffuse + specular) * (1.0 + 1.0 * NdotL * shadowFactor);
         if (uUseEnvMap) {
             vec3 V = normalize(uCamPos - vWorldPos);
             vec3 R = reflect(-V, N);
@@ -148,6 +149,7 @@ void main() {
         }
         FragColor = vec4(lit, col.a);
     }
+    if (uAlphaTest && FragColor.a <= 0.0) discard;
 }
 )";
 

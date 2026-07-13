@@ -39,6 +39,8 @@ struct Vertex {
 struct MeshData {
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;
+    std::vector<int32_t> tvertIndices; // per-vertex: original tvert index (for matFrame remapping)
+    int32_t numTVertsPerFrame = 0;     // number of tverts per material frame
     uint32_t vao{}, vbo{}, ebo{};
     int32_t materialIndex = -1; // index into DTSShape::materialTextures
     int32_t materialIdx = -1;   // raw material index from GLB file
@@ -48,6 +50,7 @@ struct MeshData {
     void updateGPU();
     void render();
     void destroy();
+    void remapUVs(int32_t matFrame, const std::vector<Point2F>& tverts); // remap UVs based on material frame index
 };
 
 struct Texture {
@@ -55,6 +58,8 @@ struct Texture {
     int32_t width{}, height{};
     int32_t format{};
     bool loaded = false;
+    bool hasAlpha = false;
+    float alphaZeroRatio = 0.0f; // fraction of pixels with alpha == 0
     void load(const uint8_t* data, size_t size);
     bool loadBM8(const uint8_t* data, size_t size);
     void loadRaw(const uint8_t* pixels, int32_t w, int32_t h, int32_t channels);
@@ -167,6 +172,7 @@ struct DTSShape {
     std::vector<uint32_t> materialFlags; // parallel to materialTextures
     std::vector<float> materialMetallic; // parallel to materialTextures
     std::vector<float> materialRoughness; // parallel to materialTextures
+    std::vector<std::vector<Point2F>> meshTVerts; // per-mesh: all tvert data (numTVerts * numMatFrames)
     std::vector<Texture> lightmaps;
     std::vector<int8_t> materialLightmapIndex; // per-material: -1 no lightmap, >=0 index into lightmaps[]
     bool isInterior = false;

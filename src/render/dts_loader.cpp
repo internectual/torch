@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <unordered_map>
 
 // DTS element-count sanity caps (prevent bad_alloc / parse hangs on hostile files)
 static const int32_t kMaxDTSCount = 1 << 16;
@@ -66,6 +67,7 @@ struct DTSBuf {
         guard++;
     }
     void alignS16() { if (pos16 & 1) pos16++; }
+    void align8() { pos8 = (pos8 + 3) & ~(size_t)3; } // align to 4-byte boundary (matches T2 align32())
 };
 
 enum : uint32_t {
@@ -413,8 +415,23 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
             }
             if (md.indices.size() > 1000000) break;
         }
-        md.materialIdx = 0;
+        // Extract material index from first primitive (MaterialMask = 0x0FFFFFFF)
+        {
+            int32_t matMask = 0x0FFFFFFF;
+            int32_t bestMat = 0, bestCount = 0;
+            std::unordered_map<int32_t, int32_t> matCounts;
+            for (int pi = 0; pi < numPrims; pi++) {
+                if (primMatIdx[pi] & (1 << 28)) continue; // NoMaterial flag
+                int32_t mi = primMatIdx[pi] & matMask;
+                matCounts[mi]++;
+            }
+            for (auto& [m, c] : matCounts) {
+                if (c > bestCount) { bestCount = c; bestMat = m; }
+            }
+            md.materialIdx = bestCount > 0 ? bestMat : 0;
+        }
         md.nodeIndex = nodeIdx;
+        md.numTVertsPerFrame = numTVerts;
         if (!md.vertices.empty() && !md.indices.empty()) {
         result.meshes.push_back(std::move(md));
         }
@@ -431,16 +448,24 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         }
     }
 
-    // Material list
+    // Material list (old format v<19: embedded in S32 stream)
     int32_t gotList = rS32();
     if (gotList != 0) {
-        // TSMaterialList::read — skip the whole thing since we don't use materials
-        // Format: materialCount(S32), then for each: flags(S32), reflectance(S32),
-        //   bump(S32), detail(S32), nameLen(S32), nameBytes, plus optional extra S32
         int32_t numMats = rS32();
         result.materialNames.resize(numMats);
+        result.materialFlags.resize(numMats, 0);
         for (int i = 0; i < numMats; i++) {
-            rS32(); rS32(); rS32(); rS32(); // flags, reflectance, bump, detail
+            uint32_t rawFlags = rS32();
+            // Remap T2 bit layout
+            uint32_t flags = 0;
+            if (rawFlags & (1 << 0)) flags |= 16; // S_Wrap
+            if (rawFlags & (1 << 1)) flags |= 32; // T_Wrap
+            if (rawFlags & (1 << 2)) flags |= 1;  // Translucent
+            if (rawFlags & (1 << 3)) flags |= 2;  // Additive
+            if (rawFlags & (1 << 5)) flags |= 4;  // SelfIlluminating
+            if (rawFlags & (1 << 6)) flags |= 8;  // NeverEnvMap
+            result.materialFlags[i] = flags;
+            rS32(); rS32(); rS32(); // reflectance, bump, detail
             int32_t nameLen = rS32();
             if (nameLen > 0 && nameLen < 1000 && pos + nameLen <= size) {
                 result.materialNames[i] = std::string((const char*)data + pos, nameLen);
@@ -547,6 +572,64 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     }
 
     result.loaded = !result.meshes.empty();
+    result.meshTVerts.resize(result.meshes.size());
+
+    // ─── Resolve textures (shared with v19+ path) ────────────────────
+    for (auto& n : result.materialNames)
+        for (auto& c : n) if (c == '\\') c = '/';
+
+    // Save per-DTS-material flags
+    std::vector<uint32_t> dtsMatFlags = result.materialFlags;
+    result.materialFlags.clear();
+
+    struct MatSlot { int texIdx = -1; };
+    std::vector<MatSlot> matSlots(result.materialNames.size());
+    auto& fs = Engine::instance().fs();
+    static const char* texExts[] = {".bm8", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tga", ".dds"};
+    static const char* skipExts[] = {".dds", ".png", ".jpg", ".bmp", ".tga"};
+    auto hasExt = [](const std::string& s, const char* ext) {
+        size_t el = strlen(ext);
+        return s.size() >= el && s.compare(s.size() - el, el, ext) == 0;
+    };
+
+    try {
+    for (size_t i = 0; i < result.materialNames.size(); i++) {
+        if (result.materialNames[i].empty()) continue;
+        std::string lower = result.materialNames[i];
+        for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
+        std::string base = lower;
+        for (auto* se : skipExts) if (hasExt(base, se)) { base = base.substr(0, base.size() - strlen(se)); break; }
+        // T2 convention: material names ending in 'C' are variants — try without the suffix too
+        std::string stripped = base;
+        if (stripped.size() > 2 && stripped.back() == 'c') stripped.pop_back();
+        std::vector<std::string> cands = {"textures/"+lower, "textures/"+base, "textures/"+stripped, lower, base, stripped};
+        for (auto& c : cands)
+            for (auto* e : texExts) {
+                auto d = fs.read((c + e).c_str());
+                if (!d.empty()) {
+                    Texture t;
+                    if (strcmp(e, ".bm8") == 0) t.loadBM8(d.data(), d.size());
+                    else t.load(d.data(), d.size());
+                    if (t.loaded) {
+                        matSlots[i].texIdx = (int)result.textures.size();
+                        uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
+                        result.materialFlags.push_back(flags);
+                        result.textures.push_back(std::move(t));
+                        goto nextTexOld;
+                    }
+                }
+            }
+        nextTexOld:;
+    }
+    } catch (const std::bad_alloc&) {}
+
+    result.materialLightmapIndex.assign(result.materialNames.size(), -1);
+
+    for (auto& mesh : result.meshes) {
+        int mi = mesh.materialIdx;
+        if (mi >= 0 && mi < (int)matSlots.size()) mesh.materialIndex = matSlots[mi].texIdx;
+    }
+
     return result;
     } catch (...) { return result; }
 }
@@ -628,8 +711,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     std::vector<QuatF> defRot(numNodes);
     std::vector<Point3F> defTrans(numNodes);
     for (int i = 0; i < numNodes; i++) defRot[i] = buf.readQuat16();
+    buf.align8(); // T2 tsShape.cc:708 - align 8-bit buffer after buf16 defaultRotations
     for (int i = 0; i < numNodes; i++) defTrans[i] = buf.readPoint3F();
-    buf.checkGuard(); // 8
     std::vector<QuatF> nodeRotations(numNodeRot);
     std::vector<Point3F> nodeTranslations(numNodeTrans);
     std::vector<float> nodeUScales(numNodeUScale);
@@ -637,10 +720,12 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     std::vector<QuatF> nodeAScaleRots(numNodeArbScale);    // scale rotations (Quat16 each)
     for (int i = 0; i < numNodeRot; i++) nodeRotations[i] = buf.readQuat16();
     for (int i = 0; i < numNodeTrans; i++) nodeTranslations[i] = buf.readPoint3F();
+    buf.align8(); // matches T2 alloc.align32() before guard (pads 8-bit buffer to 4-byte boundary)
+    buf.checkGuard(); // 8 (after defRot, defTrans, nodeTrans, nodeRot per T2 tsShape.cc:726)
     for (int i = 0; i < numNodeUScale; i++) nodeUScales[i] = buf.readF32();
     for (int i = 0; i < numNodeAScale; i++) { Point3F s; s.x = buf.readF32(); s.y = buf.readF32(); s.z = buf.readF32(); nodeAScales[i] = s; }
     for (int i = 0; i < numNodeArbScale; i++) nodeAScaleRots[i] = buf.readQuat16();
-    if (ver >= 22) buf.checkGuard(); // 9 (only exists for v > 21)
+    if (ver >= 22) { buf.align8(); buf.checkGuard(); } // 9 (only exists for v > 21)
     // v > 23: ground transforms stored separately (restores what v22/v23 accidentally dropped)
     if (ver > 23) {
         for (int i = 0; i < numGroundFrames; i++) buf.readPoint3F(); // groundTranslations
@@ -731,10 +816,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         if (numTVerts > 10000 || numTVerts < 0) { numTVerts = 0; }
         if (!shareData) {
             meshTVerts[m].resize(numTVerts * numMatFrames);
-            for (int i = 0; i < numTVerts; i++) { meshTVerts[m][i].x = buf.readF32(); meshTVerts[m][i].y = buf.readF32(); }
-            for (int f = 1; f < numMatFrames; f++)
-                for (int t = 0; t < numTVerts; t++)
-                    meshTVerts[m][f * numTVerts + t] = meshTVerts[m][t];
+            for (int f = 0; f < numMatFrames; f++)
+                for (int t = 0; t < numTVerts; t++) { meshTVerts[m][f * numTVerts + t].x = buf.readF32(); meshTVerts[m][f * numTVerts + t].y = buf.readF32(); }
         } else if (parentMesh >= 0 && parentMesh < m) {
             int cc = std::min(numTVerts * numMatFrames, (int)meshTVerts[parentMesh].size());
             meshTVerts[m].assign(meshTVerts[parentMesh].begin(), meshTVerts[parentMesh].begin() + cc);
@@ -842,8 +925,24 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             }
             if (md.indices.size() > 1000000) break; // safety cap
         }
-        md.materialIdx = 0;
+        // Extract material index from first primitive (MaterialMask = 0x0FFFFFFF)
+        // T2 matIndex packs: bits 30-31=type, bit 29=Indexed, bit 28=NoMaterial, bits 0-27=material
+        {
+            int32_t matMask = 0x0FFFFFFF;
+            int32_t bestMat = 0, bestCount = 0;
+            std::unordered_map<int32_t, int32_t> matCounts;
+            for (auto& p : prims) {
+                if (p.matIndex & (1 << 28)) continue; // NoMaterial flag
+                int32_t mi = p.matIndex & matMask;
+                matCounts[mi]++;
+            }
+            for (auto& [m, c] : matCounts) {
+                if (c > bestCount) { bestCount = c; bestMat = m; }
+            }
+            md.materialIdx = bestCount > 0 ? bestMat : 0;
+        }
         md.nodeIndex = -1;
+        md.numTVertsPerFrame = numTVerts;
         // Assign nodeIndex from owning object
         for (int oi = 0; oi < numObjects; oi++) {
             if (m >= dtsObjects[oi].sm && m < dtsObjects[oi].sm + dtsObjects[oi].nm) {
@@ -983,11 +1082,15 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         capCount(prS32()); // numGroundFrames
         int32_t baseObjState = 0;
         if (ver > 21) {
+            capCount(prS32()); // baseRotation
+            capCount(prS32()); // baseTranslation
+            capCount(prS32()); // baseScale
             baseObjState = capCount(prS32()); // baseObjectState
-            for (int j = 1; j < 5; j++) capCount(prS32()); // baseDecalState, baseGroundState, baseIFLState, baseScale
+            capCount(prS32()); // baseDecalState
         } else if (ver >= 17) {
+            capCount(prS32()); // baseRotation (baseTranslation = baseRotation for v<22)
             baseObjState = capCount(prS32()); // baseObjectState
-            for (int j = 1; j < 3; j++) capCount(prS32()); // baseDecalState, baseGroundState
+            capCount(prS32()); // baseDecalState
         }
         if (ver > 8) { capCount(prS32()); capCount(prS32()); } // firstTrigger, numTriggers
         if (ver > 7) prF32(); // toolBegin
@@ -995,8 +1098,15 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         // Read matters sets
         std::vector<int32_t> rotMatters, transMatters, scaleMatters;
         rotMatters = readIntSet();
-        if (ver >= 22) { transMatters = readIntSet(); scaleMatters = readIntSet(); }
-        else { skipIntSet(); skipIntSet(); }
+        if (ver >= 22) {
+            transMatters = readIntSet();
+            scaleMatters = readIntSet();
+        } else {
+            // v<22: no separate translationMatters/scaleMatters in stream
+            // T2 just copies translationMatters = rotationMatters
+            transMatters = rotMatters;
+            // scaleMatters stays empty (scale not animated in v<22)
+        }
         if (ver > 10) skipIntSet(); // decalMatters
         if (ver > 5) skipIntSet(); // iflMatters
         std::vector<int32_t> visMatters = readIntSet();
@@ -1059,15 +1169,16 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                         newKf.rotation = {0, 0, 0, 1};
                         newKf.scale = {1, 1, 1};
                         newKf.hasRotation = false;
-                        newKf.hasTranslation = true;
+                        newKf.hasTranslation = false;
                         newKf.hasScale = false;
                         anim.keyframes.push_back(newKf);
                         kf = &anim.keyframes.back();
                     }
-                    kf->hasTranslation = true;
                     int32_t idx = baseTrans + j * numKFrames + k;
-                    if (idx >= 0 && idx < (int)nodeTranslations.size())
+                    if (idx >= 0 && idx < (int)nodeTranslations.size()) {
+                        kf->hasTranslation = true;
                         kf->translation = nodeTranslations[idx];
+                    }
                 }
             }
             for (int j = 0; j < scaleCount && j < (int)scaleMatters.size(); j++) {
@@ -1158,10 +1269,28 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         int32_t numMats = capCount(prS32());
         result.materialNames.resize(numMats);
         for (int i = 0; i < numMats; i++) result.materialNames[i] = prStr();
+        // T2 reads flags, reflectance, bump, detail in SEPARATE loops (not interleaved)
+        std::vector<uint32_t> rawFlagsVec(numMats);
+        for (int i = 0; i < numMats; i++) rawFlagsVec[i] = capCount(prS32()); // ALL flags
+        for (int i = 0; i < numMats; i++) capCount(prS32()); // ALL reflectance
+        for (int i = 0; i < numMats; i++) capCount(prS32()); // ALL bump
+        for (int i = 0; i < numMats; i++) capCount(prS32()); // ALL detail
+        if (ver > 11) for (int i = 0; i < numMats; i++) capCount(prS32()); // ALL detailScale
+        if (ver > 20) for (int i = 0; i < numMats; i++) capCount(prS32()); // ALL reflectionAmount
         for (int i = 0; i < numMats; i++) {
-            capCount(prS32()); capCount(prS32()); capCount(prS32()); capCount(prS32()); // matFlags, reflectance, bump, detail
-            capCount(prS32()); // dummy (v25+)
-            capCount(prS32()); // detailScale (float as S32)
+            uint32_t rawFlags = rawFlagsVec[i];
+            // Remap T2 bit layout to our internal flags:
+            // T2: S_Wrap=1<<0, T_Wrap=1<<1, Translucent=1<<2, Additive=1<<3,
+            //     SelfIlluminating=1<<5, NeverEnvMap=1<<6
+            // Ours: Translucent=1, Additive=2, SelfIllum=4, NeverEnvMap=8, SWrap=16, TWrap=32
+            uint32_t flags = 0;
+            if (rawFlags & (1 << 0)) flags |= 16; // S_Wrap
+            if (rawFlags & (1 << 1)) flags |= 32; // T_Wrap
+            if (rawFlags & (1 << 2)) flags |= 1;  // Translucent
+            if (rawFlags & (1 << 3)) flags |= 2;  // Additive
+            if (rawFlags & (1 << 5)) flags |= 4;  // SelfIlluminating
+            if (rawFlags & (1 << 6)) flags |= 8;  // NeverEnvMap
+            result.materialFlags.push_back(flags);
         }
     }
 
@@ -1172,7 +1301,11 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     struct MatSlot { int texIdx = -1; };
     std::vector<MatSlot> matSlots(result.materialNames.size());
     auto& fs = Engine::instance().fs();
-    static const char* texExts[] = {".png", ".bm8", ".jpg", ".jpeg", ".gif", ".bmp", ".tga", ".dds"};
+    static const char* texExts[] = {".bm8", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tga", ".dds"};
+
+    // materialFlags was populated from DTS material stream — save per-DTS-material
+    std::vector<uint32_t> dtsMatFlags = result.materialFlags;
+    result.materialFlags.clear();
 
     try {
     for (size_t i = 0; i < result.materialNames.size(); i++) {
@@ -1181,21 +1314,24 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
         std::string base = lower;
         for (auto* se : skipExts) if (hasExt(base, se)) { base = base.substr(0, base.size() - strlen(se)); break; }
-        std::vector<std::string> cands = {"textures/"+lower, "textures/"+base, lower, base};
+        std::string stripped = base;
+        if (stripped.size() > 2 && stripped.back() == 'c') stripped.pop_back();
+        std::vector<std::string> cands = {"textures/"+lower, "textures/"+base, "textures/"+stripped, lower, base, stripped};
         for (auto& c : cands)
             for (auto* e : texExts) {
-                auto d = fs.read((c + e).c_str());
-                if (!d.empty()) {
-                    Texture t;
-                    if (strcmp(e, ".bm8") == 0) t.loadBM8(d.data(), d.size());
-                    else t.load(d.data(), d.size());
-                    if (t.loaded) {
-                        matSlots[i].texIdx = (int)result.textures.size();
-                        result.textures.push_back(std::move(t));
-                        result.materialFlags.push_back(0);
-                        goto nextTex;
+                    auto d = fs.read((c + e).c_str());
+                    if (!d.empty()) {
+                        Texture t;
+                        if (strcmp(e, ".bm8") == 0) t.loadBM8(d.data(), d.size());
+                        else t.load(d.data(), d.size());
+                        if (t.loaded) {
+                            matSlots[i].texIdx = (int)result.textures.size();
+                            uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
+                            result.materialFlags.push_back(flags);
+                            result.textures.push_back(std::move(t));
+                            goto nextTex;
+                        }
                     }
-                }
             }
         nextTex:;
     }
@@ -1256,8 +1392,57 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     }
 
     result.loaded = !result.meshes.empty() && !result.nodes.empty();
+    result.meshTVerts = std::move(meshTVerts);
     Console::instance().printf(LogLevel::Info,
         "DTS: loaded '%s' (%zu meshes, %zu textures, %zu nodes, %zu anims)",
         name, result.meshes.size(), result.textures.size(), result.nodes.size(), result.animations.size());
+
+    // Debug dump for weapon_disc
+    {
+        std::string lower = name;
+        for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
+        if (lower.find("weapon_disc") != std::string::npos) {
+            auto& con = Console::instance();
+            con.printf(LogLevel::Info, "WEAPON_DISC DEBUG:");
+            con.printf(LogLevel::Info, "  Nodes (%zu):", result.nodes.size());
+            for (size_t i = 0; i < result.nodes.size(); i++) {
+                auto& nd = result.nodes[i];
+                con.printf(LogLevel::Info, "    [%zu] parent=%d name='%s'",
+                    i, nd.parentIndex, nd.name.c_str());
+            }
+            con.printf(LogLevel::Info, "  Default Local Transforms (%zu):", result.defaultLocalTransforms.size());
+            for (size_t i = 0; i < result.defaultLocalTransforms.size(); i++) {
+                auto& m = result.defaultLocalTransforms[i];
+                con.printf(LogLevel::Info, "    [%zu] T=(%.3f,%.3f,%.3f) R=(%.4f,%.4f,%.4f,%.4f)",
+                    i, m.m[0][3], m.m[1][3], m.m[2][3],
+                    /* quat approx */ 0.f, 0.f, 0.f, 0.f);
+            }
+            con.printf(LogLevel::Info, "  Default Transforms (world, %zu):", result.defaultTransforms.size());
+            for (size_t i = 0; i < result.defaultTransforms.size(); i++) {
+                auto& m = result.defaultTransforms[i];
+                con.printf(LogLevel::Info, "    [%zu] T=(%.3f,%.3f,%.3f)", i, m.m[0][3], m.m[1][3], m.m[2][3]);
+            }
+            con.printf(LogLevel::Info, "  Meshes (%zu):", result.meshes.size());
+            for (size_t i = 0; i < result.meshes.size(); i++) {
+                auto& m = result.meshes[i];
+                con.printf(LogLevel::Info, "    [%zu] node=%d verts=%zu matIdx=%d", i, m.nodeIndex, m.vertices.size(), m.materialIndex);
+            }
+            con.printf(LogLevel::Info, "  Animations (%zu):", result.animations.size());
+            for (size_t ai = 0; ai < result.animations.size(); ai++) {
+                auto& a = result.animations[ai];
+                con.printf(LogLevel::Info, "    [%zu] '%s' dur=%.3f loop=%d keyframes=%zu objKeyframes=%zu",
+                    ai, a.name.c_str(), a.duration, a.looping, a.keyframes.size(), a.objectKeyframes.size());
+                for (size_t ki = 0; ki < a.keyframes.size(); ki++) {
+                    auto& kf = a.keyframes[ki];
+                    con.printf(LogLevel::Info, "      kf[%zu] t=%.3f node=%d rot=(%.4f,%.4f,%.4f,%.4f) trans=(%.3f,%.3f,%.3f) hasR=%d hasT=%d",
+                        ki, kf.time, kf.nodeIndex,
+                        kf.rotation.x, kf.rotation.y, kf.rotation.z, kf.rotation.w,
+                        kf.translation.x, kf.translation.y, kf.translation.z,
+                        kf.hasRotation, kf.hasTranslation);
+                }
+            }
+        }
+    }
+
     return result;
 }

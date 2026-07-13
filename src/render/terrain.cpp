@@ -876,6 +876,7 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
         nodes = dtsResult.nodes;
         objectStartMesh = std::move(dtsResult.objectStartMesh);
         objectNumMeshes = std::move(dtsResult.objectNumMeshes);
+        meshTVerts = std::move(dtsResult.meshTVerts);
 
         if (details.empty()) {
             DTSShape::DetailLevel dl;
@@ -1009,6 +1010,9 @@ void DTSShape::render(int32_t detailLevel) {
         } else {
             if (shader) shader->setUniform("uUseTexture", (int32_t)0);
         }
+        // Alpha test: only for materials flagged Translucent or Additive
+        bool alphaTest = (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0;
+        if (shader) shader->setUniform("uAlphaTest", (int32_t)alphaTest);
 
         // Bind lightmap if material uses one
         int lmIdx = (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
@@ -1064,7 +1068,314 @@ void DTSShape::render(int32_t detailLevel) {
 
 void DTSShape::renderAnimation(const char* animName, float time) {
     if (!loaded) return;
-    // Bone animation transform rebuild produces wrong results.
-    // Fall back to static render. Vis/frame animation handled in game loop.
-    render(0);
+
+    // Find the animation
+    const Animation* anim = nullptr;
+    for (auto& a : animations) {
+        if (a.name == animName) { anim = &a; break; }
+    }
+    if (!anim) { render(0); return; }
+
+    // Wrap time for looping animations
+    float t = time;
+    if (anim->duration > 0.0f) {
+        if (anim->looping) {
+            t = fmodf(t, anim->duration);
+            if (t < 0.0f) t += anim->duration;
+        } else {
+            t = std::max(0.0f, std::min(t, anim->duration));
+        }
+    }
+
+    int32_t numNodes = (int32_t)nodes.size();
+    if (numNodes <= 0) { render(0); return; }
+
+    // ── Step 1: Per-node interpolated rotation & translation (from keyframes) ──
+    std::vector<QuatF> nodeRot(numNodes, {0, 0, 0, 1});
+    std::vector<Point3F> nodeTrans(numNodes, {0, 0, 0});
+    std::vector<Point3F> nodeScale(numNodes, {1, 1, 1});
+    std::vector<bool> rotSet(numNodes, false), transSet(numNodes, false), scaleSet(numNodes, false);
+
+    // Group keyframes by node — keyframes are sorted by (nodeIndex, time) from dts_loader.
+    // For each animated node, find bracketing keyframes and interpolate.
+    size_t ki = 0;
+    while (ki < anim->keyframes.size()) {
+        int32_t ni = anim->keyframes[ki].nodeIndex;
+        if (ni < 0 || ni >= numNodes) { ki++; continue; }
+
+        // Collect all keyframes for this node (contiguous since sorted by nodeIndex)
+        size_t start = ki;
+        while (ki < anim->keyframes.size() && anim->keyframes[ki].nodeIndex == ni) ki++;
+        size_t end = ki;
+
+        // Find bracketing pair for rotation
+        if (!rotSet[ni]) {
+            const Keyframe* kf0 = nullptr;
+            const Keyframe* kf1 = nullptr;
+            for (size_t j = start; j < end; j++) {
+                if (!anim->keyframes[j].hasRotation) continue;
+                if (anim->keyframes[j].time <= t) {
+                    if (!kf0 || anim->keyframes[j].time >= kf0->time) kf0 = &anim->keyframes[j];
+                }
+                if (anim->keyframes[j].time >= t) {
+                    if (!kf1 || anim->keyframes[j].time <= kf1->time) kf1 = &anim->keyframes[j];
+                }
+            }
+            if (kf0 && kf1) {
+                if (kf0 == kf1 || std::abs(kf1->time - kf0->time) < 0.0001f) {
+                    nodeRot[ni] = kf0->rotation;
+                } else {
+                    float alpha = (t - kf0->time) / (kf1->time - kf0->time);
+                    nodeRot[ni] = Math::quatSlerp(kf0->rotation, kf1->rotation, alpha);
+                }
+            } else if (kf0) {
+                nodeRot[ni] = kf0->rotation;
+            }
+            if (kf0) rotSet[ni] = true;
+        }
+
+        // Find bracketing pair for translation
+        if (!transSet[ni]) {
+            const Keyframe* kf0 = nullptr;
+            const Keyframe* kf1 = nullptr;
+            for (size_t j = start; j < end; j++) {
+                if (!anim->keyframes[j].hasTranslation) continue;
+                if (anim->keyframes[j].time <= t) {
+                    if (!kf0 || anim->keyframes[j].time >= kf0->time) kf0 = &anim->keyframes[j];
+                }
+                if (anim->keyframes[j].time >= t) {
+                    if (!kf1 || anim->keyframes[j].time <= kf1->time) kf1 = &anim->keyframes[j];
+                }
+            }
+            if (kf0 && kf1) {
+                if (kf0 == kf1 || std::abs(kf1->time - kf0->time) < 0.0001f) {
+                    nodeTrans[ni] = kf0->translation;
+                } else {
+                    float alpha = (t - kf0->time) / (kf1->time - kf0->time);
+                    nodeTrans[ni].x = kf0->translation.x + alpha * (kf1->translation.x - kf0->translation.x);
+                    nodeTrans[ni].y = kf0->translation.y + alpha * (kf1->translation.y - kf0->translation.y);
+                    nodeTrans[ni].z = kf0->translation.z + alpha * (kf1->translation.z - kf0->translation.z);
+                }
+            } else if (kf0) {
+                nodeTrans[ni] = kf0->translation;
+            }
+            if (kf0) transSet[ni] = true;
+        }
+
+        // Find bracketing pair for scale
+        if (!scaleSet[ni]) {
+            const Keyframe* kf0 = nullptr;
+            const Keyframe* kf1 = nullptr;
+            for (size_t j = start; j < end; j++) {
+                if (!anim->keyframes[j].hasScale) continue;
+                if (anim->keyframes[j].time <= t) {
+                    if (!kf0 || anim->keyframes[j].time >= kf0->time) kf0 = &anim->keyframes[j];
+                }
+                if (anim->keyframes[j].time >= t) {
+                    if (!kf1 || anim->keyframes[j].time <= kf1->time) kf1 = &anim->keyframes[j];
+                }
+            }
+            if (kf0 && kf1) {
+                if (kf0 == kf1 || std::abs(kf1->time - kf0->time) < 0.0001f) {
+                    nodeScale[ni] = kf0->scale;
+                } else {
+                    float alpha = (t - kf0->time) / (kf1->time - kf0->time);
+                    nodeScale[ni].x = kf0->scale.x + alpha * (kf1->scale.x - kf0->scale.x);
+                    nodeScale[ni].y = kf0->scale.y + alpha * (kf1->scale.y - kf0->scale.y);
+                    nodeScale[ni].z = kf0->scale.z + alpha * (kf1->scale.z - kf0->scale.z);
+                }
+            } else if (kf0) {
+                nodeScale[ni] = kf0->scale;
+            }
+            if (kf0) scaleSet[ni] = true;
+        }
+    }
+
+    // ── Step 2: Fill in defaults for unanimated components from bind pose ──
+    for (int32_t i = 0; i < numNodes; i++) {
+        if (!rotSet[i]) {
+            nodeRot[i] = QuatF::fromMatrix(defaultLocalTransforms[i]);
+        }
+        if (!transSet[i]) {
+            nodeTrans[i] = {defaultLocalTransforms[i].m[0][3],
+                           defaultLocalTransforms[i].m[1][3],
+                           defaultLocalTransforms[i].m[2][3]};
+        }
+        if (!scaleSet[i]) {
+            nodeScale[i] = {1, 1, 1};
+        }
+    }
+
+    // ── Step 3: Build local matrices and compose world transforms ──
+    // T2: setMatrix(rot, trans, &local) then world[i] = world[parent] * local
+    std::vector<MatrixF> nodeWorld(numNodes);
+    for (int32_t i = 0; i < numNodes; i++) {
+        MatrixF local;
+        if (rotSet[i] || transSet[i] || scaleSet[i]) {
+            // At least one component was animated — build from interpolated values
+            local = nodeRot[i].toMatrix();
+            MatrixF scaleMat;
+            scaleMat.identity();
+            scaleMat.setScale(nodeScale[i]);
+            local = local * scaleMat;
+            local.m[0][3] = nodeTrans[i].x;
+            local.m[1][3] = nodeTrans[i].y;
+            local.m[2][3] = nodeTrans[i].z;
+            local.m[3][3] = 1.0f;
+        } else {
+            // Fully unanimated — use bind-pose local transform directly
+            local = defaultLocalTransforms[i];
+        }
+
+        // Compose with parent
+        int32_t pi = nodes[i].parentIndex;
+        if (pi >= 0 && pi < numNodes)
+            nodeWorld[i] = nodeWorld[pi] * local;
+        else
+            nodeWorld[i] = local;
+    }
+
+    // ── Step 4: Handle object-level vis/frame/matFrame animation ──
+    std::vector<bool> objectVisible(objectStartMesh.size() > 0 ? objectStartMesh.size() : defaultTransforms.size(), true);
+    std::vector<int32_t> objectMatFrame(objectVisible.size(), 0);
+    if (!anim->objectKeyframes.empty()) {
+        for (size_t okfIdx = 0; okfIdx < anim->objectKeyframes.size(); ) {
+            const auto& okf = anim->objectKeyframes[okfIdx];
+            int32_t objIdx = okf.objectIndex;
+            if (objIdx < 0 || objIdx >= (int32_t)objectVisible.size()) { okfIdx++; continue; }
+            float lastVis = 1.0f;
+            int32_t lastMatFrame = 0;
+            while (okfIdx < anim->objectKeyframes.size() &&
+                   anim->objectKeyframes[okfIdx].objectIndex == objIdx) {
+                if (anim->objectKeyframes[okfIdx].time <= t) {
+                    lastVis = anim->objectKeyframes[okfIdx].vis;
+                    lastMatFrame = anim->objectKeyframes[okfIdx].matFrameIndex;
+                }
+                okfIdx++;
+            }
+            objectVisible[objIdx] = (lastVis > 0.5f);
+            objectMatFrame[objIdx] = lastMatFrame;
+        }
+    }
+
+    // ── Step 5: Render with animated transforms ──
+    auto* shader = ShaderManager::getDefaultShader();
+    if (shader) shader->bind();
+    auto& r = Engine::instance().renderer();
+    shader->setUniform("uProjection", r.projection);
+    shader->setUniform("uView", r.view);
+    shader->setUniform("uCamPos", r.cameraPos);
+    if (shader) shader->setUniform("uShadowStrength", 0.0f);
+
+    const MatrixF baseModel = r.modelMatrix();
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+
+    for (size_t mi = 0; mi < meshes.size(); mi++) {
+        MeshData& mesh = meshes[mi];
+
+        // Check object visibility for vis/frame animation
+        // Need to find which object this mesh belongs to
+        bool meshVisible = true;
+        for (size_t oi = 0; oi < objectStartMesh.size(); oi++) {
+            if (mi >= (size_t)objectStartMesh[oi] &&
+                mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi])) {
+                if (oi < objectVisible.size())
+                    meshVisible = objectVisible[oi];
+                break;
+            }
+        }
+        if (!meshVisible) continue;
+
+        // Apply material frame animation (matFrameIndex shifts tvert UVs)
+        {
+            int32_t objForMesh = -1;
+            for (size_t oi = 0; oi < objectStartMesh.size(); oi++) {
+                if (mi >= (size_t)objectStartMesh[oi] &&
+                    mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi])) {
+                    objForMesh = (int32_t)oi; break;
+                }
+            }
+            int32_t mf = 0;
+            if (objForMesh >= 0 && objForMesh < (int32_t)objectMatFrame.size())
+                mf = objectMatFrame[objForMesh];
+            if (mi < meshTVerts.size())
+                mesh.remapUVs(mf, meshTVerts[mi]);
+        }
+
+        // Apply skinned mesh deformation if needed
+        if (mi < skins.size() && skins[mi].hasSkin) {
+            updateSkinnedMesh(mesh, skins[mi], nodeWorld, defaultTransforms);
+            r.setModel(baseModel);
+        } else {
+            MatrixF fm = baseModel;
+            if (mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)nodeWorld.size())
+                fm = baseModel * nodeWorld[mesh.nodeIndex];
+            r.setModel(fm);
+        }
+
+        // Bind texture and set material properties (same as render())
+        uint32_t flags = 0;
+        if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialTextures.size()) {
+            auto& tex = materialTextures[mesh.materialIndex];
+            if (tex.loaded) {
+                tex.bind(0);
+                if (shader) shader->setUniform("uUseTexture", (int32_t)1);
+            } else {
+                if (shader) shader->setUniform("uUseTexture", (int32_t)0);
+            }
+            if (mesh.materialIndex < (int)materialFlags.size())
+                flags = materialFlags[mesh.materialIndex];
+        } else {
+            if (shader) shader->setUniform("uUseTexture", (int32_t)0);
+        }
+        bool alphaTest = (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0;
+        if (shader) shader->setUniform("uAlphaTest", (int32_t)alphaTest);
+
+        // Lightmap
+        int lmIdx = (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
+            ? materialLightmapIndex[mesh.materialIdx] : -1;
+        if (lmIdx >= 0 && lmIdx < (int)lightmaps.size() && lightmaps[lmIdx].loaded) {
+            lightmaps[lmIdx].bind(1);
+            if (shader) shader->setUniform("uLightmap", (int32_t)1);
+            if (shader) shader->setUniform("uUseLightmap", (int32_t)1);
+        } else {
+            if (shader) shader->setUniform("uUseLightmap", (int32_t)0);
+        }
+
+        // Blend mode
+        if (flags & MatFlag_Additive) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            glDepthMask(GL_FALSE);
+        } else if (flags & MatFlag_Translucent) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        } else {
+            glDisable(GL_BLEND);
+            glDepthMask(GL_TRUE);
+        }
+
+        if (shader) shader->setUniform("uSelfIlluminated", (int32_t)((flags & MatFlag_SelfIlluminating) ? 1 : 0));
+
+        float metallic = 0.0f, roughness = 0.5f;
+        if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialMetallic.size()) {
+            metallic = materialMetallic[mesh.materialIndex];
+            roughness = materialRoughness[mesh.materialIndex];
+        }
+        if (shader) shader->setUniform("uMetallic", metallic);
+        if (shader) shader->setUniform("uRoughness", roughness);
+
+        bool useEnvMap = false;
+        auto& ren = Engine::instance().renderer();
+        if (ren.sky && ren.sky->emap.loaded && !(flags & MatFlag_NeverEnvMap))
+            useEnvMap = true;
+        if (shader) shader->setUniform("uUseEnvMap", (int32_t)(useEnvMap ? 1 : 0));
+
+        mesh.render();
+    }
+
+    glCullFace(GL_BACK);
+    glEnable(GL_CULL_FACE);
 }
