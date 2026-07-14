@@ -1069,6 +1069,7 @@ void DTSShape::render(int32_t detailLevel) {
 
     // Pass 2: Translucent meshes (depth writes OFF, blending ON)
     glDepthMask(GL_FALSE);
+    glDepthFunc(GL_LEQUAL);
     glEnable(GL_BLEND);
     for (size_t mi = 0; mi < meshes.size(); mi++) {
         uint32_t f = 0;
@@ -1080,6 +1081,7 @@ void DTSShape::render(int32_t detailLevel) {
 
     // Restore GL state
     glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
     glDisable(GL_BLEND);
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
