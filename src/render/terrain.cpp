@@ -1010,8 +1010,7 @@ void DTSShape::render(int32_t detailLevel) {
         } else {
             if (shader) shader->setUniform("uUseTexture", (int32_t)0);
         }
-        // T2 always forces Translucent on all materials — blending always enabled
-        // Alpha test: only for materials with Translucent flag (palette alpha matters only for these)
+        // Alpha test: only for materials flagged Translucent or Additive
         bool alphaTest = (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0;
         if (shader) shader->setUniform("uAlphaTest", (int32_t)alphaTest);
 

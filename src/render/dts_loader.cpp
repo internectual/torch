@@ -454,16 +454,17 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         int32_t numMats = rS32();
         result.materialNames.resize(numMats);
         result.materialFlags.resize(numMats, 0);
+        // Old format: flags/reflectance/bump/detail are interleaved per material in the stream
         for (int i = 0; i < numMats; i++) {
             uint32_t rawFlags = rS32();
             // Remap T2 bit layout
             uint32_t flags = 0;
-            if (rawFlags & (1 << 0)) flags |= 16; // S_Wrap
-            if (rawFlags & (1 << 1)) flags |= 32; // T_Wrap
-            if (rawFlags & (1 << 2)) flags |= 1;  // Translucent
-            if (rawFlags & (1 << 3)) flags |= 2;  // Additive
-            if (rawFlags & (1 << 5)) flags |= 4;  // SelfIlluminating
-            if (rawFlags & (1 << 6)) flags |= 8;  // NeverEnvMap
+            if (rawFlags & (1 << 0)) flags |= 16;
+            if (rawFlags & (1 << 1)) flags |= 32;
+            if (rawFlags & (1 << 2)) flags |= 1;
+            if (rawFlags & (1 << 3)) flags |= 2;
+            if (rawFlags & (1 << 5)) flags |= 4;
+            if (rawFlags & (1 << 6)) flags |= 8;
             result.materialFlags[i] = flags;
             rS32(); rS32(); rS32(); // reflectance, bump, detail
             int32_t nameLen = rS32();
@@ -586,7 +587,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     std::vector<MatSlot> matSlots(result.materialNames.size());
     auto& fs = Engine::instance().fs();
     static const char* texExts[] = {".bm8", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tga", ".dds"};
-    static const char* skipExts[] = {".dds", ".png", ".jpg", ".bmp", ".tga"};
+    static const char* skipExts[] = {".dds", ".png", ".jpg", ".bmp", ".tga", ".ifl", ".iflod", ".dml", ".mis"};
     auto hasExt = [](const std::string& s, const char* ext) {
         size_t el = strlen(ext);
         return s.size() >= el && s.compare(s.size() - el, el, ext) == 0;
@@ -599,10 +600,52 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
         std::string base = lower;
         for (auto* se : skipExts) if (hasExt(base, se)) { base = base.substr(0, base.size() - strlen(se)); break; }
-        // T2 convention: material names ending in 'C' are variants — try without the suffix too
         std::string stripped = base;
         if (stripped.size() > 2 && stripped.back() == 'c') stripped.pop_back();
         std::vector<std::string> cands = {"textures/"+lower, "textures/"+base, "textures/"+stripped, lower, base, stripped};
+
+        // IFL (Image File List) support: parse the .ifl file and load the first frame
+        if (lower.size() > 4 && lower.substr(lower.size() - 4) == ".ifl") {
+            bool loaded = false;
+            for (auto* prefix : {"textures/", ""}) {
+                if (loaded) break;
+                auto iflData = fs.read((prefix + lower).c_str());
+                if (iflData.empty()) continue;
+                std::string iflContent(iflData.begin(), iflData.end());
+                size_t lineEnd = iflContent.find('\n');
+                std::string firstLine = (lineEnd != std::string::npos) ? iflContent.substr(0, lineEnd) : iflContent;
+                size_t spacePos = firstLine.find(' ');
+                std::string texName = (spacePos != std::string::npos) ? firstLine.substr(0, spacePos) : firstLine;
+                while (!texName.empty() && texName.back() <= ' ') texName.pop_back();
+                while (!texName.empty() && texName.front() <= ' ') texName.erase(0, 1);
+                if (texName.empty()) continue;
+                std::string texLower = texName;
+                for (auto& c : texLower) c = (char)std::tolower((unsigned char)c);
+                std::vector<std::string> texCands = {prefix + texLower, "textures/" + texLower};
+                for (auto& tc : texCands) {
+                    if (loaded) break;
+                    for (auto* e : texExts) {
+                        auto d = fs.read((tc + e).c_str());
+                        if (!d.empty()) {
+                            Texture t;
+                            if (strcmp(e, ".bm8") == 0) t.loadBM8(d.data(), d.size());
+                            else t.load(d.data(), d.size());
+                            if (t.loaded) {
+                                matSlots[i].texIdx = (int)result.textures.size();
+                                uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
+                                result.materialFlags.push_back(flags);
+                                result.textures.push_back(std::move(t));
+                                loaded = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            goto nextTexOld;
+        }
+
+        // cands already declared above before IFL check
         for (auto& c : cands)
             for (auto* e : texExts) {
                 auto d = fs.read((c + e).c_str());
@@ -1317,6 +1360,49 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         std::string stripped = base;
         if (stripped.size() > 2 && stripped.back() == 'c') stripped.pop_back();
         std::vector<std::string> cands = {"textures/"+lower, "textures/"+base, "textures/"+stripped, lower, base, stripped};
+
+        // IFL (Image File List) support
+        if (lower.size() > 4 && lower.substr(lower.size() - 4) == ".ifl") {
+            bool loaded = false;
+            for (auto* prefix : {"textures/", ""}) {
+                if (loaded) break;
+                auto iflData = fs.read((prefix + lower).c_str());
+                if (iflData.empty()) continue;
+                std::string iflContent(iflData.begin(), iflData.end());
+                size_t lineEnd = iflContent.find('\n');
+                std::string firstLine = (lineEnd != std::string::npos) ? iflContent.substr(0, lineEnd) : iflContent;
+                size_t spacePos = firstLine.find(' ');
+                std::string texName = (spacePos != std::string::npos) ? firstLine.substr(0, spacePos) : firstLine;
+                while (!texName.empty() && texName.back() <= ' ') texName.pop_back();
+                while (!texName.empty() && texName.front() <= ' ') texName.erase(0, 1);
+                if (texName.empty()) continue;
+                std::string texLower = texName;
+                for (auto& c : texLower) c = (char)std::tolower((unsigned char)c);
+                std::vector<std::string> texCands = {prefix + texLower, "textures/" + texLower};
+                for (auto& tc : texCands) {
+                    if (loaded) break;
+                    for (auto* e : texExts) {
+                        auto d = fs.read((tc + e).c_str());
+                        if (!d.empty()) {
+                            Texture t;
+                            if (strcmp(e, ".bm8") == 0) t.loadBM8(d.data(), d.size());
+                            else t.load(d.data(), d.size());
+                            if (t.loaded) {
+                                matSlots[i].texIdx = (int)result.textures.size();
+                                uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
+                                result.materialFlags.push_back(flags);
+                                result.textures.push_back(std::move(t));
+                                loaded = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            goto nextTex;
+        }
+
+        // cands already declared above before IFL check
         for (auto& c : cands)
             for (auto* e : texExts) {
                     auto d = fs.read((c + e).c_str());
