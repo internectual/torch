@@ -566,8 +566,16 @@ void Texture::load(const uint8_t* data, size_t size) {
     }
     loadRaw(pixels, w, h, 4);
     if (loaded) {
-        for (size_t i = 3; i < (size_t)(w * h * 4); i += 4)
-            if (pixels[i] < 250) { hasAlpha = true; break; }
+        int64_t total = 0, zeroAlpha = 0, nearZeroAlpha = 0;
+        for (size_t i = 0; i < (size_t)(w * h * 4); i += 4) {
+            total++;
+            uint8_t a = pixels[i + 3];
+            if (a == 0) zeroAlpha++;
+            else if (a <= 10) nearZeroAlpha++;
+        }
+        alphaZeroRatio = total > 0 ? (float)((double)zeroAlpha / (double)total) : 0.0f;
+        nearZeroAlphaRatio = total > 0 ? (float)((double)nearZeroAlpha / (double)total) : 0.0f;
+        hasAlpha = alphaZeroRatio > 0.6f;
     }
     stbi_image_free(pixels);
 }
@@ -608,6 +616,18 @@ bool Texture::decodeBM8(const uint8_t* data, size_t size,
     uint8_t palette[1024];
     memcpy(palette, data + paletteStart, 1024);
 
+    // Read palette type: RGB(0) or RGBA(1)
+    // T2 uploads RGB palettes as GL_RGB (no alpha) — all pixels are opaque
+    uint32_t palType = 0;
+    memcpy(&palType, data + mipDataStart + 4, 4);
+    bool isRGB = (palType == 0);
+
+    // For RGB palettes, alpha channel is unused — force all to 255 (opaque)
+    if (isRGB) {
+        for (int i = 0; i < 256; i++)
+            palette[i * 4 + 3] = 255;
+    }
+
     uint32_t pixelCount = w * h;
     if (pixelCount > byteSize) pixelCount = byteSize;
 
@@ -630,12 +650,15 @@ bool Texture::loadBM8(const uint8_t* data, size_t size) {
     if (!decodeBM8(data, size, rgba, w, h)) return false;
     loadRaw(rgba.data(), w, h, 4);
     if (loaded) {
-        int64_t total = 0, zeroAlpha = 0;
+        int64_t total = 0, zeroAlpha = 0, nearZeroAlpha = 0;
         for (size_t i = 0; i < rgba.size(); i += 4) {
             total++;
-            if (rgba[i + 3] == 0) zeroAlpha++;
+            uint8_t a = rgba[i + 3];
+            if (a == 0) zeroAlpha++;
+            else if (a <= 10) nearZeroAlpha++;
         }
         alphaZeroRatio = total > 0 ? (float)((double)zeroAlpha / (double)total) : 0.0f;
+        nearZeroAlphaRatio = total > 0 ? (float)((double)nearZeroAlpha / (double)total) : 0.0f;
         hasAlpha = alphaZeroRatio > 0.6f;
     }
     return loaded;

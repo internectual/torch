@@ -59,7 +59,8 @@ struct Texture {
     int32_t format{};
     bool loaded = false;
     bool hasAlpha = false;
-    float alphaZeroRatio = 0.0f; // fraction of pixels with alpha == 0
+    float alphaZeroRatio = 0.0f;      // fraction of pixels with alpha == 0
+    float nearZeroAlphaRatio = 0.0f;  // fraction of pixels with 0 < alpha <= 10
     void load(const uint8_t* data, size_t size);
     bool loadBM8(const uint8_t* data, size_t size);
     void loadRaw(const uint8_t* pixels, int32_t w, int32_t h, int32_t channels);
@@ -129,6 +130,7 @@ struct DTSShape {
     struct DetailLevel {
         float size;
         int32_t meshIndex;
+        std::vector<int32_t> meshIndices; // actual mesh indices for this detail level
     };
     std::vector<DetailLevel> details;
     struct Node {

@@ -985,8 +985,12 @@ void DTSShape::render(int32_t detailLevel) {
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
 
-    // Two-pass rendering: opaque first, then translucent (correct depth ordering)
-    auto renderMesh = [&](size_t mi) {
+    // T2 fadeSet: force alpha test + translucent blending for ALL materials.
+    // For RGB textures (alpha=255), this changes nothing. For RGBA textures,
+    // alpha=0 pixels are discarded and the rest blend correctly.
+    // Two-pass: textures with alphaZeroRatio=0 render opaque (depth writes ON),
+    // textures with alphaZeroRatio>0 render translucent (depth writes OFF, blending ON).
+    auto renderMesh = [&](size_t mi, bool doBlend) {
         MeshData& mesh = meshes[mi];
         if (mi < skins.size() && skins[mi].hasSkin) {
             updateSkinnedMesh(mesh, skins[mi], nodeWorld, defaultTransforms);
@@ -1011,6 +1015,8 @@ void DTSShape::render(int32_t detailLevel) {
         } else {
             if (shader) shader->setUniform("uUseTexture", (int32_t)0);
         }
+
+        // Alpha test only for materials with Translucent or Additive flags
         bool alphaTest = (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0;
         if (shader) shader->setUniform("uAlphaTest", (int32_t)alphaTest);
 
@@ -1024,11 +1030,12 @@ void DTSShape::render(int32_t detailLevel) {
             if (shader) shader->setUniform("uUseLightmap", (int32_t)0);
         }
 
+        // T2 fadeSet: all materials get translucent blending
         if (flags & MatFlag_Additive) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             glDepthMask(GL_FALSE);
-        } else if (flags & MatFlag_Translucent) {
+        } else if (doBlend) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glDepthMask(GL_FALSE);
@@ -1056,27 +1063,43 @@ void DTSShape::render(int32_t detailLevel) {
         mesh.render();
     };
 
-    // Pass 1: Opaque meshes (depth writes ON, no blending)
-    glDepthMask(GL_TRUE);
-    glDisable(GL_BLEND);
-    for (size_t mi = 0; mi < meshes.size(); mi++) {
-        uint32_t f = 0;
-        if (meshes[mi].materialIndex >= 0 && meshes[mi].materialIndex < (int)materialFlags.size())
-            f = materialFlags[meshes[mi].materialIndex];
-        if (!(f & (MatFlag_Translucent | MatFlag_Additive)))
-            renderMesh(mi);
+    // Classify meshes by material flags (Translucent/Additive → translucent pass)
+    auto needsTranslucent = [&](size_t mi) -> bool {
+        if (mi >= meshes.size()) return false;
+        int32_t matIdx = meshes[mi].materialIndex;
+        if (matIdx >= 0 && matIdx < (int)materialFlags.size())
+            return (materialFlags[matIdx] & (MatFlag_Translucent | MatFlag_Additive)) != 0;
+        return false;
+    };
+
+    // Determine which meshes to render for the selected detail level
+    std::vector<size_t> renderList;
+    if (detailLevel >= 0 && detailLevel < (int)details.size() && !details[detailLevel].meshIndices.empty()) {
+        renderList.reserve(details[detailLevel].meshIndices.size());
+        for (int32_t mi : details[detailLevel].meshIndices) {
+            if (mi >= 0 && mi < (int)meshes.size())
+                renderList.push_back((size_t)mi);
+        }
+    } else {
+        renderList.reserve(meshes.size());
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+            renderList.push_back(mi);
     }
 
-    // Pass 2: Translucent meshes (depth writes OFF, blending ON)
+    // Pass 1: Opaque meshes
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    for (size_t mi : renderList) {
+        if (!needsTranslucent(mi))
+            renderMesh(mi, false);
+    }
+
+    // Pass 2: Translucent meshes
     glDepthMask(GL_FALSE);
     glDepthFunc(GL_LEQUAL);
-    glEnable(GL_BLEND);
-    for (size_t mi = 0; mi < meshes.size(); mi++) {
-        uint32_t f = 0;
-        if (meshes[mi].materialIndex >= 0 && meshes[mi].materialIndex < (int)materialFlags.size())
-            f = materialFlags[meshes[mi].materialIndex];
-        if (f & (MatFlag_Translucent | MatFlag_Additive))
-            renderMesh(mi);
+    for (size_t mi : renderList) {
+        if (needsTranslucent(mi))
+            renderMesh(mi, true);
     }
 
     // Restore GL state
@@ -1293,41 +1316,19 @@ void DTSShape::renderAnimation(const char* animName, float time) {
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
 
-    // Reset GL state
-    glDepthMask(GL_TRUE);
-    glDisable(GL_BLEND);
+    // Classify meshes by material flags (same as render())
+    auto needsTranslucent = [&](size_t mi) -> bool {
+        if (mi >= meshes.size()) return false;
+        int32_t matIdx = meshes[mi].materialIndex;
+        if (matIdx >= 0 && matIdx < (int)materialFlags.size())
+            return (materialFlags[matIdx] & (MatFlag_Translucent | MatFlag_Additive)) != 0;
+        return false;
+    };
 
-    for (size_t mi = 0; mi < meshes.size(); mi++) {
+    // Pre-setup: determine mesh visibility, apply matFrame UVs, apply skinning
+    // Two-pass render: opaque first (depth writes ON), then translucent (blending ON)
+    auto renderAnimMesh = [&](size_t mi, bool doBlend) {
         MeshData& mesh = meshes[mi];
-
-        // Check object visibility for vis/frame animation
-        // Need to find which object this mesh belongs to
-        bool meshVisible = true;
-        for (size_t oi = 0; oi < objectStartMesh.size(); oi++) {
-            if (mi >= (size_t)objectStartMesh[oi] &&
-                mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi])) {
-                if (oi < objectVisible.size())
-                    meshVisible = objectVisible[oi];
-                break;
-            }
-        }
-        if (!meshVisible) continue;
-
-        // Apply material frame animation (matFrameIndex shifts tvert UVs)
-        {
-            int32_t objForMesh = -1;
-            for (size_t oi = 0; oi < objectStartMesh.size(); oi++) {
-                if (mi >= (size_t)objectStartMesh[oi] &&
-                    mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi])) {
-                    objForMesh = (int32_t)oi; break;
-                }
-            }
-            int32_t mf = 0;
-            if (objForMesh >= 0 && objForMesh < (int32_t)objectMatFrame.size())
-                mf = objectMatFrame[objForMesh];
-            if (mi < meshTVerts.size())
-                mesh.remapUVs(mf, meshTVerts[mi]);
-        }
 
         // Apply skinned mesh deformation if needed
         if (mi < skins.size() && skins[mi].hasSkin) {
@@ -1340,7 +1341,7 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             r.setModel(fm);
         }
 
-        // Bind texture and set material properties (same as render())
+        // Bind texture and set material properties
         uint32_t flags = 0;
         if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialTextures.size()) {
             auto& tex = materialTextures[mesh.materialIndex];
@@ -1355,7 +1356,8 @@ void DTSShape::renderAnimation(const char* animName, float time) {
         } else {
             if (shader) shader->setUniform("uUseTexture", (int32_t)0);
         }
-        // Alpha test: only for materials flagged Translucent or Additive
+
+        // Alpha test only for materials with Translucent or Additive flags
         bool alphaTest = (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0;
         if (shader) shader->setUniform("uAlphaTest", (int32_t)alphaTest);
 
@@ -1370,12 +1372,12 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             if (shader) shader->setUniform("uUseLightmap", (int32_t)0);
         }
 
-        // Blend mode
+        // T2 fadeSet: all materials get translucent blending
         if (flags & MatFlag_Additive) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             glDepthMask(GL_FALSE);
-        } else if (flags & MatFlag_Translucent) {
+        } else if (doBlend) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glDepthMask(GL_FALSE);
@@ -1401,9 +1403,97 @@ void DTSShape::renderAnimation(const char* animName, float time) {
         if (shader) shader->setUniform("uUseEnvMap", (int32_t)(useEnvMap ? 1 : 0));
 
         mesh.render();
+    };
+
+    // Determine which meshes to render for the selected detail level
+    std::vector<size_t> renderList;
+    {
+        int32_t dl = 0; // default to highest detail
+        if (dl >= 0 && dl < (int)details.size() && !details[dl].meshIndices.empty()) {
+            renderList.reserve(details[dl].meshIndices.size());
+            for (int32_t mi : details[dl].meshIndices) {
+                if (mi >= 0 && mi < (int)meshes.size())
+                    renderList.push_back((size_t)mi);
+            }
+        } else {
+            renderList.reserve(meshes.size());
+            for (size_t mi = 0; mi < meshes.size(); mi++)
+                renderList.push_back(mi);
+        }
+    }
+
+    // Pass 1: Opaque meshes
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    for (size_t mi : renderList) {
+        // Check object visibility
+        bool meshVisible = true;
+        for (size_t oi = 0; oi < objectStartMesh.size(); oi++) {
+            if (mi >= (size_t)objectStartMesh[oi] &&
+                mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi])) {
+                if (oi < objectVisible.size())
+                    meshVisible = objectVisible[oi];
+                break;
+            }
+        }
+        if (!meshVisible) continue;
+
+        // Apply material frame animation
+        {
+            int32_t objForMesh = -1;
+            for (size_t oi = 0; oi < objectStartMesh.size(); oi++) {
+                if (mi >= (size_t)objectStartMesh[oi] &&
+                    mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi])) {
+                    objForMesh = (int32_t)oi; break;
+                }
+            }
+            int32_t mf = 0;
+            if (objForMesh >= 0 && objForMesh < (int32_t)objectMatFrame.size())
+                mf = objectMatFrame[objForMesh];
+            if (mi < meshTVerts.size())
+                meshes[mi].remapUVs(mf, meshTVerts[mi]);
+        }
+
+        if (!needsTranslucent(mi))
+            renderAnimMesh(mi, false);
+    }
+
+    // Pass 2: Translucent meshes
+    glDepthMask(GL_FALSE);
+    glDepthFunc(GL_LEQUAL);
+    for (size_t mi : renderList) {
+        bool meshVisible = true;
+        for (size_t oi = 0; oi < objectStartMesh.size(); oi++) {
+            if (mi >= (size_t)objectStartMesh[oi] &&
+                mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi])) {
+                if (oi < objectVisible.size())
+                    meshVisible = objectVisible[oi];
+                break;
+            }
+        }
+        if (!meshVisible) continue;
+
+        {
+            int32_t objForMesh = -1;
+            for (size_t oi = 0; oi < objectStartMesh.size(); oi++) {
+                if (mi >= (size_t)objectStartMesh[oi] &&
+                    mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi])) {
+                    objForMesh = (int32_t)oi; break;
+                }
+            }
+            int32_t mf = 0;
+            if (objForMesh >= 0 && objForMesh < (int32_t)objectMatFrame.size())
+                mf = objectMatFrame[objForMesh];
+            if (mi < meshTVerts.size())
+                meshes[mi].remapUVs(mf, meshTVerts[mi]);
+        }
+
+        if (needsTranslucent(mi))
+            renderAnimMesh(mi, true);
     }
 
     glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
     glDisable(GL_BLEND);
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);

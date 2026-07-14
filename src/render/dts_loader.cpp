@@ -793,10 +793,21 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     buf.checkGuard(); // 11
     for (int i = 0; i < numTriggers; i++) { buf.readU32(); buf.readF32(); }
     buf.checkGuard(); // 12
+
+    // ─── Detail levels ─────────────────────────────────────────────
+    // T2 Detail: nameIndex(S32), subShapeNum(S32), objectDetailNum(S32),
+    //            size(F32), averageError(F32), maxError(F32), polyCount(S32)
+    // "If size < 0 then the detail level will never be selected by the
+    //  standard detail selection process... utility details (collision, etc.)"
+    struct DtsDetail { int32_t nameIdx, subShape, objDetail; float size; };
+    std::vector<DtsDetail> dtsDetails(numDetails);
     for (int i = 0; i < numDetails; i++) {
-        capCount(buf.readS32()); capCount(buf.readS32()); capCount(buf.readS32());
-        buf.readF32(); buf.readF32(); buf.readF32();
-        capCount(buf.readS32());
+        dtsDetails[i].nameIdx = capCount(buf.readS32());
+        dtsDetails[i].subShape = capCount(buf.readS32());
+        dtsDetails[i].objDetail = capCount(buf.readS32());
+        dtsDetails[i].size = buf.readF32();
+        buf.readF32(); buf.readF32(); // averageError, maxError
+        capCount(buf.readS32()); // polyCount
     }
     buf.checkGuard(); // 13
 
@@ -810,7 +821,14 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         if (buf.pos32 >= buf.size32 && m > 100) break;
         uint32_t meshTypeRaw = buf.readU32();
         uint32_t meshType = meshTypeRaw & 0x7; // TypeMask = Standard|Skin|Decal|Sorted|Null = 7
-        if (meshType == DTSMesh_Null) continue; // NullMeshType: only type consumed, no data
+        if (meshType == DTSMesh_Null) {
+            // Null meshes have no data but we must preserve index mapping:
+            // detail level meshIndices reference original DTS mesh indices, so
+            // result.meshes must have an entry at every index (even empty ones).
+            result.meshes.push_back(MeshData());
+            result.skins.push_back(SkinInfo());
+            continue;
+        }
         if (meshType == DTSMesh_Decal) {
             // T2 TSDecalMesh::assemble for v>=19:
             // guard (v<20 only), primitives (sz*2 S16 + sz S32), indices (sz S16),
@@ -831,6 +849,10 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             }
             buf.readS32(); // materialIndex
             buf.checkGuard();
+            // Decal meshes have no renderable geometry but we must preserve
+            // index mapping for detail level meshIndices.
+            result.meshes.push_back(MeshData());
+            result.skins.push_back(SkinInfo());
             continue;
         }
 
@@ -1444,27 +1466,53 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             result.nodes[i].name = "node" + std::to_string(i);
     }
 
-    // ─── Store object-to-mesh mapping ─────────────────────────────────
+    // ─── Build detail levels ──────────────────────────────────────────
+    // Debug: log detail level info
+    {
+        int posCount = 0, negCount = 0;
+        for (auto& dl : dtsDetails) {
+            if (dl.size >= 0.0f) posCount++; else negCount++;
+        }
+        Console::instance().printf(LogLevel::Info,
+            "DTS: %d detail levels (%d positive, %d negative), %d objects, %d meshes",
+            numDetails, posCount, negCount, numObjects, numMeshes);
+    }
+
+    // Store detail levels (only non-utility ones for rendering)
+    // Each detail level lists which meshes to render (one per object at objDetail offset)
+    // Note: result.meshes[sm + od] maps to original DTS mesh index because
+    // Null and Decal meshes push empty entries to preserve index mapping.
+    for (auto& dl : dtsDetails) {
+        if (dl.size < 0.0f) continue;
+        DTSShape::DetailLevel detail;
+        detail.size = dl.size;
+        detail.meshIndex = dl.objDetail;
+        for (int i = 0; i < numObjects; i++) {
+            int32_t od = dl.objDetail;
+            int32_t sm = dtsObjects[i].sm;
+            int32_t nm = dtsObjects[i].nm;
+            if (od >= 0 && od < nm && sm + od >= 0 && sm + od < numMeshes)
+                detail.meshIndices.push_back(sm + od);
+        }
+        result.details.push_back(detail);
+    }
+
+    // Fallback: if no non-utility details found, create default
+    if (result.details.empty() && !result.meshes.empty()) {
+        DTSShape::DetailLevel dl;
+        dl.size = 1000.0f;
+        dl.meshIndex = 0;
+        for (size_t i = 0; i < result.meshes.size(); i++)
+            dl.meshIndices.push_back((int32_t)i);
+        result.details.push_back(dl);
+    }
+
+    // ─── Store object-to-mesh mapping (after filtering) ────────────────
     result.objectStartMesh.resize(numObjects);
     result.objectNumMeshes.resize(numObjects);
     for (int i = 0; i < numObjects; i++) {
         result.objectStartMesh[i] = dtsObjects[i].sm;
         result.objectNumMeshes[i] = dtsObjects[i].nm;
-    }
-
-    // ─── Build detail levels ──────────────────────────────────────────
-    // Details were already read from the buffer but not stored.
-    // Re-read them from the file data.
-    const uint8_t* detPtr = data + 16;
-    size_t detRem = sz32b;
-    for (int skip = 0; skip < 15; skip++) { // skip header fields before numDetails... actually we can't re-read
-    }
-    // For now, create a default detail level if meshes exist
-    if (!result.meshes.empty()) {
-        DTSShape::DetailLevel dl;
-        dl.size = 1000.0f;
-        dl.meshIndex = 0;
-        result.details.push_back(dl);
     }
 
     // ─── Build default transforms ─────────────────────────────────────

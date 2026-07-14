@@ -2399,7 +2399,16 @@ void Game::render(float dt) {
         if (!shapeViewerBoundsInit) {
             Point3F mn{1e9f,1e9f,1e9f}, mx{-1e9f,-1e9f,-1e9f};
             const auto& nodeWorld = shapeViewerShape.defaultTransforms;
-            for (size_t mi = 0; mi < shapeViewerShape.meshes.size(); mi++) {
+            // Only use detail level 0 meshes for bounds computation
+            std::vector<int32_t> boundMeshes;
+            if (!shapeViewerShape.details.empty() && !shapeViewerShape.details[0].meshIndices.empty()) {
+                boundMeshes = shapeViewerShape.details[0].meshIndices;
+            } else {
+                boundMeshes.resize(shapeViewerShape.meshes.size());
+                for (int32_t i = 0; i < (int32_t)boundMeshes.size(); i++) boundMeshes[i] = i;
+            }
+            for (int32_t mi : boundMeshes) {
+                if (mi < 0 || mi >= (int32_t)shapeViewerShape.meshes.size()) continue;
                 auto& m = shapeViewerShape.meshes[mi];
                 // Get the node world transform for this mesh
                 MatrixF nodeXform;
