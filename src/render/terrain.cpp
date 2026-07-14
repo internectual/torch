@@ -985,7 +985,8 @@ void DTSShape::render(int32_t detailLevel) {
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
 
-    for (size_t mi = 0; mi < meshes.size(); mi++) {
+    // Two-pass rendering: opaque first, then translucent (correct depth ordering)
+    auto renderMesh = [&](size_t mi) {
         MeshData& mesh = meshes[mi];
         if (mi < skins.size() && skins[mi].hasSkin) {
             updateSkinnedMesh(mesh, skins[mi], nodeWorld, defaultTransforms);
@@ -1010,7 +1011,6 @@ void DTSShape::render(int32_t detailLevel) {
         } else {
             if (shader) shader->setUniform("uUseTexture", (int32_t)0);
         }
-        // Alpha test: only for materials flagged Translucent or Additive
         bool alphaTest = (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0;
         if (shader) shader->setUniform("uAlphaTest", (int32_t)alphaTest);
 
@@ -1024,7 +1024,6 @@ void DTSShape::render(int32_t detailLevel) {
             if (shader) shader->setUniform("uUseLightmap", (int32_t)0);
         }
 
-        // Blend mode
         if (flags & MatFlag_Additive) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE);
@@ -1055,6 +1054,28 @@ void DTSShape::render(int32_t detailLevel) {
         if (shader) shader->setUniform("uUseEnvMap", (int32_t)(useEnvMap ? 1 : 0));
 
         mesh.render();
+    };
+
+    // Pass 1: Opaque meshes (depth writes ON, no blending)
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    for (size_t mi = 0; mi < meshes.size(); mi++) {
+        uint32_t f = 0;
+        if (meshes[mi].materialIndex >= 0 && meshes[mi].materialIndex < (int)materialFlags.size())
+            f = materialFlags[meshes[mi].materialIndex];
+        if (!(f & (MatFlag_Translucent | MatFlag_Additive)))
+            renderMesh(mi);
+    }
+
+    // Pass 2: Translucent meshes (depth writes OFF, blending ON)
+    glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    for (size_t mi = 0; mi < meshes.size(); mi++) {
+        uint32_t f = 0;
+        if (meshes[mi].materialIndex >= 0 && meshes[mi].materialIndex < (int)materialFlags.size())
+            f = materialFlags[meshes[mi].materialIndex];
+        if (f & (MatFlag_Translucent | MatFlag_Additive))
+            renderMesh(mi);
     }
 
     // Restore GL state
