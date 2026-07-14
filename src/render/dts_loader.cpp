@@ -449,15 +449,25 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     }
 
     // Material list (old format v<19: embedded in S32 stream)
+    // T2 format: gotList(S32), then TSMaterialList::read = version(U8) + count(U32) + names + flags(reflectance,bump,detail in separate loops)
     int32_t gotList = rS32();
     if (gotList != 0) {
-        int32_t numMats = rS32();
+        uint8_t matVersion = rU8(); // TSMaterialList version (should be 1)
+        int32_t numMats = rS32();   // material count
         result.materialNames.resize(numMats);
         result.materialFlags.resize(numMats, 0);
-        // Old format: flags/reflectance/bump/detail are interleaved per material in the stream
+        // Read names first (MaterialList::read: version + count + names)
+        // T2 readString reads U8 length (1 byte) + string bytes
+        for (int i = 0; i < numMats; i++) {
+            uint8_t nameLen = rU8();
+            if (nameLen > 0 && pos + nameLen <= size) {
+                result.materialNames[i] = std::string((const char*)data + pos, nameLen);
+                pos += nameLen;
+            }
+        }
+        // Read flags, reflectance, bump, detail in SEPARATE loops (TSMaterialList::read)
         for (int i = 0; i < numMats; i++) {
             uint32_t rawFlags = rS32();
-            // Remap T2 bit layout
             uint32_t flags = 0;
             if (rawFlags & (1 << 0)) flags |= 16;
             if (rawFlags & (1 << 1)) flags |= 32;
@@ -466,19 +476,12 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
             if (rawFlags & (1 << 5)) flags |= 4;
             if (rawFlags & (1 << 6)) flags |= 8;
             result.materialFlags[i] = flags;
-            rS32(); rS32(); rS32(); // reflectance, bump, detail
-            int32_t nameLen = rS32();
-            if (nameLen > 0 && nameLen < 1000 && pos + nameLen <= size) {
-                result.materialNames[i] = std::string((const char*)data + pos, nameLen);
-                pos += nameLen;
-            } else {
-                skip(nameLen > 0 ? nameLen : 0);
-            }
         }
-        // Extra per-material S32 (present in some versions)
-        if (ver >= 16) {
-            for (int i = 0; i < numMats; i++) rS32();
-        }
+        for (int i = 0; i < numMats; i++) rS32(); // reflectance
+        for (int i = 0; i < numMats; i++) rS32(); // bump
+        for (int i = 0; i < numMats; i++) rS32(); // detail
+        if (ver > 11) for (int i = 0; i < numMats; i++) rS32(); // detailScale
+        if (ver > 20) for (int i = 0; i < numMats; i++) rS32(); // reflectionAmount
     }
 
     // Skins — read as meshes but don't add to result
