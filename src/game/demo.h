@@ -338,6 +338,7 @@ struct InitialBlockData {
     bool phase2Valid{};
     std::string phase2Error;
     int phase2TrailingBits{};
+    std::map<uint32_t, std::string> datablockWeaponShapes; // datablock index → weapon shape path
 };
 
 struct PathManagerRecord {

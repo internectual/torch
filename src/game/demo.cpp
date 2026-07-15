@@ -478,6 +478,7 @@ void DemoParser::readGhostStartBlock(BitStream& bs, bool useIBTracker) {
 void DemoParser::readDataBlocks(BitStream& bs) {
     initialBlock.dataBlockCount = (int)bs.readU32();
     Console::instance().printf(LogLevel::Debug, "DataBlocks: %d blocks", initialBlock.dataBlockCount);
+    int payloadStartBits = bs.getCurPos();
     for (int i = 0; i < initialBlock.dataBlockCount && !bs.isError(); i++) {
         DataBlockHeader hdr;
         hdr.classId  = bs.readU32();
@@ -490,6 +491,14 @@ void DemoParser::readDataBlocks(BitStream& bs) {
         // Each datablock payload is self-describing — we skip by reading the
         // top-level struct fields. Without class-specific parsers we conservatively
         // skip all remaining bits in the initial block after headers.
+    }
+    // Attempt to extract weapon shape paths from datablock payloads.
+    // Note: tagged strings in T2 demos don't include shape file paths — they're
+    // inline in datablock payloads. Without full class-specific parsers, the
+    // brute-force scan cannot reliably extract them.
+    if (!initialBlock.datablockWeaponShapes.empty()) {
+        Console::instance().printf(LogLevel::Info, "DataBlocks: mapped %zu weapon shapes from payloads",
+            initialBlock.datablockWeaponShapes.size());
     }
     Console::instance().printf(LogLevel::Debug, "DataBlocks: %zu headers read", initialBlock.dataBlockHeaders.size());
 }

@@ -3033,7 +3033,18 @@ void Game::render(float dt) {
                     for (int img = 0; img < 8; img++) {
                         int16_t dbId = g->mountedImages[img].datablockId;
                         if (dbId < 0) continue;
-                        const char* wPath = weaponShapeForDataBlock(dbId);
+                        // Try dynamic mapping from demo stream first, then hardcoded fallback
+                        const char* wPath = nullptr;
+                        std::string dynamicPath;
+                        if (demoParser) {
+                            const auto& ib = demoParser->getInitialBlock();
+                            auto wit = ib.datablockWeaponShapes.find(dbId);
+                            if (wit != ib.datablockWeaponShapes.end()) {
+                                dynamicPath = wit->second;
+                                wPath = dynamicPath.c_str();
+                            }
+                        }
+                        if (!wPath) wPath = weaponShapeForDataBlock(dbId);
                         if (!wPath) continue;
 
                         // Load weapon shape (cached)
