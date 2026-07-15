@@ -2918,18 +2918,48 @@ void Game::render(float dt) {
                         }
                         if (!wShape || !wShape->loaded) continue;
 
-                        // Position weapon at player's right hand (offset from body)
+                        // Position weapon at player's hand node if available
                         Point3F weaponPos = {rp.x + 0.3f, rp.y + 0.1f, rp.z + 0.2f};
+                        MatrixF weaponRot;
+                        bool usedNodeTransform = false;
 
-                        MatrixF weaponModel;
-                        if (mg->hasRotation) {
-                            QuatF wq(mg->renderRotation.x, mg->renderRotation.y, mg->renderRotation.z, mg->renderRotation.w);
-                            weaponModel = wq.toMatrix();
-                        } else {
-                            weaponModel.setRotationAxis({0, 1, 0}, -mg->moveYaw);
+                        if (shape) {
+                            int handNode = shape->findNode("rhand");
+                            if (handNode < 0) handNode = shape->findNode("mount0");
+                            if (handNode >= 0 && handNode < (int)shape->defaultTransforms.size()) {
+                                // Extract world-space position from the hand node transform
+                                const MatrixF& nodeXform = shape->defaultTransforms[handNode];
+                                // The node transform is in model space; combine with ghost world transform
+                                MatrixF worldXform;
+                                if (mg->hasRotation) {
+                                    QuatF wq(mg->renderRotation.x, mg->renderRotation.y, mg->renderRotation.z, mg->renderRotation.w);
+                                    worldXform = wq.toMatrix();
+                                } else {
+                                    worldXform.setRotationAxis({0, 1, 0}, -mg->moveYaw);
+                                }
+                                // Transform hand node position to world space
+                                Point3F nodePos = nodeXform.transform({0, 0, 0});
+                                Point3F worldOffset = worldXform.transformNormal(nodePos);
+                                weaponPos = {rp.x + worldOffset.x, rp.y + worldOffset.y, rp.z + worldOffset.z};
+                                // Use the combined rotation for weapon orientation
+                                weaponRot = worldXform * nodeXform;
+                                weaponRot.setTranslation(weaponPos);
+                                usedNodeTransform = true;
+                            }
                         }
-                        weaponModel.setTranslation(weaponPos);
-                        r.setModel(weaponModel * Math::czUpToYUp());
+
+                        if (!usedNodeTransform) {
+                            MatrixF weaponModel;
+                            if (mg->hasRotation) {
+                                QuatF wq(mg->renderRotation.x, mg->renderRotation.y, mg->renderRotation.z, mg->renderRotation.w);
+                                weaponModel = wq.toMatrix();
+                            } else {
+                                weaponModel.setRotationAxis({0, 1, 0}, -mg->moveYaw);
+                            }
+                            weaponModel.setTranslation(weaponPos);
+                            weaponRot = weaponModel;
+                        }
+                        r.setModel(weaponRot * Math::czUpToYUp());
                         wShape->render(0);
                     }
                 }
