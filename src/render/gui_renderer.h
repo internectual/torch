@@ -24,6 +24,7 @@ struct GuiControl {
     bool active = true;
     bool selected = false;
     bool checked = false;
+    bool hovered = false;
     int groupNum = 0;
     int cursorPos = 0; // caret position for text edit controls
     std::vector<GuiControl*> children;
@@ -84,6 +85,7 @@ public:
     void render();
     bool handleInput(int x, int y, bool pressed);
     bool handleScroll(int x, int y, int wheelDelta);
+    GuiControl* hitTest(GuiControl* ctl, int mx, int my);
 
     GuiControl* getCanvas() { return canvas; }
     GuiControl* findControl(const std::string& name);
@@ -114,7 +116,6 @@ private:
     };
     std::vector<ScheduledEvent> events;
     void renderControl(GuiControl* ctl);
-    GuiControl* hitTest(GuiControl* ctl, int x, int y);
 
     // Fade animation tracking for GuiFadeinBitmapCtrl
     std::unordered_map<std::string, FadeState> fadeStates;

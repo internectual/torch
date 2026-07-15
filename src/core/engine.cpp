@@ -1142,6 +1142,9 @@ void Engine::run() {
         if (gui && gui->getCanvas()) {
             int mx = plat->input().mouseX;
             int my = plat->input().mouseY;
+            // Hover detection: set hovered state on control under mouse
+            GuiControl* hover = gui->hitTest(gui->getCanvas(), mx, my);
+            if (hover) hover->hovered = true;
             bool pressed = plat->input().mouseButtons[1] != 0;
             static bool prevPressed = false;
             if (pressed && !prevPressed) {

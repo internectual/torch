@@ -1883,6 +1883,12 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
 
 void GuiRenderer::update(float dt) {
     updateFades(dt);
+    // Clear hover states each frame
+    std::function<void(GuiControl*)> clearHover = [&](GuiControl* ctl) {
+        ctl->hovered = false;
+        for (auto* c : ctl->children) clearHover(c);
+    };
+    for (auto* d : dialogStack) clearHover(d);
     double now = Engine::instance().timer().now();
     // Collect expired events first, then execute after erasing
     // (execution may add new events, invalidating iterators)
