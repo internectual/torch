@@ -2961,6 +2961,14 @@ void Game::render(float dt) {
                         }
                         r.setModel(weaponRot * Math::czUpToYUp());
                         wShape->render(0);
+
+                        // Muzzle flash when firing
+                        if (mg->mountedImages[img].isFiring) {
+                            Point3F muzzlePos = weaponPos;
+                            float flashSize = 0.15f;
+                            ColorF flashCol = {1.0f, 0.9f, 0.5f, 0.9f};
+                            r.drawSprite(muzzlePos, flashSize, flashCol);
+                        }
                     }
                 }
             } else {
