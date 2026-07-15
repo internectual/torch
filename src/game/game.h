@@ -420,6 +420,7 @@ private:
     bool demoShowEvents = true;
     // Orbit camera for demo spectator mode
     bool demoOrbitCam = false;
+    bool demoFirstPersonCam = false;
     float orbitAngle = 0;
     float orbitDistance = 300.0f;
     float orbitHeight = 150.0f;

@@ -1380,12 +1380,15 @@ void World::render(const Point3F& cameraPos) {
         r.drawSprite(p.pos, 0.3f, col);
     }
 
-    // Render explosion boxes (legacy, still used for visual feedback)
+    // Render explosion sprites with bright center
     for (auto& e : explosions) {
         float t = e.lifetime / e.maxLifetime;
         float size = e.radius * (1.0f + (1.0f - t) * 2.0f);
-        ColorF col = {e.color.r, e.color.g, e.color.b, t * 0.3f};
-        r.drawSprite(e.pos, size * 0.5f, col);
+        // Hot white core (shrinks over time)
+        float coreSize = size * 0.3f * t;
+        r.drawSprite(e.pos, coreSize, {1.0f, 1.0f, 0.9f, t * 0.8f});
+        // Colored fireball (expands, fades)
+        r.drawSprite(e.pos, size * 0.5f, {e.color.r, e.color.g, e.color.b, t * 0.4f});
     }
 
     // Render particles
@@ -2229,6 +2232,7 @@ void Game::update(float dt) {
         // F2 toggle for orbit camera
         static bool prevF2 = false;
         if (currentInput.orbitCam && !prevF2) {
+            demoFirstPersonCam = false;
             demoOrbitCam = !demoOrbitCam;
             if (freeCamActive) { freeCamActive = false; }
         }
@@ -2246,6 +2250,17 @@ void Game::update(float dt) {
             }
         }
         prevF3 = f3Down;
+
+        // F4 toggle for first-person camera
+        static bool prevF4 = false;
+        bool f4Down = plat.input().keysDown[SCANCODE_F4];
+        if (f4Down && !prevF4) {
+            demoFirstPersonCam = !demoFirstPersonCam;
+            demoOrbitCam = false;
+            if (freeCamActive) { freeCamActive = false; }
+            Console::instance().printf(LogLevel::Info, "First-person camera %s", demoFirstPersonCam ? "ON" : "OFF");
+        }
+        prevF4 = f4Down;
 
         // Editor: place ghost on left click, cycle class on scroll
         if (editorActive && freeCamActive) {
@@ -2547,7 +2562,20 @@ void Game::render(float dt) {
         camTarget = freeCamTarget;
     } else if (demoPlaying && demoHasPos) {
         // Orbit camera for spectator mode
-        if (demoOrbitCam) {
+        if (demoFirstPersonCam) {
+            // First-person camera: position at spectated ghost's eye level, look in facing direction
+            int fpIdx = (spectateGhostIndex >= 0) ? spectateGhostIndex : controlGhostIndex;
+            if (fpIdx >= 0 && demoParser) {
+                const GhostEntry* g = demoParser->getGhostTracker().getGhost(fpIdx);
+                if (g && (g->position.x != 0 || g->position.y != 0 || g->position.z != 0)) {
+                    camPos = {g->renderPos.x, g->renderPos.y + 1.8f, g->renderPos.z};
+                    // Look forward from the ghost's facing direction
+                    float yaw = atan2f(g->renderRotation.x, g->renderRotation.w) * 2.0f;
+                    float lookDist = 10.0f;
+                    camTarget = {camPos.x + sinf(yaw) * lookDist, camPos.y, camPos.z + cosf(yaw) * lookDist};
+                }
+            }
+        } else if (demoOrbitCam) {
             Point3F targetPos = demoCameraPos;
             // If spectating a specific ghost, track its position
             if (spectateGhostIndex >= 0 && demoParser) {

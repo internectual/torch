@@ -25,6 +25,7 @@ constexpr int SCANCODE_E       = 8;
 constexpr int SCANCODE_Q       = 20;
 constexpr int SCANCODE_F2      = 59;
 constexpr int SCANCODE_F3      = 60;
+constexpr int SCANCODE_F4      = 61;
 constexpr int SCANCODE_LBRACKET = 47;
 constexpr int SCANCODE_RBRACKET = 48;
 constexpr int SCANCODE_PERIOD  = 54;
