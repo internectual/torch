@@ -1420,12 +1420,13 @@ void World::render(const Point3F& cameraPos) {
         }
         // Health bar above bot
         {
-            auto* font = Engine::instance().renderer().getFont();
+            auto& ren = Engine::instance().renderer();
+            auto* font = ren.getFont();
             if (font) {
                 Point3F above = {b.pos.x, b.pos.y + 2.5f, b.pos.z};
-                Point3F screen = worldToScreen(above, Engine::instance().renderer().viewMatrix(),
-                    Engine::instance().renderer().projectionMatrix(), 1024, 768);
-                if (screen.z > 0 && screen.x >= 0 && screen.x <= 1024 && screen.y >= 0 && screen.y <= 768) {
+                Point3F screen = worldToScreen(above, ren.viewMatrix(),
+                    ren.projectionMatrix(), ren.config().width, ren.config().height);
+                if (screen.z > 0 && screen.x >= 0 && screen.x <= ren.config().width && screen.y >= 0 && screen.y <= ren.config().height) {
                     float barW = 40, barH = 5;
                     float by = screen.y - 15;
                     Engine::instance().renderer().drawBox({{screen.x - barW/2 - 1, by - 1, 0},
@@ -3252,7 +3253,7 @@ void Game::render(float dt) {
         if (demoPlaying && demoParser) {
             auto* font = r.getFont();
             if (font) {
-                int screenW = 1024, screenH = 768;
+                int screenW = r.config().width, screenH = r.config().height;
                 for (int idx : indices) {
                     const GhostEntry* g = gt.getGhost(idx);
                     if (!g) continue;
@@ -3369,7 +3370,7 @@ void Game::render(float dt) {
             auto* font = r.getFont();
             if (font) {
                 std::vector<int> hudIndices = liveGhosts.getAllIndices();
-                int screenW = 1024, screenH = 768;
+                int screenW = r.config().width, screenH = r.config().height;
                 for (int idx : hudIndices) {
                     if (serverPlayerGhostSynced && (uint32_t)idx == serverPlayerGhostIndex) continue;
                     const GhostEntry* g = liveGhosts.getGhost(idx);
