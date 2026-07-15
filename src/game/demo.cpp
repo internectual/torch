@@ -508,11 +508,37 @@ void DemoParser::readDataBlocks(BitStream& bs) {
         // top-level struct fields. Without class-specific parsers we conservatively
         // skip all remaining bits in the initial block after headers.
     }
-    // Attempt to extract weapon shape paths from datablock payloads.
-    // Scan raw payload bytes for embedded ASCII strings matching weapon shape patterns.
+    // Attempt to extract shape paths from datablock payloads by scanning raw bytes
+    {
+        int payloadStart = (payloadStartBits + 7) / 8;
+        int payloadEnd = (bs.getCurPos()) / 8;
+        for (auto& hdr : initialBlock.dataBlockHeaders) {
+            int dbStart = (hdr.dataBitsStart + 7) / 8;
+            int dbEnd = (hdr.total < (int)initialBlock.dataBlockHeaders.size() - 1)
+                ? (initialBlock.dataBlockHeaders[hdr.total + 1].dataBitsStart + 7) / 8
+                : payloadEnd;
+            if (dbStart >= payloadEnd || dbEnd > payloadEnd) continue;
+            for (int b = dbStart; b < dbEnd - 10; b++) {
+                if (b < 0 || b >= (int)bs.getBufferSize()) break;
+                const uint8_t* raw = bs.getBuffer();
+                if (!raw) break;
+                if (raw[b] == 's' && raw[b+1] == 'h' && raw[b+2] == 'a' &&
+                    raw[b+3] == 'p' && raw[b+4] == 'e' && raw[b+5] == 's' && raw[b+6] == '/') {
+                    int j = b;
+                    while (j < dbEnd && j < (int)bs.getBufferSize() && raw[j] >= 32 && raw[j] < 127) j++;
+                    if (j - b > 5) {
+                        std::string path((const char*)&raw[b], j - b);
+                        initialBlock.datablockWeaponShapes[hdr.index] = path;
+                    }
+                }
+            }
+        }
+    }
     if (!initialBlock.datablockWeaponShapes.empty()) {
         Console::instance().printf(LogLevel::Info, "DataBlocks: mapped %zu weapon shapes from payloads",
             initialBlock.datablockWeaponShapes.size());
+        for (auto& [idx, path] : initialBlock.datablockWeaponShapes)
+            Console::instance().printf(LogLevel::Info, "  db[%u] -> %s", idx, path.c_str());
     }
     if (!initialBlock.datablockWeaponShapes.empty()) {
         Console::instance().printf(LogLevel::Info, "DataBlocks: mapped %zu weapon shapes from payloads",
