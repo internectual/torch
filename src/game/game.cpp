@@ -2845,17 +2845,26 @@ void Game::render(float dt) {
                 }
 
                 // Build model matrix
+                bool isPlayer = (g->className == "Player" || g->className == "MPB");
+                bool isVehicle = (g->className.find("Vehicle") != std::string::npos ||
+                                  g->className == "Shrike" || g->className == "Turbograv" ||
+                                  g->className == "Shield" || g->className == "Wildcat");
                 MatrixF model;
                 if (g->hasRotation) {
                     QuatF q(mg->renderRotation.x, mg->renderRotation.y, mg->renderRotation.z, mg->renderRotation.w);
                     model = q.toMatrix();
-                } else if (mg->isMoving || g->className == "Player" || g->className == "MPB") {
+                } else if (mg->isMoving || isPlayer) {
                     float yaw = mg->moveYaw;
                     model.setRotationAxis({0, 1, 0}, -yaw);
                 } else {
                     model.identity();
                 }
-                model.setTranslation({rp.x, rp.y, rp.z});
+                // Hover bob for stationary vehicles
+                float hoverY = 0.0f;
+                if (isVehicle && !mg->isMoving) {
+                    hoverY = sinf(demoTime * 2.0f + idx * 1.7f) * 0.15f;
+                }
+                model.setTranslation({rp.x, rp.y + hoverY, rp.z});
                 r.setModel(model * Math::czUpToYUp());
 
                 // Apply skin-based tint color for player ghosts
@@ -2905,10 +2914,6 @@ void Game::render(float dt) {
                 // Pick animation: try multiple animation names per class
                 const char* animName = nullptr;
                 const char* altName = nullptr;
-                bool isPlayer = (g->className == "Player" || g->className == "MPB");
-                bool isVehicle = (g->className.find("Vehicle") != std::string::npos ||
-                                  g->className == "Shrike" || g->className == "Turbograv" ||
-                                  g->className == "Shield" || g->className == "Wildcat");
                 bool isTurret = (g->className == "Turret" || g->className == "Sentry");
                 if (isPlayer) {
                     animName = mg->isMoving ? "run" : "stand";
