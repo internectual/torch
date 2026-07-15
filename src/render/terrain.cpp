@@ -317,8 +317,8 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
     shader->setUniform("uDetail3", (int32_t)4);
 
     if (lightmap.loaded) {
-        lightmap.bind(5);
-        shader->setUniform("uLightmap", (int32_t)5);
+        lightmap.bind(6);
+        shader->setUniform("uLightmap", (int32_t)6);
         shader->setUniform("uUseLightmap", (int32_t)1);
     } else {
         shader->setUniform("uUseLightmap", (int32_t)0);
@@ -327,6 +327,12 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
     // Use vertex color when no detail textures (procedural terrain)
     bool hasDetails = splatMap.loaded && detailTextures.size() >= 1 && detailTextures[0].loaded;
     shader->setUniform("uUseVertexColor", (int32_t)(hasDetails ? 0 : 1));
+
+    // Calculate detail tiling based on terrain world size
+    // Detail textures should tile at a consistent ~8-unit world-space density
+    float worldSize = (float)size * squareSize;
+    float detailTiling = worldSize / 8.0f;
+    shader->setUniform("uDetailTiling", detailTiling);
 
     auto& renderer = Engine::instance().renderer();
     MatrixF model;
