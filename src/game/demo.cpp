@@ -11,6 +11,7 @@
 // Pending explosion events from projectile ghost parsers
 std::vector<DemoParser::PendingExplosion> DemoParser::s_pendingExplosions;
 DemoParser::SunData DemoParser::s_sunData;
+std::string DemoParser::s_pendingTerrainFile;
 
 // ═══════════════════════════════════════════════════════════════
 // Huffman processor
@@ -1704,10 +1705,23 @@ static void readTSStaticData(BitStream& bs, bool, const Vec3&, GhostEntry*) {
     bs.readMatrixF(); bs.readPoint3F();
 }
 
-static void readTerrainBlockData(BitStream& bs, bool, const Vec3&, GhostEntry*) {
-    if (bs.readFlag()) {
-        bs.readInt(3); bs.readPoint3F(); bs.readInt(4);
-        bs.readInt(4); bs.readInt(4);
+static void readTerrainBlockData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry*) {
+    if (bs.readFlag()) { // init
+        bs.readU32(); // CRC
+        std::string terrFile = bs.readString(); // terrain file name
+        std::string detailTex = bs.readString(); // detail texture name
+        bs.readU32(); // squareSize
+        // Read empty square RLE
+        uint32_t emptySize = bs.readU32();
+        for (uint32_t i = 0; i < emptySize; i++) bs.readU32();
+        // Store terrain file name for later loading
+        if (!terrFile.empty()) {
+            DemoParser::s_pendingTerrainFile = terrFile;
+        }
+    } else {
+        // Normal update: empty square RLE
+        uint32_t emptySize = bs.readU32();
+        for (uint32_t i = 0; i < emptySize; i++) bs.readU32();
     }
 }
 

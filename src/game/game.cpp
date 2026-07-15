@@ -4315,6 +4315,26 @@ void Game::playDemo(const char* path) {
         Console::instance().printf(LogLevel::Warn, "Mission load failed, playing without terrain");
     }
 
+    // If terrain wasn't loaded and we have a terrain file from ghost data, try to load it
+    if (w && !w->terrain()->loaded && !DemoParser::s_pendingTerrainFile.empty()) {
+        Console::instance().printf(LogLevel::Info, "Trying terrain from ghost data: %s", DemoParser::s_pendingTerrainFile.c_str());
+        auto& fs = Engine::instance().fs();
+        std::vector<std::string> terPaths = {
+            DemoParser::s_pendingTerrainFile,
+            "terrains/" + DemoParser::s_pendingTerrainFile,
+            DemoParser::s_pendingTerrainFile + ".ter",
+            "terrains/" + DemoParser::s_pendingTerrainFile + ".ter"
+        };
+        for (auto& tp : terPaths) {
+            auto terData = fs.read(tp.c_str());
+            if (!terData.empty()) {
+                Console::instance().printf(LogLevel::Info, "  loaded terrain: %s", tp.c_str());
+                w->terrain()->load(terData.data(), terData.size());
+                break;
+            }
+        }
+    }
+
     // Reset demo path history
     demoPath.clear();
     demoPathCount = 0;

@@ -550,6 +550,9 @@ public:
     static std::vector<PendingExplosion> s_pendingExplosions;
     std::vector<PendingExplosion> consumeExplosions() { auto r = std::move(s_pendingExplosions); s_pendingExplosions.clear(); return r; }
 
+    // Terrain file from ghost data (for when .mis doesn't have it)
+    static std::string s_pendingTerrainFile;
+
     // Sun data extracted from demo stream (for when .mis is unavailable)
     struct SunData {
         Vec3 direction{};
