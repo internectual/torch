@@ -2849,8 +2849,10 @@ void Game::render(float dt) {
 
                 // Apply cloak transparency
                 if (g->cloaked) {
-                    ColorF cloakTint = {0.4f, 0.6f, 0.8f, 0.15f};
-                    if (defShader) defShader->setUniform("uTint", cloakTint);
+                    // Screen-door transparency: alternate pixels are discarded
+                    if (defShader) defShader->setUniform("uScreenDoor", 0.5f);
+                } else {
+                    if (defShader) defShader->setUniform("uScreenDoor", 0.0f);
                 }
 
                 // Pick animation: try multiple animation names per class

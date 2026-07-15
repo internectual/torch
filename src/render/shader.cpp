@@ -62,6 +62,7 @@ uniform vec4 uTint = vec4(1.0);
 uniform bool uFogEnabled = false;
 uniform vec3 uFogColor = vec3(0.75, 0.8, 0.85);
 uniform float uFogDensity = 0.01;
+uniform float uScreenDoor = 0.0;
 
 uniform sampler2DShadow uShadowMap;
 uniform mat4 uShadowMatrix;
@@ -150,6 +151,12 @@ void main() {
         FragColor = vec4(lit, col.a);
     }
     if (uAlphaTest && FragColor.a <= 0.0) discard;
+    // Screen-door transparency (dithered transparency for cloak effect)
+    if (uScreenDoor > 0.01) {
+        vec2 screenPos = gl_FragCoord.xy;
+        float dither = mod(floor(screenPos.x) + floor(screenPos.y), 2.0);
+        if (dither < uScreenDoor) discard;
+    }
 }
 )";
 
