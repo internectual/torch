@@ -118,6 +118,7 @@ public:
     TerrainBlock* terrain() { return &terrainBlock; }
     Sky* sky() { return &skyBox; }
     const Point3F& spawnPoint() const { return playerSpawn; }
+    float waterLevel() const { return water.active ? water.level : 0.0f; }
 
     // Object management
     struct WorldObject {
@@ -324,6 +325,10 @@ public:
     int getSpectateGhostIndex() const { return spectateGhostIndex; }
     float getDamageFlash() const { return damageFlash; }
     float getWhiteOut() const { return whiteOut; }
+    bool isUnderwater() const {
+        if (!demoPlaying) return false;
+        return demoCameraPos.y < w->waterLevel();
+    }
     void toggleDemoPause() { demoPaused = !demoPaused; }
     void toggleDemoEvents() { demoShowEvents = !demoShowEvents; }
     bool demoEventsShown() const { return demoShowEvents; }

@@ -109,6 +109,11 @@ void HUD::render(Game* game) {
             r.drawBox({{0, 0, 0}, {(float)w, (float)h, 0}}, {1, 1, 1, alpha});
         }
 
+        // Underwater effect: blue tint when camera is below water level
+        if (game->isUnderwater()) {
+            r.drawBox({{0, 0, 0}, {(float)w, (float)h, 0}}, {0.05f, 0.15f, 0.35f, 0.45f});
+        }
+
         int mins = (int)(game->getDemoTime() / 60);
         int secs = (int)(game->getDemoTime()) % 60;
         int totalMins = (int)(game->getDemoTotalTime() / 60);
