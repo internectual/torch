@@ -222,6 +222,19 @@ private:
     void updatePrecipitation(float dt, const Point3F& camPos);
     void renderPrecipitation();
 
+    // Water rendering
+    struct WaterState {
+        bool active = false;
+        float level = 0.0f;           // Y position of water surface
+        ColorF surfaceColor{0.1f, 0.3f, 0.6f, 0.5f};
+        float opacity = 0.5f;
+        float waveSpeed = 0.5f;
+        float waveMagnitude = 0.15f;
+        float size = 2048.0f;         // Coverage area
+    };
+    WaterState water;
+    void renderWater();
+
     // Bots (simple AI targets)
     struct Bot {
         Point3F pos{0, 5, 0};

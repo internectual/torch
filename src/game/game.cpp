@@ -480,6 +480,47 @@ bool World::load(const char* mapName) {
             }
         }
 
+        // Parse WaterBlock from mission
+        for (auto& obj : objects) {
+            if (obj.className == "WaterBlock") {
+                // WaterBlock position.y = water level
+                std::string posStr = getProp(obj.props, "position");
+                if (!posStr.empty()) {
+                    float px, py, pz;
+                    if (sscanf(posStr.c_str(), "%f %f %f", &px, &py, &pz) >= 3) {
+                        water.level = py;
+                        water.active = true;
+                    }
+                }
+                // Try scale for coverage size
+                std::string scaleStr = getProp(obj.props, "scale");
+                if (!scaleStr.empty()) {
+                    float sx, sy, sz;
+                    if (sscanf(scaleStr.c_str(), "%f %f %f", &sx, &sy, &sz) >= 3) {
+                        water.size = std::max(sx, sz);
+                    }
+                }
+                // Parse surface color if available
+                std::string colorStr = getProp(obj.props, "baseColor");
+                if (!colorStr.empty()) {
+                    float cr, cg, cb;
+                    if (sscanf(colorStr.c_str(), "%f %f %f", &cr, &cg, &cb) >= 3) {
+                        water.surfaceColor = {cr, cg, cb, water.opacity};
+                    }
+                }
+                std::string opacityStr = getProp(obj.props, "opacity");
+                if (!opacityStr.empty()) {
+                    water.opacity = (float)std::atof(opacityStr.c_str());
+                    water.surfaceColor.a = water.opacity;
+                }
+                if (water.active) {
+                    Console::instance().printf(LogLevel::Info, "  WaterBlock: level=%.1f size=%.0f opacity=%.2f",
+                        water.level, water.size, water.opacity);
+                }
+                break;
+            }
+        }
+
         // Collect all unique shape names referenced in the mission
         std::vector<std::string> shapeNames;
         auto addShapeName = [&](const std::string& n) {
@@ -1282,34 +1323,8 @@ void World::render(const Point3F& cameraPos) {
     // Render precipitation
     renderPrecipitation();
 
-    // Simple water plane for procedural terrain (no mission loaded)
-    if (!loaded || terrainBlock.loaded) {
-        float waterLevel = 0.0f;
-        float time = Engine::instance().game().gameTime();
-        float waveOffset = sinf(time * 0.5f) * 0.15f;
-        int gridRes = 16;
-        float size = 2048.0f;
-        float step = size / gridRes;
-        Point3F cam = r.cameraPos;
-        // Only render water within reasonable distance
-        if (cam.y > waterLevel - 20.0f && cam.y < waterLevel + 50.0f) {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            for (int z = 0; z < gridRes; z++) {
-                for (int x = 0; x < gridRes; x++) {
-                    float wx = -size/2 + x * step;
-                    float wz = -size/2 + z * step;
-                    // Only draw quads near camera
-                    float dist = (wx - cam.x) * (wx - cam.x) + (wz - cam.z) * (wz - cam.z);
-                    if (dist > 600.0f * 600.0f) continue;
-                    float wy = waterLevel + waveOffset + sinf(wx * 0.01f + time) * 0.1f;
-                    Box3F quad = {{wx, wy - 0.1f, wz}, {wx + step, wy + 0.1f, wz + step}};
-                    r.drawBox(quad, {0.1f, 0.3f, 0.6f, 0.5f});
-                }
-            }
-            glDisable(GL_BLEND);
-        }
-    }
+    // Render water surface
+    renderWater();
 
     // Render bots
     auto* shader = ShaderManager::getDefaultShader();
@@ -1521,6 +1536,56 @@ void World::renderPrecipitation() {
         if (!d.active) continue;
         r.drawSprite(d.pos, precipitation.dropSize, dropColor);
     }
+}
+
+void World::renderWater() {
+    // If no WaterBlock in mission, use default water level 0
+    float waterLevel = water.active ? water.level : 0.0f;
+    float waterSize = water.active ? water.size : 2048.0f;
+
+    auto& r = Engine::instance().renderer();
+    float time = Engine::instance().game().gameTime();
+    Point3F cam = r.cameraPos;
+
+    // Don't render if camera is too far above water
+    if (cam.y > waterLevel + 80.0f) return;
+
+    int gridRes = 24;
+    float halfSize = waterSize * 0.5f;
+    float step = waterSize / gridRes;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    for (int z = 0; z < gridRes; z++) {
+        for (int x = 0; x < gridRes; x++) {
+            float wx = -halfSize + x * step;
+            float wz = -halfSize + z * step;
+
+            // Skip quads far from camera
+            float dx = wx + step * 0.5f - cam.x;
+            float dz = wz + step * 0.5f - cam.z;
+            float dist = sqrtf(dx * dx + dz * dz);
+            if (dist > 400.0f) continue;
+
+            // Wave animation
+            float wy = waterLevel;
+            wy += sinf(time * water.waveSpeed + wx * 0.01f) * water.waveMagnitude;
+            wy += sinf(time * water.waveSpeed * 0.7f + wz * 0.015f) * water.waveMagnitude * 0.5f;
+
+            // Fade alpha with distance
+            float alpha = water.surfaceColor.a;
+            if (dist > 200.0f) alpha *= 1.0f - (dist - 200.0f) / 200.0f;
+
+            ColorF col = water.surfaceColor;
+            col.a = std::max(0.01f, alpha);
+
+            Box3F quad = {{wx, wy - 0.05f, wz}, {wx + step, wy + 0.05f, wz + step}};
+            r.drawBox(quad, col);
+        }
+    }
+
+    glDisable(GL_BLEND);
 }
 
 Game::Game() : pl(new Player), w(new World) {
@@ -3449,8 +3514,8 @@ static const char* shapePathForClass(const std::string& className, const std::st
         return "shapes/station_inv_human.dts";
     if (className == "Marker" || className == "WayPoint" || className == "SpawnSphere")
         return "shapes/gravemarker_1.dts";
-    if (className == "WaterBlock")
-        return "shapes/effect_plasma_explosion.dts";
+    if (className == "WaterBlock" || className == "MissionArea")
+        return nullptr;
     if (className == "Projectile" || className == "EnergyProjectile")
         return "shapes/energy_bolt.dts";
     if (className == "GrenadeProjectile" || className == "FlareProjectile")
@@ -3477,7 +3542,8 @@ static bool isRenderableGhostClass(const std::string& className) {
     if (className == "InteriorInstance" || className == "StaticShape" ||
         className == "ScopeAlwaysShape" || className == "TSStatic" ||
         className == "TerrainBlock" || className == "Sky" || className == "Sun" ||
-        className == "Lightning")
+        className == "Lightning" || className == "WaterBlock" ||
+        className == "MissionArea")
         return false;
     return true;
 }
