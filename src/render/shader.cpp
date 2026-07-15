@@ -144,8 +144,7 @@ void main() {
         }
         if (uFogEnabled) {
             float dist = length(vWorldPos - uCamPos);
-            float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * dist * dist);
-            fogFactor = clamp(fogFactor, 0.0, 1.0);
+            float fogFactor = clamp(uFogDensity * dist, 0.0, 1.0);
             lit = mix(lit, uFogColor, fogFactor);
         }
         FragColor = vec4(lit, col.a);
@@ -252,8 +251,7 @@ void main() {
     vec3 lit = base.rgb * lighting;
     if (uFogEnabled) {
         float dist = length(vWorldPos - uCamPos);
-        float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * dist * dist);
-        fogFactor = clamp(fogFactor, 0.0, 1.0);
+        float fogFactor = clamp(uFogDensity * dist, 0.0, 1.0);
         lit = mix(lit, uFogColor, fogFactor);
     }
     FragColor = vec4(lit, 1.0);
