@@ -27,6 +27,10 @@ void HUD::render(Game* game) {
     int32_t w = Engine::instance().platform().width();
     int32_t h = Engine::instance().platform().height();
 
+    // Save perspective projection for 3D name tag projection
+    MatrixF perspProj = r.projectionMatrix();
+    MatrixF perspView = r.viewMatrix();
+
     // Push 2D ortho projection for HUD
     MatrixF ortho;
     ortho.identity();
@@ -200,9 +204,12 @@ void HUD::render(Game* game) {
         // Player name tags
         if (auto* dp = game->getDemoParser()) {
             const GhostTracker& gt = dp->getGhostTracker();
-            const MatrixF& view = r.viewMatrix();
-            const MatrixF& proj = r.projectionMatrix();
             auto indices = gt.getAllIndices();
+            int w = Engine::instance().renderer().config().width;
+            int h = Engine::instance().renderer().config().height;
+            // Restore perspective projection for 3D-to-2D projection
+            r.setProjection(perspProj);
+            r.setView(perspView);
             for (int gi : indices) {
                 const GhostEntry* g = gt.getGhost(gi);
                 if (!g || g->playerName.empty()) continue;
@@ -215,6 +222,8 @@ void HUD::render(Game* game) {
                 if (dist > 500.0f) continue;
                 // Project world position to screen (above head)
                 Point3F wp = {g->position.x, g->position.y + 2.5f, g->position.z};
+                const MatrixF& view = r.viewMatrix();
+                const MatrixF& proj = r.projectionMatrix();
                 const float* v = &view.m[0][0];
                 float cx = wp.x*v[0]+wp.y*v[4]+wp.z*v[8]+v[12];
                 float cy = wp.x*v[1]+wp.y*v[5]+wp.z*v[9]+v[13];
@@ -252,6 +261,10 @@ void HUD::render(Game* game) {
         }
 
         // Event log pane
+        // Restore ortho projection for 2D HUD elements
+        r.setProjection(ortho);
+        MatrixF id; id.identity();
+        r.setView(id);
         if (game->demoEventsShown() && font) {
             const auto& events = game->getDemoEventLog();
             int total = (int)events.size();
