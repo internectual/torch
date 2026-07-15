@@ -1262,6 +1262,7 @@ void Engine::run() {
         else
             g->menu().setActive(true);
         g->menu().update(dt);
+        g->menu().render();
         plat->setRelativeMouse(false);
         plat->showMouse(true);
         {
