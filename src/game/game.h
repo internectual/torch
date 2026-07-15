@@ -18,7 +18,7 @@ class Game;
 struct GameConfig {
     std::string playerName = "Player";
     std::string serverHost = "localhost";
-    uint16_t serverPort = 28000;
+    uint16_t serverPort = T2Protocol::DEFAULT_PORT;
     bool online = false;
     bool dedicated = false;
     float moveSpeed = 10.0f;

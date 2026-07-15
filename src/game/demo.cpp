@@ -573,7 +573,7 @@ static std::string extractMissionNameViaNode(const uint8_t* data, size_t size) {
     hdr[hOff++] = (uint8_t)strlen(sig);
     memcpy(hdr + hOff, sig, strlen(sig)); hOff += (int)strlen(sig);
     auto put32 = [&](uint32_t v) { hdr[hOff++] = v & 0xff; hdr[hOff++] = (v>>8) & 0xff; hdr[hOff++] = (v>>16) & 0xff; hdr[hOff++] = (v>>24) & 0xff; };
-    put32(0x00330004); // protocol v25034
+    put32(T2Demo::ProtocolV25034); // protocol v25034
     put32(0);          // length ms
     put32((uint32_t)size); // initial block size
     write(rfd, hdr, hOff);

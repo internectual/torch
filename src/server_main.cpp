@@ -15,7 +15,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    uint16_t port = 28000;
+    uint16_t port = T2Protocol::DEFAULT_PORT;
     const char* mission = nullptr;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) port = (uint16_t)atoi(argv[++i]);

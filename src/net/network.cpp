@@ -455,13 +455,13 @@ void NetworkManager::queryLanServers() {
     uint8_t queryPacket[] = { (uint8_t)PacketType::QueryServers, 'T','2','L','A','N','Q' };
     sockaddr_in broadcastAddr{};
     broadcastAddr.sin_family = AF_INET;
-    broadcastAddr.sin_port = htons(28002);
+    broadcastAddr.sin_port = htons(T2Protocol::LAN_QUERY_PORT);
     broadcastAddr.sin_addr.s_addr = INADDR_BROADCAST;
 
     sendto(sock, queryPacket, sizeof(queryPacket), 0, (sockaddr*)&broadcastAddr, sizeof(broadcastAddr));
 
     // Also broadcast on standard T2 port
-    broadcastAddr.sin_port = htons(28000);
+    broadcastAddr.sin_port = htons(T2Protocol::DEFAULT_PORT);
     sendto(sock, queryPacket, sizeof(queryPacket), 0, (sockaddr*)&broadcastAddr, sizeof(broadcastAddr));
 
     impl->querying = true;

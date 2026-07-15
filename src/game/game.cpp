@@ -938,22 +938,8 @@ bool World::load(const char* mapName) {
 
     // Fallback if DML-based loading failed
     if (skyFaces.size() < 6) {
-        skyFaces.clear();
-        std::vector<std::string> fallbackPaths = {
-            "textures/skies/default/right.jpg", "skies/default/right.jpg",
-            "textures/gui/splash.jpg"
-        };
-        for (auto& sp : fallbackPaths) {
-            auto test = fs.read(sp.c_str());
-            if (!test.empty()) {
-                skyFaces = {
-                    "textures/skies/default/right.jpg", "textures/skies/default/left.jpg",
-                    "textures/skies/default/top.jpg", "textures/skies/default/bottom.jpg",
-                    "textures/skies/default/front.jpg", "textures/skies/default/back.jpg"
-                };
-                break;
-            }
-        }
+        Console::instance().printf(LogLevel::Error, "Sky: failed to load cubemap faces from materialList '%s'. Expected 6 face textures in the DML.", skyMaterialList.c_str());
+        Console::instance().printf(LogLevel::Error, "Sky: falling back to procedural gradient sky");
     }
 
     if (skyFaces.size() >= 6) {
@@ -1807,11 +1793,11 @@ bool Game::init() {
     });
 
     con.addCommand("connect", [this](int32_t argc, const char* const* argv) {
-        if (argc > 1) connectToServer(argv[1], argc > 2 ? (uint16_t)atoi(argv[2]) : 28000);
+        if (argc > 1) connectToServer(argv[1], argc > 2 ? (uint16_t)atoi(argv[2]) : T2Protocol::DEFAULT_PORT);
     });
 
     con.addCommand("startServer", [this](int32_t argc, const char* const* argv) {
-        uint16_t port = (argc > 1) ? (uint16_t)atoi(argv[1]) : 28000;
+        uint16_t port = (argc > 1) ? (uint16_t)atoi(argv[1]) : T2Protocol::DEFAULT_PORT;
         if (argc > 2) {
             Console::instance().setVariable("sv_mission", argv[2]);
         }
@@ -3604,31 +3590,15 @@ void Game::startLocalGame(const char* map) {
 
         if (!foundMissions.empty()) {
             std::sort(foundMissions.begin(), foundMissions.end());
-            // Prefer Training1, then Training2, then Katabatic
-            std::vector<std::string> priority = {"Training1", "Training2", "Katabatic"};
             missionPath = foundMissions[0];
-            for (auto& p : priority)
-                if (std::find(foundMissions.begin(), foundMissions.end(), p) != foundMissions.end())
-                    { missionPath = p; break; }
             Console::instance().printf(LogLevel::Info, "Found %zu missions, loading: %s", foundMissions.size(), missionPath.c_str());
         } else {
-            // Fallback to hardcoded list if dynamic discovery fails
-            const char* mapsToTry[] = {
-                "Training1", "Training2", "Katabatic", "Damnation", nullptr
-            };
-            for (int i = 0; mapsToTry[i]; i++) {
-                std::string p = std::string("missions/") + mapsToTry[i] + ".mis";
-                if (!fs.read(p.c_str()).empty()) {
-                    missionPath = mapsToTry[i];
-                    Console::instance().printf(LogLevel::Info, "Found mission (fallback): %s", p.c_str());
-                    break;
-                }
-            }
+            Console::instance().printf(LogLevel::Error, "No missions found in filesystem. Expected .mis files in missions/ directory.");
         }
 
         if (missionPath.empty()) {
-            missionPath = "Training1";
-            Console::instance().printf(LogLevel::Info, "Using default mission: %s", missionPath.c_str());
+            Console::instance().printf(LogLevel::Error, "Cannot start local game: no mission available. Place .mis/.ter files in missions/ directory.");
+            return;
         }
     }
 
@@ -3667,6 +3637,9 @@ void Game::startLocalGame(const char* map) {
             if (weatherType == 1)      ambPath = "audio/fx/environment/coldwind1.wav";
             else if (weatherType == 2) ambPath = "audio/fx/environment/wetwind.wav";
             else                        ambPath = "audio/fx/environment/drywind.wav";
+            if (!Engine::instance().fs().fileExists(ambPath)) {
+                Console::instance().printf(LogLevel::Warn, "Ambient sound not found: %s (weather type %d)", ambPath, weatherType);
+            }
             ambientSound = audio.loadSound(ambPath);
             if (ambientSound) {
                 ambientSource = audio.createSource();

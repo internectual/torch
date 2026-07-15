@@ -43,8 +43,20 @@
 // ─── End Protocol Overview ─────────────────────────────────────────
 namespace T2Protocol {
     constexpr uint16_t DEFAULT_PORT = 28000;
+    constexpr uint16_t LAN_QUERY_PORT = 28002;
     constexpr uint32_t PROTOCOL_VERSION = 3;
     constexpr uint32_t CHALLENGE_SIZE = 8;
+
+    // Ghost class IDs (from consoleObject.h)
+    constexpr int CLASS_PLAYER = 31;
+    constexpr int CLASS_VEHICLE_FLYING = 13;
+    constexpr int CLASS_VEHICLE_HOVER = 17;
+    constexpr int CLASS_VEHICLE_WHEELED = 62;
+    constexpr int CLASS_VEHICLE_HOVER2 = 58;
+    constexpr int CLASS_FLAG_RED = 100;
+    constexpr int CLASS_FLAG_BLUE = 101;
+    constexpr int CLASS_PROJECTILE = 33;
+    constexpr int CLASS_SENSOR = 54;
 
     // Game data types
     enum GameDataType : uint8_t {

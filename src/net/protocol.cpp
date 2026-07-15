@@ -351,7 +351,7 @@ struct GameServer::Impl {
         for (auto& sg : serverGhosts) {
             if (!sg.active) continue;
             // Player ghosts are always visible
-            if (sg.classId == 31) { visible.insert(sg.index); continue; }
+            if (sg.classId == T2Protocol::CLASS_PLAYER) { visible.insert(sg.index); continue; }
             // Distance check
             float dx = sg.posX - cl.posX;
             float dz = sg.posZ - cl.posZ;
@@ -410,7 +410,7 @@ struct GameServer::Impl {
 
             uint8_t ghBuf[32];
             size_t ghLen = T2Protocol::encodeGhostHeader(ghBuf, sizeof(ghBuf), gm);
-            bool always = (sg.classId == 31);
+            bool always = (sg.classId == T2Protocol::CLASS_PLAYER);
             if (always) ghBuf[0] = T2Protocol::GDT_GhostAlways;
             if (ghLen == 0) continue;
 
@@ -424,7 +424,7 @@ struct GameServer::Impl {
             memcpy(posData + p, &sg.health, 4); p += 4;
             float fKills = 0, fDeaths = 0, fTeam = 0;
             std::string pname = "Player";
-            if (sg.classId == 31) {
+            if (sg.classId == T2Protocol::CLASS_PLAYER) {
                 for (auto& c : clients)
                     if (c.playerGhostIndex == sg.index) { fKills = (float)c.kills; fDeaths = (float)c.deaths; fTeam = (float)c.teamId; pname = c.playerName; break; }
             }
@@ -1401,7 +1401,7 @@ void GameServer::update() {
             if (!cl.active) continue;
             for (auto& sg : impl->serverGhosts) {
                 if (!sg.active || (sg.classId != 100 && sg.classId != 101)) continue;
-                int flagTeam = (sg.classId == 100) ? 1 : 2; // RedFlag=team1, BlueFlag=team2
+                int flagTeam = (sg.classId == T2Protocol::CLASS_FLAG_RED) ? 1 : 2; // RedFlag=team1, BlueFlag=team2
 
                 // Flag carried by someone: sync to carrier
                 if (sg.passengerCi >= 0) {
@@ -1477,7 +1477,7 @@ void GameServer::update() {
 
         // Respawn timed-out flags
         for (auto& sg : impl->serverGhosts) {
-            if ((sg.classId == 100 || sg.classId == 101) && !sg.active && sg.respawnTime > 0 &&
+            if ((sg.classId == T2Protocol::CLASS_FLAG_RED || sg.classId == T2Protocol::CLASS_FLAG_BLUE) && !sg.active && sg.respawnTime > 0 &&
                 Engine::instance().timer().now() >= sg.respawnTime) {
                 sg.active = true;
                 sg.respawnTime = 0;
@@ -1517,7 +1517,7 @@ void GameServer::update() {
         // Try to enter a nearby vehicle
         for (auto& sg : impl->serverGhosts) {
             if (!sg.active || sg.passengerCi >= 0) continue;
-            bool isVeh = (sg.classId == 13 || sg.classId == 17 || sg.classId == 62 || sg.classId == 58);
+            bool isVeh = (sg.classId == T2Protocol::CLASS_VEHICLE_FLYING || sg.classId == T2Protocol::CLASS_VEHICLE_HOVER || sg.classId == T2Protocol::CLASS_VEHICLE_WHEELED || sg.classId == T2Protocol::CLASS_VEHICLE_HOVER2);
             if (!isVeh) continue;
             float dx = cl.posX - sg.posX;
             float dz = cl.posZ - sg.posZ;
@@ -1537,8 +1537,8 @@ void GameServer::update() {
         if (!driver.active) continue;
         float forward = (driver.lastMove.flags & 1) ? 1.0f : 0;
         float backward = 0; // could add flag later
-        bool isFlying = (sg.classId == 13);
-        bool isHover = (sg.classId == 17);
+            bool isFlying = (sg.classId == T2Protocol::CLASS_VEHICLE_FLYING);
+            bool isHover = (sg.classId == T2Protocol::CLASS_VEHICLE_HOVER);
         float accel = isFlying ? 25.0f : isHover ? 20.0f : 15.0f;
         float maxSpeed = isFlying ? 35.0f : isHover ? 25.0f : 20.0f;
         float braking = isFlying ? 1.0f : isHover ? 2.0f : 3.0f;
