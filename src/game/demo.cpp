@@ -729,7 +729,6 @@ void DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
 
     // ─── Tagged strings table ─────────────────
     // Format: flag(1 bit) + ID(12 bits) + Huffman string, repeated until flag=0
-    // Both v24834 and v25034 use this format
     while (!bs.isError()) {
         if (!bs.readFlag()) break;
         int id = bs.readInt(12);
