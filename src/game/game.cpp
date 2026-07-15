@@ -405,6 +405,43 @@ bool World::load(const char* mapName) {
                 }
             }
 
+            // Override detail textures from .mis if specified
+            for (int i = 0; i < 4; i++) {
+                std::string key = "detailtex" + std::to_string(i + 1);
+                std::string texName = getProp(terrainObj->props, key.c_str());
+                if (!texName.empty() && i < (int)terrainBlock.textureNames.size()) {
+                    terrainBlock.textureNames[i] = texName;
+                    // Reload the texture
+                    std::vector<std::string> exts = {".png", ".jpg", ".bmp", ".bm8", ".gif"};
+                    bool found = false;
+                    for (auto& ext : exts) {
+                        std::string path = "textures/" + texName + ext;
+                        auto td = fs.read(path.c_str());
+                        if (!td.empty()) {
+                            terrainBlock.detailTextures[i].load(td.data(), td.size());
+                            if (terrainBlock.detailTextures[i].loaded) {
+                                Console::instance().printf(LogLevel::Info, "  detail texture %d overridden: %s", i, path.c_str());
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!found) {
+                        for (auto& ext : exts) {
+                            std::string path = texName + ext;
+                            auto td = fs.read(path.c_str());
+                            if (!td.empty()) {
+                                terrainBlock.detailTextures[i].load(td.data(), td.size());
+                                if (terrainBlock.detailTextures[i].loaded) {
+                                    Console::instance().printf(LogLevel::Info, "  detail texture %d overridden: %s", i, path.c_str());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if (!terrainBlock.loaded) {
                 // Still try just .ter extension
                 std::string tryPath = terrainFile;
