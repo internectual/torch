@@ -738,14 +738,10 @@ void DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
     }
 
     // ─── Second tagged strings section ─────────────────
-    // NOTE: The initial block contains a second tagged strings section (inside
-    // NetConnection::readDemoStartBlock) using a different format:
-    // skip(U32) + strings + skip(U32) + strings...
-    // We cannot reliably locate this section because the intermediate sections
-    // (data blocks, camera, moves, ConnectionProtocol, pathManager) are variable-length
-    // and our section-skipping code produces incorrect offsets.
-    // The mission name for some demos (e.g., Minotaur, Damnation) lives in this
-    // second section and cannot be extracted with the current parser.
+    // The initial block has two tagged strings sections. The second is inside
+    // NetConnection::readDemoStartBlock after data blocks, camera/moves,
+    // ConnectionProtocol, and pathManager. We cannot reliably skip the
+    // variable-length pathManager to reach it.
 
     // ─── Find mission name ───────────────────────────────────
     // 1. First try scanning tagged strings for a .mis path or mission name
