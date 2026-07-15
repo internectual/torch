@@ -8,6 +8,7 @@ Shader* ShaderManager::textShader = nullptr;
 Shader* ShaderManager::lineShader = nullptr;
 Shader* ShaderManager::shadowShader = nullptr;
 Shader* ShaderManager::spriteShader = nullptr;
+Shader* ShaderManager::cloudShader = nullptr;
 
 static const char* defaultVert = R"(
 #version 330 core
@@ -341,6 +342,33 @@ void main() {
 }
 )";
 
+static const char* cloudVert = R"(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUV;
+uniform mat4 uMVP;
+out vec2 vUV;
+void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+    vUV = aUV;
+}
+)";
+
+static const char* cloudFrag = R"(
+#version 330 core
+in vec2 vUV;
+uniform sampler2D uTexture;
+uniform float uOpacity;
+uniform float uScrollU;
+out vec4 FragColor;
+void main() {
+    vec2 uv = vec2(vUV.x + uScrollU, vUV.y);
+    vec4 tex = texture(uTexture, uv);
+    FragColor = vec4(tex.rgb, tex.a * uOpacity);
+    if (FragColor.a < 0.01) discard;
+}
+)";
+
 static const char* spriteVert = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -422,6 +450,11 @@ void ShaderManager::init() {
     if (!spriteShader->load(spriteVert, spriteFrag)) {
         Console::instance().printf(LogLevel::Error, "Failed to load sprite shader");
     }
+
+    cloudShader = new Shader();
+    if (!cloudShader->load(cloudVert, cloudFrag)) {
+        Console::instance().printf(LogLevel::Error, "Failed to load cloud shader");
+    }
 }
 
 void ShaderManager::destroy() {
@@ -432,6 +465,7 @@ void ShaderManager::destroy() {
     delete lineShader; lineShader = nullptr;
     delete shadowShader; shadowShader = nullptr;
     delete spriteShader; spriteShader = nullptr;
+    delete cloudShader; cloudShader = nullptr;
 }
 
 Shader* ShaderManager::getDefaultShader() { return defaultShader; }
@@ -441,3 +475,4 @@ Shader* ShaderManager::getTextShader() { return textShader; }
 Shader* ShaderManager::getLineShader() { return lineShader; }
 Shader* ShaderManager::getShadowShader() { return shadowShader; }
 Shader* ShaderManager::getSpriteShader() { return spriteShader; }
+Shader* ShaderManager::getCloudShader() { return cloudShader; }

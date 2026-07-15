@@ -669,6 +669,7 @@ bool World::load(const char* mapName) {
     // Load sky from mission materialList
     std::vector<std::string> skyFaces;
     std::string emapPath;
+    std::vector<std::string> cloudPaths;
     if (!skyMaterialList.empty()) {
         // Try to load the DML file
         std::string dmlPath = "textures/" + skyMaterialList;
@@ -699,6 +700,8 @@ bool World::load(const char* mapName) {
                         faceNames.push_back(line);
                     else if (lineIdx == 6)
                         emapPath = line;
+                    else if (lineIdx >= 7 && lineIdx <= 9)
+                        cloudPaths.push_back(line);
                 }
                 lineIdx++;
                 pos = end + 1;
@@ -822,6 +825,46 @@ bool World::load(const char* mapName) {
 
             if (!skyBox.emap.loaded) {
                 Console::instance().printf(LogLevel::Debug, "  emap NOT FOUND: %s", emapPath.c_str());
+            }
+
+            // Load cloud layers from DML lines 7-9
+            for (size_t ci = 0; ci < cloudPaths.size() && ci < 3; ci++) {
+                Sky::CloudLayer layer;
+                layer.scrollSpeed = (ci == 0) ? 0.3f : (ci == 1) ? 0.15f : 0.08f;
+                layer.opacity = (ci == 0) ? 0.6f : (ci == 1) ? 0.4f : 0.3f;
+                layer.height = (ci == 0) ? 0.7f : (ci == 1) ? 0.5f : 0.3f;
+
+                bool found = false;
+                for (auto& ext : exts) {
+                    std::string texPath = "textures/" + cloudPaths[ci] + ext;
+                    auto td = fs.read(texPath.c_str());
+                    if (!td.empty()) {
+                        layer.texture.load(td.data(), td.size());
+                        if (layer.texture.loaded) {
+                            Console::instance().printf(LogLevel::Info, "  cloud layer %zu loaded: %s", ci, texPath.c_str());
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (!found) {
+                    for (auto& ext : exts) {
+                        std::string texPath = cloudPaths[ci] + ext;
+                        auto td = fs.read(texPath.c_str());
+                        if (!td.empty()) {
+                            layer.texture.load(td.data(), td.size());
+                            if (layer.texture.loaded) {
+                                Console::instance().printf(LogLevel::Info, "  cloud layer %zu loaded: %s", ci, texPath.c_str());
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!found) {
+                    Console::instance().printf(LogLevel::Debug, "  cloud layer %zu NOT FOUND: %s", ci, cloudPaths[ci].c_str());
+                }
+                skyBox.cloudLayers.push_back(std::move(layer));
             }
         }
     } else {
@@ -1105,6 +1148,11 @@ void World::render(const Point3F& cameraPos) {
 
     auto& r = Engine::instance().renderer();
 
+    // Render sky first (behind everything, depth writes off)
+    glDepthMask(GL_FALSE);
+    skyBox.render(r.view, r.projection);
+    glDepthMask(GL_TRUE);
+
     // Render terrain
     if (terrainBlock.loaded) {
         ShaderManager::getTerrainShader()->bind();
@@ -1199,9 +1247,6 @@ void World::render(const Point3F& cameraPos) {
 
     // Render particles
     renderParticles();
-
-    // Render sky
-    skyBox.render(r.view, r.projection);
 
     // Simple water plane for procedural terrain (no mission loaded)
     if (!loaded || terrainBlock.loaded) {

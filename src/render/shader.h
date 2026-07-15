@@ -10,6 +10,7 @@ public:
     static Shader* getLineShader();
     static Shader* getShadowShader();
     static Shader* getSpriteShader();
+    static Shader* getCloudShader();
 
     static void init();
     static void destroy();
@@ -22,4 +23,5 @@ private:
     static Shader* lineShader;
     static Shader* shadowShader;
     static Shader* spriteShader;
+    static Shader* cloudShader;
 };

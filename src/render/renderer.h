@@ -215,6 +215,16 @@ struct Sky {
     bool loaded = false;
     void load(const std::vector<std::string>& faces);
     void render(const MatrixF& view, const MatrixF& proj);
+
+    // Cloud layers (from DML lines 7-9)
+    struct CloudLayer {
+        Texture texture;
+        float scrollSpeed = 0.0f;   // horizontal scroll speed
+        float opacity = 1.0f;
+        float height = 0.5f;        // 0-1, position on sky dome
+    };
+    std::vector<CloudLayer> cloudLayers;
+    uint32_t cloudVAO = 0, cloudVBO = 0;
 };
 
 class Renderer {

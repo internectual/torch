@@ -333,7 +333,6 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
     shader->setUniform("uProjection", renderer.projection);
     shader->setUniform("uView", renderer.view);
     shader->setUniform("uModel", model);
-    shader->setUniform("uLightDir", Point3F{0.5f, 0.8f, 0.6f});
     shader->setUniform("uCamPos", cameraPos);
     shader->setUniform("uFogEnabled", (int32_t)(fogEnabled ? 1 : 0));
     if (fogEnabled) {
@@ -690,7 +689,7 @@ void Sky::render(const MatrixF& view, const MatrixF& proj) {
     shader->setUniform("uProjection", proj);
     shader->setUniform("uView", view);
 
-    if (loaded && emap.loaded) {
+    if (loaded && cubemap) {
         // Cubemap sky
         shader->setUniform("uUseGradient", (int32_t)0);
         shader->setUniform("uSkybox", 0);
@@ -724,6 +723,70 @@ void Sky::render(const MatrixF& view, const MatrixF& proj) {
 
     glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLES, 0, 36);
+
+    // Render cloud layers (scrolling textured quads at sky distance)
+    if (!cloudLayers.empty()) {
+        auto* cloudShader = ShaderManager::getCloudShader();
+        if (cloudShader) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+            cloudShader->bind();
+            cloudShader->setUniform("uProjection", proj);
+            cloudShader->setUniform("uView", view);
+
+            float time = Engine::instance().game().gameTime();
+
+            for (size_t ci = 0; ci < cloudLayers.size(); ci++) {
+                auto& cloud = cloudLayers[ci];
+                if (!cloud.texture.loaded) continue;
+
+                // Create cloud VAO/VBO if needed
+                if (!cloudVAO) {
+                    float verts[] = {
+                        // pos (x,y,z) + uv (u,v)
+                        -1, 0, -1,  0, 0,
+                         1, 0, -1,  1, 0,
+                         1, 0,  1,  1, 1,
+                        -1, 0, -1,  0, 0,
+                         1, 0,  1,  1, 1,
+                        -1, 0,  1,  0, 1,
+                    };
+                    glGenVertexArrays(1, &cloudVAO);
+                    glGenBuffers(1, &cloudVBO);
+                    glBindVertexArray(cloudVAO);
+                    glBindBuffer(GL_ARRAY_BUFFER, cloudVBO);
+                    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+                    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+                    glEnableVertexAttribArray(0);
+                    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+                    glEnableVertexAttribArray(1);
+                }
+
+                // Scroll UVs over time
+                float scrollU = time * cloud.scrollSpeed * 0.001f;
+
+                // Position the cloud dome above the camera
+                MatrixF model;
+                float height = 50.0f + cloud.height * 150.0f;
+                model.setTranslation(Point3F(0, height, 0));
+
+                MatrixF mvp = proj * view * model;
+                cloudShader->setUniform("uMVP", mvp);
+                cloudShader->setUniform("uOpacity", cloud.opacity);
+                cloudShader->setUniform("uScrollU", scrollU);
+
+                cloud.texture.bind(0);
+                cloudShader->setUniform("uTexture", (int32_t)0);
+
+                glBindVertexArray(cloudVAO);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+            }
+
+            glDisable(GL_BLEND);
+        }
+    }
+
     glDepthFunc(GL_LESS);
 }
 
