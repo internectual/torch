@@ -739,9 +739,67 @@ void DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
 
     // ─── Second tagged strings section ─────────────────
     // The initial block has two tagged strings sections. The second is inside
-    // NetConnection::readDemoStartBlock after data blocks, camera/moves,
-    // ConnectionProtocol, and pathManager. We cannot reliably skip the
-    // variable-length pathManager to reach it.
+    // NetConnection::readDemoStartBlock. We skip: data blocks, camera/moves,
+    // ConnectionProtocol, roundTrip/packetLoss, pathManager.
+    {
+        // Skip data blocks
+        while (bs.readFlag()) {
+            bs.readInt(7); bs.readInt(10); bs.readInt(10); bs.readInt(11);
+            while (bs.readFlag()) {}
+        }
+        // Skip firstPerson, camera, moves
+        bs.readFlag(); bs.readPoint3F(); bs.readFloat(32);
+        bs.readU32(); bs.readU32(); bs.readU32();
+        // Skip moveList
+        int moveCount = bs.readInt(32);
+        for (int i = 0; i < moveCount && !bs.isError(); i++) {
+            bs.readFlag(); if (bs.readFlag()) bs.readInt(16);
+            bs.readFlag(); if (bs.readFlag()) bs.readInt(16);
+            bs.readFlag(); if (bs.readFlag()) bs.readInt(16);
+            bs.readInt(6); bs.readInt(6); bs.readInt(6);
+            bs.readFlag();
+            for (int j = 0; j < 6; j++) bs.readFlag();
+        }
+        // Skip ConnectionProtocol
+        for (int i = 0; i < 39; i++) bs.readU32();
+        // Skip roundTripTime, packetLoss
+        bs.readFloat(32); bs.readFloat(32);
+        // Skip pathManager (from PathManager::readState)
+        uint32_t numPaths = bs.readU32();
+        for (uint32_t i = 0; i < numPaths && !bs.isError(); i++) {
+            bs.readU32(); // totalTime
+            uint32_t numPos = bs.readU32();
+            for (uint32_t j = 0; j < numPos && !bs.isError(); j++) {
+                bs.readFloat(32); bs.readFloat(32); bs.readFloat(32); // Point3F
+                bs.readU32(); // msToNext
+            }
+        }
+    }
+
+    // Read second tagged strings section (if present)
+    {
+        int pos = 0, sectionParsed = 0;
+        int skip = bs.readInt(32);
+        if (!bs.isError() && skip >= 0 && skip < T2Demo::TaggedStringCount) {
+            pos += skip;
+            while (pos < T2Demo::TaggedStringCount && !bs.isError()) {
+                int count = bs.readInt(32);
+                if (bs.isError() || count < 0 || count > 100) break;
+                for (int i = 0; i < count && !bs.isError(); i++) {
+                    std::string s = bs.readString();
+                    if (pos >= 0 && pos < T2Demo::TaggedStringCount)
+                        initialBlock.taggedStrings[pos] = s;
+                    sectionParsed++;
+                    pos++;
+                }
+                skip = bs.readInt(32);
+                if (bs.isError() || skip < 0 || skip > T2Demo::TaggedStringCount) break;
+                pos += skip;
+            }
+            if (sectionParsed > 0)
+                Console::instance().printf(LogLevel::Info, "  Second tagged strings: %d entries parsed", sectionParsed);
+        }
+    }
 
     // ─── Find mission name ───────────────────────────────────
     // 1. First try scanning tagged strings for a .mis path or mission name
