@@ -778,7 +778,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         const std::vector<BmpCell>* bmpCells = nullptr;
         Texture* shTex = getShellTexWithCells(r, "shll_button.png", bmpCells);
         if (shTex && bmpCells && bmpCells->size() >= 9) {
-            int state = 0; // 0=normal, 1=highlight, 2=pressed
+            int state = ctl->hovered ? 1 : (ctl->menuOpen ? 2 : 0); // 0=normal, 1=highlight, 2=pressed
             auto& cL = (*bmpCells)[state * 3 + 0]; // left cap for this state
             auto& cF = (*bmpCells)[state * 3 + 1]; // fill/middle for this state
             auto& cR = (*bmpCells)[state * 3 + 2]; // right cap for this state
@@ -857,6 +857,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             if (justify == "center") tx = x + (ctl->extentX - tw) * 0.5f;
             else if (justify == "right") tx = x + ctl->extentX - tw - textOfsX;
             bf->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
+        }
+        // Hover highlight: yellow border when the mouse is over this control
+        if (ctl->hovered) {
+            r.drawRectFill({x-1, y-1, 0}, {x + ctl->extentX + 1, y, 0}, {1.0f, 1.0f, 0.4f, 0.9f});
+            r.drawRectFill({x-1, y + ctl->extentY, 0}, {x + ctl->extentX + 1, y + ctl->extentY + 1, 0}, {1.0f, 1.0f, 0.4f, 0.9f});
+            r.drawRectFill({x-1, y-1, 0}, {x, y + ctl->extentY + 1, 0}, {1.0f, 1.0f, 0.4f, 0.9f});
+            r.drawRectFill({x + ctl->extentX, y-1, 0}, {x + ctl->extentX + 1, y + ctl->extentY + 1, 0}, {1.0f, 1.0f, 0.4f, 0.9f});
         }
         // Popup menu for ShellLaunchMenu
         if (ctl->menuOpen && !ctl->menuItems.empty()) {
@@ -1748,7 +1755,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             float textW = tabFont ? tabFont->measure(ctl->tabs[ti].text.c_str()).x : (float)ctl->tabs[ti].text.size() * 9.0f;
             float tw = std::max(60.0f, textW + 16);
             bool sel = (ti == ctl->selectedTab);
-            ColorF fill = sel ? ColorF{0.35f,0.45f,0.55f,1} : ColorF{0.2f,0.22f,0.28f,1};
+            bool hv = ctl->hovered && (ti == ctl->hoveredTab);
+            ColorF fill = sel ? ColorF{0.35f,0.45f,0.55f,1} : (hv ? ColorF{0.32f,0.36f,0.46f,1} : ColorF{0.2f,0.22f,0.28f,1});
             r.drawRectFill({tabX, y, 0}, {tabX + tw, y + tabH, 0}, fill);
             if (sel)
                 r.drawRectFill({tabX, y + tabH - 1, 0}, {tabX + tw, y + tabH, 0}, {0.6f,0.7f,0.8f,1});
@@ -1886,9 +1894,11 @@ void GuiRenderer::update(float dt) {
     // Clear hover states each frame
     std::function<void(GuiControl*)> clearHover = [&](GuiControl* ctl) {
         ctl->hovered = false;
+        ctl->hoveredTab = -1;
         for (auto* c : ctl->children) clearHover(c);
     };
     for (auto* d : dialogStack) clearHover(d);
+    if (canvas) clearHover(canvas);
     double now = Engine::instance().timer().now();
     // Collect expired events first, then execute after erasing
     // (execution may add new events, invalidating iterators)
@@ -1995,6 +2005,15 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
     return nullptr;
 }
 
+GuiControl* GuiRenderer::hitTestTop(int mx, int my) {
+    for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it) {
+        GuiControl* h = hitTest(*it, mx, my);
+        if (h) return h;
+    }
+    if (canvas) return hitTest(canvas, mx, my);
+    return nullptr;
+}
+
 bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
     // Check all dialogs from top to bottom
     GuiControl* hit = nullptr;
@@ -2037,6 +2056,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         }
         break;
     }
+    if (!hit && canvas) hit = hitTest(canvas, x, y);
     if (!hit) return false;
     // GuiServerBrowser: row selection + column header sort
     if (hit->className == "GuiServerBrowser") {
@@ -2175,7 +2195,9 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                             auto gi = sobj->fields.find(gk);
                             if (gi != sobj->fields.end()) {
                                 std::string guiName = gi->second.toString();
-                                if (!guiName.empty()) {
+                                if (guiName == "__QUIT__") {
+                                    Engine::instance().quit();
+                                } else if (!guiName.empty()) {
                                     Engine::instance().guiRenderer().setContent(guiName);
                                     if (!Engine::instance().guiRenderer().isDialogActive("LaunchToolbarDlg"))
                                         Engine::instance().guiRenderer().pushDialog("LaunchToolbarDlg");

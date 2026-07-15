@@ -2321,6 +2321,9 @@ bool ScriptEngine::init() {
                     if (txt == "TRAINING") guiName = "TrainingGui";
                     else if (txt == "LAN GAME") guiName = "GameGui";
                     else if (txt == "GAME") guiName = "GameGui";
+                    else if (txt == "SETTINGS") guiName = "OptionsDlg";
+                    else if (txt == "RECORDING") guiName = "DemoPlaybackDlg";
+                    else if (txt == "QUIT") guiName = "__QUIT__";
                     sobj->fields[gk] = VMValue(guiName);
                     sobj->fields["key[" + std::to_string(id) + "]"] = VMValue("0");
                 }

@@ -1143,8 +1143,29 @@ void Engine::run() {
             int mx = plat->input().mouseX;
             int my = plat->input().mouseY;
             // Hover detection: set hovered state on control under mouse
-            GuiControl* hover = gui->hitTest(gui->getCanvas(), mx, my);
-            if (hover) hover->hovered = true;
+            GuiControl* hover = gui->hitTestTop(mx, my);
+            if (hover) {
+                hover->hovered = true;
+                // Compute hovered tab index for tab-group controls
+                if (hover->className == "ShellTabGroupCtrl" || hover->className == "GuiTabBookCtrl") {
+                    float ax = hover->posX, ay = hover->posY;
+                    for (auto* p = hover->parent; p && p != gui->getCanvas(); p = p->parent) { ax += p->posX; ay += p->posY; }
+                    const float tabH = 29;
+                    hover->hoveredTab = -1;
+                    if (my >= ay && my < ay + tabH) {
+                        float tabX = ax + 2;
+                        auto* hf = Engine::instance().renderer().getFont();
+                        for (int ti = 0; ti < (int)hover->tabs.size(); ti++) {
+                            float textW = hf ? hf->measure(hover->tabs[ti].text.c_str()).x : (float)hover->tabs[ti].text.size() * 9.0f;
+                            float tw = std::max(60.0f, textW + 16);
+                            if (mx >= tabX && mx < tabX + tw) { hover->hoveredTab = ti; break; }
+                            tabX += tw + 1;
+                        }
+                    }
+                } else {
+                    hover->hoveredTab = -1;
+                }
+            }
             bool pressed = plat->input().mouseButtons[1] != 0;
             static bool prevPressed = false;
             if (pressed && !prevPressed) {

@@ -25,6 +25,7 @@ struct GuiControl {
     bool selected = false;
     bool checked = false;
     bool hovered = false;
+    int hoveredTab = -1; // index of tab under mouse within a ShellTabGroupCtrl
     int groupNum = 0;
     int cursorPos = 0; // caret position for text edit controls
     std::vector<GuiControl*> children;
@@ -86,6 +87,7 @@ public:
     bool handleInput(int x, int y, bool pressed);
     bool handleScroll(int x, int y, int wheelDelta);
     GuiControl* hitTest(GuiControl* ctl, int mx, int my);
+    GuiControl* hitTestTop(int mx, int my); // dialogStack (top-down) then canvas
 
     GuiControl* getCanvas() { return canvas; }
     GuiControl* findControl(const std::string& name);

@@ -538,7 +538,9 @@ void Menu::update(float dt) {
         }
         // Mouse click activates item
         static bool prevMouseBtn = false;
-        bool mouseBtn = input.mouseButtons[0] != 0;
+        // SDL reports the left button as index 1 (SDL_BUTTON_LEFT), matching the
+        // engine's GUI click path (engine.cpp uses mouseButtons[1]).
+        bool mouseBtn = input.mouseButtons[1] != 0;
         if (mouseBtn && !prevMouseBtn) {
             for (int i = 0; i < itemCount; i++) {
                 float iy = startY + i * itemH;
@@ -631,7 +633,20 @@ void Menu::update(float dt) {
 void Menu::render() {
     auto& r = Engine::instance().renderer();
     auto* font = r.getFont();
-    int32_t w = Engine::instance().platform().width();
+    float w = (float)Engine::instance().platform().width();
+    float h = (float)Engine::instance().platform().height();
+
+    // 2D pixel-space projection (top-left origin, y-down) matching Font::render,
+    // so highlight rects and text align with mouse coordinates.
+    MatrixF ortho; ortho.identity();
+    ortho.m[0][0] = 2.0f / w;
+    ortho.m[1][1] = -2.0f / h;
+    ortho.m[0][3] = -1.0f;
+    ortho.m[1][3] = 1.0f;
+    r.setProjection(ortho);
+    r.setView(MatrixF{});
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
 
     // Simple menu rendering
     if (!active) return;
@@ -642,6 +657,12 @@ void Menu::render() {
             if (font) font->render(title, w * 0.5f - 80, 100, {1, 1, 0, 1}, 2.0f);
 
             const char* items[] = {"Start Local Game", "Server Browser", "Settings", "Controls", "Quit"};
+            // Hover/selection highlight box behind the active item
+            {
+                float hx = w * 0.5f - 100.0f;
+                float hy = 200.0f + (float)selectedItem * 40.0f;
+                r.drawRectFill({hx, hy, 0.0f}, {hx + 200.0f, hy + 40.0f, 0.0f}, {1.0f, 1.0f, 0.0f, 0.18f});
+            }
             for (int i = 0; i < 5; i++) {
                 float ix = w * 0.5f - 80;
                 float iy = 200 + i * 40;
