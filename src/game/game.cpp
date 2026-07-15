@@ -355,6 +355,10 @@ bool World::load(const char* mapName) {
         misData = fs.readText(misPath.c_str());
     }
 
+    // Cloud layer properties (populated from Sky object if .mis available)
+    float cloudHeights[3] = {0.7f, 0.5f, 0.3f};
+    float cloudSpeeds[3] = {0.3f, 0.15f, 0.08f};
+
     if (!misData.empty()) {
         Console::instance().printf(LogLevel::Info, "Found mission: %s (%zu bytes, first 30: '%s')", misPath.c_str(), misData.size(),
             misData.substr(0, 30).c_str());
@@ -436,6 +440,16 @@ bool World::load(const char* mapName) {
             }
             Console::instance().printf(LogLevel::Debug, "  fog: enabled=%d color=(%.2f %.2f %.2f) density=%.4f dist=%.0f",
                 fog.enabled, fog.color.r, fog.color.g, fog.color.b, fog.density, fog.distance);
+
+            // Read cloud layer properties
+            for (int ci = 0; ci < 3; ci++) {
+                std::string hKey = "cloudheightper[" + std::to_string(ci) + "]";
+                std::string hStr = getProp(skyObj->props, hKey.c_str());
+                if (!hStr.empty()) cloudHeights[ci] = (float)std::atof(hStr.c_str());
+                std::string sKey = "cloudspeed" + std::to_string(ci + 1);
+                std::string sStr = getProp(skyObj->props, sKey.c_str());
+                if (!sStr.empty()) cloudSpeeds[ci] = (float)std::atof(sStr.c_str()) * 1000.0f;
+            }
         }
 
         // Parse Sun from mission for dynamic lighting
@@ -942,11 +956,12 @@ bool World::load(const char* mapName) {
             }
 
             // Load cloud layers from DML lines 7-9
+            // Use cloud properties from Sky object (read above)
             for (size_t ci = 0; ci < cloudPaths.size() && ci < 3; ci++) {
                 Sky::CloudLayer layer;
-                layer.scrollSpeed = (ci == 0) ? 0.3f : (ci == 1) ? 0.15f : 0.08f;
+                layer.scrollSpeed = cloudSpeeds[ci];
                 layer.opacity = (ci == 0) ? 0.6f : (ci == 1) ? 0.4f : 0.3f;
-                layer.height = (ci == 0) ? 0.7f : (ci == 1) ? 0.5f : 0.3f;
+                layer.height = cloudHeights[ci];
 
                 bool found = false;
                 for (auto& ext : exts) {
