@@ -1243,7 +1243,9 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
     // CloakMask + MountMask + ShieldMask
     if (bs.readFlag()) {
         if (bs.readFlag()) { // hasCloakData
-            bs.readFlag(); bs.readFlag(); // cloaked, isControlled
+            bool cloaked = bs.readFlag();
+            bs.readFlag(); // isControlled
+            if (entry) entry->cloaked = cloaked;
             if (bs.readFlag()) { bs.readFlag(); bs.readF32(); } // fading → fadeOut, fadeTime
         }
         if (bs.readFlag()) { // MountMask
@@ -1675,7 +1677,15 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
         readStaticShapeData(bs, isInitial, cp, entry);
         if (bs.readFlag()) bs.readFloat(8); // CapacitorEnergy
         if (bs.readFlag()) return true; // control shortcut
-        if (bs.readFlag()) { bs.readFloat(10); bs.readFloat(10); bs.readFloat(8); } // barrel
+        if (bs.readFlag()) {
+            float barrelPitch = bs.readFloat(10);
+            float barrelYaw = bs.readFloat(10);
+            bs.readFloat(8);
+            if (entry) {
+                entry->barrelPitch = barrelPitch;
+                entry->barrelYaw = barrelYaw;
+            }
+        }
     }
     else if (cn == "Item" || cn == "mine") readItemData(bs, isInitial, cp, entry);
     else if (cn == "Camera") readCameraData(bs, isInitial, cp, entry);

@@ -2824,6 +2824,12 @@ void Game::render(float dt) {
                     if (defShader) defShader->setUniform("uTint", tint);
                 }
 
+                // Apply cloak transparency
+                if (g->cloaked) {
+                    ColorF cloakTint = {0.4f, 0.6f, 0.8f, 0.15f};
+                    if (defShader) defShader->setUniform("uTint", cloakTint);
+                }
+
                 // Pick animation: try multiple animation names per class
                 const char* animName = nullptr;
                 const char* altName = nullptr;

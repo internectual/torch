@@ -385,6 +385,13 @@ struct GhostEntry {
         bool isFiring = false;
     };
     MountedImage mountedImages[8]{};
+
+    // Turret barrel aiming
+    float barrelPitch = 0.0f;
+    float barrelYaw = 0.0f;
+
+    // Cloak state
+    bool cloaked = false;
 };
 
 class GhostTracker {
