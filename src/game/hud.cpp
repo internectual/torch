@@ -122,19 +122,34 @@ void HUD::render(Game* game) {
         if (game->isDemoPaused()) status = "|| PAUSE";
         else if (game->isDemoFastForward()) status = ">> FAST";
         ColorF statusColor = game->isDemoPaused() ? ColorF{1, 1, 0, 1} : ColorF{0, 1, 0, 1};
-        // Progress bar (20 chars wide)
+        // Speed display
+        float speed = game->getDemoSpeed();
+        char speedBuf[16];
+        snprintf(speedBuf, sizeof(speedBuf), "%.1fx", speed);
+
+        snprintf(buf, sizeof(buf), "[%s] %s %02d:%02d/%02d:%02d",
+                 status, speedBuf, mins, secs, totalMins, totalSecs);
+        if (font) font->render(buf, 20.0f, 20.0f, statusColor, 2.0f);
+
+        // Graphical progress bar
         float progress = game->getDemoTotalTime() > 0
             ? game->getDemoTime() / game->getDemoTotalTime() : 0;
         if (progress < 0) progress = 0;
         if (progress > 1) progress = 1;
-        int barChars = (int)(progress * 20);
-        char bar[32];
-        for (int i = 0; i < 20; i++) bar[i] = (i < barChars) ? '#' : '.';
-        bar[20] = 0;
-
-        snprintf(buf, sizeof(buf), "[%s] [%s] %02d:%02d/%02d:%02d",
-                 status, bar, mins, secs, totalMins, totalSecs);
-        if (font) font->render(buf, 20.0f, 20.0f, statusColor, 2.0f);
+        float barW = 300.0f, barH = 8.0f;
+        float bx = 20.0f, by = 42.0f;
+        // Background
+        Box3F bgBox = {{bx, by - barH, 0}, {bx + barW, by, 0}};
+        r.drawBox(bgBox, {0.2f, 0.2f, 0.2f, 0.7f});
+        // Fill
+        float fw = barW * progress;
+        Box3F fillBox = {{bx + 1, by - barH + 1, 0}, {bx + fw - 1, by - 1, 0}};
+        r.drawBox(fillBox, {0.3f, 1.0f, 0.3f, 0.9f});
+        // Border
+        r.drawLine({bx, by, 0}, {bx + barW, by, 0}, {1, 1, 1, 0.5f});
+        r.drawLine({bx + barW, by, 0}, {bx + barW, by - barH, 0}, {1, 1, 1, 0.5f});
+        r.drawLine({bx + barW, by - barH, 0}, {bx, by - barH, 0}, {1, 1, 1, 0.5f});
+        r.drawLine({bx, by - barH, 0}, {bx, by, 0}, {1, 1, 1, 0.5f});
 
         // Ghost count and help text
         if (auto* dp = game->getDemoParser()) {
@@ -150,9 +165,14 @@ void HUD::render(Game* game) {
             // Spectate target indicator
             if (font) font->render(buf, 20.0f, 48.0f, {0.7f, 0.7f, 0.7f, 0.8f}, 2.0f);
             // Spectate target indicator
-            int sidx = game->getControlGhostIndex(); // the private field isn't exposed, use controlGhostIndex
-            // Actually, let's just access it through the game
-            (void)sidx;
+            int sidx = game->getControlGhostIndex();
+            if (sidx >= 0) {
+                const GhostTracker& gt = game->getDemoParser()->getGhostTracker();
+                const GhostEntry* g = gt.getGhost(sidx);
+                if (g && !g->playerName.empty()) {
+                    if (font) font->render(g->playerName.c_str(), 20.0f, 68.0f, {0.3f, 1.0f, 0.5f, 0.9f}, 2.0f);
+                }
+            }
         }
 
         // Chat message overlay (recent demo events)
@@ -331,7 +351,27 @@ void HUD::renderEnergyBar(float energy, float maxEnergy) {
     }
 }
 
-void HUD::renderAmmo(int32_t current, int32_t max) {}
+void HUD::renderAmmo(int32_t current, int32_t max) {
+    auto& r = Engine::instance().renderer();
+    int32_t h = Engine::instance().platform().height();
+    float barW = 200.0f, barH = 10.0f;
+    float x = 20.0f, y = (float)h - 36.0f;
+    if (max <= 0) return;
+    float fill = (float)current / (float)max;
+    if (fill > 1) fill = 1;
+    if (fill < 0) fill = 0;
+
+    r.drawLine({x, y, 0}, {x + barW, y, 0}, {1, 1, 1, 0.5f});
+    r.drawLine({x + barW, y, 0}, {x + barW, y - barH, 0}, {1, 1, 1, 0.5f});
+    r.drawLine({x + barW, y - barH, 0}, {x, y - barH, 0}, {1, 1, 1, 0.5f});
+    r.drawLine({x, y - barH, 0}, {x, y, 0}, {1, 1, 1, 0.5f});
+
+    if (fill > 0) {
+        float fw = barW * fill;
+        Box3F aBox = {{x + 1, y - barH + 1, 0}, {x + fw - 1, y - 1, 0}};
+        r.drawBox(aBox, {1.0f, 0.8f, 0.2f, 0.8f});
+    }
+}
 
 void HUD::renderScoreboard(Game* game) {
     auto& r = Engine::instance().renderer();

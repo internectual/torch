@@ -324,6 +324,7 @@ public:
     bool isDemoPlaying() const { return demoPlaying; }
     bool isDemoPaused() const { return demoPaused; }
     bool isDemoFastForward() const { return demoFastForward || demoJetHeld; }
+    float getDemoSpeed() const { return demoPaused ? 0.0f : (isDemoFastForward() ? 4.0f : 1.0f); }
     float getDemoTime() const { return demoTime; }
     float getDemoTotalTime() const { return demoTotalTime; }
     bool demoHasPosition() const { return demoHasPos; }

@@ -2156,15 +2156,12 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                         }
                     }
                     // Call onSelect script (handles setContent via %this.gui[%tab])
-                    // The script's gui[] is stored by numeric index (gui[0], gui[1], etc.)
-                    // but the script's viewTab uses text as index (gui["TRAINING"]) which fails.
-                    // So we also set content directly from C++ using the stored numeric field.
                     auto* ts = Engine::instance().script().ts();
                     if (ts && ts->hasFunction(hit->name + "::onSelect"))
                         ts->callFunction(hit->name + "::onSelect",
                             {VMValue(hit->name), VMValue(ti), VMValue(hit->tabs[ti].text)});
-                    // C++ fallback: only for main LaunchTabView (not nested tab groups like GM_TabView)
-                    // The script's viewTab uses text-based lookup which fails. Use numeric index instead.
+                    // Set content directly from C++ using the stored numeric gui[] field
+                    // (script's viewTab uses text-based lookup which fails for T2 shell GUIs)
                     if (hit->name == "LaunchTabView") {
                         auto* sobj = ScriptEngine::instance().findObject(hit->name.c_str());
                         if (sobj) {
