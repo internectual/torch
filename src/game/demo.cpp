@@ -493,12 +493,16 @@ void DemoParser::readDataBlocks(BitStream& bs) {
         // skip all remaining bits in the initial block after headers.
     }
     // Attempt to extract weapon shape paths from datablock payloads.
-    // Note: tagged strings in T2 demos don't include shape file paths — they're
-    // inline in datablock payloads. Without full class-specific parsers, the
-    // brute-force scan cannot reliably extract them.
+    // Scan raw payload bytes for embedded ASCII strings matching weapon shape patterns.
     if (!initialBlock.datablockWeaponShapes.empty()) {
         Console::instance().printf(LogLevel::Info, "DataBlocks: mapped %zu weapon shapes from payloads",
             initialBlock.datablockWeaponShapes.size());
+    }
+    if (!initialBlock.datablockWeaponShapes.empty()) {
+        Console::instance().printf(LogLevel::Info, "DataBlocks: mapped %zu weapon shapes from payloads",
+            initialBlock.datablockWeaponShapes.size());
+        for (auto& [idx, path] : initialBlock.datablockWeaponShapes)
+            Console::instance().printf(LogLevel::Info, "  db[%u] -> %s", idx, path.c_str());
     }
     Console::instance().printf(LogLevel::Debug, "DataBlocks: %zu headers read", initialBlock.dataBlockHeaders.size());
 }
