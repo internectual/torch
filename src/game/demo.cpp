@@ -1440,7 +1440,19 @@ static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEnt
     if (bs.readFlag()) { // initial update
         if (entry) entry->position = bs.readPoint3F();
         else bs.readPoint3F();
-        bs.readPoint3F(); // velocity
+        Vec3 vel = bs.readPoint3F(); // velocity
+        if (entry && (vel.x != 0 || vel.y != 0 || vel.z != 0)) {
+            // Orient projectile along velocity vector
+            float len = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z);
+            if (len > 0.001f) {
+                Vec3 dir = {vel.x/len, vel.y/len, vel.z/len};
+                // Build rotation from forward (0,1,0) to direction
+                float yaw = atan2f(dir.x, dir.y);
+                float half = yaw * 0.5f;
+                entry->rotation = {0, sinf(half), 0, cosf(half)};
+                entry->hasRotation = true;
+            }
+        }
         bs.readRangedU32(0, 4095); // currTick
         bs.readFlag(); // quickSplash
         if (bs.readFlag()) {
@@ -1497,7 +1509,17 @@ static void readBombProjectileData(BitStream& bs, bool, const Vec3&, GhostEntry*
         if (bs.readFlag()) {
             if (entry) entry->position = bs.readPoint3F();
             else bs.readPoint3F();
-            bs.readPoint3F(); // velocity
+            Vec3 vel = bs.readPoint3F(); // velocity
+            if (entry && (vel.x != 0 || vel.y != 0 || vel.z != 0)) {
+                float len = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z);
+                if (len > 0.001f) {
+                    Vec3 dir = {vel.x/len, vel.y/len, vel.z/len};
+                    float yaw = atan2f(dir.x, dir.y);
+                    float half = yaw * 0.5f;
+                    entry->rotation = {0, sinf(half), 0, cosf(half)};
+                    entry->hasRotation = true;
+                }
+            }
         }
         if (!bs.readFlag()) return;
         bs.readPoint3F(); bs.readPoint3F(); return; // endPoint, endNormal
@@ -1505,7 +1527,17 @@ static void readBombProjectileData(BitStream& bs, bool, const Vec3&, GhostEntry*
     // full state
     if (entry) entry->position = bs.readPoint3F();
     else bs.readPoint3F();
-    bs.readPoint3F(); // velocity
+    Vec3 vel2 = bs.readPoint3F(); // velocity
+    if (entry && (vel2.x != 0 || vel2.y != 0 || vel2.z != 0)) {
+        float len = sqrtf(vel2.x*vel2.x + vel2.y*vel2.y + vel2.z*vel2.z);
+        if (len > 0.001f) {
+            Vec3 dir = {vel2.x/len, vel2.y/len, vel2.z/len};
+            float yaw = atan2f(dir.x, dir.y);
+            float half = yaw * 0.5f;
+            entry->rotation = {0, sinf(half), 0, cosf(half)};
+            entry->hasRotation = true;
+        }
+    }
     bs.readInt(12); // currTick
     if (bs.readFlag()) {}
     if (bs.readFlag()) { bs.readPoint3F(); bs.readPoint3F(); }
@@ -1524,7 +1556,13 @@ static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& 
         } else { // live projectile
             if (entry) entry->position = bs.readCompressedPoint(cp);
             else bs.readCompressedPoint(cp);
-            bs.readNormalVector(14); // direction
+            Vec3 dir = bs.readNormalVector(14); // direction
+            if (entry && (dir.x != 0 || dir.y != 0 || dir.z != 0)) {
+                float yaw = atan2f(dir.x, dir.y);
+                float half = yaw * 0.5f;
+                entry->rotation = {0, sinf(half), 0, cosf(half)};
+                entry->hasRotation = true;
+            }
             bs.readRangedU32(0, 511); // currTick
             if (bs.readFlag()) {
                 bs.readInt(10); bs.readRangedU32(0, 7); // source
@@ -1551,7 +1589,17 @@ static void readSeekerProjectileData(BitStream& bs, bool isInitial, const Vec3&,
         }
         if (entry) entry->position = bs.readPoint3F();
         else bs.readPoint3F();
-        bs.readPoint3F(); // velocity
+        Vec3 vel = bs.readPoint3F(); // velocity
+        if (entry && (vel.x != 0 || vel.y != 0 || vel.z != 0)) {
+            float len = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z);
+            if (len > 0.001f) {
+                Vec3 dir = {vel.x/len, vel.y/len, vel.z/len};
+                float yaw = atan2f(dir.x, dir.y);
+                float half = yaw * 0.5f;
+                entry->rotation = {0, sinf(half), 0, cosf(half)};
+                entry->hasRotation = true;
+            }
+        }
         if (bs.readFlag()) {
             if (!bs.readFlag()) bs.readPoint3F(); // targetDirection
             else bs.readInt(11); // targetGhost
