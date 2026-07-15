@@ -2913,6 +2913,18 @@ void Game::render(float dt) {
                 r.drawBox(box, {rcol, gcol, bcol, 1.0f});
             }
 
+            // Shield effect: render a glowing box outline when shielded
+            if (mg->shieldLevel > 0.01f) {
+                float sAlpha = mg->shieldLevel * 0.35f;
+                bool isPlr = (g->className == "Player" || g->className == "MPB");
+                float sSize = isPlr ? 1.0f : 1.8f;
+                float pulse = sinf(demoTime * 6.0f) * 0.1f + 0.9f;
+                sAlpha *= pulse;
+                r.drawBox({{rp.x - sSize, rp.y - sSize, rp.z - sSize},
+                           {rp.x + sSize, rp.y + sSize, rp.z + sSize}},
+                          {0.3f, 0.6f, 1.0f, sAlpha});
+            }
+
             // Ground shadow for all renderable ghosts
             if (isRenderableGhostClass(g->className)) {
                 float groundH = 0.0f;

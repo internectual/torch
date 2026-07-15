@@ -1254,7 +1254,9 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
             if (bs.readFlag()) { bs.readU32(); bs.readU32(); }
         }
         if (bs.readFlag()) { // ShieldMask
-            bs.readInt(10); bs.readInt(5);
+            int shieldVal = bs.readInt(10);
+            bs.readInt(5);
+            if (entry) entry->shieldLevel = shieldVal / 1023.0f;
         }
     }
     if (bs.readFlag()) {

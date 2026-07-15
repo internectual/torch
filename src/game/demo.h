@@ -392,6 +392,9 @@ struct GhostEntry {
 
     // Cloak state
     bool cloaked = false;
+
+    // Shield state
+    float shieldLevel = 0.0f;  // 0-1 normalized shield strength
 };
 
 class GhostTracker {
