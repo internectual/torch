@@ -184,9 +184,17 @@ struct DTSShape {
     std::vector<uint32_t> collisionIndices;
     bool load(const uint8_t* data, size_t size);
     bool loadGLB(const uint8_t* data, size_t size);
-    void render(int32_t detailLevel = 0);
+    // Node overrides: per-instance transform modifications (e.g., turret barrel aiming)
+    struct NodeOverride {
+        int nodeIndex;
+        MatrixF transform;
+    };
+    void render(int32_t detailLevel = 0, const NodeOverride* overrides = nullptr, int numOverrides = 0);
     void renderAnimation(const char* animName, float time);
     bool applySkin(const std::string& skinName);
+
+    // Find node index by name (-1 if not found)
+    int findNode(const std::string& name) const;
 };
 
 struct TerrainBlock {

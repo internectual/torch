@@ -1023,7 +1023,7 @@ bool DTSShape::applySkin(const std::string& skinName) {
     return anyReplaced;
 }
 
-void DTSShape::render(int32_t detailLevel) {
+void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int numOverrides) {
     try {
     auto* shader = ShaderManager::getDefaultShader();
     if (shader) shader->bind();
@@ -1034,7 +1034,14 @@ void DTSShape::render(int32_t detailLevel) {
 
     if (shader) shader->setUniform("uShadowStrength", 0.0f);
 
-    const std::vector<MatrixF>& nodeWorld = defaultTransforms;
+    // Build effective node transforms, applying any overrides
+    std::vector<MatrixF> nodeWorld = defaultTransforms;
+    if (overrides && numOverrides > 0) {
+        for (int i = 0; i < numOverrides; i++) {
+            if (overrides[i].nodeIndex >= 0 && overrides[i].nodeIndex < (int)nodeWorld.size())
+                nodeWorld[overrides[i].nodeIndex] = overrides[i].transform;
+        }
+    }
     const MatrixF baseModel = r.modelMatrix();
 
     if (isInterior) {
@@ -1172,6 +1179,12 @@ void DTSShape::render(int32_t detailLevel) {
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
     } catch (...) {}
+}
+
+int DTSShape::findNode(const std::string& name) const {
+    for (int i = 0; i < (int)nodes.size(); i++)
+        if (nodes[i].name == name) return i;
+    return -1;
 }
 
 void DTSShape::renderAnimation(const char* animName, float time) {

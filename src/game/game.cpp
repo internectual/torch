@@ -2852,6 +2852,7 @@ void Game::render(float dt) {
                 bool isVehicle = (g->className.find("Vehicle") != std::string::npos ||
                                   g->className == "Shrike" || g->className == "Turbograv" ||
                                   g->className == "Shield" || g->className == "Wildcat");
+                bool isTurret = (g->className == "Turret" || g->className == "Sentry");
                 if (isPlayer) {
                     animName = mg->isMoving ? "run" : "stand";
                     altName  = mg->isMoving ? "run" : "idle";
@@ -2859,13 +2860,36 @@ void Game::render(float dt) {
                     animName = mg->isMoving ? "hover" : "float";
                     altName  = mg->isMoving ? "float" : "still";
                 }
+
+                // Turret barrel aiming: apply barrelPitch/yaw to the barrel node
+                DTSShape::NodeOverride barrelOverride;
+                int numOverrides = 0;
+                if (isTurret && shape && (mg->barrelPitch != 0.0f || mg->barrelYaw != 0.0f)) {
+                    int barrelNode = shape->findNode("barrel");
+                    if (barrelNode < 0) barrelNode = shape->findNode("mount0");
+                    if (barrelNode >= 0) {
+                        // Get the default transform for this node
+                        barrelOverride.nodeIndex = barrelNode;
+                        if (barrelNode < (int)shape->defaultTransforms.size())
+                            barrelOverride.transform = shape->defaultTransforms[barrelNode];
+                        else
+                            barrelOverride.transform.identity();
+                        // Apply pitch (X rotation) and yaw (Y rotation) to the barrel
+                        MatrixF pitchMat, yawMat;
+                        pitchMat.setRotationAxis({1, 0, 0}, -mg->barrelPitch);
+                        yawMat.setRotationAxis({0, 1, 0}, -mg->barrelYaw);
+                        barrelOverride.transform = barrelOverride.transform * yawMat * pitchMat;
+                        numOverrides = 1;
+                    }
+                }
+
                 if (animName) {
                     bool found = false;
                     for (auto& a : shape->animations)
                         if (a.name == animName) { found = true; break; }
                     shape->renderAnimation(found ? animName : (altName ? altName : animName), mg->animTime);
                 } else {
-                    shape->render(0);
+                    shape->render(0, numOverrides > 0 ? &barrelOverride : nullptr, numOverrides);
                 }
 
                 // Render mounted weapons for player ghosts
