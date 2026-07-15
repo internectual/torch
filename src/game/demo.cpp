@@ -1218,7 +1218,10 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
     if (bs.readFlag()) {
         for (int i = 0; i < 8; i++) {
             if (bs.readFlag()) {
-                if (bs.readFlag()) bs.readInt(11);
+                if (bs.readFlag()) {
+                    int dbId = bs.readInt(11);
+                    if (entry && i < 8) entry->mountedImages[i].datablockId = dbId;
+                }
                 if (bs.readFlag()) {
                     if (bs.readFlag()) bs.readInt(10); else {
                         std::string s = bs.readString();
@@ -1226,7 +1229,13 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
                             entry->skinName = s;
                     }
                 }
-                bs.readFlag(); bs.readFlag(); bs.readFlag(); bs.readFlag(); bs.readFlag(); bs.readInt(3);
+                bool flags[5];
+                for (int f = 0; f < 5; f++) flags[f] = bs.readFlag();
+                int fireCount = bs.readInt(3);
+                if (entry && i < 8) {
+                    entry->mountedImages[i].loaded = flags[3]; // "loaded" flag
+                    entry->mountedImages[i].isFiring = (fireCount > 0);
+                }
                 if (isInitial) bs.readFlag();
             }
         }

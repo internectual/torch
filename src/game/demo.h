@@ -377,6 +377,14 @@ struct GhostEntry {
     std::string playerName;
     int teamId{-1};
     std::string shapeName; // from datablock
+
+    // Mounted image (weapon) slots
+    struct MountedImage {
+        int16_t datablockId = -1;
+        bool loaded = false;
+        bool isFiring = false;
+    };
+    MountedImage mountedImages[8]{};
 };
 
 class GhostTracker {

@@ -19,6 +19,9 @@
 #include <fstream>
 #include <cstdlib>
 
+// Forward declarations
+static const char* weaponShapeForDataBlock(int dbIndex);
+
 // ─── Sound helpers ────────────────────────────────────────────────
 static void playChatBeep() {
     static SoundBuffer* beepBuf = nullptr;
@@ -2843,6 +2846,48 @@ void Game::render(float dt) {
                 } else {
                     shape->render(0);
                 }
+
+                // Render mounted weapons for player ghosts
+                if (isPlayer) {
+                    for (int img = 0; img < 8; img++) {
+                        int16_t dbId = g->mountedImages[img].datablockId;
+                        if (dbId < 0) continue;
+                        const char* wPath = weaponShapeForDataBlock(dbId);
+                        if (!wPath) continue;
+
+                        // Load weapon shape (cached)
+                        static std::unordered_map<std::string, DTSShape> weaponCache;
+                        auto it = weaponCache.find(wPath);
+                        DTSShape* wShape = nullptr;
+                        if (it != weaponCache.end()) {
+                            wShape = &it->second;
+                        } else {
+                            auto& fs = Engine::instance().fs();
+                            auto data = fs.read(wPath);
+                            if (!data.empty()) {
+                                auto& entry = weaponCache[wPath];
+                                entry.name = wPath;
+                                entry.load(data.data(), data.size());
+                                if (entry.loaded) wShape = &entry;
+                            }
+                        }
+                        if (!wShape || !wShape->loaded) continue;
+
+                        // Position weapon at player's right hand (offset from body)
+                        Point3F weaponPos = {rp.x + 0.3f, rp.y + 0.1f, rp.z + 0.2f};
+
+                        MatrixF weaponModel;
+                        if (mg->hasRotation) {
+                            QuatF wq(mg->renderRotation.x, mg->renderRotation.y, mg->renderRotation.z, mg->renderRotation.w);
+                            weaponModel = wq.toMatrix();
+                        } else {
+                            weaponModel.setRotationAxis({0, 1, 0}, -mg->moveYaw);
+                        }
+                        weaponModel.setTranslation(weaponPos);
+                        r.setModel(weaponModel * Math::czUpToYUp());
+                        wShape->render(0);
+                    }
+                }
             } else {
                 // Fallback: colored box with size based on class
                 float size = 0.8f;
@@ -3542,6 +3587,24 @@ static const char* shapePathForClass(const std::string& className, const std::st
         return "shapes/effect_plasma_explosion.dts";
     // For unknown classes, try a path based on the class name
     return nullptr;
+}
+
+// Maps T2 weapon datablock indices to shape file paths
+// These are approximate — actual indices depend on the game's datablock setup
+static const char* weaponShapeForDataBlock(int dbIndex) {
+    switch (dbIndex) {
+        case 0: return "shapes/weapons/blaster.dts";
+        case 1: return "shapes/weapons/chaingun.dts";
+        case 2: return "shapes/weapons/disc.dts";
+        case 3: return "shapes/weapons/grenade_launcher.dts";
+        case 4: return "shapes/weapons/laser_rifle.dts";
+        case 5: return "shapes/weapons/mortar.dts";
+        case 6: return "shapes/weapons/shocklance.dts";
+        case 7: return "shapes/weapons/sniper_rifle.dts";
+        case 8: return "shapes/weapons/targeting_laser.dts";
+        case 9: return "shapes/weapons/repair_pack.dts";
+        default: return nullptr;
+    }
 }
 
 // Returns true if a ghost with this class name should be rendered as a 3D model
