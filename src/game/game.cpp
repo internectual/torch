@@ -675,6 +675,14 @@ bool World::load(const char* mapName) {
                         wo.rotAngleDeg = (count >= 4) ? vals[3] : 0;
                     }
                 }
+                {
+                    std::string scaleStr = getProp(obj.props, "scale");
+                    if (!scaleStr.empty()) {
+                        float sx, sy, sz;
+                        if (sscanf(scaleStr.c_str(), "%f %f %f", &sx, &sy, &sz) == 3)
+                            wo.scale = {sx, sy, sz};
+                    }
+                }
                 wo.shapeName = getProp(obj.props, "shapename");
                 if (wo.shapeName.empty())
                     wo.shapeName = getProp(obj.props, "interiorFile");
@@ -1265,15 +1273,23 @@ void World::render(const Point3F& cameraPos) {
         if (obj.shape && obj.shape->loaded) {
             MatrixF model;
             if (obj.rotAngleDeg != 0 && (obj.rot.x != 0 || obj.rot.y != 0 || obj.rot.z != 0)) {
-                // Axis-angle rotation
-                Point3F axis = obj.rot;
+                // Axis-angle rotation: convert axis from T2 Z-up to Y-up
+                Point3F axis = {obj.rot.x, obj.rot.z, -obj.rot.y};
                 float len = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
                 if (len > 0.0001f) {
                     axis.x /= len; axis.y /= len; axis.z /= len;
                     model.setRotationAxis(axis, Math::DEG2RAD(obj.rotAngleDeg));
                 }
             }
-            model.setTranslation(obj.pos);
+            // Convert position from T2 Z-up to Y-up: (x,y,z) -> (x, z, -y)
+            Point3F pos = {obj.pos.x, obj.pos.z, -obj.pos.y};
+            model.setTranslation(pos);
+            // Apply non-unit scale if present
+            if (obj.scale.x != 1.0f || obj.scale.y != 1.0f || obj.scale.z != 1.0f) {
+                MatrixF scaleMat;
+                scaleMat.setScale(obj.scale);
+                model = model * scaleMat;
+            }
             r.setModel(model * Math::czUpToYUp());
             if (!obj.animName.empty())
                 obj.shape->renderAnimation(obj.animName.c_str(), obj.animTime);
