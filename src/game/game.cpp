@@ -381,6 +381,8 @@ bool World::load(const char* mapName) {
             std::string sqStr = getProp(terrainObj->props, "squaresize");
             if (!sqStr.empty()) terrainBlock.squareSize = (float)std::atof(sqStr.c_str());
             Console::instance().printf(LogLevel::Debug, "  terrain squareSize: %.1f", terrainBlock.squareSize);
+            std::string hsStr = getProp(terrainObj->props, "heightscale");
+            if (!hsStr.empty()) terrainBlock.heightScale = (float)std::atof(hsStr.c_str());
             std::string posStr = getProp(terrainObj->props, "position");
             if (!posStr.empty()) {
                 float px, py, pz;
