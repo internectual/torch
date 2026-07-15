@@ -39,6 +39,7 @@ public:
     AffineTransform readAffineTransform(const Vec3& cp = Vec3{});
     int*       readMatrixF(Vec3* outPos = nullptr); // returns elements[16] (internal)
     std::string readString();
+    std::string readRawString();
     std::string unpackNetString();
     void setStringBufferEnabled(bool en) { stringBufferEnabled = en; if (!en) stringBuffer.clear(); }
 

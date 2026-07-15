@@ -241,6 +241,9 @@ BitStream::AffineTransform BitStream::readAffineTransform(const Vec3& cp) {
 }
 
 std::string BitStream::readString() {
+    // v24834 uses raw strings: U8 length + raw bytes (no Huffman, no string buffer)
+    // v25034+ uses Huffman with string buffer compression
+    // Detect format by checking if the first flag+length produces a reasonable string
     if (stringBufferEnabled && !stringBuffer.empty() && readFlag()) {
         int offset = readInt(8);
         stringBuffer = stringBuffer.substr(0, offset) + readHuffBuffer();
@@ -248,6 +251,18 @@ std::string BitStream::readString() {
         stringBuffer = readHuffBuffer();
     }
     return stringBuffer;
+}
+
+std::string BitStream::readRawString() {
+    // Raw string format: U8 length + raw bytes (used in v24834)
+    int len = readInt(8);
+    if (len <= 0 || len > 256 || isError()) return "";
+    std::string r;
+    r.resize(len);
+    for (int i = 0; i < len; i++)
+        r[i] = (char)readU8();
+    if (!r.empty()) r.back() = '\0';
+    return r;
 }
 
 std::string BitStream::unpackNetString() {
@@ -713,8 +728,13 @@ void DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
     int totalBits = (int)size * 8;
 
     // ─── Tagged strings table (1024 entries) ─────────────────
-    for (int i = 0; i < T2Demo::TaggedStringCount && !bs.isError(); i++)
-        if (bs.readFlag()) initialBlock.taggedStrings[i] = bs.readString();
+    // v24834 uses raw strings (U8 len + bytes), v25034+ uses Huffman
+    bool useRawStrings = (header.protocolVersion == T2Demo::ProtocolV24834);
+    for (int i = 0; i < T2Demo::TaggedStringCount && !bs.isError(); i++) {
+        if (bs.readFlag()) {
+            initialBlock.taggedStrings[i] = useRawStrings ? bs.readRawString() : bs.readString();
+        }
+    }
 
     // ─── Find mission name ───────────────────────────────────
     // 1. First try scanning tagged strings for a .mis path or mission name
