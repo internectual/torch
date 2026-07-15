@@ -2835,6 +2835,14 @@ void Game::render(float dt) {
                             else if (sn.find("white") != std::string::npos)
                                 tint = {0.9f, 0.9f, 0.9f, 1.0f};
                         }
+                        // Blend towards red when damaged
+                        float hpFrac = mg->health / mg->maxHealth;
+                        if (hpFrac < 0.5f) {
+                            float dmg = 1.0f - hpFrac * 2.0f; // 0 at 50%, 1 at 0%
+                            tint.r = tint.r + (1.0f - tint.r) * dmg * 0.6f;
+                            tint.g = tint.g * (1.0f - dmg * 0.4f);
+                            tint.b = tint.b * (1.0f - dmg * 0.4f);
+                        }
                     }
                     if (defShader) defShader->setUniform("uTint", tint);
                 }
