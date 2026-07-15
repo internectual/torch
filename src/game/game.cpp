@@ -1427,19 +1427,50 @@ float World::getHeight(float x, float z) const {
 // ─── Particle System ──────────────────────────────────────────
 
 void World::spawnExplosion(const Point3F& pos, const ColorF& color, float radius, int count) {
-    for (int i = 0; i < count; i++) {
+    // 1. Central bright flash (short-lived)
+    {
+        Particle p;
+        p.pos = pos;
+        p.vel = {0, 0, 0};
+        p.lifetime = 0.15f;
+        p.maxLifetime = 0.15f;
+        p.size = radius * 0.8f;
+        p.color = {1.0f, 0.95f, 0.8f, 1.0f};
+        p.active = true;
+        if (particles.size() < 1000) particles.push_back(p);
+    }
+    // 2. Fireball particles (orange/red, medium life)
+    int fireCount = count / 2;
+    for (int i = 0; i < fireCount; i++) {
         Particle p;
         float theta = ((float)std::rand() / RAND_MAX) * 3.14159f * 2.0f;
         float phi = ((float)std::rand() / RAND_MAX) * 3.14159f;
         float speed = ((float)std::rand() / RAND_MAX) * radius * 4.0f;
         p.pos = pos;
         p.vel = {sinf(phi) * cosf(theta) * speed, fabsf(cosf(phi)) * speed * 0.8f, sinf(phi) * sinf(theta) * speed};
-        p.lifetime = 0.3f + ((float)std::rand() / RAND_MAX) * 0.6f;
+        p.lifetime = 0.3f + ((float)std::rand() / RAND_MAX) * 0.4f;
         p.maxLifetime = p.lifetime;
         p.size = 0.3f + ((float)std::rand() / RAND_MAX) * 0.5f;
-        p.color = color;
+        // Vary from bright yellow to deep orange
+        float t = (float)std::rand() / RAND_MAX;
+        p.color = {1.0f, 0.4f + t * 0.5f, t * 0.2f, 1.0f};
         p.active = true;
-        // Fade alpha over lifetime
+        if (particles.size() < 1000) particles.push_back(p);
+    }
+    // 3. Smoke particles (dark, slower, longer-lived)
+    int smokeCount = count / 3;
+    for (int i = 0; i < smokeCount; i++) {
+        Particle p;
+        float theta = ((float)std::rand() / RAND_MAX) * 3.14159f * 2.0f;
+        float phi = ((float)std::rand() / RAND_MAX) * 3.14159f * 0.5f;
+        float speed = ((float)std::rand() / RAND_MAX) * radius * 1.5f;
+        p.pos = pos;
+        p.vel = {sinf(phi) * cosf(theta) * speed, fabsf(cosf(phi)) * speed * 0.5f + 1.0f, sinf(phi) * sinf(theta) * speed};
+        p.lifetime = 0.6f + ((float)std::rand() / RAND_MAX) * 0.8f;
+        p.maxLifetime = p.lifetime;
+        p.size = 0.5f + ((float)std::rand() / RAND_MAX) * 0.8f;
+        p.color = {0.3f, 0.3f, 0.3f, 0.6f};
+        p.active = true;
         if (particles.size() < 1000) particles.push_back(p);
     }
 }
