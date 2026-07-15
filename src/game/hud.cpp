@@ -500,6 +500,7 @@ void Menu::update(float dt) {
     if (!active) return;
 
     auto& input = Engine::instance().platform().input();
+    auto& ren = Engine::instance().renderer();
 
     static bool prevUp = false, prevDown = false, prevEnter = false, prevEsc = false;
     bool up = input.keysDown[SCANCODE_UP];
@@ -507,8 +508,34 @@ void Menu::update(float dt) {
     bool enter = input.keysDown[SCANCODE_RETURN];
     bool esc = input.keysDown[SCANCODE_ESCAPE];
 
+    // Mouse hover: update selectedItem based on mouse Y position
+    int mx = input.mouseX;
+    int my = input.mouseY;
+    int menuW = ren.config().width;
+    int menuH = ren.config().height;
     if (currentScreen == Main) {
         const int itemCount = 5;
+        float startY = (float)menuH * 0.35f;
+        float itemH = 40.0f;
+        for (int i = 0; i < itemCount; i++) {
+            float iy = startY + i * itemH;
+            if (my >= iy && my < iy + itemH && mx >= menuW * 0.3f && mx <= menuW * 0.7f) {
+                selectedItem = i;
+            }
+        }
+        // Mouse click activates item
+        static bool prevMouseBtn = false;
+        bool mouseBtn = input.mouseButtons[0] != 0;
+        if (mouseBtn && !prevMouseBtn) {
+            for (int i = 0; i < itemCount; i++) {
+                float iy = startY + i * itemH;
+                if (my >= iy && my < iy + itemH && mx >= menuW * 0.3f && mx <= menuW * 0.7f) {
+                    selectedItem = i;
+                    enter = true;
+                }
+            }
+        }
+        prevMouseBtn = mouseBtn;
         if (up && !prevUp) { selectedItem = (selectedItem - 1 + itemCount) % itemCount; }
         if (down && !prevDown) { selectedItem = (selectedItem + 1) % itemCount; }
 
