@@ -143,10 +143,78 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
         clean += content[i];
     }
 
-    // Parse objects
+    // Parse objects and datablocks
     while (pos < clean.size()) {
-        // Look for "new"
+        // Look for "new" or "datablock"
         size_t found = clean.find("new ", pos);
+        size_t dbFound = clean.find("datablock ", pos);
+        if (dbFound != std::string::npos && (found == std::string::npos || dbFound < found)) {
+            // Parse datablock definition
+            pos = dbFound + 10; // skip "datablock "
+            while (pos < clean.size() && clean[pos] <= ' ') pos++;
+            // Read class name
+            size_t start = pos;
+            while (pos < clean.size() && clean[pos] > ' ' && clean[pos] != '(' && clean[pos] != '{') pos++;
+            std::string className = clean.substr(start, pos - start);
+            // Read optional (InstanceName)
+            std::string objName;
+            while (pos < clean.size() && clean[pos] <= ' ') pos++;
+            if (pos < clean.size() && clean[pos] == '(') {
+                pos++;
+                start = pos;
+                while (pos < clean.size() && clean[pos] != ')') pos++;
+                objName = clean.substr(start, pos - start);
+                if (pos < clean.size()) pos++;
+            }
+            // Skip inheritance
+            while (pos < clean.size() && clean[pos] <= ' ') pos++;
+            if (pos < clean.size() && clean[pos] == ':') {
+                pos++;
+                while (pos < clean.size() && clean[pos] > ' ') pos++;
+            }
+            // Expect {
+            while (pos < clean.size() && clean[pos] <= ' ') pos++;
+            if (pos >= clean.size() || clean[pos] != '{') { pos++; continue; }
+            pos++;
+            // Parse properties until }
+            MisObject obj;
+            obj.className = className;
+            obj.objName = objName;
+            while (pos < clean.size()) {
+                while (pos < clean.size() && clean[pos] <= ' ') pos++;
+                if (pos >= clean.size() || clean[pos] == '}') { if (pos < clean.size()) pos++; break; }
+                // Read property name
+                start = pos;
+                while (pos < clean.size() && clean[pos] != '=' && clean[pos] > ' ' && clean[pos] != '{') pos++;
+                std::string propName = trim(clean.substr(start, pos - start));
+                if (propName.empty()) { pos++; continue; }
+                while (pos < clean.size() && clean[pos] <= ' ') pos++;
+                if (pos < clean.size() && clean[pos] == '=') pos++;
+                while (pos < clean.size() && clean[pos] <= ' ') pos++;
+                std::string propValue;
+                if (pos < clean.size() && clean[pos] == '"') {
+                    pos++;
+                    start = pos;
+                    while (pos < clean.size() && clean[pos] != '"') {
+                        if (clean[pos] == '\\') { pos++; if (pos < clean.size()) { propValue += clean[pos]; pos++; } }
+                        else { propValue += clean[pos]; pos++; }
+                    }
+                    if (pos < clean.size()) pos++;
+                } else {
+                    start = pos;
+                    while (pos < clean.size() && clean[pos] != ';' && clean[pos] != '}') pos++;
+                    propValue = trim(clean.substr(start, pos - start));
+                }
+                if (pos < clean.size() && clean[pos] == ';') pos++;
+                for (auto& c : propName) if (c >= 'A' && c <= 'Z') c += 32;
+                obj.props.push_back({propName, propValue});
+            }
+            // Skip ;
+            while (pos < clean.size() && clean[pos] <= ' ') pos++;
+            if (pos < clean.size() && clean[pos] == ';') pos++;
+            objects.push_back(std::move(obj));
+            continue;
+        }
         if (found == std::string::npos) break;
         pos = found;
 

@@ -611,6 +611,15 @@ bool World::load(const char* mapName) {
             }
         }
 
+        // Extract shapeFile paths from datablock definitions
+        for (auto& obj : objects) {
+            std::string shapeFile = getProp(obj.props, "shapefile");
+            if (!shapeFile.empty()) {
+                datablockShapeMap[obj.className] = shapeFile;
+                addShapeName(shapeFile);
+            }
+        }
+
         // Load all unique shapes
         for (auto& shapeName : shapeNames) {
             DTSShape shape;
@@ -4058,7 +4067,15 @@ DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::stri
 
     // Find the shape path for this class
     auto& fs = Engine::instance().fs();
-    const char* path = shapePathForClass(className, skinName);
+    // First try datablock shape map from .mis
+    std::string dbShapePath;
+    auto dbIt = w->datablockShapeMap.find(className);
+    if (dbIt != w->datablockShapeMap.end()) {
+        dbShapePath = dbIt->second;
+        // Clean trailing quote
+        if (!dbShapePath.empty() && dbShapePath.back() == '"') dbShapePath.pop_back();
+    }
+    const char* path = !dbShapePath.empty() ? dbShapePath.c_str() : shapePathForClass(className, skinName);
     if (!path) {
         // Try class-name-based paths for unknown classes
         std::string lower = className;

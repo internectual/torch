@@ -138,6 +138,9 @@ public:
     // Sky material list
     std::string skyMaterialList;
 
+    // Datablock class name -> shape file path mapping (from .mis)
+    std::unordered_map<std::string, std::string> datablockShapeMap;
+
     // Object management
     struct WorldObject {
         Point3F pos;
