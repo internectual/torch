@@ -455,6 +455,31 @@ bool World::load(const char* mapName) {
             }
         }
 
+        // Parse Precipitation from mission
+        for (auto& obj : objects) {
+            if (obj.className == "Precipitation") {
+                PrecipitationState ps;
+                std::string s;
+                s = getProp(obj.props, "numDrops"); if (!s.empty()) ps.numDrops = std::atoi(s.c_str());
+                s = getProp(obj.props, "boxWidth"); if (!s.empty()) ps.boxWidth = (float)std::atof(s.c_str());
+                s = getProp(obj.props, "boxHeight"); if (!s.empty()) ps.boxHeight = (float)std::atof(s.c_str());
+                s = getProp(obj.props, "dropSize"); if (!s.empty()) ps.dropSize = (float)std::atof(s.c_str());
+                s = getProp(obj.props, "minSpeed"); if (!s.empty()) ps.minSpeed = (float)std::atof(s.c_str());
+                s = getProp(obj.props, "maxSpeed"); if (!s.empty()) ps.maxSpeed = (float)std::atof(s.c_str());
+                s = getProp(obj.props, "followCam");
+                if (!s.empty()) ps.followCam = (std::atoi(s.c_str()) != 0);
+                if (ps.numDrops > 0 && ps.maxSpeed > 0) {
+                    ps.active = true;
+                    precipitation = ps;
+                    initPrecipitation(precipitation);
+                    Console::instance().printf(LogLevel::Info, "  Precipitation: %d drops, box=%.0fx%.0f, speed=%.1f-%.1f",
+                        precipitation.numDrops, precipitation.boxWidth, precipitation.boxHeight,
+                        precipitation.minSpeed, precipitation.maxSpeed);
+                }
+                break;
+            }
+        }
+
         // Collect all unique shape names referenced in the mission
         std::vector<std::string> shapeNames;
         auto addShapeName = [&](const std::string& n) {
@@ -1141,6 +1166,12 @@ void World::update(float dt) {
 
     // Update particles
     updateParticles(dt);
+
+    // Update precipitation
+    if (precipitation.active) {
+        Point3F camPos = Engine::instance().renderer().cameraPos;
+        updatePrecipitation(dt, camPos);
+    }
 }
 
 void World::render(const Point3F& cameraPos) {
@@ -1247,6 +1278,9 @@ void World::render(const Point3F& cameraPos) {
 
     // Render particles
     renderParticles();
+
+    // Render precipitation
+    renderPrecipitation();
 
     // Simple water plane for procedural terrain (no mission loaded)
     if (!loaded || terrainBlock.loaded) {
@@ -1428,6 +1462,64 @@ void World::renderParticles() {
     for (auto& p : particles) {
         if (!p.active) continue;
         r.drawSprite(p.pos, p.size, p.color);
+    }
+}
+
+// ─── Precipitation System ─────────────────────────────────────
+
+void World::initPrecipitation(const PrecipitationState& state) {
+    precipitation.drops.resize(state.numDrops);
+    float halfW = state.boxWidth * 0.5f;
+    float halfD = state.boxWidth * 0.5f;
+    for (auto& d : precipitation.drops) {
+        d.pos.x = ((float)std::rand() / RAND_MAX) * state.boxWidth - halfW;
+        d.pos.y = ((float)std::rand() / RAND_MAX) * state.boxHeight;
+        d.pos.z = ((float)std::rand() / RAND_MAX) * state.boxWidth - halfD;
+        float speed = state.minSpeed + ((float)std::rand() / RAND_MAX) * (state.maxSpeed - state.minSpeed);
+        d.vel = {0, -speed, 0};
+        d.active = true;
+    }
+}
+
+void World::updatePrecipitation(float dt, const Point3F& camPos) {
+    if (!precipitation.active || precipitation.drops.empty()) return;
+
+    float halfW = precipitation.boxWidth * 0.5f;
+    float halfD = precipitation.boxWidth * 0.5f;
+    float boxY = precipitation.boxHeight;
+
+    for (auto& d : precipitation.drops) {
+        if (!d.active) continue;
+        d.pos.y += d.vel.y * dt;
+        // Reset drop when it falls below the box
+        if (d.pos.y < -5.0f) {
+            d.pos.y = boxY + ((float)std::rand() / RAND_MAX) * 10.0f;
+            float speed = precipitation.minSpeed + ((float)std::rand() / RAND_MAX) * (precipitation.maxSpeed - precipitation.minSpeed);
+            d.vel.y = -speed;
+        }
+    }
+
+    // If following camera, re-center drops around camera
+    if (precipitation.followCam) {
+        for (auto& d : precipitation.drops) {
+            if (!d.active) continue;
+            float dx = d.pos.x - camPos.x;
+            float dz = d.pos.z - camPos.z;
+            if (dx > halfW) d.pos.x -= precipitation.boxWidth;
+            else if (dx < -halfW) d.pos.x += precipitation.boxWidth;
+            if (dz > halfD) d.pos.z -= precipitation.boxWidth;
+            else if (dz < -halfD) d.pos.z += precipitation.boxWidth;
+        }
+    }
+}
+
+void World::renderPrecipitation() {
+    if (!precipitation.active || precipitation.drops.empty()) return;
+    auto& r = Engine::instance().renderer();
+    ColorF dropColor = {0.8f, 0.85f, 0.9f, 0.4f};
+    for (auto& d : precipitation.drops) {
+        if (!d.active) continue;
+        r.drawSprite(d.pos, precipitation.dropSize, dropColor);
     }
 }
 

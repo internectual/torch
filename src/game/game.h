@@ -200,6 +200,28 @@ private:
     Point3F playerSpawn{0, 5, 0};
     bool loaded = false;
 
+    // Precipitation system
+    struct PrecipitationDrop {
+        Point3F pos;
+        Point3F vel;
+        bool active = false;
+    };
+    struct PrecipitationState {
+        int numDrops = 1024;
+        float boxWidth = 200.0f;
+        float boxHeight = 100.0f;
+        float dropSize = 0.5f;
+        float minSpeed = 1.5f;
+        float maxSpeed = 2.0f;
+        bool followCam = true;
+        bool active = false;
+        std::vector<PrecipitationDrop> drops;
+    };
+    PrecipitationState precipitation;
+    void initPrecipitation(const PrecipitationState& state);
+    void updatePrecipitation(float dt, const Point3F& camPos);
+    void renderPrecipitation();
+
     // Bots (simple AI targets)
     struct Bot {
         Point3F pos{0, 5, 0};
