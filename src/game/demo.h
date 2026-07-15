@@ -517,4 +517,12 @@ private:
 public:
     DemoMove readRawMove(const uint8_t* data, size_t size);
     PacketData parsePacket(const uint8_t* data, size_t size, int blockIndex = -1);
+
+    // Pending explosion events from projectile parsers
+    struct PendingExplosion {
+        Vec3 position;
+        float time;
+    };
+    static std::vector<PendingExplosion> s_pendingExplosions;
+    std::vector<PendingExplosion> consumeExplosions() { auto r = std::move(s_pendingExplosions); s_pendingExplosions.clear(); return r; }
 };

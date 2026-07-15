@@ -140,15 +140,7 @@ public:
     std::vector<Projectile>& projectiles() { return projList; }
     void spawnProjectile(const Projectile& p);
 
-private:
-    TerrainBlock terrainBlock;
-    Sky skyBox;
-    CollisionMesh interiorCollision;
-    std::vector<WorldObject> worldObjects;
-    std::vector<DTSShape> shapes;
-    std::vector<Projectile> projList;
-
-    // Particle system
+    // Particle system (public for demo playback)
     struct Particle {
         Point3F pos;
         Point3F vel;
@@ -163,6 +155,14 @@ private:
     void spawnTrail(const Point3F& pos, const ColorF& color, float size = 0.2f);
     void updateParticles(float dt);
     void renderParticles();
+
+private:
+    TerrainBlock terrainBlock;
+    Sky skyBox;
+    CollisionMesh interiorCollision;
+    std::vector<WorldObject> worldObjects;
+    std::vector<DTSShape> shapes;
+    std::vector<Projectile> projList;
 
     // Temp explosion struct for API compatibility
     struct Explosion {

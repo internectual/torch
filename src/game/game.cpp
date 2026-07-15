@@ -1970,6 +1970,14 @@ void Game::update(float dt) {
                     // Store control object ghost index for highlight
                     if (pd.gameState.controlObjectGhostIndex >= 0)
                         controlGhostIndex = pd.gameState.controlObjectGhostIndex;
+
+                    // Consume pending explosions from projectile parsers
+                    auto explosions = demoParser->consumeExplosions();
+                    for (auto& exp : explosions) {
+                        Point3F expPos = {exp.position.x, exp.position.y, exp.position.z};
+                        w->spawnExplosion(expPos, {1.0f, 0.7f, 0.3f, 1.0f}, 2.0f, 15);
+                        shakeIntensity = std::max(shakeIntensity, 1.5f);
+                    }
                 }
                 delete block;
             }

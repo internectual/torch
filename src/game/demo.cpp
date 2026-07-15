@@ -8,6 +8,9 @@
 #include <set>
 #include <zlib.h>
 
+// Pending explosion events from projectile ghost parsers
+std::vector<DemoParser::PendingExplosion> DemoParser::s_pendingExplosions;
+
 // ═══════════════════════════════════════════════════════════════
 // Huffman processor
 // ═══════════════════════════════════════════════════════════════
@@ -1426,7 +1429,11 @@ static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEnt
         bs.readPoint3F(); // velocity
         bs.readRangedU32(0, 4095); // currTick
         bs.readFlag(); // quickSplash
-        if (bs.readFlag()) { bs.readPoint3F(); bs.readPoint3F(); } // explode
+        if (bs.readFlag()) {
+            Vec3 expPos = bs.readPoint3F();
+            bs.readPoint3F(); // normal
+            DemoParser::s_pendingExplosions.push_back({expPos, 0.0f});
+        }
         if (bs.readFlag()) { bs.readRangedU32(0, 1024); bs.readRangedU32(0, 7); } // source
         if (bs.readFlag()) bs.readRangedU32(0, 1024); // vehicleObject
     } else { // non-initial
@@ -1435,7 +1442,11 @@ static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEnt
             else bs.readPoint3F();
             bs.readPoint3F(); // velocity
         }
-        if (bs.readFlag()) { bs.readPoint3F(); bs.readPoint3F(); } // ExplosionMask
+        if (bs.readFlag()) {
+            Vec3 expPos = bs.readPoint3F();
+            bs.readPoint3F(); // normal
+            DemoParser::s_pendingExplosions.push_back({expPos, 0.0f});
+        }
     }
 }
 
@@ -1492,7 +1503,10 @@ static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& 
     readGameBaseData(bs, isInitial);
     if (bs.readFlag()) { // InitialUpdateMask
         if (bs.readFlag()) { // hidden/already exploded
-            bs.readCompressedPoint(cp); bs.readNormalVector(14); bs.readFlag();
+            Vec3 expPos = bs.readCompressedPoint(cp);
+            bs.readNormalVector(14);
+            bool hitWater = bs.readFlag();
+            DemoParser::s_pendingExplosions.push_back({expPos, 0.0f});
         } else { // live projectile
             if (entry) entry->position = bs.readCompressedPoint(cp);
             else bs.readCompressedPoint(cp);
@@ -1505,14 +1519,22 @@ static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& 
             if (bs.readFlag()) bs.readInt(10); // vehicleObject
         }
     } else { // non-initial: explosion
-        bs.readCompressedPoint(cp); bs.readNormalVector(14); bs.readFlag();
+        Vec3 expPos = bs.readCompressedPoint(cp);
+        bs.readNormalVector(14);
+        bs.readFlag();
+        DemoParser::s_pendingExplosions.push_back({expPos, 0.0f});
     }
 }
 
 static void readSeekerProjectileData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
     readGameBaseData(bs, isInitial);
     if (!bs.readFlag()) { // non-full state
-        if (bs.readFlag()) { bs.readPoint3F(); bs.readPoint3F(); return; } // explosion
+        if (bs.readFlag()) {
+            Vec3 expPos = bs.readPoint3F();
+            bs.readPoint3F(); // normal
+            DemoParser::s_pendingExplosions.push_back({expPos, 0.0f});
+            return;
+        }
         if (entry) entry->position = bs.readPoint3F();
         else bs.readPoint3F();
         bs.readPoint3F(); // velocity
