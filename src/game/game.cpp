@@ -3122,8 +3122,20 @@ void Game::render(float dt) {
                 g->className == "EnergyBolt" || g->className == "LinearFlare" ||
                 g->className.find("Tracer") != std::string::npos);
             if (isProjectile) {
+                // Color by projectile type
+                ColorF trailCol = {0.5f, 1.0f, 1.0f, 1.0f}; // default cyan
+                if (g->className.find("Grenade") != std::string::npos)
+                    trailCol = {0.3f, 1.0f, 0.3f, 1.0f}; // green
+                else if (g->className.find("Seeker") != std::string::npos)
+                    trailCol = {1.0f, 0.6f, 0.1f, 1.0f}; // orange
+                else if (g->className.find("Linear") != std::string::npos || g->className.find("Sniper") != std::string::npos)
+                    trailCol = {0.2f, 0.8f, 1.0f, 1.0f}; // cyan
+                else if (g->className.find("Bomb") != std::string::npos)
+                    trailCol = {1.0f, 0.3f, 0.1f, 1.0f}; // red-orange
+                else if (g->className.find("Shock") != std::string::npos)
+                    trailCol = {0.8f, 0.2f, 1.0f, 1.0f}; // purple
                 auto& trail = demoTrails[idx];
-                trail.push_back(TrailPoint{rp.x, rp.y, rp.z, 1.0f});
+                trail.push_back({rp.x, rp.y, rp.z, 1.0f, trailCol});
                 if (trail.size() > 30) trail.erase(trail.begin());
             }
         }
@@ -3140,22 +3152,25 @@ void Game::render(float dt) {
                 if (pts.empty()) { it = demoTrails.erase(it); continue; } else { ++it; }
                 // Draw trail as a fading line strip with glow
                 if (pts.size() >= 2) {
-                    std::vector<Point3F> linePts;
-                    for (auto& tp : pts) linePts.push_back({tp.x, tp.y, tp.z});
+                    // Use the first point's color as trail color
+                    ColorF baseCol = pts[0].color;
                     float alpha = pts.back().life;
-                    // Glow layer (wider, fainter)
-                    { std::vector<Point3F> glowPts = linePts;
-                      float ga = alpha * 0.25f;
-                      Point3F off = {0.3f, 0, 0.3f};
-                      for (auto& p : glowPts) { p.x += off.x; p.z += off.z; }
-                      r.drawLineStrip(glowPts, {0.2f, 0.6f, 1.0f, ga}); }
-                    { std::vector<Point3F> glowPts = linePts;
-                      float ga = alpha * 0.25f;
-                      Point3F off = {-0.3f, 0, -0.3f};
-                      for (auto& p : glowPts) { p.x += off.x; p.z += off.z; }
-                      r.drawLineStrip(glowPts, {0.2f, 0.6f, 1.0f, ga}); }
-                    // Core line
-                    r.drawLineStrip(linePts, {0.5f, 1.0f, 1.0f, alpha * 0.9f});
+                    // Outer glow pass (thick, faint)
+                    for (int g = 0; g < 3; g++) {
+                        float expand = (3 - g) * 0.12f;
+                        float ga = alpha * 0.12f * (3 - g);
+                        std::vector<Point3F> glowPts;
+                        for (auto& tp : pts) {
+                            float t = &tp - &pts[0];
+                            float ptAlpha = (t + 1.0f) / pts.size();
+                            glowPts.push_back({tp.x, tp.y + expand * ptAlpha, tp.z});
+                        }
+                        r.drawLineStrip(glowPts, {baseCol.r, baseCol.g, baseCol.b, ga});
+                    }
+                    // Core line (bright, thin)
+                    std::vector<Point3F> corePts;
+                    for (auto& tp : pts) corePts.push_back({tp.x, tp.y, tp.z});
+                    r.drawLineStrip(corePts, {baseCol.r * 0.7f + 0.3f, baseCol.g * 0.7f + 0.3f, baseCol.b * 0.7f + 0.3f, alpha * 0.9f});
                 }
             }
         }

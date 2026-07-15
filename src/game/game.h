@@ -437,7 +437,7 @@ private:
     int editorPlaceClass = 31; // classId to place
 
     // Projectile trail system
-    struct TrailPoint { float x, y, z; float life; };
+    struct TrailPoint { float x, y, z; float life; ColorF color; };
     std::map<int, std::vector<TrailPoint>> demoTrails;
 
     // Live network ghost tracking
