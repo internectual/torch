@@ -626,39 +626,7 @@ bool World::load(const char* mapName) {
 
         // Build collision mesh from DIF interior shapes
         // Prefer hull collision data when available (more accurate)
-        {
-            std::vector<float> allVerts;
-            std::vector<uint32_t> allIndices;
-            uint32_t vertBase = 0;
-
-            for (auto& s : shapes) {
-                if (!s.isInterior || !s.loaded) continue;
-                // Use hull collision data if available, otherwise fall back to visual mesh
-                if (!s.collisionVerts.empty() && !s.collisionIndices.empty()) {
-                    for (auto v : s.collisionVerts) allVerts.push_back(v);
-                    for (auto idx : s.collisionIndices) allIndices.push_back(vertBase + idx);
-                    vertBase += (uint32_t)s.collisionVerts.size() / 3;
-                } else {
-                    for (auto& mesh : s.meshes) {
-                        for (auto& v : mesh.vertices) {
-                            allVerts.push_back(v.pos.x);
-                            allVerts.push_back(v.pos.y);
-                            allVerts.push_back(v.pos.z);
-                        }
-                        for (auto idx : mesh.indices) {
-                            allIndices.push_back(vertBase + idx);
-                        }
-                        vertBase += (uint32_t)mesh.vertices.size();
-                    }
-                }
-            }
-
-            if (!allIndices.empty()) {
-                interiorCollision.addMesh(allVerts.data(), (int)allVerts.size(), allIndices.data(), (int)allIndices.size());
-                interiorCollision.build();
-                Console::instance().printf(LogLevel::Info, "Collision mesh built: %zu triangles", interiorCollision.triangles.size());
-            }
-        }
+        // Collision mesh is built after world objects are placed (see below)
 
         // Place objects from mission, mapping to loaded shapes
         for (auto& obj : objects) {
@@ -706,6 +674,73 @@ bool World::load(const char* mapName) {
                     Console::instance().printf(LogLevel::Debug, "  placed: %s at (%.1f, %.1f, %.1f)",
                         wo.shapeName.c_str(), wo.pos.x, wo.pos.y, wo.pos.z);
                 }
+            }
+        }
+
+        // Build collision mesh from world objects with per-object transforms applied
+        {
+            std::vector<float> allVerts;
+            std::vector<uint32_t> allIndices;
+            uint32_t vertBase = 0;
+
+            for (auto& wo : worldObjects) {
+                if (!wo.shape || !wo.shape->loaded || !wo.shape->isInterior) continue;
+
+                // Build transform matrix for this object (same as render code)
+                MatrixF xform;
+                xform.identity();
+                if (wo.rotAngleDeg != 0 && (wo.rot.x != 0 || wo.rot.y != 0 || wo.rot.z != 0)) {
+                    Point3F axis = {wo.rot.x, wo.rot.z, -wo.rot.y};
+                    float len = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+                    if (len > 0.0001f) {
+                        axis.x /= len; axis.y /= len; axis.z /= len;
+                        xform.setRotationAxis(axis, Math::DEG2RAD(wo.rotAngleDeg));
+                    }
+                }
+                if (wo.scale.x != 1.0f || wo.scale.y != 1.0f || wo.scale.z != 1.0f) {
+                    MatrixF scaleMat;
+                    scaleMat.setScale(wo.scale);
+                    xform = xform * scaleMat;
+                }
+                Point3F pos = {wo.pos.x, wo.pos.z, -wo.pos.y};
+                xform.setTranslation(pos);
+                // Apply czUpToYUp so collision matches rendering
+                MatrixF fullXform = xform * Math::czUpToYUp();
+
+                auto addCollisionVerts = [&](const std::vector<float>& cVerts, const std::vector<uint32_t>& cIndices) {
+                    uint32_t base = vertBase;
+                    for (size_t i = 0; i + 2 < cVerts.size(); i += 3) {
+                        Point3F v = {cVerts[i], cVerts[i+1], cVerts[i+2]};
+                        Point3F tv = fullXform.transform(v);
+                        allVerts.push_back(tv.x);
+                        allVerts.push_back(tv.y);
+                        allVerts.push_back(tv.z);
+                    }
+                    for (auto idx : cIndices) allIndices.push_back(base + idx);
+                    vertBase += (uint32_t)cVerts.size() / 3;
+                };
+
+                if (!wo.shape->collisionVerts.empty() && !wo.shape->collisionIndices.empty()) {
+                    addCollisionVerts(wo.shape->collisionVerts, wo.shape->collisionIndices);
+                } else {
+                    for (auto& mesh : wo.shape->meshes) {
+                        std::vector<float> vData;
+                        std::vector<uint32_t> iData;
+                        for (auto& v : mesh.vertices) {
+                            vData.push_back(v.pos.x);
+                            vData.push_back(v.pos.y);
+                            vData.push_back(v.pos.z);
+                        }
+                        for (auto idx : mesh.indices) iData.push_back(idx);
+                        addCollisionVerts(vData, iData);
+                    }
+                }
+            }
+
+            if (!allIndices.empty()) {
+                interiorCollision.addMesh(allVerts.data(), (int)allVerts.size(), allIndices.data(), (int)allIndices.size());
+                interiorCollision.build();
+                Console::instance().printf(LogLevel::Info, "Collision mesh built: %zu triangles", interiorCollision.triangles.size());
             }
         }
 
