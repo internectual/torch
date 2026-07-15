@@ -728,7 +728,7 @@ void DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
     BitStream bs(data, size);
     int totalBits = (int)size * 8;
 
-    // ─── Tagged strings table ─────────────────
+    // ─── Tagged strings table (first section) ─────────────────
     // Format: flag(1 bit) + ID(12 bits) + Huffman string, repeated until flag=0
     while (!bs.isError()) {
         if (!bs.readFlag()) break;
@@ -736,6 +736,16 @@ void DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
         if (id < 0 || id >= T2Demo::TaggedStringCount) break;
         initialBlock.taggedStrings[id] = bs.readString();
     }
+
+    // ─── Second tagged strings section ─────────────────
+    // NOTE: The initial block contains a second tagged strings section (inside
+    // NetConnection::readDemoStartBlock) using a different format:
+    // skip(U32) + strings + skip(U32) + strings...
+    // We cannot reliably locate this section because the intermediate sections
+    // (data blocks, camera, moves, ConnectionProtocol, pathManager) are variable-length
+    // and our section-skipping code produces incorrect offsets.
+    // The mission name for some demos (e.g., Minotaur, Damnation) lives in this
+    // second section and cannot be extracted with the current parser.
 
     // ─── Find mission name ───────────────────────────────────
     // 1. First try scanning tagged strings for a .mis path or mission name
