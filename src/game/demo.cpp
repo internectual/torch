@@ -1303,8 +1303,9 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
             float half = bodyYaw * 0.5f;
             entry->rotation = {0, sinf(half), 0, cosf(half)};
             entry->hasRotation = true;
+            entry->headPitch = headX;
+            entry->headYaw = headZ;
         }
-        (void)headX; (void)headZ;
         readMove(bs);
         bs.readFlag(); // allowWarp
     }
@@ -1431,14 +1432,23 @@ static void readMissionMarkerData(BitStream& bs, bool isInitial, const Vec3& cp,
     }
 }
 
-static void readProjectileData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry*) {
+static void readProjectileData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
     readGameBaseData(bs, isInitial);
-    // Projectile base class has no extra fields
+    if (!bs.readFlag()) return; // non-full state
+    if (entry) entry->position = bs.readCompressedPoint(cp);
+    else bs.readCompressedPoint(cp);
+    bs.readCompressedPoint(cp); // velocity
+    if (bs.readFlag()) bs.readInt(10); // source
+    if (bs.readFlag()) bs.readInt(10); // vehicleObject
 }
 
-static void readDebrisData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry*) {
+static void readDebrisData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
     readGameBaseData(bs, isInitial);
-    for (int i = 0; i < 6; i++) bs.readF32();
+    if (bs.readFlag()) {
+        if (entry) entry->position = bs.readCompressedPoint(cp);
+        else bs.readCompressedPoint(cp);
+    }
+    for (int i = 0; i < 3; i++) bs.readF32(); // velocity
     for (int i = 0; i < 4; i++) bs.readBool();
     for (int i = 0; i < 6; i++) bs.readF32();
     for (int i = 0; i < 2; i++) bs.readBool();
@@ -1493,12 +1503,17 @@ static void readSniperProjectileData(BitStream& bs, bool isInitial, GhostEntry* 
     readGameBaseData(bs, isInitial);
     if (bs.readFlag()) { // initial
         bs.readFloat(7); // energyPercentage
-        bs.readPoint3F(); bs.readPoint3F(); // initialPosition, endPos
+        Vec3 startPos = bs.readPoint3F();
+        Vec3 endPos = bs.readPoint3F(); // endPos
+        if (entry) entry->position = startPos;
         bs.readFlag(); bs.readFlag(); // truncated, hitWater
         if (bs.readFlag()) { bs.readRangedU32(0, 1024); bs.readRangedU32(0, 7); bs.readFlag(); }
     } else { // swing update
         if (bs.readFlag()) { bs.readRangedU32(0, 1024); bs.readRangedU32(0, 7); bs.readFlag(); }
-        else { bs.readPoint3F(); }
+        else {
+            Vec3 pos = bs.readPoint3F();
+            if (entry) entry->position = pos;
+        }
         bs.readPoint3F(); // endPos
         bs.readFlag(); // truncated
     }
@@ -1508,7 +1523,9 @@ static void readShockLanceProjectileData(BitStream& bs, bool isInitial, GhostEnt
     readGameBaseData(bs, isInitial);
     if (bs.readFlag()) bs.readRangedU32(0, 1024); // targetObject
     if (bs.readFlag()) { // initial update
-        bs.readPoint3F(); bs.readPoint3F(); // start, end
+        Vec3 start = bs.readPoint3F();
+        Vec3 end = bs.readPoint3F(); // end
+        if (entry) entry->position = start;
         bs.readFlag(); // hitObject
         if (bs.readFlag()) { bs.readRangedU32(0, 1024); bs.readRangedU32(0, 7); }
     }

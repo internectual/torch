@@ -1997,6 +1997,9 @@ void Game::update(float dt) {
             } else {
                 shakeOffset = {0,0,0};
             }
+            // Decay damage flash and whiteout
+            if (damageFlash > 0) damageFlash = std::max(0.0f, damageFlash - dt * 3.0f);
+            if (whiteOut > 0) whiteOut = std::max(0.0f, whiteOut - dt * 2.0f);
             int blocksThisFrame;
             if (demoStepRequest) {
                 blocksThisFrame = 1;
@@ -2108,6 +2111,7 @@ void Game::update(float dt) {
                     // Store damage flash and whiteout for screen effects
                     damageFlash = pd.gameState.damageFlash;
                     whiteOut = pd.gameState.whiteOut;
+                    if (pd.gameState.cameraFov > 0) demoCameraFov = pd.gameState.cameraFov;
                     // Camera shake on damage
                     if (pd.gameState.damageFlash > 0.5f)
                         shakeIntensity = std::max(shakeIntensity, pd.gameState.damageFlash * 3.0f);
@@ -2643,7 +2647,13 @@ void Game::render(float dt) {
     }
     // Apply camera shake
     Point3F finalCam = {camPos.x + shakeOffset.x, camPos.y + shakeOffset.y, camPos.z + shakeOffset.z};
+    // Apply FOV from demo stream if available
+    float savedFov = r.config().fov;
+    if (demoPlaying && demoCameraFov > 0 && demoCameraFov < 180) {
+        r.config().fov = demoCameraFov;
+    }
     r.setCamera(finalCam, camTarget, {0, 1, 0});
+    r.config().fov = savedFov; // restore for HUD rendering
 
     // Shadow pass and scene rendering — skip in shape viewer / test shape mode
     if (!shapeViewerActive && !testShapeLoaded) {
@@ -3042,25 +3052,40 @@ void Game::render(float dt) {
                     altName  = mg->isMoving ? "float" : "still";
                 }
 
-                // Turret barrel aiming: apply barrelPitch/yaw to the barrel node
-                DTSShape::NodeOverride barrelOverride;
+                // Node overrides for turret barrel and player head
+                DTSShape::NodeOverride overrides[2];
                 int numOverrides = 0;
                 if (isTurret && shape && (mg->barrelPitch != 0.0f || mg->barrelYaw != 0.0f)) {
                     int barrelNode = shape->findNode("barrel");
                     if (barrelNode < 0) barrelNode = shape->findNode("mount0");
                     if (barrelNode >= 0) {
-                        // Get the default transform for this node
-                        barrelOverride.nodeIndex = barrelNode;
+                        overrides[numOverrides].nodeIndex = barrelNode;
                         if (barrelNode < (int)shape->defaultTransforms.size())
-                            barrelOverride.transform = shape->defaultTransforms[barrelNode];
+                            overrides[numOverrides].transform = shape->defaultTransforms[barrelNode];
                         else
-                            barrelOverride.transform.identity();
-                        // Apply pitch (X rotation) and yaw (Y rotation) to the barrel
+                            overrides[numOverrides].transform.identity();
                         MatrixF pitchMat, yawMat;
                         pitchMat.setRotationAxis({1, 0, 0}, -mg->barrelPitch);
                         yawMat.setRotationAxis({0, 1, 0}, -mg->barrelYaw);
-                        barrelOverride.transform = barrelOverride.transform * yawMat * pitchMat;
-                        numOverrides = 1;
+                        overrides[numOverrides].transform = overrides[numOverrides].transform * yawMat * pitchMat;
+                        numOverrides++;
+                    }
+                }
+                // Player head aim direction
+                if (isPlayer && shape && (mg->headPitch != 0.0f || mg->headYaw != 0.0f)) {
+                    int headNode = shape->findNode("head");
+                    if (headNode < 0) headNode = shape->findNode("mount4");
+                    if (headNode >= 0 && numOverrides < 2) {
+                        overrides[numOverrides].nodeIndex = headNode;
+                        if (headNode < (int)shape->defaultTransforms.size())
+                            overrides[numOverrides].transform = shape->defaultTransforms[headNode];
+                        else
+                            overrides[numOverrides].transform.identity();
+                        MatrixF pitchMat, yawMat;
+                        pitchMat.setRotationAxis({1, 0, 0}, -mg->headPitch);
+                        yawMat.setRotationAxis({0, 0, 1}, -mg->headYaw);
+                        overrides[numOverrides].transform = overrides[numOverrides].transform * yawMat * pitchMat;
+                        numOverrides++;
                     }
                 }
 
@@ -3070,7 +3095,7 @@ void Game::render(float dt) {
                         if (a.name == animName) { found = true; break; }
                     shape->renderAnimation(found ? animName : (altName ? altName : animName), mg->animTime);
                 } else {
-                    shape->render(0, numOverrides > 0 ? &barrelOverride : nullptr, numOverrides);
+                    shape->render(0, numOverrides > 0 ? overrides : nullptr, numOverrides);
                 }
 
                 // Render mounted weapons for player ghosts

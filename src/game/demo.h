@@ -396,6 +396,10 @@ struct GhostEntry {
 
     // Shield state
     float shieldLevel = 0.0f;  // 0-1 normalized shield strength
+
+    // Head rotation (aim direction)
+    float headPitch = 0.0f;
+    float headYaw = 0.0f;
 };
 
 class GhostTracker {
