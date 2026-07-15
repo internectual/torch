@@ -524,15 +524,15 @@ void Menu::update(float dt) {
     // Mouse hover: update selectedItem based on mouse Y position
     int mx = input.mouseX;
     int my = input.mouseY;
-    int menuW = ren.config().width;
-    int menuH = ren.config().height;
     if (currentScreen == Main) {
         const int itemCount = 5;
-        float startY = (float)menuH * 0.35f;
+        float startY = 200.0f;
         float itemH = 40.0f;
+        float leftX = (float)ren.config().width * 0.5f - 100.0f;
+        float rightX = (float)ren.config().width * 0.5f + 100.0f;
         for (int i = 0; i < itemCount; i++) {
             float iy = startY + i * itemH;
-            if (my >= iy && my < iy + itemH && mx >= menuW * 0.3f && mx <= menuW * 0.7f) {
+            if (my >= iy && my < iy + itemH && mx >= leftX && mx <= rightX) {
                 selectedItem = i;
             }
         }
@@ -542,7 +542,7 @@ void Menu::update(float dt) {
         if (mouseBtn && !prevMouseBtn) {
             for (int i = 0; i < itemCount; i++) {
                 float iy = startY + i * itemH;
-                if (my >= iy && my < iy + itemH && mx >= menuW * 0.3f && mx <= menuW * 0.7f) {
+                if (my >= iy && my < iy + itemH && mx >= leftX && mx <= rightX) {
                     selectedItem = i;
                     enter = true;
                 }
