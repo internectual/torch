@@ -11,6 +11,7 @@ public:
     static Shader* getShadowShader();
     static Shader* getSpriteShader();
     static Shader* getCloudShader();
+    static Shader* getWaterShader();
 
     static void init();
     static void destroy();
@@ -24,4 +25,5 @@ private:
     static Shader* shadowShader;
     static Shader* spriteShader;
     static Shader* cloudShader;
+    static Shader* waterShader;
 };

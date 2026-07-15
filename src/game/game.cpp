@@ -1635,12 +1635,37 @@ void World::renderWater() {
     // Don't render if camera is too far above water
     if (cam.y > waterLevel + 80.0f) return;
 
+    auto* waterShdr = ShaderManager::getWaterShader();
+    if (!waterShdr) return;
+    waterShdr->bind();
+    waterShdr->setUniform("uProjection", r.projection);
+    waterShdr->setUniform("uView", r.view);
+    waterShdr->setUniform("uCamPos", cam);
+
+    // Sun lighting
+    Point3F sunDir = sunLightDirUsed ? sunLightDir : Point3F{0.5f, 0.8f, 0.6f};
+    waterShdr->setUniform("uSunDir", sunDir);
+    waterShdr->setUniform("uSunColor", Point3F{sunColor.r, sunColor.g, sunColor.b});
+
+    // Water appearance
+    ColorF waterCol = water.surfaceColor;
+    waterShdr->setUniform("uWaterColor", Point3F{waterCol.r, waterCol.g, waterCol.b});
+    waterShdr->setUniform("uWaterOpacity", waterCol.a);
+
+    // Fog
+    waterShdr->setUniform("uFogEnabled", (int32_t)(fog.enabled ? 1 : 0));
+    if (fog.enabled) {
+        waterShdr->setUniform("uFogColor", Point3F{fog.color.r, fog.color.g, fog.color.b});
+        waterShdr->setUniform("uFogDensity", fog.density);
+    }
+
     int gridRes = 24;
     float halfSize = waterSize * 0.5f;
     float step = waterSize / gridRes;
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
 
     for (int z = 0; z < gridRes; z++) {
         for (int x = 0; x < gridRes; x++) {
@@ -1658,18 +1683,31 @@ void World::renderWater() {
             wy += sinf(time * water.waveSpeed + wx * 0.01f) * water.waveMagnitude;
             wy += sinf(time * water.waveSpeed * 0.7f + wz * 0.015f) * water.waveMagnitude * 0.5f;
 
-            // Fade alpha with distance
-            float alpha = water.surfaceColor.a;
-            if (dist > 200.0f) alpha *= 1.0f - (dist - 200.0f) / 200.0f;
+            // Build model matrix for this quad
+            MatrixF model;
+            model.identity();
+            model.setTranslation({wx, wy, wz});
+            MatrixF scale;
+            scale.setScale({step, 1.0f, step});
+            model = model * scale;
+            waterShdr->setUniform("uModel", model);
 
-            ColorF col = water.surfaceColor;
-            col.a = std::max(0.01f, alpha);
-
-            Box3F quad = {{wx, wy - 0.05f, wz}, {wx + step, wy + 0.05f, wz + step}};
-            r.drawBox(quad, col);
+            // Draw a simple quad (two triangles)
+            float verts[] = {
+                0, 0, 0,  step, 0, 0,  step, 0, step,
+                0, 0, 0,  step, 0, step,  0, 0, step
+            };
+            // Use drawBox for simplicity
+            Box3F quad = {{0, -0.05f, 0}, {step, 0.05f, step}};
+            MatrixF boxModel;
+            boxModel.identity();
+            boxModel.setTranslation({wx, wy, wz});
+            waterShdr->setUniform("uModel", boxModel);
+            r.drawBox(quad, {1, 1, 1, 1}); // white, shader handles color
         }
     }
 
+    glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
 }
 

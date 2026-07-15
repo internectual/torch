@@ -9,6 +9,7 @@ Shader* ShaderManager::lineShader = nullptr;
 Shader* ShaderManager::shadowShader = nullptr;
 Shader* ShaderManager::spriteShader = nullptr;
 Shader* ShaderManager::cloudShader = nullptr;
+Shader* ShaderManager::waterShader = nullptr;
 
 static const char* defaultVert = R"(
 #version 330 core
@@ -374,6 +375,62 @@ void main() {
 }
 )";
 
+static const char* waterVert = R"(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uProjection;
+uniform mat4 uView;
+uniform mat4 uModel;
+out vec3 vWorldPos;
+out vec3 vNormal;
+void main() {
+    vec4 worldPos = uModel * vec4(aPos, 1.0);
+    vWorldPos = worldPos.xyz;
+    vNormal = vec3(0.0, 1.0, 0.0);
+    gl_Position = uProjection * uView * worldPos;
+}
+)";
+
+static const char* waterFrag = R"(
+#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+uniform vec3 uCamPos;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform vec3 uWaterColor;
+uniform float uWaterOpacity;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+uniform bool uFogEnabled;
+out vec4 FragColor;
+void main() {
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(uCamPos - vWorldPos);
+    vec3 L = normalize(uSunDir);
+    // Fresnel effect: more reflective at grazing angles
+    float cosTheta = max(dot(N, V), 0.0);
+    float fresnel = pow(1.0 - cosTheta, 3.0) * 0.95 + 0.05;
+    // Sky reflection color (approximation)
+    vec3 skyReflect = mix(vec3(0.4, 0.6, 0.8), vec3(0.7, 0.8, 0.9), cosTheta);
+    // Specular highlight
+    vec3 H = normalize(L + V);
+    float spec = pow(max(dot(N, H), 0.0), 128.0);
+    vec3 specular = uSunColor * spec * 1.5;
+    // Combine: reflection + water base + specular
+    vec3 waterBase = uWaterColor * (1.0 - fresnel);
+    vec3 reflColor = skyReflect * fresnel;
+    vec3 color = waterBase + reflColor + specular;
+    // Fog
+    if (uFogEnabled) {
+        float dist = length(vWorldPos - uCamPos);
+        float fogFactor = clamp(uFogDensity * dist, 0.0, 1.0);
+        color = mix(color, uFogColor, fogFactor);
+    }
+    FragColor = vec4(color, uWaterOpacity);
+}
+)";
+
 static const char* spriteVert = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -460,6 +517,11 @@ void ShaderManager::init() {
     if (!cloudShader->load(cloudVert, cloudFrag)) {
         Console::instance().printf(LogLevel::Error, "Failed to load cloud shader");
     }
+
+    waterShader = new Shader();
+    if (!waterShader->load(waterVert, waterFrag)) {
+        Console::instance().printf(LogLevel::Error, "Failed to load water shader");
+    }
 }
 
 void ShaderManager::destroy() {
@@ -471,6 +533,7 @@ void ShaderManager::destroy() {
     delete shadowShader; shadowShader = nullptr;
     delete spriteShader; spriteShader = nullptr;
     delete cloudShader; cloudShader = nullptr;
+    delete waterShader; waterShader = nullptr;
 }
 
 Shader* ShaderManager::getDefaultShader() { return defaultShader; }
@@ -481,3 +544,4 @@ Shader* ShaderManager::getLineShader() { return lineShader; }
 Shader* ShaderManager::getShadowShader() { return shadowShader; }
 Shader* ShaderManager::getSpriteShader() { return spriteShader; }
 Shader* ShaderManager::getCloudShader() { return cloudShader; }
+Shader* ShaderManager::getWaterShader() { return waterShader; }
