@@ -1256,11 +1256,6 @@ void Engine::run() {
         if (g->isTestShapeLoaded() || g->isShapeViewerActive()) { plat->swapBuffers(); continue; }
 
         // ─── Dev panel (always rendered) ───────────────────────────────────
-        // Disable the game's built-in menu when TS GUI dialogs are active
-        if (gui && gui->dialogCount() > 0)
-            g->menu().setActive(false);
-        else
-            g->menu().setActive(true);
         g->menu().update(dt);
         g->menu().render();
         plat->setRelativeMouse(false);
