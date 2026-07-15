@@ -727,13 +727,14 @@ void DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
     BitStream bs(data, size);
     int totalBits = (int)size * 8;
 
-    // ─── Tagged strings table (1024 entries) ─────────────────
-    // v24834 uses raw strings (U8 len + bytes), v25034+ uses Huffman
-    bool useRawStrings = (header.protocolVersion == T2Demo::ProtocolV24834);
-    for (int i = 0; i < T2Demo::TaggedStringCount && !bs.isError(); i++) {
-        if (bs.readFlag()) {
-            initialBlock.taggedStrings[i] = useRawStrings ? bs.readRawString() : bs.readString();
-        }
+    // ─── Tagged strings table ─────────────────
+    // Format: flag(1 bit) + ID(12 bits) + Huffman string, repeated until flag=0
+    // Both v24834 and v25034 use this format
+    while (!bs.isError()) {
+        if (!bs.readFlag()) break;
+        int id = bs.readInt(12);
+        if (id < 0 || id >= T2Demo::TaggedStringCount) break;
+        initialBlock.taggedStrings[id] = bs.readString();
     }
 
     // ─── Find mission name ───────────────────────────────────

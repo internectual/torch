@@ -128,7 +128,7 @@ namespace T2Demo {
     constexpr uint32_t ProtocolV25034 = 0x00330004;
 
     // Tagged strings
-    constexpr int TaggedStringCount = 1024;
+    constexpr int TaggedStringCount = 4096;
 
     // Deterministic ghost class names for T2 (sorted by strcmp order,
     // matching AbstractClassRep::initialize). Index = classId.
