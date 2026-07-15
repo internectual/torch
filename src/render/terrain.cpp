@@ -331,8 +331,12 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
     // Calculate detail tiling based on terrain world size
     // Detail textures should tile at a consistent ~8-unit world-space density
     float worldSize = (float)size * squareSize;
-    float detailTiling = worldSize / 8.0f;
-    shader->setUniform("uDetailTiling", detailTiling);
+    float defaultTiling = worldSize / 8.0f;
+    shader->setUniform("uDetailTiling", defaultTiling);
+    shader->setUniform("uDetailTiling0", detailTilings[0] > 0 ? detailTilings[0] : defaultTiling);
+    shader->setUniform("uDetailTiling1", detailTilings[1] > 0 ? detailTilings[1] : defaultTiling);
+    shader->setUniform("uDetailTiling2", detailTilings[2] > 0 ? detailTilings[2] : defaultTiling);
+    shader->setUniform("uDetailTiling3", detailTilings[3] > 0 ? detailTilings[3] : defaultTiling);
 
     auto& renderer = Engine::instance().renderer();
     MatrixF model;

@@ -442,6 +442,19 @@ bool World::load(const char* mapName) {
                 }
             }
 
+            // Read per-layer tiling from .mis
+            for (int i = 0; i < 4; i++) {
+                std::string key = "texscale" + std::to_string(i + 1);
+                std::string val = getProp(terrainObj->props, key.c_str());
+                if (!val.empty()) terrainBlock.detailTilings[i] = (float)std::atof(val.c_str());
+                // Also try "texTiling" variant
+                if (terrainBlock.detailTilings[i] == 0) {
+                    key = "textiling" + std::to_string(i + 1);
+                    val = getProp(terrainObj->props, key.c_str());
+                    if (!val.empty()) terrainBlock.detailTilings[i] = (float)std::atof(val.c_str());
+                }
+            }
+
             if (!terrainBlock.loaded) {
                 // Still try just .ter extension
                 std::string tryPath = terrainFile;

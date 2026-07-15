@@ -205,6 +205,10 @@ uniform bool uUseLightmap = false;
 uniform bool uUseVertexColor = false;
 uniform vec3 uLightDir = vec3(0.5, 0.8, 0.6);
 uniform float uDetailTiling = 32.0;
+uniform float uDetailTiling0 = 32.0;
+uniform float uDetailTiling1 = 32.0;
+uniform float uDetailTiling2 = 32.0;
+uniform float uDetailTiling3 = 32.0;
 
 uniform bool uFogEnabled = false;
 uniform vec3 uFogColor = vec3(0.75, 0.8, 0.85);
@@ -238,10 +242,10 @@ void main() {
         vec4 weights = texture(uSplatMap, vUV);
         float total = weights.r + weights.g + weights.b + weights.a;
         if (total > 0.0) weights /= total;
-        vec4 c0 = texture(uDetail0, vUV * uDetailTiling);
-        vec4 c1 = texture(uDetail1, vUV * uDetailTiling);
-        vec4 c2 = texture(uDetail2, vUV * uDetailTiling);
-        vec4 c3 = texture(uDetail3, vUV * uDetailTiling);
+        vec4 c0 = texture(uDetail0, vUV * uDetailTiling0);
+        vec4 c1 = texture(uDetail1, vUV * uDetailTiling1);
+        vec4 c2 = texture(uDetail2, vUV * uDetailTiling2);
+        vec4 c3 = texture(uDetail3, vUV * uDetailTiling3);
         base = c0 * weights.r + c1 * weights.g + c2 * weights.b + c3 * weights.a;
     }
 

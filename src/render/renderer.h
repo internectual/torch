@@ -205,6 +205,7 @@ struct TerrainBlock {
     std::vector<float> heights;
     std::vector<MeshData> meshes;
     std::vector<Texture> detailTextures;
+    float detailTilings[4] = {0, 0, 0, 0}; // 0 = use default
     Texture splatMap;
     Texture lightmap;
     std::vector<std::string> textureNames;
