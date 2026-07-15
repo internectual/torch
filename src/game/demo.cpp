@@ -10,6 +10,7 @@
 
 // Pending explosion events from projectile ghost parsers
 std::vector<DemoParser::PendingExplosion> DemoParser::s_pendingExplosions;
+DemoParser::SunData DemoParser::s_sunData;
 
 // ═══════════════════════════════════════════════════════════════
 // Huffman processor
@@ -1577,9 +1578,19 @@ static void readSkyData(BitStream& bs, bool, const Vec3&, GhostEntry*) {
 
 static void readSunData(BitStream& bs, bool, const Vec3&, GhostEntry*) {
     if (bs.readFlag()) {
-        bs.readPoint3F(); bs.readFloat(8); bs.readFloat(8);
-        bs.readInt(8); bs.readInt(8); bs.readInt(8);
+        Vec3 sunDir = bs.readPoint3F();
+        float az = bs.readFloat(8);
+        float el = bs.readFloat(8);
+        int r = bs.readInt(8);
+        int g = bs.readInt(8);
+        int b = bs.readInt(8);
         bs.readFlag(); bs.readFlag();
+        auto& sd = DemoParser::s_sunData;
+        sd.direction = sunDir;
+        sd.azimuth = az;
+        sd.elevation = el;
+        sd.r = r; sd.g = g; sd.b = b;
+        sd.valid = true;
     }
 }
 

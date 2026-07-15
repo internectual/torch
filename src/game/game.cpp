@@ -727,11 +727,11 @@ bool World::load(const char* mapName) {
             }
         }
     } else {
-        Console::instance().printf(LogLevel::Warn, "No mission file found for '%s', using procedural terrain", mapName);
+        Console::instance().printf(LogLevel::Warn, "No mission file found for '%s', skipping terrain/sky/fog setup", mapName);
     }
 
-    // Generate terrain if not loaded
-    if (!terrainBlock.loaded) {
+    // Generate terrain only if we have a real mission (skip for missing .mis in demo playback)
+    if (!terrainBlock.loaded && !misData.empty()) {
         terrainBlock.load(nullptr, 0);
     }
 
@@ -1980,6 +1980,21 @@ void Game::update(float dt) {
                         Point3F expPos = {exp.position.x, exp.position.y, exp.position.z};
                         w->spawnExplosion(expPos, {1.0f, 0.7f, 0.3f, 1.0f}, 2.0f, 15);
                         shakeIntensity = std::max(shakeIntensity, 1.5f);
+                    }
+
+                    // Apply sun data from demo stream if .mis didn't provide it
+                    if (!w->sunLightDirUsed) {
+                        auto& sd = DemoParser::s_sunData;
+                        if (sd.valid) {
+                            w->sunLightDir.x = cosf(sd.elevation) * sinf(sd.azimuth);
+                            w->sunLightDir.y = sinf(sd.elevation);
+                            w->sunLightDir.z = cosf(sd.elevation) * cosf(sd.azimuth);
+                            w->sunLightDirUsed = true;
+                            w->sunColor = {(float)sd.r / 255.0f, (float)sd.g / 255.0f, (float)sd.b / 255.0f};
+                            w->sunColorUsed = true;
+                            Console::instance().printf(LogLevel::Info, "Applied sun from demo stream: az=%.0f el=%.0f color=(%d %d %d)",
+                                sd.azimuth * 180.0f / 3.14159f, sd.elevation * 180.0f / 3.14159f, sd.r, sd.g, sd.b);
+                        }
                     }
                 }
                 delete block;
@@ -3923,10 +3938,7 @@ void Game::playDemo(const char* path) {
             loadMap = fname;
         }
     }
-    if (loadMap.empty()) {
-        loadMap = "Training1";
-        Console::instance().printf(LogLevel::Info, "Unknown mission, defaulting to '%s' for terrain", loadMap.c_str());
-    }
+    // Note: no fallback to other missions - wrong .ter geometry would be worse than no terrain
 
     Console::instance().printf(LogLevel::Info, "Loading mission map: %s", loadMap.c_str());
     State prevState = gameState;

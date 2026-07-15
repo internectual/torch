@@ -120,6 +120,24 @@ public:
     const Point3F& spawnPoint() const { return playerSpawn; }
     float waterLevel() const { return water.active ? water.level : 0.0f; }
 
+    // Sun lighting from mission (public for demo playback override)
+    Point3F sunLightDir{0.5f, 0.8f, 0.6f};
+    ColorF sunColor{1, 1, 1, 1};
+    bool sunLightDirUsed = false;
+    bool sunColorUsed = false;
+
+    // Fog from mission
+    struct FogParams {
+        bool enabled = true;
+        ColorF color{0.75f, 0.8f, 0.85f, 1.0f};
+        float density = 0.0015f;
+        float distance = 666.0f;
+    };
+    FogParams fog;
+
+    // Sky material list
+    std::string skyMaterialList;
+
     // Object management
     struct WorldObject {
         Point3F pos;
@@ -183,21 +201,6 @@ private:
     };
     std::vector<ItemPickup> items;
 
-    struct FogParams {
-        bool enabled = true;
-        ColorF color{0.75f, 0.8f, 0.85f, 1.0f}; // matches gradient sky horizon
-        float density = 0.0015f;  // gentle fade
-        float distance = 666.0f;
-    };
-    FogParams fog;
-
-    // Sun lighting from mission
-    Point3F sunLightDir{0.5f, 0.8f, 0.6f};
-    ColorF sunColor{1, 1, 1, 1};
-    bool sunLightDirUsed = false;
-    bool sunColorUsed = false;
-
-    std::string skyMaterialList;
     Point3F playerSpawn{0, 5, 0};
     bool loaded = false;
 

@@ -543,4 +543,13 @@ public:
     };
     static std::vector<PendingExplosion> s_pendingExplosions;
     std::vector<PendingExplosion> consumeExplosions() { auto r = std::move(s_pendingExplosions); s_pendingExplosions.clear(); return r; }
+
+    // Sun data extracted from demo stream (for when .mis is unavailable)
+    struct SunData {
+        Vec3 direction{};
+        float azimuth{}, elevation{};
+        int r{}, g{}, b{};
+        bool valid = false;
+    };
+    static SunData s_sunData;
 };
