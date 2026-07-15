@@ -284,7 +284,12 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     for (int m = 0; m < numMeshes && m < 10000; m++) {
         if (eof()) break;
         int32_t meshType = rS32();
-        if (meshType == 4) continue; // NullMeshType — no data in file
+        if (meshType == 4) {
+            // Null meshes have no data but we must preserve index mapping
+            result.meshes.push_back(MeshData());
+            result.skins.push_back(SkinInfo());
+            continue;
+        }
 
         // Mesh body from readAllocMesh (v15-v18):
         // DebugGuard (synthetic, no stream read)
@@ -308,7 +313,6 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         std::vector<Point2F> tverts(numTVerts);
         for (int i = 0; i < numTVerts; i++) tverts[i] = {rF32(), rF32()};
 
-        // Normals: v<=21 reads count from stream, then 3*count F32s
         int32_t numNorms = rS32();
         if (numNorms < 0 || numNorms > 100000) numNorms = 0;
         std::vector<Point3F> norms(numNorms);
@@ -319,15 +323,15 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         if (numPrims < 0 || numPrims > 10000) numPrims = 0;
         std::vector<int32_t> primStart(numPrims), primNumElems(numPrims), primMatIdx(numPrims);
         if (ver < 18) {
-            // v<18: primitives read as S32s (start, numElems per prim), then matIdx separately
             for (int i = 0; i < numPrims; i++) { primStart[i] = (int16_t)rS32(); primNumElems[i] = (int16_t)rS32(); }
             for (int i = 0; i < numPrims; i++) primMatIdx[i] = rS32();
         } else {
-            // v>=18: primitives read as S16s (2 per prim from buf16), then S32 matIdx
-            for (int i = 0; i < numPrims; i++) { primStart[i] = rS16(); primNumElems[i] = rS16(); }
-            for (int i = 0; i < numPrims; i++) primMatIdx[i] = rS32();
+            for (int i = 0; i < numPrims; i++) {
+                primStart[i] = rS16();
+                primNumElems[i] = rS16();
+                primMatIdx[i] = rS32();
+            }
         }
-
         // Indices
         int32_t numIndices = rS32();
         if (numIndices < 0 || numIndices > 100000) numIndices = 0;
@@ -432,6 +436,51 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         }
         md.nodeIndex = nodeIdx;
         md.numTVertsPerFrame = numTVerts;
+        // Fix winding: first check if winding is already correct using vertex normals.
+        // Only apply center-based fix when vertex normals reveal systematic winding errors.
+        {
+            Point3F center{0,0,0};
+            for (auto& v : md.vertices) { center.x += v.pos.x; center.y += v.pos.y; center.z += v.pos.z; }
+            float invN = 1.0f / std::max(1, (int)md.vertices.size());
+            center.x *= invN; center.y *= invN; center.z *= invN;
+
+            // First pass: check if vertex normals agree with face normals
+            int disagreeCount = 0, totalCount = 0;
+            for (size_t fi = 0; fi + 2 < md.indices.size(); fi += 3) {
+                int i0 = md.indices[fi], i1 = md.indices[fi+1], i2 = md.indices[fi+2];
+                if (i0 < 0 || i0 >= (int)md.vertices.size() || i1 < 0 || i1 >= (int)md.vertices.size() || i2 < 0 || i2 >= (int)md.vertices.size()) continue;
+                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                auto& v0 = md.vertices[i0].pos; auto& v1 = md.vertices[i1].pos; auto& v2 = md.vertices[i2].pos;
+                float e1x = v1.x-v0.x, e1y = v1.y-v0.y, e1z = v1.z-v0.z;
+                float e2x = v2.x-v0.x, e2y = v2.y-v0.y, e2z = v2.z-v0.z;
+                float fnx = e1y*e2z - e1z*e2y, fny = e1z*e2x - e1x*e2z, fnz = e1x*e2y - e1y*e2x;
+                auto& n0 = md.vertices[i0].normal; auto& n1 = md.vertices[i1].normal; auto& n2 = md.vertices[i2].normal;
+                float vnx = n0.x+n1.x+n2.x, vny = n0.y+n1.y+n2.y, vnz = n0.z+n1.z+n2.z;
+                float nDot = fnx*vnx + fny*vny + fnz*vnz;
+                float nlen = sqrtf(vnx*vnx + vny*vny + vnz*vnz);
+                totalCount++;
+                if (nlen > 0.001f && nDot < 0) disagreeCount++;
+            }
+
+            // If vertex normals disagree on many faces, winding is systematically wrong — fix it with center test
+            bool needsFix = (totalCount > 0 && (float)disagreeCount / totalCount > 0.3f);
+
+            if (needsFix) {
+                for (size_t fi = 0; fi + 2 < md.indices.size(); fi += 3) {
+                    int i0 = md.indices[fi], i1 = md.indices[fi+1], i2 = md.indices[fi+2];
+                    if (i0 < 0 || i0 >= (int)md.vertices.size() || i1 < 0 || i1 >= (int)md.vertices.size() || i2 < 0 || i2 >= (int)md.vertices.size()) continue;
+                    if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                    auto& v0 = md.vertices[i0].pos; auto& v1 = md.vertices[i1].pos; auto& v2 = md.vertices[i2].pos;
+                    float fcx = (v0.x+v1.x+v2.x)/3.0f, fcy = (v0.y+v1.y+v2.y)/3.0f, fcz = (v0.z+v1.z+v2.z)/3.0f;
+                    float e1x = v1.x-v0.x, e1y = v1.y-v0.y, e1z = v1.z-v0.z;
+                    float e2x = v2.x-v0.x, e2y = v2.y-v0.y, e2z = v2.z-v0.z;
+                    float fnx = e1y*e2z - e1z*e2y, fny = e1z*e2x - e1x*e2z, fnz = e1x*e2y - e1y*e2x;
+                    float dx = fcx-center.x, dy = fcy-center.y, dz = fcz-center.z;
+                    float dot = fnx*dx + fny*dy + fnz*dz;
+                    if (dot < 0) { std::swap(md.indices[fi+1], md.indices[fi+2]); }
+                }
+            }
+        }
         if (!md.vertices.empty() && !md.indices.empty()) {
         result.meshes.push_back(std::move(md));
         }
@@ -546,11 +595,22 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
             result.nodes[i].name = "node" + std::to_string(i);
     }
 
-    // Build detail levels
+    // Build detail levels with meshIndices (same as v19+ path)
     for (int i = 0; i < numDetails; i++) {
         DTSShape::DetailLevel dl;
         dl.size = details[i].sz;
         dl.meshIndex = details[i].objDetail;
+                if (dl.size >= 0.0f) {
+            int32_t od = details[i].objDetail;
+            for (int j = 0; j < numObjects; j++) {
+                int32_t sm = objs[j].sm;
+                int32_t nm = objs[j].nm;
+                if (od >= 0 && od < nm && sm + od >= 0 && sm + od < (int)result.meshes.size()) {
+                    if (!result.meshes[sm + od].vertices.empty())
+                        dl.meshIndices.push_back(sm + od);
+                }
+            }
+        }
         result.details.push_back(dl);
     }
 
@@ -607,9 +667,10 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         if (stripped.size() > 2 && stripped.back() == 'c') stripped.pop_back();
         std::vector<std::string> cands = {"textures/"+lower, "textures/"+base, "textures/"+stripped, lower, base, stripped};
 
+        bool loaded = false;
+
         // IFL (Image File List) support: parse the .ifl file and load the first frame
-        if (lower.size() > 4 && lower.substr(lower.size() - 4) == ".ifl") {
-            bool loaded = false;
+        if (!loaded && lower.size() > 4 && lower.substr(lower.size() - 4) == ".ifl") {
             for (auto* prefix : {"textures/", ""}) {
                 if (loaded) break;
                 auto iflData = fs.read((prefix + lower).c_str());
@@ -645,11 +706,50 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
                     }
                 }
             }
-            goto nextTexOld;
         }
 
-        // cands already declared above before IFL check
-        for (auto& c : cands)
+        // Try IFL files for materials without .ifl extension
+        for (auto& c : cands) {
+            if (loaded) break;
+            auto iflData = fs.read((c + ".ifl").c_str());
+            if (!iflData.empty()) {
+                std::string iflContent(iflData.begin(), iflData.end());
+                size_t lineEnd = iflContent.find('\n');
+                std::string firstLine = (lineEnd != std::string::npos) ? iflContent.substr(0, lineEnd) : iflContent;
+                size_t spacePos = firstLine.find(' ');
+                std::string texName = (spacePos != std::string::npos) ? firstLine.substr(0, spacePos) : firstLine;
+                while (!texName.empty() && texName.back() <= ' ') texName.pop_back();
+                while (!texName.empty() && texName.front() <= ' ') texName.erase(0, 1);
+                if (!texName.empty()) {
+                    std::string texLower = texName;
+                    for (auto& ch : texLower) ch = (char)std::tolower((unsigned char)ch);
+                    std::vector<std::string> texCands = {"textures/" + texLower, texLower};
+                    for (auto& tc : texCands) {
+                        if (loaded) break;
+                        for (auto* e : texExts) {
+                            auto d = fs.read((tc + e).c_str());
+                            if (!d.empty()) {
+                                Texture t;
+                                if (strcmp(e, ".bm8") == 0) t.loadBM8(d.data(), d.size());
+                                else t.load(d.data(), d.size());
+                                if (t.loaded) {
+                                    matSlots[i].texIdx = (int)result.textures.size();
+                                    uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
+                                    result.materialFlags.push_back(flags);
+                                    result.textures.push_back(std::move(t));
+                                    loaded = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Regular texture files
+        if (!loaded) for (auto& c : cands) {
+            if (loaded) break;
             for (auto* e : texExts) {
                 auto d = fs.read((c + e).c_str());
                 if (!d.empty()) {
@@ -661,11 +761,12 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
                         uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
                         result.materialFlags.push_back(flags);
                         result.textures.push_back(std::move(t));
-                        goto nextTexOld;
+                        loaded = true;
+                        break;
                     }
                 }
             }
-        nextTexOld:;
+        }
     }
     } catch (const std::bad_alloc&) {}
 
@@ -1331,6 +1432,36 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         result.animations.push_back(anim);
     }
 
+    // Post-process: for animations with no object keyframes, copy object keyframes
+    // from the first animation that has them. This ensures all animations have proper
+    // object visibility (e.g., sensor_pulse deploy states).
+    {
+        // Find the best source animation (one with the most object keyframes)
+        int bestSourceIdx = -1;
+        size_t bestSourceCount = 0;
+        for (size_t i = 0; i < result.animations.size(); i++) {
+            if (result.animations[i].objectKeyframes.size() > bestSourceCount) {
+                bestSourceCount = result.animations[i].objectKeyframes.size();
+                bestSourceIdx = (int)i;
+            }
+        }
+        if (bestSourceIdx >= 0 && bestSourceCount > 0) {
+            for (size_t i = 0; i < result.animations.size(); i++) {
+                if (result.animations[i].objectKeyframes.empty() && !result.animations[i].keyframes.empty()) {
+                    // Copy object keyframes with time remapped to target animation's duration
+                    float srcDur = result.animations[bestSourceIdx].duration;
+                    float dstDur = result.animations[i].duration;
+                    for (auto& okf : result.animations[bestSourceIdx].objectKeyframes) {
+                        DTSShape::ObjectKeyframe newOkf = okf;
+                        if (srcDur > 0.0f && dstDur > 0.0f)
+                            newOkf.time = okf.time * (dstDur / srcDur);
+                        result.animations[i].objectKeyframes.push_back(newOkf);
+                    }
+                }
+            }
+        }
+    }
+
     // Materials
     if (postRem >= 1) {
         post++; postRem--; // stream type
@@ -1386,9 +1517,10 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         if (stripped.size() > 2 && stripped.back() == 'c') stripped.pop_back();
         std::vector<std::string> cands = {"textures/"+lower, "textures/"+base, "textures/"+stripped, lower, base, stripped};
 
+        bool loaded = false;
+
         // IFL (Image File List) support
-        if (lower.size() > 4 && lower.substr(lower.size() - 4) == ".ifl") {
-            bool loaded = false;
+        if (!loaded && lower.size() > 4 && lower.substr(lower.size() - 4) == ".ifl") {
             for (auto* prefix : {"textures/", ""}) {
                 if (loaded) break;
                 auto iflData = fs.read((prefix + lower).c_str());
@@ -1424,11 +1556,49 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                     }
                 }
             }
-            goto nextTex;
         }
 
-        // cands already declared above before IFL check
-        for (auto& c : cands)
+        // Try IFL files first for materials without .ifl extension
+        for (auto& c : cands) {
+            if (loaded) break;
+            auto iflData = fs.read((c + ".ifl").c_str());
+            if (!iflData.empty()) {
+                std::string iflContent(iflData.begin(), iflData.end());
+                size_t lineEnd = iflContent.find('\n');
+                std::string firstLine = (lineEnd != std::string::npos) ? iflContent.substr(0, lineEnd) : iflContent;
+                size_t spacePos = firstLine.find(' ');
+                std::string texName = (spacePos != std::string::npos) ? firstLine.substr(0, spacePos) : firstLine;
+                while (!texName.empty() && texName.back() <= ' ') texName.pop_back();
+                while (!texName.empty() && texName.front() <= ' ') texName.erase(0, 1);
+                if (!texName.empty()) {
+                    std::string texLower = texName;
+                    for (auto& ch : texLower) ch = (char)std::tolower((unsigned char)ch);
+                    std::vector<std::string> texCands = {"textures/" + texLower, texLower};
+                    for (auto& tc : texCands) {
+                        if (loaded) break;
+                        for (auto* e : texExts) {
+                            auto d = fs.read((tc + e).c_str());
+                            if (!d.empty()) {
+                                Texture t;
+                                if (strcmp(e, ".bm8") == 0) t.loadBM8(d.data(), d.size());
+                                else t.load(d.data(), d.size());
+                                if (t.loaded) {
+                                    matSlots[i].texIdx = (int)result.textures.size();
+                                    uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
+                                    result.materialFlags.push_back(flags);
+                                    result.textures.push_back(std::move(t));
+                                    loaded = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Then try regular texture files
+        if (!loaded) for (auto& c : cands) {
+            if (loaded) break;
             for (auto* e : texExts) {
                     auto d = fs.read((c + e).c_str());
                     if (!d.empty()) {
@@ -1440,12 +1610,13 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                             uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
                             result.materialFlags.push_back(flags);
                             result.textures.push_back(std::move(t));
-                            goto nextTex;
+                            loaded = true;
+                            break;
                         }
                     }
+                }
             }
-        nextTex:;
-    }
+        }
     } catch (const std::bad_alloc&) {
         Console::instance().printf(LogLevel::Warn, "DTS: OOM loading textures for '%s' (%zu materials)", name, result.materialNames.size());
     }
@@ -1491,8 +1662,12 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             int32_t od = dl.objDetail;
             int32_t sm = dtsObjects[i].sm;
             int32_t nm = dtsObjects[i].nm;
-            if (od >= 0 && od < nm && sm + od >= 0 && sm + od < numMeshes)
-                detail.meshIndices.push_back(sm + od);
+            if (od >= 0 && od < nm && sm + od >= 0 && sm + od < numMeshes) {
+                int32_t meshIdx = sm + od;
+                // Skip empty meshes (Null/Decal) — they have no renderable geometry
+                if (meshIdx >= 0 && meshIdx < (int)result.meshes.size() && !result.meshes[meshIdx].vertices.empty())
+                    detail.meshIndices.push_back(meshIdx);
+            }
         }
         result.details.push_back(detail);
     }
@@ -1538,45 +1713,37 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     {
         std::string lower = name;
         for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
-        if (lower.find("weapon_disc") != std::string::npos) {
+        if (lower.find("projectile") != std::string::npos || lower.find("weapon_disc") != std::string::npos) {
             auto& con = Console::instance();
-            con.printf(LogLevel::Info, "WEAPON_DISC DEBUG:");
-            con.printf(LogLevel::Info, "  Nodes (%zu):", result.nodes.size());
-            for (size_t i = 0; i < result.nodes.size(); i++) {
-                auto& nd = result.nodes[i];
-                con.printf(LogLevel::Info, "    [%zu] parent=%d name='%s'",
-                    i, nd.parentIndex, nd.name.c_str());
-            }
-            con.printf(LogLevel::Info, "  Default Local Transforms (%zu):", result.defaultLocalTransforms.size());
-            for (size_t i = 0; i < result.defaultLocalTransforms.size(); i++) {
-                auto& m = result.defaultLocalTransforms[i];
-                con.printf(LogLevel::Info, "    [%zu] T=(%.3f,%.3f,%.3f) R=(%.4f,%.4f,%.4f,%.4f)",
-                    i, m.m[0][3], m.m[1][3], m.m[2][3],
-                    /* quat approx */ 0.f, 0.f, 0.f, 0.f);
-            }
-            con.printf(LogLevel::Info, "  Default Transforms (world, %zu):", result.defaultTransforms.size());
-            for (size_t i = 0; i < result.defaultTransforms.size(); i++) {
-                auto& m = result.defaultTransforms[i];
-                con.printf(LogLevel::Info, "    [%zu] T=(%.3f,%.3f,%.3f)", i, m.m[0][3], m.m[1][3], m.m[2][3]);
-            }
-            con.printf(LogLevel::Info, "  Meshes (%zu):", result.meshes.size());
+            con.printf(LogLevel::Info, "PROJECTILE DEBUG '%s':", name);
+            con.printf(LogLevel::Info, "  Nodes (%zu), Objects (%zu), Meshes (%zu), Details (%zu)",
+                result.nodes.size(), result.objectStartMesh.size(), result.meshes.size(), result.details.size());
             for (size_t i = 0; i < result.meshes.size(); i++) {
                 auto& m = result.meshes[i];
-                con.printf(LogLevel::Info, "    [%zu] node=%d verts=%zu matIdx=%d", i, m.nodeIndex, m.vertices.size(), m.materialIndex);
-            }
-            con.printf(LogLevel::Info, "  Animations (%zu):", result.animations.size());
-            for (size_t ai = 0; ai < result.animations.size(); ai++) {
-                auto& a = result.animations[ai];
-                con.printf(LogLevel::Info, "    [%zu] '%s' dur=%.3f loop=%d keyframes=%zu objKeyframes=%zu",
-                    ai, a.name.c_str(), a.duration, a.looping, a.keyframes.size(), a.objectKeyframes.size());
-                for (size_t ki = 0; ki < a.keyframes.size(); ki++) {
-                    auto& kf = a.keyframes[ki];
-                    con.printf(LogLevel::Info, "      kf[%zu] t=%.3f node=%d rot=(%.4f,%.4f,%.4f,%.4f) trans=(%.3f,%.3f,%.3f) hasR=%d hasT=%d",
-                        ki, kf.time, kf.nodeIndex,
-                        kf.rotation.x, kf.rotation.y, kf.rotation.z, kf.rotation.w,
-                        kf.translation.x, kf.translation.y, kf.translation.z,
-                        kf.hasRotation, kf.hasTranslation);
+                if (m.vertices.empty()) {
+                    con.printf(LogLevel::Info, "    mesh[%zu] EMPTY node=%d", i, m.nodeIndex);
+                    continue;
                 }
+                Point3F mn{1e9f,1e9f,1e9f}, mx{-1e9f,-1e9f,-1e9f};
+                for (auto& v : m.vertices) {
+                    if (v.pos.x < mn.x) mn.x = v.pos.x; if (v.pos.y < mn.y) mn.y = v.pos.y; if (v.pos.z < mn.z) mn.z = v.pos.z;
+                    if (v.pos.x > mx.x) mx.x = v.pos.x; if (v.pos.y > mx.y) mx.y = v.pos.y; if (v.pos.z > mx.z) mx.z = v.pos.z;
+                }
+                con.printf(LogLevel::Info, "    mesh[%zu] node=%d verts=%zu indices=%zu mat=%d bounds=(%.3f,%.3f,%.3f)-(%.3f,%.3f,%.3f)",
+                    i, m.nodeIndex, m.vertices.size(), m.indices.size(), m.materialIndex,
+                    mn.x, mn.y, mn.z, mx.x, mx.y, mx.z);
+                // Check for degenerate faces (all indices same vertex)
+                int degenCount = 0;
+                for (size_t fi = 0; fi + 2 < m.indices.size(); fi += 3) {
+                    if (m.indices[fi] == m.indices[fi+1] || m.indices[fi+1] == m.indices[fi+2] || m.indices[fi] == m.indices[fi+2])
+                        degenCount++;
+                }
+                if (degenCount > 0)
+                    con.printf(LogLevel::Info, "    mesh[%zu] DEGEN FACES: %d/%zu", i, degenCount, m.indices.size()/3);
+            }
+            for (size_t i = 0; i < result.details.size(); i++) {
+                auto& d = result.details[i];
+                con.printf(LogLevel::Info, "    detail[%zu] size=%.1f meshIdx=%d meshIndices=%zu", i, d.size, d.meshIndex, d.meshIndices.size());
             }
         }
     }
