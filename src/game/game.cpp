@@ -3003,12 +3003,29 @@ void Game::render(float dt) {
                         r.setModel(weaponRot * Math::czUpToYUp());
                         wShape->render(0);
 
-                        // Muzzle flash when firing
+                        // Muzzle flash and particles when firing
                         if (mg->mountedImages[img].isFiring) {
                             Point3F muzzlePos = weaponPos;
                             float flashSize = 0.15f;
                             ColorF flashCol = {1.0f, 0.9f, 0.5f, 0.9f};
                             r.drawSprite(muzzlePos, flashSize, flashCol);
+                            // Spawn a few spark particles
+                            for (int s = 0; s < 3; s++) {
+                                World::Particle spark;
+                                spark.pos = muzzlePos;
+                                float spread = 0.3f;
+                                spark.vel = {
+                                    ((float)std::rand() / RAND_MAX - 0.5f) * spread,
+                                    ((float)std::rand() / RAND_MAX) * spread * 0.5f,
+                                    ((float)std::rand() / RAND_MAX - 0.5f) * spread
+                                };
+                                spark.lifetime = 0.1f + ((float)std::rand() / RAND_MAX) * 0.15f;
+                                spark.maxLifetime = spark.lifetime;
+                                spark.size = 0.05f + ((float)std::rand() / RAND_MAX) * 0.05f;
+                                spark.color = {1.0f, 0.8f, 0.3f, 1.0f};
+                                spark.active = true;
+                                if (w->particles.size() < 1000) w->particles.push_back(spark);
+                            }
                         }
                     }
                 }
