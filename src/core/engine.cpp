@@ -970,7 +970,8 @@ void Engine::run() {
                 } else if (g->isShapeViewerActive()) {
                     g->shapeViewerActive = false;
                     g->shapeViewerShape = DTSShape{};
-                } else {
+                } else if (!active || active->name != "LaunchToolbarDlg") {
+                    // Only quit from ESC when not on the main LAUNCH menu
                     Engine::instance().quit();
                 }
             }
