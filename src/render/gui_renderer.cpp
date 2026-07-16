@@ -865,19 +865,28 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             r.drawRectFill({x-1, y-1, 0}, {x, y + ctl->extentY + 1, 0}, {1.0f, 1.0f, 0.4f, 0.9f});
             r.drawRectFill({x + ctl->extentX, y-1, 0}, {x + ctl->extentX + 1, y + ctl->extentY + 1, 0}, {1.0f, 1.0f, 0.4f, 0.9f});
         }
-        // Popup menu for ShellLaunchMenu
+        // Popup menu for ShellLaunchMenu (the LAUNCH sidebar)
         if (ctl->menuOpen && !ctl->menuItems.empty()) {
             float popX = x;
             float popY = y - (float)ctl->menuItems.size() * 20.0f - 4; // render above button
             float popW = 180, lineH = 20;
             float popH = lineH * (float)ctl->menuItems.size();
-            r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.15f,0.15f,0.2f,0.95f});
+            // Sidebar background — distinct from canvas bg, plus a border so it
+            // reads as a panel (the old bg matched the canvas exactly → invisible)
+            r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.08f, 0.09f, 0.13f, 0.98f});
+            r.drawRectFill({popX, popY, 0}, {popX + popW, popY + 1, 0}, {0.5f, 0.6f, 0.8f, 1});
+            r.drawRectFill({popX, popY + popH - 1, 0}, {popX + popW, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
+            r.drawRectFill({popX, popY, 0}, {popX + 1, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
+            r.drawRectFill({popX + popW - 1, popY, 0}, {popX + popW, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
             float iy = popY;
-            for (auto& item : ctl->menuItems) {
+            for (size_t ii = 0; ii < ctl->menuItems.size(); ii++) {
+                auto& item = ctl->menuItems[ii];
                 if (item.isSeparator) {
                     r.drawRectFill({popX + 4, iy + lineH*0.5f, 0}, {popX + popW - 4, iy + lineH*0.5f + 1, 0}, {0.4f,0.4f,0.5f,0.8f});
-                } else if (font) {
-                    font->render(item.text.c_str(), popX + 6, iy + 2, {0.8f,0.9f,1,1}, 1.0f);
+                } else {
+                    if ((int)ii == ctl->hoveredItem)
+                        r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {0.32f, 0.42f, 0.6f, 1});
+                    if (font) font->render(item.text.c_str(), popX + 6, iy + 2, {0.85f,0.92f,1,1}, 1.0f);
                 }
                 iy += lineH;
             }
@@ -1895,6 +1904,7 @@ void GuiRenderer::update(float dt) {
     std::function<void(GuiControl*)> clearHover = [&](GuiControl* ctl) {
         ctl->hovered = false;
         ctl->hoveredTab = -1;
+        ctl->hoveredItem = -1;
         for (auto* c : ctl->children) clearHover(c);
     };
     for (auto* d : dialogStack) clearHover(d);
@@ -2014,6 +2024,25 @@ GuiControl* GuiRenderer::hitTestTop(int mx, int my) {
     return nullptr;
 }
 
+GuiControl* GuiRenderer::launchPopupAt(int mx, int my) {
+    std::function<GuiControl*(GuiControl*)> findLM = [&](GuiControl* c) -> GuiControl* {
+        if (!c) return nullptr;
+        if (c->className == "ShellLaunchMenu" && c->menuOpen && !c->menuItems.empty()) {
+            float ax = c->posX, ay = c->posY;
+            for (auto* p = c->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+            float popX = ax, popY = ay - (float)c->menuItems.size() * 20.0f - 4;
+            float popW = 180, lineH = 20;
+            if (mx >= popX && mx < popX + popW && my >= popY && my < popY + lineH * (float)c->menuItems.size())
+                return c;
+        }
+        for (auto* ch : c->children) { auto* r = findLM(ch); if (r) return r; }
+        return nullptr;
+    };
+    for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it) { GuiControl* r = findLM(*it); if (r) return r; }
+    if (canvas) return findLM(canvas);
+    return nullptr;
+}
+
 bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
     // Check all dialogs from top to bottom
     GuiControl* hit = nullptr;
@@ -2111,29 +2140,45 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         }
         return true;
     }
-    // ShellLaunchMenu: toggle popup menu or select item
-    if (hit->className == "ShellLaunchMenu") {
+    // ShellLaunchMenu: open popup on button click; select item when popup open.
+    // Popup items render ABOVE the button (outside its extent) so hitTest can't
+    // locate the control there — detect open popups at the click point directly.
+    if (hit && hit->className == "ShellLaunchMenu") {
         if (hit->menuOpen) {
-            // Check if click is on a popup item
-            float ax = hit->posX, ay = hit->posY;
-            for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
-            float popX = ax;
-            float popY = ay - (float)hit->menuItems.size() * 20.0f - 4;
-            float popW = 180, lineH = 20;
-            if (x >= popX && x < popX + popW && y >= popY && y < popY + lineH * (float)hit->menuItems.size()) {
-                int idx = (int)((y - popY) / lineH);
-                if (idx >= 0 && idx < (int)hit->menuItems.size() && !hit->menuItems[idx].isSeparator) {
-                    auto* ts = Engine::instance().script().ts();
-                    if (ts && ts->hasFunction(hit->name + "::onSelect"))
-                        ts->callFunction(hit->name + "::onSelect",
-                            {VMValue(hit->name), VMValue(hit->menuItems[idx].id), VMValue(hit->menuItems[idx].text)});
-                }
-            }
-            hit->menuOpen = false;
+            hit->menuOpen = false; // clicked button while open -> close
         } else {
-            hit->menuOpen = true;
+            hit->menuOpen = true;  // open the sidebar
         }
         return true;
+    }
+    // Open popup item click (click lands outside the button's extent)
+    {
+        GuiControl* lm = launchPopupAt(x, y);
+        if (lm) {
+            float ax = lm->posX, ay = lm->posY;
+            for (auto* p = lm->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+            float popY = ay - (float)lm->menuItems.size() * 20.0f - 4;
+            float lineH = 20;
+            int idx = (int)((y - popY) / lineH);
+            if (idx >= 0 && idx < (int)lm->menuItems.size() && !lm->menuItems[idx].isSeparator) {
+                std::string txt = lm->menuItems[idx].text;
+                auto* ts = Engine::instance().script().ts();
+                if (ts && ts->hasFunction(lm->name + "::onSelect")) {
+                    ts->callFunction(lm->name + "::onSelect",
+                        {VMValue(lm->name), VMValue(lm->menuItems[idx].id), VMValue(txt)});
+                } else {
+                    // Default launch-sidebar actions when no script onSelect is wired
+                    auto& gr = Engine::instance().guiRenderer();
+                    if (txt == "QUIT") Engine::instance().quit();
+                    else if (txt == "SETTINGS") gr.setContent("OptionsDlg");
+                    else if (txt == "TRAINING") gr.setContent("TrainingGui");
+                    else if (txt == "LAN GAME") gr.setContent("GameGui");
+                    else if (txt == "RECORDINGS") gr.setContent("DemoPlaybackDlg");
+                }
+            }
+            lm->menuOpen = false;
+            return true;
+        }
     }
     // ShellPopupMenu / GuiPopUpMenuCtrl: toggle dropdown or select item
     if (hit->className == "ShellPopupMenu" || hit->className == "GuiPopUpMenuCtrl") {

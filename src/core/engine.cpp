@@ -1166,6 +1166,18 @@ void Engine::run() {
                     hover->hoveredTab = -1;
                 }
             }
+            // Track hovered item in any open ShellLaunchMenu popup (items render
+            // outside the button's extent, so hitTest can't see them)
+            GuiControl* pop = gui->launchPopupAt(mx, my);
+            if (pop) {
+                pop->hovered = true;
+                float ax = pop->posX, ay = pop->posY;
+                for (auto* p = pop->parent; p && p != gui->getCanvas(); p = p->parent) { ax += p->posX; ay += p->posY; }
+                float popY = ay - (float)pop->menuItems.size() * 20.0f - 4;
+                float lineH = 20;
+                int idx = (int)((my - popY) / lineH);
+                pop->hoveredItem = (idx >= 0 && idx < (int)pop->menuItems.size() && !pop->menuItems[idx].isSeparator) ? idx : -1;
+            }
             bool pressed = plat->input().mouseButtons[1] != 0;
             static bool prevPressed = false;
             if (pressed && !prevPressed) {
