@@ -2170,10 +2170,10 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                     // Default launch-sidebar actions when no script onSelect is wired
                     auto& gr = Engine::instance().guiRenderer();
                     if (txt == "QUIT") Engine::instance().quit();
-                    else if (txt == "SETTINGS") gr.setContent("OptionsDlg");
-                    else if (txt == "TRAINING") gr.setContent("TrainingGui");
-                    else if (txt == "LAN GAME") gr.setContent("GameGui");
-                    else if (txt == "RECORDINGS") gr.setContent("DemoPlaybackDlg");
+                    else if (txt == "SETTINGS") gr.pushDialog("OptionsDlg");
+                    else if (txt == "TRAINING") gr.pushDialog("TrainingGui");
+                    else if (txt == "LAN GAME") gr.pushDialog("GameGui");
+                    else if (txt == "RECORDINGS") gr.pushDialog("DemoPlaybackDlg");
                 }
             }
             lm->menuOpen = false;

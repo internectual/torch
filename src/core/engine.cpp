@@ -960,13 +960,19 @@ void Engine::run() {
         if (!gui->isDialogActive("ConsoleDlg")) {
             static bool prevEsc = false;
             bool escDown = plat->input().keysDown[SCANCODE_ESCAPE];
-            if (escDown && !prevEsc && g->isShapeViewerActive()) {
-                // Exit shape viewer
-                g->shapeViewerActive = false;
-                g->shapeViewerShape = DTSShape{};
-                Console::instance().printf(LogLevel::Info, "Shape Viewer: closed");
-            } else if (escDown && !prevEsc && g->state() != Game::MenuScreen) {
-                g->togglePauseGame();
+            if (escDown && !prevEsc) {
+                // ESC closes the active overlay dialog first, then falls back
+                // to shape viewer / pause behavior.
+                if (gui->dialogCount() > 1) {
+                    GuiControl* active = gui->activeDialog();
+                    if (active) gui->popDialog(active->name);
+                } else if (g->isShapeViewerActive()) {
+                    g->shapeViewerActive = false;
+                    g->shapeViewerShape = DTSShape{};
+                    Console::instance().printf(LogLevel::Info, "Shape Viewer: closed");
+                } else if (g->state() != Game::MenuScreen) {
+                    g->togglePauseGame();
+                }
             }
             prevEsc = escDown;
 
