@@ -965,9 +965,11 @@ void Engine::run() {
             bool escEdge = std::find(kq.begin(), kq.end(), SCANCODE_ESCAPE) != kq.end();
             if (escEdge) {
                 GuiControl* active = gui->activeDialog();
-                bool isLaunchUI = active && active->name == "LaunchToolbarDlg";
-                if (gui->dialogCount() > 1 && !isLaunchUI) {
-                    gui->popDialog(gui->activeDialog()->name);
+                fprintf(stderr, "DBG ESC dialogs=%zu active='%s'\n",
+                    gui->dialogCount(), active ? active->name.c_str() : "null");
+                if (gui->dialogCount() > 1) {
+                    fprintf(stderr, "DBG ESC popDialog '%s'\n", active->name.c_str());
+                    gui->popDialog(active->name);
                 } else if (g->isShapeViewerActive()) {
                     g->shapeViewerActive = false;
                     g->shapeViewerShape = DTSShape{};
@@ -1183,6 +1185,7 @@ void Engine::run() {
                 float lineH = 20;
                 int idx = (int)((my - popY) / lineH);
                 pop->hoveredItem = (idx >= 0 && idx < (int)pop->menuItems.size() && !pop->menuItems[idx].isSeparator) ? idx : -1;
+                fprintf(stderr, "DBG hover mx=%d my=%d popY=%.0f idx=%d hoveredItem=%d\n", mx, my, popY, idx, pop->hoveredItem);
             }
             bool pressed = plat->input().mouseButtons[1] != 0;
             static bool prevPressed = false;

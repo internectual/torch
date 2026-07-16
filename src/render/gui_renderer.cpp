@@ -867,6 +867,14 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         // Popup menu for ShellLaunchMenu (the LAUNCH sidebar)
         if (ctl->menuOpen && !ctl->menuItems.empty()) {
+            // Popup extends above the button outside our own scissor — disable
+            // parent scissor so popup + highlight render visibly above the button.
+            GLboolean scissorWas = glIsEnabled(GL_SCISSOR_TEST);
+            GLint oldScissor[4] = {};
+            if (scissorWas) {
+                glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
+                glDisable(GL_SCISSOR_TEST);
+            }
             float popX = x;
             float popY = y - (float)ctl->menuItems.size() * 20.0f - 4; // render above button
             float popW = 180, lineH = 20;
@@ -894,6 +902,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     if (font) font->render(item.text.c_str(), popX + 6, iy + 2, {0.9f,0.95f,1,1}, 1.0f);
                 }
                 iy += lineH;
+            }
+            // Restore parent scissor after drawing popup that overflows the button
+            if (scissorWas) {
+                glEnable(GL_SCISSOR_TEST);
+                glScissor(oldScissor[0], oldScissor[1], oldScissor[2], oldScissor[3]);
             }
         }
     } else if (cn == "GuiTextCtrl") {
@@ -2073,25 +2086,30 @@ bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
 }
 
 bool GuiRenderer::handleInput(int x, int y, bool pressed) {
+    fprintf(stderr, "DBG handleInput x=%d y=%d pressed=%d\n", x, y, pressed);
     if (!pressed) return false;
     GuiControl* hit = nullptr;
-    // Check all dialogs from top to bottom so clicks pass through transparent overlays
+    // Check all dialogs from top to bottom so clicks pass through non-interactive
+    // overlays (e.g. LaunchToolbarDlg must not block clicks on the LAUNCH sidebar).
     for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it) {
         hit = hitTest(*it, x, y);
         if (!hit) continue;
-        // If hit is a dialog root (no clickable class) with no onClick, skip to next
-        if (hit == *it && hit->onClick == nullptr) {
-            bool isClickable = hit->className == "ShellLaunchMenu" || hit->className == "ShellPopupMenu" ||
-                hit->className == "GuiPopUpMenuCtrl" || hit->className == "ShellTabGroupCtrl" ||
-                hit->className == "GuiTabBookCtrl" || hit->className == "ShellTextList" ||
-                hit->className == "GuiListBoxCtrl" || hit->className == "GuiTextListCtrl" ||
-                hit->className == "GuiServerBrowser" || hit->className.find("Button") != std::string::npos;
-            if (!isClickable) { hit = nullptr; continue; }
-        }
+        bool ctlClickable = hit->onClick != nullptr ||
+            hit->className == "ShellLaunchMenu" || hit->className == "ShellPopupMenu" ||
+            hit->className == "GuiPopUpMenuCtrl" || hit->className == "ShellTabGroupCtrl" ||
+            hit->className == "GuiTabBookCtrl" || hit->className == "ShellTextList" ||
+            hit->className == "GuiListBoxCtrl" || hit->className == "GuiTextListCtrl" ||
+            hit->className == "GuiServerBrowser" || hit->className.find("Button") != std::string::npos;
+        // If deepest hit is the dialog root itself and it's not clickable, skip
+        if (hit == *it && !ctlClickable) { hit = nullptr; continue; }
+        // Also skip if the deepest hit is an immediate child of a non-clickable
+        // dialog root (e.g. full-screen background profile in LaunchToolbarDlg)
+        if (hit->parent == *it && !ctlClickable) { hit = nullptr; continue; }
         break;
     }
     if (!hit && canvas) hit = hitTest(canvas, x, y);
-    if (!hit) return false;
+    if (!hit) { fprintf(stderr, "DBG handleInput no hit\n"); return false; }
+    fprintf(stderr, "DBG handleInput hit='%s' class='%s'\n", hit->name.c_str(), hit->className.c_str());
     // GuiServerBrowser: row selection + column header sort
     if (hit->className == "GuiServerBrowser") {
         // Compute absolute position of the control
@@ -2160,29 +2178,33 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     {
         GuiControl* lm = launchPopupAt(x, y);
         if (lm) {
+            fprintf(stderr, "DBG launchPopupAt found='%s' class='%s'\n", lm->name.c_str(), lm->className.c_str());
             float ax = lm->posX, ay = lm->posY;
             for (auto* p = lm->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
             float popY = ay - (float)lm->menuItems.size() * 20.0f - 4;
             float lineH = 20;
             int idx = (int)((y - popY) / lineH);
-            if (idx >= 0 && idx < (int)lm->menuItems.size() && !lm->menuItems[idx].isSeparator) {
+            if (idx >= 0 && idx < (int)lm->menuItems.size()) {
                 std::string txt = lm->menuItems[idx].text;
-                auto* ts = Engine::instance().script().ts();
-                if (ts && ts->hasFunction(lm->name + "::onSelect")) {
-                    ts->callFunction(lm->name + "::onSelect",
-                        {VMValue(lm->name), VMValue(lm->menuItems[idx].id), VMValue(txt)});
-                } else {
-                    // Default launch-sidebar actions when no script onSelect is wired
-                    // (script wins if LaunchToolbarMenu::onSelect exists). Option
-                    // panels open as overlays (pushDialog) so the launch menu stays
-                    // behind and can be returned to; game panes replace content.
-                    auto& gr = Engine::instance().guiRenderer();
-                    if (txt == "QUIT") Engine::instance().quit();
-                    else if (txt == "SETTING") gr.pushDialog("OptionsDlg");
-                    else if (txt == "TRAINING") gr.pushDialog("TrainingGui");
-                    else if (txt == "LAN GAME") gr.pushDialog("GameGui");
-                    else if (txt == "RECORDING") gr.pushDialog("DemoPlaybackDlg");
-                    else if (txt == "CREDIT") gr.pushDialog("CreditsDlg");
+                bool sep = lm->menuItems[idx].isSeparator;
+                fprintf(stderr, "DBG LAUNCH click idx=%d txt='%s' sep=%d\n", idx, txt.c_str(), sep);
+                if (!sep) {
+                    auto* ts = Engine::instance().script().ts();
+                    if (ts && ts->hasFunction(lm->name + "::onSelect")) {
+                        ts->callFunction(lm->name + "::onSelect",
+                            {VMValue(lm->name), VMValue(lm->menuItems[idx].id), VMValue(txt)});
+                    } else {
+                        // Default launch-sidebar actions when no script onSelect is wired
+                        auto& gr = Engine::instance().guiRenderer();
+                        fprintf(stderr, "DBG LAUNCH item txt='%s'\n", txt.c_str());
+                        if (txt == "QUIT") Engine::instance().quit();
+                        else if (txt == "SETTING") { fprintf(stderr, "DBG pushDialog OptionsDlg\n"); gr.pushDialog("OptionsDlg"); }
+                        else if (txt == "TRAINING") { fprintf(stderr, "DBG pushDialog TrainingGui\n"); gr.pushDialog("TrainingGui"); }
+                        else if (txt == "LAN GAME") { fprintf(stderr, "DBG pushDialog GameGui\n"); gr.pushDialog("GameGui"); }
+                        else if (txt == "RECORDING") { fprintf(stderr, "DBG pushDialog DemoPlaybackDlg\n"); gr.pushDialog("DemoPlaybackDlg"); }
+                        else if (txt == "CREDIT") { fprintf(stderr, "DBG pushDialog CreditsDlg\n"); gr.pushDialog("CreditsDlg"); }
+                        else fprintf(stderr, "DBG LAUNCH item UNMATCHED\n");
+                    }
                 }
             }
             lm->menuOpen = false;
@@ -2441,7 +2463,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
         if (ctl) {
             ctl->visible = true;
             dialogStack.push_back(ctl);
-        callOnAddOnce(ctl);
+            fprintf(stderr, "DBG pushDialog '%s' stack now %zu\n", ctl->name.c_str(), dialogStack.size());
             // Trigger onWake so script functions like LaunchToolbarDlg::onWake populate menus
             if (auto* ts = Engine::instance().script().ts()) {
                 if (ts->hasFunction(name + "::onWake")) {
@@ -2458,6 +2480,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
 void GuiRenderer::popDialog(const std::string& name) {
     for (auto it = dialogStack.begin(); it != dialogStack.end(); ++it) {
         if ((*it)->name == name || name.empty()) {
+            fprintf(stderr, "DBG popDialog '%s' stack was %zu\n", name.c_str(), dialogStack.size());
             dialogStack.erase(it);
             Console::instance().printf(LogLevel::Debug, "GUI: popDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
             return;
