@@ -964,7 +964,9 @@ void Engine::run() {
             auto& kq = plat->input().keyPressQueue;
             bool escEdge = std::find(kq.begin(), kq.end(), SCANCODE_ESCAPE) != kq.end();
             if (escEdge) {
-                if (gui->dialogCount() > 1) {
+                GuiControl* active = gui->activeDialog();
+                bool isLaunchUI = active && active->name == "LaunchToolbarDlg";
+                if (gui->dialogCount() > 1 && !isLaunchUI) {
                     gui->popDialog(gui->activeDialog()->name);
                 } else if (g->isShapeViewerActive()) {
                     g->shapeViewerActive = false;

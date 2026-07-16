@@ -871,9 +871,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             float popY = y - (float)ctl->menuItems.size() * 20.0f - 4; // render above button
             float popW = 180, lineH = 20;
             float popH = lineH * (float)ctl->menuItems.size();
-            // Sidebar background — distinct from canvas bg, plus a border so it
-            // reads as a panel (the old bg matched the canvas exactly → invisible)
-            r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.08f, 0.09f, 0.13f, 0.98f});
+            // Sidebar background — visibly lighter than canvas so it reads as a panel
+            r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.35f, 0.35f, 0.42f, 0.99f});
             r.drawRectFill({popX, popY, 0}, {popX + popW, popY + 1, 0}, {0.5f, 0.6f, 0.8f, 1});
             r.drawRectFill({popX, popY + popH - 1, 0}, {popX + popW, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
             r.drawRectFill({popX, popY, 0}, {popX + 1, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
@@ -884,9 +883,9 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 if (item.isSeparator) {
                     r.drawRectFill({popX + 4, iy + lineH*0.5f, 0}, {popX + popW - 4, iy + lineH*0.5f + 1, 0}, {0.4f,0.4f,0.5f,0.8f});
                 } else {
+                    // Hover highlight: unmistakable green bar so user can verify it draws
                     if ((int)ii == ctl->hoveredItem) {
-                        // Hover highlight: bright neon fill so it's unmistakable
-                        r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {1.0f, 0.2f, 0.1f, 1});
+                        r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {0.1f, 1.0f, 0.2f, 1});
                         r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + 1, 0}, {1, 1, 1, 1});
                         r.drawRectFill({popX + 2, iy + lineH - 1, 0}, {popX + popW - 2, iy + lineH, 0}, {1, 1, 1, 1});
                         r.drawRectFill({popX + 2, iy, 0}, {popX + 3, iy + lineH, 0}, {1, 1, 1, 1});
@@ -2179,10 +2178,11 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                     // behind and can be returned to; game panes replace content.
                     auto& gr = Engine::instance().guiRenderer();
                     if (txt == "QUIT") Engine::instance().quit();
-                    else if (txt == "SETTINGS") gr.pushDialog("OptionsDlg");
-                    else if (txt == "TRAINING") gr.setContent("TrainingGui");
-                    else if (txt == "LAN GAME") gr.setContent("GameGui");
-                    else if (txt == "RECORDINGS") gr.pushDialog("DemoPlaybackDlg");
+                    else if (txt == "SETTING") gr.pushDialog("OptionsDlg");
+                    else if (txt == "TRAINING") gr.pushDialog("TrainingGui");
+                    else if (txt == "LAN GAME") gr.pushDialog("GameGui");
+                    else if (txt == "RECORDING") gr.pushDialog("DemoPlaybackDlg");
+                    else if (txt == "CREDIT") gr.pushDialog("CreditsDlg");
                 }
             }
             lm->menuOpen = false;
