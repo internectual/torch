@@ -2110,6 +2110,41 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         break;
     }
     if (!hit && canvas) hit = hitTest(canvas, x, y);
+    // If no dialog/canvas control under the click, still check for an open
+    // ShellLaunchMenu popup (its items render outside the button's extent).
+    if (!hit) {
+        GuiControl* lm = launchPopupAt(x, y);
+        if (lm) {
+            // Click landed in the open popup — dispatch that item directly
+            // instead of falling through to the button's open/close toggle.
+            float ax = lm->posX, ay = lm->posY;
+            for (auto* p = lm->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+            float popY = ay - (float)lm->menuItems.size() * 20.0f - 4;
+            float lineH = 20;
+            int idx = (int)((y - popY) / lineH);
+            if (idx >= 0 && idx < (int)lm->menuItems.size()) {
+                std::string txt = lm->menuItems[idx].text;
+                bool sep = lm->menuItems[idx].isSeparator;
+                if (!sep) {
+                    auto* ts = Engine::instance().script().ts();
+                    if (ts && ts->hasFunction(lm->name + "::onSelect")) {
+                        ts->callFunction(lm->name + "::onSelect",
+                            {VMValue(lm->name), VMValue(lm->menuItems[idx].id), VMValue(txt)});
+                    } else {
+                        auto& gr = Engine::instance().guiRenderer();
+                        if (txt == "QUIT") Engine::instance().quit();
+                        else if (txt == "SETTING") gr.pushDialog("OptionsDlg");
+                        else if (txt == "TRAINING") gr.pushDialog("TrainingGui");
+                        else if (txt == "LAN GAME") gr.pushDialog("GameGui");
+                        else if (txt == "RECORDING") gr.pushDialog("DemoPlaybackDlg");
+                        else if (txt == "CREDIT") gr.pushDialog("CreditsDlg");
+                    }
+                }
+            }
+            lm->menuOpen = false;
+            return true;
+        }
+    }
     // GuiServerBrowser: row selection + column header sort
     if (hit->className == "GuiServerBrowser") {
         // Compute absolute position of the control
@@ -2173,34 +2208,6 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             hit->menuOpen = true;  // open the sidebar
         }
         return true;
-    }
-    // Open popup item click (click lands outside the button's extent)
-    {
-        GuiControl* lm = launchPopupAt(x, y);
-        if (lm) {
-            float ax = lm->posX, ay = lm->posY;
-            for (auto* p = lm->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
-            float popY = ay - (float)lm->menuItems.size() * 20.0f - 4;
-            float lineH = 20;
-            int idx = (int)((y - popY) / lineH);
-            if (idx >= 0 && idx < (int)lm->menuItems.size()) {
-                std::string txt = lm->menuItems[idx].text;
-                bool sep = lm->menuItems[idx].isSeparator;
-                if (!sep) {
-                    auto* ts = Engine::instance().script().ts();
-                    if (ts && ts->hasFunction(lm->name + "::onSelect")) {
-                        ts->callFunction(lm->name + "::onSelect",
-                            {VMValue(lm->name), VMValue(lm->menuItems[idx].id), VMValue(txt)});
-                    } else {
-                        // Default launch-sidebar actions when no script onSelect is wired
-                        auto& gr = Engine::instance().guiRenderer();
-                        if (txt == "QUIT") Engine::instance().quit();
-                    }
-                }
-            }
-            lm->menuOpen = false;
-            return true;
-        }
     }
     // ShellPopupMenu / GuiPopUpMenuCtrl: toggle dropdown or select item
     if (hit->className == "ShellPopupMenu" || hit->className == "GuiPopUpMenuCtrl") {

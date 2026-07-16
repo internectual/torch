@@ -964,14 +964,18 @@ void Engine::run() {
             auto& kq = plat->input().keyPressQueue;
             bool escEdge = std::find(kq.begin(), kq.end(), SCANCODE_ESCAPE) != kq.end();
             if (escEdge) {
-                GuiControl* active = gui->activeDialog();
+                // ESC always closes the topmost dialog when >1 is open.
+                // When only LaunchToolbarDlg is on the stack, ESC has no effect
+                // (the user closes the sidebar by clicking the button again).
                 if (gui->dialogCount() > 1) {
+                    GuiControl* active = gui->activeDialog();
                     if (active) gui->popDialog(active->name);
                 } else if (g->isShapeViewerActive()) {
                     g->shapeViewerActive = false;
                     g->shapeViewerShape = DTSShape{};
-                } else if (!active || active->name != "LaunchToolbarDlg") {
-                    // Only quit from ESC when not on the main LAUNCH menu
+                } else if (gui->activeDialog() && gui->activeDialog()->name == "LaunchToolbarDlg") {
+                    // ESC on standalone LaunchToolbarDlg: do nothing
+                } else {
                     Engine::instance().quit();
                 }
             }
