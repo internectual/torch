@@ -884,9 +884,15 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 if (item.isSeparator) {
                     r.drawRectFill({popX + 4, iy + lineH*0.5f, 0}, {popX + popW - 4, iy + lineH*0.5f + 1, 0}, {0.4f,0.4f,0.5f,0.8f});
                 } else {
-                    if ((int)ii == ctl->hoveredItem)
-                        r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {0.32f, 0.42f, 0.6f, 1});
-                    if (font) font->render(item.text.c_str(), popX + 6, iy + 2, {0.85f,0.92f,1,1}, 1.0f);
+                    if ((int)ii == ctl->hoveredItem) {
+                        // Hover highlight: bright neon fill so it's unmistakable
+                        r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {1.0f, 0.2f, 0.1f, 1});
+                        r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + 1, 0}, {1, 1, 1, 1});
+                        r.drawRectFill({popX + 2, iy + lineH - 1, 0}, {popX + popW - 2, iy + lineH, 0}, {1, 1, 1, 1});
+                        r.drawRectFill({popX + 2, iy, 0}, {popX + 3, iy + lineH, 0}, {1, 1, 1, 1});
+                        r.drawRectFill({popX + popW - 3, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {1, 1, 1, 1});
+                    }
+                    if (font) font->render(item.text.c_str(), popX + 6, iy + 2, {0.9f,0.95f,1,1}, 1.0f);
                 }
                 iy += lineH;
             }
@@ -2168,12 +2174,15 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                         {VMValue(lm->name), VMValue(lm->menuItems[idx].id), VMValue(txt)});
                 } else {
                     // Default launch-sidebar actions when no script onSelect is wired
+                    // (script wins if LaunchToolbarMenu::onSelect exists). Option
+                    // panels open as overlays (pushDialog) so the launch menu stays
+                    // behind and can be returned to; game panes replace content.
                     auto& gr = Engine::instance().guiRenderer();
                     if (txt == "QUIT") Engine::instance().quit();
-                    else if (txt == "SETTINGS") gr.setContent("OptionsDlg");
+                    else if (txt == "SETTINGS") gr.pushDialog("OptionsDlg");
                     else if (txt == "TRAINING") gr.setContent("TrainingGui");
                     else if (txt == "LAN GAME") gr.setContent("GameGui");
-                    else if (txt == "RECORDINGS") gr.setContent("DemoPlaybackDlg");
+                    else if (txt == "RECORDINGS") gr.pushDialog("DemoPlaybackDlg");
                 }
             }
             lm->menuOpen = false;

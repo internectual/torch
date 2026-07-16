@@ -956,19 +956,24 @@ void Engine::run() {
             prevM = mDown;
         }
 
-        // ESC toggles pause menu (when not in console)
+        // ESC backs out of dialogs (script-driven UI), pauses in-game, or
+        // quits from the top-level menu. processEvents no longer quits on ESC.
+        // Use the queued key-press (edge-triggered) so a fast keydown+keyup
+        // (e.g. driven by xdotool) isn't missed between frames.
         if (!gui->isDialogActive("ConsoleDlg")) {
-            static bool prevEsc = false;
-            bool escDown = plat->input().keysDown[SCANCODE_ESCAPE];
-            if (escDown && !prevEsc && g->isShapeViewerActive()) {
-                // Exit shape viewer
-                g->shapeViewerActive = false;
-                g->shapeViewerShape = DTSShape{};
-                Console::instance().printf(LogLevel::Info, "Shape Viewer: closed");
-            } else if (escDown && !prevEsc && g->state() != Game::MenuScreen) {
-                g->togglePauseGame();
+            auto& kq = plat->input().keyPressQueue;
+            bool escEdge = std::find(kq.begin(), kq.end(), SCANCODE_ESCAPE) != kq.end();
+            if (escEdge) {
+                if (gui->dialogCount() > 1) {
+                    gui->popDialog(gui->activeDialog()->name);
+                } else if (g->isShapeViewerActive()) {
+                    g->shapeViewerActive = false;
+                    g->shapeViewerShape = DTSShape{};
+                } else {
+                    Engine::instance().quit();
+                }
             }
-            prevEsc = escDown;
+        }
 
             // Shape viewer: left/right arrows to cycle shapes (hold to repeat)
             if (g->isShapeViewerActive()) {
@@ -996,7 +1001,6 @@ void Engine::run() {
                 quit();
             }
             prevQ = qDown;
-        }
 
         // ~ key toggles console via GUI ConsoleDlg
         {

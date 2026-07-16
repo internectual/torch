@@ -69,6 +69,7 @@ bool Platform::processEvents() {
     inputState.mouseDeltaY = 0;
     inputState.mouseWheel = 0;
     inputState.textInput.clear();
+    inputState.keyPressQueue.clear();
 
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -81,8 +82,10 @@ bool Platform::processEvents() {
                 inputState.textInput += e.text.text;
                 break;
             case SDL_EVENT_KEY_DOWN:
-                if (e.key.scancode < 512) inputState.keysDown[e.key.scancode] = true;
-                if (e.key.key == SDLK_ESCAPE) { running = false; return false; }
+                if (e.key.scancode < 512) {
+                    inputState.keysDown[e.key.scancode] = true;
+                    inputState.keyPressQueue.push_back(e.key.scancode);
+                }
                 break;
             case SDL_EVENT_KEY_UP:
                 if (e.key.scancode < 512) inputState.keysDown[e.key.scancode] = false;

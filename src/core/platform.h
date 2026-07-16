@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 // SDL3 scancode constants (USB HID usage table)
 constexpr int SCANCODE_GRAVE   = 53;  // ~ key
@@ -54,6 +55,7 @@ struct InputState {
     int32_t mouseX{}, mouseY{}, mouseDeltaX{}, mouseDeltaY{};
     int32_t mouseWheel{};
     std::string textInput; // consumed text this frame (SDL_TEXT_INPUT)
+    std::vector<int> keyPressQueue; // edge-triggered keydowns this frame (scancodes)
 };
 
 class Platform {
