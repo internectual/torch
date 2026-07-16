@@ -737,17 +737,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
     if (cn == "GuiButtonCtrl" || cn == "GuiTextButtonCtrl" ||
         cn == "ShellBitmapButton" || cn == "GuiBitmapButtonCtrl" ||
         cn == "ShellLaunchMenu") {
-        // Disable scissor for ShellLaunchMenu so popup (which extends above the
-        // button outside its extent) is rendered fully visible.
-        GLboolean scissorWas = false;
-        GLint oldScissor[4] = {};
-        if (cn == "ShellLaunchMenu") {
-            scissorWas = glIsEnabled(GL_SCISSOR_TEST);
-            if (scissorWas) {
-                glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
-                glDisable(GL_SCISSOR_TEST);
-            }
-        }
         ColorF btnFill{0.25f, 0.25f, 0.35f, 1}, btnBorder{0.5f, 0.5f, 0.6f, 1};
         ColorF btnText{1,1,1,1};
         auto* prof = getProfile(ctl->profileName);
@@ -882,8 +871,9 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             float popY = y - (float)ctl->menuItems.size() * 20.0f - 4; // render above button
             float popW = 180, lineH = 20;
             float popH = lineH * (float)ctl->menuItems.size();
-            // Sidebar background — visibly lighter than canvas so it reads as a panel
-            r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.35f, 0.35f, 0.42f, 0.99f});
+            // Sidebar background — distinct from canvas bg, plus a border so it
+            // reads as a panel (the old bg matched the canvas exactly → invisible)
+            r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.08f, 0.09f, 0.13f, 0.98f});
             r.drawRectFill({popX, popY, 0}, {popX + popW, popY + 1, 0}, {0.5f, 0.6f, 0.8f, 1});
             r.drawRectFill({popX, popY + popH - 1, 0}, {popX + popW, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
             r.drawRectFill({popX, popY, 0}, {popX + 1, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
@@ -894,22 +884,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 if (item.isSeparator) {
                     r.drawRectFill({popX + 4, iy + lineH*0.5f, 0}, {popX + popW - 4, iy + lineH*0.5f + 1, 0}, {0.4f,0.4f,0.5f,0.8f});
                 } else {
-                    // Hover highlight: unmistakable green bar so user can verify it draws
-                    if ((int)ii == ctl->hoveredItem) {
-                        r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {0.1f, 1.0f, 0.2f, 1});
-                        r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + 1, 0}, {1, 1, 1, 1});
-                        r.drawRectFill({popX + 2, iy + lineH - 1, 0}, {popX + popW - 2, iy + lineH, 0}, {1, 1, 1, 1});
-                        r.drawRectFill({popX + 2, iy, 0}, {popX + 3, iy + lineH, 0}, {1, 1, 1, 1});
-                        r.drawRectFill({popX + popW - 3, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {1, 1, 1, 1});
-                    }
-                    if (font) font->render(item.text.c_str(), popX + 6, iy + 2, {0.9f,0.95f,1,1}, 1.0f);
+                    if ((int)ii == ctl->hoveredItem)
+                        r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {0.32f, 0.42f, 0.6f, 1});
+                    if (font) font->render(item.text.c_str(), popX + 6, iy + 2, {0.85f,0.92f,1,1}, 1.0f);
                 }
                 iy += lineH;
-            }
-            // Restore scissor after ShellLaunchMenu render so popup visible above button
-            if (scissorWas) {
-                glEnable(GL_SCISSOR_TEST);
-                glScissor(oldScissor[0], oldScissor[1], oldScissor[2], oldScissor[3]);
             }
         }
     } else if (cn == "GuiTextCtrl") {
@@ -2091,60 +2070,23 @@ bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
 bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     if (!pressed) return false;
     GuiControl* hit = nullptr;
-    // Check all dialogs from top to bottom so clicks pass through non-interactive
-    // overlays (e.g. LaunchToolbarDlg must not block clicks on the LAUNCH sidebar).
+    // Check all dialogs from top to bottom so clicks pass through transparent overlays
     for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it) {
         hit = hitTest(*it, x, y);
         if (!hit) continue;
-        bool ctlClickable = hit->onClick != nullptr ||
-            hit->className == "ShellLaunchMenu" || hit->className == "ShellPopupMenu" ||
-            hit->className == "GuiPopUpMenuCtrl" || hit->className == "ShellTabGroupCtrl" ||
-            hit->className == "GuiTabBookCtrl" || hit->className == "ShellTextList" ||
-            hit->className == "GuiListBoxCtrl" || hit->className == "GuiTextListCtrl" ||
-            hit->className == "GuiServerBrowser" || hit->className.find("Button") != std::string::npos;
-        // If deepest hit is the dialog root itself and it's not clickable, skip
-        if (hit == *it && !ctlClickable) { hit = nullptr; continue; }
-        // Also skip if the deepest hit is an immediate child of a non-clickable
-        // dialog root (e.g. full-screen background profile in LaunchToolbarDlg)
-        if (hit->parent == *it && !ctlClickable) { hit = nullptr; continue; }
+        // If hit is a dialog root (no clickable class) with no onClick, skip to next
+        if (hit == *it && hit->onClick == nullptr) {
+            bool isClickable = hit->className == "ShellLaunchMenu" || hit->className == "ShellPopupMenu" ||
+                hit->className == "GuiPopUpMenuCtrl" || hit->className == "ShellTabGroupCtrl" ||
+                hit->className == "GuiTabBookCtrl" || hit->className == "ShellTextList" ||
+                hit->className == "GuiListBoxCtrl" || hit->className == "GuiTextListCtrl" ||
+                hit->className == "GuiServerBrowser" || hit->className.find("Button") != std::string::npos;
+            if (!isClickable) { hit = nullptr; continue; }
+        }
         break;
     }
     if (!hit && canvas) hit = hitTest(canvas, x, y);
-    // If no dialog/canvas control under the click, still check for an open
-    // ShellLaunchMenu popup (its items render outside the button's extent).
-    if (!hit) {
-        GuiControl* lm = launchPopupAt(x, y);
-        if (lm) {
-            // Click landed in the open popup — dispatch that item directly
-            // instead of falling through to the button's open/close toggle.
-            float ax = lm->posX, ay = lm->posY;
-            for (auto* p = lm->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
-            float popY = ay - (float)lm->menuItems.size() * 20.0f - 4;
-            float lineH = 20;
-            int idx = (int)((y - popY) / lineH);
-            if (idx >= 0 && idx < (int)lm->menuItems.size()) {
-                std::string txt = lm->menuItems[idx].text;
-                bool sep = lm->menuItems[idx].isSeparator;
-                if (!sep) {
-                    auto* ts = Engine::instance().script().ts();
-                    if (ts && ts->hasFunction(lm->name + "::onSelect")) {
-                        ts->callFunction(lm->name + "::onSelect",
-                            {VMValue(lm->name), VMValue(lm->menuItems[idx].id), VMValue(txt)});
-                    } else {
-                        auto& gr = Engine::instance().guiRenderer();
-                        if (txt == "QUIT") Engine::instance().quit();
-                        else if (txt == "SETTING") gr.pushDialog("OptionsDlg");
-                        else if (txt == "TRAINING") gr.pushDialog("TrainingGui");
-                        else if (txt == "LAN GAME") gr.pushDialog("GameGui");
-                        else if (txt == "RECORDING") gr.pushDialog("DemoPlaybackDlg");
-                        else if (txt == "CREDIT") gr.pushDialog("CreditsDlg");
-                    }
-                }
-            }
-            lm->menuOpen = false;
-            return true;
-        }
-    }
+    if (!hit) return false;
     // GuiServerBrowser: row selection + column header sort
     if (hit->className == "GuiServerBrowser") {
         // Compute absolute position of the control
@@ -2198,7 +2140,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         }
         return true;
     }
-    // LAUNCH sidebar click: open/close sidebar or select item.
+    // ShellLaunchMenu: open popup on button click; select item when popup open.
     // Popup items render ABOVE the button (outside its extent) so hitTest can't
     // locate the control there — detect open popups at the click point directly.
     if (hit && hit->className == "ShellLaunchMenu") {
@@ -2208,6 +2150,35 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             hit->menuOpen = true;  // open the sidebar
         }
         return true;
+    }
+    // Open popup item click (click lands outside the button's extent)
+    {
+        GuiControl* lm = launchPopupAt(x, y);
+        if (lm) {
+            float ax = lm->posX, ay = lm->posY;
+            for (auto* p = lm->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+            float popY = ay - (float)lm->menuItems.size() * 20.0f - 4;
+            float lineH = 20;
+            int idx = (int)((y - popY) / lineH);
+            if (idx >= 0 && idx < (int)lm->menuItems.size() && !lm->menuItems[idx].isSeparator) {
+                std::string txt = lm->menuItems[idx].text;
+                auto* ts = Engine::instance().script().ts();
+                if (ts && ts->hasFunction(lm->name + "::onSelect")) {
+                    ts->callFunction(lm->name + "::onSelect",
+                        {VMValue(lm->name), VMValue(lm->menuItems[idx].id), VMValue(txt)});
+                } else {
+                    // Default launch-sidebar actions when no script onSelect is wired
+                    auto& gr = Engine::instance().guiRenderer();
+                    if (txt == "QUIT") Engine::instance().quit();
+                    else if (txt == "SETTINGS") gr.setContent("OptionsDlg");
+                    else if (txt == "TRAINING") gr.setContent("TrainingGui");
+                    else if (txt == "LAN GAME") gr.setContent("GameGui");
+                    else if (txt == "RECORDINGS") gr.setContent("DemoPlaybackDlg");
+                }
+            }
+            lm->menuOpen = false;
+            return true;
+        }
     }
     // ShellPopupMenu / GuiPopUpMenuCtrl: toggle dropdown or select item
     if (hit->className == "ShellPopupMenu" || hit->className == "GuiPopUpMenuCtrl") {
@@ -2461,6 +2432,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
         if (ctl) {
             ctl->visible = true;
             dialogStack.push_back(ctl);
+        callOnAddOnce(ctl);
             // Trigger onWake so script functions like LaunchToolbarDlg::onWake populate menus
             if (auto* ts = Engine::instance().script().ts()) {
                 if (ts->hasFunction(name + "::onWake")) {
