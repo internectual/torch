@@ -737,6 +737,17 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
     if (cn == "GuiButtonCtrl" || cn == "GuiTextButtonCtrl" ||
         cn == "ShellBitmapButton" || cn == "GuiBitmapButtonCtrl" ||
         cn == "ShellLaunchMenu") {
+        // Disable scissor for ShellLaunchMenu so popup (which extends above the
+        // button outside its extent) is rendered fully visible.
+        GLboolean scissorWas = false;
+        GLint oldScissor[4] = {};
+        if (cn == "ShellLaunchMenu") {
+            scissorWas = glIsEnabled(GL_SCISSOR_TEST);
+            if (scissorWas) {
+                glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
+                glDisable(GL_SCISSOR_TEST);
+            }
+        }
         ColorF btnFill{0.25f, 0.25f, 0.35f, 1}, btnBorder{0.5f, 0.5f, 0.6f, 1};
         ColorF btnText{1,1,1,1};
         auto* prof = getProfile(ctl->profileName);
@@ -867,14 +878,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         // Popup menu for ShellLaunchMenu (the LAUNCH sidebar)
         if (ctl->menuOpen && !ctl->menuItems.empty()) {
-            // Popup extends above the button outside our own scissor — disable
-            // parent scissor so popup + highlight render visibly above the button.
-            GLboolean scissorWas = glIsEnabled(GL_SCISSOR_TEST);
-            GLint oldScissor[4] = {};
-            if (scissorWas) {
-                glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
-                glDisable(GL_SCISSOR_TEST);
-            }
             float popX = x;
             float popY = y - (float)ctl->menuItems.size() * 20.0f - 4; // render above button
             float popW = 180, lineH = 20;
@@ -903,7 +906,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 }
                 iy += lineH;
             }
-            // Restore parent scissor after drawing popup that overflows the button
+            // Restore scissor after ShellLaunchMenu render so popup visible above button
             if (scissorWas) {
                 glEnable(GL_SCISSOR_TEST);
                 glScissor(oldScissor[0], oldScissor[1], oldScissor[2], oldScissor[3]);
@@ -2086,7 +2089,6 @@ bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
 }
 
 bool GuiRenderer::handleInput(int x, int y, bool pressed) {
-    fprintf(stderr, "DBG handleInput x=%d y=%d pressed=%d\n", x, y, pressed);
     if (!pressed) return false;
     GuiControl* hit = nullptr;
     // Check all dialogs from top to bottom so clicks pass through non-interactive
@@ -2108,8 +2110,6 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         break;
     }
     if (!hit && canvas) hit = hitTest(canvas, x, y);
-    if (!hit) { fprintf(stderr, "DBG handleInput no hit\n"); return false; }
-    fprintf(stderr, "DBG handleInput hit='%s' class='%s'\n", hit->name.c_str(), hit->className.c_str());
     // GuiServerBrowser: row selection + column header sort
     if (hit->className == "GuiServerBrowser") {
         // Compute absolute position of the control
@@ -2178,7 +2178,6 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     {
         GuiControl* lm = launchPopupAt(x, y);
         if (lm) {
-            fprintf(stderr, "DBG launchPopupAt found='%s' class='%s'\n", lm->name.c_str(), lm->className.c_str());
             float ax = lm->posX, ay = lm->posY;
             for (auto* p = lm->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
             float popY = ay - (float)lm->menuItems.size() * 20.0f - 4;
@@ -2187,7 +2186,6 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             if (idx >= 0 && idx < (int)lm->menuItems.size()) {
                 std::string txt = lm->menuItems[idx].text;
                 bool sep = lm->menuItems[idx].isSeparator;
-                fprintf(stderr, "DBG LAUNCH click idx=%d txt='%s' sep=%d\n", idx, txt.c_str(), sep);
                 if (!sep) {
                     auto* ts = Engine::instance().script().ts();
                     if (ts && ts->hasFunction(lm->name + "::onSelect")) {
@@ -2196,14 +2194,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                     } else {
                         // Default launch-sidebar actions when no script onSelect is wired
                         auto& gr = Engine::instance().guiRenderer();
-                        fprintf(stderr, "DBG LAUNCH item txt='%s'\n", txt.c_str());
                         if (txt == "QUIT") Engine::instance().quit();
-                        else if (txt == "SETTING") { fprintf(stderr, "DBG pushDialog OptionsDlg\n"); gr.pushDialog("OptionsDlg"); }
-                        else if (txt == "TRAINING") { fprintf(stderr, "DBG pushDialog TrainingGui\n"); gr.pushDialog("TrainingGui"); }
-                        else if (txt == "LAN GAME") { fprintf(stderr, "DBG pushDialog GameGui\n"); gr.pushDialog("GameGui"); }
-                        else if (txt == "RECORDING") { fprintf(stderr, "DBG pushDialog DemoPlaybackDlg\n"); gr.pushDialog("DemoPlaybackDlg"); }
-                        else if (txt == "CREDIT") { fprintf(stderr, "DBG pushDialog CreditsDlg\n"); gr.pushDialog("CreditsDlg"); }
-                        else fprintf(stderr, "DBG LAUNCH item UNMATCHED\n");
                     }
                 }
             }
@@ -2463,7 +2454,6 @@ void GuiRenderer::pushDialog(const std::string& name) {
         if (ctl) {
             ctl->visible = true;
             dialogStack.push_back(ctl);
-            fprintf(stderr, "DBG pushDialog '%s' stack now %zu\n", ctl->name.c_str(), dialogStack.size());
             // Trigger onWake so script functions like LaunchToolbarDlg::onWake populate menus
             if (auto* ts = Engine::instance().script().ts()) {
                 if (ts->hasFunction(name + "::onWake")) {
@@ -2480,7 +2470,6 @@ void GuiRenderer::pushDialog(const std::string& name) {
 void GuiRenderer::popDialog(const std::string& name) {
     for (auto it = dialogStack.begin(); it != dialogStack.end(); ++it) {
         if ((*it)->name == name || name.empty()) {
-            fprintf(stderr, "DBG popDialog '%s' stack was %zu\n", name.c_str(), dialogStack.size());
             dialogStack.erase(it);
             Console::instance().printf(LogLevel::Debug, "GUI: popDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
             return;
