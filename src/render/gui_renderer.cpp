@@ -2146,7 +2146,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         }
         return true;
     }
-    // ShellLaunchMenu: open popup on button click; select item when popup open.
+    // LAUNCH sidebar click: open/close sidebar or select item.
     // Popup items render ABOVE the button (outside its extent) so hitTest can't
     // locate the control there — detect open popups at the click point directly.
     if (hit && hit->className == "ShellLaunchMenu") {
