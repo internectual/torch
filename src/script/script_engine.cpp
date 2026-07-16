@@ -2485,14 +2485,6 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
-    tsInstance->registerNative("removeTabByIndex", [getOrCreateCtrl](const auto& args) -> VMValue {
-        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
-        if (ctl && args.size() >= 2) {
-            int idx = (int)args[1].toDouble();
-            if (idx >= 0 && idx < (int)ctl->tabs.size()) ctl->tabs.erase(ctl->tabs.begin() + idx);
-        }
-        return VMValue(1);
-    });
     tsInstance->registerNative("getSelected", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
         return VMValue(ctl ? ctl->selectedRow : 0);
