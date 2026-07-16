@@ -925,6 +925,7 @@ bool Engine::init(int argc, char* argv[]) {
 void Engine::run() {
     running = true;
 
+    fprintf(stderr, "TORCH-RUN-START\n");
     double lastTime = Timer::now();
     double fpsTimer = 0;
     int frameCount = 0;
@@ -975,6 +976,17 @@ void Engine::run() {
                 }
             }
             prevEsc = escDown;
+
+                // trace dialog stack after ESC handling (stderr only)
+                {
+                    std::string stack;
+                    for (size_t k = 0; k < gui->dialogCount(); ++k) {
+                        if (k) stack += " -> ";
+                        GuiControl* dk = gui->activeDialog();
+                        stack += dk ? dk->name : "(null)";
+                    }
+                    fprintf(stderr, "ESC-DIALOGS: [%s]\n", stack.c_str());
+                }
 
             // Shape viewer: left/right arrows to cycle shapes (hold to repeat)
             if (g->isShapeViewerActive()) {

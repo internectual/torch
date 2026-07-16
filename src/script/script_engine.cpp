@@ -1962,6 +1962,7 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
+    // Mark a GUI control as persistent so setContent preserves it across panel swaps
 
     // Console functions used by ConsoleDlg.gui (ToggleConsole / ConsoleEntry::eval)
     tsInstance->registerNative("activateKeyboard", [](const auto&) -> VMValue { return VMValue(1); });
@@ -2294,8 +2295,6 @@ bool ScriptEngine::init() {
         ctl->menuItems.push_back({0, "", true});
         return VMValue(1);
     });
-    // Bridge for passing gui name from addLaunchTab to addTab (script's field+bracket fails)
-    static std::unordered_map<std::string, std::string> g_pendingTabGuis;
     auto getOrCreateCtrl = [](const std::string& name) -> GuiControl* {
         auto& g = Engine::instance().guiRenderer();
         auto* ctl = g.findControl(name);
@@ -2304,6 +2303,83 @@ bool ScriptEngine::init() {
         }
         return ctl;
     };
+
+    tsInstance->registerNative("addLaunchTab", [getOrCreateCtrl](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        auto* ctl = getOrCreateCtrl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        int id = (int)args[1].toDouble();
+        std::string txt = args[2].toString();
+        std::string gui = args.size() > 3 ? args[3].toString() : txt;
+        ctl->tabs.push_back({txt, true});
+        auto* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
+        if (sobj) {
+            std::string gk = "gui[" + std::to_string((int)ctl->tabs.size() - 1) + "]";
+            sobj->fields[gk] = VMValue(gui);
+        }
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("viewLastTab", [getOrCreateCtrl](const auto& args) -> VMValue {
+        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
+        if (!ctl || ctl->tabs.empty()) return VMValue(0);
+        int idx = (int)ctl->tabs.size() - 1;
+        ctl->selectedTab = idx;
+        auto& gr = Engine::instance().guiRenderer();
+        for (int i = 0; i < (int)ctl->tabs.size(); ++i) {
+            if (ctl->tabs[i].active) {
+                ctl->selectedTab = i;
+                auto* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
+                if (sobj) {
+                    std::string gk = "gui[" + std::to_string(i) + "]";
+                    auto gi = sobj->fields.find(gk);
+                    if (gi != sobj->fields.end() && !gi->second.toString().empty()) {
+                        gr.setContent(gi->second.toString());
+                        return VMValue(1);
+                    }
+                }
+            }
+        }
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("closeCurrentTab", [getOrCreateCtrl](const auto& args) -> VMValue {
+        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
+        if (!ctl || ctl->selectedTab < 0 || ctl->selectedTab >= (int)ctl->tabs.size()) return VMValue(0);
+        ctl->tabs.erase(ctl->tabs.begin() + ctl->selectedTab);
+        if (ctl->selectedTab >= (int)ctl->tabs.size())
+            ctl->selectedTab = (int)ctl->tabs.size() - 1;
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("closeTab", [getOrCreateCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = getOrCreateCtrl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        int idx = (int)args[1].toDouble();
+        if (idx < 0 || idx >= (int)ctl->tabs.size()) return VMValue(0);
+        ctl->tabs.erase(ctl->tabs.begin() + idx);
+        if (ctl->selectedTab >= (int)ctl->tabs.size())
+            ctl->selectedTab = (int)ctl->tabs.size() - 1;
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("removeTabByIndex", [getOrCreateCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = getOrCreateCtrl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        int idx = (int)args[1].toDouble();
+        if (idx < 0 || idx >= (int)ctl->tabs.size()) return VMValue(0);
+        ctl->tabs.erase(ctl->tabs.begin() + idx);
+        if (ctl->selectedTab >= (int)ctl->tabs.size())
+            ctl->selectedTab = (int)ctl->tabs.size() - 1;
+        if (auto* ts = Engine::instance().script().ts()) {
+            if (ts->hasFunction(ctl->name + "::onSelect") && ctl->selectedTab >= 0)
+                ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(ctl->selectedTab), VMValue(ctl->tabs[ctl->selectedTab].text)});
+        }
+        return VMValue(1);
+    });
+
     tsInstance->registerNative("addTab", [getOrCreateCtrl](const auto& args) -> VMValue {
         std::string cname = args.empty() ? "" : args[0].toString();
         auto* ctl = getOrCreateCtrl(cname);
@@ -2317,14 +2393,7 @@ bool ScriptEngine::init() {
             if (ScriptObject* sobj = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
                 std::string gk = "gui[" + std::to_string(id) + "]";
                 if (sobj->fields.find(gk) == sobj->fields.end()) {
-                    std::string guiName = txt;
-                    if (txt == "TRAINING") guiName = "TrainingGui";
-                    else if (txt == "LAN GAME") guiName = "GameGui";
-                    else if (txt == "GAME") guiName = "GameGui";
-                    else if (txt == "SETTINGS") guiName = "OptionsDlg";
-                    else if (txt == "RECORDING") guiName = "DemoPlaybackDlg";
-                    else if (txt == "QUIT") guiName = "__QUIT__";
-                    sobj->fields[gk] = VMValue(guiName);
+                    sobj->fields[gk] = VMValue(txt);
                     sobj->fields["key[" + std::to_string(id) + "]"] = VMValue("0");
                 }
             }
@@ -2340,6 +2409,20 @@ bool ScriptEngine::init() {
         return VMValue(ctl ? ctl->selectedTab : -1);
     });
     tsInstance->registerNative("setSelectedByIndex", [getOrCreateCtrl](const auto& args) -> VMValue {
+        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl && args.size() >= 2) {
+            int idx = (int)args[1].toDouble();
+            ctl->selectedTab = idx;
+            if (idx >= 0 && idx < (int)ctl->tabs.size()) {
+                auto* ts = Engine::instance().script().ts();
+                if (ts && ts->hasFunction(ctl->name + "::onSelect"))
+                    ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(idx), VMValue(ctl->tabs[idx].text)});
+            }
+        }
+        return VMValue(1);
+    });
+    // setSelected is the T2 alias for setSelectedByIndex.
+    tsInstance->registerNative("setSelected", [getOrCreateCtrl](const auto& args) -> VMValue {
         auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
         if (ctl && args.size() >= 2) {
             int idx = (int)args[1].toDouble();
@@ -2378,17 +2461,8 @@ bool ScriptEngine::init() {
                             return VMValue(1);
                         }
                     }
-                    // Fallback: use text as GUI name
-                    Engine::instance().guiRenderer().setContent(text);
-                    return VMValue(1);
                 }
             }
-        }
-        // Last resort: use text directly as a GUI name (with mapping)
-        if (!text.empty()) {
-            std::string mappedName = text;
-            if (text == "GAME") mappedName = "GameGui";
-            Engine::instance().guiRenderer().setContent(mappedName);
         }
         return VMValue(1);
     });

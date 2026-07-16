@@ -2166,17 +2166,8 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                 if (ts && ts->hasFunction(lm->name + "::onSelect")) {
                     ts->callFunction(lm->name + "::onSelect",
                         {VMValue(lm->name), VMValue(lm->menuItems[idx].id), VMValue(txt)});
-                } else {
-                    // Default launch-sidebar actions when no script onSelect is wired
-                    auto& gr = Engine::instance().guiRenderer();
-                    if (txt == "QUIT") Engine::instance().quit();
-                    else if (txt == "SETTINGS") gr.pushDialog("OptionsDlg");
-                    else if (txt == "TRAINING") gr.pushDialog("TrainingGui");
-                    else if (txt == "LAN GAME") gr.pushDialog("GameGui");
-                    else if (txt == "RECORDINGS") gr.pushDialog("DemoPlaybackDlg");
-                }
+                    }
             }
-            lm->menuOpen = false;
             return true;
         }
     }
@@ -2432,6 +2423,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
         if (ctl) {
             ctl->visible = true;
             dialogStack.push_back(ctl);
+            fprintf(stderr, "SETCONTENT %s stack=%zu\n", name.c_str(), dialogStack.size());
         callOnAddOnce(ctl);
             // Trigger onWake so script functions like LaunchToolbarDlg::onWake populate menus
             if (auto* ts = Engine::instance().script().ts()) {
@@ -2441,6 +2433,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
                 }
             }
             Console::instance().printf(LogLevel::Debug, "GUI: pushDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
+            fprintf(stderr, "PUSH %s stack=%zu\n", name.c_str(), dialogStack.size());
         } else {
         Console::instance().printf(LogLevel::Warn, "GUI: pushDialog '%s' not found", name.c_str());
     }
@@ -2449,13 +2442,22 @@ void GuiRenderer::pushDialog(const std::string& name) {
 void GuiRenderer::popDialog(const std::string& name) {
     for (auto it = dialogStack.begin(); it != dialogStack.end(); ++it) {
         if ((*it)->name == name || name.empty()) {
+            // Fire onSleep before removal — mirrors the native T2 dialog lifecycle.
+            if (auto* ts = Engine::instance().script().ts()) {
+                if (ts->hasFunction(name + "::onSleep")) {
+                    Console::instance().printf(LogLevel::Debug,
+                        "GUI: popDialog calling onSleep '%s'", name.c_str());
+                    ts->callFunction(name + "::onSleep", {});
+                }
+            }
             dialogStack.erase(it);
-            Console::instance().printf(LogLevel::Debug, "GUI: popDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
+            Console::instance().printf(LogLevel::Debug,
+                "GUI: popDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
+            fprintf(stderr, "POP %s stack=%zu\n", name.c_str(), dialogStack.size());
             return;
         }
     }
 }
-
 void GuiRenderer::callOnAddOnce(GuiControl* ctl) {
     if (!ctl || onAddCalled.count(ctl->name)) return;
     onAddCalled.insert(ctl->name);
@@ -2469,8 +2471,14 @@ void GuiRenderer::callOnAddOnce(GuiControl* ctl) {
 void GuiRenderer::setContent(const std::string& name) {
     GuiControl* ctl = soToGui(name, nullptr);
     if (ctl) {
-        dialogStack.clear();
-        dialogStack.push_back(ctl);
+        // Replace only the content slot; preserve pushed dialogs underneath so
+        // toolbars/consoles survive panel swaps.
+        if (!dialogStack.empty() && dialogStack.front() == canvas)
+            dialogStack.front() = ctl;
+        else if (!dialogStack.empty())
+            dialogStack[0] = ctl;
+        else
+            dialogStack.push_back(ctl);
         callOnAddOnce(ctl);
         if (auto* ts = Engine::instance().script().ts()) {
             if (ts->hasFunction(name + "::onWake")) ts->callFunction(name + "::onWake", {});
