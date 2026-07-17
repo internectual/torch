@@ -248,8 +248,8 @@ void GuiRenderer::render() {
     r.setProjection(ortho);
     r.setView(MatrixF{});
 
-    // Render dialogs in two passes so that base dialogs (e.g. LaunchToolbarDlg)
-    // are always visible above overlays (e.g. NewWarriorDlg). This matches T2
+    // Render dialogs in two passes so that base dialogs
+    // are always visible above overlays. This matches T2
     // behavior where the bottom toolbar stays accessible even when a modal is open.
     std::vector<GuiControl*> baseDialogs, overlays;
     for (auto* dlg : dialogStack) {
@@ -1250,9 +1250,31 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (prof) { auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc); }
         float barY = y + ctl->extentY * 0.4f;
         float barH = ctl->extentY * 0.2f;
-        float knobX = x + ctl->extentX * 0.5f;
-        r.drawRectFill({x, barY, 0}, {x + ctl->extentX, barY + barH, 0}, fc);
-        r.drawRectFill({knobX-4, y, 0}, {knobX+4, y+ctl->extentY, 0}, kc);
+        float barInset = ctl->usePlusMinus ? 16 : 0;
+        float barX = x + barInset;
+        float barW = ctl->extentX - barInset * 2;
+        // Normalize value to 0..1
+        float range = ctl->sliderMax - ctl->sliderMin;
+        float norm = range > 0 ? (ctl->sliderValue - ctl->sliderMin) / range : 0.5f;
+        if (norm < 0) norm = 0; if (norm > 1) norm = 1;
+        float knobX = barX + barW * norm;
+        // Bar
+        r.drawRectFill({barX, barY, 0}, {barX + barW, barY + barH, 0}, fc);
+        // Filled portion
+        r.drawRectFill({barX, barY, 0}, {knobX, barY + barH, 0}, {fc.r*1.5f, fc.g*1.5f, fc.b*1.5f, 1});
+        // Knob
+        r.drawRectFill({knobX-4, y+2, 0}, {knobX+4, y+ctl->extentY-2, 0}, kc);
+        // +/- buttons
+        if (ctl->usePlusMinus) {
+            ColorF btnC{0.3f,0.3f,0.4f,1};
+            if (ctl->hovered) btnC = {0.4f,0.5f,0.6f,1};
+            r.drawRectFill({x, barY-2, 0}, {x+14, barY+barH+2, 0}, btnC);
+            r.drawRectFill({x+ctl->extentX-14, barY-2, 0}, {x+ctl->extentX, barY+barH+2, 0}, btnC);
+            if (font) {
+                font->render("-", x+5, barY-1, {1,1,1,1}, 1.0f);
+                font->render("+", x+ctl->extentX-9, barY-1, {1,1,1,1}, 1.0f);
+            }
+        }
     } else if (cn == "GuiProgressCtrl") {
         ColorF bg{0.2f,0.2f,0.25f,1}, fg{0.0f,0.4f,0.8f,1};
         auto* prof = getProfile(ctl->profileName);
@@ -1331,7 +1353,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 ss->setUniform("uUseTexture",int32_t(1)); ss->setUniform("uTexture",int32_t(0));
                 glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, fillTex->id);
                 struct SV{float x,y,z;float u,v;float r,g,b,a;};
-                SV v[4]={{x,y,0,0,0,1,1,1,1},{x+ctl->extentX,y,0,ctl->extentX/src.w,0,1,1,1,1},{x,y+ctl->extentY,0,0,ctl->extentY/src.h,1,1,1,1},{x+ctl->extentX,y+ctl->extentY,0,ctl->extentX/src.w,ctl->extentY/src.h,1,1,1,1}};
+                SV v[4]={{x,y,0,0,0,fc.r,fc.g,fc.b,fc.a},{x+ctl->extentX,y,0,ctl->extentX/src.w,0,fc.r,fc.g,fc.b,fc.a},{x,y+ctl->extentY,0,0,ctl->extentY/src.h,fc.r,fc.g,fc.b,fc.a},{x+ctl->extentX,y+ctl->extentY,0,ctl->extentX/src.w,ctl->extentY/src.h,fc.r,fc.g,fc.b,fc.a}};
                 uint32_t ids[]={0,1,2,1,3,2};
                 drawQuadBatch(v, sizeof(v), ids, sizeof(ids));
             }
@@ -1343,8 +1365,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         const std::vector<BmpCell>* tabCells = nullptr;
         Texture* tabTex = getShellTexWithCells(r, "dlg_titletab.png", tabCells);
         bool hasTitle = !ctl->text.empty() && tabTex && tabTex->loaded;
-        // Frame edges using dlg_frame_edge (top edge skipped if title tab present)
-        if (edgeTex && edgeTex->loaded) {
+        // Frame edges using dlg_frame_edge (only for ShellDlgFrame, not content panes)
+        if (cn == "ShellDlgFrame" && edgeTex && edgeTex->loaded) {
             auto doEdge = [&](float ex,float ey,float ew,float eh, const BmpCell& s, bool tileX, bool tileY) {
                 float u0=(float)s.x/edgeTex->width,v0=(float)s.y/edgeTex->height;
                 float u1=(float)(s.x+s.w)/edgeTex->width,v1=(float)(s.y+s.h)/edgeTex->height;
@@ -1787,29 +1809,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         for (auto* child : ctl->children)
             renderControlRec(gr, child, canvas, scrollOfsX, scrollOfsY, clip);
         return; // prevent generic children loop below
-    } else if (cn == "ShellBitmapButton" && ctl->name == "LaunchToolbarCloseButton") {
-        // Close button in LaunchToolbarDlg: draw an X
-        ColorF bg{0.25f,0.25f,0.3f,1};
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bg);
-        // Draw X mark
-        float cx = x + ctl->extentX * 0.5f, cy = y + ctl->extentY * 0.5f;
-        auto drawLine = [&](float x1, float y1, float x2, float y2) {
-            r.drawRectFill({x1, y1, 0}, {x2, y2, 0}, {0.8f,0.8f,0.9f,1});
-        };
-        drawLine(cx-3, cy-3, cx+3, cy+3);
-        drawLine(cx-3, cy+3, cx+3, cy-3);
-        // Border
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + 1, 0}, {0.4f,0.4f,0.5f,0.5f});
-        r.drawRectFill({x, y + ctl->extentY - 1, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.1f,0.1f,0.15f,0.5f});
-    } else if (cn == "GuiControl" && ctl->name == "LaunchToolbarDlg") {
-        // Transparent overlay — no background, just render children
-    } else if (cn == "GuiControl" && ctl->name == "LaunchToolbarPane") {
-        // Toolbar pane at the bottom of LaunchGui: gradient fill + top border
-        float halfH = ctl->extentY * 0.5f;
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + halfH, 0}, {0.14f,0.14f,0.17f,1});
-        r.drawRectFill({x, y + halfH, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.1f,0.1f,0.12f,1});
-        // Top highlight border
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + 1, 0}, {0.3f,0.3f,0.4f,0.6f});
     } else if (cn.find("Hud") == 0 || cn.find("ShellFieldCtrl") == 0 || cn.find("ShellField") == 0) {
         // HUD controls: transparent background with specific rendering per type
         auto* prof = getProfile(ctl->profileName);
@@ -2273,25 +2272,6 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                     if (ts && ts->hasFunction(hit->name + "::onSelect"))
                         ts->callFunction(hit->name + "::onSelect",
                             {VMValue(hit->name), VMValue(ti), VMValue(hit->tabs[ti].text)});
-                    // Set content directly from C++ using the stored numeric gui[] field
-                    // (script's viewTab uses text-based lookup which fails for T2 shell GUIs)
-                    if (hit->name == "LaunchTabView") {
-                        auto* sobj = ScriptEngine::instance().findObject(hit->name.c_str());
-                        if (sobj) {
-                            std::string gk = "gui[" + std::to_string(ti) + "]";
-                            auto gi = sobj->fields.find(gk);
-                            if (gi != sobj->fields.end()) {
-                                std::string guiName = gi->second.toString();
-                                if (guiName == "__QUIT__") {
-                                    Engine::instance().quit();
-                                } else if (!guiName.empty()) {
-                                    Engine::instance().guiRenderer().setContent(guiName);
-                                    if (!Engine::instance().guiRenderer().isDialogActive("LaunchToolbarDlg"))
-                                        Engine::instance().guiRenderer().pushDialog("LaunchToolbarDlg");
-                                }
-                            }
-                        }
-                    }
                     return true;
                 }
                 tabX += tw + 1;
@@ -2306,6 +2286,53 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
 
     // Click on non-text control clears focus
     if (focusedCtrl) focusedCtrl = nullptr;
+
+    // ShellSliderCtrl: start drag on click
+    if (hit->className == "ShellSliderCtrl" || hit->className == "GuiSliderCtrl") {
+        float ax = hit->posX, ay = hit->posY;
+        for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+        float barInset = hit->usePlusMinus ? 16 : 0;
+        float barX = ax + barInset;
+        float barW = hit->extentX - barInset * 2;
+        if (hit->usePlusMinus && x < ax + 16) {
+            float range = hit->sliderMax - hit->sliderMin;
+            float step = hit->sliderTicks > 0 ? range / (float)hit->sliderTicks : range * 0.01f;
+            hit->sliderValue -= step;
+            if (hit->sliderValue < hit->sliderMin) hit->sliderValue = hit->sliderMin;
+            if (!hit->command.empty()) Console::instance().execute(hit->command.c_str());
+            return true;
+        }
+        if (hit->usePlusMinus && x > ax + hit->extentX - 16) {
+            float range = hit->sliderMax - hit->sliderMin;
+            float step = hit->sliderTicks > 0 ? range / (float)hit->sliderTicks : range * 0.01f;
+            hit->sliderValue += step;
+            if (hit->sliderValue > hit->sliderMax) hit->sliderValue = hit->sliderMax;
+            if (!hit->command.empty()) Console::instance().execute(hit->command.c_str());
+            return true;
+        }
+        float norm = (float)(x - barX) / barW;
+        if (norm < 0) norm = 0; if (norm > 1) norm = 1;
+        float range = hit->sliderMax - hit->sliderMin;
+        hit->sliderValue = hit->sliderMin + range * norm;
+        if (hit->sliderTicks > 0) {
+            float step = range / (float)hit->sliderTicks;
+            hit->sliderValue = std::round(hit->sliderValue / step) * step;
+        }
+        hit->sliderDragging = true;
+        if (!hit->command.empty()) Console::instance().execute(hit->command.c_str());
+        return true;
+    }
+    // ShellWindowCtrl: start drag on title bar
+    if (hit->className == "ShellWindowCtrl") {
+        float ax = hit->posX, ay = hit->posY;
+        for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+        if (y - ay < 20) {
+            hit->windowDragging = true;
+            hit->dragOffsetX = x - ax;
+            hit->dragOffsetY = y - ay;
+        }
+        return true;
+    }
 
     // Radio button / checkbox: handle group mutual exclusion before onClick
     if (hit->className == "GuiRadioCtrl" || hit->className == "ShellRadioButton") {
@@ -2326,6 +2353,60 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         return true;
     }
     return false;
+}
+
+bool GuiRenderer::handleDrag(int x, int y) {
+    if (!canvas) return false;
+    // Find any control that is being dragged
+    std::function<bool(GuiControl*)> findDrag = [&](GuiControl* ctl) -> bool {
+        if (!ctl) return false;
+        if (ctl->sliderDragging) {
+            float ax = ctl->posX, ay = ctl->posY;
+            for (auto* p = ctl->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+            float barInset = ctl->usePlusMinus ? 16 : 0;
+            float barX = ax + barInset;
+            float barW = ctl->extentX - barInset * 2;
+            float norm = (float)(x - barX) / barW;
+            if (norm < 0) norm = 0; if (norm > 1) norm = 1;
+            float range = ctl->sliderMax - ctl->sliderMin;
+            float oldVal = ctl->sliderValue;
+            ctl->sliderValue = ctl->sliderMin + range * norm;
+            // Snap to ticks
+            if (ctl->sliderTicks > 0) {
+                float step = range / (float)ctl->sliderTicks;
+                ctl->sliderValue = std::round(ctl->sliderValue / step) * step;
+            }
+            // Fire command if value changed
+            if (ctl->sliderValue != oldVal && !ctl->command.empty())
+                Console::instance().execute(ctl->command.c_str());
+            return true;
+        }
+        if (ctl->windowDragging) {
+            float ax = ctl->posX, ay = ctl->posY;
+            for (auto* p = ctl->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+            ctl->posX += (x - ax - ctl->dragOffsetX);
+            ctl->posY += (y - ay - ctl->dragOffsetY);
+            ctl->dragOffsetX = x - (ctl->posX);
+            ctl->dragOffsetY = y - (ctl->posY);
+            return true;
+        }
+        for (auto* c : ctl->children) if (findDrag(c)) return true;
+        return false;
+    };
+    for (auto* d : dialogStack) if (findDrag(d)) return true;
+    return findDrag(canvas);
+}
+
+void GuiRenderer::handleDragRelease() {
+    if (!canvas) return;
+    std::function<void(GuiControl*)> clearDrag = [&](GuiControl* ctl) {
+        if (!ctl) return;
+        ctl->sliderDragging = false;
+        ctl->windowDragging = false;
+        for (auto* c : ctl->children) clearDrag(c);
+    };
+    clearDrag(canvas);
+    for (auto* d : dialogStack) clearDrag(d);
 }
 
 void GuiRenderer::handleKeyboard() {
@@ -2416,29 +2497,24 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     fi = it->second->fields.find("visible"); if (fi != it->second->fields.end()) ctl->visible = fi->second.toBool();
     fi = it->second->fields.find("groupNum"); if (fi != it->second->fields.end()) ctl->groupNum = (int)fi->second.toDouble();
     fi = it->second->fields.find("sel"); if (fi != it->second->fields.end()) ctl->checked = fi->second.toBool();
+    fi = it->second->fields.find("variable"); if (fi != it->second->fields.end()) ctl->variable = fi->second.toString();
+    fi = it->second->fields.find("range"); if (fi != it->second->fields.end()) {
+        float lo = 0, hi = 1;
+        sscanf(fi->second.toString().c_str(), "%f %f", &lo, &hi);
+        ctl->sliderMin = lo; ctl->sliderMax = hi;
+    }
+    fi = it->second->fields.find("ticks"); if (fi != it->second->fields.end()) ctl->sliderTicks = (int)fi->second.toDouble();
+    fi = it->second->fields.find("usePlusMinus"); if (fi != it->second->fields.end()) ctl->usePlusMinus = fi->second.toBool();
+    fi = it->second->fields.find("noTitleBar"); if (fi != it->second->fields.end()) ctl->usePlusMinus = !fi->second.toBool(); // repurpose: no titlebar
+    fi = it->second->fields.find("value"); if (fi != it->second->fields.end()) {
+        float v = (float)fi->second.toDouble();
+        if (ctl->className.find("Slider") != std::string::npos) ctl->sliderValue = v;
+    }
     if (ctl->className == "GuiCanvas") canvas = ctl;
     bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellBitmapButton" || ctl->className == "ShellToggleButton" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl" || ctl->className == "ShellTextEditCtrl";
     if (!ctl->command.empty() && isClickable) {
         std::string cmd = ctl->command;
-        // Intercept training START button to use C++ startLocalGame instead of script CreateServer path
-        if (cmd.find("TrainingGui.startTraining") != std::string::npos) {
-            ctl->onClick = []() {
-                auto& g = Engine::instance().guiRenderer();
-                auto* list = g.findControl("TrainingMissionList");
-                if (list && list->selectedRow >= 0 && list->selectedRow < (int)list->listRows.size()) {
-                    std::string row = list->listRows[list->selectedRow];
-                    size_t tab = row.find('\t');
-                    std::string mission = (tab != std::string::npos) ? row.substr(tab + 1) : row;
-                    Console::instance().printf(LogLevel::Info, "Training: starting mission '%s'", mission.c_str());
-                    Engine::instance().game().startLocalGame(mission.c_str());
-                } else {
-                    Console::instance().printf(LogLevel::Warn, "Training: no mission selected, starting default");
-                    Engine::instance().game().startLocalGame();
-                }
-            };
-        } else {
-            ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); };
-        }
+        ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); };
     }
     // Recursively create children from ScriptObjects with parent == this name
     // NOTE: children must be created BEFORE adding to parent/canvas, so that
@@ -2477,7 +2553,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
             dialogStack.push_back(ctl);
             fprintf(stderr, "SETCONTENT %s stack=%zu\n", name.c_str(), dialogStack.size());
         callOnAddOnce(ctl);
-            // Trigger onWake so script functions like LaunchToolbarDlg::onWake populate menus
+            // Trigger onWake so script functions can populate menus, etc.
             if (auto* ts = Engine::instance().script().ts()) {
                 if (ts->hasFunction(name + "::onWake")) {
                     Console::instance().printf(LogLevel::Debug, "GUI: pushDialog calling onWake '%s'", name.c_str());
@@ -2527,8 +2603,7 @@ void GuiRenderer::setContent(const std::string& name) {
         return;
     }
     // Fire onSleep on the current content before swapping panels, mirroring
-    // the T2 lifecycle where each panel manages its own pushed dialogs
-    // (e.g. GameGui/onSleep pops LaunchToolbarDlg).
+    // the T2 lifecycle where each panel manages its own pushed dialogs.
     if (!dialogStack.empty() && dialogStack.front() != canvas) {
         std::string oldName = dialogStack.front()->name;
         if (auto* ts = Engine::instance().script().ts()) {

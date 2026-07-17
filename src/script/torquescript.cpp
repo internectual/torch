@@ -208,18 +208,6 @@ void TorqueScript::init() {}
 void TorqueScript::shutdown() {}
 
 void TorqueScript::setGlobal(const std::string& name, const VMValue& val) {
-    const char* noLoginVal = Console::instance().getStringVariable("Engine::noLogin", "");
-    if (name == "$LaunchMode" && val.toString() == "Normal" && strcmp(noLoginVal, "1") == 0) {
-        impl->globals["$LaunchMode"] = VMValue(std::string("Offline"));
-        Console::instance().setVariable("$LaunchMode", "Offline");
-        return;
-    }
-    if (name == "$PlayingOnline" && val.toString() == "1" &&
-        strcmp(Console::instance().getStringVariable("$LaunchMode", ""), "Offline") == 0) {
-        impl->globals["$PlayingOnline"] = VMValue(std::string("0"));
-        Console::instance().setVariable("$PlayingOnline", "0");
-        return;
-    }
     impl->globals[name] = val;
     Console::instance().setVariable(name.c_str(), val.toString().c_str());
 }

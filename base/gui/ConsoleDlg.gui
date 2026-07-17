@@ -3,19 +3,19 @@
 // Profiles
 new GuiControlProfile ("GuiConsoleScrollProfile")
 {
-   opaque = true;
-   fillColor = "0 0 0 192";
-   border = true;
-   borderColor   = "0 0 0";
-   borderColorHL = "255 255 255";
-   fontType = "Lucida Console";
-   fontSize = 12;
-   fontColor = "255 255 255";
-   fontColorHL = "0 0 0";
-   fixedExtent = true;
-   justify = "center";
-   soundButtonDown = sButtonDown;
-   soundButtonOver = sButtonOver;
+    opaque = true;
+    fillColor = "0 0 0 192";
+    border = true;
+    borderColor   = "0 0 0";
+    borderColorHL = "255 255 255";
+    fontType = "Lucida Console";
+    fontSize = 12;
+    fontColor = "255 255 255";
+    fontColorHL = "0 0 0";
+    fixedExtent = true;
+    justify = "center";
+    soundButtonDown = sButtonDown;
+    soundButtonOver = sButtonOver;
 	canKeyFocus = false;
 };
 
@@ -27,44 +27,44 @@ if(!isObject(GuiConsoleProfile)) new GuiControlProfile(GuiConsoleProfile)
 if(!isObject(GuiTransConsoleProfile)) new GuiControlProfile(GuiTransConsoleProfile)
 {
 	fontType = "Lucida Console";
-   fontSize = 12;
-   fontColor = "255 255 255";
-   fontColorHL = "130 130 130";
-   fontColorNA = "255 0 0";
+    fontSize = 12;
+    fontColor = "255 255 255";
+    fontColorHL = "130 130 130";
+    fontColorNA = "255 0 0";
 	fontColors[1] = "255 0 0";
-   fontColors[6] = "50 50 50";
-   fontColors[7] = "50 50 0";  
-   fontColors[8] = "0 0 50"; 
-   fontColors[9] = "0 50 0";   
+    fontColors[6] = "50 50 50";
+    fontColors[7] = "50 50 0";  
+    fontColors[8] = "0 0 50"; 
+    fontColors[9] = "0 50 0";   
 };
 
 if(!isObject(GuiConsoleEditProfile)) new GuiControlProfile (GuiConsoleEditProfile)
 {
-   opaque = true;
-   //fillColor = "255 255 255";
+    opaque = true;
+    //fillColor = "255 255 255";
 	fillColor = "0 0 0 192";
-   fillColorHL = "255 255 255";
+    fillColorHL = "255 255 255";
 	cursorColor = "255 255 255";
-   //border = 1;
-   //borderThickness = 2;
+    //border = 1;
+    //borderThickness = 2;
 	fontType = "Lucida Console";
 	fontSize = 12;
-   borderColor = "0 0 0";
-   fontColor = "255 255 255";
-   fontColorHL = "0 0 0";
-   fontColorNA = "0 0 0";
-   textOffset = "0 2";
-   autoSizeWidth = false;
-   autoSizeHeight = true;
-   tab = true;
-   canKeyFocus = true;
+    borderColor = "0 0 0";
+    fontColor = "255 255 255";
+    fontColorHL = "0 0 0";
+    fontColorNA = "0 0 0";
+    textOffset = "0 2";
+    autoSizeWidth = false;
+    autoSizeHeight = true;
+    tab = true;
+    canKeyFocus = true;
 };
 
 
 
 //--- OBJECT WRITE BEGIN ---
 new GuiControl(ConsoleDlg) {
-   profile = "GuiDefaultProfile";
+    profile = "GuiDefaultProfile";
 	horizSizing = "width";
 	vertSizing = "height";
 	position = "0 0";
@@ -83,7 +83,7 @@ new GuiControl(ConsoleDlg) {
 		minExtent = "8 8";
 		visible = "1";
 		helpTag = "0";
-
+	
 		new GuiScrollCtrl()
 		{
 			profile = "GuiConsoleScrollProfile";
@@ -148,5 +148,3 @@ function ToggleConsole(%make)
       }
    }
 }
-
-

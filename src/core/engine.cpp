@@ -707,47 +707,13 @@ bool Engine::init(int argc, char* argv[]) {
             else a += c;
         }
         if (!a.empty()) args.push_back(a);
-        ts->setGlobal("Game::argc", VMValue((int32_t)args.size()));
+        ts->setGlobal("$Game::argc", VMValue((int32_t)args.size()));
         for (size_t i = 0; i < args.size(); i++)
-            ts->setGlobal("Game::argv[" + std::to_string(i) + "]", VMValue(args[i]));
+            ts->setGlobal("$Game::argv[" + std::to_string(i) + "]", VMValue(args[i]));
         for (size_t i = 0; i < args.size(); i++)
-            ts->setGlobal("ARGV[" + std::to_string(i) + "]", VMValue(args[i]));
-    }
-
-    // Load essential scripts: profiles first, then startup
-    if (scr->ts()) {
-        auto* ts = scr->ts();
-        // Try loading the main profile definitions
-        const char* profileScripts[] = {
-            "gui/guiProfiles.cs",
-            "scripts/EditorProfiles.cs",
-            nullptr
-        };
-        for (int i = 0; profileScripts[i]; i++) {
-            auto sdata = fs.read(profileScripts[i]);
-            if (!sdata.empty()) {
-                Console::instance().printf(LogLevel::Info, "Loading script: %s (%zu bytes)", profileScripts[i], sdata.size());
-                ts->execute(std::string((const char*)sdata.data(), sdata.size()), profileScripts[i]);
-            } else {
-                Console::instance().printf(LogLevel::Debug, "Script not found: %s", profileScripts[i]);
-            }
-        }
-        Console::instance().printf(LogLevel::Info, "Profiles loaded: %zu script objects", scr->objects.size());
-    }
-
-    // Execute preload files (from torch.cfg preload = ...)
-    if (scr->ts() && !preloadFiles.empty()) {
-        auto* ts = scr->ts();
-        Console::instance().printf(LogLevel::Info, "Preloading %zu file(s)...", preloadFiles.size());
-        for (auto& pf : preloadFiles) {
-            auto pdata = fs.read(pf.c_str());
-            if (!pdata.empty()) {
-                Console::instance().printf(LogLevel::Info, "Preload: %s (%zu bytes)", pf.c_str(), pdata.size());
-                ts->execute(std::string((const char*)pdata.data(), pdata.size()), pf);
-            } else {
-                Console::instance().printf(LogLevel::Warn, "Preload: file not found: %s", pf.c_str());
-            }
-        }
+            ts->setGlobal("$ARGV[" + std::to_string(i) + "]", VMValue(args[i]));
+        for (size_t i = 0; i < args.size(); i++)
+            Console::instance().printf(LogLevel::Info, "Game::argv[%zu] = %s", i, args[i].c_str());
     }
 
     // -compile: parse/validate then exit (DSO writing not yet implemented)
@@ -787,47 +753,18 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().printf(LogLevel::Info, "Registered console commands as TS natives");
     }
 
-    // Load essential GUI files for HUD, menus, and login
-    {
-        const char* guiFiles[] = {
-            "gui/PlayGui.gui",
-            "gui/GameGui.gui",
-            "gui/ChatGui.gui",
-            "gui/HUDDlgs.gui",
-            "gui/LoadingGui.gui",
-            "gui/CenterPrint.gui",
-            "gui/EULADlg.gui",
-            "gui/LoginDlg.gui",
-            "gui/ImmSplashDlg.gui",
-            "gui/CreateAccountDlg.gui",
-            "gui/LoginMessageBoxDlg.gui",
-            "gui/LoginMessagePopupDlg.gui",
-            "gui/EditAccountDlg.gui",
-            "gui/PickLoginInfoDlg.gui",
-            "gui/PasswordDlg.gui",
-            "gui/PickTeamDlg.gui",
-            "gui/MessageBoxDlg.gui",
-            "gui/MessagePopupDlg.gui",
-            "gui/OptionsDlg.gui",
-            "gui/ServerInfoDlg.gui",
-            "gui/RecordingsDlg.gui",
-            "gui/DemoPlaybackDlg.gui",
-            "gui/DemoLoadProgressDlg.gui",
-            "gui/TrainingGui.gui",
-            "gui/ConsoleDlg.gui",
-            nullptr
-        };
-        for (int i = 0; guiFiles[i]; i++) {
-            if (scr->ts()) {
-                auto guiData = fs.read(guiFiles[i]);
-                if (!guiData.empty()) {
-                    std::string src((const char*)guiData.data(), guiData.size());
-                    scr->ts()->execute(src, guiFiles[i]);
-                    Console::instance().printf(LogLevel::Info, "Loaded GUI: %s", guiFiles[i]);
-                } else {
-                    Console::instance().printf(LogLevel::Debug, "GUI not found: %s", guiFiles[i]);
-                }
-            }
+    // Execute init script — the script defines the entire execution flow.
+    // The init script (console_start.cs) parses args, creates profiles,
+    // GUI controls, and execs any other scripts it needs.
+    if (scr->ts()) {
+        std::string initPath = Console::instance().getStringVariable("initScript", "console_start.cs");
+        auto initData = fs.read(initPath.c_str());
+        if (!initData.empty()) {
+            std::string src((const char*)initData.data(), initData.size());
+            scr->ts()->executeNested(src, initPath);
+            Console::instance().printf(LogLevel::Info, "Init script: %s (%zu bytes)", initPath.c_str(), initData.size());
+        } else {
+            Console::instance().printf(LogLevel::Warn, "Init script not found: %s", initPath.c_str());
         }
     }
 
@@ -865,22 +802,6 @@ bool Engine::init(int argc, char* argv[]) {
         }
     } else if (noLogin) {
         Console::instance().printf(LogLevel::Info, "-nologin: dev panel (F1 overlay, ~ console, Pause debug)");
-        Console::instance().setVariable("$SkipLogin", "true");
-        Console::instance().setVariable("$pref::SkipIntro", "true");
-        Console::instance().setVariable("$pref::SkipGGIntro", "true");
-        Console::instance().setVariable("$LaunchMode", "Offline");
-        Console::instance().setVariable("$IRCClient::serverCount", "0");
-        Console::instance().setVariable("$PlayingOnline", "0");
-        Console::instance().setVariable("Engine::noLogin", "1");
-        // Execute init script using the same nested-exec path as script-level exec()
-        if (scr->ts()) {
-            std::string initPath = Console::instance().getStringVariable("initScript", "console_start.cs");
-            auto initData = fs.read(initPath.c_str());
-            if (!initData.empty()) {
-                std::string src((const char*)initData.data(), initData.size());
-                scr->ts()->executeNested(src, initPath);
-            }
-        }
         plat->processEvents();
         ren->beginFrame({0.15f, 0.15f, 0.2f, 1.0f});
         if (gui) gui->render();
@@ -1224,6 +1145,10 @@ void Engine::run() {
             static bool prevPressed = false;
             if (pressed && !prevPressed) {
                 gui->handleInput(mx, my, true);
+            } else if (pressed) {
+                gui->handleDrag(mx, my);
+            } else if (!pressed && prevPressed) {
+                gui->handleDragRelease();
             }
             prevPressed = pressed;
         }

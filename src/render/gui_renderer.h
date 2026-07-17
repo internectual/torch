@@ -56,6 +56,18 @@ struct GuiControl {
     // ESC should never pop base dialogs (e.g. LaunchToolbarDlg) so the sidebar stays.
     bool isBaseDialog = false;
 
+    // ShellSliderCtrl fields
+    float sliderValue = 0.5f;  // 0..1 normalized
+    float sliderMin = 0.0f, sliderMax = 1.0f;
+    int sliderTicks = 0;  // 0 = continuous
+    bool sliderDragging = false;
+    bool usePlusMinus = false;
+    std::string variable; // $pref::* variable binding
+
+    // ShellWindowCtrl fields
+    bool windowDragging = false;
+    float dragOffsetX = 0, dragOffsetY = 0;
+
     // GuiServerBrowser fields
     struct ServerBrowserColumn {
         std::string name;
@@ -90,6 +102,8 @@ public:
     void refresh();
     void render();
     bool handleInput(int x, int y, bool pressed);
+    bool handleDrag(int x, int y); // continuous mouse-move while button held
+    void handleDragRelease(); // stop all dragging on mouse-up
     bool handleScroll(int x, int y, int wheelDelta);
     GuiControl* hitTest(GuiControl* ctl, int mx, int my);
     GuiControl* hitTestTop(int mx, int my); // dialogStack (top-down) then canvas

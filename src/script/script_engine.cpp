@@ -738,7 +738,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                         return false;
                     };
                     if (!findNative(fullName)) {
-                        if (!findNative(name)) { // bare name fallback (e.g. "tabCount" from "LaunchTabView::tabCount")
+                        if (!findNative(name)) { // bare name fallback (e.g. "someField" from "SomeCtrl::someField")
                             if (!findDSO(fullName) && !findDSO(name)) {
                                 Console::instance().printf(LogLevel::Debug, "VM: calling unknown func %s", fullName.c_str());
                                 stack.push(VMValue(0));
@@ -1186,7 +1186,7 @@ bool ScriptEngine::init() {
     });
 
     tsInstance->registerNative("isDemo", [](const auto&) -> VMValue {
-        return VMValue(Engine::instance().game().isDemoPlaying() ? 1 : 0);
+        return VMValue(0);
     });
 
     // String utility functions
@@ -2575,13 +2575,7 @@ bool ScriptEngine::init() {
         if (args.size() >= 2) {
             auto* ctl = getListCtrl(args[0].toString());
             if (ctl) {
-                bool show = args[1].toInt() != 0;
-                ctl->visible = show;
-                // When hiding a WARRIOR SETUP pane, pop the NewWarriorDlg dialog
-                if (!show && ctl->name == "GM_WarriorPane") {
-                    if (Engine::instance().guiRenderer().isDialogActive("NewWarriorDlg"))
-                        Engine::instance().guiRenderer().popDialog("NewWarriorDlg");
-                }
+                ctl->visible = args[1].toInt() != 0;
             }
         }
         return VMValue(1);
@@ -2617,11 +2611,40 @@ bool ScriptEngine::init() {
             if (ctl) {
                 if (ctl->className == "GuiRadioCtrl" || ctl->className == "ShellRadioButton" || ctl->className == "GuiCheckBoxCtrl")
                     ctl->checked = args[1].toBool();
+                else if (ctl->className.find("Slider") != std::string::npos)
+                    ctl->sliderValue = (float)args[1].toInt() / 1000.0f;  // T2 convention: value * 1000
+                else if (ctl->className.find("Window") != std::string::npos && args.size() >= 4) {
+                    ctl->posX = (float)args[1].toInt();
+                    ctl->posY = (float)args[2].toInt();
+                    if (args.size() >= 5) { ctl->extentX = (float)args[3].toInt(); ctl->extentY = (float)args[4].toInt(); }
+                }
                 else
                     ctl->text = args[1].toString();
             }
         }
         return VMValue(1);
+    });
+    tsInstance->registerNative("getValue", [getListCtrl](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        if (ctl->className.find("Slider") != std::string::npos)
+            return VMValue((int)(ctl->sliderValue * 1000.0f));  // T2 convention
+        if (ctl->className.find("CheckBox") != std::string::npos || ctl->className.find("Radio") != std::string::npos || ctl->className.find("Toggle") != std::string::npos)
+            return VMValue(ctl->checked ? 1 : 0);
+        return VMValue(ctl->text);
+    });
+    tsInstance->registerNative("getExtent", [getListCtrl](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("0 0");
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl) return VMValue("0 0");
+        return VMValue(std::to_string((int)ctl->extentX) + " " + std::to_string((int)ctl->extentY));
+    });
+    tsInstance->registerNative("getPosition", [getListCtrl](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("0 0");
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl) return VMValue("0 0");
+        return VMValue(std::to_string((int)ctl->posX) + " " + std::to_string((int)ctl->posY));
     });
     tsInstance->registerNative("scrollToTop", [getListCtrl](const auto& args) -> VMValue {
         if (!args.empty()) {
