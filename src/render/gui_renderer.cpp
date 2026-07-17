@@ -248,10 +248,18 @@ void GuiRenderer::render() {
     r.setProjection(ortho);
     r.setView(MatrixF{});
 
-    // Render all dialogs: first is content, subsequent are overlays
+    // Render dialogs in two passes so that base dialogs (e.g. LaunchToolbarDlg)
+    // are always visible above overlays (e.g. NewWarriorDlg). This matches T2
+    // behavior where the bottom toolbar stays accessible even when a modal is open.
+    std::vector<GuiControl*> baseDialogs, overlays;
     for (auto* dlg : dialogStack) {
-        renderControl(dlg);
+        if (dlg && dlg->isBaseDialog)
+            baseDialogs.push_back(dlg);
+        else
+            overlays.push_back(dlg);
     }
+    for (auto* dlg : overlays) renderControl(dlg);
+    for (auto* dlg : baseDialogs) renderControl(dlg);
     // Always render debug overlay so user knows the engine is alive
     r.renderText("TORCH", 10, 10, {0,1,0,1}, 2.0f);
     r.renderText("~ Console | Pause Debug", 10, 35, {0.8f,0.8f,0.8f,1}, 1.0f);
@@ -1909,6 +1917,49 @@ void GuiRenderer::update(float dt) {
     };
     for (auto* d : dialogStack) clearHover(d);
     if (canvas) clearHover(canvas);
+    // Apply hover states from mouse position each frame.
+    // Hit-test from topmost overlay down to content so the frontmost control gets hover.
+    auto& plat = Engine::instance().platform();
+    int mx = plat.input().mouseX;
+    int my = plat.input().mouseY;
+    std::function<void(GuiControl*)> applyHover = [&](GuiControl* ctl) {
+        if (!ctl) return;
+        float ax = ctl->posX, ay = ctl->posY;
+        for (auto* p = ctl->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+        if (mx >= ax && my >= ay && mx < ax + ctl->extentX && my < ay + ctl->extentY) {
+            ctl->hovered = true;
+            if (ctl->className == "ShellTabGroupCtrl" || ctl->className == "GuiTabBookCtrl") {
+                float tabX = ax + 2;
+                const float tabH = 29;
+                if (my >= ay && my < ay + tabH && mx >= tabX) {
+                    for (int ti = 0; ti < (int)ctl->tabs.size(); ti++) {
+                        float textW = ctl->tabs[ti].text.size() * 9.0f;
+                        float tw = std::max(60.0f, textW + 16);
+                        if (mx >= tabX && mx < tabX + tw) {
+                            ctl->hoveredTab = ti;
+                            break;
+                        }
+                        tabX += tw;
+                    }
+                }
+            }
+            if (ctl->className == "ShellLaunchMenu" && ctl->menuOpen && !ctl->menuItems.empty()) {
+                float popX = ax;
+                float popY = ay - (float)ctl->menuItems.size() * 20.0f - 4;
+                float popW = 180, lineH = 20;
+                if (mx >= popX && mx < popX + popW && my >= popY && my < popY + lineH * (float)ctl->menuItems.size()) {
+                    ctl->hoveredItem = (int)((my - popY) / lineH);
+                }
+            }
+            // Stop hover walk at children: parent hover stays true, children can have own hover
+        }
+        for (auto* c : ctl->children) applyHover(c);
+    };
+    // Walk dialogs from bottom to top so topmost dialog's children win
+    if (canvas) {
+        for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it)
+            applyHover(*it);
+    }
     double now = Engine::instance().timer().now();
     // Collect expired events first, then execute after erasing
     // (execution may add new events, invalidating iterators)
