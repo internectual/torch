@@ -122,11 +122,8 @@ void GuiRenderer::init() {
                 ctl->className.find("Button") != std::string::npos ||
                 ctl->className == "GuiCheckBoxCtrl" ||
                 ctl->className == "GuiRadioCtrl" ||
-                ctl->className == "ShellBitmapButton" ||
-                ctl->className == "ShellToggleButton" ||
                 ctl->className == "ShellTabButton" ||
-                ctl->className == "GuiTextEditCtrl" ||
-                ctl->className == "ShellTextEditCtrl";
+                ctl->className == "GuiTextEditCtrl";
             if (!ctl->command.empty() && isClickable) {
                 std::string cmd = ctl->command;
                 ctl->onClick = [cmd]() {
@@ -208,7 +205,7 @@ void GuiRenderer::refresh() {
             it = obj->fields.find("profile"); if (it != obj->fields.end()) ctl->profileName = it->second.toString();
             it = obj->fields.find("visible"); if (it != obj->fields.end()) ctl->visible = it->second.toBool();
             if (ctl->className == "GuiCanvas") canvas = ctl;
-            bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellBitmapButton" || ctl->className == "ShellToggleButton" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl" || ctl->className == "ShellTextEditCtrl";
+    bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl";
             if (!ctl->command.empty() && isClickable) { std::string cmd = ctl->command; ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); }; }
             auto pit = obj->internals.find("parent");
             if (pit != obj->internals.end()) {
@@ -743,7 +740,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
 
     // Button types
     if (cn == "GuiButtonCtrl" || cn == "GuiTextButtonCtrl" ||
-        cn == "ShellBitmapButton" || cn == "GuiBitmapButtonCtrl" ||
+        cn == "GuiBitmapButtonCtrl" ||
         cn == "ShellLaunchMenu") {
         ColorF btnFill{0.25f, 0.25f, 0.35f, 1}, btnBorder{0.5f, 0.5f, 0.6f, 1};
         ColorF btnText{1,1,1,1};
@@ -1130,8 +1127,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             if (fs && fs->currentAlpha < 1.0f)
                 r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0,0,0, 1.0f - fs->currentAlpha});
         }
-    } else if (cn == "GuiTextEditCtrl" || cn == "ShellTextEditCtrl" ||
-               cn == "GuiLoginPasswordCtrl") {
+    } else if (cn == "GuiTextEditCtrl" || cn == "GuiLoginPasswordCtrl") {
         ColorF fc{0.3f,0.3f,0.35f,1}, tc{0.8f,0.8f,1,1};
         std::string bmp;
         auto* prof = getProfile(ctl->profileName);
@@ -1177,7 +1173,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 r.drawRectFill({x + 3 + preW, cy, 0}, {x + 4 + preW, cy + ch, 0}, {1,1,1,1});
             }
         }
-    } else if (cn == "GuiListBoxCtrl" || cn == "ShellTextList" || cn == "GuiTextListCtrl") {
+    } else if (cn == "GuiListBoxCtrl" || cn == "GuiTextListCtrl") {
         ColorF fc{0.15f,0.15f,0.2f,1}, tc{0.9f,0.9f,1,1}, selFc{0.3f,0.3f,0.5f,1}, selTc{1,1,1,1};
         auto* prof = getProfile(ctl->profileName);
         if (prof) {
@@ -1186,11 +1182,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto sfi = prof->fields.find("selectionColor"); if (sfi != prof->fields.end()) parseColor(sfi->second.toString(), selFc);
         }
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
-        // Find scroll offset from parent ShellScrollCtrl
+        // Find scroll offset from parent scroll container
         float listScrollY = 0, listScrollX = 0;
         GuiControl* sp = ctl->parent;
         while (sp) {
-            if (sp->className == "GuiScrollCtrl" || sp->className == "ShellScrollCtrl") {
+            if (sp->className == "GuiScrollCtrl") {
                 listScrollY = sp->scrollY;
                 listScrollX = sp->scrollX;
                 break;
@@ -1221,8 +1217,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 font->render(ctl->listRows[i].c_str(), x + 3, rowY + 1, tc, 1.0f);
             }
         }
-    } else if (cn == "GuiCheckBoxCtrl" || cn == "GuiRadioCtrl" ||
-               cn == "ShellToggleButton" || cn == "ShellRadioButton") {
+    } else if (cn == "GuiCheckBoxCtrl" || cn == "GuiRadioCtrl") {
         ColorF fc{0.5f,0.5f,0.6f,1}, tc{1,1,1,1};
         std::string bmp;
         auto* prof = getProfile(ctl->profileName);
@@ -1244,7 +1239,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         if (font && !ctl->text.empty())
             font->render(ctl->text.c_str(), x + sz + 4, y + 2, tc, 1.0f);
-    } else if (cn == "GuiSliderCtrl" || cn == "ShellSliderCtrl") {
+    } else if (cn == "GuiSliderCtrl") {
         ColorF fc{0.4f,0.4f,0.5f,1}, kc{0.7f,0.7f,0.8f,1};
         auto* prof = getProfile(ctl->profileName);
         if (prof) { auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc); }
@@ -1287,7 +1282,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             float scrollOfsY = 0, scrollOfsX = 0;
             GuiControl* sp = ctl->parent;
             while (sp) {
-                if (sp->className == "GuiScrollCtrl" || sp->className == "ShellScrollCtrl") {
+            if (sp->className == "GuiScrollCtrl") {
                     scrollOfsY = sp->scrollY;
                     scrollOfsX = sp->scrollX;
                     break;
@@ -1549,7 +1544,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 font->render(ctl->text.c_str(), tx2, ty2, txc, 1.0f);
             }
         }
-    } else if (cn == "GuiPopUpMenuCtrl" || cn == "ShellPopupMenu") {
+    } else if (cn == "GuiPopUpMenuCtrl") {
         ColorF fc{0.25f,0.25f,0.3f,1}, txc{0.6f,0.9f,1,1};
         auto* prof = getProfile(ctl->profileName);
         if (prof) {
@@ -1579,7 +1574,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 iy += lineH;
             }
         }
-    } else if (cn == "GuiScrollCtrl" || cn == "ShellScrollCtrl") {
+    } else if (cn == "GuiScrollCtrl") {
         ColorF sc{0.18f,0.18f,0.22f,1};
         auto* prof = getProfile(ctl->profileName);
         if (prof) { auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), sc); }
@@ -2100,7 +2095,7 @@ bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
         hit = hitTest(*it, x, y);
         if (!hit) continue;
         if (hit == *it && hit->onClick == nullptr) {
-            bool isScrollable = hit->className == "GuiScrollCtrl" || hit->className == "ShellScrollCtrl";
+            bool isScrollable = hit->className == "GuiScrollCtrl";
             if (!isScrollable) { hit = nullptr; continue; }
         }
         break;
@@ -2108,7 +2103,7 @@ bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
     if (!hit) return false;
     GuiControl* scrollCtrl = hit;
     while (scrollCtrl) {
-        if (scrollCtrl->className == "GuiScrollCtrl" || scrollCtrl->className == "ShellScrollCtrl") {
+        if (scrollCtrl->className == "GuiScrollCtrl") {
             scrollCtrl->scrollY += (wheelDelta > 0 ? 30 : -30);
             return true;
         }
@@ -2126,9 +2121,9 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         if (!hit) continue;
         // If hit is a dialog root (no clickable class) with no onClick, skip to next
         if (hit == *it && hit->onClick == nullptr) {
-            bool isClickable = hit->className == "ShellLaunchMenu" || hit->className == "ShellPopupMenu" ||
+            bool isClickable = hit->className == "ShellLaunchMenu" ||
                 hit->className == "GuiPopUpMenuCtrl" || hit->className == "ShellTabGroupCtrl" ||
-                hit->className == "GuiTabBookCtrl" || hit->className == "ShellTextList" ||
+                hit->className == "GuiTabBookCtrl" ||
                 hit->className == "GuiListBoxCtrl" || hit->className == "GuiTextListCtrl" ||
                 hit->className == "GuiServerBrowser" || hit->className.find("Button") != std::string::npos;
             if (!isClickable) { hit = nullptr; continue; }
@@ -2164,14 +2159,14 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         return true;
     }
     // ShellTextList / GuiListBoxCtrl: row selection
-    if (hit->className == "ShellTextList" || hit->className == "GuiListBoxCtrl" || hit->className == "GuiTextListCtrl") {
+    if (hit->className == "GuiListBoxCtrl" || hit->className == "GuiTextListCtrl") {
         float ax = hit->posX, ay = hit->posY;
         for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
         // Get scroll offset
         float scrollY = 0;
         GuiControl* sp = hit->parent;
         while (sp) {
-            if (sp->className == "GuiScrollCtrl" || sp->className == "ShellScrollCtrl") {
+            if (sp->className == "GuiScrollCtrl") {
                 scrollY = sp->scrollY;
                 break;
             }
@@ -2221,8 +2216,8 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             return true;
         }
     }
-    // ShellPopupMenu / GuiPopUpMenuCtrl: toggle dropdown or select item
-    if (hit->className == "ShellPopupMenu" || hit->className == "GuiPopUpMenuCtrl") {
+    // GuiPopUpMenuCtrl: toggle dropdown or select item
+    if (hit->className == "GuiPopUpMenuCtrl") {
         if (hit->menuOpen) {
             float ax = hit->posX, ay = hit->posY;
             for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
@@ -2279,7 +2274,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         }
     }
     // Text edit: set focusedCtrl for keyboard input
-    if (hit->className == "GuiTextEditCtrl" || hit->className == "ShellTextEditCtrl") {
+    if (hit->className == "GuiTextEditCtrl") {
         focusedCtrl = hit;
         return true;
     }
@@ -2288,7 +2283,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     if (focusedCtrl) focusedCtrl = nullptr;
 
     // ShellSliderCtrl: start drag on click
-    if (hit->className == "ShellSliderCtrl" || hit->className == "GuiSliderCtrl") {
+    if (hit->className == "GuiSliderCtrl") {
         float ax = hit->posX, ay = hit->posY;
         for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
         float barInset = hit->usePlusMinus ? 16 : 0;
@@ -2335,7 +2330,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     }
 
     // Radio button / checkbox: handle group mutual exclusion before onClick
-    if (hit->className == "GuiRadioCtrl" || hit->className == "ShellRadioButton") {
+    if (hit->className == "GuiRadioCtrl") {
         if (hit->groupNum != 0) {
             // Uncheck siblings with same groupNum, then check this one
             auto* p = hit->parent;
@@ -2483,6 +2478,29 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     ctl = new GuiControl;
     ctl->name = it->second->name;
     ctl->className = it->second->className;
+
+    // Normalize Shell* class names to their Gui* equivalents.
+    // Torque folded Shell* into Gui* in later versions; the scripts still
+    // use Shell* names but the rendering/input logic is identical.
+    {
+        static const std::map<std::string, std::string> sShellToGui = {
+            {"ShellTextEditCtrl",        "GuiTextEditCtrl"},
+            {"ShellToggleButton",        "GuiCheckBoxCtrl"},
+            {"ShellRadioButton",         "GuiRadioCtrl"},
+            {"ShellBitmapButton",        "GuiBitmapButtonCtrl"},
+            {"ShellTextList",            "GuiTextListCtrl"},
+            {"ShellScrollCtrl",          "GuiScrollCtrl"},
+            {"ShellSliderCtrl",          "GuiSliderCtrl"},
+            {"ShellPopupMenu",          "GuiPopUpMenuCtrl"},
+            {"ShellFancyTextList",       "GuiTextListCtrl"},
+            {"ShellFancyArrayScrollCtrl","GuiScrollCtrl"},
+            {"ShellChatMemberList",      "GuiTextListCtrl"},
+            {"ShellLoadFileDlg",         "GuiFileDialogCtrl"},
+            {"ShellSaveFileDlg",         "GuiFileDialogCtrl"},
+        };
+        auto it2 = sShellToGui.find(ctl->className);
+        if (it2 != sShellToGui.end()) ctl->className = it2->second;
+    }
     auto parsePair = [&](const std::string& key, float& a, float& b) {
         auto fi = it->second->fields.find(key);
         if (fi != it->second->fields.end()) { std::string s = fi->second.toString(); sscanf(s.c_str(), "%f %f", &a, &b); }
@@ -2511,7 +2529,7 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
         if (ctl->className.find("Slider") != std::string::npos) ctl->sliderValue = v;
     }
     if (ctl->className == "GuiCanvas") canvas = ctl;
-    bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellBitmapButton" || ctl->className == "ShellToggleButton" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl" || ctl->className == "ShellTextEditCtrl";
+    bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl";
     if (!ctl->command.empty() && isClickable) {
         std::string cmd = ctl->command;
         ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); };
