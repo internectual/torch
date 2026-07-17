@@ -2422,6 +2422,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
     }
         if (ctl) {
             ctl->visible = true;
+            ctl->isBaseDialog = inBaseDialogPush;
             dialogStack.push_back(ctl);
             fprintf(stderr, "SETCONTENT %s stack=%zu\n", name.c_str(), dialogStack.size());
         callOnAddOnce(ctl);
@@ -2470,22 +2471,36 @@ void GuiRenderer::callOnAddOnce(GuiControl* ctl) {
 
 void GuiRenderer::setContent(const std::string& name) {
     GuiControl* ctl = soToGui(name, nullptr);
-    if (ctl) {
-        // Replace only the content slot; preserve pushed dialogs underneath so
-        // toolbars/consoles survive panel swaps.
-        if (!dialogStack.empty() && dialogStack.front() == canvas)
-            dialogStack.front() = ctl;
-        else if (!dialogStack.empty())
-            dialogStack[0] = ctl;
-        else
-            dialogStack.push_back(ctl);
-        callOnAddOnce(ctl);
-        if (auto* ts = Engine::instance().script().ts()) {
-            if (ts->hasFunction(name + "::onWake")) ts->callFunction(name + "::onWake", {});
-        }
-    } else {
+    if (!ctl) {
         Console::instance().printf(LogLevel::Warn, "GUI: setContent '%s' not found", name.c_str());
+        return;
     }
+    // Fire onSleep on the current content before swapping panels, mirroring
+    // the T2 lifecycle where each panel manages its own pushed dialogs
+    // (e.g. GameGui/onSleep pops LaunchToolbarDlg).
+    if (!dialogStack.empty() && dialogStack.front() != canvas) {
+        std::string oldName = dialogStack.front()->name;
+        if (auto* ts = Engine::instance().script().ts()) {
+            if (ts->hasFunction(oldName + "::onSleep")) {
+                ts->callFunction(oldName + "::onSleep", {});
+                if (!dialogStack.empty() && dialogStack.front()->name == oldName)
+                    dialogStack.front() = ctl;
+            } else {
+                dialogStack.front() = ctl;
+            }
+        }
+    } else if (!dialogStack.empty()) {
+        dialogStack.front() = ctl;
+    } else {
+        dialogStack.push_back(ctl);
+    }
+    callOnAddOnce(ctl);
+    // Mark any dialogs pushed during onWake as base dialogs so ESC preserves them.
+    inBaseDialogPush = true;
+    if (auto* ts = Engine::instance().script().ts()) {
+        if (ts->hasFunction(name + "::onWake")) ts->callFunction(name + "::onWake", {});
+    }
+    inBaseDialogPush = false;
 }
 
 bool GuiRenderer::isDialogActive(const std::string& name) {

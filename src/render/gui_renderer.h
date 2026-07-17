@@ -52,6 +52,10 @@ struct GuiControl {
     std::vector<MenuItem> menuItems;
     bool menuOpen = false;
 
+    // Lifecycle flag: true if this dialog was pushed during the content's onWake.
+    // ESC should never pop base dialogs (e.g. LaunchToolbarDlg) so the sidebar stays.
+    bool isBaseDialog = false;
+
     // GuiServerBrowser fields
     struct ServerBrowserColumn {
         std::string name;
@@ -101,10 +105,12 @@ public:
     void handleKeyboard(); // process keyboard input for focused text control
     bool isDialogActive(const std::string& name);
     GuiControl* activeDialog() { return dialogStack.empty() ? canvas : dialogStack.back(); }
+    GuiControl* getDialog(size_t i) const { return i < dialogStack.size() ? dialogStack[i] : nullptr; }
     void update(float dt); // process scheduled events
     void addSchedule(double delay, const std::string& command);
     size_t dialogCount() const { return dialogStack.size(); }
     GuiControl* getFocused() const { return focusedCtrl; }
+    bool inBaseDialogPush = false;
     void setFocused(GuiControl* c) { focusedCtrl = c; }
     FadeState* getFadeState(const GuiControl* ctl, bool createIfMissing);
 

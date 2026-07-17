@@ -962,11 +962,35 @@ void Engine::run() {
             static bool prevEsc = false;
             bool escDown = plat->input().keysDown[SCANCODE_ESCAPE];
             if (escDown && !prevEsc) {
-                // ESC closes the active overlay dialog first, then falls back
-                // to shape viewer / pause behavior.
-                if (gui->dialogCount() > 1) {
-                    GuiControl* active = gui->activeDialog();
-                    if (active) gui->popDialog(active->name);
+                // ESC closes open popup menus first, then closes overlay dialogs.
+                // Only pop dialogs if there are more than just content+base toolbar on
+                // the stack; otherwise the base toolbar would disappear.
+                bool popupClosed = false;
+                {
+                    auto& objs = ScriptEngine::instance().objects;
+                    for (const auto& kv : objs) {
+                        if (kv.second->className == "ShellLaunchMenu" || kv.second->className == "ShellPopupMenu" || kv.second->className == "GuiPopUpMenuCtrl") {
+                            if (auto* ctl = gui->findControl(kv.first)) {
+                                if (ctl->menuOpen) {
+                                    ctl->menuOpen = false;
+                                    popupClosed = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!popupClosed && gui->dialogCount() > 2) {
+                    // Pop the topmost overlay dialog; never pop base dialogs.
+                    // Base dialogs are at index 0 (content) and 1 (first push).
+                    // Overlays start at index 2.
+                    for (int i = (int)gui->dialogCount() - 1; i >= 2; --i) {
+                        auto* dlg = gui->getDialog(i);
+                        if (dlg) {
+                            gui->popDialog(dlg->name);
+                            break;
+                        }
+                    }
                 } else if (g->isShapeViewerActive()) {
                     g->shapeViewerActive = false;
                     g->shapeViewerShape = DTSShape{};
@@ -982,7 +1006,7 @@ void Engine::run() {
                     std::string stack;
                     for (size_t k = 0; k < gui->dialogCount(); ++k) {
                         if (k) stack += " -> ";
-                        GuiControl* dk = gui->activeDialog();
+                        GuiControl* dk = gui->getDialog(k);
                         stack += dk ? dk->name : "(null)";
                     }
                     fprintf(stderr, "ESC-DIALOGS: [%s]\n", stack.c_str());
