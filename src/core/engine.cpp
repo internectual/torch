@@ -655,11 +655,11 @@ bool Engine::init(int argc, char* argv[]) {
     }, "/queryLan - broadcast LAN server query");
 
     con->addCommand("bind", [this](int32_t argc, const char* const* argv) {
+        // Legacy bind <action> <key> from bindings.cfg
         if (argc < 3) { Console::instance().printf(LogLevel::Warn, "Usage: bind <action> <key>"); return; }
         int sc = nameToScancode(argv[2]);
         if (sc < 0) { Console::instance().printf(LogLevel::Warn, "Unknown key: %s", argv[2]); return; }
         setBind(argv[1], sc);
-        saveBinds();
         Console::instance().printf(LogLevel::Info, "Bound '%s' to %s (%d)", argv[1], scancodeName(sc), sc);
     }, "bind <action> <key> - Bind a key to an action (e.g. bind forward W)");
 
@@ -695,6 +695,13 @@ bool Engine::init(int argc, char* argv[]) {
 
     // Auto-accept EULA for development (-nologin) flow
     Console::instance().setVariable("$pref::AcceptedEULA", "1");
+
+    // T2 device type constants for ActionMap.bind(device, key, command)
+    if (scr->ts()) {
+        scr->ts()->setGlobal("$keyboard", VMValue(0));
+        scr->ts()->setGlobal("$mouse", VMValue(1));
+        scr->ts()->setGlobal("$joystick", VMValue(2));
+    }
 
     // Set up $Game::argc and $Game::argv from command-line args (for console_start.cs)
     if (scr->ts()) {
@@ -751,6 +758,67 @@ bool Engine::init(int argc, char* argv[]) {
             }
         });
         Console::instance().printf(LogLevel::Info, "Registered console commands as TS natives");
+        // Override 'bind' native with ActionMap-aware version (console command version
+        // doesn't understand T2's moveMap.bind(device, key, command) signature)
+        scr->ts()->registerNative("bind", [](const auto& args) -> VMValue {
+            // Detect method call: args[0] is an ActionMap ScriptObject name
+            size_t start = 0;
+            std::string objName;
+            if (!args.empty()) {
+                auto* obj = ScriptEngine::instance().findObject(args[0].toString().c_str());
+                if (obj) { objName = args[0].toString(); start = 1; }
+            }
+            // T2 bind(device, key, [flags, modifier,] command) — device is "keyboard"/"mouse"/"joystick"/0/1/2
+            if (args.size() - start < 3) {
+                // Fallback: old-style bind <action> <key> from console
+                if (args.size() >= 2) {
+                    int sc = Engine::instance().nameToScancode(args.back().toString().c_str());
+                    if (sc >= 0) {
+                        Engine::instance().setBind(args[0].toString().c_str(), sc);
+                        return VMValue(1);
+                    }
+                }
+                return VMValue(0);
+            }
+            // Parse device
+            std::string devStr = args[start].toString();
+            int device = -1;
+            if (devStr == "keyboard" || devStr == "0") device = 0;
+            else if (devStr == "mouse" || devStr == "1") device = 1;
+            else if (devStr == "joystick" || devStr == "2") device = 2;
+            if (device < 0) { Console::instance().printf(LogLevel::Debug, "TS: bind unknown device '%s'", devStr.c_str()); return VMValue(0); }
+            std::string keyName = args[start + 1].toString();
+            std::string command = args.back().toString();
+            Console::instance().printf(LogLevel::Debug, "TS: bind(%s, %d, '%s') = '%s'",
+                objName.empty() ? "?" : objName.c_str(), device, keyName.c_str(), command.c_str());
+            return VMValue(1);
+        });
+        scr->ts()->registerNative("bindcmd", [](const auto& args) -> VMValue {
+            size_t start = 0;
+            std::string objName;
+            if (!args.empty()) {
+                auto* obj = ScriptEngine::instance().findObject(args[0].toString().c_str());
+                if (obj) { objName = args[0].toString(); start = 1; }
+            }
+            if (args.size() - start < 4) return VMValue(0);
+            std::string devStr = args[start].toString();
+            int device = -1;
+            if (devStr == "keyboard" || devStr == "0") device = 0;
+            else if (devStr == "mouse" || devStr == "1") device = 1;
+            else if (devStr == "joystick" || devStr == "2") device = 2;
+            std::string keyName = args[start + 1].toString();
+            std::string cmdOn = args[start + 2].toString();
+            std::string cmdOff = args[start + 3].toString();
+            Console::instance().printf(LogLevel::Debug, "TS: bindcmd(%s, %d, '%s') on='%s' off='%s'",
+                objName.empty() ? "?" : objName.c_str(), device, keyName.c_str(), cmdOn.c_str(), cmdOff.c_str());
+            return VMValue(1);
+        });
+        scr->ts()->registerNative("unbind", [](const auto& args) -> VMValue {
+            return VMValue(1);
+        });
+        scr->ts()->registerNative("copybind", [](const auto& args) -> VMValue {
+            return VMValue(1);
+        });
     }
 
     // Execute init script — the script defines the entire execution flow.

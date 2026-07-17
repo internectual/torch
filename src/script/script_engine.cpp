@@ -3210,6 +3210,153 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
+    // ===== ActionMap bind/bindCmd/unbind/copyBind =====
+    // T2 ActionMap method signatures:
+    //   bind(device, key, [flags, modifier,] command)
+    //   bindCmd(device, key, cmdOn, cmdOff)
+    //   unbind(device, key)
+    //   copyBind(sourceMap, command)
+    // When called as obj.method(), the VM passes the object name as args[0].
+
+    // Map: (objectName, device, keyName) → command string
+    struct BindEntry { std::string cmdOn; std::string cmdOff; bool isCmd = false; };
+    static std::map<std::tuple<std::string, int, std::string>, BindEntry> s_actionBinds;
+
+    auto parseDevice = [](const std::string& s) -> int {
+        if (s == "keyboard" || s == "0") return 0;
+        if (s == "mouse" || s == "1") return 1;
+        if (s == "joystick" || s == "2") return 2;
+        // Try as number
+        char* end;
+        long n = strtol(s.c_str(), &end, 10);
+        if (*end == 0) return (int)n;
+        return -1;
+    };
+
+    tsInstance->registerNative("bind", [&s_actionBinds, parseDevice](const auto& args) -> VMValue {
+        // Method call: args[0] = objectName, rest = T2 bind args
+        // Standalone: args = T2 bind args (no objectName)
+        size_t start = 0;
+        std::string objName;
+        // Detect method call: if first arg is an existing ScriptObject, it's the object name
+        if (!args.empty()) {
+            auto* obj = ScriptEngine::instance().findObject(args[0].toString().c_str());
+            if (obj) {
+                objName = args[0].toString();
+                start = 1;
+            }
+        }
+        // T2 bind(device, key, [flags, modifier,] command)
+        if (args.size() - start < 3) {
+            Console::instance().printf(LogLevel::Debug, "TS: bind() needs at least 3 args (device, key, command)");
+            return VMValue(0);
+        }
+        int device = parseDevice(args[start].toString());
+        if (device < 0) { Console::instance().printf(LogLevel::Debug, "TS: bind unknown device '%s'", args[start].toString().c_str()); return VMValue(0); }
+        std::string keyName = args[start + 1].toString();
+        // The command is the last arg; flags/modifier are ignored for now
+        std::string command = args[start + args.size() - start - 1 + start - 1].toString();
+        // Actually, the command is args[start + 2] for simple form, or last arg for flag form
+        // T2 forms: bind(dev, key, cmd) | bind(dev, key, flags, modifier, cmd) | bind(dev, key, flags, modifier, deadZone, sens, cmd)
+        // The command is always the last non-flag arg. Simple approach: last arg is always the command.
+        command = args.back().toString();
+        // Store binding
+        auto key = std::make_tuple(objName, device, keyName);
+        s_actionBinds[key] = {command, "", false};
+        // Also store in simple action map for key lookups
+        std::string actionKey = keyName;
+        Console::instance().printf(LogLevel::Debug, "TS: bind(%s, %d, '%s') = '%s'",
+            objName.empty() ? "?" : objName.c_str(), device, keyName.c_str(), command.c_str());
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("bindcmd", [&s_actionBinds, parseDevice](const auto& args) -> VMValue {
+        size_t start = 0;
+        std::string objName;
+        if (!args.empty()) {
+            auto* obj = ScriptEngine::instance().findObject(args[0].toString().c_str());
+            if (obj) { objName = args[0].toString(); start = 1; }
+        }
+        if (args.size() - start < 4) return VMValue(0);
+        int device = parseDevice(args[start].toString());
+        if (device < 0) return VMValue(0);
+        std::string keyName = args[start + 1].toString();
+        std::string cmdOn = args[start + 2].toString();
+        std::string cmdOff = args[start + 3].toString();
+        auto key = std::make_tuple(objName, device, keyName);
+        s_actionBinds[key] = {cmdOn, cmdOff, true};
+        Console::instance().printf(LogLevel::Debug, "TS: bindcmd(%s, %d, '%s') on='%s' off='%s'",
+            objName.empty() ? "?" : objName.c_str(), device, keyName.c_str(), cmdOn.c_str(), cmdOff.c_str());
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("unbind", [&s_actionBinds, parseDevice](const auto& args) -> VMValue {
+        size_t start = 0;
+        std::string objName;
+        if (!args.empty()) {
+            auto* obj = ScriptEngine::instance().findObject(args[0].toString().c_str());
+            if (obj) { objName = args[0].toString(); start = 1; }
+        }
+        if (args.size() - start < 2) return VMValue(0);
+        int device = parseDevice(args[start].toString());
+        std::string keyName = args[start + 1].toString();
+        auto key = std::make_tuple(objName, device, keyName);
+        s_actionBinds.erase(key);
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("copybind", [&s_actionBinds](const auto& args) -> VMValue {
+        // copyBind(sourceMap, command) — copy a binding from sourceMap to this map
+        // For now, just stub it
+        return VMValue(1);
+    });
+
+    // getResolution — returns "width height"
+    tsInstance->registerNative("getResolution", [](const auto&) -> VMValue {
+        auto& gui = Engine::instance().guiRenderer();
+        auto* canvas = gui.findControl("GuiCanvas");
+        if (canvas)
+            return VMValue(std::to_string((int)canvas->extentX) + " " + std::to_string((int)canvas->extentY));
+        return VMValue("1024 768");
+    });
+
+    // getWord — extract Nth space-delimited word from a string
+    tsInstance->registerNative("getWord", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string str = args[0].toString();
+        int idx = args.size() > 1 ? args[1].toInt() : 0;
+        int word = 0;
+        size_t start = 0;
+        while (start < str.size()) {
+            size_t pos = str.find(' ', start);
+            if (word == idx) {
+                size_t end = (pos != std::string::npos) ? pos : str.size();
+                return VMValue(str.substr(start, end - start));
+            }
+            if (pos == std::string::npos) break;
+            start = pos + 1;
+            word++;
+        }
+        return VMValue("");
+    });
+
+    tsInstance->registerNative("getWordCount", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string str = args[0].toString();
+        if (str.empty()) return VMValue(0);
+        int count = 1;
+        for (char c : str) if (c == ' ') count++;
+        return VMValue(count);
+    });
+
+    // firstWord — returns first word
+    tsInstance->registerNative("firstWord", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string str = args[0].toString();
+        size_t pos = str.find(' ');
+        return VMValue(pos != std::string::npos ? str.substr(0, pos) : str);
+    });
+
     // Copy all TS-registered natives to DSO VM so DSO functions can find them
     for (auto& entry : tsInstance->getNatives()) {
         vmInstance->registerNativeFunction(entry.first.c_str(), entry.second);
