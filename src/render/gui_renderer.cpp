@@ -160,18 +160,7 @@ void GuiRenderer::init() {
         }
     }
 
-    // Third pass: propagate extent from canvas down, inheriting from
-    // the nearest ancestor with a non-default (>100x30) extent.
-    std::function<void(GuiControl*, float, float)> propagateExtent;
-    propagateExtent = [&](GuiControl* ctl, float parentW, float parentH) {
-        float w = ctl->extentX, h = ctl->extentY;
-        if (w <= 100 && h <= 30) { w = parentW; h = parentH; }
-        ctl->extentX = w; ctl->extentY = h;
-        for (auto* child : ctl->children)
-            propagateExtent(child, w, h);
-    };
-    auto& platRef = Engine::instance().platform();
-    if (canvas) propagateExtent(canvas, (float)platRef.width(), (float)platRef.height());
+    // Third pass: no extent propagation — each control keeps its declared extent.
 
     // Checkerboard texture
     std::vector<uint8_t> cb(16*16*4);
@@ -221,6 +210,12 @@ void GuiRenderer::refresh() {
             }
         }
     }
+    // Scale fonts to match window size vs GUI design size (1024x768 vs 640x480)
+    auto& plat = Engine::instance().platform();
+    float scaleX = (float)plat.width() / 640.0f;
+    float scaleY = (float)plat.height() / 480.0f;
+    float fontScale = 1.3f;
+    Engine::instance().renderer().setFontScale(fontScale);
 }
 
 
@@ -245,27 +240,9 @@ void GuiRenderer::render() {
     r.setProjection(ortho);
     r.setView(MatrixF{});
 
-    // Render dialogs in two passes so that base dialogs
-    // are always visible above overlays. This matches T2
-    // behavior where the bottom toolbar stays accessible even when a modal is open.
-    std::vector<GuiControl*> baseDialogs, overlays;
-    for (auto* dlg : dialogStack) {
-        if (dlg && dlg->isBaseDialog)
-            baseDialogs.push_back(dlg);
-        else
-            overlays.push_back(dlg);
-    }
-    for (auto* dlg : overlays) renderControl(dlg);
-    for (auto* dlg : baseDialogs) renderControl(dlg);
-    // Always render debug overlay so user knows the engine is alive
-    r.renderText("TORCH", 10, 10, {0,1,0,1}, 2.0f);
-    r.renderText("~ Console | Pause Debug", 10, 35, {0.8f,0.8f,0.8f,1}, 1.0f);
-    // When no dialog is active, show loading text
-    if (dialogStack.empty()) {
-        r.drawBox({{0,0,0}, {1024,768,0}}, {0.15f,0.15f,0.2f,1});
-        r.renderText("Torch - Loading...", 380, 370, {0.6f,0.6f,0.7f,1}, 1.5f);
-    }
-
+    // Render dialogs in stack order (front to back) so later-pushed dialogs
+    // appear on top of earlier ones (e.g. NewWarriorDlg over GameGui).
+    for (auto* dlg : dialogStack) renderControl(dlg);
 
 
     // Restore projection and view
@@ -1164,13 +1141,14 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         if (font) {
             std::string display = ctl->text.empty() ? "..." : ctl->text;
-            font->render(display.c_str(), x + 3, y + 2, tc, 1.0f);
+            font->render(display.c_str(), x + 3, y + 2, {1,1,1,1}, 1.0f);
             // Cursor when focused
             if (ctl == gr->getFocused()) {
-                float preW = font->measure(ctl->text.substr(0, ctl->cursorPos).c_str()).x;
+                float sc = font->defaultScale;
+                float preW = font->measure(ctl->text.substr(0, ctl->cursorPos).c_str(), sc).x;
+                float scaledH = font->charHeight * sc;
                 float cy = y + 2;
-                float ch = (float)font->charHeight;
-                r.drawRectFill({x + 3 + preW, cy, 0}, {x + 4 + preW, cy + ch, 0}, {1,1,1,1});
+                r.drawRectFill({x + 3 + preW, cy, 0}, {x + 5 + preW, cy + scaledH, 0}, {1,1,1,1});
             }
         }
     } else if (cn == "GuiListBoxCtrl" || cn == "GuiTextListCtrl") {
@@ -2275,12 +2253,17 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     }
     // Text edit: set focusedCtrl for keyboard input
     if (hit->className == "GuiTextEditCtrl") {
+        if (!focusedCtrl) Engine::instance().platform().startTextInput();
         focusedCtrl = hit;
+        focusedCtrl->cursorPos = (int)focusedCtrl->text.size();
         return true;
     }
 
-    // Click on non-text control clears focus
-    if (focusedCtrl) focusedCtrl = nullptr;
+    // Click on non-text control clears focus — fire command on the previously focused text edit
+    if (focusedCtrl && focusedCtrl->className == "GuiTextEditCtrl" && !focusedCtrl->command.empty()) {
+        Console::instance().execute(focusedCtrl->command.c_str());
+    }
+    if (focusedCtrl) { focusedCtrl = nullptr; Engine::instance().platform().stopTextInput(); }
 
     // ShellSliderCtrl: start drag on click
     if (hit->className == "GuiSliderCtrl") {
@@ -2423,11 +2406,13 @@ void GuiRenderer::handleKeyboard() {
 
     auto& input = Engine::instance().platform().input();
     const std::string& ti = input.textInput;
+    bool textChanged = false;
     if (!ti.empty()) {
         for (char c : ti) {
             if (c >= 0x20 && c <= 0x7e && focusedCtrl->text.size() < 200) {
                 focusedCtrl->text.insert(focusedCtrl->cursorPos, 1, c);
                 focusedCtrl->cursorPos++;
+                textChanged = true;
             }
         }
     }
@@ -2437,9 +2422,15 @@ void GuiRenderer::handleKeyboard() {
         if (focusedCtrl->cursorPos > 0 && !focusedCtrl->text.empty()) {
             focusedCtrl->text.erase(focusedCtrl->cursorPos - 1, 1);
             focusedCtrl->cursorPos--;
+            textChanged = true;
         }
     }
     prevBS = input.keysDown[SCANCODE_BACKSPACE];
+
+    // Fire command on text change (T2 convention: command fires on every edit)
+    if (textChanged && !focusedCtrl->command.empty()) {
+        Console::instance().execute(focusedCtrl->command.c_str());
+    }
 
     if (input.keysDown[SCANCODE_RETURN] && !prevEnter) {
         // Fire command (Enter handler), then fall back to altCommand, then onClick
@@ -2515,6 +2506,7 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     fi = it->second->fields.find("visible"); if (fi != it->second->fields.end()) ctl->visible = fi->second.toBool();
     fi = it->second->fields.find("groupNum"); if (fi != it->second->fields.end()) ctl->groupNum = (int)fi->second.toDouble();
     fi = it->second->fields.find("sel"); if (fi != it->second->fields.end()) ctl->checked = fi->second.toBool();
+    fi = it->second->fields.find("active"); if (fi != it->second->fields.end()) ctl->active = fi->second.toBool();
     fi = it->second->fields.find("variable"); if (fi != it->second->fields.end()) ctl->variable = fi->second.toString();
     fi = it->second->fields.find("range"); if (fi != it->second->fields.end()) {
         float lo = 0, hi = 1;
@@ -2548,10 +2540,6 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     } else if (ctl != canvas && canvas) {
         canvas->addChild(ctl);
     }
-    if (canvas) {
-        ctl->extentX = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentX : ctl->extentX;
-        ctl->extentY = (ctl->extentX <= 100 && ctl->extentY <= 30) ? canvas->extentY : ctl->extentY;
-    }
     return ctl;
 }
 
@@ -2569,7 +2557,6 @@ void GuiRenderer::pushDialog(const std::string& name) {
             ctl->visible = true;
             ctl->isBaseDialog = inBaseDialogPush;
             dialogStack.push_back(ctl);
-            fprintf(stderr, "SETCONTENT %s stack=%zu\n", name.c_str(), dialogStack.size());
         callOnAddOnce(ctl);
             // Trigger onWake so script functions can populate menus, etc.
             if (auto* ts = Engine::instance().script().ts()) {
@@ -2579,7 +2566,6 @@ void GuiRenderer::pushDialog(const std::string& name) {
                 }
             }
             Console::instance().printf(LogLevel::Debug, "GUI: pushDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
-            fprintf(stderr, "PUSH %s stack=%zu\n", name.c_str(), dialogStack.size());
         } else {
         Console::instance().printf(LogLevel::Warn, "GUI: pushDialog '%s' not found", name.c_str());
     }
@@ -2599,7 +2585,6 @@ void GuiRenderer::popDialog(const std::string& name) {
             dialogStack.erase(it);
             Console::instance().printf(LogLevel::Debug,
                 "GUI: popDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
-            fprintf(stderr, "POP %s stack=%zu\n", name.c_str(), dialogStack.size());
             return;
         }
     }

@@ -1579,6 +1579,28 @@ bool ScriptEngine::init() {
         return VMValue(args[0].toString());
     });
 
+    tsInstance->registerNative("stripTrailingSpaces", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string s = args[0].toString();
+        size_t end = s.find_last_not_of(" \t\r\n");
+        return VMValue(end == std::string::npos ? "" : s.substr(0, end + 1));
+    });
+
+    tsInstance->registerNative("stripLeadingSpaces", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string s = args[0].toString();
+        size_t start = s.find_first_not_of(" \t\r\n");
+        return VMValue(start == std::string::npos ? "" : s.substr(start));
+    });
+
+    tsInstance->registerNative("stripSpaces", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string s = args[0].toString();
+        std::string result;
+        for (char c : s) if (c != ' ' && c != '\t' && c != '\r' && c != '\n') result += c;
+        return VMValue(result);
+    });
+
     {
         static int nextTagId = 1;
         tsInstance->registerNative("addTaggedString", [](const auto& args) -> VMValue {
@@ -2529,6 +2551,7 @@ bool ScriptEngine::init() {
                 return VMValue((double)(ctl->checked ? 1 : 0));
             if (ctl->selectedRow >= 0 && ctl->selectedRow < (int)ctl->listRows.size())
                 return VMValue(ctl->listRows[ctl->selectedRow]);
+            return VMValue(ctl->text);
         }
         return VMValue(std::string(""));
     });
