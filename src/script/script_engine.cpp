@@ -2305,17 +2305,21 @@ bool ScriptEngine::init() {
     };
 
     tsInstance->registerNative("addLaunchTab", [getOrCreateCtrl](const auto& args) -> VMValue {
+        // args[0] = %this (object name), args[1] = text, args[2] = gui, args[3] = makeInactive
         if (args.size() < 3) return VMValue(0);
         auto* ctl = getOrCreateCtrl(args[0].toString());
         if (!ctl) return VMValue(0);
-        int id = (int)args[1].toDouble();
-        std::string txt = args[2].toString();
-        std::string gui = args.size() > 3 ? args[3].toString() : txt;
-        ctl->tabs.push_back({txt, true});
+        std::string txt = args[1].toString();
+        std::string gui = args[2].toString();
+        bool makeInactive = args.size() > 3 && args[3].toDouble() != 0;
+        int id = (int)ctl->tabs.size();
+        ctl->tabs.push_back({txt, !makeInactive});
         auto* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
         if (sobj) {
-            std::string gk = "gui[" + std::to_string((int)ctl->tabs.size() - 1) + "]";
+            std::string gk = "gui[" + std::to_string(id) + "]";
             sobj->fields[gk] = VMValue(gui);
+            std::string kk = "key[" + std::to_string(id) + "]";
+            sobj->fields[kk] = VMValue("0");
         }
         return VMValue(1);
     });
@@ -2353,10 +2357,26 @@ bool ScriptEngine::init() {
     });
 
     tsInstance->registerNative("closeTab", [getOrCreateCtrl](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
+        if (args.size() < 3) return VMValue(0);
         auto* ctl = getOrCreateCtrl(args[0].toString());
         if (!ctl) return VMValue(0);
-        int idx = (int)args[1].toDouble();
+        std::string gui = args[1].toString();
+        std::string key = args[2].toString();
+        int idx = -1;
+        auto* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
+        if (sobj) {
+            for (int i = 0; i < (int)ctl->tabs.size(); ++i) {
+                std::string gk = "gui[" + std::to_string(i) + "]";
+                std::string kk = "key[" + std::to_string(i) + "]";
+                auto gi = sobj->fields.find(gk);
+                auto ki = sobj->fields.find(kk);
+                if (gi != sobj->fields.end() && ki != sobj->fields.end() &&
+                    gi->second.toString() == gui && ki->second.toString() == key) {
+                    idx = i;
+                    break;
+                }
+            }
+        }
         if (idx < 0 || idx >= (int)ctl->tabs.size()) return VMValue(0);
         ctl->tabs.erase(ctl->tabs.begin() + idx);
         if (ctl->selectedTab >= (int)ctl->tabs.size())
@@ -2436,36 +2456,44 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // viewTab: handle both calling conventions (text index and direct GUI name)
-    tsInstance->registerNative("viewTab", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(1);
+    // viewTab: args[0]=%this, args[1]=text, args[2]=gui, args[3]=key
+    tsInstance->registerNative("viewTab", [getOrCreateCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = getOrCreateCtrl(args[0].toString());
+        if (!ctl) return VMValue(0);
         std::string text = args[1].toString();
-        std::string guiFromArg = args.size() > 2 ? args[2].toString() : "";
-        std::string cname = args[0].toString();
-        // OpenLaunchTabs calls viewTab("", TrainingGui, 0) — use guiFromArg directly
-        if (text.empty() && !guiFromArg.empty()) {
-            Engine::instance().guiRenderer().setContent(guiFromArg);
-            return VMValue(1);
+        std::string guiArg = args.size() > 2 ? args[2].toString() : "";
+        std::string keyArg = args.size() > 3 ? args[3].toString() : "";
+        int foundIdx = -1;
+        if (!text.empty()) {
+            for (int i = 0; i < (int)ctl->tabs.size(); ++i) {
+                if (ctl->tabs[i].text == text) { foundIdx = i; break; }
+            }
         }
-        // Find the tab by text and look up its gui[i] field
-        GuiControl* ctl = Engine::instance().guiRenderer().findControl(cname);
-        if (ctl) {
-            for (int i = 0; i < (int)ctl->tabs.size(); i++) {
-                if (ctl->tabs[i].text == text) {
-                    auto* sobj = ScriptEngine::instance().findObject(cname.c_str());
-                    if (sobj) {
-                        std::string gk = "gui[" + std::to_string(i) + "]";
-                        auto gi = sobj->fields.find(gk);
-                        if (gi != sobj->fields.end() && !gi->second.toString().empty()) {
-                            Engine::instance().guiRenderer().setContent(gi->second.toString());
-                            return VMValue(1);
-                        }
+        if (foundIdx < 0 && !guiArg.empty()) {
+            auto* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
+            if (sobj) {
+                for (int i = 0; i < (int)ctl->tabs.size(); ++i) {
+                    std::string gk = "gui[" + std::to_string(i) + "]";
+                    std::string kk = "key[" + std::to_string(i) + "]";
+                    auto gi = sobj->fields.find(gk);
+                    auto ki = sobj->fields.find(kk);
+                    if (gi != sobj->fields.end() && ki != sobj->fields.end() &&
+                        gi->second.toString() == guiArg && ki->second.toString() == keyArg) {
+                        foundIdx = i;
+                        break;
                     }
                 }
             }
         }
+        if (foundIdx < 0 || foundIdx >= (int)ctl->tabs.size()) return VMValue(0);
+        ctl->selectedTab = foundIdx;
+        auto* ts = Engine::instance().script().ts();
+        if (ts && ts->hasFunction(ctl->name + "::onSelect"))
+            ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(foundIdx), VMValue(ctl->tabs[foundIdx].text)});
         return VMValue(1);
     });
+
 
     // viewLastTab and closeCurrentTab have script implementations; let them run.
     tsInstance->registerNative("isTabActive", [getOrCreateCtrl](const auto& args) -> VMValue {
