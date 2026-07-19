@@ -2149,8 +2149,16 @@ void GuiRenderer::updateFades(float dt) {
 
 GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
     if (!ctl || !ctl->visible || !ctl->active) return nullptr;
-    // Tab pages never intercept clicks — pass through to parent tab group
-    if (ctl->className == "GuiTabPageCtrl") return nullptr;
+    // Tab pages themselves are not click targets, but their children are.
+    if (ctl->className == "GuiTabPageCtrl") {
+        float x = ctl->posX, y = ctl->posY;
+        GuiControl* p = ctl->parent;
+        while (p && p != canvas) { x += p->posX; y += p->posY; p = p->parent; }
+        if (mx >= x && mx < x + ctl->extentX && my >= y && my < y + ctl->extentY) {
+            for (auto* child : ctl->children) { auto* h = hitTest(child, mx, my); if (h) return h; }
+        }
+        return nullptr;
+    }
     float x = ctl->posX;
     float y = ctl->posY;
     GuiControl* p = ctl->parent;

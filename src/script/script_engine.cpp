@@ -2004,9 +2004,29 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("popDialog", [](const auto& args) -> VMValue {
         if (!args.empty()) {
             std::string name = args.back().toString();
-            Engine::instance().guiRenderer().popDialog(name);
+            if (!name.empty()) Engine::instance().guiRenderer().popDialog(name);
         }
         return VMValue(1);
+    });
+
+    // GuiPlayerView::setModel(%shape, %skin) — also register on TS interpreter
+    // so .cs scripts (which run through tsInstance, not vmInstance) can call it
+    tsInstance->registerNative("setmodel", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        std::string objName = args[0].toString();
+        std::string shape = args[1].toString();
+        std::string skin = args.size() > 2 ? args[2].toString() : "";
+        auto& gui = Engine::instance().guiRenderer();
+        auto* ctl = gui.findControl(objName);
+        if (ctl) {
+            ctl->modelShape = shape;
+            ctl->modelSkin = skin;
+            ctl->modelYaw = 0.5f;
+            ctl->modelPitch = 0.15f;
+            Console::instance().printf(LogLevel::Info, "GuiPlayerView: setModel('%s', '%s') on '%s'", shape.c_str(), skin.c_str(), objName.c_str());
+            return VMValue(1);
+        }
+        return VMValue(0);
     });
     // Mark a GUI control as persistent so setContent preserves it across panel swaps
 
