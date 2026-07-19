@@ -1089,9 +1089,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bgTex->id);
             else
                 r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.08f,0.08f,0.12f,1});
-        } else {
-            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bgColor);
         }
+        // No bitmap: GuiChunkedBitmapCtrl is transparent (children paint over it)
         // Fade overlay for GuiFadeinBitmapCtrl
         if (cn == "GuiFadeinBitmapCtrl") {
             FadeState* fs = gr->getFadeState(ctl, false);
