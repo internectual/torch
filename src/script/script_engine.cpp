@@ -1875,6 +1875,30 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
+    // GuiPlayerView::setModel(%shape, %skin) — called as %this.setModel(%shape, %skin)
+    // Method dispatch puts objName as args[0], then script args
+    vmInstance->registerNativeFunction("setmodel", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        std::string objName = args[0].toString();
+        std::string shape = args[1].toString();
+        std::string skin = args.size() > 2 ? args[2].toString() : "";
+        // Find the GUI control and store the shape/skin
+        auto& gui = Engine::instance().guiRenderer();
+        auto* ctl = gui.findControl(objName);
+        if (ctl) {
+            ctl->modelShape = shape;
+            ctl->modelSkin = skin;
+            ctl->modelYaw = 0.5f;
+            ctl->modelPitch = 0.15f;
+            Console::instance().printf(LogLevel::Info, "GuiPlayerView: setModel('%s', '%s') on '%s'", shape.c_str(), skin.c_str(), objName.c_str());
+            return VMValue(1);
+        }
+        return VMValue(0);
+    });
+
+    // GuiPlayerView::update() — just a no-op trigger; setModel does the work
+    // The T2 script defines GMW_PlayerModel::update() which calls setModel internally
+
     // DSO script compatibility stubs
     vmInstance->registerNativeFunction("t2csri_glue_initChecks", [](const auto&) { return VMValue(1); });
     vmInstance->registerNativeFunction("Base64_CreateArray", [](const auto&) { return VMValue(""); });

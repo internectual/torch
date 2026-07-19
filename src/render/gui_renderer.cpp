@@ -16,6 +16,9 @@ GuiControl* GuiControl::findChild(const std::string& name) {
     return nullptr;
 }
 
+// GuiPlayerView shape cache (control name -> loaded shape)
+static std::unordered_map<std::string, DTSShape> s_playerViewShapes;
+
 void GuiControl::addChild(GuiControl* child) {
     child->parent = this;
     children.push_back(child);
@@ -1836,6 +1839,133 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 hf->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
             }
         }
+    } else if (cn == "GuiPlayerView") {
+        // Dark background
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.08f, 0.08f, 0.12f, 1});
+        // If model is set, render it
+        if (!ctl->modelShape.empty()) {
+            // Load shape on demand (cached)
+            auto& cache = s_playerViewShapes;
+            auto it = cache.find(ctl->name);
+            if (it == cache.end() || it->second.name != ctl->modelShape) {
+                DTSShape shape;
+                shape.name = ctl->modelShape;
+                auto& fs = Engine::instance().fs();
+                std::string lower = ctl->modelShape;
+                for (auto& c : lower) c = (char)tolower((unsigned char)c);
+                std::vector<std::string> paths = {
+                    "shapes/" + ctl->modelShape + ".dts",
+                    "shapes/" + ctl->modelShape + ".glb",
+                    "shapes/" + ctl->modelShape
+                };
+                for (auto& p : paths) {
+                    auto data = fs.read(p.c_str());
+                    if (!data.empty()) {
+                        shape.load(data.data(), data.size());
+                        break;
+                    }
+                }
+                cache[ctl->name] = shape;
+                it = cache.find(ctl->name);
+            }
+            if (it != cache.end() && it->second.loaded) {
+                auto& shape = it->second;
+                // Save GL state
+                auto savedProj = r.projectionMatrix();
+                auto savedView = r.view;
+                GLint oldScissor[4]; glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
+                GLboolean scissorWasOn = glIsEnabled(GL_SCISSOR_TEST);
+                GLint oldVP[4]; glGetIntegerv(GL_VIEWPORT, oldVP);
+
+                // Compute screen-space clip region (GL coords: origin bottom-left)
+                int w = Engine::instance().platform().width();
+                int h = Engine::instance().platform().height();
+                float sx = x, sy = y, sw = ctl->extentX, sh = ctl->extentY;
+
+                // Clamp to parent clip
+                if (clip) {
+                    if (sx < clip->x) { sw -= (clip->x - sx); sx = clip->x; }
+                    if (sy < clip->y) { sh -= (clip->y - sy); sy = clip->y; }
+                    if (sx + sw > clip->x + clip->w) sw = clip->x + clip->w - sx;
+                    if (sy + sh > clip->y + clip->h) sh = clip->y + clip->h - sy;
+                }
+                if (sw <= 0 || sh <= 0) return;
+
+                // Set viewport and scissor to control bounds
+                glViewport((GLint)sx, (GLint)(h - sy - sh), (GLsizei)sw, (GLsizei)sh);
+                glEnable(GL_SCISSOR_TEST);
+                glScissor((GLint)sx, (GLint)(h - sy - sh), (GLsizei)sw, (GLsizei)sh);
+                glEnable(GL_DEPTH_TEST);
+                glDepthMask(GL_TRUE);
+                glClear(GL_DEPTH_BUFFER_BIT);
+
+                // Set perspective projection
+                MatrixF persp;
+                persp.identity();
+                float aspect = sw / sh;
+                float fov = 1.0f; // ~60 degrees half-angle
+                persp.m[0][0] = fov / aspect;
+                persp.m[1][1] = fov;
+                persp.m[2][2] = -100.0f / (100.0f - 0.1f);
+                persp.m[2][3] = -1.0f;
+                persp.m[3][2] = -(0.1f * 100.0f) / (100.0f - 0.1f);
+                persp.m[3][3] = 0.0f;
+                r.setProjection(persp);
+                r.setView(MatrixF{});
+
+                // Compute model bounds for framing
+                Point3F mn{1e9f, 1e9f, 1e9f}, mx{-1e9f, -1e9f, -1e9f};
+                const auto& nodeWorld = shape.defaultTransforms;
+                std::vector<int32_t> boundMeshes;
+                if (!shape.details.empty() && !shape.details[0].meshIndices.empty())
+                    boundMeshes = shape.details[0].meshIndices;
+                else {
+                    boundMeshes.resize(shape.meshes.size());
+                    for (int32_t i = 0; i < (int32_t)boundMeshes.size(); i++) boundMeshes[i] = i;
+                }
+                for (int32_t mi : boundMeshes) {
+                    if (mi < 0 || mi >= (int32_t)shape.meshes.size()) continue;
+                    auto& m = shape.meshes[mi];
+                    MatrixF nodeXform; nodeXform.identity();
+                    if (m.nodeIndex >= 0 && m.nodeIndex < (int)nodeWorld.size())
+                        nodeXform = nodeWorld[m.nodeIndex];
+                    int step = std::max(1, (int)m.vertices.size() / 16);
+                    for (size_t vi = 0; vi < m.vertices.size(); vi += step) {
+                        Point3F wp = nodeXform.transform(m.vertices[vi].pos);
+                        if (wp.x < mn.x) mn.x = wp.x; if (wp.y < mn.y) mn.y = wp.y; if (wp.z < mn.z) mn.z = wp.z;
+                        if (wp.x > mx.x) mx.x = wp.x; if (wp.y > mx.y) mx.y = wp.y; if (wp.z > mx.z) mx.z = wp.z;
+                    }
+                }
+                Point3F center{(mn.x+mx.x)*0.5f, (mn.y+mx.y)*0.5f, (mn.z+mx.z)*0.5f};
+                float dx = mx.x-mn.x, dy = mx.y-mn.y, dz = mx.z-mn.z;
+                float radius = 0.5f * std::sqrt(dx*dx+dy*dy+dz*dz);
+                float fitScale = (radius > 1e-3f) ? (1.0f / radius) : 1.0f;
+
+                // Orbit transform
+                MatrixF ry; ry.setRotationY(ctl->modelYaw);
+                MatrixF sc2; sc2.setScale({fitScale, fitScale, fitScale});
+                MatrixF tr; tr.setTranslation({-center.x, -center.y, -center.z});
+                MatrixF model = ry * Math::czUpToYUp() * sc2 * tr;
+                r.setModel(model);
+
+                // Render the shape
+                auto* defShader = ShaderManager::getDefaultShader();
+                if (defShader) defShader->bind();
+                shape.render(0);
+
+                // Restore GL state
+                glViewport(oldVP[0], oldVP[1], oldVP[2], oldVP[3]);
+                if (!scissorWasOn) glDisable(GL_SCISSOR_TEST);
+                glScissor(oldScissor[0], oldScissor[1], oldScissor[2], oldScissor[3]);
+                glDisable(GL_DEPTH_TEST);
+                glDepthMask(GL_FALSE);
+                r.setProjection(savedProj);
+                r.setView(savedView);
+                glDisable(GL_BLEND);
+                glEnable(GL_BLEND);
+            }
+        }
+        return; // GuiPlayerView has no children
     } else {
         // Generic GuiControl with profile-aware fill and text
         ColorF gc{0.2f, 0.2f, 0.25f, 1.0f};

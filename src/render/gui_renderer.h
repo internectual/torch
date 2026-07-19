@@ -81,6 +81,12 @@ struct GuiControl {
     int sbSelected = -1;
     double sbLastQueryTime = 0;
 
+    // GuiPlayerView fields
+    std::string modelShape;   // shape name (e.g. "light_male", "bioderm_medium")
+    std::string modelSkin;    // skin name override
+    float modelYaw = 0.5f;    // orbit rotation
+    float modelPitch = 0.15f;
+
     GuiControl* findChild(const std::string& name);
     void addChild(GuiControl* child);
 };
