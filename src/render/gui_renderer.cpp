@@ -210,12 +210,6 @@ void GuiRenderer::refresh() {
             }
         }
     }
-    // Scale fonts to match window size vs GUI design size (1024x768 vs 640x480)
-    auto& plat = Engine::instance().platform();
-    float scaleX = (float)plat.width() / 640.0f;
-    float scaleY = (float)plat.height() / 480.0f;
-    float fontScale = 1.3f;
-    Engine::instance().renderer().setFontScale(fontScale);
 }
 
 

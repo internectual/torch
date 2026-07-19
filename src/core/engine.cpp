@@ -821,6 +821,11 @@ bool Engine::init(int argc, char* argv[]) {
         });
     }
 
+    // Set font scale before init script so GGIntro and LoginDlg use the same scale
+    {
+        Engine::instance().renderer().setFontScale(1.0f);
+    }
+
     // Execute init script — the script defines the entire execution flow.
     // The init script (console_start.cs) parses args, creates profiles,
     // GUI controls, and execs any other scripts it needs.
