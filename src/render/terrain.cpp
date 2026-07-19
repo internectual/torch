@@ -358,40 +358,37 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
 #include "render/font8x8.h"
 
 bool Font::loadGFT(const uint8_t* data, size_t size) {
-    // GFT header: version(u32), charWidth(u32), charHeight(u32), charCount(u32)
+    // V12 GFT format: version(u32), fontHeight(u32), baseLine(u32), charCount(u32)
     if (size < 16) return false;
-    uint32_t ver, cw, ch, count;
-    memcpy(&ver, data, 4); memcpy(&cw, data+4, 4); memcpy(&ch, data+8, 4); memcpy(&count, data+12, 4);
-    (void)ver; (void)cw;
+    uint32_t ver, fontHeight, baseLineVal, count;
+    memcpy(&ver, data, 4); memcpy(&fontHeight, data+4, 4); memcpy(&baseLineVal, data+8, 4); memcpy(&count, data+12, 4);
+    (void)ver;
     if (count > 256) return false;
-    // Per-char data: array of GFTChar (9 bytes each): bitmapIndex(u16), xOrigin,u8, yOrigin,u8, width,u8, height,u8, xOffset,s8, yOffset,s8, xAdvance,u8
+    // Per-char data: 9 bytes each: bitmapIndex(u16), xOffset(u8), yOffset(u8), width(u8), height(u8), xOrigin(s8), yOrigin(s8), xAdvance(u8)
+    // Note: xOffset/yOffset = atlas position, xOrigin/yOrigin = bearings (V12 naming)
     uint32_t charDataOff = 16;
     uint32_t charDataSize = count * 9;
-    size_t pngStartOff = charDataOff + charDataSize + 4; // 4 bytes for PNG data length
+    size_t pngStartOff = charDataOff + charDataSize + 4; // 4 bytes for bitmapCount
     if (pngStartOff >= size) return false;
     // Read per-char metrics
     int asciiOff = 32;
-    uint32_t maxW = 0, maxH = 0, maxTotal = 0;
+    uint32_t maxW = 0;
     for (uint32_t i = 0; i < count && i + asciiOff < 256; i++) {
         const uint8_t* cd = data + charDataOff + i * 9;
-        uint32_t ch = i + asciiOff;
-        glyphs[ch].width = cd[4];
-        glyphs[ch].height = cd[5];
-        glyphs[ch].xOff = (int8_t)cd[6];
-        glyphs[ch].yOff = (int8_t)cd[7];
-        glyphs[ch].xAdvance = cd[8];
-        if (glyphs[ch].width > maxW) maxW = glyphs[ch].width;
-        if (glyphs[ch].height > maxH) maxH = glyphs[ch].height;
-        uint32_t total = (uint32_t)(glyphs[ch].yOff + glyphs[ch].height);
-        if (total > maxTotal) maxTotal = total;
+        uint32_t ci = i + asciiOff;
+        glyphs[ci].width = cd[4];
+        glyphs[ci].height = cd[5];
+        glyphs[ci].xOff = (int8_t)cd[6];   // bearing X
+        glyphs[ci].yOff = (int8_t)cd[7];   // bearing Y
+        glyphs[ci].xAdvance = cd[8];
+        if (glyphs[ci].width > maxW) maxW = glyphs[ci].width;
     }
-    charWidth = maxW > 0 ? maxW : (int32_t)cw;
-    // Cell height includes yOff + glyph height so baseline is at the cell bottom
-    charHeight = maxTotal > 0 ? (int32_t)maxTotal : (int32_t)ch;
-    if (charHeight <= 0) charHeight = (int32_t)ch;
-    if (charHeight <= 0) charHeight = (int32_t)cw;
+    charWidth = maxW > 0 ? maxW : (int32_t)fontHeight;
+    charHeight = (int32_t)fontHeight;
+    baseLine = (int32_t)baseLineVal;
     if (charHeight <= 0) charHeight = 12;
-    fontSize = (int32_t)ch;
+    if (baseLine <= 0) baseLine = charHeight;
+    fontSize = (int32_t)fontHeight;
     proportional = true;
 
 
@@ -411,14 +408,14 @@ bool Font::loadGFT(const uint8_t* data, size_t size) {
     // Build UV coordinates for each char from the per-char position data
     for (uint32_t i = 0; i < count && i + asciiOff < 256; i++) {
         const uint8_t* cd = data + charDataOff + i * 9;
-        uint32_t ch = i + asciiOff;
+        uint32_t ci = i + asciiOff;
         uint8_t xo = cd[2], yo = cd[3];
         uint8_t gw = cd[4], gh = cd[5];
         if (gw == 0 || gh == 0) continue;
         float u0 = (float)xo / texWidth, v0 = (float)yo / texHeight;
         float u1 = (float)(xo + gw) / texWidth, v1 = (float)(yo + gh) / texHeight;
-        charUV[ch][0] = u0; charUV[ch][1] = v0;
-        charUV[ch][2] = u1; charUV[ch][3] = v1;
+        charUV[ci][0] = u0; charUV[ci][1] = v0;
+        charUV[ci][2] = u1; charUV[ci][3] = v1;
     }
     loaded = true;
     return true;
@@ -574,17 +571,15 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
         float gW = prop ? (float)glyphs[c].width * scale : lh;
         float gH = prop ? (float)glyphs[c].height * scale : lh;
         float gXOff = prop ? (float)glyphs[c].xOff * scale : 0;
-        float gYOff = prop ? (float)(charHeight - glyphs[c].yOff) * scale : 0;
+        float gYOff = prop ? (float)(baseLine - glyphs[c].yOff) * scale : 0;
         float adv = prop ? (float)glyphs[c].xAdvance * scale : lh;
 
         float l = penX + gXOff, r2 = l + gW;
         float t = penY + gYOff, b2 = t + gH;
         float ra = col.r, ga = col.g, ba = col.b, aa = col.a;
 
-        // Half-texel offset to prevent UV bleeding
-        float du = 0.5f / texWidth, dv = 0.5f / texHeight;
-        float u0 = charUV[c][0] + du, v0 = charUV[c][1] + dv;
-        float u1 = charUV[c][2] - du, v1 = charUV[c][3] - dv;
+        float u0 = charUV[c][0], v0 = charUV[c][1];
+        float u1 = charUV[c][2], v1 = charUV[c][3];
 
         // 6 vertices per glyph (2 triangles, no index buffer)
         verts.push_back({l, t, 0, u0, v0, ra, ga, ba, aa});

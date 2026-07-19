@@ -104,7 +104,8 @@ struct GFTChar {
 
 struct Font {
     uint32_t texture{};
-    int32_t charWidth{}, charHeight{};   // max glyph size
+    int32_t charWidth{}, charHeight{};   // max glyph size, font cell height
+    int32_t baseLine = 0;                // distance from top of cell to baseline
     int32_t texWidth{}, texHeight{};
     float charUV[256][4]{};
     GlyphInfo glyphs[256]{};
