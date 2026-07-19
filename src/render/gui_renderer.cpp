@@ -1135,14 +1135,14 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         if (font) {
             std::string display = ctl->text.empty() ? "..." : ctl->text;
-            font->render(display.c_str(), x + 3, y + 2, {1,1,1,1}, 1.0f);
+            float sc = font->defaultScale;
+            float textH = font->charHeight * sc;
+            float textY = y + (ctl->extentY - textH) * 0.5f;
+            font->render(display.c_str(), x + 3, textY, {1,1,1,1}, 1.0f);
             // Cursor when focused
             if (ctl == gr->getFocused()) {
-                float sc = font->defaultScale;
                 float preW = font->measure(ctl->text.substr(0, ctl->cursorPos).c_str(), sc).x;
-                float scaledH = font->charHeight * sc;
-                float cy = y + 2;
-                r.drawRectFill({x + 3 + preW, cy, 0}, {x + 5 + preW, cy + scaledH, 0}, {1,1,1,1});
+                r.drawRectFill({x + 3 + preW, textY, 0}, {x + 5 + preW, textY + textH, 0}, {1,1,1,1});
             }
         }
     } else if (cn == "GuiListBoxCtrl" || cn == "GuiTextListCtrl") {
