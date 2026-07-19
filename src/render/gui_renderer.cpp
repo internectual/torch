@@ -1853,10 +1853,15 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto fti = prof->fields.find("fontType"); if (fti != prof->fields.end()) gf = r.getFont(fti->second.toString().c_str(), (int)fontSize);
             auto toi = prof->fields.find("textOffset"); if (toi != prof->fields.end()) sscanf(toi->second.toString().c_str(), "%f %f", &textOfsX, &textOfsY);
             auto ji = prof->fields.find("justify"); if (ji != prof->fields.end()) justify = ji->second.toString();
-            auto oi = prof->fields.find("opaque");
-            if (oi != prof->fields.end()) { std::string ov = oi->second.toString(); if (ov == "true" || ov == "1") gc.a = 1.0f; }
         }
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, gc);
+        bool isOpaque = false;
+        if (prof) {
+            auto oi = prof->fields.find("opaque");
+            if (oi != prof->fields.end()) { std::string ov = oi->second.toString(); if (ov == "true" || ov == "1") { isOpaque = true; gc.a = 1.0f; } }
+        }
+        // T2 convention: only draw background fill when opaque=true; opaque=false means transparent
+        if (isOpaque)
+            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, gc);
         if (!ctl->text.empty() && gf) {
             float tx = x + textOfsX;
             float ty = y + (ctl->extentY - fontSize) * 0.5f + textOfsY;

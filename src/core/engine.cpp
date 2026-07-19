@@ -2149,6 +2149,30 @@ void Engine::run() {
 void Engine::shutdown() {
     Console::instance().printf(LogLevel::Info, "Shutting down...");
 
+    // Auto-export client prefs so warrior name and settings persist between runs
+    {
+        std::string outDir = Console::instance().getStringVariable("outputDir", "");
+        std::string modPath = Console::instance().getStringVariable("modPath", "base");
+        if (!outDir.empty()) {
+            std::string fullPath = outDir + "/" + modPath + "/prefs/ClientPrefs.cs";
+            auto slash = fullPath.rfind('/');
+            if (slash != std::string::npos) {
+                std::string dir = fullPath.substr(0, slash);
+                struct stat st; if (stat(dir.c_str(), &st) != 0) mkdir(dir.c_str(), 0755);
+            }
+            FILE* f = fopen(fullPath.c_str(), "w");
+            if (f) {
+                Console::instance().forEach([&](const char* name, const Console::ConsoleItem& item) {
+                    if (item.type != Console::ConsoleItem::Variable) return;
+                    if (strncmp(name, "$pref::", 7) == 0)
+                        fprintf(f, "%s = \"%s\";\n", name, item.value.c_str());
+                });
+                fclose(f);
+                Console::instance().printf(LogLevel::Info, "Exported client prefs to %s", fullPath.c_str());
+            }
+        }
+    }
+
     g->shutdown();
     net->shutdown();
     scr->shutdown();
