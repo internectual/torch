@@ -3,6 +3,7 @@
 #include "net/network.h"
 #include <string>
 #include <vector>
+#include <map>
 #include <unordered_map>
 #include <functional>
 #include <set>
@@ -55,6 +56,9 @@ struct GuiControl {
     // Lifecycle flag: true if this dialog was pushed during the content's onWake.
     // ESC should never pop base dialogs (e.g. LaunchToolbarDlg) so the sidebar stays.
     bool isBaseDialog = false;
+
+    // Generic named-field storage set from script (e.g. altColor on ShellTabFrame)
+    std::map<std::string, std::string> fields;
 
     // ShellSliderCtrl fields
     float sliderValue = 0.5f;  // 0..1 normalized

@@ -3241,8 +3241,9 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("setAltColor", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() >= 2) {
             auto* ctl = getListCtrl(args[0].toString());
-            if (ctl && args.size() >= 2) {
-                Console::instance().printf(LogLevel::Debug, "setAltColor: ctl='%s' color='%s'", args[0].toString().c_str(), args[1].toString().c_str());
+            if (ctl) {
+                // GM_TabFrame.setAltColor(bool): toggles the gold highlight frame
+                ctl->fields["altColor"] = args[1].toBool() ? "1" : "0";
             }
         }
         return VMValue(1);

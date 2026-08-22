@@ -1385,7 +1385,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             }
         }
     } else if (cn == "GuiCheckBoxCtrl" || cn == "GuiRadioCtrl") {
-        ColorF fc{0.5f,0.5f,0.6f,1}, tc{1,1,1,1};
+        ColorF tc{1,1,1,1};
         auto* prof = getProfile(ctl->profileName);
         if (prof) {
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
@@ -1395,8 +1395,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         Texture* cbTex = getShellTex(r, cn == "GuiCheckBoxCtrl" ? "shll_checkbox.png" : "shll_radio.png");
         if (cn == "GuiRadioCtrl" && cbTex && cbTex->loaded &&
             cbTex->height % 30 == 0 && cbTex->height >= 60) {
-            // T2 shll_radio.png: vertical state array of 29x30 cells.
-            // [0]=unchecked [1]=checked ... [4]=hover highlight when present.
+            // T2 sh_radio atlas: vertical 29x30 state cells [0]=off [1]=on [4]=hover ring
             int states = cbTex->height / 30;
             int st = ctl->checked ? 1 : 0;
             float scale = ctl->extentY / 30.0f; if (scale > 1) scale = 1;
@@ -1414,9 +1413,17 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 if (ctl->checked)
                     r.drawRectFill({x + 4, y + 4, 0}, {x + sz - 4, y + sz - 4, 0}, {0.3f,0.5f,0.8f,0.8f});
             } else {
-                ColorF bg = ctl->checked ? ColorF{0.3f,0.5f,0.8f,1} : fc;
+                ColorF bg = ctl->checked ? ColorF{0.3f,0.5f,0.8f,1} : ColorF{0.5f,0.5f,0.6f,1};
                 r.drawRectFill({x, y, 0}, {x + sz, y + sz, 0}, bg);
             }
+        }
+        // T2 draws each radio choice inside a slim beveled box
+        {
+            float boxH = 20.0f;
+            float boxY = y + (ctl->extentY - boxH) * 0.5f;
+            r.drawRectFill({x - 2, boxY, 0}, {x + ctl->extentX, boxY + boxH, 0}, {0.09f, 0.11f, 0.15f, 0.9f});
+            r.drawRectFill({x - 2, boxY, 0}, {x + ctl->extentX, boxY + 1, 0}, {0.35f, 0.55f, 0.55f, 0.8f});
+            r.drawRectFill({x - 2, boxY + boxH - 1, 0}, {x + ctl->extentX, boxY + boxH, 0}, {0.15f, 0.28f, 0.28f, 0.8f});
         }
         if (font && !ctl->text.empty())
             font->render(ctl->text.c_str(), x + sz + 4, y + 2, tc, 1.0f);
@@ -1760,25 +1767,35 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc);
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), txc);
         }
-        // Closed popup: T2 gui/shll_pulldown 9-piece skin (TL..BR files), arrow overlay
-        if (!drawShellNinePatch(r, "shll_pulldown", x, y, ctl->extentX, ctl->extentY)) {
+        // Closed popup: T2 renders a slim pulldown button vertically centered
+        // in the control extent, with horizontally centered value text.
+        float slimH = 20.0f;
+        float slimY = y + (ctl->extentY - slimH) * 0.5f;
+        if (!drawShellNinePatch(r, "shll_pulldown", x, slimY, ctl->extentX, slimH)) {
             Texture* bgTex = getShellTex(r, "shll_entryfield.png");
-            if (bgTex && bgTex->loaded) {
-                r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bgTex->id);
-            } else {
-                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
-            }
+            if (bgTex && bgTex->loaded)
+                r.drawTexturedRect({x, slimY, 0}, {x + ctl->extentX, slimY + slimH, 0}, bgTex->id);
+            else
+                r.drawRectFill({x, slimY, 0}, {x + ctl->extentX, slimY + slimH, 0}, fc);
         }
         // Dropdown arrow indicator (triangle pointing down)
-        float arrX = x + ctl->extentX - 18;
-        float arrY = y + (ctl->extentY - 8) * 0.5f;
-        r.drawRectFill({arrX, arrY, 0}, {arrX + 12, arrY + 8, 0}, {0.4f, 0.4f, 0.5f, 1});
-        // Small downward triangle using rects
-        r.drawRectFill({arrX + 3, arrY + 2, 0}, {arrX + 9, arrY + 3, 0}, {0.2f, 0.2f, 0.25f, 1});
-        r.drawRectFill({arrX + 4, arrY + 4, 0}, {arrX + 8, arrY + 5, 0}, {0.2f, 0.2f, 0.25f, 1});
+        float arrX = x + ctl->extentX - 16;
+        float arrY = slimY + (slimH - 8) * 0.5f;
+        r.drawRectFill({arrX, arrY, 0}, {arrX + 11, arrY + 8, 0}, {0.25f, 0.5f, 0.5f, 1});
+        r.drawRectFill({arrX + 2, arrY + 2, 0}, {arrX + 9, arrY + 3, 0}, {0.08f, 0.28f, 0.28f, 1});
+        r.drawRectFill({arrX + 3, arrY + 4, 0}, {arrX + 8, arrY + 5, 0}, {0.08f, 0.28f, 0.28f, 1});
+        r.drawRectFill({arrX + 4, arrY + 6, 0}, {arrX + 7, arrY + 7, 0}, {0.08f, 0.28f, 0.28f, 1});
         if (font && !ctl->text.empty()) {
-            // Clip text to control width minus dropdown arrow
-            font->render(ctl->text.c_str(), x + 4, y + (ctl->extentY - (float)font->charHeight) * 0.5f, txc, 1.0f);
+            // Horizontally centered; truncate with "..." when too wide for the arrow area
+            std::string txt = ctl->text;
+            float maxW = ctl->extentX - 24.0f;
+            if (font->measure(txt.c_str()).x > maxW) {
+                while (txt.size() > 1 && font->measure((txt + "...").c_str()).x > maxW)
+                    txt.pop_back();
+                txt += "...";
+            }
+            float tx = x + 8.0f + (maxW - font->measure(txt.c_str()).x) * 0.5f;
+            font->render(txt.c_str(), tx, slimY + (slimH - (float)font->charHeight) * 0.5f, txc, 1.0f);
         }
         // Dropdown list when open — drawn in the top-most post pass so later
         // siblings/overlays don't paint over it.
@@ -1978,13 +1995,16 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
     } else if (cn == "ShellTabFrame") {
         // Tab content frame — draw a bordered area for tab pages
         ColorF frameBg{0.12f,0.12f,0.15f,1};
-        ColorF frameBorder{0.25f,0.25f,0.32f,1};
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, frameBg);
-        // Thin border
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + 1, 0}, frameBorder);
-        r.drawRectFill({x, y + ctl->extentY - 1, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, frameBorder);
-        r.drawRectFill({x, y, 0}, {x + 1, y + ctl->extentY, 0}, frameBorder);
-        r.drawRectFill({x + ctl->extentX - 1, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, frameBorder);
+        // Gold highlight frame when script toggled altColor (GM_TabFrame.setAltColor)
+        bool alt = false;
+        { auto fit = ctl->fields.find("altColor"); if (fit != ctl->fields.end()) alt = (fit->second == "1"); }
+        ColorF frameBorder = alt ? ColorF{0.95f, 0.78f, 0.15f, 1} : ColorF{0.25f, 0.25f, 0.32f, 1};
+        float bw = alt ? 2.0f : 1.0f;
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + bw, 0}, frameBorder);
+        r.drawRectFill({x, y + ctl->extentY - bw, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, frameBorder);
+        r.drawRectFill({x, y, 0}, {x + bw, y + ctl->extentY, 0}, frameBorder);
+        r.drawRectFill({x + ctl->extentX - bw, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, frameBorder);
     } else if (cn == "ShellTabGroupCtrl" || cn == "GuiTabBookCtrl") {
         // Tab group: draw tab buttons along the top, then children below
         const float tabH = 29;
@@ -2043,6 +2063,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                         if (!found) rowYs.push_back(c.y);
                     }
                     numStates = (int)rowYs.size();
+                    // T2 shell tab/button skins use at most 4 states; separator-scan
+                    // noise on 54x192-style atlases over-counts rows and slices
+                    // mid-art, leaving garbage bands around the tabs.
+                    if (numStates > 4) numStates = 4;
                     if (numStates < 1) numStates = 3;
                     state = std::min(state, numStates - 1);
                 }
