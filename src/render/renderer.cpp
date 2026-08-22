@@ -333,7 +333,16 @@ void Renderer::spriteBatchFlush() {
     glBindVertexArray(spriteVAO);
     glBindBuffer(GL_ARRAY_BUFFER, spriteVBO);
     glBufferData(GL_ARRAY_BUFFER, spriteBatchBuf.size() * sizeof(float), spriteBatchBuf.data(), GL_DYNAMIC_DRAW);
+
+    // 2D quads are wound for front-facing with culling OFF; if any earlier
+    // code left GL_CULL_FACE enabled, every quad here would be discarded.
+    GLboolean cullWasOn = glIsEnabled(GL_CULL_FACE);
+    GLboolean depthWasOn = glIsEnabled(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(spriteBatchBuf.size() / 9));
+    if (cullWasOn) glEnable(GL_CULL_FACE);
+    if (depthWasOn) glEnable(GL_DEPTH_TEST);
 
     stats.drawCalls++;
     spriteBatchBuf.clear();
@@ -418,9 +427,13 @@ void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color, u
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
 
+    // Disable culling for this quad and RESTORE the previous state — an
+    // unconditional glEnable here leaked culling into the rest of the frame,
+    // silently discarding every subsequently batched 2D quad and 3D model.
+    GLboolean cullWasOn = glIsEnabled(GL_CULL_FACE);
     glDisable(GL_CULL_FACE);
     glDrawArrays(GL_TRIANGLES, 0, 6);
-    glEnable(GL_CULL_FACE);
+    if (cullWasOn) glEnable(GL_CULL_FACE);
 
     glDepthMask(GL_TRUE);
 

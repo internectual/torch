@@ -1093,6 +1093,7 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
 
         // Alpha test only for materials with Translucent or Additive flags
         bool alphaTest = (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0;
+        if (getenv("TORCH_NO_ALPHATEST")) alphaTest = false; // diagnostic escape hatch
         if (shader) shader->setUniform("uAlphaTest", (int32_t)alphaTest);
 
         int lmIdx = (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
@@ -1183,7 +1184,11 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     glDisable(GL_BLEND);
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        fprintf(stderr, "DBG DTSShape::render EXCEPTION: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "DBG DTSShape::render EXCEPTION: unknown\n");
+    }
 }
 
 int DTSShape::findNode(const std::string& name) const {

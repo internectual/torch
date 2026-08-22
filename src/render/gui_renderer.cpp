@@ -7,6 +7,7 @@
 #include <GL/glew.h>
 #include <algorithm>
 #include <unordered_map>
+#include <set>
 #include <cstdio>
 #include <cmath>
 
@@ -678,6 +679,50 @@ static Texture* getShellTexWithCells(Renderer& r, const char* name, const std::v
     return tex;
 }
 
+// Draw an arbitrary sub-region of a texture into a destination rect.
+static void drawTexRegion(Renderer& r, Texture* tex, float sx, float sy, float sw, float sh,
+                          float dx, float dy, float dw, float dh) {
+    if (!tex || !tex->loaded || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+    r.drawTexturedRectUV({dx, dy, 0}, {dx + dw, dy + dh, 0}, tex->id,
+        sx / tex->width, sy / tex->height, (sx + sw) / tex->width, (sy + sh) / tex->height);
+}
+
+// Compose a 9-piece shell skin from separate files under textures/gui/
+// (<base>_TL.png .. <base>_BR.png). Returns false if pieces are missing so
+// the caller can fall back to flat fills.
+static bool drawShellNinePatch(Renderer& r, const std::string& base,
+                               float x, float y, float w, float h) {
+    auto ld = [&](const char* suf) -> Texture* {
+        return r.loadTexture(("textures/gui/" + base + suf + ".png").c_str());
+    };
+    Texture* tl = ld("_TL");
+    if (!tl || !tl->loaded) return false;
+    Texture* tm = ld("_TM"); Texture* tr = ld("_TR");
+    Texture* ml = ld("_ML"); Texture* mm = ld("_MM"); Texture* mr = ld("_MR");
+    Texture* bl = ld("_BL"); Texture* bm = ld("_BM"); Texture* br = ld("_BR");
+    if (!tm || !tr || !ml || !mm || !mr || !bl || !bm || !br ||
+        !tm->loaded || !tr->loaded || !ml->loaded || !mm->loaded ||
+        !mr->loaded || !bl->loaded || !bm->loaded || !br->loaded) return false;
+    float ps = tl->width;
+    if (ps > w * 0.5f) ps = w * 0.5f;
+    if (ps > h * 0.5f) ps = h * 0.5f;
+    float iw = w - 2 * ps, ih = h - 2 * ps;
+    drawTexRegion(r, tl, 0, 0, (float)tl->width, (float)tl->height, x, y, ps, ps);
+    drawTexRegion(r, tr, 0, 0, (float)tr->width, (float)tr->height, x + w - ps, y, ps, ps);
+    drawTexRegion(r, bl, 0, 0, (float)bl->width, (float)bl->height, x, y + h - ps, ps, ps);
+    drawTexRegion(r, br, 0, 0, (float)br->width, (float)br->height, x + w - ps, y + h - ps, ps, ps);
+    if (iw > 0) {
+        drawTexRegion(r, tm, 0, 0, (float)tm->width, (float)tm->height, x + ps, y, iw, ps);
+        drawTexRegion(r, bm, 0, 0, (float)bm->width, (float)bm->height, x + ps, y + h - ps, iw, ps);
+        drawTexRegion(r, mm, 0, 0, (float)mm->width, (float)mm->height, x + ps, y + ps, iw, ih);
+    }
+    if (ih > 0) {
+        drawTexRegion(r, ml, 0, 0, (float)ml->width, (float)ml->height, x, y + ps, ps, ih);
+        drawTexRegion(r, mr, 0, 0, (float)mr->width, (float)mr->height, x + w - ps, y + ps, ps, ih);
+    }
+    return true;
+}
+
 // Forward declaration with clip support
 static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canvas,
     float scrollOfsX, float scrollOfsY, const ClipRect* clip);
@@ -752,16 +797,27 @@ static void drawPopupDropdownList(Renderer& r, GuiControl* ctl, float x, float y
     r.drawRectFill({popX, popY + popH - 1, 0}, {popX + popW, popY + popH, 0}, {0.4f, 0.5f, 0.7f, 1});
     r.drawRectFill({popX, popY, 0}, {popX + 1, popY + popH, 0}, {0.4f, 0.5f, 0.7f, 1});
     r.drawRectFill({popX + popW - 1, popY, 0}, {popX + popW, popY + popH, 0}, {0.4f, 0.5f, 0.7f, 1});
+    // T2 pulldown bar art behind hovered / selected rows
+    Texture* rolTex = getShellTex(r, "shll_pulldownbar_rol.png");
+    Texture* actTex = getShellTex(r, "shll_pulldownbar_act.png");
     int itemIdx = 0;
     float iy = popY;
     for (auto& item : ctl->menuItems) {
         if (item.isSeparator) {
             r.drawRectFill({popX + 4, iy + lineH*0.5f, 0}, {popX + popW - 4, iy + lineH*0.5f + 1, 0}, {0.4f,0.4f,0.5f,0.8f});
         } else {
-            if (itemIdx == ctl->hoveredItem)
+            bool hovered = (itemIdx == ctl->hoveredItem);
+            bool sel = (item.text == ctl->text);
+            Texture* barTex = hovered ? rolTex : (sel ? actTex : nullptr);
+            if (barTex && barTex->loaded && !hovered)
+                drawTexRegion(r, barTex, 0, 0, (float)barTex->width, (float)barTex->height,
+                              popX + 3, iy + 2, popW - 6, lineH - 4);
+            else if (hovered && rolTex && rolTex->loaded)
+                drawTexRegion(r, rolTex, 0, 0, (float)rolTex->width, (float)rolTex->height,
+                              popX + 3, iy + 2, popW - 6, lineH - 4);
+            else if (hovered)
                 r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {0.32f, 0.42f, 0.6f, 1});
             if (font) {
-                bool sel = (item.text == ctl->text);
                 ColorF ic = sel ? ColorF{0.3f,0.5f,0.8f,0.9f} : ColorF{0.85f,0.92f,1,1};
                 font->render(item.text.c_str(), popX + 6, iy + (lineH - (float)font->charHeight) * 0.5f, ic, 1.0f);
             }
@@ -875,37 +931,43 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (launchTex && launchTex->loaded) {
             r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, launchTex->id);
         } else {
-        // 3-slice renderer: cells are row-major [row0:Ln,Lh,Lp row1:Mn,Mh,Mp row2:Rn,Rh,Rp]
-        // For state S: Left=cells[S], Mid=cells[3+S], Right=cells[6+S] (states in columns, pieces in rows)
+        // 3-slice renderer for shll_button-style atlases (54x123 = 3 state
+        // COLUMNS x 3 piece ROWS: top cap / middle band / bottom cap).
+        // Cell index = part*3 + state (states are columns, parts are rows).
         const std::vector<BmpCell>* bmpCells = nullptr;
         Texture* shTex = getShellTexWithCells(r, "shll_button.png", bmpCells);
-        if (shTex && bmpCells && bmpCells->size() >= 9) {
+        bool haveOwnTex = btnTex && btnTex->loaded;
+        bool gridApplies = bmpCells && bmpCells->size() >= 9 &&
+                           (!haveOwnTex || (btnTex->width == 54 && btnTex->height == 123));
+        if (gridApplies) {
             int state = ctl->hovered ? 1 : (ctl->menuOpen ? 2 : 0); // 0=normal, 1=highlight, 2=pressed
-            auto& cL = (*bmpCells)[state * 3 + 0]; // left cap for this state
-            auto& cF = (*bmpCells)[state * 3 + 1]; // fill/middle for this state
-            auto& cR = (*bmpCells)[state * 3 + 2]; // right cap for this state
-            auto* ss = ShaderManager::getSpriteShader();
-            if (ss) {
-                ss->bind(); ss->setUniform("uProjection",r.projection); ss->setUniform("uView",r.view);
-                ss->setUniform("uUseTexture",int32_t(1)); ss->setUniform("uTexture",int32_t(0));
-                glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, shTex->id);
-                float cellH = (float)cL.h;
-                float lw = (float)cL.w, rw = (float)cR.w;
-                float midW = ctl->extentX - lw - rw; if (midW < 0) midW = 0;
-                float by = y + (ctl->extentY - cellH) * 0.5f; // vertically center
-                // Left cap (native size)
-                r.drawTexturedRectUV({x, by, 0}, {x + lw, by + cellH, 0}, shTex->id,
-                    (float)cL.x/shTex->width, (float)cL.y/shTex->height,
-                    (float)(cL.x+cL.w)/shTex->width, (float)(cL.y+cL.h)/shTex->height);
-                // Right cap (native size)
-                r.drawTexturedRectUV({x + lw + midW, by, 0}, {x + lw + midW + rw, by + cellH, 0}, shTex->id,
-                    (float)cR.x/shTex->width, (float)cR.y/shTex->height,
-                    (float)(cR.x+cR.w)/shTex->width, (float)(cR.y+cR.h)/shTex->height);
-                // Fill center (stretched, inset 1px to avoid separator border)
-                r.drawTexturedRectUV({x + lw, by, 0}, {x + lw + midW, by + cellH, 0}, shTex->id,
-                    (float)(cF.x+1)/shTex->width, (float)(cF.y+1)/shTex->height,
-                    (float)(cF.x+cF.w-1)/shTex->width, (float)(cF.y+cF.h-1)/shTex->height);
-            }
+            auto& cTop = (*bmpCells)[0 * 3 + state]; // top cap for this state
+            auto& cMid = (*bmpCells)[1 * 3 + state]; // stretchable middle band
+            auto& cBot = (*bmpCells)[2 * 3 + state]; // bottom cap for this state
+            float capH = (float)cTop.h;              // 41px native cap height
+            // Scale caps down so the full art fits typical button heights (~38px)
+            float capDst = ctl->extentY * 0.5f;
+            if (capDst > capH) capDst = capH;
+            float midDst = ctl->extentY - 2 * capDst; if (midDst < 0) midDst = 0;
+            drawTexRegion(r, shTex, (float)cTop.x, (float)cTop.y, (float)cTop.w, (float)cTop.h,
+                          x, y, ctl->extentX, capDst);
+            if (midDst > 0)
+                drawTexRegion(r, shTex, (float)(cMid.x + 1), (float)(cMid.y + 1), (float)(cMid.w - 2), (float)(cMid.h - 2),
+                              x, y + capDst, ctl->extentX, midDst);
+            drawTexRegion(r, shTex, (float)cBot.x, (float)cBot.y, (float)cBot.w, (float)cBot.h,
+                          x, y + ctl->extentY - capDst, ctl->extentX, capDst);
+        } else if (!launchTex && btnTex && btnTex->loaded && btnTex->width > btnTex->height * 2) {
+            // Horizontal multi-state strip (e.g. gui/shll_soundbutton 104x27 = 4 states):
+            // [normal, hover/rollover, pressed, disabled]
+            int n = (btnTex->width + btnTex->height / 2) / btnTex->height;
+            if (n < 1) n = 1;
+            float cw = (float)btnTex->width / n;
+            int st = ctl->hovered ? 1 : 0;
+            if (st >= n) st = 0;
+            drawTexRegion(r, btnTex, st * cw, 0, cw, (float)btnTex->height,
+                          x, y, ctl->extentX, ctl->extentY);
+        } else if (!launchTex && btnTex && btnTex->loaded) {
+            r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, btnTex->id);
         } else {
             // Gradient-like button using stacked rects (since shell textures unavailable)
             ColorF top = btnFill;
@@ -1324,23 +1386,37 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
     } else if (cn == "GuiCheckBoxCtrl" || cn == "GuiRadioCtrl") {
         ColorF fc{0.5f,0.5f,0.6f,1}, tc{1,1,1,1};
-        std::string bmp;
         auto* prof = getProfile(ctl->profileName);
         if (prof) {
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
-            auto bi = prof->fields.find("bitmap"); if (bi != prof->fields.end()) bmp = bi->second.toString();
         }
         float sz = 16;
-        Texture* cbTex = nullptr;
-        if (!bmp.empty()) { cbTex = r.loadTexture((bmp + ".png").c_str()); if (!cbTex) cbTex = r.loadTexture(("textures/" + bmp + ".png").c_str()); }
-        if (!cbTex) cbTex = getShellTex(r, cn == "GuiCheckBoxCtrl" ? "shll_checkbox.png" : "shll_radio.png");
-        if (cbTex && cbTex->loaded) {
-            r.drawTexturedRect({x, y, 0}, {x + sz, y + sz, 0}, cbTex->id);
-            if (ctl->checked)
-                r.drawRectFill({x + 4, y + 4, 0}, {x + sz - 4, y + sz - 4, 0}, {0.3f,0.5f,0.8f,0.8f});
-        } else {
-            ColorF bg = ctl->checked ? ColorF{0.3f,0.5f,0.8f,1} : fc;
-            r.drawRectFill({x, y, 0}, {x + sz, y + sz, 0}, bg);
+        bool drewAtlas = false;
+        Texture* cbTex = getShellTex(r, cn == "GuiCheckBoxCtrl" ? "shll_checkbox.png" : "shll_radio.png");
+        if (cn == "GuiRadioCtrl" && cbTex && cbTex->loaded &&
+            cbTex->height % 30 == 0 && cbTex->height >= 60) {
+            // T2 shll_radio.png: vertical state array of 29x30 cells.
+            // [0]=unchecked [1]=checked ... [4]=hover highlight when present.
+            int states = cbTex->height / 30;
+            int st = ctl->checked ? 1 : 0;
+            float scale = ctl->extentY / 30.0f; if (scale > 1) scale = 1;
+            float dw = (float)cbTex->width * scale, dh = 30.0f * scale;
+            float dy = y + (ctl->extentY - dh) * 0.5f;
+            drawTexRegion(r, cbTex, 0, (float)st * 30.0f, (float)cbTex->width, 30.0f, x, dy, dw, dh);
+            if (ctl->hovered && states >= 5)
+                drawTexRegion(r, cbTex, 0, 4.0f * 30.0f, (float)cbTex->width, 30.0f, x, dy, dw, dh);
+            sz = dw;
+            drewAtlas = true;
+        }
+        if (!drewAtlas) {
+            if (cbTex && cbTex->loaded) {
+                r.drawTexturedRect({x, y, 0}, {x + sz, y + sz, 0}, cbTex->id);
+                if (ctl->checked)
+                    r.drawRectFill({x + 4, y + 4, 0}, {x + sz - 4, y + sz - 4, 0}, {0.3f,0.5f,0.8f,0.8f});
+            } else {
+                ColorF bg = ctl->checked ? ColorF{0.3f,0.5f,0.8f,1} : fc;
+                r.drawRectFill({x, y, 0}, {x + sz, y + sz, 0}, bg);
+            }
         }
         if (font && !ctl->text.empty())
             font->render(ctl->text.c_str(), x + sz + 4, y + 2, tc, 1.0f);
@@ -1684,12 +1760,14 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc);
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), txc);
         }
-        // Try to load entry field texture for background
-        Texture* bgTex = getShellTex(r, "shll_entryfield.png");
-        if (bgTex && bgTex->loaded) {
-            r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bgTex->id);
-        } else {
-            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
+        // Closed popup: T2 gui/shll_pulldown 9-piece skin (TL..BR files), arrow overlay
+        if (!drawShellNinePatch(r, "shll_pulldown", x, y, ctl->extentX, ctl->extentY)) {
+            Texture* bgTex = getShellTex(r, "shll_entryfield.png");
+            if (bgTex && bgTex->loaded) {
+                r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bgTex->id);
+            } else {
+                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
+            }
         }
         // Dropdown arrow indicator (triangle pointing down)
         float arrX = x + ctl->extentX - 18;
@@ -2008,6 +2086,14 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             renderControlRec(gr, child, canvas, scrollOfsX, scrollOfsY, clip);
         return; // prevent generic children loop below
     } else if (cn.find("Hud") == 0 || cn.find("ShellFieldCtrl") == 0 || cn.find("ShellField") == 0) {
+        // T2 shell pane/field frame (shll_field_* nine-piece files)
+        if (cn.find("ShellField") == 0) {
+            if (!drawShellNinePatch(r, "shll_field", x, y, ctl->extentX, ctl->extentY))
+                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.12f, 0.12f, 0.15f, 1});
+            for (auto* child : ctl->children)
+                renderControlRec(gr, child, canvas, scrollOfsX, scrollOfsY, clip);
+            return;
+        }
         // HUD controls: transparent background with specific rendering per type
         auto* prof = getProfile(ctl->profileName);
         ColorF tc{0.8f,0.8f,0.9f,0.9f};
@@ -2133,19 +2219,14 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 glDepthMask(GL_TRUE);
                 glClear(GL_DEPTH_BUFFER_BIT);
 
-                // Set perspective projection
+                // Set perspective projection — use the engine's own builder
+                // (hand-rolled matrices risk row/column convention mismatches).
+                // Camera pulled back along -Z via the view matrix.
                 MatrixF persp;
-                persp.identity();
-                float aspect = sw / sh;
-                float fov = 1.0f; // ~60 degrees half-angle
-                persp.m[0][0] = fov / aspect;
-                persp.m[1][1] = fov;
-                persp.m[2][2] = -100.0f / (100.0f - 0.1f);
-                persp.m[2][3] = -1.0f;
-                persp.m[3][2] = -(0.1f * 100.0f) / (100.0f - 0.1f);
-                persp.m[3][3] = 0.0f;
+                persp.perspective(1.2f, sw / sh, 0.1f, 100.0f);
                 r.setProjection(persp);
-                r.setView(MatrixF{});
+                MatrixF viewM; viewM = MatrixF{}; viewM.setTranslation({0, 0.1f, -2.3f});
+                r.setView(viewM);
 
                 // Compute model bounds for framing
                 Point3F mn{1e9f, 1e9f, 1e9f}, mx{-1e9f, -1e9f, -1e9f};
@@ -2179,18 +2260,18 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 MatrixF ry; ry.setRotationY(ctl->modelYaw);
                 MatrixF sc2; sc2.setScale({fitScale, fitScale, fitScale});
                 MatrixF tr; tr.setTranslation({-center.x, -center.y, -center.z});
-                // Push the centered model into the camera frustum: the perspective
-                // matrix has near=0.1/far=100 with w=-z_eye, so a model sitting at
-                // z≈0 has w≈0 and gets clipped away entirely.
-                float camDist = 2.8f * (radius > 1e-3f ? 1.0f : 0.0f) + 2.2f;
-                MatrixF push; push.setTranslation({0, 0, -camDist});
-                MatrixF model = push * ry * Math::czUpToYUp() * sc2 * tr;
+                MatrixF model = ry * sc2 * tr;
                 r.setModel(model);
 
                 // Render the shape
                 auto* defShader = ShaderManager::getDefaultShader();
                 if (defShader) defShader->bind();
+                // GUI pass runs with culling disabled; don't let a leaked
+                // GL_CULL_FACE from earlier code discard the model's faces.
+                GLboolean modelCullWasOn = glIsEnabled(GL_CULL_FACE);
+                glDisable(GL_CULL_FACE);
                 shape.render(0);
+                if (modelCullWasOn) glEnable(GL_CULL_FACE);
 
                 // Restore GL state
                 glViewport(oldVP[0], oldVP[1], oldVP[2], oldVP[3]);
