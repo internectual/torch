@@ -1393,6 +1393,15 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         float sz = 16;
         bool drewAtlas = false;
         Texture* cbTex = getShellTex(r, cn == "GuiCheckBoxCtrl" ? "shll_checkbox.png" : "shll_radio.png");
+        // T2 draws each radio choice inside a slim beveled box — draw it BEFORE
+        // the state art so selection stays fully visible.
+        {
+            float boxH = 20.0f;
+            float boxY = y + (ctl->extentY - boxH) * 0.5f;
+            r.drawRectFill({x - 2, boxY, 0}, {x + ctl->extentX, boxY + boxH, 0}, {0.09f, 0.11f, 0.15f, 0.9f});
+            r.drawRectFill({x - 2, boxY, 0}, {x + ctl->extentX, boxY + 1, 0}, {0.35f, 0.55f, 0.55f, 0.8f});
+            r.drawRectFill({x - 2, boxY + boxH - 1, 0}, {x + ctl->extentX, boxY + boxH, 0}, {0.15f, 0.28f, 0.28f, 0.8f});
+        }
         if (cn == "GuiRadioCtrl" && cbTex && cbTex->loaded &&
             cbTex->height % 30 == 0 && cbTex->height >= 60) {
             // T2 sh_radio atlas: vertical 29x30 state cells [0]=off [1]=on [4]=hover ring
@@ -1417,14 +1426,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 r.drawRectFill({x, y, 0}, {x + sz, y + sz, 0}, bg);
             }
         }
-        // T2 draws each radio choice inside a slim beveled box
-        {
-            float boxH = 20.0f;
-            float boxY = y + (ctl->extentY - boxH) * 0.5f;
-            r.drawRectFill({x - 2, boxY, 0}, {x + ctl->extentX, boxY + boxH, 0}, {0.09f, 0.11f, 0.15f, 0.9f});
-            r.drawRectFill({x - 2, boxY, 0}, {x + ctl->extentX, boxY + 1, 0}, {0.35f, 0.55f, 0.55f, 0.8f});
-            r.drawRectFill({x - 2, boxY + boxH - 1, 0}, {x + ctl->extentX, boxY + boxH, 0}, {0.15f, 0.28f, 0.28f, 0.8f});
-        }
+        // T2 draws each radio choice inside a slim beveled box (drawn above,
+        // before the state art, so selection stays visible)
         if (font && !ctl->text.empty())
             font->render(ctl->text.c_str(), x + sz + 4, y + 2, tc, 1.0f);
     } else if (cn == "GuiSliderCtrl") {
@@ -1795,7 +1798,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 txt += "...";
             }
             float tx = x + 8.0f + (maxW - font->measure(txt.c_str()).x) * 0.5f;
-            font->render(txt.c_str(), tx, slimY + (slimH - (float)font->charHeight) * 0.5f, txc, 1.0f);
+            font->render(txt.c_str(), tx, slimY + (slimH - (float)font->charHeight) * 0.5f, txc, 1.0f, true);
         }
         // Dropdown list when open — drawn in the top-most post pass so later
         // siblings/overlays don't paint over it.
@@ -2011,10 +2014,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         Font* tabFont = font;
         auto* prof = getProfile(ctl->profileName);
         std::string tabBmpBase;
+        ColorF tabTc{0.03f, 0.03f, 0.03f, 1}; // T2 tab labels are dark on lit tabs
         if (prof) {
             tabFont = getProfileFont(prof);
             auto bbi = prof->fields.find("bitmapBase");
             if (bbi != prof->fields.end()) tabBmpBase = bbi->second.toString();
+            auto fci = prof->fields.find("fontColor");
+            if (fci != prof->fields.end()) parseColor(fci->second.toString(), tabTc);
         }
         Texture* tabBaseTex = nullptr;
         const std::vector<BmpCell>* tabCells = nullptr;
@@ -2046,12 +2052,15 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // First pass: draw tab backgrounds and text
         float tabX = x + 2;
         for (int ti = 0; ti < (int)ctl->tabs.size(); ti++) {
+            // addTab indexes by script id — blank filler tabs (id gaps) aren't drawn
+            if (ctl->tabs[ti].text.empty()) continue;
             float textW = tabFont ? tabFont->measure(ctl->tabs[ti].text.c_str()).x : (float)ctl->tabs[ti].text.size() * 9.0f;
             float tw = std::max(60.0f, textW + 16);
             bool sel = (ti == ctl->selectedTab);
             bool hv = ctl->hovered && (ti == ctl->hoveredTab);
             if (tabBaseTex && tabBaseTex->loaded) {
-                // Bitmap array: detect number of states from cells, then select correct row
+                // T2 horizontal skins (shll_horztabbutton/lnch_Tab): each state row
+                // is [left cap | stretchable middle | right cap], W/3 per column.
                 int state = sel ? 2 : (hv ? 1 : 0);
                 int numStates = 3;
                 if (tabCells && !tabCells->empty()) {
@@ -2070,10 +2079,15 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     if (numStates < 1) numStates = 3;
                     state = std::min(state, numStates - 1);
                 }
-                // Compute UV: divide texture vertically into numStates equal strips
-                float v0 = (float)state / (float)numStates;
-                float v1 = (float)(state + 1) / (float)numStates;
-                r.drawTexturedRectUV({tabX, y, 0}, {tabX + tw, y + tabH, 0}, tabBaseTex->id, 0, v0, 1, v1);
+                float shRow = (float)tabBaseTex->height / numStates;
+                float colW = (float)tabBaseTex->width / 3.0f;
+                float syRow = state * shRow;
+                float capW = std::min(colW, tw * 0.5f);
+                float midW = tw - capW * 2; if (midW < 0) midW = 0;
+                drawTexRegion(r, tabBaseTex, 0, syRow, colW, shRow, tabX, y, capW, tabH);
+                if (midW > 0)
+                    drawTexRegion(r, tabBaseTex, colW, syRow, colW, shRow, tabX + capW, y, midW, tabH);
+                drawTexRegion(r, tabBaseTex, colW * 2, syRow, colW, shRow, tabX + capW + midW, y, capW, tabH);
             } else {
                 // Fallback: colored rectangles with better styling
                 ColorF fill, border;
@@ -2101,7 +2115,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             // Tab text
             if (tabFont && !ctl->tabs[ti].text.empty()) {
                 float ty = y + (tabH - (float)tabFont->charHeight) * 0.5f;
-                tabFont->render(ctl->tabs[ti].text.c_str(), tabX + (tw - textW) * 0.5f, ty, {1,1,1,1}, 1.0f);
+                tabFont->render(ctl->tabs[ti].text.c_str(), tabX + (tw - textW) * 0.5f, ty, tabTc, 1.0f, true);
             }
             tabX += tw + 1;
         }
@@ -2380,6 +2394,7 @@ void GuiRenderer::update(float dt) {
                 if (tabProf) tabFont = getProfileFont(tabProf);
                 if (my >= ay && my < ay + tabH && mx >= tabX) {
                     for (int ti = 0; ti < (int)ctl->tabs.size(); ti++) {
+                        if (ctl->tabs[ti].text.empty()) continue; // blank filler tabs aren't interactive
                         float textW = tabFont ? tabFont->measure(ctl->tabs[ti].text.c_str()).x : (float)ctl->tabs[ti].text.size() * 9.0f;
                         float tw = std::max(60.0f, textW + 16);
                         if (mx >= tabX && mx < tabX + tw) {
@@ -2667,6 +2682,12 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         if (canvas) closePopups(canvas);
     }
     if (!hit) return false;
+    // GuiPlayerView: press begins drag-to-rotate (handled in handleDrag)
+    if (hit->className == "GuiPlayerView") {
+        hit->modelRotating = true;
+        hit->lastDragX = x;
+        return true;
+    }
     // GuiServerBrowser: row selection + column header sort
     if (hit->className == "GuiServerBrowser") {
         // Compute absolute position of the control
@@ -2787,6 +2808,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             auto* tabProf = getProfile(hit->profileName);
             if (tabProf) tabFont = getProfileFont(tabProf);
             for (int ti = 0; ti < (int)hit->tabs.size(); ti++) {
+                if (hit->tabs[ti].text.empty()) continue; // blank filler tabs aren't clickable
                 float textW = tabFont ? tabFont->measure(hit->tabs[ti].text.c_str()).x : (float)hit->tabs[ti].text.size() * 9.0f;
                 float tw = std::max(60.0f, textW + 16);
                 if (x >= tabX && x < tabX + tw) {
@@ -2900,6 +2922,21 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
 
 bool GuiRenderer::handleDrag(int x, int y) {
     if (!canvas) return false;
+    // GuiPlayerView: dragging horizontally rotates the model
+    {
+        std::function<bool(GuiControl*)> rotate = [&](GuiControl* c) -> bool {
+            if (!c) return false;
+            if (c->modelRotating && c->lastDragX >= 0) {
+                c->modelYaw += (float)(x - c->lastDragX) * 0.01f;
+                c->lastDragX = x;
+                return true;
+            }
+            for (auto* ch : c->children) if (rotate(ch)) return true;
+            return false;
+        };
+        for (auto* d : dialogStack) if (rotate(d)) return true;
+        if (rotate(canvas)) return true;
+    }
     // Find any control that is being dragged
     std::function<bool(GuiControl*)> findDrag = [&](GuiControl* ctl) -> bool {
         if (!ctl) return false;
@@ -2946,6 +2983,8 @@ void GuiRenderer::handleDragRelease() {
         if (!ctl) return;
         ctl->sliderDragging = false;
         ctl->windowDragging = false;
+        ctl->modelRotating = false;
+        ctl->lastDragX = -1;
         for (auto* c : ctl->children) clearDrag(c);
     };
     clearDrag(canvas);

@@ -60,6 +60,10 @@ struct GuiControl {
     // Generic named-field storage set from script (e.g. altColor on ShellTabFrame)
     std::map<std::string, std::string> fields;
 
+    // GuiPlayerView mouse-drag rotation
+    bool modelRotating = false;
+    int lastDragX = -1;
+
     // ShellSliderCtrl fields
     float sliderValue = 0.5f;  // 0..1 normalized
     float sliderMin = 0.0f, sliderMax = 1.0f;

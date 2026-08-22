@@ -120,7 +120,7 @@ struct Font {
     bool load(const uint8_t* data, size_t size);
     bool loadDefault(int size = 8);
     bool loadGFT(const uint8_t* data, size_t size);
-    void render(const char* text, float x, float y, const ColorF& color, float scale = 1.0f);
+    void render(const char* text, float x, float y, const ColorF& color, float scale = 1.0f, bool exactColor = false);
     Point2F measure(const char* text, float scale = 1.0f);
 };
 

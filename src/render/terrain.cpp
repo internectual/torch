@@ -514,12 +514,13 @@ bool Font::load(const uint8_t* data, size_t size) {
     return true;
 }
 
-void Font::render(const char* text, float x, float y, const ColorF& color, float scale) {
+void Font::render(const char* text, float x, float y, const ColorF& color, float scale, bool exactColor) {
     if (!loaded || !text) return;
     scale *= defaultScale;
     // Enforce minimum brightness so text is always readable on dark backgrounds
+    // (exactColor=true opts out — e.g. T2 pulldowns/tab labels are black-on-teal)
     ColorF col = color;
-    if (col.r + col.g + col.b < 0.3f) col = {1,1,1,1};
+    if (!exactColor && col.r + col.g + col.b < 0.3f) col = {1,1,1,1};
 
     // Flush any pending sprite batch before we bind our own shader/projection
     Engine::instance().renderer().flushSpriteBatch();

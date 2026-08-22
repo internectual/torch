@@ -2242,10 +2242,21 @@ bool ScriptEngine::init() {
 
     // Track named audio sources (name -> source mapping for alxCreateSource)
     static std::unordered_map<std::string, SoundSource*> s_audioSources;
+    static std::unordered_map<std::string, SoundBuffer*> s_audioBuffers;
+    static int s_nextAudioHandle = 1;
 
     tsInstance->registerNative("alxPlay", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         std::string name = args[0].toString();
+        // Numeric handle from alxCreateSource → play that source directly
+        if (!name.empty() && name.find_first_not_of("0123456789") == std::string::npos) {
+            auto it = s_audioSources.find(name);
+            if (it != s_audioSources.end()) {
+                auto bit = s_audioBuffers.find(name);
+                if (bit != s_audioBuffers.end()) it->second->play(bit->second);
+                return VMValue(1);
+            }
+        }
         // Try creating a one-shot source from sound/Name.wav or sound/Name.ogg
         auto& audio = Engine::instance().audio();
         auto loadAndPlay = [&](const std::string& path) -> bool {
@@ -2953,6 +2964,16 @@ bool ScriptEngine::init() {
         };
         std::string path = "sound/" + soundName + ".wav";
         if (!tryLoad(path)) { path = "sound/" + soundName + ".ogg"; tryLoad(path); }
+        // Full relative paths (e.g. "voice/Male1/gbl.hi.wav" from voice.vl2)
+        if (!buf && soundName.find('/') != std::string::npos) {
+            tryLoad(soundName);
+            if (!buf) {
+                std::string lower = soundName;
+                for (auto& c : lower) c = (char)tolower((unsigned char)c);
+                tryLoad(lower);
+            }
+            if (buf) path = soundName;
+        }
         if (!buf) {
             for (auto& c : soundName) c = (char)tolower((unsigned char)c);
             path = "sound/" + soundName + ".wav";
@@ -2964,11 +2985,19 @@ bool ScriptEngine::init() {
         src->play(buf);
         src->stop(); // created but not playing yet
         s_audioSources[name] = src;
-        return VMValue(1);
+        s_audioBuffers[name] = buf;
+        // Numeric handle so script-side alxPlay(%handle) can resolve the source
+        int h = s_nextAudioHandle++;
+        s_audioSources[std::to_string(h)] = src;
+        s_audioBuffers[std::to_string(h)] = buf;
+        return VMValue((double)h);
     });
     tsInstance->registerNative("alxGetWaveLen", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         std::string name = args[0].toString();
+        // Full wave paths (voice.vl2 etc.) — return a sane fixed length so
+        // script-side schedule() re-enables buttons after playback.
+        if (name.find('/') != std::string::npos) return VMValue(2500.0);
         auto it = s_audioSources.find(name);
         if (it == s_audioSources.end()) return VMValue(0);
         // Return 1000 as a default reasonable length (T2 stubs often return this)
