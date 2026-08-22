@@ -2349,8 +2349,16 @@ bool ScriptEngine::init() {
         if (args.size() < 3) return VMValue(1);
         auto* ctl = getListCtrl(args[0].toString());
         if (!ctl) return VMValue(1);
-        int id = (int)args[1].toDouble();
-        std::string txt = args[2].toString();
+        // ShellLaunchMenu uses add(id, text), popup menus use add(text, id)
+        std::string txt;
+        int id;
+        if (ctl->className == "ShellLaunchMenu") {
+            id = (int)args[1].toDouble();
+            txt = args[2].toString();
+        } else {
+            txt = args[1].toString();
+            id = (int)args[2].toDouble();
+        }
         ctl->menuItems.push_back({id, txt, false});
         return VMValue(1);
     });
@@ -2508,10 +2516,19 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     // setSelected is the T2 alias for setSelectedByIndex.
+    // For popup menus: set selectedRow and update displayed text.
+    // For tab controls: set selectedTab and trigger onSelect.
     tsInstance->registerNative("setSelected", [getOrCreateCtrl](const auto& args) -> VMValue {
         auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
         if (ctl && args.size() >= 2) {
             int idx = (int)args[1].toDouble();
+            // Popup menu: update selected item text
+            if (!ctl->menuItems.empty()) {
+                ctl->selectedRow = idx;
+                if (idx >= 0 && idx < (int)ctl->menuItems.size())
+                    ctl->text = ctl->menuItems[idx].text;
+            }
+            // Tab control: update selected tab
             ctl->selectedTab = idx;
             if (idx >= 0 && idx < (int)ctl->tabs.size()) {
                 auto* ts = Engine::instance().script().ts();
@@ -2608,18 +2625,44 @@ bool ScriptEngine::init() {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
         if (!ctl || args.size() < 2) return VMValue(std::string(""));
         int id = args[1].toInt();
+        // Search menuItems first (popup menus), then listRows (text lists)
+        for (auto& item : ctl->menuItems)
+            if (item.id == id) return VMValue(item.text);
+        if (id >= 0 && id < (int)ctl->listRows.size())
+            return VMValue(ctl->listRows[id]);
+        return VMValue(std::string(""));
+    });
+    // getText() — return the currently selected/displayed text
+    tsInstance->registerNative("getText", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (!ctl) return VMValue(std::string(""));
+        return VMValue(ctl->text);
+    });
+    // getTextById(id) — return text of item with matching id
+    tsInstance->registerNative("getTextById", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (!ctl || args.size() < 2) return VMValue(std::string(""));
+        int id = args[1].toInt();
+        for (auto& item : ctl->menuItems)
+            if (item.id == id) return VMValue(item.text);
         if (id >= 0 && id < (int)ctl->listRows.size())
             return VMValue(ctl->listRows[id]);
         return VMValue(std::string(""));
     });
     tsInstance->registerNative("size", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
-        return VMValue((int32_t)(ctl ? (int32_t)ctl->listRows.size() : 0));
+        if (!ctl) return VMValue(0);
+        // Check menuItems first (popup menus), then listRows (text lists)
+        if (!ctl->menuItems.empty()) return VMValue((int32_t)ctl->menuItems.size());
+        return VMValue((int32_t)ctl->listRows.size());
     });
     tsInstance->registerNative("findText", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
         if (!ctl || args.size() < 2) return VMValue(0);
         std::string search = args[1].toString();
+        // Search menuItems first (popup menus), then listRows (text lists)
+        for (int i = 0; i < (int)ctl->menuItems.size(); i++)
+            if (ctl->menuItems[i].text == search) return VMValue(i);
         for (int i = 0; i < (int)ctl->listRows.size(); i++)
             if (ctl->listRows[i] == search) return VMValue(i);
         return VMValue(-1);
@@ -2646,6 +2689,18 @@ bool ScriptEngine::init() {
             }
         }
         return VMValue(1);
+    });
+    tsInstance->registerNative("isVisible", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        return VMValue(ctl ? (ctl->visible ? 1 : 0) : 0);
+    });
+    // getId() — return the object name as a string (used with Canvas.getContent() comparisons)
+    tsInstance->registerNative("getId", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string name = args[0].toString();
+        auto* obj = ScriptEngine::instance().findObject(name.c_str());
+        if (obj) return VMValue(name);
+        return VMValue(0);
     });
     tsInstance->registerNative("setActive", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() >= 2) {
@@ -3104,7 +3159,14 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("sort", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
-        if (ctl && !ctl->listRows.empty()) {
+        if (!ctl) return VMValue(1);
+        // Sort menuItems (popup menus) if present, otherwise listRows
+        if (!ctl->menuItems.empty()) {
+            std::sort(ctl->menuItems.begin(), ctl->menuItems.end(),
+                [](const GuiControl::MenuItem& a, const GuiControl::MenuItem& b) {
+                    return a.text < b.text;
+                });
+        } else if (!ctl->listRows.empty()) {
             int col = args.size() > 1 ? args[1].toInt() : 0;
             std::sort(ctl->listRows.begin(), ctl->listRows.end(),
                 [col](const std::string& a, const std::string& b) {
@@ -3422,6 +3484,302 @@ bool ScriptEngine::init() {
         std::string str = args[0].toString();
         size_t pos = str.find(' ');
         return VMValue(pos != std::string::npos ? str.substr(0, pos) : str);
+    });
+
+    // ─── Warrior setup / options missing natives ──────────────────────
+
+    // quit() — exit the engine
+    tsInstance->registerNative("quit", [](const auto&) -> VMValue {
+        Engine::instance().quit();
+        return VMValue(1);
+    });
+
+    // Canvas.getContent() — return name of the base content panel
+    tsInstance->registerNative("getContent", [](const auto&) -> VMValue {
+        auto& gui = Engine::instance().guiRenderer();
+        if (auto* c = gui.getDialog(0))
+            return VMValue(c->name);
+        return VMValue("");
+    });
+
+    // Canvas.repaint() — no-op (continuous rendering)
+    // (already registered at line 2730)
+
+    // addScheme(id, r, g, b) — store a color scheme on a popup menu control
+    // Called as %this.addScheme(idx, r, g, b) — args[0] is objName
+    tsInstance->registerNative("addScheme", [](const auto& args) -> VMValue {
+        if (args.size() < 5) return VMValue(0);
+        std::string objName = args[0].toString();
+        int idx = args[1].toInt();
+        int r = args[2].toInt(), g = args[3].toInt(), b = args[4].toInt();
+        auto* obj = ScriptEngine::instance().findObject(objName.c_str());
+        if (obj) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%d %d %d", r, g, b);
+            obj->fields["schemeColor" + std::to_string(idx)] = VMValue(std::string(buf));
+        }
+        return VMValue(1);
+    });
+
+    // MessageBoxOK(title, message) — stub that logs and returns 1
+    tsInstance->registerNative("MessageBoxOK", [](const auto& args) -> VMValue {
+        std::string title = args.size() > 0 ? args[0].toString() : "Message";
+        std::string msg = args.size() > 1 ? args[1].toString() : "";
+        Console::instance().printf(LogLevel::Info, "MessageBoxOK: [%s] %s", title.c_str(), msg.c_str());
+        return VMValue(1);
+    });
+
+    // MessageBoxYesNo(title, message) — stub that returns 1 (Yes)
+    tsInstance->registerNative("MessageBoxYesNo", [](const auto& args) -> VMValue {
+        std::string title = args.size() > 0 ? args[0].toString() : "Message";
+        std::string msg = args.size() > 1 ? args[1].toString() : "";
+        Console::instance().printf(LogLevel::Info, "MessageBoxYesNo: [%s] %s", title.c_str(), msg.c_str());
+        return VMValue(1);
+    });
+
+    // MessageBoxOkCancel(title, message) — stub that returns 1 (OK)
+    tsInstance->registerNative("MessageBoxOkCancel", [](const auto& args) -> VMValue {
+        std::string title = args.size() > 0 ? args[0].toString() : "Message";
+        std::string msg = args.size() > 1 ? args[1].toString() : "";
+        Console::instance().printf(LogLevel::Info, "MessageBoxOkCancel: [%s] %s", title.c_str(), msg.c_str());
+        return VMValue(1);
+    });
+
+    // getDesktopResolution() — return "width height" of the desktop
+    tsInstance->registerNative("getDesktopResolution", [](const auto&) -> VMValue {
+        return Engine::instance().guiRenderer().findControl("GuiCanvas")
+            ? VMValue(std::to_string((int)Engine::instance().guiRenderer().findControl("GuiCanvas")->extentX) + " " +
+                       std::to_string((int)Engine::instance().guiRenderer().findControl("GuiCanvas")->extentY))
+            : VMValue("1024 768");
+    });
+
+    // getResolutionList() — return empty (single resolution mode)
+    tsInstance->registerNative("getResolutionList", [](const auto&) -> VMValue {
+        auto* c = Engine::instance().guiRenderer().findControl("GuiCanvas");
+        if (c) {
+            std::string res = std::to_string((int)c->extentX) + " " + std::to_string((int)c->extentY);
+            return VMValue(res);
+        }
+        return VMValue("1024 768");
+    });
+
+    // getDisplayDeviceList() — return "OpenGL"
+    tsInstance->registerNative("getDisplayDeviceList", [](const auto&) -> VMValue {
+        return VMValue("OpenGL");
+    });
+
+    // setScreenMode(w, h, bpp, fullScreen) — stub
+    tsInstance->registerNative("setScreenMode", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    // setDisplayDevice(name) — stub
+    tsInstance->registerNative("setDisplayDevice", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    // setVerticalSync(bool) — stub
+    tsInstance->registerNative("setVerticalSync", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    // writeLine(objName, line) — write a line to a FileObject's buffer
+    tsInstance->registerNative("writeLine", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        std::string objName = args[0].toString();
+        std::string line = args[1].toString();
+        auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
+        if (!sobj) return VMValue(0);
+        // Append to the internal buffer (same as read data)
+        auto dit = sobj->internals.find("__fo_data");
+        if (dit != sobj->internals.end()) {
+            dit->second.str += line + "\n";
+        } else {
+            sobj->internals["__fo_data"] = VMValue(line + "\n");
+            sobj->internals["__fo_pos"] = VMValue(0);
+        }
+        return VMValue(1);
+    });
+
+    // openForWrite(objName, path) — create an empty file object for writing
+    tsInstance->registerNative("openForWrite", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string objName = args[0].toString();
+        auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
+        if (!sobj) return VMValue(0);
+        sobj->internals["__fo_data"] = VMValue(std::string());
+        sobj->internals["__fo_pos"] = VMValue(0);
+        sobj->internals["__fo_path"] = VMValue(args.size() > 1 ? args[1].toString() : "");
+        return VMValue(1);
+    });
+
+    // openForAppend(objName, path) — open for appending
+    tsInstance->registerNative("openForAppend", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string objName = args[0].toString();
+        std::string path = args.size() > 1 ? args[1].toString() : "";
+        auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
+        if (!sobj) return VMValue(0);
+        // Try to read existing content
+        std::vector<uint8_t> data;
+        if (Engine::instance().fs().readFile(path.c_str(), data)) {
+            sobj->internals["__fo_data"] = VMValue(std::string(data.begin(), data.end()));
+        } else {
+            sobj->internals["__fo_data"] = VMValue(std::string());
+        }
+        sobj->internals["__fo_pos"] = VMValue(0);
+        sobj->internals["__fo_path"] = VMValue(path);
+        return VMValue(1);
+    });
+
+    // new ActionMap() — create a new ScriptObject for ActionMap
+    tsInstance->registerNative("ActionMap", [](const auto& args) -> VMValue {
+        static int mapCount = 0;
+        std::string name;
+        if (!args.empty()) {
+            name = args[0].toString();
+        } else {
+            name = "ActionMap_" + std::to_string(mapCount++);
+        }
+        // Create the object if it doesn't exist
+        auto& objs = ScriptEngine::instance().objects;
+        if (objs.find(name) == objs.end()) {
+            auto* obj = new ScriptObject;
+            obj->name = name;
+            obj->className = "ActionMap";
+            objs[name] = obj;
+        }
+        return VMValue(name);
+    });
+
+    // removeTaggedString(id) — no-op (tagged strings are not stored)
+    tsInstance->registerNative("removeTaggedString", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    // getRecords(objName, tag) — return concatenation of all tagged fields
+    tsInstance->registerNative("getRecords", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string objName = args[0].toString();
+        std::string tag = args.size() > 1 ? args[1].toString() : "";
+        auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
+        if (!sobj) return VMValue("");
+        std::string result;
+        for (auto& [k, v] : sobj->fields) {
+            if (tag.empty() || k.find(tag) == 0) {
+                if (!result.empty()) result += "\t";
+                result += v.toString();
+            }
+        }
+        return VMValue(result);
+    });
+
+    // getColumnName(objName, colIdx) — return column name
+    tsInstance->registerNative("getColumnName", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        // Stub: return column index as string
+        return VMValue("Col" + std::to_string(args[1].toInt()));
+    });
+
+    // getColumnKey(objName, colIdx) — return column key
+    tsInstance->registerNative("getColumnKey", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        return VMValue("col" + std::to_string(args[1].toInt()));
+    });
+
+    // getNumColumns(objName) — return 0
+    tsInstance->registerNative("getNumColumns", [](const auto&) -> VMValue {
+        return VMValue(0);
+    });
+
+    // getRowId(objName, rowIdx) — return row index as id
+    tsInstance->registerNative("getRowId", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        return VMValue(args[1].toInt());
+    });
+
+    // isRowActive(objName, rowIdx) — return true
+    tsInstance->registerNative("isRowActive", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    // setRowActive(objName, rowIdx, active) — no-op
+    tsInstance->registerNative("setRowActive", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    // selectRowByAddress(objName, addr) — no-op
+    tsInstance->registerNative("selectRowByAddress", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    // resize(objName, x, y, w, h) — set position and extent
+    tsInstance->registerNative("resize", [](const auto& args) -> VMValue {
+        if (args.size() < 5) return VMValue(0);
+        std::string objName = args[0].toString();
+        auto* ctl = Engine::instance().guiRenderer().findControl(objName);
+        if (ctl) {
+            ctl->posX = (float)args[1].toInt();
+            ctl->posY = (float)args[2].toInt();
+            ctl->extentX = (float)args[3].toInt();
+            ctl->extentY = (float)args[4].toInt();
+            return VMValue(1);
+        }
+        // Also set on the script object
+        auto* obj = ScriptEngine::instance().findObject(objName.c_str());
+        if (obj) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%d %d", args[1].toInt(), args[2].toInt());
+            obj->fields["position"] = VMValue(std::string(buf));
+            snprintf(buf, sizeof(buf), "%d %d", args[3].toInt(), args[4].toInt());
+            obj->fields["extent"] = VMValue(std::string(buf));
+        }
+        return VMValue(1);
+    });
+
+    // queryFavoriteServers() — stub
+    tsInstance->registerNative("queryFavoriteServers", [](const auto&) -> VMValue {
+        return VMValue(0);
+    });
+
+    // isServerQueryActive() — return 0
+    tsInstance->registerNative("isServerQueryActive", [](const auto&) -> VMValue {
+        return VMValue(0);
+    });
+
+    // getT2VersionNumber() — return version string
+    tsInstance->registerNative("getT2VersionNumber", [](const auto&) -> VMValue {
+        return VMValue("0.1.0 (Torch)");
+    });
+
+    // DatabaseQueryArray() — stub
+    tsInstance->registerNative("DatabaseQueryArray", [](const auto&) -> VMValue {
+        return VMValue(0);
+    });
+
+    // alxIsEnabled() — return whether audio is initialized
+    tsInstance->registerNative("alxIsEnabled", [](const auto&) -> VMValue {
+        return VMValue(Engine::instance().audio().isInitialized() ? 1 : 0);
+    });
+
+    // connect(host, port) — stub
+    tsInstance->registerNative("connect", [](const auto&) -> VMValue {
+        return VMValue(0);
+    });
+
+    // disconnect() — stub
+    tsInstance->registerNative("disconnect", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    // disconnectedCleanup() — stub
+    tsInstance->registerNative("disconnectedCleanup", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+
+    // createServer(port, maxPlayers) — stub
+    tsInstance->registerNative("createServer", [](const auto&) -> VMValue {
+        return VMValue(0);
     });
 
     // Copy all TS-registered natives to DSO VM so DSO functions can find them

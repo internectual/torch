@@ -114,6 +114,7 @@ public:
     GuiControl* hitTest(GuiControl* ctl, int mx, int my);
     GuiControl* hitTestTop(int mx, int my); // dialogStack (top-down) then canvas
     GuiControl* launchPopupAt(int mx, int my); // open ShellLaunchMenu popup containing (mx,my)
+    GuiControl* popupMenuAt(int mx, int my); // open GuiPopUpMenuCtrl dropdown item at (mx,my)
 
     GuiControl* getCanvas() { return canvas; }
     GuiControl* findControl(const std::string& name);

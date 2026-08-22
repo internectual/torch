@@ -291,8 +291,20 @@ bool Engine::init(int argc, char* argv[]) {
         if ((strcmp(argv[i], "-init") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) {
             execFile = argv[i + 1];
             Console::instance().setVariable("initScript", argv[i + 1]);
-            std::ofstream of("torch.cfg", std::ios::app);
-            if (of) of << "initScript = " << argv[i + 1] << std::endl;
+            // Persist only if not already recorded (avoid duplicate lines from repeated -init runs)
+            {
+                std::ifstream cfgIn("torch.cfg");
+                std::string line, want = "initScript = " + std::string(argv[i + 1]);
+                bool found = false;
+                while (cfgIn && std::getline(cfgIn, line)) {
+                    while (!line.empty() && (line.back() == ' ' || line.back() == '\r')) line.pop_back();
+                    if (line == want) { found = true; break; }
+                }
+                if (!found) {
+                    std::ofstream of("torch.cfg", std::ios::app);
+                    if (of) of << want << std::endl;
+                }
+            }
         }
         if ((strcmp(argv[i], "-compile") == 0 || strcmp(argv[i], "-c") == 0) && i + 1 < argc)
             compileFile = argv[i + 1];
@@ -995,17 +1007,6 @@ void Engine::run() {
             }
             prevEsc = escDown;
 
-                // trace dialog stack after ESC handling (stderr only)
-                {
-                    std::string stack;
-                    for (size_t k = 0; k < gui->dialogCount(); ++k) {
-                        if (k) stack += " -> ";
-                        GuiControl* dk = gui->getDialog(k);
-                        stack += dk ? dk->name : "(null)";
-                    }
-                    fprintf(stderr, "ESC-DIALOGS: [%s]\n", stack.c_str());
-                }
-
             // Shape viewer: left/right arrows to cycle shapes (hold to repeat)
             if (g->isShapeViewerActive()) {
                 static bool prevLeft = false, prevRight = false;
@@ -1479,7 +1480,8 @@ void Engine::run() {
                         }
                     }
                 };
-                if (launchEnter && !prevLaunchEnter && !gui->isDialogActive("ConsoleDlg")) doLaunch();
+                // Only fire doLaunch when no GUI dialogs are active — Enter should be handled by the dialog system
+                if (launchEnter && !prevLaunchEnter && gui->dialogCount() == 0 && !gui->isDialogActive("ConsoleDlg")) doLaunch();
                 prevLaunchEnter = launchEnter;
 
                 // Mouse click handling for path/args/launch
