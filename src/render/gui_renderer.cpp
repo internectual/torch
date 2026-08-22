@@ -931,31 +931,28 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (launchTex && launchTex->loaded) {
             r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, launchTex->id);
         } else {
-        // 3-slice renderer for shll_button-style atlases (54x123 = 3 state
-        // COLUMNS x 3 piece ROWS: top cap / middle band / bottom cap).
-        // Cell index = part*3 + state (states are columns, parts are rows).
+        // 3-slice renderer for shll_button.png (54x123): 3x3 grid of 18x41 where
+        // COLUMNS are states [normal/hover/pressed] and ROWS are pieces
+        // [top cap / middle band / bottom cap]. Stack the three pieces at exact
+        // thirds so the button reconstructs as one contiguous beveled shape.
         const std::vector<BmpCell>* bmpCells = nullptr;
         Texture* shTex = getShellTexWithCells(r, "shll_button.png", bmpCells);
         bool haveOwnTex = btnTex && btnTex->loaded;
         bool gridApplies = bmpCells && bmpCells->size() >= 9 &&
                            (!haveOwnTex || (btnTex->width == 54 && btnTex->height == 123));
         if (gridApplies) {
-            int state = ctl->hovered ? 1 : (ctl->menuOpen ? 2 : 0); // 0=normal, 1=highlight, 2=pressed
-            auto& cTop = (*bmpCells)[0 * 3 + state]; // top cap for this state
-            auto& cMid = (*bmpCells)[1 * 3 + state]; // stretchable middle band
-            auto& cBot = (*bmpCells)[2 * 3 + state]; // bottom cap for this state
-            float capH = (float)cTop.h;              // 41px native cap height
-            // Scale caps down so the full art fits typical button heights (~38px)
-            float capDst = ctl->extentY * 0.5f;
-            if (capDst > capH) capDst = capH;
-            float midDst = ctl->extentY - 2 * capDst; if (midDst < 0) midDst = 0;
-            drawTexRegion(r, shTex, (float)cTop.x, (float)cTop.y, (float)cTop.w, (float)cTop.h,
-                          x, y, ctl->extentX, capDst);
-            if (midDst > 0)
-                drawTexRegion(r, shTex, (float)(cMid.x + 1), (float)(cMid.y + 1), (float)(cMid.w - 2), (float)(cMid.h - 2),
-                              x, y + capDst, ctl->extentX, midDst);
-            drawTexRegion(r, shTex, (float)cBot.x, (float)cBot.y, (float)cBot.w, (float)cBot.h,
-                          x, y + ctl->extentY - capDst, ctl->extentX, capDst);
+            // shll_button.png layout (verified visually): row y=41..82 is the
+            // complete horizontal pill button (54x41); rows above/below are
+            // end-cap kits. Stretch the pill; tint for hover/pressed feedback.
+            (void)bmpCells;
+            int state = ctl->hovered ? 1 : (ctl->menuOpen ? 2 : 0);
+            float syPill = 41.0f;
+            drawTexRegion(r, shTex, 0, syPill, (float)shTex->width, 41.0f,
+                          x, y, ctl->extentX, ctl->extentY);
+            if (state == 1)
+                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {1, 1, 1, 0.12f});
+            else if (state == 2)
+                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0, 0, 0, 0.20f});
         } else if (!launchTex && btnTex && btnTex->loaded && btnTex->width > btnTex->height * 2) {
             // Horizontal multi-state strip (e.g. gui/shll_soundbutton 104x27 = 4 states):
             // [normal, hover/rollover, pressed, disabled]
@@ -1307,12 +1304,15 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // Shell entry field: same row-major 3-slice layout
         const std::vector<BmpCell>* fieldCells = nullptr;
         Texture* fieldTex2 = getShellTexWithCells(r, "shll_entryfield.png", fieldCells);
+        float textOffX = 3.0f; // text inset from control left
         if (fieldTex2 && fieldCells && fieldCells->size() >= 3) {
             int state = 0;
             auto& cL = (*fieldCells)[state];
             auto& cF = (*fieldCells)[3 + state];
             auto& cR = (*fieldCells)[6 + state];
             float cellH = (float)cL.h, lw = (float)cL.w, rw = (float)cR.w, midW = ctl->extentX - lw - rw;
+            // The left cap contains the field's border — text starts inside it
+            textOffX = lw + 2.0f;
             if (midW < 0) midW = 0;
             float fy = y + (ctl->extentY - cellH) * 0.5f;
             r.drawTexturedRectUV({x,fy,0},{x+lw,fy+cellH,0}, fieldTex2->id,
@@ -1333,11 +1333,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             float sc = font->defaultScale;
             float textH = font->charHeight * sc;
             float textY = y + (ctl->extentY - textH) * 0.5f;
-            font->render(display.c_str(), x + 3, textY, {1,1,1,1}, 1.0f);
+            font->render(display.c_str(), x + textOffX, textY, {1,1,1,1}, 1.0f);
             // Cursor when focused
             if (ctl == gr->getFocused()) {
                 float preW = font->measure(ctl->text.substr(0, ctl->cursorPos).c_str(), sc).x;
-                r.drawRectFill({x + 3 + preW, textY, 0}, {x + 5 + preW, textY + textH, 0}, {1,1,1,1});
+                r.drawRectFill({x + textOffX + preW, textY, 0}, {x + textOffX + preW + 2, textY + textH, 0}, {1,1,1,1});
             }
         }
     } else if (cn == "GuiListBoxCtrl" || cn == "GuiTextListCtrl") {
