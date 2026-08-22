@@ -19,6 +19,12 @@ GuiControl* GuiControl::findChild(const std::string& name) {
 // GuiPlayerView shape cache (control name -> loaded shape)
 static std::unordered_map<std::string, DTSShape> s_playerViewShapes;
 
+// Open popup dropdowns collected during the dialog pass; drawn last so they
+// render on top of sibling/overlay controls (T2 popups are topmost layers).
+static std::vector<GuiControl*> s_openPopups;
+static void drawLaunchPopupList(Renderer& r, GuiControl* ctl, float x, float y);
+static void drawPopupDropdownList(Renderer& r, GuiControl* ctl, float x, float y);
+
 void GuiControl::addChild(GuiControl* child) {
     child->parent = this;
     children.push_back(child);
@@ -244,6 +250,19 @@ void GuiRenderer::render() {
     // Render dialogs in stack order (front to back) so later-pushed dialogs
     // appear on top of earlier ones (e.g. NewWarriorDlg over GameGui).
     for (auto* dlg : dialogStack) renderControl(dlg);
+
+    // Open popup dropdowns render LAST (top-most): sibling and overlay
+    // controls drawn above must not paint over an open popup list.
+    if (!s_openPopups.empty()) {
+        r.flushSpriteBatch();
+        for (auto* pc : s_openPopups) {
+            float px = pc->posX, py = pc->posY;
+            for (auto* p = pc->parent; p && p != canvas; p = p->parent) { px += p->posX; py += p->posY; }
+            if (pc->className == "GuiPopUpMenuCtrl") drawPopupDropdownList(r, pc, px, py);
+            else drawLaunchPopupList(r, pc, px, py);
+        }
+        s_openPopups.clear();
+    }
 
     // Flush remaining sprite batch before restoring projection
     r.flushSpriteBatch();
@@ -689,6 +708,69 @@ static void computeContentExtent(GuiControl* ctl) {
     ctl->contentW = maxX;
 }
 
+// LAUNCH sidebar popup list — renders ABOVE the button (ShellLaunchMenu).
+// Called from the top-most post pass in GuiRenderer::render().
+static void drawLaunchPopupList(Renderer& r, GuiControl* ctl, float x, float y) {
+    auto* font = r.getFont();
+    float popX = x;
+    float popY = y - (float)ctl->menuItems.size() * 20.0f - 4; // render above button
+    float popW = 180, lineH = 20;
+    float popH = lineH * (float)ctl->menuItems.size();
+    // Sidebar background — distinct from canvas bg, plus a border so it
+    // reads as a panel (the old bg matched the canvas exactly → invisible)
+    r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.08f, 0.09f, 0.13f, 0.98f});
+    r.drawRectFill({popX, popY, 0}, {popX + popW, popY + 1, 0}, {0.5f, 0.6f, 0.8f, 1});
+    r.drawRectFill({popX, popY + popH - 1, 0}, {popX + popW, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
+    r.drawRectFill({popX, popY, 0}, {popX + 1, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
+    r.drawRectFill({popX + popW - 1, popY, 0}, {popX + popW, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
+    float iy = popY;
+    for (size_t ii = 0; ii < ctl->menuItems.size(); ii++) {
+        auto& item = ctl->menuItems[ii];
+        if (item.isSeparator) {
+            r.drawRectFill({popX + 4, iy + lineH*0.5f, 0}, {popX + popW - 4, iy + lineH*0.5f + 1, 0}, {0.4f,0.4f,0.5f,0.8f});
+        } else {
+            if ((int)ii == ctl->hoveredItem)
+                r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {0.32f, 0.42f, 0.6f, 1});
+            if (font) font->render(item.text.c_str(), popX + 6, iy + (lineH - (float)font->charHeight) * 0.5f, {0.85f,0.92f,1,1}, 1.0f);
+        }
+        iy += lineH;
+    }
+}
+
+// GuiPopUpMenuCtrl dropdown list — renders BELOW the control.
+// Called from the top-most post pass in GuiRenderer::render().
+static void drawPopupDropdownList(Renderer& r, GuiControl* ctl, float x, float y) {
+    auto* font = r.getFont();
+    float popX = x;
+    float popY = y + ctl->extentY;
+    float popW = ctl->extentX, lineH = 20;
+    float popH = lineH * (float)ctl->menuItems.size();
+    // Background
+    r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.12f, 0.13f, 0.18f, 0.97f});
+    // Border
+    r.drawRectFill({popX, popY, 0}, {popX + popW, popY + 1, 0}, {0.4f, 0.5f, 0.7f, 1});
+    r.drawRectFill({popX, popY + popH - 1, 0}, {popX + popW, popY + popH, 0}, {0.4f, 0.5f, 0.7f, 1});
+    r.drawRectFill({popX, popY, 0}, {popX + 1, popY + popH, 0}, {0.4f, 0.5f, 0.7f, 1});
+    r.drawRectFill({popX + popW - 1, popY, 0}, {popX + popW, popY + popH, 0}, {0.4f, 0.5f, 0.7f, 1});
+    int itemIdx = 0;
+    float iy = popY;
+    for (auto& item : ctl->menuItems) {
+        if (item.isSeparator) {
+            r.drawRectFill({popX + 4, iy + lineH*0.5f, 0}, {popX + popW - 4, iy + lineH*0.5f + 1, 0}, {0.4f,0.4f,0.5f,0.8f});
+        } else {
+            if (itemIdx == ctl->hoveredItem)
+                r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {0.32f, 0.42f, 0.6f, 1});
+            if (font) {
+                bool sel = (item.text == ctl->text);
+                ColorF ic = sel ? ColorF{0.3f,0.5f,0.8f,0.9f} : ColorF{0.85f,0.92f,1,1};
+                font->render(item.text.c_str(), popX + 6, iy + (lineH - (float)font->charHeight) * 0.5f, ic, 1.0f);
+            }
+        }
+        iy += lineH;
+        itemIdx++;
+    }
+}
+
 void GuiRenderer::renderControl(GuiControl* ctl) {
     renderControlRec(this, ctl, canvas, 0, 0, nullptr);
 }
@@ -886,32 +968,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             r.drawRectFill({x-1, y-1, 0}, {x, y + ctl->extentY + 1, 0}, {1.0f, 1.0f, 0.4f, 0.9f});
             r.drawRectFill({x + ctl->extentX, y-1, 0}, {x + ctl->extentX + 1, y + ctl->extentY + 1, 0}, {1.0f, 1.0f, 0.4f, 0.9f});
         }
-        // Popup menu for ShellLaunchMenu (the LAUNCH sidebar)
-        if (ctl->menuOpen && !ctl->menuItems.empty()) {
-            float popX = x;
-            float popY = y - (float)ctl->menuItems.size() * 20.0f - 4; // render above button
-            float popW = 180, lineH = 20;
-            float popH = lineH * (float)ctl->menuItems.size();
-            // Sidebar background — distinct from canvas bg, plus a border so it
-            // reads as a panel (the old bg matched the canvas exactly → invisible)
-            r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.08f, 0.09f, 0.13f, 0.98f});
-            r.drawRectFill({popX, popY, 0}, {popX + popW, popY + 1, 0}, {0.5f, 0.6f, 0.8f, 1});
-            r.drawRectFill({popX, popY + popH - 1, 0}, {popX + popW, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
-            r.drawRectFill({popX, popY, 0}, {popX + 1, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
-            r.drawRectFill({popX + popW - 1, popY, 0}, {popX + popW, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
-            float iy = popY;
-            for (size_t ii = 0; ii < ctl->menuItems.size(); ii++) {
-                auto& item = ctl->menuItems[ii];
-                if (item.isSeparator) {
-                    r.drawRectFill({popX + 4, iy + lineH*0.5f, 0}, {popX + popW - 4, iy + lineH*0.5f + 1, 0}, {0.4f,0.4f,0.5f,0.8f});
-                } else {
-                    if ((int)ii == ctl->hoveredItem)
-                        r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {0.32f, 0.42f, 0.6f, 1});
-                    if (font) font->render(item.text.c_str(), popX + 6, iy + 2, {0.85f,0.92f,1,1}, 1.0f);
-                }
-                iy += lineH;
-            }
-        }
+        // Popup menu for ShellLaunchMenu (the LAUNCH sidebar).
+        // Drawn in a top-most post pass (see GuiRenderer::render) so sibling
+        // controls can't paint over the open list.
+        if (ctl->menuOpen && !ctl->menuItems.empty())
+            s_openPopups.push_back(ctl);
     } else if (cn == "GuiTextCtrl") {
         ColorF tc{1,1,1,1};
         auto* prof = getProfile(ctl->profileName);
@@ -926,14 +987,26 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         if (font && !ctl->text.empty()) {
             float ch = (float)font->charHeight;
+            // Split into lines first so multi-line labels still work.
+            std::vector<std::string> lines;
+            size_t pos2 = 0;
+            while (pos2 < ctl->text.size()) {
+                size_t nl = ctl->text.find('\n', pos2);
+                lines.push_back((nl != std::string::npos) ? ctl->text.substr(pos2, nl - pos2) : ctl->text.substr(pos2));
+                pos2 = (nl != std::string::npos) ? nl + 1 : ctl->text.size();
+            }
+            // Shrink-to-fit: T2's shell fonts fit these stored extents natively;
+            // if ours measures wider than the extent, scale down so labels don't
+            // spill into neighboring controls (e.g. "Game Type:" under its popup).
+            float maxW = 0;
+            for (auto& l : lines) maxW = std::max(maxW, font->measure(l.c_str()).x);
+            float scale = 1.0f;
+            float availW = ctl->extentX - 6.0f;
+            if (ctl->extentX > 8 && maxW > availW && maxW > 1.0f) scale = availW / maxW;
             float lineY = y + 2;
-            size_t pos = 0;
-            while (pos < ctl->text.size()) {
-                size_t nl = ctl->text.find('\n', pos);
-                std::string line = (nl != std::string::npos) ? ctl->text.substr(pos, nl - pos) : ctl->text.substr(pos);
-                font->render(line.c_str(), x + 2, lineY, tc, 1.0f);
-                lineY += ch;
-                pos = (nl != std::string::npos) ? nl + 1 : ctl->text.size();
+            for (auto& l : lines) {
+                font->render(l.c_str(), x + 2, lineY, tc, scale);
+                lineY += ch * scale;
             }
         }
     } else if (cn == "GuiMLTextCtrl") {
@@ -1629,37 +1702,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             // Clip text to control width minus dropdown arrow
             font->render(ctl->text.c_str(), x + 4, y + (ctl->extentY - (float)font->charHeight) * 0.5f, txc, 1.0f);
         }
-        // Dropdown list when open
-        if (ctl->menuOpen && !ctl->menuItems.empty()) {
-            float popX = x;
-            float popY = y + ctl->extentY;
-            float popW = ctl->extentX, lineH = 20;
-            float popH = lineH * (float)ctl->menuItems.size();
-            // Background
-            r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.12f, 0.13f, 0.18f, 0.97f});
-            // Border
-            r.drawRectFill({popX, popY, 0}, {popX + popW, popY + 1, 0}, {0.4f, 0.5f, 0.7f, 1});
-            r.drawRectFill({popX, popY + popH - 1, 0}, {popX + popW, popY + popH, 0}, {0.4f, 0.5f, 0.7f, 1});
-            r.drawRectFill({popX, popY, 0}, {popX + 1, popY + popH, 0}, {0.4f, 0.5f, 0.7f, 1});
-            r.drawRectFill({popX + popW - 1, popY, 0}, {popX + popW, popY + popH, 0}, {0.4f, 0.5f, 0.7f, 1});
-            int itemIdx = 0;
-            float iy = popY;
-            for (auto& item : ctl->menuItems) {
-                if (item.isSeparator) {
-                    r.drawRectFill({popX + 4, iy + lineH*0.5f, 0}, {popX + popW - 4, iy + lineH*0.5f + 1, 0}, {0.4f,0.4f,0.5f,0.8f});
-                } else {
-                    if (itemIdx == ctl->hoveredItem)
-                        r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {0.32f, 0.42f, 0.6f, 1});
-                    if (font) {
-                        bool sel = (item.text == ctl->text);
-                        ColorF ic = sel ? ColorF{0.3f,0.5f,0.8f,0.9f} : ColorF{0.85f,0.92f,1,1};
-                        font->render(item.text.c_str(), popX + 6, iy + (lineH - (float)font->charHeight) * 0.5f, ic, 1.0f);
-                    }
-                }
-                iy += lineH;
-                itemIdx++;
-            }
-        }
+        // Dropdown list when open — drawn in the top-most post pass so later
+        // siblings/overlays don't paint over it.
+        if (ctl->menuOpen && !ctl->menuItems.empty())
+            s_openPopups.push_back(ctl);
     } else if (cn == "GuiScrollCtrl") {
         ColorF sc{0.18f,0.18f,0.22f,1};
         auto* prof = getProfile(ctl->profileName);
@@ -2074,6 +2120,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 }
                 if (sw <= 0 || sh <= 0) return;
 
+                // Flush queued 2D quads (incl. our own background fill) BEFORE
+                // switching viewport/scissor/projection — otherwise they flush
+                // later under wrong state or land on top of the 3D model.
+                r.flushSpriteBatch();
+
                 // Set viewport and scissor to control bounds
                 glViewport((GLint)sx, (GLint)(h - sy - sh), (GLsizei)sw, (GLsizei)sh);
                 glEnable(GL_SCISSOR_TEST);
@@ -2128,7 +2179,12 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 MatrixF ry; ry.setRotationY(ctl->modelYaw);
                 MatrixF sc2; sc2.setScale({fitScale, fitScale, fitScale});
                 MatrixF tr; tr.setTranslation({-center.x, -center.y, -center.z});
-                MatrixF model = ry * Math::czUpToYUp() * sc2 * tr;
+                // Push the centered model into the camera frustum: the perspective
+                // matrix has near=0.1/far=100 with w=-z_eye, so a model sitting at
+                // z≈0 has w≈0 and gets clipped away entirely.
+                float camDist = 2.8f * (radius > 1e-3f ? 1.0f : 0.0f) + 2.2f;
+                MatrixF push; push.setTranslation({0, 0, -camDist});
+                MatrixF model = push * ry * Math::czUpToYUp() * sc2 * tr;
                 r.setModel(model);
 
                 // Render the shape
@@ -2349,7 +2405,10 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
         GuiControl* p = ctl->parent;
         while (p && p != canvas) { x += p->posX; y += p->posY; p = p->parent; }
         if (mx >= x && mx < x + ctl->extentX && my >= y && my < y + ctl->extentY) {
-            for (auto* child : ctl->children) { auto* h = hitTest(child, mx, my); if (h) return h; }
+            // Later-defined children are top-most (T2 z-order): test them first.
+            for (auto it = ctl->children.rbegin(); it != ctl->children.rend(); ++it) {
+                auto* h = hitTest(*it, mx, my); if (h) return h;
+            }
         }
         return nullptr;
     }
@@ -2362,7 +2421,10 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
         p = p->parent;
     }
     if (mx >= x && mx < x + ctl->extentX && my >= y && my < y + ctl->extentY) {
-        for (auto* child : ctl->children) { auto* h = hitTest(child, mx, my); if (h) return h; }
+        // Later-defined children are top-most (T2 z-order): test them first.
+        for (auto it = ctl->children.rbegin(); it != ctl->children.rend(); ++it) {
+            auto* h = hitTest(*it, mx, my); if (h) return h;
+        }
         return ctl;
     }
     return nullptr;
@@ -2717,6 +2779,10 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             }
         }
         hit->checked = true;
+        // T2 convention: clicking a radio fires its command (e.g. GMW_PlayerModel.update()).
+        // Only when there's no C++ onClick wrapper — that already runs the command.
+        if (!hit->onClick && !hit->command.empty())
+            Console::instance().execute(hit->command.c_str());
     } else if (hit->className == "GuiCheckBoxCtrl") {
         hit->checked = !hit->checked;
     }

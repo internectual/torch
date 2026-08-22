@@ -259,7 +259,11 @@ bool Engine::init(int argc, char* argv[]) {
     // Parse args
     bool noLogin = false;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-data") == 0 && i + 1 < argc) dataDir = argv[i + 1];
+        if ((strcmp(argv[i], "-data") == 0) && i + 1 < argc) dataDir = argv[i + 1];
+        if ((strcmp(argv[i], "-width") == 0) && i + 1 < argc)
+            Console::instance().setVariable("videoWidth", argv[i + 1]);
+        if (strcmp(argv[i], "-height") == 0 && i + 1 < argc)
+            Console::instance().setVariable("videoHeight", argv[i + 1]);
         if (strcmp(argv[i], "-output") == 0 && i + 1 < argc) outputDir = argv[i + 1];
         if (strcmp(argv[i], "-mod") == 0 && i + 1 < argc) modPath = argv[i + 1];
         if (strcmp(argv[i], "-online") == 0) Console::instance().setVariable("online", "1");
