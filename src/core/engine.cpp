@@ -545,6 +545,8 @@ bool Engine::init(int argc, char* argv[]) {
                 ren->addFont(ft);
                 if (ft->fontName == "Lucida Console" && ft->fontSize == 12)
                     lucidaFont = ft;
+                if (ft->fontName == "Verdana Bold" && ft->fontSize == 16)
+                    panelHeaderFont = ft;
                 Console::instance().printf(LogLevel::Info, "Loaded font: %s %d", ft->fontName.c_str(), ft->fontSize);
             } else {
                 delete ft;
@@ -553,6 +555,7 @@ bool Engine::init(int argc, char* argv[]) {
         // Scale the dev panel overlay font for modern displays; leave game canvas fonts at 1.0
         float fontScale = 1.0f; (void)fontScale;
         // Use Lucida Console 12 — the only available monospace GFT
+        if (panelHeaderFont && !panelHeaderFont->loaded) panelHeaderFont = nullptr;
         if (lucidaFont && lucidaFont->loaded) {
             if (overlayFont && overlayFontOwned) { delete overlayFont; overlayFontOwned = false; }
             overlayFont = lucidaFont;
@@ -637,6 +640,24 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().printf(LogLevel::Info,"testclickNA (%.0f,%.0f)->%d",ax+target->extentX/2,ay+target->extentY/2,(int)r);
     }, "testclickNA - click NEW ALIAS");
 
+    // DEBUG: focus the NEW WARRIOR name field for keyboard input
+    con->addCommand("testfocusName", [this](int32_t, const char* const*) {
+        if (!gui) return;
+        GuiControl* target = nullptr;
+        std::function<void(GuiControl*)> walk=[&](GuiControl* c){
+            if (!c||target) return;
+            if (c->name == "NW_NameEdit") { target=c; return; }
+            for (auto* ch : c->children) walk(ch);
+        };
+        for (auto* d : gui->dialogStackForDebug()) walk(d);
+        if (gui->getCanvas()) walk(gui->getCanvas());
+        if (!target) { Console::instance().printf(LogLevel::Warn,"testfocusName: not found"); return; }
+        gui->setFocused(target);
+        Engine::instance().platform().startTextInput();
+        target->cursorPos = (int)target->text.size();
+        Console::instance().printf(LogLevel::Info,"testfocusName focused NW_NameEdit");
+    }, "testfocusName - focus the new-warrior name field");
+
     // DEBUG: press+release Enter through the polled keyboard state
     con->addCommand("testenter", [this](int32_t, const char* const*) {
         auto& inp = plat->input();
@@ -670,8 +691,7 @@ bool Engine::init(int argc, char* argv[]) {
         clickBtnByCommand("doDeleteWarrior");
     }, "testclickYES - click message-box Yes");
     // DEBUG: report which control hit-tests at the DELETE ALIAS button center
-    con->addCommand("testhitDEL", [this](int32_t, const char* const*) {
-        if (!gui) return;
+    con->addCommand("testhitDEL", [this](int32_t, const char* const*) {        if (!gui) return;
         std::function<void(GuiControl*,float,float,const char*)> walk=[&](GuiControl* c,float ox,float oy,const char* where){
             if (!c) return;
             float ax=ox+c->posX, ay=oy+c->posY;
@@ -1313,6 +1333,10 @@ void Engine::run() {
                     if (my >= ay && my < ay + tabH) {
                         float tabX = ax + 2;
                         for (int ti = 0; ti < (int)hover->tabs.size(); ti++) {
+                            // Blank filler tabs (addTab id gaps) occupy no
+                            // layout space — skip them WITHOUT consuming
+                            // width, matching the render/click loops.
+                            if (hover->tabs[ti].text.empty()) continue;
                             float tw = lsT ? GuiRenderer::launchTabWidth(hover, ti, maxTabW) : maxTabW;
                             if (mx >= tabX && mx < tabX + tw) { hover->hoveredTab = ti; break; }
                             tabX += tw + tabSpacing;
@@ -1681,7 +1705,12 @@ void Engine::run() {
                 }
 
                 ly += 2;
-                overlayFont->render("=== Torch GUI Dev ===", rightX, ly, {0.3f, 0.8f, 1, 1}, 1.5f * sc); ly += int(18 * sc);
+                if (panelHeaderFont) {
+                    panelHeaderFont->render("=== Torch GUI Dev ===", rightX, ly, {0.3f, 0.8f, 1, 1}, 1.0f);
+                    ly += int(22 * sc);
+                } else {
+                    overlayFont->render("=== Torch GUI Dev ===", rightX, ly, {0.3f, 0.8f, 1, 1}, 1.5f * sc); ly += int(18 * sc);
+                }
                 snprintf(buf, sizeof(buf), "FPS: %d  dt: %.1fms", frameCount, dt * 1000);
                 overlayFont->render(buf, rightX, ly, {0.6f, 0.6f, 0.6f, 1}, sc); ly += int(16 * sc);
                 snprintf(buf, sizeof(buf), "GUI dialogs: %zu", gui ? gui->dialogCount() : 0);

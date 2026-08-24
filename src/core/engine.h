@@ -102,4 +102,5 @@ public: // TEST HARNESS: temporarily public so dts_one can install an empty FS
     void renderMinimap();
     Font* overlayFont = nullptr;
     bool overlayFontOwned = false;
+    Font* panelHeaderFont = nullptr; // native-size bold GFT for the dev-panel title (no bitmap magnification)
 };

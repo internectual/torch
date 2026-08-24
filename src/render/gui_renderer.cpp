@@ -1609,45 +1609,15 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             }
         }
     } else if (cn == "GuiCheckBoxCtrl" || cn == "GuiRadioCtrl") {
-        ColorF tc{1,1,1,1};
+        ColorF tc{1,1,1,1}, tcHL{-1,-1,-1,1};
+        std::string justify;
         auto* prof = getProfile(ctl->profileName);
         std::string radioBmp;
         if (prof) {
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
+            auto fhi = prof->fields.find("fontColorHL"); if (fhi != prof->fields.end()) parseColor(fhi->second.toString(), tcHL);
             auto bmi = prof->fields.find("bitmap"); if (bmi != prof->fields.end()) radioBmp = bmi->second.toString();
-        }
-        // ShellRadioButton (profile bitmap gui/shll_radio): T2 renders these
-        // as full shell buttons (same skin family as shll_button), not as
-        // small circles — e.g. LIGHT/MEDIUM/HEAVY in the warrior pane.
-        if (cn == "GuiRadioCtrl" && (radioBmp.find("shll_radio") != std::string::npos ||
-                                     ctl->extentX >= 60)) {
-            Texture* rbTex = nullptr;
-            const std::vector<T2Cell>* rarr = t2SkinArray(r, "shll_button.png", rbTex);
-            if (rarr && rarr->size() >= 9 && rbTex && rbTex->loaded) {
-                constexpr int kStates = 3; // normal / hilight / depressed
-                int rst = ctl->checked ? 2 : (ctl->hovered ? 1 : 0);
-                auto& rcL = (*rarr)[0 * kStates + rst];
-                auto& rcM = (*rarr)[1 * kStates + rst];
-                auto& rcR = (*rarr)[2 * kStates + rst];
-                float rcellH = (float)rcL.h;
-                float rsy = (rcellH > 0) ? ctl->extentY / rcellH : 1.0f;
-                float rlw = (float)rcL.w * rsy, rrw = (float)rcR.w * rsy, rbh = rcellH * rsy;
-                float rmidW = std::max(ctl->extentX - rlw - rrw, 0.0f);
-                float rfy = y + (ctl->extentY - rbh) * 0.5f;
-                drawTexRegion(r, rbTex, (float)rcL.x, (float)rcL.y, (float)rcL.w, (float)rcL.h, x, rfy, rlw, rbh);
-                if (rmidW > 0)
-                    drawTexRegion(r, rbTex, (float)rcM.x, (float)rcM.y, (float)rcM.w, (float)rcM.h,
-                                  x + rlw, rfy, rmidW, rbh);
-                drawTexRegion(r, rbTex, (float)rcR.x, (float)rcR.y, (float)rcR.w, (float)rcR.h,
-                              x + rlw + rmidW, rfy, rrw, rbh);
-                if (font && !ctl->text.empty()) {
-                    ColorF rtc = ctl->hovered ? ColorF{0.10f, 0.27f, 0.22f, 1} : tc; // fontColorHL
-                    float rtw = font->measure(ctl->text.c_str()).x;
-                    font->render(ctl->text.c_str(), x + (ctl->extentX - rtw) * 0.5f,
-                                 y + (ctl->extentY - (float)font->charHeight) * 0.5f, rtc, 1.0f);
-                }
-                return; // skinned shell radio fully rendered
-            }
+            auto ji = prof->fields.find("justify"); if (ji != prof->fields.end()) justify = ji->second.toString();
         }
         float sz = 16;
         bool drewAtlas = false;
@@ -1663,7 +1633,9 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         if (cn == "GuiRadioCtrl" && cbTex && cbTex->loaded &&
             cbTex->height % 30 == 0 && cbTex->height >= 60) {
-            // T2 sh_radio atlas: vertical 29x30 state cells [0]=off [1]=on [4]=hover ring
+            // shll_radio atlas (29x150): five 29x30 cells — [0]=unchecked,
+            // [1]=checked (bright green core = the selected indicator),
+            // [4]=white hover ring drawn over the base state.
             int states = cbTex->height / 30;
             int st = ctl->checked ? 1 : 0;
             float scale = ctl->extentY / 30.0f; if (scale > 1) scale = 1;
@@ -1685,10 +1657,17 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 r.drawRectFill({x, y, 0}, {x + sz, y + sz, 0}, bg);
             }
         }
-        // T2 draws each radio choice inside a slim beveled box (drawn above,
-        // before the state art, so selection stays visible)
-        if (font && !ctl->text.empty())
-            font->render(ctl->text.c_str(), x + sz + 4, y + 2, tc, 1.0f);
+        if (font && !ctl->text.empty()) {
+            const ColorF& rtc = (ctl->hovered && tcHL.r >= 0) ? tcHL : tc;
+            float tx0 = x + sz + 4;
+            float availW = ctl->extentX - (tx0 - x);
+            float ttw = font->measure(ctl->text.c_str()).x;
+            float tx = tx0;
+            float ty2 = y + (ctl->extentY - (float)font->charHeight) * 0.5f;
+            if (justify == "center")
+                tx = tx0 + std::max((availW - ttw) * 0.5f, 0.f);
+            font->render(ctl->text.c_str(), tx, ty2, rtc, 1.0f);
+        }
     } else if (cn == "GuiSliderCtrl") {
         ColorF fc{0.4f,0.4f,0.5f,1}, kc{0.7f,0.7f,0.8f,1};
         auto* prof = getProfile(ctl->profileName);
@@ -3446,25 +3425,32 @@ void GuiRenderer::handleKeyboard() {
             focusedCtrl = nullptr;
         }
     } else {
-        // No text control focused: T2 Enter-to-default-button behavior
-        // When Enter is pressed with no focused text control and a dialog is active,
-        // find the first GuiButtonCtrl in the active dialog and activate it
+        // No text control focused: T2 fires only explicit ACCELERATORS on
+        // Enter (e.g. MessageBox YES="enter") — never a random default
+        // button, which leaked keystrokes into unrelated responders.
         if (input.keysDown[SCANCODE_RETURN] && !prevEnter && !dialogStack.empty()) {
-            GuiControl* activeDlg = dialogStack.back();
-            std::vector<GuiControl*> stk = activeDlg->children;
-            while (!stk.empty()) {
-                auto* c = stk.back(); stk.pop_back();
-                if ((c->className == "GuiButtonCtrl" || c->className == "GuiTextButtonCtrl" ||
-                     c->className == "GuiBitmapButtonCtrl" || c->className == "ShellButtonCtrl") && c->visible) {
-                    // Execute its command or onClick
-                    if (!c->command.empty()) {
-                        Console::instance().execute(c->command.c_str());
-                    } else if (c->onClick) {
-                        c->onClick();
-                    }
-                    break;
+            auto accOf = [](GuiControl* c) {
+                ScriptObject* so = ScriptEngine::instance().findObject(c->name.c_str());
+                if (!so) return std::string();
+                auto it = so->fields.find("accelerator");
+                return it == so->fields.end() ? std::string() : it->second.toString();
+            };
+            std::function<GuiControl*(GuiControl*)> findAcc = [&](GuiControl* c) -> GuiControl* {
+                if (!c) return nullptr;
+                for (auto* ch : c->children) {
+                    if (!ch->visible) continue;
+                    std::string a = accOf(ch);
+                    if (a == "enter" || a == "return") return ch;
+                    if (GuiControl* r = findAcc(ch)) return r;
                 }
-                for (auto* ch : c->children) stk.push_back(ch);
+                return nullptr;
+            };
+            GuiControl* b = findAcc(dialogStack.back());
+            if (b) {
+                if (!b->command.empty())
+                    Console::instance().execute(b->command.c_str());
+                else if (b->onClick)
+                    b->onClick();
             }
         }
     }
@@ -3602,6 +3588,17 @@ void GuiRenderer::popDialog(const std::string& name) {
                         ts->callFunction(name + "::onSleep", {});
                     }
                 }
+            }
+            // Drop keyboard focus if it lived inside the removed subtree —
+            // a stale focusedCtrl would keep firing its command on Enter.
+            auto ownsFocused = [&](GuiControl* root) {
+                GuiControl* p = focusedCtrl;
+                while (p) { if (p == root) return true; p = p->parent; }
+                return false;
+            };
+            if (focusedCtrl && ownsFocused(*it)) {
+                focusedCtrl = nullptr;
+                Engine::instance().platform().stopTextInput();
             }
             it = dialogStack.erase(it);
         } else {
