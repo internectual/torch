@@ -763,12 +763,23 @@ static Texture* getShellTexWithCells(Renderer& r, const char* name, const std::v
     return tex;
 }
 
+static int tabCellsRefSize() {
+    static int n = -1;
+    if (n < 0) {
+        Renderer* rr = nullptr; // not needed; use global cache size
+        n = (int)g_cellCache.size();
+    }
+    return n;
+}
+
 // Draw an arbitrary sub-region of a texture into a destination rect.
+static int tabCellsRefSize();
 static void drawTexRegion(Renderer& r, Texture* tex, float sx, float sy, float sw, float sh,
-                          float dx, float dy, float dw, float dh) {
+                          float dx, float dy, float dw, float dh,
+                          const ColorF* tint = nullptr) {
     if (!tex || !tex->loaded || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
     r.drawTexturedRectUV({dx, dy, 0}, {dx + dw, dy + dh, 0}, tex->id,
-        sx / tex->width, sy / tex->height, (sx + sw) / tex->width, (sy + sh) / tex->height);
+        sx / tex->width, sy / tex->height, (sx + sw) / tex->width, (sy + sh) / tex->height, tint);
 }
 
 // Compose a 9-piece shell skin from separate files under textures/gui/
@@ -1549,8 +1560,43 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
     } else if (cn == "GuiCheckBoxCtrl" || cn == "GuiRadioCtrl") {
         ColorF tc{1,1,1,1};
         auto* prof = getProfile(ctl->profileName);
+        std::string radioBmp;
         if (prof) {
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
+            auto bmi = prof->fields.find("bitmap"); if (bmi != prof->fields.end()) radioBmp = bmi->second.toString();
+        }
+        // ShellRadioButton (profile bitmap gui/shll_radio): T2 renders these
+        // as full shell buttons (same skin family as shll_button), not as
+        // small circles — e.g. LIGHT/MEDIUM/HEAVY in the warrior pane.
+        if (cn == "GuiRadioCtrl" && (radioBmp.find("shll_radio") != std::string::npos ||
+                                     ctl->extentX >= 60)) {
+            Texture* rbTex = nullptr;
+            const std::vector<T2Cell>* rarr = t2SkinArray(r, "shll_button.png", rbTex);
+            if (rarr && rarr->size() >= 9 && rbTex && rbTex->loaded) {
+                constexpr int kStates = 3; // normal / hilight / depressed
+                int rst = ctl->checked ? 2 : (ctl->hovered ? 1 : 0);
+                auto& rcL = (*rarr)[0 * kStates + rst];
+                auto& rcM = (*rarr)[1 * kStates + rst];
+                auto& rcR = (*rarr)[2 * kStates + rst];
+                float rcellH = (float)rcL.h;
+                float rsy = (rcellH > 0) ? ctl->extentY / rcellH : 1.0f;
+                float rlw = (float)rcL.w * rsy, rrw = (float)rcR.w * rsy, rbh = rcellH * rsy;
+                float rmidW = std::max(ctl->extentX - rlw - rrw, 0.0f);
+                float rfy = y + (ctl->extentY - rbh) * 0.5f;
+                drawTexRegion(r, rbTex, (float)rcL.x, (float)rcL.y, (float)rcL.w, (float)rcL.h, x, rfy, rlw, rbh);
+                if (rmidW > 0)
+                    drawTexRegion(r, rbTex, (float)rcM.x, (float)rcM.y, (float)rcM.w, (float)rcM.h,
+                                  x + rlw, rfy, rmidW, rbh);
+                drawTexRegion(r, rbTex, (float)rcR.x, (float)rcR.y, (float)rcR.w, (float)rcR.h,
+                              x + rlw + rmidW, rfy, rrw, rbh);
+                if (font && !ctl->text.empty()) {
+                    ColorF rtc = ctl->hovered ? ColorF{0.10f, 0.27f, 0.22f, 1} : tc; // fontColorHL
+                    float rtw = font->measure(ctl->text.c_str()).x;
+                    font->render(ctl->text.c_str(), x + (ctl->extentX - rtw) * 0.5f,
+                                 y + (ctl->extentY - (float)font->charHeight) * 0.5f, rtc, 1.0f);
+                }
+                return; // skinned shell radio fully rendered
+            }
         }
         float sz = 16;
         bool drewAtlas = false;
@@ -1771,11 +1817,22 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 };
                 dq(x+4,ty,lw,bh,cL,false); dq(x+4+lw,ty,midW,bh,cM,true); dq(x+4+lw+midW,ty,rw,bh,cR,false);
                 if (font) {
-                    float tx = x+4+lw+4;
                     font = getProfileFont(prof);
                     float toX, toY;
+                    float tx = x+4+lw+4;
                     if (getTextOffset(prof, toX, toY)) { tx += toX; }
-                    font->render(ctl->text.c_str(), tx, ty+bh*0.2f, txc, 1.0f);
+                    bool shellPane = prof && prof->fields.count("bitmapBase") &&
+                                     prof->fields["bitmapBase"].toString().find("gui/shll") == 0;                    if (shellPane) {
+                        // Shell panes (ShellPaneProfile): black title text
+                        // centered in the pane width, sitting just below the
+                        // bright band — matches the reference screenshot.
+                        ColorF black{0.02f, 0.02f, 0.02f, 1};
+                        float tw = font->measure(ctl->text.c_str()).x;
+                        font->render(ctl->text.c_str(), x + (ctl->extentX - tw) * 0.5f,
+                                     y + 7.5f, black, 1.0f);
+                    } else {
+                        font->render(ctl->text.c_str(), tx, ty+bh*0.2f, txc, 1.0f);
+                    }
                 }
             }
         } else if (!ctl->text.empty()) {
@@ -1800,20 +1857,38 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     (float)(cF.x+cF.w)/tabTex->width, (float)(cF.y+cF.h)/tabTex->height);
                 if (font) {
                     font = getProfileFont(prof);
-                    float tx = x + lw + 4, ty = y + 2;
-                    float toX, toY;
-                    if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
-                    font->render(ctl->text.c_str(), tx, ty, txc, 1.0f);
+                    bool shellPane2 = prof && prof->fields.count("bitmapBase") &&
+                                      prof->fields["bitmapBase"].toString().find("gui/shll") == 0;
+                    if (shellPane2) {
+                        // Shell panes: black title centered below the band
+                        ColorF black{0.02f, 0.02f, 0.02f, 1};
+                        float tw = font->measure(ctl->text.c_str()).x;
+                        font->render(ctl->text.c_str(), x + (ctl->extentX - tw) * 0.5f,
+                                     y + 7.5f, black, 1.0f);
+                    } else {
+                        float tx = x + lw + 4, ty = y + 2;
+                        float toX, toY;
+                        if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
+                        font->render(ctl->text.c_str(), tx, ty, txc, 1.0f);
+                    }
                 }
             } else if (tabTex && tabTex->loaded) {
                 float th = (float)tabTex->height;
                 r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + th, 0}, tabTex->id);
                 if (font) {
                     font = getProfileFont(prof);
-                    float tx = x + 8, ty = y + 2;
-                    float toX, toY;
-                    if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
-                    font->render(ctl->text.c_str(), tx, ty, txc, 1.0f);
+                    bool shellPane3 = prof && prof->fields.count("bitmapBase") &&
+                                      prof->fields["bitmapBase"].toString().find("gui/shll") == 0;                    if (shellPane3) {
+                        ColorF black{0.02f, 0.02f, 0.02f, 1};
+                        float tw = font->measure(ctl->text.c_str()).x;
+                        font->render(ctl->text.c_str(), x + (ctl->extentX - tw) * 0.5f,
+                                     y + 7.5f, black, 1.0f);
+                    } else {
+                        float tx = x + 8, ty = y + 2;
+                        float toX, toY;
+                        if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
+                        font->render(ctl->text.c_str(), tx, ty, txc, 1.0f);
+                    }
                 }
             } else if (font) {
                 font->render(ctl->text.c_str(), x + 6, y + 4, txc, 1.5f);
@@ -2175,22 +2250,31 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // the top edge and fade-out strips descend both side edges.
         bool alt = false;
         { auto fit = ctl->fields.find("altColor"); if (fit != ctl->fields.end()) alt = (fit->second == "1"); }
-        Texture* grad = r.loadTexture(alt ? "textures/gui/shll_horztabframegrada.png"
-                                          : "textures/gui/shll_horztabframegrad.png");
-        if (!grad || !grad->loaded)
-            grad = r.loadTexture("textures/gui/shll_horztabframegrada.png");
-        if (grad && grad->loaded) {
-            float gw = (float)grad->width;   // 9px — also the top bar height
-            float gh = (float)grad->height;  // 254px fade length
-            float w = ctl->extentX, h = ctl->extentY;
-            if (h > gh) h = gh;              // strips never outlive their fade
-            // Top bar: stretch the strip's fully-opaque leading rows across
-            drawTexRegion(r, grad, 0, 0, gw, gw, x, y, w, gw);
-            // Left edge: full-height fade-out strip at natural size
-            drawTexRegion(r, grad, 0, 0, gw, gh, x, y, gw, h);
+        const char* sfx = alt ? "a" : "";
+        std::string basePath = std::string("textures/gui/shll_horztabframe");
+        // Solid 8x8 fill for the top bar; 9x254 fade strips for the sides
+        Texture* edge = r.loadTexture((basePath + "gradedge" + sfx + ".png").c_str());
+        if (!edge || !edge->loaded)
+            edge = r.loadTexture((basePath + "gradedgea.png").c_str());
+        Texture* strip = r.loadTexture((basePath + "grad" + sfx + ".png").c_str());
+        if (!strip || !strip->loaded)
+            strip = r.loadTexture((basePath + "grada.png").c_str());
+        float gw = 9.f, gh = 254.f;
+        float w = ctl->extentX, h = ctl->extentY;
+        if (h > gh) h = gh;                  // strips never outlive their fade
+        if (edge && edge->loaded) {
+            float ew = (float)edge->width;
+            drawTexRegion(r, edge, 0, 0, ew, ew, x, y, w, gw);
+        } else if (strip && strip->loaded) {
+            drawTexRegion(r, strip, 2, 2, 2, 2, x, y, w, gw); // solid rows fallback
+        }
+        if (strip && strip->loaded) {
+            // Side fade strips at natural size; their baked-in corner
+            // anti-aliasing rounds the frame's top corners authentically.
+            drawTexRegion(r, strip, 0, 0, gw, gh, x, y, gw, h);
             // Right edge: same strip mirrored horizontally
-            r.drawTexturedRectUV({x + w - gw, y, 0}, {x + w, y + h, 0}, grad->id,
-                                 1.0f, 0.0f, 0.0f, gh / (float)grad->height);
+            r.drawTexturedRectUV({x + w - gw, y, 0}, {x + w, y + h, 0}, strip->id,
+                                 1.0f, 0.0f, 0.0f, 1.0f);
         }
     } else if (cn == "ShellTabGroupCtrl" || cn == "GuiTabBookCtrl") {
         // Tab group: draw tab buttons along the top, then children below
@@ -2293,18 +2377,24 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     drawTexRegion(r, tabBaseTex, st * cellW, cellH * 2, cellW, cellH,
                                   tabX + tw - cellW, y, cellW, tabH);
                 } else if (texHi % 3 == 0) {
+                    // lnch_Tab family: the art is bright teal for every state;
+                    // T2 renders UNSELECTED toolbar tabs darkened (~#002C32
+                    // measured off the reference) and only the selected tab at
+                    // full brightness with its cyan SEL label.
+                    ColorF dim{0.06f, 0.40f, 0.42f, 1};
+                    const ColorF* tint = (!sel && !hv) ? &dim : nullptr;
                     float rowH = texH / 3.f;
                     float rofs = (sel ? 2 : (hv ? 1 : 0)) * rowH;
                     float leftW = std::min(14.f, texW * 0.5f);
                     float rightW = std::min(10.f, texW - leftW);
-                    drawTexRegion(r, tabBaseTex, 0, rofs, leftW, rowH, tabX, y, leftW, tabH);
+                    drawTexRegion(r, tabBaseTex, 0, rofs, leftW, rowH, tabX, y, leftW, tabH, tint);
                     float midDstW = tw - leftW - rightW;
                     if (midDstW > 0)
                         drawTexRegion(r, tabBaseTex, leftW, rofs, texW - leftW - rightW, rowH,
-                                      tabX + leftW, y, midDstW, tabH);
+                                      tabX + leftW, y, midDstW, tabH, tint);
                     if (tw > leftW + rightW)
                         drawTexRegion(r, tabBaseTex, texW - rightW, rofs, rightW, rowH,
-                                      tabX + tw - rightW, y, rightW, tabH);
+                                      tabX + tw - rightW, y, rightW, tabH, tint);
                 }
             }
             // Tab text — profile color per state (SEL bright, HL on hover)

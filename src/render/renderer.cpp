@@ -377,14 +377,15 @@ void Renderer::drawTexturedRect(const Point3F& a, const Point3F& b, uint32_t tex
     spriteBatchAdd(verts, texId);
 }
 
-void Renderer::drawTexturedRectUV(const Point3F& a, const Point3F& b, uint32_t texId, float u0, float v0, float u1, float v1) {
+void Renderer::drawTexturedRectUV(const Point3F& a, const Point3F& b, uint32_t texId, float u0, float v0, float u1, float v1, const ColorF* tint) {
+    float cr = tint ? tint->r : 1, cg = tint ? tint->g : 1, cb = tint ? tint->b : 1, ca = tint ? tint->a : 1;
     float verts[] = {
-        a.x,a.y,a.z, u0,v0, 1,1,1,1,
-        b.x,a.y,a.z, u1,v0, 1,1,1,1,
-        a.x,b.y,a.z, u0,v1, 1,1,1,1,
-        b.x,a.y,a.z, u1,v0, 1,1,1,1,
-        b.x,b.y,a.z, u1,v1, 1,1,1,1,
-        a.x,b.y,a.z, u0,v1, 1,1,1,1,
+        a.x,a.y,a.z, u0,v0, cr,cg,cb,ca,
+        b.x,a.y,a.z, u1,v0, cr,cg,cb,ca,
+        a.x,b.y,a.z, u0,v1, cr,cg,cb,ca,
+        b.x,a.y,a.z, u1,v0, cr,cg,cb,ca,
+        b.x,b.y,a.z, u1,v1, cr,cg,cb,ca,
+        a.x,b.y,a.z, u0,v1, cr,cg,cb,ca,
     };
     spriteBatchAdd(verts, texId);
 }

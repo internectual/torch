@@ -619,6 +619,32 @@ bool Engine::init(int argc, char* argv[]) {
     }, "testclick - simulate a GUI click on the next top tab");
 
     // DEBUG: single click at TRAINING launch-tab center
+    // DEBUG: click the NEW ALIAS button (located by its command text)
+    con->addCommand("testclickNA", [this](int32_t, const char* const*) {
+        if (!gui) return;
+        GuiControl* target = nullptr;
+        std::function<void(GuiControl*,float,float)> walk=[&](GuiControl* c,float ox,float oy){
+            if (!c||target) return;
+            float ax=ox+c->posX, ay=oy+c->posY;
+            if (c->command.find("createNewAlias") != std::string::npos) { target=c; return; }
+            for (auto* ch : c->children) walk(ch,ax,ay);
+        };
+        for (auto* d : gui->dialogStackForDebug()) walk(d,0,0);
+        if (!target) { Console::instance().printf(LogLevel::Warn,"testclickNA: not found"); return; }
+        float ax=target->posX, ay=target->posY;
+        for (auto* p=target->parent; p; p=p->parent){ax+=p->posX; ay+=p->posY;}
+        bool r = gui->handleInput(ax+target->extentX/2, ay+target->extentY/2, true);
+        Console::instance().printf(LogLevel::Info,"testclickNA (%.0f,%.0f)->%d",ax+target->extentX/2,ay+target->extentY/2,(int)r);
+    }, "testclickNA - click NEW ALIAS");
+
+    // DEBUG: press+release Enter through the polled keyboard state
+    con->addCommand("testenter", [this](int32_t, const char* const*) {
+        auto& inp = plat->input();
+        static bool down=false;
+        inp.keysDown[40] = !down; // 40 = SDL_SCANCODE_RETURN
+        fprintf(stderr,"[TESTENTER] return=%d\n", !down);
+        down=!down;
+    }, "testenter - toggle Enter key state");
     con->addCommand("testclickLT", [this](int32_t, const char* const*) {
         bool r = gui && gui->handleInput(200, 460, true);
         Console::instance().printf(LogLevel::Info, "testclickLT(200,460) -> %d", (int)r);

@@ -264,7 +264,7 @@ public:
     void drawRectFill(const Point3F& a, const Point3F& b, const ColorF& color);
     void drawSprite(const Point3F& pos, float size, const ColorF& color, uint32_t texture = 0);
     void drawTexturedRect(const Point3F& a, const Point3F& b, uint32_t texture);
-    void drawTexturedRectUV(const Point3F& a, const Point3F& b, uint32_t texture, float u0, float v0, float u1, float v1);
+    void drawTexturedRectUV(const Point3F& a, const Point3F& b, uint32_t texture, float u0, float v0, float u1, float v1, const ColorF* tint = nullptr);
     void flushSpriteBatch();
 
     Texture* loadTexture(const char* path);
