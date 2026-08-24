@@ -132,6 +132,10 @@ public:
     static void tabLayoutParams(const GuiControl* grp, float& maxTabW, float& tabSpacing);
     static void launchPopupGeometry(const GuiControl* lm, float x, float y,
                                     float& popX, float& popY, float& popW, float& popH, float& lineH);
+    // Launch-toolbar style (lnch_Tab skin): compact, text-sized buttons with
+    // a state dot — unlike fixed-width shll_horztabbutton tab books.
+    static bool launchStyleTabs(const GuiControl* grp);
+    static float launchTabWidth(const GuiControl* grp, int ti, float maxTabW);
 
     GuiControl* getCanvas() { return canvas; }
     GuiControl* findControl(const std::string& name);

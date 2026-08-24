@@ -642,9 +642,50 @@ bool Engine::init(int argc, char* argv[]) {
         auto& inp = plat->input();
         static bool down=false;
         inp.keysDown[40] = !down; // 40 = SDL_SCANCODE_RETURN
-        fprintf(stderr,"[TESTENTER] return=%d\n", !down);
         down=!down;
     }, "testenter - toggle Enter key state");
+
+    // DEBUG: click a dialog button located by its command text
+    // testclickDEL -> DELETE ALIAS button, testclickYES -> confirm-Yes button
+    auto clickBtnByCommand = [this](const char* needle) {
+        if (!gui) return;
+        GuiControl* target = nullptr;
+        std::function<void(GuiControl*,float,float)> walk=[&](GuiControl* c,float ox,float oy){
+            if (!c||target) return;
+            float ax=ox+c->posX, ay=oy+c->posY;
+            if (c->command.find(needle) != std::string::npos && c->visible) { target=c; return; }
+            for (auto* ch : c->children) walk(ch,ax,ay);
+        };
+        for (auto* d : gui->dialogStackForDebug()) walk(d,0,0);
+        if (!target) { Console::instance().printf(LogLevel::Warn,"clickBtn: '%s' not found", needle); return; }
+        float ax=target->posX, ay=target->posY;
+        for (auto* p=target->parent; p; p=p->parent){ax+=p->posX; ay+=p->posY;}
+        bool r = gui->handleInput((int)(ax+target->extentX/2), (int)(ay+target->extentY/2), true);
+        Console::instance().printf(LogLevel::Info,"clickBtn '%s' (%.0f,%.0f)->%d",needle,ax+target->extentX/2,ay+target->extentY/2,(int)r);
+    };
+    con->addCommand("testclickDEL", [clickBtnByCommand](int32_t, const char* const*) {
+        clickBtnByCommand("GM_WarriorPane.deleteWarrior");
+    }, "testclickDEL - click DELETE ALIAS");
+    con->addCommand("testclickYES", [clickBtnByCommand](int32_t, const char* const*) {
+        clickBtnByCommand("doDeleteWarrior");
+    }, "testclickYES - click message-box Yes");
+    // DEBUG: report which control hit-tests at the DELETE ALIAS button center
+    con->addCommand("testhitDEL", [this](int32_t, const char* const*) {
+        if (!gui) return;
+        std::function<void(GuiControl*,float,float,const char*)> walk=[&](GuiControl* c,float ox,float oy,const char* where){
+            if (!c) return;
+            float ax=ox+c->posX, ay=oy+c->posY;
+            if (503>=ax && 503<ax+c->extentX && 382>=ay && 382<ay+c->extentY)
+                Console::instance().printf(LogLevel::Info,"HIT[%s] %s/%s xy=%.0f,%.0f ext=%.0fx%.0f vis=%d act=%d cmd=[%s]",
+                    where,c->name.c_str(),c->className.c_str(),ax,ay,c->extentX,c->extentY,(int)c->visible,(int)c->active,c->command.c_str());
+            for (auto* ch : c->children) walk(ch,ax,ay,where);
+        };
+        auto& ds = gui->dialogStackForDebug();
+        for (size_t i=0;i<ds.size();i++) walk(ds[i],0,0,"dlg");
+        if (gui->getCanvas()) walk(gui->getCanvas(),0,0,"canvas");
+        GuiControl* h = gui->hitTestTop(503, 382);
+        Console::instance().printf(LogLevel::Info, "testhitDEL top=%s", h ? h->name.c_str() : "<none>");
+    }, "testhitDEL - who covers (503,382)?");
     con->addCommand("testclickLT", [this](int32_t, const char* const*) {
         bool r = gui && gui->handleInput(200, 460, true);
         Console::instance().printf(LogLevel::Info, "testclickLT(200,460) -> %d", (int)r);
@@ -1268,11 +1309,13 @@ void Engine::run() {
                     hover->hoveredTab = -1;
                     float maxTabW, tabSpacing;
                     GuiRenderer::tabLayoutParams(hover, maxTabW, tabSpacing);
+                    bool lsT = GuiRenderer::launchStyleTabs(hover);
                     if (my >= ay && my < ay + tabH) {
                         float tabX = ax + 2;
                         for (int ti = 0; ti < (int)hover->tabs.size(); ti++) {
-                            if (mx >= tabX && mx < tabX + maxTabW) { hover->hoveredTab = ti; break; }
-                            tabX += maxTabW + tabSpacing;
+                            float tw = lsT ? GuiRenderer::launchTabWidth(hover, ti, maxTabW) : maxTabW;
+                            if (mx >= tabX && mx < tabX + tw) { hover->hoveredTab = ti; break; }
+                            tabX += tw + tabSpacing;
                         }
                     }
                 } else {

@@ -878,6 +878,57 @@ void GuiRenderer::tabLayoutParams(const GuiControl* grp, float& maxTabW, float& 
     }
 }
 
+// Launch-toolbar tabs use the lnch_Tab-family skin: a 54xN (N%3==0, not the
+// 32-pitch band grid) atlas. Those buttons render compact — sized to their
+// label plus the state-dot zone — instead of full maxTabWidth.
+static Texture* loadGuiTexLoose(const std::string& base) {
+    Renderer& r = Engine::instance().renderer();
+    const std::string paths[] = { base + ".png", "textures/" + base + ".png", "textures/gui/" + base + ".png" };
+    Texture* tex = nullptr;
+    for (auto& p : paths) {
+        tex = r.loadTexture(p.c_str());
+        if (tex && tex->loaded) break;
+    }
+    return tex && tex->loaded ? tex : nullptr;
+}
+
+bool GuiRenderer::launchStyleTabs(const GuiControl* grp) {
+    if (!grp) return false;
+    for (auto& t : grp->tabs) {
+        if (t.text.empty()) continue;
+        std::string base;
+        auto sit = grp->tabSets.find(t.set);
+        if (sit != grp->tabSets.end() && !sit->second.empty()) base = sit->second;
+        if (base.empty()) {
+            ScriptObject* prof = getProfile(grp->profileName);
+            if (!prof) return false;
+            auto bi = prof->fields.find("bitmapBase");
+            if (bi == prof->fields.end()) return false;
+            base = bi->second.toString();
+        }
+        if (base.empty()) return false;
+        Texture* tex = loadGuiTexLoose(base);
+        if (!tex) return false;
+        int h = tex->height, w = tex->width;
+        bool bandGrid = (w % 3 == 0) && h >= 96 && (h % 32 == 0);
+        return w == 54 && (h % 3 == 0) && !bandGrid;
+    }
+    return false;
+}
+
+float GuiRenderer::launchTabWidth(const GuiControl* grp, int ti, float maxTabW) {
+    float textW = 60.f;
+    Font* f = nullptr;
+    if (ScriptObject* prof = getProfile(grp->profileName)) f = getProfileFont(prof);
+    if (!f) f = Engine::instance().renderer().getFont();
+    if (ti >= 0 && ti < (int)grp->tabs.size()) {
+        if (f) textW = f->measure(grp->tabs[ti].text.c_str()).x;
+        else textW = (float)grp->tabs[ti].text.size() * 9.0f;
+    }
+    // Label + dot zone; ref.png buttons measure ~55-56 GUI px wide.
+    return std::min(maxTabW, std::max(44.f, textW + 26.f));
+}
+
 // LAUNCH sidebar popup list — renders ABOVE the button (ShellLaunchMenu).
 // Called from the top-most post pass in GuiRenderer::render().
 static void drawLaunchPopupList(Renderer& r, GuiControl* ctl, float x, float y) {
@@ -2332,10 +2383,17 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             // addTab indexes by script id — blank filler tabs (id gaps) aren't drawn
             if (ctl->tabs[ti].text.empty()) continue;
             float textW = tabFont ? tabFont->measure(ctl->tabs[ti].text.c_str()).x : (float)ctl->tabs[ti].text.size() * 9.0f;
-            float tw = maxTabW;
             bool sel = (ti == ctl->selectedTab);
             bool hv = ctl->hovered && (ti == ctl->hoveredTab);
             Texture* tabBaseTex = tabTexFor(ctl->tabs[ti].set);
+            float tw = maxTabW;
+            if (tabBaseTex) {
+                int th = (int)tabBaseTex->height, tbw = (int)tabBaseTex->width;
+                bool bandGrid = (tbw % 3 == 0) && th >= 96 && (th % 32 == 0);
+                // Launch toolbar (lnch_Tab): compact text-sized buttons
+                if (!bandGrid && tbw == 54 && th % 3 == 0)
+                    tw = std::min(maxTabW, std::max(44.f, textW + 26.f));
+            }
             if (tabBaseTex) {
                 // Authentic T2 skin slicing, decoded from the game's own
                 // textures.vl2 art (pixel-scanned):
@@ -2354,9 +2412,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 //     the first 96px of horztabbutton; its olive second half
                 //     mirrors the B skin.
                 //
-                //   lnch_Tab (54x102): three 34px STATE rows (normal /
-                //     hilite / selected). Slice [left 14px][mid][right 10px]
-                //     so the end bevels stay crisp while the middle stretches.
+                //   lnch_Tab (54x102) is handled procedurally below — its
+                //     column/band layout doesn't slice cleanly.
                 float texW = (float)tabBaseTex->width, texH = (float)tabBaseTex->height;
                 int texHi = (int)texH;
                 int st = sel ? 2 : (hv ? 1 : 0);
@@ -2377,24 +2434,41 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     drawTexRegion(r, tabBaseTex, st * cellW, cellH * 2, cellW, cellH,
                                   tabX + tw - cellW, y, cellW, tabH);
                 } else if (texHi % 3 == 0) {
-                    // lnch_Tab family: the art is bright teal for every state;
-                    // T2 renders UNSELECTED toolbar tabs darkened (~#002C32
-                    // measured off the reference) and only the selected tab at
-                    // full brightness with its cyan SEL label.
-                    ColorF dim{0.06f, 0.40f, 0.42f, 1};
-                    const ColorF* tint = (!sel && !hv) ? &dim : nullptr;
-                    float rowH = texH / 3.f;
-                    float rofs = (sel ? 2 : (hv ? 1 : 0)) * rowH;
-                    float leftW = std::min(14.f, texW * 0.5f);
-                    float rightW = std::min(10.f, texW - leftW);
-                    drawTexRegion(r, tabBaseTex, 0, rofs, leftW, rowH, tabX, y, leftW, tabH, tint);
-                    float midDstW = tw - leftW - rightW;
-                    if (midDstW > 0)
-                        drawTexRegion(r, tabBaseTex, leftW, rofs, texW - leftW - rightW, rowH,
-                                      tabX + leftW, y, midDstW, tabH, tint);
-                    if (tw > leftW + rightW)
-                        drawTexRegion(r, tabBaseTex, texW - rightW, rofs, rightW, rowH,
-                                      tabX + tw - rightW, y, rightW, tabH, tint);
+                    // lnch_Tab family — authentic look decoded from ref.png:
+                    // teal bevel frame (top border, bright inner line, dark
+                    // seam, bottom double border) around a bright-to-dark
+                    // vertical gradient body; ONE state dot near the right
+                    // edge on EVERY button — pale cyan when hot/selected,
+                    // gray when idle. Label centered.
+                    auto fill = [&](float fx, float fy, float fw, float fh, const ColorF& c) {
+                        r.drawRectFill({fx, fy, 0}, {fx + fw, fy + fh, 0}, c);
+                    };
+                    ColorF cTop{92 / 255.f, 159 / 255.f, 168 / 255.f, 1};
+                    ColorF cIn{1 / 255.f, 105 / 255.f, 119 / 255.f, 1};
+                    ColorF cSeam{3 / 255.f, 54 / 255.f, 61 / 255.f, 1};
+                    ColorF cBotA{1 / 255.f, 102 / 255.f, 115 / 255.f, 1};
+                    ColorF cBotB{1 / 255.f, 85 / 255.f, 97 / 255.f, 1};
+                    fill(tabX, y, tw, 1.f, cTop);
+                    fill(tabX, y + 1, tw, 2.f, cIn);
+                    fill(tabX, y + 3, tw, 1.f, cSeam);
+                    int gh = tabH - 7;
+                    for (int i = 0; i < gh; i++) {
+                        float t = gh > 1 ? (float)i / (float)(gh - 1) : 0.f;
+                        float g = 88.f + (41.f - 88.f) * t;
+                        fill(tabX, y + 4 + i, tw, 1.f, ColorF{2 / 255.f, g / 255.f, (g + 11.f) / 255.f, 1});
+                    }
+                    fill(tabX, y + tabH - 3, tw, 1.f, cBotA);
+                    fill(tabX, y + tabH - 2, tw, 2.f, cBotB);
+                    auto disc = [&](float cx, float cy, float rad, const ColorF& c) {
+                        for (int dy = -(int)rad; dy <= (int)rad; dy++) {
+                            float hw = std::sqrt(rad * rad - (float)(dy * dy));
+                            fill(cx - hw, cy + (float)dy, hw * 2.f, 1.f, c);
+                        }
+                    };
+                    float dcx = tabX + tw - 12.f, dcy = y + 12.f;
+                    disc(dcx, dcy, 4.5f, {10 / 255.f, 25 / 255.f, 27 / 255.f, 1});
+                    disc(dcx, dcy, 3.f, (sel || hv) ? ColorF{196 / 255.f, 231 / 255.f, 255 / 255.f, 1}
+                                                    : ColorF{92 / 255.f, 92 / 255.f, 92 / 255.f, 1});
                 }
             }
             // Tab text — profile color per state (SEL bright, HL on hover)
@@ -2683,12 +2757,14 @@ void GuiRenderer::update(float dt) {
                 if (tabProf) tabFont = getProfileFont(tabProf);
                 if (my >= ay && my < ay + tabH && mx >= tabX) {
                     // Layout MUST match render/hit-test: fixed-width tabs
-                    // (maxTabWidth) separated by tabSpacing.
+                    // (maxTabWidth) separated by tabSpacing — or compact
+                    // text-sized buttons for the lnch_Tab launch style.
                     float maxTabW, tabSpacing;
                     tabLayoutParams(ctl, maxTabW, tabSpacing);
+                    bool lsT = launchStyleTabs(ctl);
                     for (int ti = 0; ti < (int)ctl->tabs.size(); ti++) {
                         if (ctl->tabs[ti].text.empty()) continue; // blank filler tabs aren't interactive
-                        float tw = maxTabW;
+                        float tw = lsT ? launchTabWidth(ctl, ti, maxTabW) : maxTabW;
                         if (mx >= tabX && mx < tabX + tw) {
                             ctl->hoveredTab = ti;
                             break;
@@ -2852,9 +2928,20 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
 }
 
 GuiControl* GuiRenderer::hitTestTop(int mx, int my) {
+    // A pushed DIALOG ROOT that claims the point itself (no descendant did)
+    // only blocks lower layers when it is modal — modeless shells like
+    // LaunchToolbarDlg must let clicks fall through their transparent areas.
+    auto modalRoot = [](GuiControl* dlg) {
+        ScriptObject* so = ScriptEngine::instance().findObject(dlg->name.c_str());
+        if (!so) return false;
+        auto mi = so->fields.find("modal");
+        return mi != so->fields.end() && mi->second.toBool();
+    };
     for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it) {
         GuiControl* h = hitTest(*it, mx, my);
-        if (h) return h;
+        if (!h) continue;
+        if (h == *it && !modalRoot(*it)) continue;
+        return h;
     }
     if (canvas) return hitTest(canvas, mx, my);
     return nullptr;
@@ -3106,13 +3193,15 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         const float tabH = 29;
         if (y >= ay && y < ay + tabH && x >= ax) {
             // Layout MUST match the render path: fixed-width tabs
-            // (maxTabWidth) separated by tabSpacing, origin +2.
+            // (maxTabWidth) separated by tabSpacing, origin +2 — or compact
+            // text-sized buttons for the lnch_Tab launch style.
             float maxTabW, tabSpacing;
             tabLayoutParams(hit, maxTabW, tabSpacing);
+            bool lsT = launchStyleTabs(hit);
             float tabX = ax + 2;
             for (int ti = 0; ti < (int)hit->tabs.size(); ti++) {
                 if (hit->tabs[ti].text.empty()) continue; // blank filler tabs aren't clickable
-                float tw = maxTabW;
+                float tw = lsT ? launchTabWidth(hit, ti, maxTabW) : maxTabW;
                 if (x >= tabX && x < tabX + tw) {
                     hit->selectedTab = ti;
                     // Show/hide sibling GuiTabPageCtrl children (T3D-style page visibility)
@@ -3586,15 +3675,8 @@ GuiControl* GuiRenderer::findControl(const std::string& name) {
         if (GuiControl* r = d->findChild(name)) return r;
     }
     auto lit = lastPushed.find(name);
-    if (lit != lastPushed.end() && lit->second) {
-        if (name == "LaunchToolbarDlg") fprintf(stderr, "[FC] LT via lastPushed\n");
+    if (lit != lastPushed.end() && lit->second)
         return lit->second;
-    }
-    if (name == "LaunchToolbarDlg") {
-        fprintf(stderr, "[FC] LT MISS size=%d keys:", (int)lastPushed.size());
-        for (auto& kv : lastPushed) fprintf(stderr, " '%s'", kv.first.c_str());
-        fprintf(stderr, "\n");
-    }
     if (!canvas) return nullptr;
     return canvas->findChild(name);
 }

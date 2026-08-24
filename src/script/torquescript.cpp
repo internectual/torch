@@ -1,4 +1,6 @@
 #include "script/torquescript.h"
+#include "script/script_engine.h"
+#include "render/gui_renderer.h"
 #include "core/console.h"
 #include "core/engine.h"
 #include <sys/stat.h>
@@ -8,6 +10,8 @@
 #include <sstream>
 #include <fstream>
 #include <set>
+
+static void syncGuiField(const std::string& objName, const std::string& field, const VMValue& val);
 #include <cctype>
 
 static std::string toLower(const std::string& s) {
@@ -146,7 +150,10 @@ struct TorqueScript::Impl {
     void writeBackVar(VMValue val) {
         if (!lastFieldObj.empty() && !lastFieldName.empty()) {
             auto* obj = ScriptEngine::instance().findObject(lastFieldObj.c_str());
-            if (obj) obj->fields[lastFieldName] = val;
+            if (obj) {
+                obj->fields[lastFieldName] = val;
+                syncGuiField(lastFieldObj, lastFieldName, val);
+            }
         } else if (!lastVarName.empty()) {
             if (lastVarName[0] == '$') {
                 outer->setGlobal(lastVarName, val);
@@ -1019,11 +1026,17 @@ VMValue TorqueScript::Impl::parseAssignment() {
         // Store back: object field, global, or local
         if (!lastFieldObj.empty() && !lastFieldName.empty()) {
             auto* obj = ScriptEngine::instance().findObject(lastFieldObj.c_str());
-            if (obj) obj->fields[lastFieldName] = val;
+            if (obj) {
+                obj->fields[lastFieldName] = val;
+                syncGuiField(lastFieldObj, lastFieldName, val);
+            }
         } else if (!targetFieldObj.empty() && !targetFieldName.empty()) {
             // Fallback: use the saved field target (bracket+field may have lost it)
             auto* obj = ScriptEngine::instance().findObject(targetFieldObj.c_str());
-            if (obj) obj->fields[targetFieldName] = val;
+            if (obj) {
+                obj->fields[targetFieldName] = val;
+                syncGuiField(targetFieldObj, targetFieldName, val);
+            }
         } else if (!lastVarName.empty()) {
             if (lastVarName[0] == '$') {
                 outer->setGlobal(lastVarName, val);
@@ -1251,6 +1264,27 @@ VMValue TorqueScript::Impl::parseUnary() {
         return newVal;
     }
     return parsePostfix();
+}
+
+// Runtime script writes to named GUI-control objects must reach the live
+// control tree, not just the ScriptObject field map — e.g. commonDialogs.cs
+// sets MBYesNoButtonYes.command right before the confirm dialog opens.
+static void syncGuiField(const std::string& objName, const std::string& field, const VMValue& val) {
+    if (objName.empty()) return;
+    GuiControl* ctl = Engine::instance().guiRenderer().findControl(objName);
+    if (!ctl) return;
+    if (field == "command") {
+        ctl->command = val.toString();
+        // Click dispatch runs the prebuilt onClick closure, not the live
+        // command string — rebuild it so runtime-assigned commands fire.
+        if (!ctl->command.empty()) {
+            std::string cmd = ctl->command;
+            ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); };
+        }
+    }
+    else if (field == "text") ctl->text = val.toString();
+    else if (field == "visible") ctl->visible = val.toBool();
+    else if (field == "active") ctl->active = val.toBool();
 }
 
 VMValue TorqueScript::Impl::parsePostfix() {
