@@ -12,6 +12,7 @@
 #include <cstring>
 #include <vector>
 #include <glob.h>
+#include <chrono>
 #include <sys/file.h>
 #include <map>
 
@@ -607,6 +608,36 @@ bool Engine::init(int argc, char* argv[]) {
             Console::instance().printf(LogLevel::Error, "Screenshot failed: %s", path);
     }, "screenshot [path] - save a screenshot to path (default: screenshot.png)");
 
+    // DEBUG: inject a GUI mouse click through the real input path; cycles
+    // JOIN -> HOST -> WARRIOR tab centers each call (scheduler drops args).
+    con->addCommand("testclick", [this](int32_t, const char* const*) {
+        static const int pts[3][2] = {{119,54},{271,54},{423,54}};
+        static int i = 0;
+        int x = pts[i][0], y = pts[i][1]; i = (i+1)%3;
+        bool r = gui && gui->handleInput(x, y, true);
+        Console::instance().printf(LogLevel::Info, "testclick(%d,%d) -> %d", x, y, (int)r);
+    }, "testclick - simulate a GUI click on the next top tab");
+
+    // DEBUG: single click at TRAINING launch-tab center
+    con->addCommand("testclickLT", [this](int32_t, const char* const*) {
+        bool r = gui && gui->handleInput(200, 460, true);
+        Console::instance().printf(LogLevel::Info, "testclickLT(200,460) -> %d", (int)r);
+    }, "testclickLT - click the TRAINING launch tab");
+
+    // DEBUG: dump dialog stack tree
+    con->addCommand("dumpstack", [this](int32_t, const char* const*) {
+        if (!gui) return;
+        std::function<void(GuiControl*,int)> walk = [&](GuiControl* c, int d) {
+            if (!c) return;
+            Console::instance().printf(LogLevel::Info, "[STK] %*s'%s'(%s) ext=%.0fx%.0f vis=%d ctl=%p kids=%d",
+                d*2,"",c->name.c_str(),c->className.c_str(),c->extentX,c->extentY,(int)c->visible,
+                (void*)c,(int)c->children.size());
+            for (auto* ch : c->children) walk(ch,d+1);
+        };
+        auto& st = gui->dialogStackForDebug();
+        for (auto* d : st) { Console::instance().printf(LogLevel::Info, "[STK] --- dlg ---"); walk(d,0); }
+    }, "dumpstack - print dialog stack");
+
     // Login flow commands
     con->addCommand("LoginDone", [this](int32_t, const char* const*) {
         gui->popDialog("LoginDlg");
@@ -846,6 +877,14 @@ bool Engine::init(int argc, char* argv[]) {
     // The init script (console_start.cs) parses args, creates profiles,
     // GUI controls, and execs any other scripts it needs.
     if (scr->ts()) {
+        // -nologin: follow the game's own headless path — skip the GG intro
+        // splash and the login dialog, landing directly on the shell.
+        if (noLogin) {
+            Console::instance().setVariable("$pref::SkipIntro", "true");
+            Console::instance().setVariable("$SkipLogin", "true");
+            Console::instance().setVariable("$pref::AcceptedEULA", "1");
+            Console::instance().setVariable("$LaunchMode", "Offline");
+        }
         std::string initPath = Console::instance().getStringVariable("initScript", "console_start.cs");
         auto initData = fs.read(initPath.c_str());
         if (!initData.empty()) {
@@ -891,6 +930,14 @@ bool Engine::init(int argc, char* argv[]) {
         }
     } else if (noLogin) {
         Console::instance().printf(LogLevel::Info, "-nologin: dev panel (F1 overlay, ~ console, Pause debug)");
+        // clientDefaults.cs forces $pref::Player::Count = 0 on fresh configs,
+        // so activating the warrior pane pushes NewWarriorDlg over everything.
+        // A headless/dev session has no warrior to create — pretend one exists.
+        if (auto* ts = scr->ts()) {
+            ts->setGlobal("$pref::Player::Count", VMValue((double)1));
+            ts->setGlobal("$pref::Player::Current", VMValue((double)0));
+        }
+        gui->popDialog("NewWarriorDlg");
         plat->processEvents();
         ren->beginFrame({0.15f, 0.15f, 0.2f, 1.0f});
         if (gui) gui->render();
@@ -1193,14 +1240,13 @@ void Engine::run() {
                     for (auto* p = hover->parent; p && p != gui->getCanvas(); p = p->parent) { ax += p->posX; ay += p->posY; }
                     const float tabH = 29;
                     hover->hoveredTab = -1;
+                    float maxTabW, tabSpacing;
+                    GuiRenderer::tabLayoutParams(hover, maxTabW, tabSpacing);
                     if (my >= ay && my < ay + tabH) {
                         float tabX = ax + 2;
-                        auto* hf = Engine::instance().renderer().getFont();
                         for (int ti = 0; ti < (int)hover->tabs.size(); ti++) {
-                            float textW = hf ? hf->measure(hover->tabs[ti].text.c_str()).x : (float)hover->tabs[ti].text.size() * 9.0f;
-                            float tw = std::max(60.0f, textW + 16);
-                            if (mx >= tabX && mx < tabX + tw) { hover->hoveredTab = ti; break; }
-                            tabX += tw + 1;
+                            if (mx >= tabX && mx < tabX + maxTabW) { hover->hoveredTab = ti; break; }
+                            tabX += maxTabW + tabSpacing;
                         }
                     }
                 } else {
@@ -1214,9 +1260,9 @@ void Engine::run() {
                 pop->hovered = true;
                 float ax = pop->posX, ay = pop->posY;
                 for (auto* p = pop->parent; p && p != gui->getCanvas(); p = p->parent) { ax += p->posX; ay += p->posY; }
-                float popY = ay - (float)pop->menuItems.size() * 20.0f - 4;
-                float lineH = 20;
-                int idx = (int)((my - popY) / lineH);
+                float popX, popY, popW, popH, lineH;
+                GuiRenderer::launchPopupGeometry(pop, ax, ay, popX, popY, popW, popH, lineH);
+                int idx = (int)((my - popY - 1.0f) / lineH); // +1px top frame inset
                 pop->hoveredItem = (idx >= 0 && idx < (int)pop->menuItems.size() && !pop->menuItems[idx].isSeparator) ? idx : -1;
             }
             bool pressed = plat->input().mouseButtons[1] != 0;
@@ -1783,12 +1829,10 @@ void Engine::run() {
                     r.drawTexturedRectUV({dx, dy, 0}, {dx + dw, dy + dh, 0}, bgTex, 0, 0, 1, 1);
                 }
             }
-            // GUI canvas at fixed 640x480 upper-left
+            // GUI canvas: the shell renders at native resolution across the
+            // whole window (anchors place bottom dialogs like the toolbar).
+            // Drawn AFTER the dev panel (below) so the shell stays top-most.
             ren->setViewport(0, 0, w, h);
-            glEnable(GL_SCISSOR_TEST);
-            glScissor(0, h - 480, 640, 480);
-            if (gui && gui->getCanvas()) gui->render();
-            glDisable(GL_SCISSOR_TEST);
 
             // Ensure proper GL state for 2D rendering (GUI may have changed it)
             glDisable(GL_DEPTH_TEST);
@@ -2125,8 +2169,16 @@ void Engine::run() {
                 }
             }
 
+            // Shell GUI on top of everything in this pass (dev panel, panels)
+            ren->setViewport(0, 0, w, h);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glEnable(GL_BLEND);
+            if (menuState && gui && gui->getCanvas()) gui->render();
+
             if (menuState) r.endFrame();
         }
+
 
         // TORCH overlay + minimap
         ren->setViewport(0, 0, plat->width(), plat->height());

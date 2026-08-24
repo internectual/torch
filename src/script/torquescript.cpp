@@ -2077,6 +2077,7 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
         return {};
     }
 
+
     TSFunc& func = it->second;
 
     // Save outer parsing state (a function call must not destroy the caller's token stream)

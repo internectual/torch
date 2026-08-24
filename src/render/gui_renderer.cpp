@@ -78,6 +78,29 @@ GuiRenderer::~GuiRenderer() {
     delete checkerTex;
 }
 
+// Normalize Shell* class names to their Gui* equivalents.
+// Torque folded Shell* into Gui* in later versions; the scripts still
+// use Shell* names but the rendering/input logic is identical.
+static std::string normalizeGuiClassName(const std::string& cn) {
+    static const std::map<std::string, std::string> sShellToGui = {
+        {"ShellTextEditCtrl",        "GuiTextEditCtrl"},
+        {"ShellToggleButton",        "GuiCheckBoxCtrl"},
+        {"ShellRadioButton",         "GuiRadioCtrl"},
+        {"ShellBitmapButton",        "GuiBitmapButtonCtrl"},
+        {"ShellTextList",            "GuiTextListCtrl"},
+        {"ShellScrollCtrl",          "GuiScrollCtrl"},
+        {"ShellSliderCtrl",          "GuiSliderCtrl"},
+        {"ShellPopupMenu",           "GuiPopUpMenuCtrl"},
+        {"ShellFancyTextList",       "GuiTextListCtrl"},
+        {"ShellFancyArrayScrollCtrl","GuiScrollCtrl"},
+        {"ShellChatMemberList",      "GuiTextListCtrl"},
+        {"ShellLoadFileDlg",         "GuiFileDialogCtrl"},
+        {"ShellSaveFileDlg",         "GuiFileDialogCtrl"},
+    };
+    auto it = sShellToGui.find(cn);
+    return it != sShellToGui.end() ? it->second : cn;
+}
+
 void GuiRenderer::init() {
     canvas = nullptr;
     auto& objs = ScriptEngine::instance().objects;
@@ -88,8 +111,7 @@ void GuiRenderer::init() {
         if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl") {
             GuiControl* ctl = new GuiControl;
             ctl->name = obj->name;
-            ctl->className = obj->className;
-
+            ctl->className = normalizeGuiClassName(obj->className);
             auto rf = [&](const std::string& key, float def) {
                 auto it = obj->fields.find(key);
                 if (it != obj->fields.end()) return (float)it->second.toDouble();
@@ -190,7 +212,7 @@ void GuiRenderer::refresh() {
         if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl") {
             if (findControl(name)) continue;
             GuiControl* ctl = new GuiControl;
-            ctl->name = obj->name; ctl->className = obj->className;
+            ctl->name = obj->name; ctl->className = normalizeGuiClassName(obj->className);
             auto parsePair = [&](const std::string& key, float& a, float& b) {
                 auto it = obj->fields.find(key);
                 if (it != obj->fields.end()) { std::string s = it->second.toString(); sscanf(s.c_str(), "%f %f", &a, &b); }
@@ -250,7 +272,10 @@ void GuiRenderer::render() {
 
     // Render dialogs in stack order (front to back) so later-pushed dialogs
     // appear on top of earlier ones (e.g. NewWarriorDlg over GameGui).
-    for (auto* dlg : dialogStack) renderControl(dlg);
+    for (auto* dlg : dialogStack) {
+        renderControl(dlg);
+        r.flushSpriteBatch();
+    }
 
     // Open popup dropdowns render LAST (top-most): sibling and overlay
     // controls drawn above must not paint over an open popup list.
@@ -292,15 +317,19 @@ static ScriptObject* getProfile(const std::string& name) {
     return result;
 }
 
-// Get font from profile's fontType/fontSize
+// Get font from profile's fontType/fontSize. Values referencing TS globals
+// (e.g. $ShellButtonFont) are normally already resolved by the script parser;
+// if they aren't, fall back to the engine default font. Missing sizes resolve
+// to the closest loaded size of the same face (see Renderer::getFont).
 static Font* getProfileFont(ScriptObject* prof) {
     if (!prof) return Engine::instance().renderer().getFont();
     auto ft = prof->fields.find("fontType");
     auto fs = prof->fields.find("fontSize");
     std::string name = (ft != prof->fields.end()) ? ft->second.toString() : "";
     int size = (fs != prof->fields.end()) ? fs->second.toInt() : 0;
-    if (name.empty() || size <= 0) return Engine::instance().renderer().getFont();
-    return Engine::instance().renderer().getFont(name.c_str(), size);
+    if (name.empty() || name[0] == '$' || size <= 0) return Engine::instance().renderer().getFont();
+    Font* f = Engine::instance().renderer().getFont(name.c_str(), size);
+    return f ? f : Engine::instance().renderer().getFont();
 }
 
 // Parse textOffset from profile (two ints: "x y")
@@ -418,8 +447,6 @@ static void drawBmpArrayButton(Renderer& r, const Point3F& dstA, const Point3F& 
         const auto& src = cells[baseIdx + 4];
         float tileW = (float)src.w, tileH = (float)src.h;
         float repeatX = mw / tileW, repeatY = mh / tileH;
-        float u0 = (float)src.x / texW, v0 = (float)src.y / texH;
-        float u1 = (float)(src.x + src.w) / texW, v1 = (float)(src.y + src.h) / texH;
         // Use GL_REPEAT for tiling
         GLint oldWrap;
         glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, &oldWrap);
@@ -642,6 +669,63 @@ static Texture* getShellTex(Renderer& r, const char* name) {
 // Bitmap array cell cache: detect cells from texture by scanning separator color
 static std::unordered_map<uint32_t, std::vector<BmpCell>> g_cellCache;
 
+// ---------------------------------------------------------------------------
+// Faithful port of Tribes 2's GuiControl::createBitmapArray (T2 guiControl.cc)
+// for shell skins like shll_button / shll_entryfield:
+//   - separator color is pixel(0,0) (transparent magenta in T2 skins),
+//     compared across all four RGBA channels
+//   - bitmap PIECES are horizontal bands separated by separator lines down
+//     column 0; the column pitch comes from the first non-separator pixel on
+//     each band's top row
+//   - button STATES are the columns at x = j*pitch
+//   - cells are inset 1px on every side to drop separator pixels
+// Layout: cells[piece * numStates + state]
+struct T2Cell { int x, y, w, h; };
+static std::unordered_map<uint32_t, std::vector<T2Cell>> g_t2ArrayCache;
+
+static const std::vector<T2Cell>& t2BitmapArray(const uint8_t* rgba, int tw, int th, uint32_t texId) {
+    auto it = g_t2ArrayCache.find(texId);
+    if (it != g_t2ArrayCache.end()) return it->second;
+    std::vector<T2Cell> cells;
+    const uint8_t* sep = rgba;
+    auto isSep = [&](int x, int y) {
+        const uint8_t* c = rgba + ((size_t)y * tw + x) * 4;
+        return c[0] == sep[0] && c[1] == sep[1] && c[2] == sep[2] && c[3] == sep[3];
+    };
+    int yofs = 0;
+    while (yofs + 1 < th) {
+        int bmpWidth = tw;
+        for (int x = 0; x < tw; x++) {
+            if (!isSep(x, yofs)) { bmpWidth = x; break; }
+        }
+        yofs += 1;
+        int bmpHeight = 0;
+        while (yofs + bmpHeight < th && !isSep(0, yofs + bmpHeight)) bmpHeight++;
+        if (bmpHeight <= 0 || bmpWidth <= 2) break;
+        int numStates = tw / bmpWidth;
+        for (int j = 0; j < numStates; j++)
+            cells.push_back({j * bmpWidth + 1, yofs + 1, bmpWidth - 2, bmpHeight - 2});
+        yofs += bmpHeight;
+    }
+    Console::instance().printf(LogLevel::Debug, "T2 bitmap array for tex %u: %zu cells", texId, cells.size());
+    auto& stored = g_t2ArrayCache[texId] = std::move(cells);
+    return stored;
+}
+
+// Load a shell skin (bm8 preferred, png fallback, procedural last) and return
+// its T2 bitmap array. Returns nullptr if the texture is missing.
+static const std::vector<T2Cell>* t2SkinArray(Renderer& r, const char* name, Texture*& outTex) {
+    outTex = getShellTex(r, name);
+    if (!outTex || !outTex->loaded) return nullptr;
+    auto cit = g_t2ArrayCache.find(outTex->id);
+    if (cit != g_t2ArrayCache.end()) return &cit->second;
+    int tw = outTex->width, th = outTex->height;
+    std::vector<uint8_t> pixels((size_t)tw * th * 4);
+    glBindTexture(GL_TEXTURE_2D, outTex->id);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    return &t2BitmapArray(pixels.data(), tw, th, outTex->id);
+}
+
 static const std::vector<BmpCell>& getBitmapCells(const uint8_t* rgba, int w, int h, uint32_t texId) {
     auto it = g_cellCache.find(texId);
     if (it != g_cellCache.end()) return it->second;
@@ -753,30 +837,92 @@ static void computeContentExtent(GuiControl* ctl) {
     ctl->contentW = maxX;
 }
 
+// Shared ShellLaunchMenu popup geometry — input hit-testing MUST match
+// drawLaunchPopupList exactly or clicks land on the wrong items.
+void GuiRenderer::launchPopupGeometry(const GuiControl* lm, float x, float y,
+                                      float& popX, float& popY, float& popW, float& popH, float& lineH) {
+    auto* font = Engine::instance().renderer().getFont();
+    lineH = 26.0f;
+    float maxTextW = 0;
+    if (font)
+        for (auto& item : lm->menuItems)
+            maxTextW = std::max(maxTextW, font->measure(item.text.c_str()).x);
+    popW = std::max(lm->extentX + 21.0f, maxTextW + 40.0f);
+    popH = lineH * (float)lm->menuItems.size() + 2.0f;
+    popX = x - 8.0f;
+    popY = y - popH - 6.0f;
+}
+
+// Tab layout knobs live on the script object (GameGui.gui /
+// LaunchToolbarDlg.gui): tabs are FIXED width (maxTabWidth) separated by
+// tabSpacing — they are never sized to their text.
+void GuiRenderer::tabLayoutParams(const GuiControl* grp, float& maxTabW, float& tabSpacing) {
+    maxTabW = 150.f; tabSpacing = 2.f;
+    if (!grp) return;
+    if (ScriptObject* so = ScriptEngine::instance().findObject(grp->name.c_str())) {
+        auto mtw = so->fields.find("maxTabWidth");
+        if (mtw != so->fields.end()) maxTabW = (float)mtw->second.toDouble();
+        auto tsp = so->fields.find("tabSpacing");
+        if (tsp != so->fields.end()) tabSpacing = (float)tsp->second.toDouble();
+    }
+}
+
 // LAUNCH sidebar popup list — renders ABOVE the button (ShellLaunchMenu).
 // Called from the top-most post pass in GuiRenderer::render().
 static void drawLaunchPopupList(Renderer& r, GuiControl* ctl, float x, float y) {
     auto* font = r.getFont();
-    float popX = x;
-    float popY = y - (float)ctl->menuItems.size() * 20.0f - 4; // render above button
-    float popW = 180, lineH = 20;
-    float popH = lineH * (float)ctl->menuItems.size();
-    // Sidebar background — distinct from canvas bg, plus a border so it
-    // reads as a panel (the old bg matched the canvas exactly → invisible)
-    r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.08f, 0.09f, 0.13f, 0.98f});
-    r.drawRectFill({popX, popY, 0}, {popX + popW, popY + 1, 0}, {0.5f, 0.6f, 0.8f, 1});
-    r.drawRectFill({popX, popY + popH - 1, 0}, {popX + popW, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
-    r.drawRectFill({popX, popY, 0}, {popX + 1, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
-    r.drawRectFill({popX + popW - 1, popY, 0}, {popX + popW, popY + popH, 0}, {0.5f, 0.6f, 0.8f, 1});
-    float iy = popY;
+    const float lineH = 26.0f;
+    // Width: T2 sizes the popup to its widest item; never narrower than the
+    // button it belongs to (reference: 136px popup over a 115px button).
+    float maxTextW = 0;
+    if (font)
+        for (auto& item : ctl->menuItems)
+            maxTextW = std::max(maxTextW, font->measure(item.text.c_str()).x);
+    float popW = std::max(ctl->extentX + 21.0f, maxTextW + 40.0f);
+    float popH = lineH * (float)ctl->menuItems.size() + 2.0f;
+    float popX = x - 8.0f;
+    float popY = y - popH - 6.0f; // opens above the LAUNCH button
+    // Panel: shll_menufield is the game's own vertical teal-gradient strip
+    // (4x136, alpha fades top→bottom); lay it over a dark base so the fade
+    // matches the reference (#0D2023 → ~#133134).
+    r.drawRectFill({popX, popY, 0}, {popX + popW, popY + popH, 0}, {0.051f, 0.125f, 0.137f, 0.97f});
+    if (Texture* mf = getShellTex(r, "shll_menufield.png"); mf && mf->loaded)
+        drawTexRegion(r, mf, 0, 1, (float)mf->width, (float)mf->height - 2,
+                      popX, popY, popW, popH);
+    // Hairline frame (#145A4B measured off the reference)
+    ColorF edge{0x14 / 255.f, 0x5A / 255.f, 0x4B / 255.f, 1};
+    r.drawRectFill({popX, popY, 0}, {popX + popW, popY + 1, 0}, edge);
+    r.drawRectFill({popX, popY + popH - 1, 0}, {popX + popW, popY + popH, 0}, edge);
+    r.drawRectFill({popX, popY, 0}, {popX + 1, popY + popH, 0}, edge);
+    r.drawRectFill({popX + popW - 1, popY, 0}, {popX + popW, popY + popH, 0}, edge);
+    Texture* rolTex = getShellTex(r, "shll_bar_rol.png");
+    Texture* sepTex = getShellTex(r, "shll_launch_sep.png");
+    float iy = popY + 1;
     for (size_t ii = 0; ii < ctl->menuItems.size(); ii++) {
         auto& item = ctl->menuItems[ii];
         if (item.isSeparator) {
-            r.drawRectFill({popX + 4, iy + lineH*0.5f, 0}, {popX + popW - 4, iy + lineH*0.5f + 1, 0}, {0.4f,0.4f,0.5f,0.8f});
+            if (sepTex && sepTex->loaded)
+                drawTexRegion(r, sepTex, 0, 0, (float)sepTex->width, (float)sepTex->height,
+                              popX + 3, iy + lineH * 0.5f - 1, popW - 6, 2);
+            else
+                r.drawRectFill({popX + 3, iy + lineH * 0.5f, 0}, {popX + popW - 3, iy + lineH * 0.5f + 1, 0}, edge);
         } else {
-            if ((int)ii == ctl->hoveredItem)
-                r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {0.32f, 0.42f, 0.6f, 1});
-            if (font) font->render(item.text.c_str(), popX + 6, iy + (lineH - (float)font->charHeight) * 0.5f, {0.85f,0.92f,1,1}, 1.0f);
+            bool hovered = ((int)ii == ctl->hoveredItem);
+            if (hovered) {
+                // shll_bar_rol: the game's own hover bar (2x16 cyan strip)
+                if (rolTex && rolTex->loaded)
+                    drawTexRegion(r, rolTex, 0, 0, (float)rolTex->width, (float)rolTex->height,
+                                  popX + 2, iy, popW - 4, lineH);
+                else
+                    r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {0.26f, 0.65f, 0.71f, 0.85f});
+            }
+            if (font && !item.text.empty()) {
+                ColorF ic{6 / 255.f, 245 / 255.f, 215 / 255.f, 1};   // LaunchMenuProfile fontColor
+                ColorF hc{74 / 255.f, 251 / 255.f, 228 / 255.f, 1};  // LaunchMenuProfile fontColorHL
+                font->render(item.text.c_str(), popX + 10,
+                             iy + (lineH - (float)font->charHeight) * 0.5f,
+                             hovered ? hc : ic, 1.0f);
+            }
         }
         iy += lineH;
     }
@@ -851,7 +997,20 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         p = p->parent;
     }
 
+
     const std::string& cn = ctl->className;
+
+    { static int tn=0; if (tn<40 && (ctl->name=="LaunchToolbarDlg"||ctl->name=="LaunchToolbarPane"||ctl->name=="LaunchToolbarMenu"))
+        fprintf(stderr, "[RC] %s (%s) vis=%d\n", ctl->name.c_str(), cn.c_str(), (int)ctl->visible), tn++; }
+
+    // Corrupt-layout guard: orphaned intro/splash dialogs can carry garbage
+    // (negative / astronomic) extents from incomplete script parsing; their
+    // fills would smear undefined geometry across the whole canvas.
+    if (cn != "GuiCanvas" &&
+        (ctl->extentX < 0 || ctl->extentY < 0 ||
+         ctl->extentX > 16384 || ctl->extentY > 16384))
+        return;
+
 
     // For GuiCanvas, just use full screen
     if (cn == "GuiCanvas") {
@@ -928,31 +1087,41 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             if (!launchTex) launchTex = tryLaunch("");  // base texture (normal state)
         }
         // Render launch button texture if available (from bitmapBase)
+        bool skinned = false; // true when the real T2 skin art was used (no extra hover tint)
         if (launchTex && launchTex->loaded) {
             r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, launchTex->id);
+            skinned = true;
         } else {
-        // 3-slice renderer for shll_button.png (54x123): 3x3 grid of 18x41 where
-        // COLUMNS are states [normal/hover/pressed] and ROWS are pieces
-        // [top cap / middle band / bottom cap]. Stack the three pieces at exact
-        // thirds so the button reconstructs as one contiguous beveled shape.
-        const std::vector<BmpCell>* bmpCells = nullptr;
-        Texture* shTex = getShellTexWithCells(r, "shll_button.png", bmpCells);
+        // Faithful T2 ShellBitmapButton rendering: shll_button is a T2 bitmap
+        // array (3 interaction states x 3 piece bands).
+        Texture* shTex = nullptr;
+        const std::vector<T2Cell>* arr = t2SkinArray(r, "shll_button.png", shTex);
         bool haveOwnTex = btnTex && btnTex->loaded;
-        bool gridApplies = bmpCells && bmpCells->size() >= 9 &&
-                           (!haveOwnTex || (btnTex->width == 54 && btnTex->height == 123));
-        if (gridApplies) {
-            // shll_button.png layout (verified visually): row y=41..82 is the
-            // complete horizontal pill button (54x41); rows above/below are
-            // end-cap kits. Stretch the pill; tint for hover/pressed feedback.
-            (void)bmpCells;
-            int state = ctl->hovered ? 1 : (ctl->menuOpen ? 2 : 0);
-            float syPill = 41.0f;
-            drawTexRegion(r, shTex, 0, syPill, (float)shTex->width, 41.0f,
-                          x, y, ctl->extentX, ctl->extentY);
-            if (state == 1)
-                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {1, 1, 1, 0.12f});
-            else if (state == 2)
-                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0, 0, 0, 0.20f});
+        if (arr && arr->size() >= 9 && shTex &&
+            (!haveOwnTex || (btnTex->width == 54 && btnTex->height == 123))) {
+            constexpr int kStates = 3; // normal / hilight / depressed
+            int st = ctl->menuOpen ? 2 : (ctl->hovered ? 1 : 0);
+            // T2 shell bitmap arrays store pieces as bands (top = LEFT cap,
+            // middle = stretchable center, bottom = RIGHT cap) and
+            // interaction states as columns — verified against shll_button /
+            // shll_entryfield art (left cap's bright edge faces left).
+            auto& cL = (*arr)[0 * kStates + st];
+            auto& cM = (*arr)[1 * kStates + st];
+            auto& cR = (*arr)[2 * kStates + st];
+            float cellH = (float)cL.h;
+            // Scale uniformly if the control height differs from the native cell
+            float sy = (cellH > 0) ? ctl->extentY / cellH : 1.0f;
+            float lw = (float)cL.w * sy, rw = (float)cR.w * sy, bh = cellH * sy;
+            float midW = std::max(ctl->extentX - lw - rw, 0.0f);
+            float fy = y + (ctl->extentY - bh) * 0.5f;
+
+            drawTexRegion(r, shTex, (float)cL.x, (float)cL.y, (float)cL.w, (float)cL.h, x, fy, lw, bh);
+            if (midW > 0)
+                drawTexRegion(r, shTex, (float)cM.x, (float)cM.y, (float)cM.w, (float)cM.h,
+                              x + lw, fy, midW, bh);
+            drawTexRegion(r, shTex, (float)cR.x, (float)cR.y, (float)cR.w, (float)cR.h,
+                          x + lw + midW, fy, rw, bh);
+            skinned = true;
         } else if (!launchTex && btnTex && btnTex->loaded && btnTex->width > btnTex->height * 2) {
             // Horizontal multi-state strip (e.g. gui/shll_soundbutton 104x27 = 4 states):
             // [normal, hover/rollover, pressed, disabled]
@@ -965,19 +1134,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                           x, y, ctl->extentX, ctl->extentY);
         } else if (!launchTex && btnTex && btnTex->loaded) {
             r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, btnTex->id);
-        } else {
-            // Gradient-like button using stacked rects (since shell textures unavailable)
-            ColorF top = btnFill;
-            ColorF bot = {btnFill.r * 0.6f, btnFill.g * 0.6f, btnFill.b * 0.6f, btnFill.a};
-            // Constrain visual height to parent bounds so button doesn't overflow toolbar
-            float visH = ctl->extentY;
-            if (ctl->parent && ctl->parent->extentY > 0 && ctl->parent->extentY < visH)
-                visH = ctl->parent->extentY;
-            float visY = y + (ctl->extentY - visH) * 0.5f;
-            float half = visH * 0.5f;
-            r.drawRectFill({x-1, visY-1, 0}, {x + ctl->extentX + 1, visY + visH + 1, 0}, btnBorder);
-            r.drawRectFill({x, visY, 0}, {x + ctl->extentX, visY + half, 0}, top);
-            r.drawRectFill({x, visY + half, 0}, {x + ctl->extentX, visY + visH, 0}, bot);
         }
         } // end else (no launchTex)
         if (!ctl->bitmap.empty()) {
@@ -1003,10 +1159,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto* prof = getProfile(ctl->profileName);
             if (prof) {
                 auto fci = prof->fields.find("fontColor");
-                if (fci != prof->fields.end()) {
+                if (fci != prof->fields.end())
                     parseColor(fci->second.toString(), tc);
-                    if (tc.r + tc.g + tc.b < 0.3f) tc = {1,1,1,1};
-                }
                 bf = getProfileFont(prof);
                 getTextOffset(prof, textOfsX, textOfsY);
                 auto ji = prof->fields.find("justify");
@@ -1020,8 +1174,9 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             else if (justify == "right") tx = x + ctl->extentX - tw - textOfsX;
             bf->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
         }
-        // Hover highlight: yellow border when the mouse is over this control
-        if (ctl->hovered) {
+        // Hover highlight: yellow border for unskinned fallback buttons only —
+        // T2 shell skins already signal hover via their hilight state art.
+        if (ctl->hovered && !skinned) {
             r.drawRectFill({x-1, y-1, 0}, {x + ctl->extentX + 1, y, 0}, {1.0f, 1.0f, 0.4f, 0.9f});
             r.drawRectFill({x-1, y + ctl->extentY, 0}, {x + ctl->extentX + 1, y + ctl->extentY + 1, 0}, {1.0f, 1.0f, 0.4f, 0.9f});
             r.drawRectFill({x-1, y-1, 0}, {x, y + ctl->extentY + 1, 0}, {1.0f, 1.0f, 0.4f, 0.9f});
@@ -1037,11 +1192,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         auto* prof = getProfile(ctl->profileName);
         if (prof) {
             auto fci = prof->fields.find("fontColor");
-            if (fci != prof->fields.end()) {
+            if (fci != prof->fields.end())
                 parseColor(fci->second.toString(), tc);
-                // Skip profile fontColor if too dark for our dark backgrounds
-                if (tc.r + tc.g + tc.b < 0.3f) tc = {1,1,1,1};
-            }
             font = getProfileFont(prof);
         }
         if (font && !ctl->text.empty()) {
@@ -1301,30 +1453,39 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         Texture* fieldTex = nullptr;
         if (!bmp.empty()) { fieldTex = r.loadTexture((bmp + ".png").c_str()); if (!fieldTex) fieldTex = r.loadTexture(("textures/" + bmp + ".png").c_str()); }
-        // Shell entry field: same row-major 3-slice layout
-        const std::vector<BmpCell>* fieldCells = nullptr;
-        Texture* fieldTex2 = getShellTexWithCells(r, "shll_entryfield.png", fieldCells);
+        // Shell entry field: T2 bitmap array (pieces as rows: left cap /
+        // center / right cap; states as columns). Caps natural size, center
+        // stretched — same recipe as the original ShellTextEditCtrl.
+        Texture* fieldTex2 = nullptr;
+        const std::vector<T2Cell>* farr = t2SkinArray(r, "shll_entryfield.png", fieldTex2);
         float textOffX = 3.0f; // text inset from control left
-        if (fieldTex2 && fieldCells && fieldCells->size() >= 3) {
-            int state = 0;
-            auto& cL = (*fieldCells)[state];
-            auto& cF = (*fieldCells)[3 + state];
-            auto& cR = (*fieldCells)[6 + state];
+        if (farr && farr->size() >= 6) {
+            // shll_entryfield is 36px wide: TWO state columns (normal / focused)
+            // x THREE piece bands (top = left cap, middle = center, bottom =
+            // right cap). Cells are band-major: [L0 L1 C0 C1 R0 R1].
+            bool focused = (ctl == gr->getFocused());
+            int st = focused ? 1 : 0;
+            auto& cL = (*farr)[0 + st];
+            auto& cF = (*farr)[2 + st];
+            auto& cR = (*farr)[4 + st];
             float cellH = (float)cL.h, lw = (float)cL.w, rw = (float)cR.w, midW = ctl->extentX - lw - rw;
             // The left cap contains the field's border — text starts inside it
             textOffX = lw + 2.0f;
             if (midW < 0) midW = 0;
-            float fy = y + (ctl->extentY - cellH) * 0.5f;
-            r.drawTexturedRectUV({x,fy,0},{x+lw,fy+cellH,0}, fieldTex2->id,
+            float sy = (cellH > 0 && ctl->extentY > 0) ? ctl->extentY / cellH : 1.0f;
+            float bh = cellH * sy;
+            float fy = y + (ctl->extentY - bh) * 0.5f;
+            r.drawTexturedRectUV({x,fy,0},{x+lw,fy+bh,0}, fieldTex2->id,
                 (float)cL.x/fieldTex2->width,(float)cL.y/fieldTex2->height,
                 (float)(cL.x+cL.w)/fieldTex2->width,(float)(cL.y+cL.h)/fieldTex2->height);
-            r.drawTexturedRectUV({x+lw+midW,fy,0},{x+lw+midW+rw,fy+cellH,0}, fieldTex2->id,
+            r.drawTexturedRectUV({x+lw+midW,fy,0},{x+lw+midW+rw,fy+bh,0}, fieldTex2->id,
                 (float)cR.x/fieldTex2->width,(float)cR.y/fieldTex2->height,
                 (float)(cR.x+cR.w)/fieldTex2->width,(float)(cR.y+cR.h)/fieldTex2->height);
-            // Fill center (stretched, inset 1px)
-            r.drawTexturedRectUV({x+lw,fy,0},{x+lw+midW,fy+cellH,0}, fieldTex2->id,
-                (float)(cF.x+1)/fieldTex2->width,(float)(cF.y+1)/fieldTex2->height,
-                (float)(cF.x+cF.w-1)/fieldTex2->width,(float)(cF.y+cF.h-1)/fieldTex2->height);
+            // Fill center (stretched)
+            if (midW > 0)
+                r.drawTexturedRectUV({x+lw,fy,0},{x+lw+midW,fy+bh,0}, fieldTex2->id,
+                    (float)cF.x/fieldTex2->width,(float)cF.y/fieldTex2->height,
+                    (float)(cF.x+cF.w)/fieldTex2->width,(float)(cF.y+cF.h)/fieldTex2->height);
         } else {
             r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
         }
@@ -1333,10 +1494,14 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             float sc = font->defaultScale;
             float textH = font->charHeight * sc;
             float textY = y + (ctl->extentY - textH) * 0.5f;
-            font->render(display.c_str(), x + textOffX, textY, {1,1,1,1}, 1.0f);
+            // Use the profile font face/size and honor its font color
+            auto* prof = getProfile(ctl->profileName);
+            Font* ef = prof ? getProfileFont(prof) : nullptr;
+            if (!ef) ef = font;
+            ef->render(display.c_str(), x + textOffX, textY, tc, 1.0f);
             // Cursor when focused
             if (ctl == gr->getFocused()) {
-                float preW = font->measure(ctl->text.substr(0, ctl->cursorPos).c_str(), sc).x;
+                float preW = ef->measure(ctl->text.substr(0, ctl->cursorPos).c_str(), sc).x;
                 r.drawRectFill({x + textOffX + preW, textY, 0}, {x + textOffX + preW + 2, textY + textH, 0}, {1,1,1,1});
             }
         }
@@ -1702,6 +1867,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (!bmpBase.empty()) loadTex(bmpBase);
         if (!bmp.empty() && !tabTex) loadTex(bmp);
         if (cn == "ShellTabButton") {
+            // Tab buttons owned by a tab GROUP are rendered by the group
+            // itself (authentic bitmap-array slicing + centered labels).
+            // Drawing the raw atlas here would smear all six piece bands
+            // across the button extent.
+            if (ctl->parent && (ctl->parent->className == "ShellTabGroupCtrl" ||
+                                ctl->parent->className == "GuiTabBookCtrl"))
+                return;
             // Tab button: determine selected state from parent tab group
             bool isSelected = ctl->selected;
             if (!isSelected && ctl->parent && ctl->parent->selectedTab >= 0) {
@@ -2014,14 +2186,21 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         Font* tabFont = font;
         auto* prof = getProfile(ctl->profileName);
         std::string tabBmpBase;
-        ColorF tabTc{0.03f, 0.03f, 0.03f, 1}; // T2 tab labels are dark on lit tabs
+        ColorF tabTc{0.03f, 0.03f, 0.03f, 1};    // fontColor
+        ColorF tabTcHL = tabTc, tabTcSEL = tabTc; // fontColorHL / fontColorSEL
         if (prof) {
             tabFont = getProfileFont(prof);
             auto bbi = prof->fields.find("bitmapBase");
             if (bbi != prof->fields.end()) tabBmpBase = bbi->second.toString();
             auto fci = prof->fields.find("fontColor");
             if (fci != prof->fields.end()) parseColor(fci->second.toString(), tabTc);
+            auto fhi = prof->fields.find("fontColorHL");
+            if (fhi != prof->fields.end()) parseColor(fhi->second.toString(), tabTcHL);
+            auto fsi = prof->fields.find("fontColorSEL");
+            if (fsi != prof->fields.end()) parseColor(fsi->second.toString(), tabTcSEL);
         }
+        float maxTabW, tabSpacing;
+        GuiRenderer::tabLayoutParams(ctl, maxTabW, tabSpacing);
         Texture* tabBaseTex = nullptr;
         const std::vector<BmpCell>* tabCells = nullptr;
         if (!tabBmpBase.empty()) {
@@ -2055,69 +2234,63 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             // addTab indexes by script id — blank filler tabs (id gaps) aren't drawn
             if (ctl->tabs[ti].text.empty()) continue;
             float textW = tabFont ? tabFont->measure(ctl->tabs[ti].text.c_str()).x : (float)ctl->tabs[ti].text.size() * 9.0f;
-            float tw = std::max(60.0f, textW + 16);
+            float tw = maxTabW;
             bool sel = (ti == ctl->selectedTab);
             bool hv = ctl->hovered && (ti == ctl->hoveredTab);
             if (tabBaseTex && tabBaseTex->loaded) {
-                // T2 horizontal skins (shll_horztabbutton/lnch_Tab): each state row
-                // is [left cap | stretchable middle | right cap], W/3 per column.
-                int state = sel ? 2 : (hv ? 1 : 0);
-                int numStates = 3;
-                if (tabCells && !tabCells->empty()) {
-                    // Count distinct y-positions to determine number of rows (states)
-                    std::vector<int> rowYs;
-                    for (auto& c : *tabCells) {
-                        bool found = false;
-                        for (int ry : rowYs) { if (std::abs(c.y - ry) < 2) { found = true; break; } }
-                        if (!found) rowYs.push_back(c.y);
-                    }
-                    numStates = (int)rowYs.size();
-                    // T2 shell tab/button skins use at most 4 states; separator-scan
-                    // noise on 54x192-style atlases over-counts rows and slices
-                    // mid-art, leaving garbage bands around the tabs.
-                    if (numStates > 4) numStates = 4;
-                    if (numStates < 1) numStates = 3;
-                    state = std::min(state, numStates - 1);
+                // Authentic T2 skin slicing, decoded from the game's own
+                // textures.vl2 art and matched against 1080p reference pixels:
+                //
+                //   shll_horztabbutton (54x192) / ...B (54x96): stacked 54x32
+                //     PIECE bands — [left cap][stretchable mid][right cap] per
+                //     state block. horztabbutton holds two blocks: green
+                //     NORMAL (y0-95) then olive SELECTED/HILITE (y96-191,
+                //     identical to shll_horztabbuttonB). Caps draw at natural
+                //     width — their transparent lead-in forms the inter-tab
+                //     gap; only the flat mid band stretches.
+                //
+                //   lnch_Tab (54x102): three 34px STATE rows (normal /
+                //     hilite / selected). Slice [left 14px][mid][right 10px]
+                //     so the end bevels stay crisp while the middle stretches.
+                float texW = (float)tabBaseTex->width, texH = (float)tabBaseTex->height;
+                int texHi = (int)texH;
+                if (texHi >= 192 && texHi % 96 == 0) {
+                    float blk = (sel || hv) ? 96.f : 0.f;
+                    // Draw the solid mid band stretched across the FULL tab
+                    // width first, then the caps on top — their internal
+                    // transparent seams then overlay body color instead of
+                    // punching holes through to the bar background.
+                    drawTexRegion(r, tabBaseTex, 0, blk + 32, texW, 32,
+                                  tabX, y, tw, tabH);
+                    if (tw > texW)
+                        drawTexRegion(r, tabBaseTex, 0, blk, texW, 32, tabX, y, texW, tabH);
+                    else
+                        drawTexRegion(r, tabBaseTex, 0, blk, texW, 32, tabX, y, tw, tabH);
+                    if (tw > texW)
+                        drawTexRegion(r, tabBaseTex, 0, blk + 64, texW, 32,
+                                      tabX + tw - texW, y, texW, tabH);
+                } else if (texHi % 3 == 0) {
+                    float rowH = texH / 3.f;
+                    float rofs = (sel ? 2 : (hv ? 1 : 0)) * rowH;
+                    float leftW = std::min(14.f, texW * 0.5f);
+                    float rightW = std::min(10.f, texW - leftW);
+                    drawTexRegion(r, tabBaseTex, 0, rofs, leftW, rowH, tabX, y, leftW, tabH);
+                    float midDstW = tw - leftW - rightW;
+                    if (midDstW > 0)
+                        drawTexRegion(r, tabBaseTex, leftW, rofs, texW - leftW - rightW, rowH,
+                                      tabX + leftW, y, midDstW, tabH);
+                    if (tw > leftW + rightW)
+                        drawTexRegion(r, tabBaseTex, texW - rightW, rofs, rightW, rowH,
+                                      tabX + tw - rightW, y, rightW, tabH);
                 }
-                float shRow = (float)tabBaseTex->height / numStates;
-                float colW = (float)tabBaseTex->width / 3.0f;
-                float syRow = state * shRow;
-                float capW = std::min(colW, tw * 0.5f);
-                float midW = tw - capW * 2; if (midW < 0) midW = 0;
-                drawTexRegion(r, tabBaseTex, 0, syRow, colW, shRow, tabX, y, capW, tabH);
-                if (midW > 0)
-                    drawTexRegion(r, tabBaseTex, colW, syRow, colW, shRow, tabX + capW, y, midW, tabH);
-                drawTexRegion(r, tabBaseTex, colW * 2, syRow, colW, shRow, tabX + capW + midW, y, capW, tabH);
-            } else {
-                // Fallback: colored rectangles with better styling
-                ColorF fill, border;
-                if (sel) {
-                    fill = ColorF{0.35f, 0.45f, 0.58f, 1};
-                    border = ColorF{0.55f, 0.65f, 0.8f, 1};
-                } else if (hv) {
-                    fill = ColorF{0.30f, 0.35f, 0.48f, 1};
-                    border = ColorF{0.4f, 0.45f, 0.6f, 1};
-                } else {
-                    fill = ColorF{0.2f, 0.22f, 0.28f, 1};
-                    border = ColorF{0.28f, 0.3f, 0.38f, 1};
-                }
-                // Tab body
-                r.drawRectFill({tabX, y + 1, 0}, {tabX + tw, y + tabH, 0}, fill);
-                // Top highlight for selected/hovered
-                if (sel || hv)
-                    r.drawRectFill({tabX + 1, y, 0}, {tabX + tw - 1, y + 1, 0}, border);
-                // Bottom accent for selected
-                if (sel)
-                    r.drawRectFill({tabX, y + tabH - 2, 0}, {tabX + tw, y + tabH, 0}, {0.5f, 0.6f, 0.75f, 1});
-                // Separator line between tabs
-                r.drawRectFill({tabX + tw, y + 4, 0}, {tabX + tw + 1, y + tabH, 0}, {0.15f, 0.16f, 0.2f, 1});
             }
-            // Tab text
+            // Tab text — profile color per state (SEL bright, HL on hover)
             if (tabFont && !ctl->tabs[ti].text.empty()) {
                 float ty = y + (tabH - (float)tabFont->charHeight) * 0.5f;
-                tabFont->render(ctl->tabs[ti].text.c_str(), tabX + (tw - textW) * 0.5f, ty, tabTc, 1.0f, true);
+                const ColorF& tc = sel ? tabTcSEL : (hv ? tabTcHL : tabTc);
+                tabFont->render(ctl->tabs[ti].text.c_str(), tabX + (tw - textW) * 0.5f, ty, tc, 1.0f, true);
             }
-            tabX += tw + 1;
+            tabX += tw + tabSpacing;
         }
         // Render children (tab content below tab bar)
         for (auto* child : ctl->children)
@@ -2336,16 +2509,19 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), gc);
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
             auto fsi = prof->fields.find("fontSize"); if (fsi != prof->fields.end()) fontSize = (float)fsi->second.toDouble();
-            auto fti = prof->fields.find("fontType"); if (fti != prof->fields.end()) gf = r.getFont(fti->second.toString().c_str(), (int)fontSize);
+            auto fti = prof->fields.find("fontType"); if (fti != prof->fields.end() && fti->second.toString()[0] != '$') gf = r.getFont(fti->second.toString().c_str(), (int)fontSize);
             auto toi = prof->fields.find("textOffset"); if (toi != prof->fields.end()) sscanf(toi->second.toString().c_str(), "%f %f", &textOfsX, &textOfsY);
             auto ji = prof->fields.find("justify"); if (ji != prof->fields.end()) justify = ji->second.toString();
         }
         bool isOpaque = false;
         if (prof) {
             auto oi = prof->fields.find("opaque");
-            if (oi != prof->fields.end()) { std::string ov = oi->second.toString(); if (ov == "true" || ov == "1") { isOpaque = true; gc.a = 1.0f; } }
+            if (oi != prof->fields.end()) { std::string ov = oi->second.toString(); if (ov == "true" || ov == "1") isOpaque = true; }
         }
-        // T2 convention: only draw background fill when opaque=true; opaque=false means transparent
+        // T2 convention: only draw background fill when opaque=true; opaque=false
+        // means transparent. The fill keeps the profile's own alpha — e.g.
+        // DlgBackProfile "0 0 0 160" is the modal DIM layer (alpha ~0.6), not a
+        // solid blackout, so it must not be forced to a=1.
         if (isOpaque)
             r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, gc);
         if (!ctl->text.empty() && gf) {
@@ -2503,6 +2679,15 @@ void GuiRenderer::updateFades(float dt) {
                 obj->fields["done"] = VMValue("1");
                 obj->fields["skip"] = VMValue("1"); // skip AVI intro, go straight to StartLoginProcess
             }
+            // T2 splash behavior: once the fade-out completes the intro dialog
+            // pops itself. Nothing in the script side does that for us, so a
+            // finished GuiFadeinBitmapCtrl removes itself from the stack —
+            // otherwise its black veil lingers over the shell forever.
+            if (fs->fadeOut) {
+                for (size_t d = 0; d < dialogStack.size(); d++) {
+                    if (dialogStack[d] == dlg) { dialogStack.erase(dialogStack.begin() + d); break; }
+                }
+            }
         }
     }
 
@@ -2565,9 +2750,9 @@ GuiControl* GuiRenderer::launchPopupAt(int mx, int my) {
         if (c->className == "ShellLaunchMenu" && c->menuOpen && !c->menuItems.empty()) {
             float ax = c->posX, ay = c->posY;
             for (auto* p = c->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
-            float popX = ax, popY = ay - (float)c->menuItems.size() * 20.0f - 4;
-            float popW = 180, lineH = 20;
-            if (mx >= popX && mx < popX + popW && my >= popY && my < popY + lineH * (float)c->menuItems.size())
+            float popX, popY, popW, popH, lineH;
+            launchPopupGeometry(c, ax, ay, popX, popY, popW, popH, lineH);
+            if (mx >= popX && mx < popX + popW && my >= popY && my < popY + popH)
                 return c;
         }
         for (auto* ch : c->children) { auto* r = findLM(ch); if (r) return r; }
@@ -2758,9 +2943,10 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         if (lm) {
             float ax = lm->posX, ay = lm->posY;
             for (auto* p = lm->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
-            float popY = ay - (float)lm->menuItems.size() * 20.0f - 4;
-            float lineH = 20;
-            int idx = (int)((y - popY) / lineH);
+            float popX, popY, popW, popH, lineH;
+            launchPopupGeometry(lm, ax, ay, popX, popY, popW, popH, lineH);
+            (void)popW;
+            int idx = (int)((y - popY - 1.0f) / lineH); // +1px top frame inset
             if (idx >= 0 && idx < (int)lm->menuItems.size() && !lm->menuItems[idx].isSeparator) {
                 std::string txt = lm->menuItems[idx].text;
                 auto* ts = Engine::instance().script().ts();
@@ -2803,14 +2989,14 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
         const float tabH = 29;
         if (y >= ay && y < ay + tabH && x >= ax) {
+            // Layout MUST match the render path: fixed-width tabs
+            // (maxTabWidth) separated by tabSpacing, origin +2.
+            float maxTabW, tabSpacing;
+            tabLayoutParams(hit, maxTabW, tabSpacing);
             float tabX = ax + 2;
-            Font* tabFont = Engine::instance().renderer().getFont();
-            auto* tabProf = getProfile(hit->profileName);
-            if (tabProf) tabFont = getProfileFont(tabProf);
             for (int ti = 0; ti < (int)hit->tabs.size(); ti++) {
                 if (hit->tabs[ti].text.empty()) continue; // blank filler tabs aren't clickable
-                float textW = tabFont ? tabFont->measure(hit->tabs[ti].text.c_str()).x : (float)hit->tabs[ti].text.size() * 9.0f;
-                float tw = std::max(60.0f, textW + 16);
+                float tw = maxTabW;
                 if (x >= tabX && x < tabX + tw) {
                     hit->selectedTab = ti;
                     // Show/hide sibling GuiTabPageCtrl children (T3D-style page visibility)
@@ -2821,14 +3007,17 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                             pageIdx++;
                         }
                     }
-                    // Call onSelect script (handles setContent via %this.gui[%tab])
+                    // Call onSelect script (handles pane visibility).
+                    // T2 passes the tab's SCRIPT ID (addTab's first arg),
+                    // not its vector index — GameGui.cs switches on ids 1/2/3.
                     auto* ts = Engine::instance().script().ts();
-                    if (ts && ts->hasFunction(hit->name + "::onSelect"))
+                    bool has = ts && ts->hasFunction(hit->name + "::onSelect");
+                    if (ts && has)
                         ts->callFunction(hit->name + "::onSelect",
-                            {VMValue(hit->name), VMValue(ti), VMValue(hit->tabs[ti].text)});
+                            {VMValue(hit->name), VMValue(hit->tabs[ti].id), VMValue(hit->tabs[ti].text)});
                     return true;
                 }
-                tabX += tw + 1;
+                tabX += tw + tabSpacing;
             }
         }
     }
@@ -3082,6 +3271,7 @@ void GuiRenderer::handleKeyboard() {
 
 // Create a GuiControl from a ScriptObject (and recursively create children)
 GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
+    static int sn=0; if (sn<40) fprintf(stderr,"[S2G] '%s' parent=%p\n", name.c_str(), (void*)parent), sn++;
     auto& objs = ScriptEngine::instance().objects;
     auto it = objs.find(name);
     if (it == objs.end() || !(it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className == "GameTSCtrl"))
@@ -3098,30 +3288,7 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     }
     ctl = new GuiControl;
     ctl->name = it->second->name;
-    ctl->className = it->second->className;
-
-    // Normalize Shell* class names to their Gui* equivalents.
-    // Torque folded Shell* into Gui* in later versions; the scripts still
-    // use Shell* names but the rendering/input logic is identical.
-    {
-        static const std::map<std::string, std::string> sShellToGui = {
-            {"ShellTextEditCtrl",        "GuiTextEditCtrl"},
-            {"ShellToggleButton",        "GuiCheckBoxCtrl"},
-            {"ShellRadioButton",         "GuiRadioCtrl"},
-            {"ShellBitmapButton",        "GuiBitmapButtonCtrl"},
-            {"ShellTextList",            "GuiTextListCtrl"},
-            {"ShellScrollCtrl",          "GuiScrollCtrl"},
-            {"ShellSliderCtrl",          "GuiSliderCtrl"},
-            {"ShellPopupMenu",          "GuiPopUpMenuCtrl"},
-            {"ShellFancyTextList",       "GuiTextListCtrl"},
-            {"ShellFancyArrayScrollCtrl","GuiScrollCtrl"},
-            {"ShellChatMemberList",      "GuiTextListCtrl"},
-            {"ShellLoadFileDlg",         "GuiFileDialogCtrl"},
-            {"ShellSaveFileDlg",         "GuiFileDialogCtrl"},
-        };
-        auto it2 = sShellToGui.find(ctl->className);
-        if (it2 != sShellToGui.end()) ctl->className = it2->second;
-    }
+    ctl->className = normalizeGuiClassName(it->second->className);
     auto parsePair = [&](const std::string& key, float& a, float& b) {
         auto fi = it->second->fields.find(key);
         if (fi != it->second->fields.end()) { std::string s = fi->second.toString(); sscanf(s.c_str(), "%f %f", &a, &b); }
@@ -3184,6 +3351,17 @@ void GuiRenderer::pushDialog(const std::string& name) {
         }
     }
         if (ctl) {
+            // If a dialog with this name is already stacked, raise it instead
+            // of pushing a duplicate — duplicate entries would each draw their
+            // background (e.g. DlgBackProfile's dim layer stacks). Compare by
+            // name as well as pointer: duplicate .gui parses can yield
+            // distinct control objects sharing one name.
+            for (auto it = dialogStack.begin(); it != dialogStack.end();) {
+                if (*it == ctl || (!ctl->name.empty() && (*it)->name == ctl->name))
+                    it = dialogStack.erase(it);
+                else
+                    ++it;
+            }
             ctl->visible = true;
             ctl->isBaseDialog = inBaseDialogPush;
             dialogStack.push_back(ctl);
@@ -3202,22 +3380,30 @@ void GuiRenderer::pushDialog(const std::string& name) {
 }
 
 void GuiRenderer::popDialog(const std::string& name) {
-    for (auto it = dialogStack.begin(); it != dialogStack.end(); ++it) {
+    // Remove every stacked instance of the named dialog — duplicates can
+    // exist when a .gui is parsed into multiple control objects; leaving any
+    // behind keeps its background (dim layer) rendering over the screen.
+    bool slept = false;
+    for (auto it = dialogStack.begin(); it != dialogStack.end();) {
         if ((*it)->name == name || name.empty()) {
-            // Fire onSleep before removal — mirrors the native T2 dialog lifecycle.
-            if (auto* ts = Engine::instance().script().ts()) {
-                if (ts->hasFunction(name + "::onSleep")) {
-                    Console::instance().printf(LogLevel::Debug,
-                        "GUI: popDialog calling onSleep '%s'", name.c_str());
-                    ts->callFunction(name + "::onSleep", {});
+            // Fire onSleep once before removal — mirrors the native T2 dialog lifecycle.
+            if (!slept) {
+                slept = true;
+                if (auto* ts = Engine::instance().script().ts()) {
+                    if (ts->hasFunction(name + "::onSleep")) {
+                        Console::instance().printf(LogLevel::Debug,
+                            "GUI: popDialog calling onSleep '%s'", name.c_str());
+                        ts->callFunction(name + "::onSleep", {});
+                    }
                 }
             }
-            dialogStack.erase(it);
-            Console::instance().printf(LogLevel::Debug,
-                "GUI: popDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
-            return;
+            it = dialogStack.erase(it);
+        } else {
+            ++it;
         }
     }
+    Console::instance().printf(LogLevel::Debug,
+        "GUI: popDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
 }
 void GuiRenderer::callOnAddOnce(GuiControl* ctl) {
     if (!ctl || onAddCalled.count(ctl->name)) return;
@@ -3269,6 +3455,12 @@ bool GuiRenderer::isDialogActive(const std::string& name) {
 }
 
 GuiControl* GuiRenderer::findControl(const std::string& name) {
+    // Pushed dialogs are roots of the dialog stack, NOT children of the
+    // canvas — search them first, otherwise every TS method call
+    // (setVisible, setValue, ...) would miss the real control and act on a
+    // freshly created ghost instead.
+    for (auto* d : dialogStack)
+        if (d) if (GuiControl* r = d->findChild(name)) return r;
     if (!canvas) return nullptr;
     return canvas->findChild(name);
 }

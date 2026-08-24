@@ -40,7 +40,7 @@ struct GuiControl {
     float contentW = 0, contentH = 0; // virtual content size
 
     // Tab group fields (for ShellTabGroupCtrl/GM_TabView/LaunchTabView)
-    struct Tab { std::string text; bool active; };
+    struct Tab { std::string text; bool active; int id = 0; };
     std::vector<Tab> tabs;
     int selectedTab = -1;
 
@@ -56,6 +56,7 @@ struct GuiControl {
     // Lifecycle flag: true if this dialog was pushed during the content's onWake.
     // ESC should never pop base dialogs (e.g. LaunchToolbarDlg) so the sidebar stays.
     bool isBaseDialog = false;
+
 
     // Generic named-field storage set from script (e.g. altColor on ShellTabFrame)
     std::map<std::string, std::string> fields;
@@ -124,12 +125,19 @@ public:
     GuiControl* launchPopupAt(int mx, int my); // open ShellLaunchMenu popup containing (mx,my)
     GuiControl* popupMenuAt(int mx, int my); // open GuiPopUpMenuCtrl dropdown item at (mx,my)
 
+    // Shared layout math so rendering, hit-testing and hover agree exactly.
+    static void tabLayoutParams(const GuiControl* grp, float& maxTabW, float& tabSpacing);
+    static void launchPopupGeometry(const GuiControl* lm, float x, float y,
+                                    float& popX, float& popY, float& popW, float& popH, float& lineH);
+
     GuiControl* getCanvas() { return canvas; }
     GuiControl* findControl(const std::string& name);
     GuiControl* soToGui(const std::string& name, GuiControl* parent);
     void callOnAddOnce(GuiControl* ctl);
     void pushDialog(const std::string& name);
+
     void popDialog(const std::string& name);
+    std::vector<GuiControl*>& dialogStackForDebug() { return dialogStack; }
     void setContent(const std::string& name);
     void handleKeyboard(); // process keyboard input for focused text control
     bool isDialogActive(const std::string& name);

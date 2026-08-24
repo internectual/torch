@@ -577,6 +577,20 @@ void Texture::load(const uint8_t* data, size_t size) {
         loadRaw(cb.data(), cw, ch, 4);
         return;
     }
+    // T2 PNG skins key transparency by COLOR (magenta #FF00FF / pure blue
+    // #0000FF), not via the alpha channel. When the corner pixel is a key
+    // color, zero every matching pixel so shell art composites correctly.
+    if (w > 0 && h > 0) {
+        auto isKey = [](const unsigned char* p) {
+            return (p[0] == 255 && p[1] == 0 && p[2] == 255) ||
+                   (p[0] == 0 && p[1] == 0 && p[2] == 255);
+        };
+        if (isKey(pixels)) {
+            size_t n = (size_t)w * h;
+            for (size_t i = 0; i < n; i++)
+                if (isKey(pixels + i * 4)) pixels[i * 4 + 3] = 0;
+        }
+    }
     loadRaw(pixels, w, h, 4);
     if (loaded) {
         int64_t total = 0, zeroAlpha = 0, nearZeroAlpha = 0;

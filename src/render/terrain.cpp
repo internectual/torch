@@ -396,14 +396,25 @@ bool Font::loadGFT(const uint8_t* data, size_t size) {
     const uint8_t* pngData = data + pngStartOff;
     size_t pngAvail = size - pngStartOff;
     int tw, th, tc;
-    unsigned char* pixels = stbi_load_from_memory(pngData, (int)pngAvail, &tw, &th, &tc, 4);
+    // GFT atlases are single-channel grayscale where intensity == coverage.
+    // Decode as 1 channel and expand to RGBA (white glyph, alpha = coverage)
+    // so vColor * tex yields correctly anti-aliased glyphs with a transparent
+    // background instead of opaque black boxes.
+    unsigned char* pixels = stbi_load_from_memory(pngData, (int)pngAvail, &tw, &th, &tc, 1);
     if (!pixels) return false;
     texWidth = tw; texHeight = th;
+    std::vector<uint8_t> rgba((size_t)tw * th * 4);
+    for (size_t i = 0, n = (size_t)tw * th; i < n; i++) {
+        rgba[i * 4 + 0] = 255;
+        rgba[i * 4 + 1] = 255;
+        rgba[i * 4 + 2] = 255;
+        rgba[i * 4 + 3] = pixels[i];
+    }
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     stbi_image_free(pixels);
     // Build UV coordinates for each char from the per-char position data
     for (uint32_t i = 0; i < count && i + asciiOff < 256; i++) {
@@ -517,10 +528,11 @@ bool Font::load(const uint8_t* data, size_t size) {
 void Font::render(const char* text, float x, float y, const ColorF& color, float scale, bool exactColor) {
     if (!loaded || !text) return;
     scale *= defaultScale;
-    // Enforce minimum brightness so text is always readable on dark backgrounds
-    // (exactColor=true opts out — e.g. T2 pulldowns/tab labels are black-on-teal)
+    // Honor the requested color exactly. T2 profiles pair dark font colors
+    // (e.g. ShellButtonProfile "8 19 6") with light skin backgrounds, so no
+    // brightness clamping — the old clamp also turned black text into solid
+    // boxes when combined with the atlas alpha bug.
     ColorF col = color;
-    if (!exactColor && col.r + col.g + col.b < 0.3f) col = {1,1,1,1};
 
     // Flush any pending sprite batch before we bind our own shader/projection
     Engine::instance().renderer().flushSpriteBatch();

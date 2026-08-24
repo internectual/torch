@@ -2493,7 +2493,7 @@ bool ScriptEngine::init() {
             if (id < 0 || id > 65535) return VMValue(1); // reject absurd indices (alloc/overflow guard)
             std::string txt = args[2].toString();
             if (id >= (int)ctl->tabs.size()) ctl->tabs.resize(id + 1);
-            ctl->tabs[id] = {txt, true};
+            ctl->tabs[id] = {txt, true, id};
             // Store gui[i]/key[i] derived from tab text (only if script hasn't already stored them)
             if (ScriptObject* sobj = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
                 std::string gk = "gui[" + std::to_string(id) + "]";
@@ -2520,8 +2520,9 @@ bool ScriptEngine::init() {
             ctl->selectedTab = idx;
             if (idx >= 0 && idx < (int)ctl->tabs.size()) {
                 auto* ts = Engine::instance().script().ts();
-                if (ts && ts->hasFunction(ctl->name + "::onSelect"))
-                    ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(idx), VMValue(ctl->tabs[idx].text)});
+                bool has = ts && ts->hasFunction(ctl->name + "::onSelect");
+                if (ts && has)
+                    ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(ctl->tabs[idx].id), VMValue(ctl->tabs[idx].text)});
             }
         }
         return VMValue(1);
@@ -2543,8 +2544,9 @@ bool ScriptEngine::init() {
             ctl->selectedTab = idx;
             if (idx >= 0 && idx < (int)ctl->tabs.size()) {
                 auto* ts = Engine::instance().script().ts();
-                if (ts && ts->hasFunction(ctl->name + "::onSelect"))
-                    ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(idx), VMValue(ctl->tabs[idx].text)});
+                bool has = ts && ts->hasFunction(ctl->name + "::onSelect");
+                if (ts && has)
+                    ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(ctl->tabs[idx].id), VMValue(ctl->tabs[idx].text)});
             }
         }
         return VMValue(1);
