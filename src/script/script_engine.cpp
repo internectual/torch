@@ -3561,14 +3561,6 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // MessageBoxYesNo(title, message) — stub that returns 1 (Yes)
-    tsInstance->registerNative("MessageBoxYesNo", [](const auto& args) -> VMValue {
-        std::string title = args.size() > 0 ? args[0].toString() : "Message";
-        std::string msg = args.size() > 1 ? args[1].toString() : "";
-        Console::instance().printf(LogLevel::Info, "MessageBoxYesNo: [%s] %s", title.c_str(), msg.c_str());
-        return VMValue(1);
-    });
-
     // MessageBoxOkCancel(title, message) — stub that returns 1 (OK)
     tsInstance->registerNative("MessageBoxOkCancel", [](const auto& args) -> VMValue {
         std::string title = args.size() > 0 ? args[0].toString() : "Message";

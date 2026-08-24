@@ -138,6 +138,12 @@ public:
 
     void popDialog(const std::string& name);
     std::vector<GuiControl*>& dialogStackForDebug() { return dialogStack; }
+
+    // Last instance pushed under each dialog name. A popped dialog leaves
+    // the stack but stays alive; re-pushing it must reuse THAT object (with
+    // its accumulated child state, e.g. LaunchTabView's tabs) rather than
+    // building a fresh empty one.
+    std::unordered_map<std::string, GuiControl*> lastPushed;
     void setContent(const std::string& name);
     void handleKeyboard(); // process keyboard input for focused text control
     bool isDialogActive(const std::string& name);

@@ -3364,6 +3364,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
             }
             ctl->visible = true;
             ctl->isBaseDialog = inBaseDialogPush;
+            if (!ctl->name.empty()) lastPushed[ctl->name] = ctl;
             dialogStack.push_back(ctl);
         callOnAddOnce(ctl);
             // Trigger onWake so script functions can populate menus, etc.
@@ -3439,6 +3440,7 @@ void GuiRenderer::setContent(const std::string& name) {
     } else {
         dialogStack.push_back(ctl);
     }
+    if (!ctl->name.empty()) lastPushed[ctl->name] = ctl;
     callOnAddOnce(ctl);
     // Mark any dialogs pushed during onWake as base dialogs so ESC preserves them.
     inBaseDialogPush = true;
@@ -3458,9 +3460,23 @@ GuiControl* GuiRenderer::findControl(const std::string& name) {
     // Pushed dialogs are roots of the dialog stack, NOT children of the
     // canvas — search them first, otherwise every TS method call
     // (setVisible, setValue, ...) would miss the real control and act on a
-    // freshly created ghost instead.
-    for (auto* d : dialogStack)
-        if (d) if (GuiControl* r = d->findChild(name)) return r;
+    // freshly created ghost instead. NOTE: findChild only scans CHILDREN,
+    // so each stack root must be matched by its own name as well.
+    for (auto* d : dialogStack) {
+        if (!d) continue;
+        if (d->name == name) return d;
+        if (GuiControl* r = d->findChild(name)) return r;
+    }
+    auto lit = lastPushed.find(name);
+    if (lit != lastPushed.end() && lit->second) {
+        if (name == "LaunchToolbarDlg") fprintf(stderr, "[FC] LT via lastPushed\n");
+        return lit->second;
+    }
+    if (name == "LaunchToolbarDlg") {
+        fprintf(stderr, "[FC] LT MISS size=%d keys:", (int)lastPushed.size());
+        for (auto& kv : lastPushed) fprintf(stderr, " '%s'", kv.first.c_str());
+        fprintf(stderr, "\n");
+    }
     if (!canvas) return nullptr;
     return canvas->findChild(name);
 }
