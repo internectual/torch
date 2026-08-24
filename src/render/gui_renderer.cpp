@@ -1000,9 +1000,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
 
     const std::string& cn = ctl->className;
 
-    { static int tn=0; if (tn<40 && (ctl->name=="LaunchToolbarDlg"||ctl->name=="LaunchToolbarPane"||ctl->name=="LaunchToolbarMenu"))
-        fprintf(stderr, "[RC] %s (%s) vis=%d\n", ctl->name.c_str(), cn.c_str(), (int)ctl->visible), tn++; }
-
     // Corrupt-layout guard: orphaned intro/splash dialogs can carry garbage
     // (negative / astronomic) extents from incomplete script parsing; their
     // fills would smear undefined geometry across the whole canvas.
@@ -2168,18 +2165,33 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (prof) { auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), scc); }
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, scc);
     } else if (cn == "ShellTabFrame") {
-        // Tab content frame — draw a bordered area for tab pages
-        ColorF frameBg{0.12f,0.12f,0.15f,1};
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, frameBg);
-        // Gold highlight frame when script toggled altColor (GM_TabFrame.setAltColor)
+        // Authentic T2 ShellTabFrame art (ShellHorzTabFrameProfile,
+        // bitmapBase gui/shll_horztabframe — no such single file exists;
+        // the game composes the frame from gradient strips instead).
+        // textures.vl2 ships shll_horztabframegrad(a).png: a 9x254 strip,
+        // solid color with alpha fading 255->0 top-to-bottom ('a' = gold
+        // active variant toggled by setAltColor, plain = green). Pixel-
+        // matched against a reference screenshot: a solid bar runs across
+        // the top edge and fade-out strips descend both side edges.
         bool alt = false;
         { auto fit = ctl->fields.find("altColor"); if (fit != ctl->fields.end()) alt = (fit->second == "1"); }
-        ColorF frameBorder = alt ? ColorF{0.95f, 0.78f, 0.15f, 1} : ColorF{0.25f, 0.25f, 0.32f, 1};
-        float bw = alt ? 2.0f : 1.0f;
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + bw, 0}, frameBorder);
-        r.drawRectFill({x, y + ctl->extentY - bw, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, frameBorder);
-        r.drawRectFill({x, y, 0}, {x + bw, y + ctl->extentY, 0}, frameBorder);
-        r.drawRectFill({x + ctl->extentX - bw, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, frameBorder);
+        Texture* grad = r.loadTexture(alt ? "textures/gui/shll_horztabframegrada.png"
+                                          : "textures/gui/shll_horztabframegrad.png");
+        if (!grad || !grad->loaded)
+            grad = r.loadTexture("textures/gui/shll_horztabframegrada.png");
+        if (grad && grad->loaded) {
+            float gw = (float)grad->width;   // 9px — also the top bar height
+            float gh = (float)grad->height;  // 254px fade length
+            float w = ctl->extentX, h = ctl->extentY;
+            if (h > gh) h = gh;              // strips never outlive their fade
+            // Top bar: stretch the strip's fully-opaque leading rows across
+            drawTexRegion(r, grad, 0, 0, gw, gw, x, y, w, gw);
+            // Left edge: full-height fade-out strip at natural size
+            drawTexRegion(r, grad, 0, 0, gw, gh, x, y, gw, h);
+            // Right edge: same strip mirrored horizontally
+            r.drawTexturedRectUV({x + w - gw, y, 0}, {x + w, y + h, 0}, grad->id,
+                                 1.0f, 0.0f, 0.0f, gh / (float)grad->height);
+        }
     } else if (cn == "ShellTabGroupCtrl" || cn == "GuiTabBookCtrl") {
         // Tab group: draw tab buttons along the top, then children below
         const float tabH = 29;
@@ -2201,31 +2213,33 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         float maxTabW, tabSpacing;
         GuiRenderer::tabLayoutParams(ctl, maxTabW, tabSpacing);
+        // Resolve the skin texture for a tab set. T2 tab groups carry named
+        // sets (addSet) whose tabs use their own bitmapBase — GameGui.cs puts
+        // WARRIOR SETUP in set 1 with gui/shll_horztabbuttonB (the olive
+        // variant); set-0 tabs fall back to the profile's bitmapBase.
         Texture* tabBaseTex = nullptr;
-        const std::vector<BmpCell>* tabCells = nullptr;
-        if (!tabBmpBase.empty()) {
-            std::string paths[] = {
-                tabBmpBase + ".png",
-                "textures/" + tabBmpBase + ".png",
-                "textures/gui/" + tabBmpBase + ".png"
-            };
-            for (auto& p : paths) {
-                tabBaseTex = r.loadTexture(p.c_str());
-                if (tabBaseTex && tabBaseTex->loaded) break;
-            }
-            if (tabBaseTex && tabBaseTex->loaded) {
-                auto cit = g_cellCache.find(tabBaseTex->id);
-                if (cit != g_cellCache.end()) {
-                    tabCells = &cit->second;
-                } else {
-                    int tw2 = tabBaseTex->width, th2 = tabBaseTex->height;
-                    std::vector<uint8_t> pixels(tw2 * th2 * 4);
-                    glBindTexture(GL_TEXTURE_2D, tabBaseTex->id);
-                    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-                    tabCells = &getBitmapCells(pixels.data(), tw2, th2, tabBaseTex->id);
+        std::map<int, Texture*> tabTexCache;
+        auto tabTexFor = [&](int setId) -> Texture* {
+            auto cit = tabTexCache.find(setId);
+            if (cit != tabTexCache.end()) return cit->second->loaded ? cit->second : nullptr;
+            std::string base = tabBmpBase;
+            auto sit = ctl->tabSets.find(setId);
+            if (sit != ctl->tabSets.end() && !sit->second.empty()) base = sit->second;
+            Texture* tex = nullptr;
+            if (!base.empty()) {
+                std::string paths[] = {
+                    base + ".png",
+                    "textures/" + base + ".png",
+                    "textures/gui/" + base + ".png"
+                };
+                for (auto& p : paths) {
+                    tex = r.loadTexture(p.c_str());
+                    if (tex && tex->loaded) break;
                 }
             }
-        }
+            tabTexCache[setId] = tex;
+            return tex && tex->loaded ? tex : nullptr;
+        };
         // Background for the area below tabs
         r.drawRectFill({x, y + tabH, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.12f, 0.12f, 0.15f, 1});
         // First pass: draw tab backgrounds and text
@@ -2237,38 +2251,47 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             float tw = maxTabW;
             bool sel = (ti == ctl->selectedTab);
             bool hv = ctl->hovered && (ti == ctl->hoveredTab);
-            if (tabBaseTex && tabBaseTex->loaded) {
+            Texture* tabBaseTex = tabTexFor(ctl->tabs[ti].set);
+            if (tabBaseTex) {
                 // Authentic T2 skin slicing, decoded from the game's own
-                // textures.vl2 art and matched against 1080p reference pixels:
+                // textures.vl2 art (pixel-scanned):
                 //
-                //   shll_horztabbutton (54x192) / ...B (54x96): stacked 54x32
-                //     PIECE bands — [left cap][stretchable mid][right cap] per
-                //     state block. horztabbutton holds two blocks: green
-                //     NORMAL (y0-95) then olive SELECTED/HILITE (y96-191,
-                //     identical to shll_horztabbuttonB). Caps draw at natural
-                //     width — their transparent lead-in forms the inter-tab
-                //     gap; only the flat mid band stretches.
+                //   shll_horztabbutton (54x192, green set-0 skin) /
+                //   shll_horztabbuttonB (54x96, olive set-1 skin): a grid of
+                //     18x32 cells — PIECES are ROWS ([left cap]
+                //     [stretchable mid][right cap], each 32px tall, bottom-
+                //     aligned art) and STATES are COLUMNS (18px pitch:
+                //     normal / hilite / selected). Column 0 caps have no
+                //     bright edge; columns 1-2 carry the lit bevel and the
+                //     mid strip brightens left-to-right; column 2 adds the
+                //     pressed bottom edge. Caps draw at natural cell width —
+                //     their transparent lead-in forms the inter-tab gap;
+                //     only the flat mid band stretches. Piece bands live in
+                //     the first 96px of horztabbutton; its olive second half
+                //     mirrors the B skin.
                 //
                 //   lnch_Tab (54x102): three 34px STATE rows (normal /
                 //     hilite / selected). Slice [left 14px][mid][right 10px]
                 //     so the end bevels stay crisp while the middle stretches.
                 float texW = (float)tabBaseTex->width, texH = (float)tabBaseTex->height;
                 int texHi = (int)texH;
-                if (texHi >= 192 && texHi % 96 == 0) {
-                    float blk = (sel || hv) ? 96.f : 0.f;
-                    // Draw the solid mid band stretched across the FULL tab
-                    // width first, then the caps on top — their internal
-                    // transparent seams then overlay body color instead of
-                    // punching holes through to the bar background.
-                    drawTexRegion(r, tabBaseTex, 0, blk + 32, texW, 32,
-                                  tabX, y, tw, tabH);
-                    if (tw > texW)
-                        drawTexRegion(r, tabBaseTex, 0, blk, texW, 32, tabX, y, texW, tabH);
-                    else
-                        drawTexRegion(r, tabBaseTex, 0, blk, texW, 32, tabX, y, tw, tabH);
-                    if (tw > texW)
-                        drawTexRegion(r, tabBaseTex, 0, blk + 64, texW, 32,
-                                      tabX + tw - texW, y, texW, tabH);
+                int st = sel ? 2 : (hv ? 1 : 0);
+                bool bandLayout = ((int)texW % 3 == 0) && texHi >= 96 && (texHi % 32 == 0);
+                if (bandLayout) {
+                    float cellW = texW / 3.f;  // 18px state-column pitch
+                    float cellH = 32.f;        // piece-band pitch
+                    // Piece bands live in the first 96px block; pick the
+                    // state COLUMN for normal/hover/selected.
+                    // Left cap (band 0) — natural width incl. transparent lead-in
+                    drawTexRegion(r, tabBaseTex, st * cellW, 0, cellW, cellH, tabX, y, cellW, tabH);
+                    // Mid band (band 1) — stretch across the remaining width
+                    float midDstW = tw - cellW * 2;
+                    if (midDstW > 0)
+                        drawTexRegion(r, tabBaseTex, st * cellW, cellH, cellW, cellH,
+                                      tabX + cellW, y, midDstW, tabH);
+                    // Right cap (band 2)
+                    drawTexRegion(r, tabBaseTex, st * cellW, cellH * 2, cellW, cellH,
+                                  tabX + tw - cellW, y, cellW, tabH);
                 } else if (texHi % 3 == 0) {
                     float rowH = texH / 3.f;
                     float rofs = (sel ? 2 : (hv ? 1 : 0)) * rowH;
@@ -2569,15 +2592,18 @@ void GuiRenderer::update(float dt) {
                 auto* tabProf = getProfile(ctl->profileName);
                 if (tabProf) tabFont = getProfileFont(tabProf);
                 if (my >= ay && my < ay + tabH && mx >= tabX) {
+                    // Layout MUST match render/hit-test: fixed-width tabs
+                    // (maxTabWidth) separated by tabSpacing.
+                    float maxTabW, tabSpacing;
+                    tabLayoutParams(ctl, maxTabW, tabSpacing);
                     for (int ti = 0; ti < (int)ctl->tabs.size(); ti++) {
                         if (ctl->tabs[ti].text.empty()) continue; // blank filler tabs aren't interactive
-                        float textW = tabFont ? tabFont->measure(ctl->tabs[ti].text.c_str()).x : (float)ctl->tabs[ti].text.size() * 9.0f;
-                        float tw = std::max(60.0f, textW + 16);
+                        float tw = maxTabW;
                         if (mx >= tabX && mx < tabX + tw) {
                             ctl->hoveredTab = ti;
                             break;
                         }
-                        tabX += tw + 1;
+                        tabX += tw + tabSpacing;
                     }
                 }
             }
@@ -3411,7 +3437,9 @@ void GuiRenderer::callOnAddOnce(GuiControl* ctl) {
     onAddCalled.insert(ctl->name);
     auto* ts = Engine::instance().script().ts();
     if (ts && ts->hasFunction(ctl->name + "::onAdd"))
-        ts->callFunction(ctl->name + "::onAdd", {});
+        // Pass the control as %this — GM_TabView::onAdd calls
+        // %this.addSet(1, "gui/shll_horztabbuttonB", ...) which needs it.
+        ts->callFunction(ctl->name + "::onAdd", {VMValue(ctl->name)});
     for (auto* ch : ctl->children)
         callOnAddOnce(ch);
 }

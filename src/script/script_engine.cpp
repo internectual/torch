@@ -2494,6 +2494,10 @@ bool ScriptEngine::init() {
             std::string txt = args[2].toString();
             if (id >= (int)ctl->tabs.size()) ctl->tabs.resize(id + 1);
             ctl->tabs[id] = {txt, true, id};
+            // Optional set argument: GM_TabView.addTab(3, "WARRIOR SETUP", 1)
+            // puts that tab in an alternate skin set
+            if (args.size() >= 4)
+                ctl->tabs[id].set = (int)args[3].toDouble();
             // Store gui[i]/key[i] derived from tab text (only if script hasn't already stored them)
             if (ScriptObject* sobj = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
                 std::string gk = "gui[" + std::to_string(id) + "]";
@@ -2508,6 +2512,22 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("tabCount", [getOrCreateCtrl](const auto& args) -> VMValue {
         auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
         return VMValue((int)(ctl ? ctl->tabs.size() : 0));
+    });
+    // ShellTabGroupCtrl tab sets: addSet(id, bitmapBase, ...) registers an
+    // alternate skin; getTabSet(tabId) reports which set a tab belongs to
+    // (GameGui.cs: GM_TabView.addSet(1,"gui/shll_horztabbuttonB",...) /
+    // GM_TabFrame.setAltColor(%this.getTabSet(%id) != 0))
+    tsInstance->registerNative("addSet", [getOrCreateCtrl](const auto& args) -> VMValue {
+        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl && args.size() >= 3)
+            ctl->tabSets[(int)args[1].toDouble()] = args[2].toString();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("getTabSet", [getOrCreateCtrl](const auto& args) -> VMValue {
+        auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
+        if (!ctl || args.size() < 2) return VMValue(0);
+        int id = (int)args[1].toDouble();
+        return VMValue(id >= 0 && id < (int)ctl->tabs.size() ? ctl->tabs[id].set : 0);
     });
     tsInstance->registerNative("getSelectedTab", [getOrCreateCtrl](const auto& args) -> VMValue {
         auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());

@@ -40,9 +40,12 @@ struct GuiControl {
     float contentW = 0, contentH = 0; // virtual content size
 
     // Tab group fields (for ShellTabGroupCtrl/GM_TabView/LaunchTabView)
-    struct Tab { std::string text; bool active; int id = 0; };
+    struct Tab { std::string text; bool active; int id = 0; int set = 0; };
     std::vector<Tab> tabs;
     int selectedTab = -1;
+    // T2 tab sets: addSet(id, bitmapBase, ...) gives tabs in that set their
+    // own skin (e.g. set 1 -> gui/shll_horztabbuttonB olive variant)
+    std::map<int, std::string> tabSets;
 
     // ShellTextList / GuiListBoxCtrl fields
     std::vector<std::string> listRows;
