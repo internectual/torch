@@ -572,26 +572,6 @@ bool Engine::init(int argc, char* argv[]) {
     // Script engine
     scr->init();
 
-    // Load persisted prefs BEFORE scripts/autoexec can export() defaults
-    // over them (setupClassicClientDefaults fires during boot). Uses the
-    // case-insensitive fs so "ClientPrefs.cs" resolves.
-    {
-        std::string outDir0 = Console::instance().getStringVariable("outputDir", "");
-        std::string modP0 = Console::instance().getStringVariable("modPath", "base");
-        if (!outDir0.empty()) {
-            std::string pp0 = outDir0 + "/" + modP0 + "/prefs/ClientPrefs.cs";
-            std::ifstream pf0(pp0.c_str());
-            if (pf0) {
-                std::string src0((std::istreambuf_iterator<char>(pf0)), std::istreambuf_iterator<char>());
-                if (!src0.empty()) {
-                    if (scr->ts()) scr->ts()->execute(src0, pp0);
-                    allowClientPrefsExport(true);
-                }
-            }
-        }
-    }
-
-
     // Network
     net->init();
 
@@ -1013,6 +993,9 @@ bool Engine::init(int argc, char* argv[]) {
             Console::instance().printf(LogLevel::Warn, "Init script not found: %s", initPath.c_str());
         }
     }
+    // Boot scripts (incl. autoexec default-seeders) may export() before real
+    // prefs were loaded — those writes are gated off. Prefs are live now.
+    allowClientPrefsExport(true);
 
     // Initialize GUI renderer from script-created objects
     gui->init();

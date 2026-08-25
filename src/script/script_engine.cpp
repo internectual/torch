@@ -1188,6 +1188,7 @@ bool ScriptEngine::init() {
         return VMValue(0);
     });
     tsInstance->registerNative("getSubStr", [](const auto& args) -> VMValue {
+
         if (args.size() < 3) return VMValue("");
         auto s = args[0].toString();
         int start = args[1].toInt();
@@ -2383,6 +2384,7 @@ bool ScriptEngine::init() {
     };
     tsInstance->registerNative("clear", [getListCtrl](const auto& args) -> VMValue {
         std::string cname = args.empty() ? "" : args[0].toString();
+        if (cname == "GMW_SkinPopup") fprintf(stderr, "[SKIN] clear\n");
         auto* ctl = getListCtrl(cname);
         if (ctl) {
             ctl->listRows.clear();
@@ -2395,6 +2397,7 @@ bool ScriptEngine::init() {
         if (args.size() < 3) return VMValue(1);
         auto* ctl = getListCtrl(args[0].toString());
         if (!ctl) return VMValue(1);
+        if (args[0].toString() == "GMW_SkinPopup") fprintf(stderr, "[SKIN] add [%s] id=%d\n", args[1].toString().c_str(), (int)args[2].toDouble());
         // ShellLaunchMenu uses add(id, text), popup menus use add(text, id)
         std::string txt;
         int id;
@@ -2589,11 +2592,17 @@ bool ScriptEngine::init() {
         auto* ctl = getOrCreateCtrl(args.empty() ? "" : args[0].toString());
         if (ctl && args.size() >= 2) {
             int idx = (int)args[1].toDouble();
-            // Popup menu: update selected item text
+            // Popup menu: stock setSelected is ID-based (ids survive sort)
             if (!ctl->menuItems.empty()) {
-                ctl->selectedRow = idx;
-                if (idx >= 0 && idx < (int)ctl->menuItems.size())
-                    ctl->text = ctl->menuItems[idx].text;
+                int row = -1;
+                for (int i = 0; i < (int)ctl->menuItems.size(); i++)
+                    if (ctl->menuItems[i].id == idx) { row = i; break; }
+                if (row == -1 && idx >= 0 && idx < (int)ctl->menuItems.size() && ctl->menuItems[idx].id == idx)
+                    row = idx; // sequential ids: positional == id
+                if (row != -1) {
+                    ctl->selectedRow = row;
+                    ctl->text = ctl->menuItems[row].text;
+                }
             }
             // Tab control: update selected tab
             ctl->selectedTab = idx;
@@ -2602,6 +2611,15 @@ bool ScriptEngine::init() {
                 bool has = ts && ts->hasFunction(ctl->name + "::onSelect");
                 if (ts && has)
                     ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(ctl->tabs[idx].id), VMValue(ctl->tabs[idx].text)});
+                return VMValue(1);
+            }
+            // Popup menu: stock T2 fires onSelect on setSelected — the warrior
+            // pane's Race/Skin/Voice cascade depends on it.
+            if (!ctl->menuItems.empty() && idx >= 0 && idx < (int)ctl->menuItems.size()) {
+                auto* ts = Engine::instance().script().ts();
+                if (ts && ts->hasFunction(ctl->name + "::onSelect"))
+                    ts->callFunction(ctl->name + "::onSelect",
+                        {VMValue(ctl->name), VMValue(idx), VMValue(ctl->menuItems[idx].text)});
             }
         }
         return VMValue(1);
@@ -2666,7 +2684,15 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("getSelected", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
-        return VMValue(ctl ? ctl->selectedRow : 0);
+        if (!ctl) return VMValue(0);
+        // Popups report the selected entry's ID (ids survive sorting)
+        if (!ctl->menuItems.empty()) {
+            if (ctl->selectedRow >= 0 && ctl->selectedRow < (int)ctl->menuItems.size()) {
+                return VMValue(ctl->menuItems[ctl->selectedRow].id);
+            }
+            return VMValue(-1);
+        }
+        return VMValue(ctl->selectedRow);
     });
     tsInstance->registerNative("getSelectedId", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
@@ -2730,7 +2756,7 @@ bool ScriptEngine::init() {
         std::string search = args[1].toString();
         // Search menuItems first (popup menus), then listRows (text lists)
         for (int i = 0; i < (int)ctl->menuItems.size(); i++)
-            if (ctl->menuItems[i].text == search) return VMValue(i);
+            if (ctl->menuItems[i].text == search) return VMValue(ctl->menuItems[i].id);
         for (int i = 0; i < (int)ctl->listRows.size(); i++)
             if (ctl->listRows[i] == search) return VMValue(i);
         return VMValue(-1);

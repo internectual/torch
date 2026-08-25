@@ -1925,7 +1925,9 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
                             impl->lastVarName = std::move(sg.savedLastVarName);
                             impl->lastFieldObj = std::move(sg.savedLastFieldObj);
                             impl->lastFieldName = std::move(sg.savedLastFieldName);
-                            impl->locals.pop();
+                            // NOTE: no locals.pop() here — executeNested never
+                            // pushed a locals frame; popping one corrupted the
+                            // shared locals stack for every later call.
                             return dsoResult;
                         }
                     }
