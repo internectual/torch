@@ -3462,7 +3462,6 @@ void GuiRenderer::handleKeyboard() {
 
 // Create a GuiControl from a ScriptObject (and recursively create children)
 GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
-    static int sn=0; if (sn<40) fprintf(stderr,"[S2G] '%s' parent=%p\n", name.c_str(), (void*)parent), sn++;
     auto& objs = ScriptEngine::instance().objects;
     auto it = objs.find(name);
     if (it == objs.end() || !(it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className == "GameTSCtrl"))
