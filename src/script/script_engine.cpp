@@ -1188,7 +1188,12 @@ bool ScriptEngine::init() {
         return VMValue(0);
     });
     tsInstance->registerNative("getSubStr", [](const auto& args) -> VMValue {
-
+        if (args.size() >= 3) {
+            const std::string& dbgS = args[0].toString();
+            if (dbgS.find(".png") == std::string::npos && dbgS.size() > 5)
+                fprintf(stderr, "[SUBBAD] start=%s len=%s src=[%.50s]\n",
+                    args[1].toString().c_str(), args[2].toString().c_str(), dbgS.c_str());
+        }
         if (args.size() < 3) return VMValue("");
         auto s = args[0].toString();
         int start = args[1].toInt();
@@ -2611,11 +2616,10 @@ bool ScriptEngine::init() {
                     ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(ctl->tabs[idx].id), VMValue(ctl->tabs[idx].text)});
                 return VMValue(1);
             }
-            // Popup menu: stock fires onSelect here, but our interpreter has a
-            // string-lifetime bug in deep nested cascades (garbage args reach
-            // natives). Disabled until that's fixed — scripts re-sync these
-            // popups on their own after activation.
-            if (!ctl->menuItems.empty() && false && idx >= 0 && idx < (int)ctl->menuItems.size()) {
+            // Popup menu: stock T2 fires name::onSelect here — warrior-pane
+            // code depends on it (RaceGender::onSelect fills the Skin list;
+            // SkinPref::onSelect applies the Show filter).
+            if (!ctl->menuItems.empty() && idx >= 0 && idx < (int)ctl->menuItems.size()) {
                 auto* ts = Engine::instance().script().ts();
                 if (ts && ts->hasFunction(ctl->name + "::onSelect"))
                     ts->callFunction(ctl->name + "::onSelect",
