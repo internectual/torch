@@ -2384,7 +2384,6 @@ bool ScriptEngine::init() {
     };
     tsInstance->registerNative("clear", [getListCtrl](const auto& args) -> VMValue {
         std::string cname = args.empty() ? "" : args[0].toString();
-        if (cname == "GMW_SkinPopup") fprintf(stderr, "[SKIN] clear\n");
         auto* ctl = getListCtrl(cname);
         if (ctl) {
             ctl->listRows.clear();
@@ -2397,7 +2396,6 @@ bool ScriptEngine::init() {
         if (args.size() < 3) return VMValue(1);
         auto* ctl = getListCtrl(args[0].toString());
         if (!ctl) return VMValue(1);
-        if (args[0].toString() == "GMW_SkinPopup") fprintf(stderr, "[SKIN] add [%s] id=%d\n", args[1].toString().c_str(), (int)args[2].toDouble());
         // ShellLaunchMenu uses add(id, text), popup menus use add(text, id)
         std::string txt;
         int id;
@@ -2613,9 +2611,11 @@ bool ScriptEngine::init() {
                     ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(ctl->tabs[idx].id), VMValue(ctl->tabs[idx].text)});
                 return VMValue(1);
             }
-            // Popup menu: stock T2 fires onSelect on setSelected — the warrior
-            // pane's Race/Skin/Voice cascade depends on it.
-            if (!ctl->menuItems.empty() && idx >= 0 && idx < (int)ctl->menuItems.size()) {
+            // Popup menu: stock fires onSelect here, but our interpreter has a
+            // string-lifetime bug in deep nested cascades (garbage args reach
+            // natives). Disabled until that's fixed — scripts re-sync these
+            // popups on their own after activation.
+            if (!ctl->menuItems.empty() && false && idx >= 0 && idx < (int)ctl->menuItems.size()) {
                 auto* ts = Engine::instance().script().ts();
                 if (ts && ts->hasFunction(ctl->name + "::onSelect"))
                     ts->callFunction(ctl->name + "::onSelect",
