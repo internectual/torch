@@ -1169,6 +1169,24 @@ bool ScriptEngine::init() {
         return VMValue(pos != std::string::npos ? (int32_t)pos : -1);
     });
 
+    tsInstance->registerNative("strlen", [](const auto& args) -> VMValue {
+        std::string v = args.empty() ? "" : args[0].toString();
+        return VMValue((double)v.size());
+    });
+    // True when the named skin is one of the Dynamix-provided skins listed
+    // in the \$Skin[*, code] table (drives the Show: Dynamix/Custom popup).
+    tsInstance->registerNative("isDynamixSkin", [](const auto& args) -> VMValue {
+        std::string skin = args.empty() ? "" : args[0].toString();
+        if (skin.empty()) return VMValue(0);
+        int count = atoi(Console::instance().getStringVariable("$SkinCount", "0"));
+        int limit = count + 8; if (limit > 64) limit = 64;
+        for (int i = 0; i < limit; i++) {
+            std::string key = "$Skin[" + std::to_string(i) + ", code]";
+            std::string code = Console::instance().getStringVariable(key.c_str(), "");
+            if (!code.empty() && code == skin) return VMValue(1);
+        }
+        return VMValue(0);
+    });
     tsInstance->registerNative("getSubStr", [](const auto& args) -> VMValue {
         if (args.size() < 3) return VMValue("");
         auto s = args[0].toString();
