@@ -587,6 +587,16 @@ bool Engine::init(int argc, char* argv[]) {
         quit();
     });
 
+    con->addCommand("dumppopup", [this](int32_t, const char* const*) {
+        auto* ctl = gui ? gui->findControl("GMW_SkinPopup") : nullptr;
+        if (!ctl) { Console::instance().printf(LogLevel::Info, "[DP] not found"); return; }
+        Console::instance().printf(LogLevel::Info, "[DP] %s items=%zu selRow=%d text=[%s] ctl=%p",
+            ctl->name.c_str(), ctl->menuItems.size(), ctl->selectedRow, ctl->text.c_str());
+        for (size_t i = 0; i < ctl->menuItems.size(); i++)
+            Console::instance().printf(LogLevel::Info, "[DP]   [%zu] id=%d text=[%s]", i,
+                ctl->menuItems[i].id, ctl->menuItems[i].text.c_str());
+    }, "dumppopup - raw dump of GMW_SkinPopup items");
+
     con->addCommand("echo", [](int32_t argc, const char* const* argv) {
         std::string msg;
         for (int i = 1; i < argc; i++) {
@@ -1051,6 +1061,43 @@ bool Engine::init(int argc, char* argv[]) {
                         std::string src((std::istreambuf_iterator<char>(pf)), std::istreambuf_iterator<char>());
                         if (!src.empty()) {
                             ts->execute(src, prefPath);
+                            // Self-heal warrior records corrupted by earlier
+                            // builds (blank skin fields left Show:Custom with
+                            // an empty Skin list on startup).
+                            double cnt2 = ts->getGlobal("$pref::Player::Count").toDouble();
+                            for (int i = 0; i < (int)cnt2 && i < 32; i++) {
+                                std::string key = "$pref::Player[" + std::to_string(i) + "]";
+                                std::string rec = ts->getGlobal(key).toString();
+                                auto fld = [&](int f) {
+                                    size_t p2 = 0;
+                                    for (int k = 0; k < f; k++) {
+                                        size_t t = rec.find('\t', p2);
+                                        if (t == std::string::npos) return std::string();
+                                        p2 = t + 1;
+                                    }
+                                    size_t e = rec.find('\t', p2);
+                                    return rec.substr(p2, e == std::string::npos ? std::string::npos : e - p2);
+                                };
+                                auto setFld = [&](int f, const std::string& v) {
+                                    std::vector<std::string> parts(5);
+                                    size_t p2 = 0;
+                                    for (int k = 0; k < 5; k++) {
+                                        size_t e = rec.find('\t', p2);
+                                        parts[k] = (k == f) ? v : rec.substr(p2, e == std::string::npos ? std::string::npos : e - p2);
+                                        if (e == std::string::npos) { for (int m = k+1; m < 5; m++) parts[m] = ""; break; }
+                                        p2 = e + 1;
+                                    }
+                                    std::string out;
+                                    for (int k = 0; k < 5; k++) { if (k) out += '\t'; out += parts[k]; }
+                                    return out;
+                                };
+                                bool changed = false;
+                                if (fld(1).empty() || fld(1) == "Human Male" && fld(0).empty()) { /* keep */ }
+                                if (fld(2).empty()) { rec = setFld(2, "beagle"); changed = true; }
+                                if (fld(3).empty()) { rec = setFld(3, "Male1"); changed = true; }
+                                if ((int)rec.size() > 0 && fld(0).empty()) { /* name empty: leave */ }
+                                if (changed) ts->setGlobal(key, VMValue(rec));
+                            }
                         }
                     }
                 }
@@ -1072,6 +1119,17 @@ bool Engine::init(int argc, char* argv[]) {
         // Enter anywhere on the shell (starting a local game mid-typing).
         g->menu().setActive(false);
         gui->popDialog("NewWarriorDlg");
+        // First-pass cascade execution corrupts native string args (VM
+        // string-lifetime bug), leaving the warrior pane's popups half-empty.
+        // A deferred warm re-activation repopulates them correctly.
+        if (scr->ts())
+            scr->ts()->execute(
+                "function __torchResyncWarrior() {"
+                "  if ($pref::Player::Count >= 1 && GameGui.pane $= \"Warrior\")"
+                "    GM_TabView.setSelected(3);"
+                "}"
+                "schedule(600, 0, \"__torchResyncWarrior\");",
+                "torch-resync");
         plat->processEvents();
         ren->beginFrame({0.15f, 0.15f, 0.2f, 1.0f});
         if (gui) gui->render();

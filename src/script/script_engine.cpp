@@ -2399,6 +2399,8 @@ bool ScriptEngine::init() {
         if (args.size() < 3) return VMValue(1);
         auto* ctl = getListCtrl(args[0].toString());
         if (!ctl) return VMValue(1);
+        if (args[0].toString() == "GMW_SkinPopup")
+            fprintf(stderr, "[SKIN] add [%s] id=%d ctl=%p\n", args[1].toString().c_str(), (int)args[2].toDouble(), (void*)ctl);
         // ShellLaunchMenu uses add(id, text), popup menus use add(text, id)
         std::string txt;
         int id;
