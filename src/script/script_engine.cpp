@@ -1178,11 +1178,15 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("isDynamixSkin", [](const auto& args) -> VMValue {
         std::string skin = args.empty() ? "" : args[0].toString();
         if (skin.empty()) return VMValue(0);
-        int count = atoi(Console::instance().getStringVariable("$SkinCount", "0"));
+        auto* tsx = Engine::instance().script().ts();
+        int count = 0;
+        if (tsx) count = (int)tsx->getGlobal("$SkinCount").toDouble();
         int limit = count + 8; if (limit > 64) limit = 64;
         for (int i = 0; i < limit; i++) {
-            std::string key = "$Skin[" + std::to_string(i) + ", code]";
-            std::string code = Console::instance().getStringVariable(key.c_str(), "");
+            // NOTE: key has NO space after the comma — the interpreter's
+            // bracket-index assembly concatenates without whitespace.
+            std::string key = "$Skin[" + std::to_string(i) + ",code]";
+            std::string code = tsx ? tsx->getGlobal(key).toString() : "";
             if (!code.empty() && code == skin) return VMValue(1);
         }
         return VMValue(0);
