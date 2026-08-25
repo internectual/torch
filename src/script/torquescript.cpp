@@ -214,15 +214,33 @@ TorqueScript::~TorqueScript() { delete impl; }
 void TorqueScript::init() {}
 void TorqueScript::shutdown() {}
 
+// Stock TorqueScript flattens indexed globals: $pref::Player[2] and
+// $pref::Player2 are THE SAME variable. Old exported prefs files use the
+// flattened form, while scripts index with brackets — both must land on
+// one canonical key or saved warriors silently vanish.
+static std::string normalizeGlobalKey(const std::string& n) {
+    if (n.empty() || n[0] != '$') return n;
+    auto lb = n.find('[');
+    if (lb == std::string::npos) return n;
+    auto rb = n.rfind(']');
+    if (rb != n.size() - 1 || rb < lb + 1) return n;
+    std::string idx = n.substr(lb + 1, rb - lb - 1);
+    if (idx.empty()) return n;
+    for (char c : idx)
+        if (!isdigit((unsigned char)c)) return n; // non-numeric index: keep verbatim
+    return n.substr(0, lb) + idx;
+}
+
 void TorqueScript::setGlobal(const std::string& name, const VMValue& val) {
-    impl->globals[name] = val;
+    impl->globals[normalizeGlobalKey(name)] = val;
     Console::instance().setVariable(name.c_str(), val.toString().c_str());
 }
 
 VMValue TorqueScript::getGlobal(const std::string& name) {
-    auto it = impl->globals.find(name);
+    std::string key = normalizeGlobalKey(name);
+    auto it = impl->globals.find(key);
     if (it != impl->globals.end()) return it->second;
-    auto* item = Console::instance().find(name.c_str());
+    auto* item = Console::instance().find(key.c_str());
     if (item && item->type == Console::ConsoleItem::Variable)
         return VMValue(item->value.c_str());
     return VMValue("");  // undefined variables are empty string in TorqueScript
@@ -1322,8 +1340,17 @@ VMValue TorqueScript::Impl::parsePostfix() {
             if (!savedVar.empty()) {
                 std::string arrayKey = savedVar + "[" + idx.toString() + "]";
                 lastVarName = arrayKey;
-                if (!lastFieldName.empty())
+                if (!lastFieldObj.empty() && !lastFieldName.empty()) {
+                    // obj.field[idx] — qualify the field name
                     lastFieldName = lastFieldName + "[" + idx.toString() + "]";
+                } else {
+                    // Pure indexed variable ($g[idx] / %v[idx]): drop any STALE
+                    // field target left by an earlier obj.field access, or the
+                    // upcoming assignment stores into that random object field
+                    // instead of the global (broke doDeleteWarrior's shift).
+                    lastFieldObj.clear();
+                    lastFieldName.clear();
+                }
                 if (!lastFieldObj.empty() && !lastFieldName.empty()) {
                     // obj.field[idx] — read from ScriptObject field
                     auto* sobj = ScriptEngine::instance().findObject(lastFieldObj.c_str());
@@ -1421,12 +1448,18 @@ VMValue TorqueScript::Impl::parsePostfix() {
         }
         if (peekToken().type == TSTokenType::PlusPlus) {
             nextToken();
+            // Target is THIS operand — stale lastField* from an earlier
+            // statement would redirect the increment (e.g. Count++ lost).
+            lastFieldObj.clear();
+            lastFieldName.clear();
             writeBackVar(VMValue(val.toDouble() + 1));
             val = VMValue(val.toDouble() + 1);
             break;
         }
         if (peekToken().type == TSTokenType::MinusMinus) {
             nextToken();
+            lastFieldObj.clear();
+            lastFieldName.clear();
             writeBackVar(VMValue(val.toDouble() - 1));
             val = VMValue(val.toDouble() - 1);
             break;
@@ -1754,6 +1787,17 @@ VMValue TorqueScript::Impl::parsePrimary() {
 }
 
 // === Nested exec ===
+// Prefs files are EXPORT-ONLY artifacts: they must always run as fresh
+// source and must never be DSO-cached — a cached snapshot would freeze
+// warrior aliases (and everything else $pref::*) at cache time.
+static bool isPrefsScript(const std::string& path) {
+    std::string low;
+    low.reserve(path.size());
+    for (char c : path) low += (char)tolower((unsigned char)c);
+    return low.find("clientprefs.cs") != std::string::npos ||
+           low.find("serverprefs.cs") != std::string::npos;
+}
+
 VMValue TorqueScript::executeNested(const std::string& source, const std::string& path) {
     Console::instance().printf(LogLevel::Debug, "TS: nested enter '%s'", path.c_str());
     // Save outer state
@@ -1803,7 +1847,7 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
 
     // Try loading DSO cache before parsing source (.cs, .gui, .mis)
     // Only cache .cs/.mis files — .gui files have no functions
-    if (isCompilableExt(path) && path.substr(path.size()-3) != ".gui") {
+    if (isCompilableExt(path) && !isPrefsScript(path) && path.substr(path.size()-3) != ".gui") {
         std::string modPath = Console::instance().getStringVariable("modPath", "base");
         std::string outDir = Console::instance().getStringVariable("outputDir", "");
         if (!outDir.empty()) {
@@ -1908,7 +1952,7 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
     }
 
     // Write source-cache DSO for .cs/.mis files only (.gui files have no functions to cache)
-    if (isCompilableExt(path) && path.find('/') != std::string::npos && path.substr(path.size()-3) != ".gui") {
+    if (isCompilableExt(path) && !isPrefsScript(path) && path.find('/') != std::string::npos && path.substr(path.size()-3) != ".gui") {
         std::string modPath = Console::instance().getStringVariable("modPath", "base");
         std::string outDir = Console::instance().getStringVariable("outputDir", "");
         if (!outDir.empty()) {
@@ -1999,7 +2043,7 @@ VMValue TorqueScript::executeFile(const std::string& path) {
 
     // For modpath .cs/.mis files, try .cs.dso first (.gui files have no functions)
     // Root-level files (no '/') like console_start.cs skip DSO
-    if (isCompilableExt(path) && path.find('/') != std::string::npos && path.substr(path.size()-3) != ".gui") {
+    if (isCompilableExt(path) && !isPrefsScript(path) && path.find('/') != std::string::npos && path.substr(path.size()-3) != ".gui") {
         std::string dsoPath = path + ".dso";
         auto dsoData = Engine::instance().fs().read(dsoPath.c_str());
         if (dsoData.empty()) {
@@ -2080,7 +2124,7 @@ VMValue TorqueScript::executeFile(const std::string& path) {
     VMValue result = execute(source, path);
 
     // After successful execution, write DSO cache to outputDir/modPath
-    if (isCompilableExt(path) && path.find('/') != std::string::npos && path.substr(path.size()-3) != ".gui") {
+    if (isCompilableExt(path) && !isPrefsScript(path) && path.find('/') != std::string::npos && path.substr(path.size()-3) != ".gui") {
         std::string modPath = Console::instance().getStringVariable("modPath", "base");
         std::string outDir = Console::instance().getStringVariable("outputDir", "");
         if (!outDir.empty()) {

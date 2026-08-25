@@ -98,3 +98,9 @@ private:
     TorqueScript* tsInstance{};
     Console* con{};
 };
+
+// Prefs-export gate: boot-time default-seeding code paths may call
+// export("$pref::*","prefs/ClientPrefs.cs") BEFORE saved prefs have been
+// loaded, which would truncate them. The engine flips this after loading.
+void allowClientPrefsExport(bool allowed);
+bool clientPrefsExportAllowed();

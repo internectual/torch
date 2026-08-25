@@ -572,6 +572,26 @@ bool Engine::init(int argc, char* argv[]) {
     // Script engine
     scr->init();
 
+    // Load persisted prefs BEFORE scripts/autoexec can export() defaults
+    // over them (setupClassicClientDefaults fires during boot). Uses the
+    // case-insensitive fs so "ClientPrefs.cs" resolves.
+    {
+        std::string outDir0 = Console::instance().getStringVariable("outputDir", "");
+        std::string modP0 = Console::instance().getStringVariable("modPath", "base");
+        if (!outDir0.empty()) {
+            std::string pp0 = outDir0 + "/" + modP0 + "/prefs/ClientPrefs.cs";
+            std::ifstream pf0(pp0.c_str());
+            if (pf0) {
+                std::string src0((std::istreambuf_iterator<char>(pf0)), std::istreambuf_iterator<char>());
+                if (!src0.empty()) {
+                    if (scr->ts()) scr->ts()->execute(src0, pp0);
+                    allowClientPrefsExport(true);
+                }
+            }
+        }
+    }
+
+
     // Network
     net->init();
 
@@ -580,6 +600,10 @@ bool Engine::init(int argc, char* argv[]) {
 
     // Register console commands
     con->addCommand("quit", [this](int32_t argc, const char* const* argv) {
+        // Persist prefs like the stock shell does in LoginDone — otherwise
+        // warriors created in a session vanish on restart.
+        if (auto* ts = scr ? scr->ts() : nullptr)
+            ts->execute("export(\"$pref::*\", \"prefs/ClientPrefs.cs\", false);", "quit-export");
         quit();
     });
 
@@ -1029,9 +1053,34 @@ bool Engine::init(int argc, char* argv[]) {
         // A headless/dev session has no warrior to create — pretend one exists.
         // ONLY when the user has no warriors: clobbering a real Count here
         // made DELETE ALIAS misbehave (guard/shift ran against wrong data).
+        // Load persisted prefs. console_start execs "prefs/clientPrefs.cs"
+        // relative to the data dir, but exports land under
+        // <outputDir>/<mod>/prefs/ — load THAT here so warriors survive.
+        if (auto* ts = scr->ts()) {
+            std::string outDir = Console::instance().getStringVariable("outputDir", "");
+            std::string modP = Console::instance().getStringVariable("modPath", "base");
+            if (!outDir.empty()) {
+                std::string prefPath = outDir + "/" + modP + "/prefs/ClientPrefs.cs";
+                struct stat st;
+                if (stat(prefPath.c_str(), &st) == 0 && st.st_size > 0) {
+                    std::ifstream pf(prefPath.c_str());
+                    if (pf) {
+                        std::string src((std::istreambuf_iterator<char>(pf)), std::istreambuf_iterator<char>());
+                        if (!src.empty()) {
+                            ts->execute(src, prefPath);
+                        }
+                    }
+                }
+            }
+        }
         if (auto* ts = scr->ts()) {
             double cnt = ts->getGlobal("$pref::Player::Count").toDouble();
             if (cnt < 1) {
+                // Seed a COMPLETE default warrior record. A bare Count=1 with
+                // an empty Player[0] made GM_WarriorPane::onActivate render an
+                // empty, unselected popup (the add-loop skips blank slots).
+                ts->setGlobal("$pref::Player[0]",
+                    VMValue(std::string("Warrior\tHuman Male\tbeagle\tMale1")));
                 ts->setGlobal("$pref::Player::Count", VMValue((double)1));
                 ts->setGlobal("$pref::Player::Current", VMValue((double)0));
             }

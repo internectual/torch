@@ -1090,6 +1090,10 @@ ScriptEngine& ScriptEngine::instance() {
     return *instance_;
 }
 
+static bool s_clientPrefsExportAllowed = false;
+void allowClientPrefsExport(bool allowed) { s_clientPrefsExportAllowed = allowed; }
+bool clientPrefsExportAllowed() { return s_clientPrefsExportAllowed; }
+
 bool ScriptEngine::init() {
     vmInstance = new VirtualMachine(this);
     tsInstance = new TorqueScript;
@@ -2143,7 +2147,15 @@ bool ScriptEngine::init() {
         if (args.size() < 2) return VMValue(0);
         std::string pattern = args[0].toString();
         std::string filePath = args[1].toString();
-        bool append = args.size() > 2 && args[2].toBool();
+        // T2 passes false/true as STRINGS — toBool() treats any non-empty
+        // string (including "False") as true, which made every export APPEND,
+        // piling up contradictory pref blocks that fought on next load.
+        bool append = false;
+        if (args.size() > 2) {
+            std::string a = args[2].toString();
+            for (auto& ch : a) ch = (char)tolower((unsigned char)ch);
+            append = (a == "true" || a == "1");
+        }
         // Build full path in outputDir
         std::string outDir = Console::instance().getStringVariable("outputDir", "");
         if (outDir.empty()) return VMValue(0);
@@ -2155,6 +2167,11 @@ bool ScriptEngine::init() {
         if (slash != std::string::npos) {
             std::string dir = fullPath.substr(0, slash);
             struct stat st; if (stat(dir.c_str(), &st) != 0) mkdir(dir.c_str(), 0755);
+        }
+        if (fullPath.find("ClientPrefs") != std::string::npos && !clientPrefsExportAllowed()) {
+            Console::instance().printf(LogLevel::Info,
+                "export: skipping ClientPrefs write (prefs not loaded yet this session)");
+            return VMValue(1);
         }
         FILE* f = fopen(fullPath.c_str(), append ? "a" : "w");
         if (!f) return VMValue(0);

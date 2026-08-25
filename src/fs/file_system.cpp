@@ -5,6 +5,8 @@
 #include <fstream>
 #include <sys/stat.h>
 #include <fnmatch.h>
+#include <dirent.h>
+#include <strings.h>
 
 namespace fs = std::filesystem;
 
@@ -55,6 +57,35 @@ bool FileSystem::readFile(const char* path, std::vector<uint8_t>& data) {
             f.seekg(0);
             f.read((char*)data.data(), data.size());
             return true;
+        }
+    }
+
+    // Case-insensitive fallback: T2 content mixes naming conventions
+    // (clientPrefs.cs vs ClientPrefs.cs) and Linux is case-sensitive.
+    for (auto& p : impl->searchPaths) {
+        std::string full = p + "/" + path;
+        auto slash = full.rfind('/');
+        if (slash == std::string::npos) continue;
+        std::string dir = full.substr(0, slash);
+        std::string base = full.substr(slash + 1);
+        DIR* d = opendir(dir.c_str());
+        if (!d) continue;
+        struct dirent* e;
+        std::string real;
+        bool found = false;
+        while ((e = readdir(d)) != nullptr) {
+            if (strcasecmp(e->d_name, base.c_str()) == 0) { real = dir + "/" + e->d_name; found = true; break; }
+        }
+        closedir(d);
+        if (found) {
+            std::ifstream f(real, std::ios::binary);
+            if (f) {
+                f.seekg(0, std::ios::end);
+                data.resize(f.tellg());
+                f.seekg(0);
+                f.read((char*)data.data(), data.size());
+                return true;
+            }
         }
     }
     return false;
