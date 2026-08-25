@@ -634,7 +634,9 @@ VMValue TorqueScript::Impl::parseFor() {
     expect(TSTokenType::For);
     expect(TSTokenType::LParen);
 
-    locals.push();
+    // NOTE: no locals.push() here — TorqueScript has no block scoping; the
+    // induction variable lives in the function scope and must survive the
+    // loop (scripts read %i after `for` to blank the last shifted slot).
 
     // Init
     if (peekToken().type != TSTokenType::Semicolon) {
@@ -715,7 +717,6 @@ VMValue TorqueScript::Impl::parseFor() {
     }
 
     loopDepth--;
-    locals.pop();
     return result;
 }
 

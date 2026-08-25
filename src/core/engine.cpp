@@ -1027,9 +1027,14 @@ bool Engine::init(int argc, char* argv[]) {
         // clientDefaults.cs forces $pref::Player::Count = 0 on fresh configs,
         // so activating the warrior pane pushes NewWarriorDlg over everything.
         // A headless/dev session has no warrior to create — pretend one exists.
+        // ONLY when the user has no warriors: clobbering a real Count here
+        // made DELETE ALIAS misbehave (guard/shift ran against wrong data).
         if (auto* ts = scr->ts()) {
-            ts->setGlobal("$pref::Player::Count", VMValue((double)1));
-            ts->setGlobal("$pref::Player::Current", VMValue((double)0));
+            double cnt = ts->getGlobal("$pref::Player::Count").toDouble();
+            if (cnt < 1) {
+                ts->setGlobal("$pref::Player::Count", VMValue((double)1));
+                ts->setGlobal("$pref::Player::Current", VMValue((double)0));
+            }
         }
         // The legacy C++ placeholder menu polls raw keys and would steal
         // Enter anywhere on the shell (starting a local game mid-typing).
