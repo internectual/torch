@@ -726,7 +726,14 @@ bool Engine::init(int argc, char* argv[]) {
     }, "dumpstack - print dialog stack");
 
     // Login flow commands
-    con->addCommand("LoginDone", [this](int32_t, const char* const*) {
+    con->addCommand("LoginDone", [this, noLogin](int32_t, const char* const*) {
+        // Boot scripts schedule LoginDone after their (stubbed) login flow.
+        // In -nologin there is no game to join — starting one from a stale
+        // login callback yanked the shell into an empty mission (black).
+        if (noLogin) {
+            Console::instance().printf(LogLevel::Info, "LoginDone ignored (-nologin)");
+            return;
+        }
         gui->popDialog("LoginDlg");
         Console::instance().printf(LogLevel::Info, "Login complete, starting game");
         g->startLocalGame();
@@ -1024,6 +1031,9 @@ bool Engine::init(int argc, char* argv[]) {
             ts->setGlobal("$pref::Player::Count", VMValue((double)1));
             ts->setGlobal("$pref::Player::Current", VMValue((double)0));
         }
+        // The legacy C++ placeholder menu polls raw keys and would steal
+        // Enter anywhere on the shell (starting a local game mid-typing).
+        g->menu().setActive(false);
         gui->popDialog("NewWarriorDlg");
         plat->processEvents();
         ren->beginFrame({0.15f, 0.15f, 0.2f, 1.0f});
