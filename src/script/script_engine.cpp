@@ -1188,12 +1188,6 @@ bool ScriptEngine::init() {
         return VMValue(0);
     });
     tsInstance->registerNative("getSubStr", [](const auto& args) -> VMValue {
-        if (args.size() >= 3) {
-            const std::string& dbgS = args[0].toString();
-            if (dbgS.find(".png") == std::string::npos && dbgS.size() > 5)
-                fprintf(stderr, "[SUBBAD] start=%s len=%s src=[%.50s]\n",
-                    args[1].toString().c_str(), args[2].toString().c_str(), dbgS.c_str());
-        }
         if (args.size() < 3) return VMValue("");
         auto s = args[0].toString();
         int start = args[1].toInt();
