@@ -113,7 +113,11 @@ void FileSystem::listFiles(const char* pattern, std::vector<std::string>& out) c
             for (auto& e : fs::recursive_directory_iterator(p)) {
                 if (e.is_regular_file()) {
                     auto rp = e.path().string().substr(p.length() + 1);
-                    if (!pattern || fnmatch(pattern, rp.c_str(), 0) == 0)
+                    // FNM_PATHNAME: '*' must not cross '/' — stock T2 findFirstFile() matches
+                    // per path component ("textures/skins/*.lmale.png" is direct
+                    // children only), and wildcard-crossing made overlapping scans
+                    // (textures/* vs textures/skins/*) yield duplicates.
+                    if (!pattern || fnmatch(pattern, rp.c_str(), FNM_PATHNAME) == 0)
                         out.push_back(rp);
                 }
             }

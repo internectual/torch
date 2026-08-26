@@ -137,6 +137,6 @@ bool Vl2Archive::fileExists(const char* path) const {
 
 void Vl2Archive::listFiles(const char* pattern, std::vector<std::string>& out) const {
     for (auto& [name, _] : impl->entries)
-        if (!pattern || fnmatch(pattern, name.c_str(), 0) == 0)
+        if (!pattern || fnmatch(pattern, name.c_str(), FNM_PATHNAME) == 0)
             out.push_back(name);
 }
