@@ -2151,6 +2151,9 @@ bool TorqueScript::hasFunction(const std::string& name) const {
     return impl->functions.find(name) != impl->functions.end();
 }
 
+const std::string& TorqueScript::dbgFile() const { return impl->currentFile; }
+int TorqueScript::dbgLine() const { return impl->srcLine; }
+
 VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VMValue>& args) {
     auto it = impl->functions.find(name);
     if (it == impl->functions.end()) {

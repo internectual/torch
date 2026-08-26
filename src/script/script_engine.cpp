@@ -1171,6 +1171,8 @@ bool ScriptEngine::init() {
 
     tsInstance->registerNative("strlen", [](const auto& args) -> VMValue {
         std::string v = args.empty() ? "" : args[0].toString();
+        if (v.find("textures/") != std::string::npos || (args.size() >= 2 && args[1].toString().find("textures/") != std::string::npos))
+            fprintf(stderr, "[SL] a0=[%s] a1=[%s] nargs=%zu\n", v.c_str(), args.size() >= 2 ? args[1].toString().c_str() : "?", args.size());
         return VMValue((double)v.size());
     });
     // True when the named skin is one of the Dynamix-provided skins listed
@@ -2399,8 +2401,10 @@ bool ScriptEngine::init() {
         if (args.size() < 3) return VMValue(1);
         auto* ctl = getListCtrl(args[0].toString());
         if (!ctl) return VMValue(1);
-        if (args[0].toString() == "GMW_SkinPopup")
-            fprintf(stderr, "[SKIN] add [%s] id=%d ctl=%p\n", args[1].toString().c_str(), (int)args[2].toDouble(), (void*)ctl);
+        // Blank display names (interpreter string-lifetime bug during
+        // first-pass cascades) render as unselectable blank rows — skip.
+        bool popupMenu = ctl->className.find("PopUpMenu") != std::string::npos;
+        if (popupMenu && args[1].toString().empty()) return VMValue(1);
         // ShellLaunchMenu uses add(id, text), popup menus use add(text, id)
         std::string txt;
         int id;

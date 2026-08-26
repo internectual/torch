@@ -64,6 +64,8 @@ public:
     VMValue execute(const std::string& source, const std::string& filename = "");
     VMValue executeFile(const std::string& path);
     bool hasFunction(const std::string& name) const;
+    const std::string& dbgFile() const;
+    int dbgLine() const;
     VMValue callFunction(const std::string& name, const std::vector<VMValue>& args);
 
     void setGlobal(const std::string& name, const VMValue& val);
