@@ -118,8 +118,8 @@ struct TorqueScript::Impl {
         // For now, we write a custom "source DSO" marker that the loader recognizes.
         FILE* f = fopen(dsoPath.c_str(), "wb");
         if (!f) return;
-        // Write header: version 0x54534F01 ("TSO\1" — Torque Source Object)
-        uint32_t version = 0x54534F01;
+        // Write header: version 0x54534F02 ("TSO\1" — Torque Source Object)
+        uint32_t version = 0x54534F02;
         fwrite(&version, 4, 1, f);
         // Store function count
         uint32_t funcCount = 0;
@@ -490,6 +490,7 @@ void TorqueScript::Impl::tokenize(const std::string& source) {
                 tok = {TSTokenType::BitwiseAnd, "&", 0, tok.pos}; srcPtr++; srcCol++; break;
             case '|':
                 if (match2('|', TSTokenType::Or)) continue;
+                if (match2('=', TSTokenType::BitOrEq)) continue;
                 tok = {TSTokenType::BitwiseOr, "|", 0, tok.pos}; srcPtr++; srcCol++; break;
             case '?':
                 tok = {TSTokenType::Question, "?", 0, tok.pos}; srcPtr++; srcCol++; break;
@@ -553,7 +554,9 @@ VMValue TorqueScript::Impl::parseProgram() {
                 stmtCount, currentFile.c_str());
             break;
         }
-        if (returning || breaking || continuing) break;
+        if (returning || breaking || continuing) {
+            break;
+        }
     }
     Console::instance().printf(LogLevel::Debug, "TS: parseProgram done (%d stmts, returning=%d, breaking=%d, continuing=%d, eof=%d)", 
         stmtCount, returning, breaking, continuing, peekToken().type == TSTokenType::Eof);
@@ -1033,7 +1036,8 @@ VMValue TorqueScript::Impl::parseAssignment() {
         peekToken().type == TSTokenType::PlusEq ||
         peekToken().type == TSTokenType::MinusEq ||
         peekToken().type == TSTokenType::StarEq ||
-        peekToken().type == TSTokenType::SlashEq) {
+        peekToken().type == TSTokenType::SlashEq ||
+        peekToken().type == TSTokenType::BitOrEq) {
         TSToken op = nextToken();
         // Save target before rhs parsing (which may overwrite lastVarName/lastField*)
         std::string targetVar = lastVarName;
@@ -1055,6 +1059,7 @@ VMValue TorqueScript::Impl::parseAssignment() {
         else if (op.type == TSTokenType::MinusEq) { val = VMValue(lhs.toDouble() - rhs.toDouble()); }
         else if (op.type == TSTokenType::StarEq) { val = VMValue(lhs.toDouble() * rhs.toDouble()); }
         else if (op.type == TSTokenType::SlashEq) { val = rhs.toDouble() != 0 ? VMValue(lhs.toDouble() / rhs.toDouble()) : VMValue(0); }
+        else if (op.type == TSTokenType::BitOrEq) { val = VMValue((double)(lhs.toInt() | rhs.toInt())); }
 
         // Store back: object field, global, or local
         if (!lastFieldObj.empty() && !lastFieldName.empty()) {
@@ -1095,7 +1100,9 @@ VMValue TorqueScript::Impl::parseTernary() {
 
 VMValue TorqueScript::Impl::parseLogicalOr() {
     VMValue lhs = parseLogicalAnd();
-    while (peekToken().type == TSTokenType::Or) {
+    // TS also accepts the word forms: "a or b" / "a and b"
+    while (peekToken().type == TSTokenType::Or ||
+           (peekToken().type == TSTokenType::Ident && peekToken().text == "or")) {
         nextToken();
         VMValue rhs = parseLogicalAnd();
         lhs = VMValue(lhs.toBool() || rhs.toBool() ? 1 : 0);
@@ -1105,7 +1112,8 @@ VMValue TorqueScript::Impl::parseLogicalOr() {
 
 VMValue TorqueScript::Impl::parseLogicalAnd() {
     VMValue lhs = parseBitwiseOr();
-    while (peekToken().type == TSTokenType::And) {
+    while (peekToken().type == TSTokenType::And ||
+           (peekToken().type == TSTokenType::Ident && peekToken().text == "and")) {
         nextToken();
         VMValue rhs = parseBitwiseOr();
         lhs = VMValue(lhs.toBool() && rhs.toBool() ? 1 : 0);
@@ -1609,6 +1617,8 @@ VMValue TorqueScript::Impl::parsePrimary() {
                         std::string src((const char*)data.data(), data.size());
                         return outer->executeNested(src, execPath);
                     }
+                    Console::instance().printf(LogLevel::Warn, "exec: file not found: %s (modPath=%s)",
+                        execPath.c_str(), modPath.c_str());
                     return VMValue(0);
                 }
                 // Try natives
@@ -1642,7 +1652,10 @@ VMValue TorqueScript::Impl::parsePrimary() {
 
             // Check for namespace::method syntax (:: is two Colon tokens)
             if (peekToken().type == TSTokenType::Colon && peekToken(1).type == TSTokenType::Colon) {
-                nextToken(); // consume ::
+                nextToken(); // consume colon #1
+                nextToken(); // consume colon #2 — was missing, so methodName
+                             // became ':' and every Class::method(args)
+                             // call derailed into the no-paren return
                 std::string methodName = nextToken().text;
                 std::string fullName = name + "::" + methodName;
 
@@ -1880,7 +1893,7 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
                 if (f) {
                     std::vector<uint8_t> dsoData((std::istreambuf_iterator<char>(f)), {});
                     uint32_t version = *(const uint32_t*)dsoData.data();
-                    if (version == 0x54534F01) {
+                    if (version == 0x54534F02) {
                         Console::instance().printf(LogLevel::Debug, "TS: loading DSO cache '%s'", path.c_str());
                         const uint8_t* p = dsoData.data() + 4;
                         uint32_t funcCount = *(const uint32_t*)p; p += 4;
@@ -2087,10 +2100,10 @@ VMValue TorqueScript::executeFile(const std::string& path) {
             if (f) dsoData = std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), {});
         }
         if (!dsoData.empty()) {
-            // Check for custom source DSO cache (v0x54534F01)
+            // Check for custom source DSO cache (v0x54534F02)
             if (dsoData.size() >= 8) {
                 uint32_t version = *(const uint32_t*)dsoData.data();
-                if (version == 0x54534F01) {
+                if (version == 0x54534F02) {
                     Console::instance().printf(LogLevel::Debug, "TS: loading source DSO cache '%s'", dsoPath.c_str());
                     const uint8_t* p = dsoData.data() + 4;
                     uint32_t funcCount = *(const uint32_t*)p; p += 4;

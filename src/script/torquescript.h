@@ -20,7 +20,7 @@ enum class TSTokenType {
     And, Or, Not, BitwiseAnd, BitwiseOr, BitwiseXor,
     Question, Shl, Shr,
     PlusPlus, MinusMinus,
-    PlusEq, MinusEq, StarEq, SlashEq,
+    PlusEq, MinusEq, StarEq, SlashEq, BitOrEq,
     Hash, New, If, Else, For, While, Do, Switch, Case, Default,
     Return, Break, Continue, Function, Package, Parent, This,
     True, False, Null, SwitchStr

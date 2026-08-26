@@ -2224,6 +2224,7 @@ bool ScriptEngine::init() {
         // Try bare path first
         auto data = fs.read(execPath.c_str());
         if (data.empty()) data = fs.read(("base/" + execPath).c_str());
+        if (data.empty()) data = fs.read(("scripts/" + execPath).c_str());
         if (!data.empty()) {
             std::string src((const char*)data.data(), data.size());
             auto* ts = Engine::instance().script().ts();
@@ -2352,7 +2353,7 @@ bool ScriptEngine::init() {
         if (ret != 0) {
             // Fall back: write minimal source-cache DSO
             FILE* f = fopen(dsoPath.c_str(), "wb");
-            if (f) { uint32_t ver = 0x54534F01, cnt = 0; fwrite(&ver, 4, 1, f); fwrite(&cnt, 4, 1, f); fclose(f); }
+            if (f) { uint32_t ver = 0x54534F02, cnt = 0; fwrite(&ver, 4, 1, f); fwrite(&cnt, 4, 1, f); fclose(f); }
         }
         return VMValue(1);
     });
@@ -2832,6 +2833,8 @@ bool ScriptEngine::init() {
             if (ctl) {
                 if (ctl->className == "GuiRadioCtrl" || ctl->className == "ShellRadioButton" || ctl->className == "GuiCheckBoxCtrl")
                     ctl->checked = args[1].toBool();
+                else if (ctl->className == "ShellTabButton" || ctl->className == "GuiTabButton")
+                    ctl->selected = args[1].toBool();  // T2 tabs: setValue(1/0) = select/deselect
                 else if (ctl->className.find("Slider") != std::string::npos)
                     ctl->sliderValue = (float)args[1].toInt() / 1000.0f;  // T2 convention: value * 1000
                 else if (ctl->className.find("Window") != std::string::npos && args.size() >= 4) {

@@ -11,8 +11,20 @@
 #include <cstdio>
 #include <cmath>
 
+// Torque control lookup is case-insensitive ("OP_VIDEOPane" must find
+// "OP_VideoPane" — the Settings dialog builds names from the pane field's
+// uppercase "VIDEO").
+static std::string lowerKey(const std::string& n) {
+    std::string r = n;
+    for (auto& c : r) c = (char)tolower((unsigned char)c);
+    return r;
+}
+static bool nameEqual(const std::string& a, const std::string& b) {
+    return a.size() == b.size() && lowerKey(a) == lowerKey(b);
+}
+
 GuiControl* GuiControl::findChild(const std::string& name) {
-    for (auto* c : children) if (c->name == name) return c;
+    for (auto* c : children) if (nameEqual(c->name, name)) return c;
     for (auto* c : children) { auto* r = c->findChild(name); if (r) return r; }
     return nullptr;
 }
@@ -68,6 +80,17 @@ static void destroyQuadBatch() {
     s_quadBatchInit = false;
 }
 
+// Canonical GuiControl identity: exactly one GuiControl per ScriptObject
+// name, shared by init(), refresh(), soToGui() and findControl().  Before
+// this registry, boot-time method calls minted detached ghost controls
+// (pre-init, canvas==NULL), and init() later built a SECOND instance --
+// dialogs then pushed the hollow ghost (kids=0, e.g. OptionsDlg rendering
+// nothing) while the real subtree sat unused.
+static std::unordered_map<std::string, GuiControl*>& createdControls() {
+    static std::unordered_map<std::string, GuiControl*> m;
+    return m;
+}
+
 GuiRenderer::GuiRenderer() {}
 GuiRenderer::~GuiRenderer() {
     auto del = [&](auto& self, GuiControl* ctl) -> void {
@@ -75,6 +98,7 @@ GuiRenderer::~GuiRenderer() {
         delete ctl;
     };
     if (canvas) del(del, canvas);
+    createdControls().clear();
     delete checkerTex;
 }
 
@@ -105,11 +129,25 @@ void GuiRenderer::init() {
     canvas = nullptr;
     auto& objs = ScriptEngine::instance().objects;
 
-    // First pass: create GuiControl objects for all GUI-related ScriptObjects
+    // First pass: create/adopt GuiControl objects for all GUI-related ScriptObjects
     std::unordered_map<std::string, GuiControl*> controlMap;
     for (auto& [name, obj] : objs) {
         if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl") {
-            GuiControl* ctl = new GuiControl;
+            GuiControl*& slot = createdControls()[lowerKey(name)];
+            GuiControl* ctl = slot;
+            if (ctl) {
+                // Adopt an existing (possibly ghost) instance: detach from any
+                // old parent and drop stale children; fields refresh below.
+                if (ctl->parent) {
+                    auto& cv = ctl->parent->children;
+                    cv.erase(std::remove(cv.begin(), cv.end(), ctl), cv.end());
+                    ctl->parent = nullptr;
+                }
+                ctl->children.clear();
+            } else {
+                ctl = new GuiControl;
+                slot = ctl;
+            }
             ctl->name = obj->name;
             ctl->className = normalizeGuiClassName(obj->className);
             auto rf = [&](const std::string& key, float def) {
@@ -211,7 +249,10 @@ void GuiRenderer::refresh() {
     for (auto& [name, obj] : objs) {
         if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl") {
             if (findControl(name)) continue;
-            GuiControl* ctl = new GuiControl;
+            GuiControl*& slot = createdControls()[lowerKey(name)];
+            GuiControl* ctl = slot;
+            if (!ctl) { ctl = new GuiControl; slot = ctl; }
+            else if (ctl->parent) { continue; }
             ctl->name = obj->name; ctl->className = normalizeGuiClassName(obj->className);
             auto parsePair = [&](const std::string& key, float& a, float& b) {
                 auto it = obj->fields.find(key);
@@ -2006,20 +2047,38 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 if (!stateTex && ctl->menuOpen) stateTex = tryBmpBase("_act");
                 if (!stateTex) stateTex = tabTex; // fallback to base texture
             }
-            if (stateTex && stateTex->loaded) {
-                r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, stateTex->id);
-            } else if (tabTex && tabTex->loaded) {
-                r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, tabTex->id);
-            } else if (ctl->parent && (ctl->parent->className == "ShellTabGroupCtrl" || ctl->parent->className == "GuiTabBookCtrl")) {
-                // Parent tab group already drew the tab background — don't cover it
-            } else {
-                // Colored rectangle fallback
-                ColorF fill = isSelected ? ColorF{0.35f,0.45f,0.55f,1} : fc;
-                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fill);
+            // Side tab (OptionsDlg-style vertical tab stack): T2 draws the
+            // left cap + stretched middle of the shell button — rounded
+            // left corners, STRAIGHT right edge that tucks under the pane
+            // — with black label text.  The selected tab pops a few px
+            // wider with a brighter gradient and a highlight bar.
+            // (Procedural: the shll_tabbutton atlas doesn't slice cleanly.)
+            {
+                float tw = ctl->extentX + (isSelected ? 6.f : 0.f);
+                float th = ctl->extentY;
+                bool hot = isSelected || ctl->hovered;
+                auto fill = [&](float fx, float fy, float fw, float fh, const ColorF& c) {
+                    r.drawRectFill({fx, fy, 0}, {fx + fw, fy + fh, 0}, c);
+                };
+                // Border frame (dark teal, like the shell palette)
+                fill(x, y, tw, th, {3 / 255.f, 54 / 255.f, 61 / 255.f, 1});
+                // Body: vertical gradient, rounded LEFT corners only
+                const float rad = 4.f;
+                int bodyH = (int)th - 2;
+                for (int i = 0; i < bodyH; i++) {
+                    float t = bodyH > 1 ? (float)i / (float)(bodyH - 1) : 0.f;
+                    float dTop = (float)i, dBot = (float)(bodyH - 1 - i);
+                    float ins = 0.f;
+                    if (dTop < rad) ins = rad - dTop;
+                    else if (dBot < rad) ins = rad - dBot;
+                    float g = hot ? (150.f + (196.f - 150.f) * t)
+                                  : (88.f + (52.f - 88.f) * t);
+                    fill(x + 1 + ins, y + 1 + i, tw - 2 - ins, 1.f,
+                         ColorF{2 / 255.f, g / 255.f, (g + 11.f) / 255.f, 1});
+                }
+                // Highlight bar along the top of the selected tab
                 if (isSelected)
-                    r.drawRectFill({x, y + ctl->extentY - 1, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.6f,0.7f,0.8f,1});
-                else
-                    r.drawRectFill({x, y + ctl->extentY - 1, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.15f,0.15f,0.2f,1});
+                    fill(x + 3, y + 2, tw - 6, 2.f, {196 / 255.f, 231 / 255.f, 255 / 255.f, 1});
             }
             if (font && !ctl->text.empty()) {
                 float tx2 = x + textOfsX;
@@ -3466,9 +3525,33 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     auto it = objs.find(name);
     if (it == objs.end() || !(it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className == "GameTSCtrl"))
         return nullptr;
-    // Already exists as a GuiControl — complete any missing subtree.
-    GuiControl* ctl = findControl(name);
-    if (ctl) {
+    // Canonical identity: reuse the registered instance if one exists.
+    {
+        GuiControl*& reg = createdControls()[lowerKey(name)];
+        if (reg) {
+            GuiControl* ctl = reg;
+            if (parent && canvas && ctl->parent == canvas) {
+                auto& cv = canvas->children;
+                cv.erase(std::remove(cv.begin(), cv.end(), ctl), cv.end());
+                parent->addChild(ctl);
+            }
+            // Snapshot child names first: soToGui() can re-enter script
+            // execution (onWake etc.) which inserts into the objects map,
+            // invalidating a live iterator.
+            std::vector<std::string> kidNames;
+            for (auto& [n, obj] : objs) {
+                auto pit = obj->internals.find("parent");
+                if (pit != obj->internals.end() && pit->second.toString() == name)
+                    kidNames.push_back(n);
+            }
+            for (auto& n : kidNames)
+                if (!findControl(n)) soToGui(n, ctl);
+            return ctl;
+        }
+    }
+    GuiControl* ctl = new GuiControl;
+    createdControls()[lowerKey(name)] = ctl;
+    if (false) {
         if (parent && ctl->parent == canvas) {
             auto& cv = canvas->children;
             cv.erase(std::remove(cv.begin(), cv.end(), ctl), cv.end());
@@ -3521,11 +3604,14 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     // Recursively create children from ScriptObjects with parent == this name
     // NOTE: children must be created BEFORE adding to parent/canvas, so that
     // findControl doesn't find this control prematurely during child creation.
-    for (auto& [n, obj] : objs) {
-        auto pit = obj->internals.find("parent");
-        if (pit != obj->internals.end() && pit->second.toString() == name) {
-            soToGui(n, ctl);
+    {
+        std::vector<std::string> kidNames;
+        for (auto& [n, obj] : objs) {
+            auto pit = obj->internals.find("parent");
+            if (pit != obj->internals.end() && pit->second.toString() == name)
+                kidNames.push_back(n);
         }
+        for (auto& n : kidNames) soToGui(n, ctl);
     }
     if (parent) {
         parent->addChild(ctl);
@@ -3566,7 +3652,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
             if (auto* ts = Engine::instance().script().ts()) {
                 if (ts->hasFunction(name + "::onWake")) {
                     Console::instance().printf(LogLevel::Debug, "GUI: pushDialog calling onWake '%s'", name.c_str());
-                    ts->callFunction(name + "::onWake", {});
+                    ts->callFunction(name + "::onWake", {VMValue(name)});
                 }
             }
             Console::instance().printf(LogLevel::Debug, "GUI: pushDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
@@ -3607,7 +3693,7 @@ void GuiRenderer::popDialog(const std::string& name) {
                     if (ts->hasFunction(name + "::onSleep")) {
                         Console::instance().printf(LogLevel::Debug,
                             "GUI: popDialog calling onSleep '%s'", name.c_str());
-                        ts->callFunction(name + "::onSleep", {});
+                        ts->callFunction(name + "::onSleep", {VMValue(name)});
                     }
                 }
             }
@@ -3654,7 +3740,7 @@ void GuiRenderer::setContent(const std::string& name) {
         std::string oldName = dialogStack.front()->name;
         if (auto* ts = Engine::instance().script().ts()) {
             if (ts->hasFunction(oldName + "::onSleep")) {
-                ts->callFunction(oldName + "::onSleep", {});
+                ts->callFunction(oldName + "::onSleep", {VMValue(oldName)});
                 if (!dialogStack.empty() && dialogStack.front()->name == oldName)
                     dialogStack.front() = ctl;
             } else {
@@ -3671,7 +3757,7 @@ void GuiRenderer::setContent(const std::string& name) {
     // Mark any dialogs pushed during onWake as base dialogs so ESC preserves them.
     inBaseDialogPush = true;
     if (auto* ts = Engine::instance().script().ts()) {
-        if (ts->hasFunction(name + "::onWake")) ts->callFunction(name + "::onWake", {});
+        if (ts->hasFunction(name + "::onWake")) ts->callFunction(name + "::onWake", {VMValue(name)});
     }
     inBaseDialogPush = false;
 }
@@ -3683,6 +3769,11 @@ bool GuiRenderer::isDialogActive(const std::string& name) {
 }
 
 GuiControl* GuiRenderer::findControl(const std::string& name) {
+    {
+        auto& reg = createdControls();
+        auto it = reg.find(lowerKey(name));
+        if (it != reg.end()) return it->second;
+    }
     // Pushed dialogs are roots of the dialog stack, NOT children of the
     // canvas — search them first, otherwise every TS method call
     // (setVisible, setValue, ...) would miss the real control and act on a
