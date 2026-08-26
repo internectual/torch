@@ -3466,13 +3466,18 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     auto it = objs.find(name);
     if (it == objs.end() || !(it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className == "GameTSCtrl"))
         return nullptr;
-    // Already exists as a GuiControl?
+    // Already exists as a GuiControl — complete any missing subtree.
     GuiControl* ctl = findControl(name);
     if (ctl) {
         if (parent && ctl->parent == canvas) {
             auto& cv = canvas->children;
             cv.erase(std::remove(cv.begin(), cv.end(), ctl), cv.end());
             parent->addChild(ctl);
+        }
+        for (auto& [n, obj] : objs) {
+            auto pit = obj->internals.find("parent");
+            if (pit != obj->internals.end() && pit->second.toString() == name && !findControl(n))
+                soToGui(n, ctl);
         }
         return ctl;
     }
