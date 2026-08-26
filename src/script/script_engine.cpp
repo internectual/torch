@@ -712,7 +712,6 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                         callArgs = std::move(impl->argFrames.back().args);
                         impl->argFrames.pop_back();
                     }
-
                     // Build full function name: ns::name
                     std::string fullName;
                     if (ns && ns[0]) fullName = std::string(ns) + "::" + name;

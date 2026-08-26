@@ -165,7 +165,9 @@ void Console::execute(const char* script) {
                     cur.clear();
                 } else if (*s == '(') depth++;
                 else if (*s == ')') depth--;
-                if (depth > 0) cur += *s;
+                // Delimiters must not leak into the next argument
+                // (",462" broke atoi() for every multi-arg command).
+                if (*s != ',' && *s != '(' && *s != ')' && depth > 0) cur += *s;
                 s++;
             }
             if (!cur.empty()) args.push_back(cur);

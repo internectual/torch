@@ -3551,20 +3551,6 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     }
     GuiControl* ctl = new GuiControl;
     createdControls()[lowerKey(name)] = ctl;
-    if (false) {
-        if (parent && ctl->parent == canvas) {
-            auto& cv = canvas->children;
-            cv.erase(std::remove(cv.begin(), cv.end(), ctl), cv.end());
-            parent->addChild(ctl);
-        }
-        for (auto& [n, obj] : objs) {
-            auto pit = obj->internals.find("parent");
-            if (pit != obj->internals.end() && pit->second.toString() == name && !findControl(n))
-                soToGui(n, ctl);
-        }
-        return ctl;
-    }
-    ctl = new GuiControl;
     ctl->name = it->second->name;
     ctl->className = normalizeGuiClassName(it->second->className);
     auto parsePair = [&](const std::string& key, float& a, float& b) {

@@ -627,6 +627,29 @@ bool Engine::init(int argc, char* argv[]) {
 
     // DEBUG: inject a GUI mouse click through the real input path; cycles
     // JOIN -> HOST -> WARRIOR tab centers each call (scheduler drops args).
+    con->addCommand("dumpLM", [this](int32_t, const char* const*) {
+        if (!gui) return;
+        std::function<void(GuiControl*)> walk = [&](GuiControl* c) {
+            if (!c) return;
+            if (c->className == "ShellLaunchMenu" || c->name.find("Launch") != std::string::npos)
+                Console::instance().printf(LogLevel::Info, "[LM] %s [%s] kids=%d items=%d open=%d vis=%d",
+                    c->name.c_str(), c->className.c_str(), (int)c->children.size(),
+                    (int)c->menuItems.size(), c->menuOpen, (int)c->visible);
+            for (auto* ch : c->children) walk(ch);
+        };
+        for (auto* d : gui->dialogStackForDebug()) walk(d);
+        if (gui->getCanvas()) walk(gui->getCanvas());
+    }, "dumpLM - LAUNCH menu state");
+    con->addCommand("testclickXY", [this](int32_t argc, const char* const* argv) {
+        if (argc < 2 || !gui) return;
+        // Accept "x,y" (scheduler-safe) or separate args
+        std::string a = argv[1];
+        int x = 0, y = 0;
+        if (argc >= 3) { x = atoi(argv[1]); y = atoi(argv[2]); }
+        else { size_t c = a.find(','); if (c != std::string::npos) { x = atoi(a.substr(0,c).c_str()); y = atoi(a.substr(c+1).c_str()); } }
+        bool r = gui->handleInput(x, y, true);
+        Console::instance().printf(LogLevel::Info, "testclickXY(%d,%d) -> %d argc=%d a1=[%s] a2=[%s]", x, y, (int)r, argc, argc>1?argv[1]:"?", argc>2?argv[2]:"?");
+    }, "testclickXY x,y - click at position");
     con->addCommand("testclick", [this](int32_t, const char* const*) {
         static const int pts[3][2] = {{119,54},{271,54},{423,54}};
         static int i = 0;
@@ -730,12 +753,19 @@ bool Engine::init(int argc, char* argv[]) {
         if (!gui) return;
         std::function<void(GuiControl*,int)> walk = [&](GuiControl* c, int d) {
             if (!c) return;
+            if (!c->menuItems.empty()) {
+                std::string items;
+                for (auto& m : c->menuItems) items += (items.empty() ? "" : ",") + m.text;
+                Console::instance().printf(LogLevel::Info, "[STK] %*s  items(%zu): %s",
+                    d*2,"",c->menuItems.size(),items.c_str());
+            }
             Console::instance().printf(LogLevel::Info, "[STK] %*s'%s'(%s) ext=%.0fx%.0f vis=%d ctl=%p kids=%d",
                 d*2,"",c->name.c_str(),c->className.c_str(),c->extentX,c->extentY,(int)c->visible,
                 (void*)c,(int)c->children.size());
             for (auto* ch : c->children) walk(ch,d+1);
         };
         auto& st = gui->dialogStackForDebug();
+        Console::instance().printf(LogLevel::Info, "[STK] stack size=%d", (int)st.size());
         for (auto* d : st) { Console::instance().printf(LogLevel::Info, "[STK] --- dlg ---"); walk(d,0); }
     }, "dumpstack - print dialog stack");
 
@@ -900,13 +930,15 @@ bool Engine::init(int argc, char* argv[]) {
         con->forEach([tsi](const char* name, const Console::ConsoleItem& item) {
             if (item.type == Console::ConsoleItem::Command) {
                 tsi->registerNative(name, [item](const auto& args) -> VMValue {
-                    std::vector<const char*> argv;
+                    // Two-pass marshalling: taking c_str() during insertion
+                    // dangles every earlier pointer when the vector grows.
                     std::vector<std::string> storage;
+                    storage.reserve(args.size());
+                    for (auto& a : args) storage.push_back(a.toString());
+                    std::vector<const char*> argv;
+                    argv.reserve(args.size() + 1);
                     argv.push_back(item.name.c_str());
-                    for (auto& a : args) {
-                        storage.push_back(a.toString());
-                        argv.push_back(storage.back().c_str());
-                    }
+                    for (auto& s : storage) argv.push_back(s.c_str());
                     if (item.cmd) item.cmd((int32_t)argv.size(), argv.data());
                     return VMValue(1);
                 });
@@ -1069,6 +1101,18 @@ bool Engine::init(int argc, char* argv[]) {
             "torch-skin-scan");
     }
 
+    // DEBUG: LaunchGui subtree probe
+    {
+        int nkids = 0, linked = 0;
+        for (auto& [n, obj] : scr->objects) {
+            auto pit = obj->internals.find("parent");
+            if (pit != obj->internals.end() && pit->second.toString() == "LaunchGui") {
+                nkids++;
+                if (scr->findObject(n.c_str())) linked++;
+            }
+        }
+        Console::instance().printf(LogLevel::Info, "[LG] objects with parent=LaunchGui: %d", nkids);
+    }
     // Initialize GUI renderer from script-created objects
     gui->init();
 

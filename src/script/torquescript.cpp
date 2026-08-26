@@ -1636,13 +1636,15 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 // Check console commands
                 auto* item = Console::instance().find(fn.c_str());
                 if (item && item->type == Console::ConsoleItem::Command) {
-                    std::vector<const char*> argv;
-                    argv.push_back(fn.c_str());
+                    // Two-pass marshalling: c_str() during insertion dangles
+                    // earlier entries when argStorage reallocates.
                     std::vector<std::string> argStorage;
-                    for (auto& a : args) {
-                        argStorage.push_back(a.toString());
-                        argv.push_back(argStorage.back().c_str());
-                    }
+                    argStorage.reserve(args.size());
+                    for (auto& a : args) argStorage.push_back(a.toString());
+                    std::vector<const char*> argv;
+                    argv.reserve(args.size() + 1);
+                    argv.push_back(fn.c_str());
+                    for (auto& s : argStorage) argv.push_back(s.c_str());
                     item->cmd((int32_t)argv.size(), argv.data());
                     return VMValue(1);
                 }
