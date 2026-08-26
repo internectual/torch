@@ -226,9 +226,23 @@ static std::string normalizeGlobalKey(const std::string& n) {
     if (rb != n.size() - 1 || rb < lb + 1) return n;
     std::string idx = n.substr(lb + 1, rb - lb - 1);
     if (idx.empty()) return n;
-    for (char c : idx)
-        if (!isdigit((unsigned char)c)) return n; // non-numeric index: keep verbatim
-    return n.substr(0, lb) + idx;
+    // Canonicalize whitespace inside the index (e.g. "$Skin[0, name]" vs
+    // "$Skin[0,name]"): writes assembled keys without whitespace while
+    // reads preserved the source's comma-space, so every lookup of a
+    // multi-field index missed during first-pass cascades.
+    std::string stripped;
+    stripped.reserve(idx.size());
+    bool changed = false;
+    for (char c : idx) {
+        if (c == ' ' || c == '\t') { changed = true; continue; }
+        stripped += c;
+    }
+    if (!changed) {
+        for (char c : idx)
+            if (!isdigit((unsigned char)c)) return n; // non-numeric index: keep verbatim
+        return n.substr(0, lb) + idx;
+    }
+    return n.substr(0, lb) + "[" + stripped + "]";
 }
 
 void TorqueScript::setGlobal(const std::string& name, const VMValue& val) {
@@ -1331,7 +1345,15 @@ VMValue TorqueScript::Impl::parsePostfix() {
             while (match(TSTokenType::Comma)) {
                 std::string savedFieldObj2 = lastFieldObj;
                 std::string savedFieldName2 = lastFieldName;
-                VMValue idx2 = parseExpression();
+                // Bare identifiers in multi-part indices are string literals
+                // (TS semantics: $Skin[0, name] indexes by the TEXT "name").
+                // Routing them through parseExpression() let contaminated
+                // locals frames resolve them to garbage/empty values.
+                VMValue idx2;
+                if (peekToken().type == TSTokenType::Ident)
+                    idx2 = VMValue(nextToken().text);
+                else
+                    idx2 = parseExpression();
                 lastFieldObj = savedFieldObj2;
                 lastFieldName = savedFieldName2;
                 idx = VMValue(idx.toString() + "," + idx2.toString());
@@ -2025,6 +2047,16 @@ void TorqueScript::Impl::parseArgumentList(std::vector<VMValue>& args) {
 
 // === Execution ===
 VMValue TorqueScript::execute(const std::string& source, const std::string& filename) {
+    // Reentrancy guard: if an execution is already in flight (e.g. a click
+    // handler or schedule callback firing mid-parse), delegating to the
+    // state-guarded nested executor prevents tokenize()/parseProgram() from
+    // clobbering the live token stream — which corrupted native-call args
+    // (garbage strlen/getSubStr inputs) and silently truncated evaluation.
+    if (impl->execDepth > 0)
+        return executeNested(source, filename.empty() ? "console" : filename);
+    // Track depth for THIS execution too, so any reentrant execute() while
+    // this parse is in flight is routed through the guarded nested path.
+    impl->execDepth++;
     impl->currentFile = filename;
     impl->running = true;
     impl->returning = false;
@@ -2032,7 +2064,9 @@ VMValue TorqueScript::execute(const std::string& source, const std::string& file
     impl->continuing = false;
     impl->lastVarName.clear();
     impl->tokenize(source);
-    return impl->parseProgram();
+    VMValue r = impl->parseProgram();
+    impl->execDepth--;
+    return r;
 }
 
 VMValue TorqueScript::executeFile(const std::string& path) {

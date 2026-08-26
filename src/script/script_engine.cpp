@@ -1171,8 +1171,6 @@ bool ScriptEngine::init() {
 
     tsInstance->registerNative("strlen", [](const auto& args) -> VMValue {
         std::string v = args.empty() ? "" : args[0].toString();
-        if (v.find("textures/") != std::string::npos || (args.size() >= 2 && args[1].toString().find("textures/") != std::string::npos))
-            fprintf(stderr, "[SL] a0=[%s] a1=[%s] nargs=%zu\n", v.c_str(), args.size() >= 2 ? args[1].toString().c_str() : "?", args.size());
         return VMValue((double)v.size());
     });
     // True when the named skin is one of the Dynamix-provided skins listed
@@ -2620,15 +2618,14 @@ bool ScriptEngine::init() {
                     ts->callFunction(ctl->name + "::onSelect", {VMValue(ctl->name), VMValue(ctl->tabs[idx].id), VMValue(ctl->tabs[idx].text)});
                 return VMValue(1);
             }
-            // Popup menu: stock T2 fires name::onSelect here — warrior-pane
-            // code depends on it (RaceGender::onSelect fills the Skin list;
-            // SkinPref::onSelect applies the Show filter).
-            if (!ctl->menuItems.empty() && idx >= 0 && idx < (int)ctl->menuItems.size()) {
-                auto* ts = Engine::instance().script().ts();
-                if (ts && ts->hasFunction(ctl->name + "::onSelect"))
-                    ts->callFunction(ctl->name + "::onSelect",
-                        {VMValue(ctl->name), VMValue(idx), VMValue(ctl->menuItems[idx].text)});
-            }
+            // Popup menu: stock T2's ShellPopupMenu::setSelected only
+            // updates the display — it does NOT fire name::onSelect.
+            // Script callbacks fire solely from real user clicks (the
+            // renderer's hit-test path).  Firing here re-triggered
+            // ::onSelect cascades during GUI wake (e.g. RaceGender
+            // setSelected inside WarriorPopup::onSelect), which re-filled
+            // lists and wrote the first-scanned skin over the player's
+            // saved preference on every startup.
         }
         return VMValue(1);
     });

@@ -1119,24 +1119,6 @@ bool Engine::init(int argc, char* argv[]) {
         // Enter anywhere on the shell (starting a local game mid-typing).
         g->menu().setActive(false);
         gui->popDialog("NewWarriorDlg");
-        // First-pass cascade execution corrupts native string args (VM
-        // string-lifetime bug), leaving the warrior pane's popups half-empty.
-        // A deferred warm re-activation repopulates them correctly.
-        if (scr->ts())
-            scr->ts()->execute(
-                "$__torchResyncTries = 0;"
-                "function __torchResyncWarrior() {"
-                "  if ($__torchResyncTries >= 12) return;"
-                "  $__torchResyncTries++;"
-                "  if ($pref::Player::Count < 1 || GameGui.pane !$= \"Warrior\") {"
-                "    schedule(1000, 0, \"__torchResyncWarrior\"); return;"
-                "  }"
-                "  GM_TabView.setSelected(3);"
-                "  if (GMW_SkinPopup.size() == 0)"
-                "    schedule(700, 0, \"__torchResyncWarrior\");"
-                "}"
-                "schedule(600, 0, \"__torchResyncWarrior\");",
-                "torch-resync");
         plat->processEvents();
         ren->beginFrame({0.15f, 0.15f, 0.2f, 1.0f});
         if (gui) gui->render();
