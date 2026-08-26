@@ -1124,9 +1124,16 @@ bool Engine::init(int argc, char* argv[]) {
         // A deferred warm re-activation repopulates them correctly.
         if (scr->ts())
             scr->ts()->execute(
+                "$__torchResyncTries = 0;"
                 "function __torchResyncWarrior() {"
-                "  if ($pref::Player::Count >= 1 && GameGui.pane $= \"Warrior\")"
-                "    GM_TabView.setSelected(3);"
+                "  if ($__torchResyncTries >= 12) return;"
+                "  $__torchResyncTries++;"
+                "  if ($pref::Player::Count < 1 || GameGui.pane !$= \"Warrior\") {"
+                "    schedule(1000, 0, \"__torchResyncWarrior\"); return;"
+                "  }"
+                "  GM_TabView.setSelected(3);"
+                "  if (GMW_SkinPopup.size() == 0)"
+                "    schedule(700, 0, \"__torchResyncWarrior\");"
                 "}"
                 "schedule(600, 0, \"__torchResyncWarrior\");",
                 "torch-resync");
