@@ -3570,12 +3570,30 @@ void GuiRenderer::pushDialog(const std::string& name) {
                 }
             }
             Console::instance().printf(LogLevel::Debug, "GUI: pushDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
+            // Persistent chrome: keep LaunchToolbarDlg on TOP of the stack so
+            // the bar stays visible and clickable over OptionsDlg,
+            // RecordingsDlg, etc.  (Rendered last = on top.)
+            if (name != "LaunchToolbarDlg") {
+                for (auto it = dialogStack.begin(); it != dialogStack.end(); ++it) {
+                    if ((*it) && (*it)->name == "LaunchToolbarDlg" && it + 1 != dialogStack.end()) {
+                        GuiControl* bar = *it;
+                        dialogStack.erase(it);
+                        dialogStack.push_back(bar);
+                        break;
+                    }
+                }
+            }
         } else {
         Console::instance().printf(LogLevel::Warn, "GUI: pushDialog '%s' not found", name.c_str());
     }
 }
 
 void GuiRenderer::popDialog(const std::string& name) {
+    // LaunchToolbarDlg is persistent shell chrome: GameGui::onSleep pops it
+    // whenever content switches, but the bar must survive SETTINGS /
+    // RECORDINGS / CREDITS tours.  Hard-skip it here; it is only removed
+    // when its own controls ask (e.g. leaving the shell).
+    if (name == "LaunchToolbarDlg") return;
     // Remove every stacked instance of the named dialog — duplicates can
     // exist when a .gui is parsed into multiple control objects; leaving any
     // behind keeps its background (dim layer) rendering over the screen.
