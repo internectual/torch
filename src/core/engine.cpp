@@ -1,4 +1,5 @@
 #include "core/engine.h"
+#include "core/config.h"
 #include <GL/glew.h>
 #include "fs/vol_archive.h"
 #include "fs/vl2_archive.h"
@@ -85,6 +86,9 @@ void Engine::loadBinds() {
 #include <ctime>
 #include <climits>
 
+// Static lock path buffer for signal-safe cleanup
+static char s_lockPath[256];
+
 // Object Tree state (file-scope for click handling access)
 static std::unordered_set<std::string> g_expandedNodes;
 static std::string g_selectedObject;
@@ -106,7 +110,7 @@ bool Engine::init(int argc, char* argv[]) {
     // Check for help before any output
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-help") == 0 || strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            fprintf(stdout, "Torch v0.1.0 — Tribes 2 Open Source Client\n");
+            fprintf(stdout, "Torch v" TORCH_VERSION_STRING " — Tribes 2 Open Source Client\n");
             fprintf(stdout, "Usage: torch [options]\n\n");
             fprintf(stdout, "Options:\n");
             fprintf(stdout, "  -data <dir>        Tribes 2 data directory\n");
@@ -144,22 +148,23 @@ bool Engine::init(int argc, char* argv[]) {
             std::exit(0);
         }
         if (strcmp(argv[i], "-version") == 0 || strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
-            fprintf(stdout, "Torch v0.1.0\n");
+            fprintf(stdout, "Torch v" TORCH_VERSION_STRING "\n");
             std::exit(0);
         }
     }
 
-    Console::instance().printf(LogLevel::Info, "Torch v0.1.0 (built " __DATE__ " " __TIME__ ")");
+    Console::instance().printf(LogLevel::Info, "Torch v" TORCH_VERSION_STRING " (built " __DATE__ " " __TIME__ ")");
 
     // Single-instance lock
-    lockFd = open("/tmp/torch.lock", O_CREAT | O_RDWR, 0644);
+    snprintf(s_lockPath, sizeof(s_lockPath), "%s/torch.lock", torchTempDir().c_str());
+    lockFd = open(s_lockPath, O_CREAT | O_RDWR, 0644);
     if (lockFd < 0 || flock(lockFd, LOCK_EX | LOCK_NB) < 0) {
         if (lockFd >= 0) { close(lockFd); lockFd = -1; }
         Console::instance().printf(LogLevel::Error, "Another instance is already running");
         return false;
     }
     auto releaseLock = [this]() {
-        if (lockFd >= 0) { close(lockFd); unlink("/tmp/torch.lock"); lockFd = -1; }
+        if (lockFd >= 0) { close(lockFd); unlink(s_lockPath); lockFd = -1; }
     };
 
     // Signal handlers for crash cleanup
@@ -167,7 +172,7 @@ bool Engine::init(int argc, char* argv[]) {
         static int* lockFdPtr = &lockFd;
         struct sigaction sa{};
         sa.sa_handler = [](int sig) {
-            if (lockFdPtr && *lockFdPtr >= 0) { close(*lockFdPtr); unlink("/tmp/torch.lock"); *lockFdPtr = -1; }
+            if (lockFdPtr && *lockFdPtr >= 0) { close(*lockFdPtr); unlink(s_lockPath); *lockFdPtr = -1; }
             _exit(128 + sig);
         };
         sigemptyset(&sa.sa_mask);
@@ -181,6 +186,7 @@ bool Engine::init(int argc, char* argv[]) {
     std::string outputDir = "";
     std::string modPath = "base";
     std::string exeDir = ".";
+    std::string initScriptSetting;  // from torch.cfg; empty = no init script
     if (argc > 0) {
         std::string exePath = argv[0];
         auto sl = exePath.rfind('/');
@@ -211,6 +217,7 @@ bool Engine::init(int argc, char* argv[]) {
                 trim(key); trim(val);
                 if (key == "dataDir") dataDir = val;
                 if (key == "outputDir") outputDir = val;
+                if (key == "initScript") initScriptSetting = val;
                 if (key == "previewImg") previewImgPath = val;
                 if (key == "canvasBg") canvasBgPath = val;
                 if (key == "preload") {
@@ -245,9 +252,13 @@ bool Engine::init(int argc, char* argv[]) {
     Console::instance().setVariable("modPath", modPath.c_str());
     if (outputDir.empty()) {
         const char* home = getenv("HOME");
-        outputDir = home ? std::string(home) + "/.loki/tribes2" : dataDir;
+        outputDir = home ? std::string(home) + "/.torch" : dataDir;
     }
     Console::instance().setVariable("outputDir", outputDir.c_str());
+    // initScript comes from torch.cfg (may be empty). Not hardcoded to the
+    // Tribes 2 script name — that value belongs to the user config.
+    if (!initScriptSetting.empty())
+        Console::instance().setVariable("initScript", initScriptSetting.c_str());
     // Create outputDir if it doesn't exist
     { struct stat st; if (stat(outputDir.c_str(), &st) != 0) mkdir(outputDir.c_str(), 0755); }
     { std::string base = outputDir + "/base"; struct stat st; if (stat(base.c_str(), &st) != 0) mkdir(base.c_str(), 0755); }
@@ -800,8 +811,7 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().printf(LogLevel::Info, "Disconnect called");
     });
 
-    // Init script path management
-    Console::instance().setVariable("initScript", "console_start.cs");
+    // Init script path management (value comes from torch.cfg, not hardcoded)
     con->addCommand("log", [](int32_t, const char* const*) {
         std::string logPath = Console::instance().getStringVariable("$ConsoleLogPath", "console.log");
         Console::instance().printf(LogLevel::Info, "Console log: %s", logPath.c_str());
@@ -1025,7 +1035,7 @@ bool Engine::init(int argc, char* argv[]) {
             Console::instance().setVariable("$pref::AcceptedEULA", "1");
             Console::instance().setVariable("$LaunchMode", "Offline");
         }
-        std::string initPath = Console::instance().getStringVariable("initScript", "console_start.cs");
+        std::string initPath = Console::instance().getStringVariable("initScript", "");
         auto initData = fs.read(initPath.c_str());
         if (!initData.empty()) {
             std::string src((const char*)initData.data(), initData.size());
@@ -1100,6 +1110,13 @@ bool Engine::init(int argc, char* argv[]) {
             "}\n",
             "torch-skin-scan");
     }
+
+    // Host-tab "Mission Name:" list (GMH_MissionList): the native buildMissionList
+    // (script_engine.cpp) overrides the stock script function of the same name.
+    // GameGui.cs calls buildMissionList() at load time (line 909), and
+    // lookupAndCall resolves natives before script functions, so our scan-based
+    // seeder runs there and seeds the $Host* globals the stock onSelect reads.
+    // No explicit call needed here.
 
     // DEBUG: LaunchGui subtree probe
     {
@@ -1230,7 +1247,7 @@ bool Engine::init(int argc, char* argv[]) {
         if (gui) gui->render();
         ren->endFrame();
         plat->swapBuffers();
-    } else if (demoPath.empty() && previewMap.empty()) {
+    } else if (demoPath.empty() && previewMap.empty() && !shapeViewerMode) {
         Console::instance().printf(LogLevel::Info, "Pushing login dialog");
         gui->pushDialog("LoginDlg");
         Console::instance().setVariable("RubyEnabled", "1");
@@ -1251,6 +1268,14 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().setVariable("$PlayingOnline", "0");
         Console::instance().setVariable("Engine::noLogin", "1");
         Console::instance().printf(LogLevel::Info, "Shape Viewer mode");
+        // Hide any shell dialogs (login etc.) so none overlay the shape viewer
+        if (gui) {
+            auto dialogs = gui->dialogStackForDebug();
+            for (auto it = dialogs.rbegin(); it != dialogs.rend(); ++it) {
+                GuiControl* d = *it;
+                if (d) gui->popDialog(d->name);
+            }
+        }
         // Defer shapeviewer command to after game init
         g->enterShapeViewer();
     }
@@ -1456,7 +1481,8 @@ void Engine::run() {
                             // Trim leading whitespace
                             while (!query.empty() && query[0] == ' ') query.erase(0, 1);
                             if (!query.empty()) {
-                                std::ofstream qf("/tmp/torch_ai_query.txt");
+                                std::string aiQPath = torchTempDir() + "/torch_ai_query.txt";
+                                std::ofstream qf(aiQPath);
                                 if (qf) qf << query;
                                 Console::instance().printf(LogLevel::Info, "[AI] %s", query.c_str());
                             }
@@ -1586,6 +1612,10 @@ void Engine::run() {
                     int mx = plat->input().mouseX;
                     int my = plat->input().mouseY;
                     scrolled = gui->handleScroll(mx, my, wheel);
+                    if (scrolled) {
+                        // Consume the wheel so the dev panel console does not also scroll
+                        plat->input().mouseWheel = 0;
+                    }
                 }
                 if (!scrolled && weaponCycleCooldown <= 0) {
                     g->player().weaponCycle(wheel > 0 ? 1 : -1);
@@ -1705,8 +1735,9 @@ void Engine::run() {
                 struct stat st;
                 static time_t lastRespCheck = 0;
                 time_t now = time(nullptr);
-                if (now != lastRespCheck && stat("/tmp/torch_ai_response.txt", &st) == 0 && st.st_size > 0) {
-                    std::ifstream rf("/tmp/torch_ai_response.txt");
+                std::string aiRespPath = torchTempDir() + "/torch_ai_response.txt";
+                if (now != lastRespCheck && stat(aiRespPath.c_str(), &st) == 0 && st.st_size > 0) {
+                    std::ifstream rf(aiRespPath);
                     std::string resp;
                     if (rf) {
                         std::getline(rf, resp, '\0'); // read all
@@ -1716,9 +1747,9 @@ void Engine::run() {
                     }
                     rf.close();
                     // Remove response file after reading
-                    std::ofstream clr("/tmp/torch_ai_response.txt", std::ios::trunc);
+                    std::ofstream clr(aiRespPath, std::ios::trunc);
                     clr.close();
-                    unlink("/tmp/torch_ai_response.txt");
+                    unlink(aiRespPath.c_str());
                 }
                 lastRespCheck = now;
             }
@@ -1767,7 +1798,7 @@ void Engine::run() {
                 static bool pathFocused = false;
                 static int pathCursor = 0;
                 static float blink = 0;
-                if (!pathFocused) editBuf = Console::instance().getStringVariable("initScript", "console_start.cs");
+                if (!pathFocused) editBuf = Console::instance().getStringVariable("initScript", "");
                 std::string sp = editBuf;
                 overlayFont->render("init:", rightX, ly, {0.5f, 0.8f, 1, 1}, sc);
                 float pathX = (float)(rightX + 50);
@@ -1808,7 +1839,7 @@ void Engine::run() {
                 static bool prevArgsLeft = false, prevArgsRight = false, prevArgsHome = false, prevArgsEnd = false;
                 bool launchEnter = plat->input().keysDown[SCANCODE_RETURN];
                 auto doLaunch = [&]() {
-                    std::string path = pathFocused ? editBuf : Console::instance().getStringVariable("initScript", "console_start.cs");
+                    std::string path = pathFocused ? editBuf : Console::instance().getStringVariable("initScript", "");
                     if (!path.empty() && scr->ts()) {
                         auto sdata = Engine::instance().fs().read(path.c_str());
                         if (!sdata.empty()) {
@@ -2333,7 +2364,8 @@ void Engine::run() {
                                                 std::string query = cmd.substr(1);
                                                 while (!query.empty() && query[0] == ' ') query.erase(0, 1);
                                                 if (!query.empty()) {
-                                                    std::ofstream qf("/tmp/torch_ai_query.txt");
+                                std::string aiQPath = torchTempDir() + "/torch_ai_query.txt";
+                                std::ofstream qf(aiQPath);
                                                     if (qf) qf << query;
                                                     Console::instance().printf(LogLevel::Info, "[AI] %s", query.c_str());
                                                 }
@@ -2472,7 +2504,7 @@ void Engine::run() {
             glDisable(GL_DEPTH_TEST);
             glDisable(GL_CULL_FACE);
             glEnable(GL_BLEND);
-            if (menuState && gui && gui->getCanvas()) gui->render();
+            if (menuState && gui && gui->getCanvas() && !g->isShapeViewerActive()) gui->render();
 
             if (menuState) r.endFrame();
         }
@@ -2524,7 +2556,7 @@ void Engine::shutdown() {
 
     Console::instance().printf(LogLevel::Info, "Goodbye");
 
-    if (lockFd >= 0) { close(lockFd); unlink("/tmp/torch.lock"); lockFd = -1; }
+    if (lockFd >= 0) { close(lockFd); unlink(s_lockPath); lockFd = -1; }
 }
 
 void Engine::renderOverlay() {

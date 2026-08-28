@@ -42,6 +42,17 @@ void FileSystem::addPath(const char* path) {
 }
 
 bool FileSystem::readFile(const char* path, std::vector<uint8_t>& data) {
+    if (!path || !path[0]) return false;
+    if (path[0] == '/') {
+        std::ifstream f(path, std::ios::binary);
+        if (f) {
+            f.seekg(0, std::ios::end);
+            data.resize(f.tellg());
+            f.seekg(0);
+            f.read((char*)data.data(), data.size());
+            return true;
+        }
+    }
     // Check archives
     for (auto a : impl->archives) {
         if (a->readFile(path, data)) return true;

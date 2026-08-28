@@ -180,6 +180,11 @@ void GuiRenderer::init() {
             if (it != obj->fields.end()) ctl->profileName = it->second.toString();
             it = obj->fields.find("visible");
             if (it != obj->fields.end()) ctl->visible = it->second.toBool();
+            it = obj->fields.find("groupNum"); if (it != obj->fields.end()) ctl->groupNum = (int)it->second.toDouble();
+            it = obj->fields.find("id"); if (it != obj->fields.end()) ctl->id = (int)it->second.toDouble();
+            it = obj->fields.find("sel"); if (it != obj->fields.end()) ctl->checked = it->second.toBool();
+            it = obj->fields.find("variable"); if (it != obj->fields.end()) ctl->variable = it->second.toString();
+            it = obj->fields.find("active"); if (it != obj->fields.end()) ctl->active = it->second.toBool();
 
             controlMap[name] = ctl;
 
@@ -266,6 +271,10 @@ void GuiRenderer::refresh() {
             it = obj->fields.find("altCommand"); if (it != obj->fields.end()) ctl->altCommand = it->second.toString();
             it = obj->fields.find("profile"); if (it != obj->fields.end()) ctl->profileName = it->second.toString();
             it = obj->fields.find("visible"); if (it != obj->fields.end()) ctl->visible = it->second.toBool();
+            it = obj->fields.find("id"); if (it != obj->fields.end()) ctl->id = (int)it->second.toDouble();
+            it = obj->fields.find("groupNum"); if (it != obj->fields.end()) ctl->groupNum = (int)it->second.toDouble();
+            it = obj->fields.find("sel"); if (it != obj->fields.end()) ctl->checked = it->second.toBool();
+            it = obj->fields.find("variable"); if (it != obj->fields.end()) ctl->variable = it->second.toString();
             if (ctl->className == "GuiCanvas") canvas = ctl;
     bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl";
             if (!ctl->command.empty() && isClickable) { std::string cmd = ctl->command; ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); }; }
@@ -865,6 +874,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
 
 static void computeContentExtent(GuiControl* ctl) {
     float maxX = 0, maxY = 0;
+    auto* font = Engine::instance().renderer().getFont();
+    float textListLineH = font ? font->charHeight + 2 : 14;
     std::function<void(GuiControl*)> recurse = [&](GuiControl* c) {
         if (c->className == "GuiConsole") {
             float linesH = (float)Console::instance().getLog().size() * 12.0f;
@@ -876,6 +887,12 @@ static void computeContentExtent(GuiControl* ctl) {
                 if (ln.size() > maxLen) maxLen = ln.size();
             float cw = c->posX + std::max(c->extentX, (float)maxLen * 10.0f);
             if (cw > maxX) maxX = cw;
+        } else if (c->className == "GuiListBoxCtrl" || c->className == "GuiTextListCtrl") {
+            float listH = (float)c->listRows.size() * textListLineH;
+            float cy = c->posY + std::max(c->extentY, listH);
+            if (cy > maxY) maxY = cy;
+            float cx = c->posX + c->extentX;
+            if (cx > maxX) maxX = cx;
         } else {
             float cx = c->posX + c->extentX;
             float cy = c->posY + c->extentY;
@@ -1636,7 +1653,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             if (ei != sobj->internals.end()) enumerate = ei->second.toInt() != 0;
         }
         // Draw visible rows
-        int visibleRows = (int)(ctl->extentY / lineH) + 1;
+        float viewH = sp ? sp->extentY : ctl->extentY;
+        int visibleRows = (int)(viewH / lineH) + 2;
         int totalRows = (int)ctl->listRows.size();
         int scrollRow = (int)(listScrollY / lineH);
         float rowY = y - fmodf(listScrollY, lineH);
@@ -2203,7 +2221,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             float thumbH = ctl->extentY * (ctl->extentY / ctl->contentH);
             if (thumbH < 16) thumbH = 16;
             if (thumbH > ctl->extentY) thumbH = ctl->extentY;
-            float thumbY = (1.0f - ctl->scrollY / maxScroll) * (ctl->extentY - thumbH);
+            float thumbY = (ctl->scrollY / maxScroll) * (ctl->extentY - thumbH);
             float sbW = 12;
             // Scroll field background
             if (vFieldTex && vFieldTex->loaded)
@@ -2955,7 +2973,14 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
         y += p->posY;
         p = p->parent;
     }
-    if (mx >= x && mx < x + ctl->extentX && my >= y && my < y + ctl->extentY) {
+    float extX = ctl->extentX;
+    float extY = ctl->extentY;
+    if (ctl->className == "GuiListBoxCtrl" || ctl->className == "GuiTextListCtrl") {
+        auto* font = Engine::instance().renderer().getFont();
+        float lineH = font ? font->charHeight + 2 : 14;
+        extY = std::max(extY, (float)ctl->listRows.size() * lineH);
+    }
+    if (mx >= x && mx < x + extX && my >= y && my < y + extY) {
         // Later-defined children are top-most (T2 z-order): test them first.
         for (auto it = ctl->children.rbegin(); it != ctl->children.rend(); ++it) {
             auto* h = hitTest(*it, mx, my); if (h) return h;
@@ -3042,7 +3067,7 @@ bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
     GuiControl* scrollCtrl = hit;
     while (scrollCtrl) {
         if (scrollCtrl->className == "GuiScrollCtrl") {
-            scrollCtrl->scrollY += (wheelDelta > 0 ? 30 : -30);
+            scrollCtrl->scrollY += (wheelDelta < 0 ? 30 : -30);
             return true;
         }
         scrollCtrl = scrollCtrl->parent;
@@ -3159,11 +3184,14 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         int row = (int)((y - ay + scrollY) / lineH);
         if (row >= 0 && row < (int)hit->listRows.size()) {
             hit->selectedRow = row;
+            // Logical id for the row: addRow's id (global mission id) when
+            // present, else the row index (lists without parallel ids).
+            int id = (row < (int)hit->listRowIds.size()) ? hit->listRowIds[row] : row;
             // Call onSelect if defined
             auto* ts = Engine::instance().script().ts();
             std::string selName = hit->name + "::onSelect";
             if (ts && ts->hasFunction(selName))
-                ts->callFunction(selName, {VMValue(hit->name), VMValue(row), VMValue(hit->listRows[row])});
+                ts->callFunction(selName, {VMValue(hit->name), VMValue(id), VMValue(hit->listRows[row])});
         }
         return true;
     }
@@ -3338,12 +3366,18 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             }
         }
         hit->checked = true;
-        // T2 convention: clicking a radio fires its command (e.g. GMW_PlayerModel.update()).
-        // Only when there's no C++ onClick wrapper — that already runs the command.
+        // T2 convention: writing the radio's id to its variable console global
+        // (e.g. $pref::Player::ArmorType = 1 for MEDIUM). Scripts read this to
+        // determine which radio is selected.
+        if (!hit->variable.empty()) {
+            Console::instance().setVariable(hit->variable.c_str(), std::to_string(hit->id).c_str());
+        }
         if (!hit->onClick && !hit->command.empty())
             Console::instance().execute(hit->command.c_str());
     } else if (hit->className == "GuiCheckBoxCtrl") {
         hit->checked = !hit->checked;
+        if (!hit->variable.empty())
+            Console::instance().setVariable(hit->variable.c_str(), hit->checked ? "1" : "0");
     }
     if (hit->onClick) {
         hit->onClick();
@@ -3566,6 +3600,7 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     fi = it->second->fields.find("profile"); if (fi != it->second->fields.end()) ctl->profileName = fi->second.toString();
     fi = it->second->fields.find("visible"); if (fi != it->second->fields.end()) ctl->visible = fi->second.toBool();
     fi = it->second->fields.find("groupNum"); if (fi != it->second->fields.end()) ctl->groupNum = (int)fi->second.toDouble();
+    fi = it->second->fields.find("id"); if (fi != it->second->fields.end()) ctl->id = (int)fi->second.toDouble();
     fi = it->second->fields.find("sel"); if (fi != it->second->fields.end()) ctl->checked = fi->second.toBool();
     fi = it->second->fields.find("active"); if (fi != it->second->fields.end()) ctl->active = fi->second.toBool();
     fi = it->second->fields.find("variable"); if (fi != it->second->fields.end()) ctl->variable = fi->second.toString();

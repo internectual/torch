@@ -1,9 +1,12 @@
 #include "script/script_engine.h"
 #include "script/torquescript.h"
 #include "core/console.h"
+#include "core/config.h"
 #include "core/engine.h"
 #include "core/string_table.h"
+#include "game/mission_parser.h"
 #include <fstream>
+#include <sstream>
 #include <stack>
 #include <cstring>
 #include <cstdlib>
@@ -12,6 +15,8 @@
 #include <cmath>
 #include <algorithm>
 #include <array>
+#include <map>
+#include <set>
 
 // === VMValue ===
 int32_t VMValue::toInt() const {
@@ -2390,6 +2395,7 @@ bool ScriptEngine::init() {
         auto* ctl = getListCtrl(cname);
         if (ctl) {
             ctl->listRows.clear();
+            ctl->listRowIds.clear();
             ctl->selectedRow = -1;
             ctl->menuItems.clear();
         }
@@ -2421,6 +2427,163 @@ bool ScriptEngine::init() {
         auto* ctl = getListCtrl(args[0].toString());
         if (!ctl) return VMValue(1);
         ctl->menuItems.push_back({0, "", true});
+        return VMValue(1);
+    });
+
+    // buildMissionList()
+    // Overrides the stock T2 buildMissionList() (GameGui.cs:836). The stock
+    // script seeds $Host* globals that GMH_MissionType::onSelect reads to fill
+    // the "Mission Name:" list (GMH_MissionList). Stock uses
+    // findFirstFile("missions/*.mis"), which finds nothing against torch's
+    // per-VL2-archive layout, so the list stays empty. This native does a direct
+    // scan across all mounted archives, parses each .mis `// MissionTypes =`
+    // header, and seeds the same globals so the stock rendering path lists every
+    // map per game type.
+    // NOTE: lookupAndCall resolves natives BEFORE script functions, so this
+    // wins over the stock script buildMissionList when GameGui.cs calls it at
+    // load time. buildMissionTypePopup (which builds the Game Type popup) is a
+    // separate function and is NOT affected.
+    auto toLowerStr = [](std::string s) {
+        for (auto& c : s) if (c >= 'A' && c <= 'Z') c += 32;
+        return s;
+    };
+    auto trimStr = [](const std::string& s) {
+        size_t a = 0, b = s.size();
+        while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r')) a++;
+        while (b > a && (s[b-1] == ' ' || s[b-1] == '\t' || s[b-1] == '\r')) b--;
+        return s.substr(a, b - a);
+    };
+    auto splitWords = [](const std::string& s, std::vector<std::string>& out) {
+        std::string tok;
+        for (char c : s + " ") {
+            if (c == ' ' || c == '\t' || c == ',' || c == ';' || c == '\n' || c == '\r') {
+                if (!tok.empty()) { out.push_back(tok); tok.clear(); }
+            } else tok += c;
+        }
+    };
+    tsInstance->registerNative("buildMissionList", [toLowerStr, trimStr, splitWords](const auto&) -> VMValue {
+        auto& fs = Engine::instance().fs();
+
+        // Discover .mis / .misPK files across the mounted archives.
+        std::vector<std::string> entries;
+        for (const char* pat : {"missions/*", "missions/*/*", "missions/*/*/*", "missions/*.mis"})
+            fs.listFiles(pat, entries);
+
+        struct MisEntry { std::string name; std::string file; std::string types; };
+        std::vector<MisEntry> all;
+        std::set<std::string> seenBases;
+        for (auto& e : entries) {
+            size_t dot = e.rfind('.');
+            if (dot == std::string::npos) continue;
+            std::string ext = e.substr(dot);
+            if (ext != ".mis" && ext != ".misPK") continue;
+
+            std::string base = e.substr(e.rfind('/') + 1);
+            size_t edot = base.rfind('.');
+            if (edot != std::string::npos) base = base.substr(0, edot);
+            if (seenBases.count(base)) continue;
+            seenBases.insert(base);
+
+            auto data = fs.read(e.c_str());
+            if (data.empty()) continue;
+            std::string content((const char*)data.data(), data.size());
+
+            // Stock T2 format: leading comment block with
+            //   // MissionTypes = CTF
+            //   // DisplayName  = Sanctuary
+            std::string dispName, typeLine;
+            bool gotTypes = false;
+            std::istringstream iss(content);
+            std::string line;
+            while (std::getline(iss, line)) {
+                std::string trimmed = trimStr(line);
+                if (trimmed.rfind("//", 0) == 0) {
+                    std::string comment = trimStr(trimmed.substr(2));
+                    size_t eqPos = comment.find('=');
+                    if (eqPos != std::string::npos) {
+                        std::string key = toLowerStr(trimStr(comment.substr(0, eqPos)));
+                        std::string val = trimStr(comment.substr(eqPos + 1));
+                        if (!gotTypes && (key == "missiontypes" || key == "missiontype" || key == "gametypes" || key == "gametype")) {
+                            typeLine = toLowerStr(val);
+                            gotTypes = true;
+                        } else if (dispName.empty() && (key == "displayname" || key == "missionname" || key == "name")) {
+                            dispName = val;
+                        }
+                    }
+                }
+                if (gotTypes && !dispName.empty()) break;
+            }
+            if (!gotTypes) {
+                // Fallback: a `gameType` property somewhere in the objects.
+                std::vector<MisObject> objs = parseMisFile(content);
+                for (auto& o : objs) {
+                    std::string g = getProp(o.props, "gametype");
+                    if (!g.empty()) { typeLine = toLowerStr(g); gotTypes = true; break; }
+                }
+            }
+
+            all.push_back({!dispName.empty() ? dispName : base, base, typeLine});
+        }
+
+        // Build per-type tables exactly like stock buildMissionList().
+        std::vector<std::string> typeOrder;
+        std::map<std::string, std::vector<int>> typeMissions; // globals lookups canonical-ish
+        std::vector<std::string> missionName, missionFile;
+        for (auto& m : all) {
+            int idx = (int)missionName.size();
+            missionName.push_back(m.name);
+            missionFile.push_back(m.file);
+            std::vector<std::string> toks;
+            splitWords(m.types, toks);
+            if (toks.empty()) toks.push_back("Unknown");
+            std::set<std::string> seen;
+            for (auto& t : toks) {
+                if (seen.count(t)) continue;
+                seen.insert(t);
+                if (std::find(typeOrder.begin(), typeOrder.end(), t) == typeOrder.end())
+                    typeOrder.push_back(t);
+                typeMissions[t].push_back(idx);
+            }
+        }
+
+        // $HostTypeCount / $HostTypeName
+        // NOTE: single numeric indices normalize to a flattened key without
+        // brackets in the TS interpreter ($HostTypeName[0] -> $HostTypeName0),
+        // so globals must be stored in that flattened form.
+        Console::instance().setVariable("$HostTypeCount", std::to_string(typeOrder.size()).c_str());
+        for (size_t i = 0; i < typeOrder.size(); i++) {
+            std::string key = "$HostTypeName" + std::to_string(i);
+            Console::instance().setVariable(key.c_str(), typeOrder[i].c_str());
+        }
+        // $HostMissionCount[type]
+        for (size_t i = 0; i < typeOrder.size(); i++) {
+            std::string key = "$HostMissionCount" + std::to_string(i);
+            Console::instance().setVariable(key.c_str(),
+                std::to_string(typeMissions[typeOrder[i]].size()).c_str());
+        }
+        // $HostMission[type,n] = global idx ; $HostMissionName / $HostMissionFile
+        for (size_t i = 0; i < typeOrder.size(); i++) {
+            auto& vec = typeMissions[typeOrder[i]];
+            for (size_t n = 0; n < vec.size(); n++) {
+                std::string key = "$HostMission[" + std::to_string(i) + "," + std::to_string(n) + "]";
+                Console::instance().setVariable(key.c_str(), std::to_string(vec[n]).c_str());
+            }
+        }
+        for (size_t g = 0; g < missionName.size(); g++) {
+            Console::instance().setVariable(("$HostMissionName" + std::to_string(g)).c_str(), missionName[g].c_str());
+            Console::instance().setVariable(("$HostMissionFile" + std::to_string(g)).c_str(), missionFile[g].c_str());
+        }
+
+        Console::instance().printf(LogLevel::Info,
+            "buildMissionList: %zu missions, %zu types (%s)",
+            missionName.size(), typeOrder.size(), missionName.empty() ? "none" : missionName[0].c_str());
+        for (size_t i = 0; i < typeOrder.size() && i < 20; i++)
+            Console::instance().printf(LogLevel::Info, "  %s: %zu missions",
+                typeOrder[i].c_str(), typeMissions[typeOrder[i]].size());
+        // Match stock buildMissionList: derive $HostTypeDisplayName for the
+        // Game Type popup (falls back to $HostTypeName per type if the
+        // *Game.cs is unreadable).
+        ScriptEngine::instance().ts()->callFunction("getMissionTypeDisplayNames", {});
         return VMValue(1);
     });
     auto getOrCreateCtrl = [](const std::string& name) -> GuiControl* {
@@ -2702,7 +2865,21 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("getSelectedId", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
         if (!ctl) return VMValue(0);
-        return VMValue(ctl->selectedRow);
+        // For text lists, return the logical id of the selected row (the id
+        // passed to addRow, e.g. the global mission id) rather than the row
+        // index — stock T2 lookups (e.g. $HostMissionFile[<id>]) use this id.
+        if (ctl->selectedRow >= 0 && ctl->selectedRow < (int)ctl->listRowIds.size())
+            return VMValue(ctl->listRowIds[ctl->selectedRow]);
+        return VMValue(ctl->selectedRow < 0 ? 0 : ctl->selectedRow);
+    });
+    tsInstance->registerNative("setSelectedById", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (!ctl || args.size() < 2) return VMValue(0);
+        int id = args[1].toInt();
+        for (size_t i = 0; i < ctl->listRowIds.size(); i++) {
+            if (ctl->listRowIds[i] == id) { ctl->selectedRow = (int)i; return VMValue(1); }
+        }
+        return VMValue(0);
     });
     tsInstance->registerNative("getValue", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
@@ -2727,9 +2904,25 @@ bool ScriptEngine::init() {
         // Search menuItems first (popup menus), then listRows (text lists)
         for (auto& item : ctl->menuItems)
             if (item.id == id) return VMValue(item.text);
-        if (id >= 0 && id < (int)ctl->listRows.size())
-            return VMValue(ctl->listRows[id]);
+        for (size_t i = 0; i < ctl->listRowIds.size(); i++)
+            if (ctl->listRowIds[i] == id) return VMValue(ctl->listRows[i]);
         return VMValue(std::string(""));
+    });
+    // getRowText(index) — return text of row at index
+    tsInstance->registerNative("getRowText", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (!ctl || args.size() < 2) return VMValue(std::string(""));
+        int row = args[1].toInt();
+        if (row >= 0 && row < (int)ctl->listRows.size())
+            return VMValue(ctl->listRows[row]);
+        return VMValue(std::string(""));
+    });
+    // rowCount() — return total number of rows
+    tsInstance->registerNative("rowCount", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (!ctl) return VMValue(0);
+        if (!ctl->menuItems.empty()) return VMValue((int32_t)ctl->menuItems.size());
+        return VMValue((int32_t)ctl->listRows.size());
     });
     // getText() — return the currently selected/displayed text
     tsInstance->registerNative("getText", [getListCtrl](const auto& args) -> VMValue {
@@ -2744,8 +2937,8 @@ bool ScriptEngine::init() {
         int id = args[1].toInt();
         for (auto& item : ctl->menuItems)
             if (item.id == id) return VMValue(item.text);
-        if (id >= 0 && id < (int)ctl->listRows.size())
-            return VMValue(ctl->listRows[id]);
+        for (size_t i = 0; i < ctl->listRowIds.size(); i++)
+            if (ctl->listRowIds[i] == id) return VMValue(ctl->listRows[i]);
         return VMValue(std::string(""));
     });
     tsInstance->registerNative("size", [getListCtrl](const auto& args) -> VMValue {
@@ -2891,8 +3084,8 @@ bool ScriptEngine::init() {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
         if (!ctl || args.size() < 2) return VMValue(-1);
         int id = args[1].toInt();
-        for (int i = 0; i < (int)ctl->listRows.size(); i++)
-            if (i == id) return VMValue(i);
+        for (size_t i = 0; i < ctl->listRowIds.size(); i++)
+            if (ctl->listRowIds[i] == id) return VMValue((int32_t)i);
         return VMValue(-1);
     });
     tsInstance->registerNative("setRowColor", [getListCtrl](const auto& args) -> VMValue {
@@ -3249,8 +3442,10 @@ bool ScriptEngine::init() {
             Console::instance().printf(LogLevel::Info, "queryMasterServer: %s", masterUrl.c_str());
             Engine::instance().network().queryMasterServer(masterUrl.c_str());
         } else {
-            // Default TribesNext master
-            Engine::instance().network().queryMasterServer("tribesnext.com:28001");
+            // Default master: check TORCH_MASTER_SERVER env var, fall back to TribesNext
+            const char* envMaster = getenv("TORCH_MASTER_SERVER");
+            std::string defaultMaster = envMaster ? envMaster : "tribesnext.com:28001";
+            Engine::instance().network().queryMasterServer(defaultMaster.c_str());
         }
         return VMValue(1);
     });
@@ -3261,8 +3456,11 @@ bool ScriptEngine::init() {
             int id = args[1].toInt();
             if (id < 0 || id > 65535) return VMValue(1); // reject absurd indices (alloc/overflow guard)
             std::string txt = args[2].toString();
-            if (id >= (int)ctl->listRows.size()) ctl->listRows.resize(id + 1);
-            ctl->listRows[id] = txt;
+            ctl->listRows.push_back(txt);
+            ctl->listRowIds.push_back(id);
+            auto* font = Engine::instance().renderer().getFont();
+            float lineH = font ? font->charHeight + 2 : 14;
+            ctl->extentY = std::max(ctl->extentY, (float)ctl->listRows.size() * lineH);
             Console::instance().printf(LogLevel::Debug, "addRow2: ctl='%s' id=%d txt='%s' rows=%zu", cname.c_str(), id, txt.c_str(), ctl->listRows.size());
         } else {
             Console::instance().printf(LogLevel::Debug, "addRow2: FAIL ctl=%p cname='%s' args=%zu", (void*)ctl, cname.c_str(), args.size());
@@ -3283,24 +3481,36 @@ bool ScriptEngine::init() {
         if (!ctl->menuItems.empty()) {
             std::sort(ctl->menuItems.begin(), ctl->menuItems.end(),
                 [](const GuiControl::MenuItem& a, const GuiControl::MenuItem& b) {
-                    return a.text < b.text;
+                    return strcasecmp(a.text.c_str(), b.text.c_str()) < 0;
                 });
         } else if (!ctl->listRows.empty()) {
             int col = args.size() > 1 ? args[1].toInt() : 0;
-            std::sort(ctl->listRows.begin(), ctl->listRows.end(),
-                [col](const std::string& a, const std::string& b) {
-                    auto getField = [](const std::string& s, int f) -> std::string {
-                        size_t start = 0;
-                        for (int i = 0; i < f; i++) {
-                            size_t tab = s.find('\t', start);
-                            if (tab == std::string::npos) return "";
-                            start = tab + 1;
-                        }
-                        size_t end = s.find('\t', start);
-                        return s.substr(start, end - start);
-                    };
-                    return getField(a, col) < getField(b, col);
+            auto getField = [](const std::string& s, int f) -> std::string {
+                size_t start = 0;
+                for (int i = 0; i < f; i++) {
+                    size_t tab = s.find('\t', start);
+                    if (tab == std::string::npos) return "";
+                    start = tab + 1;
+                }
+                size_t end = s.find('\t', start);
+                return s.substr(start, end - start);
+            };
+            // Sort indices so listRowIds travel with listRows for text lists.
+            std::vector<size_t> idx(ctl->listRows.size());
+            for (size_t i = 0; i < idx.size(); i++) idx[i] = i;
+            std::stable_sort(idx.begin(), idx.end(),
+                [&](size_t a, size_t b) {
+                    return strcasecmp(getField(ctl->listRows[a], col).c_str(),
+                                      getField(ctl->listRows[b], col).c_str()) < 0;
                 });
+            std::vector<std::string> sortedRows(ctl->listRows.size());
+            std::vector<int> sortedIds(ctl->listRowIds.size());
+            for (size_t i = 0; i < idx.size(); i++) {
+                sortedRows[i] = ctl->listRows[idx[i]];
+                if (i < sortedIds.size()) sortedIds[i] = ctl->listRowIds[idx[i]];
+            }
+            ctl->listRows.swap(sortedRows);
+            ctl->listRowIds.swap(sortedIds);
         }
         return VMValue(1);
     });
@@ -3804,10 +4014,19 @@ bool ScriptEngine::init() {
         return VMValue(0);
     });
 
-    // getRowId(objName, rowIdx) — return row index as id
+    // getRowId(objName, rowIdx) — return logical row id
     tsInstance->registerNative("getRowId", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        return VMValue(args[1].toInt());
+        if (args.empty()) return VMValue(0);
+        std::string name = args[0].toString();
+        auto& g = Engine::instance().guiRenderer();
+        auto* ctl = g.findControl(name);
+        if (!ctl && ScriptEngine::instance().findObject(name.c_str()))
+            ctl = g.soToGui(name, nullptr);
+        if (!ctl || args.size() < 2) return VMValue(0);
+        int row = args[1].toInt();
+        if (row >= 0 && row < (int)ctl->listRowIds.size())
+            return VMValue(ctl->listRowIds[row]);
+        return VMValue(row);
     });
 
     // isRowActive(objName, rowIdx) — return true

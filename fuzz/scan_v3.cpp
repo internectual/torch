@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 #include <string>
@@ -13,10 +14,12 @@ static Vl2Archive g_vl2_shapes, g_vl2_base;
 
 int main() {
     Engine::instance().filesys = &g_fs;
-    g_vl2_shapes.open("/home/methodown/t2-linux/base/shapes.vl2");
-    g_vl2_base.open("/home/methodown/t2-linux/base/base.vl2");
+    const char* t2data = getenv("TORCH_T2DATA");
+    std::string basePath = t2data ? std::string(t2data) : "base";
+    g_vl2_shapes.open((basePath + "/shapes.vl2").c_str());
+    g_vl2_base.open((basePath + "/base.vl2").c_str());
     static Vl2Archive g_vl2_skins;
-    g_vl2_skins.open("/home/methodown/t2-linux/base/skins.vl2");
+    g_vl2_skins.open((basePath + "/skins.vl2").c_str());
     g_fs.addArchive(&g_vl2_shapes);
     g_fs.addArchive(&g_vl2_base);
     g_fs.addArchive(&g_vl2_skins);

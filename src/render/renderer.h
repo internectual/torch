@@ -180,6 +180,12 @@ struct DTSShape {
     std::vector<int8_t> materialLightmapIndex; // per-material: -1 no lightmap, >=0 index into lightmaps[]
     bool isInterior = false;
     bool loaded = false;
+    /// True = shape mesh is authored Z-up and needs Math::czUpToYUp() applied at
+    /// render time to stand upright in the Y-up engine. False = the shape's own
+    /// node transforms already yield a Y-up model (e.g. skinned player/shared
+    /// meshes), so czUpToYUp would double-rotate it flat. Computed at load time.
+    bool upConvert = true;
+    MatrixF upOrientation() const { return upConvert ? Math::czUpToYUp() : MatrixF{}; }
     // Hull collision data (from DIF files)
     std::vector<float> collisionVerts;
     std::vector<uint32_t> collisionIndices;

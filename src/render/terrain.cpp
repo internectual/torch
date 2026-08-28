@@ -911,6 +911,9 @@ bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
     // Copy animations from GLB
     animations = std::move(glb.animations);
 
+    // GLB meshes are authored Y-up; no Z-up->Y-up conversion needed.
+    upConvert = false;
+
     loaded = true;
     return true;
 }
@@ -964,6 +967,42 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
             dl.size = 1000.0f;
             dl.meshIndex = 0;
             details.push_back(dl);
+        }
+
+        // Determine whether the shape's own node transforms already produce a
+        // Y-up (upright) model, or whether it is authored Z-up and needs the
+        // render-time czUpToYUp conversion. We compare the composed (nodeWorld)
+        // bounding box without any cz conversion: if it is taller on Y it is
+        // already Y-up (skip cz), otherwise it is Z-up (keep cz).
+        upConvert = true;
+        {
+            std::vector<int32_t> d0;
+            if (!details.empty() && !details[0].meshIndices.empty())
+                d0 = details[0].meshIndices;
+            else
+                for (size_t i = 0; i < meshes.size(); i++) d0.push_back((int32_t)i);
+            Point3F mn{1e30f, 1e30f, 1e30f}, mx{-1e30f, -1e30f, -1e30f};
+            bool any = false;
+            for (int32_t mi : d0) {
+                if (mi < 0 || mi >= (int)meshes.size()) continue;
+                MeshData& mesh = meshes[mi];
+                if (mesh.vertices.empty()) continue;
+                MatrixF nw;
+                nw.identity();
+                if (mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)defaultTransforms.size())
+                    nw = defaultTransforms[mesh.nodeIndex];
+                for (auto& v : mesh.vertices) {
+                    Point3F wp = nw.transform(v.pos);
+                    any = true;
+                    mn.x = std::min(mn.x, wp.x); mx.x = std::max(mx.x, wp.x);
+                    mn.y = std::min(mn.y, wp.y); mx.y = std::max(mx.y, wp.y);
+                    mn.z = std::min(mn.z, wp.z); mx.z = std::max(mx.z, wp.z);
+                }
+            }
+            if (any) {
+                float ey = mx.y - mn.y, ez = mx.z - mn.z;
+                upConvert = (ez > ey);
+            }
         }
 
         loaded = true;

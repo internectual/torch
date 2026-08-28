@@ -74,6 +74,9 @@ target_link_libraries(torch PRIVATE
 
 target_compile_definitions(torch PRIVATE
     GLEW_STATIC
+    TORCH_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    TORCH_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    TORCH_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
 
 # Dedicated server (headless, no rendering/audio)
@@ -135,6 +138,9 @@ target_link_libraries(torch_server PRIVATE
 
 target_compile_definitions(torch_server PRIVATE
     TORCH_DEDICATED
+    TORCH_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    TORCH_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    TORCH_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
 
 # Install rules

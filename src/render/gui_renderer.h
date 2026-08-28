@@ -29,6 +29,7 @@ struct GuiControl {
     int hoveredTab = -1; // index of tab under mouse within a ShellTabGroupCtrl
     int hoveredItem = -1; // index of item under mouse within an open ShellLaunchMenu popup
     int groupNum = 0;
+    int id = 0; // T2 GuiControl id (radio button value written to variable on click)
     int cursorPos = 0; // caret position for text edit controls
     std::vector<GuiControl*> children;
     GuiControl* parent = nullptr;
@@ -49,6 +50,7 @@ struct GuiControl {
 
     // ShellTextList / GuiListBoxCtrl fields
     std::vector<std::string> listRows;
+    std::vector<int> listRowIds; // parallel ids: global mission id / row id per displayed row
     int selectedRow = -1;
 
     // ShellLaunchMenu popup fields

@@ -851,8 +851,14 @@ VMValue TorqueScript::Impl::parseDo() {
 }
 
 VMValue TorqueScript::Impl::parseSwitch() {
-    if (!match(TSTokenType::Switch) && !match(TSTokenType::SwitchStr))
+    bool isStrSwitch = false;
+    if (match(TSTokenType::SwitchStr)) {
+        isStrSwitch = true;
+    } else if (match(TSTokenType::Switch)) {
+        isStrSwitch = false;
+    } else {
         error("Expected 'switch' or 'switch$'");
+    }
     expect(TSTokenType::LParen);
     VMValue val = parseExpression();
     expect(TSTokenType::RParen);
@@ -863,7 +869,12 @@ VMValue TorqueScript::Impl::parseSwitch() {
         if (match(TSTokenType::Case)) {
             VMValue caseVal = parseExpression();
             expect(TSTokenType::Colon);
-            if (val.toString() == caseVal.toString()) {
+            bool eq = isStrSwitch
+                ? (strcasecmp(val.toString().c_str(), caseVal.toString().c_str()) == 0)
+                : (val.type == VMValue::String || caseVal.type == VMValue::String
+                    ? (strcasecmp(val.toString().c_str(), caseVal.toString().c_str()) == 0)
+                    : (val.toDouble() == caseVal.toDouble()));
+            if (eq) {
                 matched = true;
                 while (peekToken().type != TSTokenType::Case && peekToken().type != TSTokenType::Default &&
                        peekToken().type != TSTokenType::RBrace && peekToken().type != TSTokenType::Eof) {
@@ -1159,7 +1170,7 @@ VMValue TorqueScript::Impl::parseEquality() {
         VMValue rhs = parseRelational();
         bool eq;
         if (op == TSTokenType::StrEq || op == TSTokenType::StrNeq) {
-            eq = lhs.toString() == rhs.toString();
+            eq = (strcasecmp(lhs.toString().c_str(), rhs.toString().c_str()) == 0);
         } else {
             eq = (lhs.type == VMValue::String || rhs.type == VMValue::String)
                 ? (lhs.toString() == rhs.toString())

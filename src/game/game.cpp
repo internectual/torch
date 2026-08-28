@@ -9,6 +9,7 @@
 #include "render/glb_loader.h"
 #include "render/gui_renderer.h"
 #include "core/console.h"
+#include "core/config.h"
 #include "core/engine.h"
 #include <algorithm>
 #include "fs/file_system.h"
@@ -197,8 +198,9 @@ void Player::render() {
         Point3F ax = {0, 1, 0};
         model.setRotationAxis(ax, -rot.z);
         model.setTranslation(pos);
-        // DTS shapes are Z-up; C converts to Y-up before the Y-up world transform
-        r.setModel(model * Math::czUpToYUp());
+        // DTS shapes are Z-up (or already Y-up via their own transforms); C
+        // converts to Y-up before the Y-up world transform when needed
+        r.setModel(model * modelShape.upOrientation());
 
         // Map animation state to animation name
         const char* animNames[] = { "stand", "run", "jump", "jet", "death" };
@@ -1387,7 +1389,7 @@ void World::render(const Point3F& cameraPos) {
                 scaleMat.setScale(obj.scale);
                 model = model * scaleMat;
             }
-            r.setModel(model * Math::czUpToYUp());
+            r.setModel(model * obj.shape->upOrientation());
             if (!obj.animName.empty())
                 obj.shape->renderAnimation(obj.animName.c_str(), obj.animTime);
             else
@@ -1471,7 +1473,7 @@ void World::render(const Point3F& cameraPos) {
             Point3F ax = {0, 1, 0};
             model.setRotationAxis(ax, b.moveYaw);
             model.setTranslation(b.pos);
-            Engine::instance().renderer().setModel(model * Math::czUpToYUp());
+            Engine::instance().renderer().setModel(model * b.shape->upOrientation());
             shader->setUniform("uUseTexture", (int32_t)0);
             shader->setUniform("uUseLightmap", (int32_t)0);
             b.shape->render(0);
@@ -2758,9 +2760,9 @@ void Game::render(float dt) {
                 if (b.shape && b.shape->loaded) {
                     MatrixF model;
                     model.setTranslation(b.pos);
-                    MatrixF mvp = r.lightViewProj() * model * Math::czUpToYUp();
+                    MatrixF mvp = r.lightViewProj() * model * b.shape->upOrientation();
                     shadowShader->setUniform("uLightMVP", mvp);
-                    r.setModel(model * Math::czUpToYUp());
+                    r.setModel(model * b.shape->upOrientation());
                     b.shape->render(0);
                 }
             }
@@ -2845,7 +2847,7 @@ void Game::render(float dt) {
         MatrixF rx; rx.setRotationX(viewPitch);
         MatrixF sc; sc.setScale({fitScale, fitScale, fitScale});
         MatrixF tr; tr.setTranslation({-center.x, -center.y, -center.z});
-        MatrixF model = ry * rx * Math::czUpToYUp() * sc * tr;
+        MatrixF model = ry * rx * testShape.upOrientation() * sc * tr;
         r.setModel(model);
 
         // Framing camera looking at the (now origin-centered, unit-radius) model
@@ -2907,8 +2909,8 @@ void Game::render(float dt) {
         MatrixF rx; rx.setRotationX(shapeViewerPitch);
         MatrixF sc; sc.setScale({shapeViewerFitScale, shapeViewerFitScale, shapeViewerFitScale});
         MatrixF tr; tr.setTranslation({-shapeViewerCenter.x, -shapeViewerCenter.y, -shapeViewerCenter.z});
-        // Orbit in Y-up: ry*rx rotate in Y-up, then C converts Z-up->Y-up, then sc*tr center/scale in Z-up
-        MatrixF model = ry * rx * Math::czUpToYUp() * sc * tr;
+        // Orbit in Y-up: ry*rx rotate in Y-up, then C converts Z-up->Y-up (if needed), then sc*tr center/scale in Z-up
+        MatrixF model = ry * rx * shapeViewerShape.upOrientation() * sc * tr;
         r.setModel(model);
 
         r.setCamera({0, 0, 2.6f}, {0, 0, 0}, {0, 1, 0});
@@ -3056,7 +3058,7 @@ void Game::render(float dt) {
                     hoverY = sinf(demoTime * 2.0f + idx * 1.7f) * 0.15f;
                 }
                 model.setTranslation({rp.x, rp.y + hoverY, rp.z});
-                r.setModel(model * Math::czUpToYUp());
+                r.setModel(model * shape->upOrientation());
 
                 // Apply skin-based tint color for player ghosts
                 {
@@ -3238,7 +3240,7 @@ void Game::render(float dt) {
                             weaponModel.setTranslation(weaponPos);
                             weaponRot = weaponModel;
                         }
-                        r.setModel(weaponRot * Math::czUpToYUp());
+                        r.setModel(weaponRot * wShape->upOrientation());
                         wShape->render(0);
 
                         // Muzzle flash and particles when firing
@@ -3493,7 +3495,7 @@ void Game::render(float dt) {
                     model = q.toMatrix();
                 }
                 model.setTranslation({rp.x, rp.y, rp.z});
-                r.setModel(model * Math::czUpToYUp());
+                r.setModel(model * g->shape->upOrientation());
                 g->shape->render(0);
             } else {
                 // Fallback box
@@ -4141,7 +4143,8 @@ DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::stri
         }
         if (!glbLoaded) {
             // On-demand DTS→GLB conversion via Blender (like .cs→.dso compilation)
-            std::string glbCachePath = std::string("/tmp/torch_glb_") + shapeName + ".glb";
+            std::string tmpDir = torchTempDir();
+            std::string glbCachePath = tmpDir + "/torch_glb_" + shapeName + ".glb";
             // Check if already cached from a previous conversion
             auto cachedGlb = fs.read(glbCachePath.c_str());
             if (!cachedGlb.empty()) {
@@ -4153,7 +4156,7 @@ DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::stri
                 auto dtsData = fs.read(dtsPath.c_str());
                 if (!dtsData.empty()) {
                     // Write DTS to temp file for Blender
-                    std::string tmpDts = std::string("/tmp/torch_convert_") + shapeName + ".dts";
+                    std::string tmpDts = tmpDir + "/torch_convert_" + shapeName + ".dts";
                     FILE* tf = fopen(tmpDts.c_str(), "wb");
                     if (tf) {
                         fwrite(dtsData.data(), 1, dtsData.size(), tf);
@@ -4161,14 +4164,20 @@ DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::stri
                         // Check if Blender is available
                         int blenderAvail = system("which blender >/dev/null 2>&1");
                         if (blenderAvail == 0) {
-                            const char* home = getenv("HOME");
-                            std::string homeDir = home ? home : "/tmp";
-                            std::string blenderScript = homeDir + "/t2-mapper/scripts/blender/dts2gltf.py";
+                            const char* mapperDir = getenv("TORCH_MAPPER_DIR");
+                            std::string blenderScript;
+                            if (mapperDir) {
+                                blenderScript = std::string(mapperDir) + "/scripts/blender/dts2gltf.py";
+                            } else {
+                                const char* home = getenv("HOME");
+                                std::string homeDir = home ? home : tmpDir;
+                                blenderScript = homeDir + "/t2-mapper/scripts/blender/dts2gltf.py";
+                            }
                             std::string cmd = "blender --background --python \"" + blenderScript + "\" -- \"" + tmpDts + "\" 2>/dev/null";
                             int ret = system(cmd.c_str());
                             if (ret == 0) {
                                 // Read the generated GLB (Blender outputs beside the DTS)
-                                std::string genGlb = std::string("/tmp/torch_convert_") + shapeName + ".glb";
+                                std::string genGlb = tmpDir + "/torch_convert_" + shapeName + ".glb";
                                 FILE* gf = fopen(genGlb.c_str(), "rb");
                                 if (gf) {
                                     fseek(gf, 0, SEEK_END);
@@ -4421,7 +4430,8 @@ void Game::enterShapeViewer() {
     }
 
     // Also scan the filesystem data directories directly
-    for (auto& baseDir : {"t2-linux/base", "base"}) {
+    std::string dataBase = torchDataDir();
+    for (auto& baseDir : std::initializer_list<std::string>{dataBase, "base"}) {
         std::error_code ec;
         if (!fs::is_directory(baseDir, ec)) continue;
         for (auto& entry : fs::recursive_directory_iterator(baseDir, fs::directory_options::skip_permission_denied, ec)) {
@@ -4429,7 +4439,8 @@ void Game::enterShapeViewer() {
             auto& p = entry.path();
             if (p.extension() == ".dts") {
                 std::string rel = p.string();
-                for (auto& prefix : {"t2-linux/base/", "base/"}) {
+                // Strip the data dir prefix to get a relative path
+                for (auto* prefix : {dataBase.c_str(), "base/"}) {
                     auto pos = rel.find(prefix);
                     if (pos != std::string::npos) {
                         rel = rel.substr(pos + strlen(prefix));

@@ -88,16 +88,39 @@ new GuiControl(ConsoleDlg) {
 		{
 			profile = "GuiConsoleScrollProfile";
 			position = "0 0";
-			extent = "640 462";
+			extent = "640 430";
 			hScrollBar = "dynamic";
 			vScrollBar = "alwaysOn";
 			horizSizing = "width";
 			vertSizing = "height";
-		
-			new GuiScrollContentCtrl("testScrollContentCtrl")
+			canKeyFocus = true;
+
+			new GuiScrollContentCtrl("missionScrollContent")
 			{
 				profile = "GuiDefaultProfile";
-				
+
+				new GuiConsole("MissionList")
+				{
+					profile = "GuiTransConsoleProfile";
+					position = "0 0";
+				};
+			};
+		};
+		new GuiScrollCtrl()
+		{
+			profile = "GuiConsoleScrollProfile";
+			position = "0 430";
+			extent = "640 32";
+			hScrollBar = "dynamic";
+			vScrollBar = "alwaysOn";
+			horizSizing = "width";
+			vertSizing = "height";
+			canKeyFocus = false;
+
+			new GuiScrollContentCtrl("consoleScrollContent")
+			{
+				profile = "GuiDefaultProfile";
+
 				new GuiConsole("testArrayCtrl")
 				{
 					profile = "GuiTransConsoleProfile";

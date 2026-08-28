@@ -84,27 +84,50 @@ new GuiControl(ConsoleDlg) {
 		visible = "1";
 		helpTag = "0";
 
-		new GuiScrollCtrl()
+		    new GuiScrollCtrl()
 		{
-			profile = "GuiConsoleScrollProfile";
-			position = "0 0";
-			extent = "640 462";
-			hScrollBar = "dynamic";
-			vScrollBar = "alwaysOn";
-			horizSizing = "width";
-			vertSizing = "height";
-		
-			new GuiScrollContentCtrl("testScrollContentCtrl")
-			{
-				profile = "GuiDefaultProfile";
-				
-				new GuiConsole("testArrayCtrl")
-				{
-					profile = "GuiTransConsoleProfile";
-					position = "0 0";
-				};
-			};
-		};
+		   profile = "GuiConsoleScrollProfile";
+		   position = "0 0";
+		   extent = "640 430";
+		   hScrollBar = "dynamic";
+		   vScrollBar = "alwaysOn";
+		   horizSizing = "width";
+		   vertSizing = "height";
+		   canKeyFocus = true;
+		   onMouseWheel = "return true;";
+
+       new GuiScrollContentCtrl("missionScrollContent")
+       {
+          profile = "GuiDefaultProfile";
+
+          new GuiConsole("MissionList")
+          {
+             profile = "GuiTransConsoleProfile";
+             position = "0 0";
+          };
+       };
+    };
+    new GuiScrollCtrl()
+    {
+       profile = "GuiConsoleScrollProfile";
+       position = "0 430";
+       extent = "640 32";
+       hScrollBar = "dynamic";
+       vScrollBar = "alwaysOn";
+       horizSizing = "width";
+       vertSizing = "height";
+
+       new GuiScrollContentCtrl("consoleScrollContent")
+       {
+          profile = "GuiDefaultProfile";
+
+          new GuiConsole("testArrayCtrl")
+          {
+             profile = "GuiTransConsoleProfile";
+             position = "0 0";
+          };
+       };
+    };
 		new GuiConsoleEditCtrl("ConsoleEntry")
 		{
 			profile = "GuiConsoleEditProfile";

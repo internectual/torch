@@ -1,6 +1,7 @@
 #include "net/network.h"
 #include "net/protocol.h"
 #include "core/console.h"
+#include "core/config.h"
 #include "core/engine.h"
 #include <cstring>
 #include <cstdlib>
@@ -143,7 +144,7 @@ bool Connection::connect(const char* host, uint16_t port) {
     connMsg.protocol = T2Protocol::PROTOCOL_VERSION;
     connMsg.challenge = impl->challenge[0];
     memset(connMsg.version, 0, sizeof(connMsg.version));
-    snprintf(connMsg.version, sizeof(connMsg.version), "torch 0.1");
+    snprintf(connMsg.version, sizeof(connMsg.version), "torch " TORCH_VERSION_STRING);
     memset(connMsg.gameType, 0, sizeof(connMsg.gameType));
     snprintf(connMsg.gameType, sizeof(connMsg.gameType), "TRIBES2");
 
@@ -295,7 +296,7 @@ void Connection::update() {
         connMsg.protocol = T2Protocol::PROTOCOL_VERSION;
         connMsg.challenge = impl->challenge[0];
         memset(connMsg.version, 0, sizeof(connMsg.version));
-        snprintf(connMsg.version, sizeof(connMsg.version), "torch 0.1");
+        snprintf(connMsg.version, sizeof(connMsg.version), "torch " TORCH_VERSION_STRING);
         memset(connMsg.gameType, 0, sizeof(connMsg.gameType));
         snprintf(connMsg.gameType, sizeof(connMsg.gameType), "TRIBES2");
         uint8_t payload[sizeof(T2Protocol::ConnectMessage)];

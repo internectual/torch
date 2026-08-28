@@ -1,6 +1,7 @@
 // Diagnostic: load a DTS from VL2 archive and dump node transform + mesh info
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 #include <string>
@@ -19,7 +20,9 @@ int main(int argc, char** argv) {
     Engine::instance().filesys = &g_fs;
 
     // Mount the shapes VL2
-    g_vl2.open("/home/methodown/t2-linux/base/shapes.vl2");
+    const char* t2data = getenv("TORCH_T2DATA");
+    std::string basePath = t2data ? std::string(t2data) : "base";
+    g_vl2.open((basePath + "/shapes.vl2").c_str());
     g_fs.addArchive(&g_vl2);
 
     auto data = g_fs.read(argv[1]);

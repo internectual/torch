@@ -1,5 +1,6 @@
 #include "game/demo.h"
 #include "core/console.h"
+#include "core/config.h"
 #include "core/timer.h"
 #include <cstdio>
 #include <cstdlib>
@@ -556,17 +557,23 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
 // Try reference parser via Node.js for reliable extraction.
 static std::string extractMissionNameViaNode(const uint8_t* data, size_t size) {
     // Write initial block to temp file for the Node.js script
-    char tmpPath[] = "/tmp/t2demo_ib_XXXXXX";
-    int fd = mkstemp(tmpPath);
+    std::string tmpPath = torchTempDir() + "/t2demo_ib_XXXXXX";
+    char tmpBuf[256];
+    snprintf(tmpBuf, sizeof(tmpBuf), "%s", tmpPath.c_str());
+    int fd = mkstemp(tmpBuf);
     if (fd < 0) return "";
     write(fd, data, size);
     close(fd);
+    tmpPath = tmpBuf;
 
     // Build the .rec file with just the header + initial block
     // Need full .rec format: U8 strlen + "Tribes2 Recording" + U32 proto + U32 lenMs + U32 ibSize + ibData
-    char recPath[] = "/tmp/t2demo_rec_XXXXXX";
-    int rfd = mkstemp(recPath);
-    if (rfd < 0) { unlink(tmpPath); return ""; }
+    std::string recPath = torchTempDir() + "/t2demo_rec_XXXXXX";
+    char recBuf[256];
+    snprintf(recBuf, sizeof(recBuf), "%s", recPath.c_str());
+    int rfd = mkstemp(recBuf);
+    if (rfd < 0) { unlink(tmpPath.c_str()); return ""; }
+    recPath = recBuf;
     uint8_t hdr[256];
     int hOff = 0;
     const char* sig = "Tribes2 Recording";
@@ -581,9 +588,10 @@ static std::string extractMissionNameViaNode(const uint8_t* data, size_t size) {
     close(rfd);
 
     // Call Node.js script with timeout (prevents hanging on large or malformed demos)
-    std::string cmd = std::string("timeout 5 node /tmp/mission_extract.js ") + recPath + " 2>/dev/null";
+    std::string missionScript = torchTempDir() + "/mission_extract.js";
+    std::string cmd = std::string("timeout 5 node ") + missionScript + " " + recPath + " 2>/dev/null";
     FILE* fp = popen(cmd.c_str(), "r");
-    if (!fp) { unlink(tmpPath); unlink(recPath); return ""; }
+    if (!fp) { unlink(tmpPath.c_str()); unlink(recPath.c_str()); return ""; }
     char buf[256];
     std::string result;
     if (fgets(buf, sizeof(buf), fp)) {
@@ -592,8 +600,8 @@ static std::string extractMissionNameViaNode(const uint8_t* data, size_t size) {
         result = buf;
     }
     pclose(fp);
-    unlink(tmpPath);
-    unlink(recPath);
+    unlink(tmpPath.c_str());
+    unlink(recPath.c_str());
     return result;
 }
 
@@ -601,7 +609,8 @@ static std::string extractMissionNameViaNode(const uint8_t* data, size_t size) {
 void DemoParser::extractScoreboardData(const char* recPath) {
     playerInfo_.clear();
     skinToPlayer_.clear();
-    std::string cmd = std::string("timeout 5 node /tmp/score_extract.js ") + recPath + " 2>/dev/null";
+    std::string scoreScript = torchTempDir() + "/score_extract.js";
+    std::string cmd = std::string("timeout 5 node ") + scoreScript + " " + recPath + " 2>/dev/null";
     FILE* fp = popen(cmd.c_str(), "r");
     if (!fp) return;
     char buf[65536];

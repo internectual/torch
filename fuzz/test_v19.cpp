@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 #include <string>
@@ -13,7 +14,9 @@ static Vl2Archive g_vl2;
 
 int main() {
     Engine::instance().filesys = &g_fs;
-    g_vl2.open("/home/methodown/t2-linux/base/shapes.vl2");
+    const char* t2data = getenv("TORCH_T2DATA");
+    std::string basePath = t2data ? std::string(t2data) : "base";
+    g_vl2.open((basePath + "/shapes.vl2").c_str());
     g_fs.addArchive(&g_vl2);
 
     const char* files[] = {"shapes/xorg3.dts", "shapes/borg2.dts", "shapes/octahedron.dts", "shapes/heavy_male_dead.dts"};
