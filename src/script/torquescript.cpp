@@ -41,6 +41,7 @@ struct TorqueScript::Impl {
     std::vector<TSToken> tokens;
     size_t tokenPos = 0;
     std::string currentFile;
+    std::string dbgSource; // last tokenized source (for parse-error context)
     bool running = true;
     bool returning = false;
     bool breaking = false;
@@ -289,6 +290,7 @@ VMValue TSLocals::get(const std::string& name) {
 void TorqueScript::Impl::tokenize(const std::string& source) {
     tokens.clear();
     tokenPos = 0;
+    dbgSource = source;
     srcPtr = source.c_str();
     srcEnd = srcPtr + source.size();
     srcLine = 1;
@@ -539,6 +541,22 @@ bool TorqueScript::Impl::match(TSTokenType type) {
 void TorqueScript::Impl::error(const std::string& msg) {
     Console::instance().printf(LogLevel::Error, "TS:%s(%d): %s",
         currentFile.c_str(), srcLine, msg.c_str());
+    // Include the offending source so parse errors are actionable
+    // (e.g. auto-generated command strings with misbalanced parens).
+    if (!dbgSource.empty()) {
+        const std::string& s = dbgSource;
+        size_t lineStart = 0;
+        for (int i = 1; i < srcLine; i++) {
+            size_t nl = s.find('\n', lineStart);
+            if (nl == std::string::npos) break;
+            lineStart = nl + 1;
+        }
+        size_t lineEnd = s.find('\n', lineStart);
+        if (lineEnd == std::string::npos) lineEnd = s.size();
+        std::string snippet = s.substr(lineStart, lineEnd - lineStart);
+        if (snippet.size() > 160) snippet = snippet.substr(0, 160) + "...";
+        Console::instance().printf(LogLevel::Error, "TS source: %s", snippet.c_str());
+    }
 }
 
 // === Parser ===
@@ -1468,6 +1486,22 @@ VMValue TorqueScript::Impl::parsePostfix() {
                     for (auto& c : nsLower) c = (char)tolower((unsigned char)c);
                     auto nsNit = natives.find(nsLower);
                     if (nsNit != natives.end()) { val = nsNit->second(methodArgs); called = true; }
+                }
+                if (!called) {
+                    // Fall back to ClassName::method (e.g. moveMap.save →
+                    // ActionMap::save). Matches stock T2 namespaced dispatch.
+                    auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
+                    if (sobj && !sobj->className.empty()) {
+                        std::string clsFull = sobj->className + "::" + methodName;
+                        auto clsFit = functions.find(clsFull);
+                        if (clsFit != functions.end()) { val = outer->callFunction(clsFull, methodArgs); called = true; }
+                        if (!called) {
+                            std::string clsLower = clsFull;
+                            for (auto& c : clsLower) c = (char)tolower((unsigned char)c);
+                            auto clsNit = natives.find(clsLower);
+                            if (clsNit != natives.end()) { val = clsNit->second(methodArgs); called = true; }
+                        }
+                    }
                 }
                 if (!called) {
                     val = VMValue(0);

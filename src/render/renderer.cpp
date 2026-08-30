@@ -50,6 +50,29 @@ bool Renderer::init(void* window) {
     Console::instance().printf(LogLevel::Info, "Renderer: OpenGL %s, GLEW %s, Renderer: %s",
         glGetString(GL_VERSION), glewGetString(GLEW_VERSION), glGetString(GL_RENDERER));
 
+    // Capture driver info for getVideoDriverInfo() (VENDOR\RENDERER\VERSION\EXTENSIONS).
+    // GL_EXTENSIONS (string form) is NULL on core profiles — enumerate via glGetStringi.
+    auto safeGL = [](GLenum name, const char* fallback) -> const char* {
+        const char* s = (const char*)glGetString(name);
+        return s ? s : fallback;
+    };
+    std::string extList;
+    GLint nExt = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &nExt);
+    if (nExt > 0) {
+        extList.reserve(4096);
+        for (GLint i = 0; i < nExt; i++) {
+            const char* e = (const char*)glGetStringi(GL_EXTENSIONS, i);
+            if (!e) continue;
+            if (!extList.empty()) extList += ' ';
+            extList += e;
+        }
+    }
+    gpuInfo = std::string(safeGL(GL_VENDOR, "Unknown")) + "\t" +
+              safeGL(GL_RENDERER, "Unknown") + "\t" +
+              safeGL(GL_VERSION, "Unknown") + "\t" +
+              extList;
+
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
     glEnable(GL_BLEND);
@@ -60,7 +83,7 @@ bool Renderer::init(void* window) {
     defaultShader = ShaderManager::getDefaultShader();
     currentShader = defaultShader;
 
-    initShadowMap();
+    initShadowMap(cfg.shadowMapSize);
 
     return true;
 }
@@ -118,7 +141,6 @@ void Renderer::beginShadowPass(const Point3F& lightDir, const Point3F& sceneCent
     // Orthographic projection from light direction
     Point3F up = {0, 1, 0};
     if (fabsf(lightDir.y) > 0.99f) up = {1, 0, 0};
-    Point3F target = {sceneCenter.x + lightDir.x, sceneCenter.y + lightDir.y, sceneCenter.z + lightDir.z};
 
     float dist = sceneRadius * 1.5f;
     Point3F eye = {sceneCenter.x + lightDir.x * dist, sceneCenter.y + lightDir.y * dist, sceneCenter.z + lightDir.z * dist};

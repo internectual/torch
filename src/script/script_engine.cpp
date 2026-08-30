@@ -5,6 +5,7 @@
 #include "core/engine.h"
 #include "core/string_table.h"
 #include "game/mission_parser.h"
+#include "game/demo.h"
 #include <fstream>
 #include <sstream>
 #include <stack>
@@ -1177,6 +1178,16 @@ bool ScriptEngine::init() {
         std::string v = args.empty() ? "" : args[0].toString();
         return VMValue((double)v.size());
     });
+    // strcspn(str, reject): length of the prefix of str with no chars from reject
+    tsInstance->registerNative("strcspn", [](const auto& args) -> VMValue {
+        std::string v = args.empty() ? "" : args[0].toString();
+        std::string reject = args.size() > 1 ? args[1].toString() : "";
+        size_t len = 0;
+        for (; len < v.size(); len++) {
+            if (reject.find(v[len]) != std::string::npos) break;
+        }
+        return VMValue((double)len);
+    });
     // True when the named skin is one of the Dynamix-provided skins listed
     // in the \$Skin[*, code] table (drives the Show: Dynamix/Custom popup).
     tsInstance->registerNative("isDynamixSkin", [](const auto& args) -> VMValue {
@@ -1212,6 +1223,37 @@ bool ScriptEngine::init() {
         if (engine.findObject(name.c_str())) return VMValue(1);
         auto* item = Console::instance().find(name.c_str());
         if (item) return VMValue(1);
+        return VMValue(0);
+    });
+
+    // call(%func, %a1, %a2, ...) — invoke the function named by the first
+    // argument, forwarding the rest. T2 uses this for callbacks stored in
+    // string variables (message dialogs, canned chat, save/load validation).
+    // Dispatch mirrors the interpreter: natives → script/DSO functions → console commands.
+    tsInstance->registerNative("call", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string fn = args[0].toString();
+        std::vector<VMValue> callArgs(args.begin() + 1, args.end());
+        auto* ts = Engine::instance().script().ts();
+        if (!ts) return VMValue(0);
+        std::string lower = fn;
+        for (auto& c : lower) c = (char)tolower((unsigned char)c);
+        const auto& natives = ts->getNatives();
+        auto nit = natives.find(lower);
+        if (nit != natives.end()) return nit->second(callArgs);
+        if (ts->hasFunction(fn)) return ts->callFunction(fn, callArgs);
+        auto* item = Console::instance().find(fn.c_str());
+        if (item && item->type == Console::ConsoleItem::Command) {
+            std::vector<std::string> argStorage;
+            argStorage.reserve(callArgs.size());
+            for (auto& a : callArgs) argStorage.push_back(a.toString());
+            std::vector<const char*> argv;
+            argv.reserve(callArgs.size() + 1);
+            argv.push_back(fn.c_str());
+            for (auto& s : argStorage) argv.push_back(s.c_str());
+            item->cmd((int32_t)argv.size(), argv.data());
+            return VMValue(1);
+        }
         return VMValue(0);
     });
 
@@ -1547,8 +1589,35 @@ bool ScriptEngine::init() {
         std::string objName = args[0].toString();
         auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
         if (sobj) {
+            auto dit = sobj->internals.find("__fo_data");
+            auto pit = sobj->internals.find("__fo_path");
+            if (dit != sobj->internals.end() && pit != sobj->internals.end()) {
+                // FileObject: flush the accumulated buffer to disk. openForAppend
+                // preloads existing content into the buffer, so a full-buffer
+                // write is equivalent to appending.
+                std::string path = pit->second.toString();
+                std::string outDir = Console::instance().getStringVariable("outputDir", "");
+                std::string modPath = Console::instance().getStringVariable("modPath", "base");
+                std::string fullPath;
+                if (!path.empty() && path[0] == '/') {
+                    fullPath = path;
+                } else if (!outDir.empty()) {
+                    // Same root the engine uses for prefs/ exports
+                    fullPath = outDir + "/" + modPath + "/" + path;
+                } else {
+                    fullPath = path;
+                }
+                auto slash = fullPath.rfind('/');
+                if (slash != std::string::npos) {
+                    std::string dir = fullPath.substr(0, slash);
+                    struct stat st; if (stat(dir.c_str(), &st) != 0) mkdir(dir.c_str(), 0755);
+                }
+                FILE* f = fopen(fullPath.c_str(), "w");
+                if (f) { fwrite(dit->second.str.data(), 1, dit->second.str.size(), f); fclose(f); }
+            }
             sobj->internals.erase("__fo_data");
             sobj->internals.erase("__fo_pos");
+            sobj->internals.erase("__fo_path");
         }
         return VMValue(1);
     });
@@ -1696,6 +1765,17 @@ bool ScriptEngine::init() {
         char buf[64];
         snprintf(buf, sizeof(buf), "%.*f", len, val);
         return VMValue(atof(buf));
+    });
+    // mFormatFloat(value, "fmt") — printf-style number formatting for HUD/options
+    // text (e.g. mFormatFloat(%ping, "%4.0f")). The format string comes from
+    // scripts; %f consumes a double in varargs.
+    tsInstance->registerNative("mFormatFloat", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return args.empty() ? VMValue("0") : VMValue(args[0].toString());
+        double v = args[0].toDouble();
+        std::string fmt = args[1].toString();
+        char buf[128];
+        snprintf(buf, sizeof(buf), fmt.c_str(), v);
+        return VMValue(buf);
     });
     tsInstance->registerNative("getRandom", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue((double)rand() / RAND_MAX);
@@ -3225,6 +3305,40 @@ bool ScriptEngine::init() {
         // Listener float params — T2 sets these, we can ignore for now
         return VMValue(1);
     });
+    // alx context queries feed the Settings→Audio page. Scripts pass bare
+    // ALC_* identifiers, which the interpreter evaluates to their own name
+    // strings, so we dispatch on args[0] here. One dummy provider/speaker
+    // keeps the provider/speaker dropdowns populated and functional.
+    static int s_audioProvider = 0;
+    static int s_audioSpeaker = 0;
+    tsInstance->registerNative("alxGetContexti", [](const auto& args) -> VMValue {
+        std::string which = args.empty() ? "" : args[0].toString();
+        if (which == "ALC_PROVIDER_COUNT" || which == "ALC_SPEAKER_COUNT") return VMValue(1);
+        if (which == "ALC_SPEAKER") return VMValue(s_audioSpeaker);
+        return VMValue(s_audioProvider);
+    });
+    tsInstance->registerNative("alxGetContextstr", [](const auto& args) -> VMValue {
+        std::string which = args.empty() ? "" : args[0].toString();
+        int idx = args.size() > 1 ? (int)args[1].toDouble() : 0;
+        if (which == "ALC_SPEAKER_NAME") {
+            if (idx <= 0) return VMValue("Generic Speakers");
+            return VMValue("Generic Speakers %" + std::to_string(idx));
+        }
+        if (idx <= 0) return VMValue("Generic Software");
+        return VMValue("Generic Software %" + std::to_string(idx));
+    });
+    tsInstance->registerNative("alxContexti", [](const auto& args) -> VMValue {
+        // Setter: ALC_PROVIDER / ALC_SPEAKER / ALC_BUFFER_DYNAMIC_MEMORY_SIZE
+        std::string which = args.empty() ? "" : args[0].toString();
+        int val = args.size() > 1 ? (int)args[1].toDouble() : 0;
+        if (which == "ALC_PROVIDER") s_audioProvider = val;
+        else if (which == "ALC_SPEAKER") s_audioSpeaker = val;
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxSetCaptureGainScale", [](const auto&) -> VMValue {
+        // Voice capture gain — no capture support in this build, accept and ignore.
+        return VMValue(1);
+    });
     tsInstance->registerNative("alxSetChannelVolume", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(1);
         std::string channel = args[0].toString();
@@ -3363,6 +3477,27 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("playJournal", [](const auto& args) -> VMValue {
         if (!args.empty()) Console::instance().printf(LogLevel::Info, "playJournal: %s", args[0].toString().c_str());
         return VMValue(1);
+    });
+
+    // Recordings screen queries. .rec header layout (see demo.cpp):
+    //   U8 strlen + "Tribes2 Recording" + U32 protocol + U32 lengthMs + U32 ibSize
+    tsInstance->registerNative("getDemoVersion", [](const auto&) -> VMValue {
+        // Protocol version this engine records/plays (matches .rec writer + DemoParser).
+        return VMValue((int32_t)T2Demo::ProtocolV25034);
+    });
+    tsInstance->registerNative("getDemoVersionLength", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("-1\t-1");
+        auto data = Engine::instance().fs().read(args[0].toString().c_str());
+        static const char* sig = "Tribes2 Recording";
+        if (data.size() < 26 || data[0] != (uint8_t)strlen(sig) ||
+            std::string((const char*)data.data() + 1, strlen(sig)) != sig)
+            return VMValue("-1\t-1");
+        auto u32 = [&](size_t off) -> uint32_t {
+            return (uint32_t)data[off] | ((uint32_t)data[off + 1] << 8) |
+                   ((uint32_t)data[off + 2] << 16) | ((uint32_t)data[off + 3] << 24);
+        };
+        size_t p = 1 + strlen(sig);
+        return VMValue(std::to_string(u32(p)) + "\t" + std::to_string(u32(p + 4)));
     });
 
     // EffectProfile is called by audio scripts
@@ -3657,6 +3792,49 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("isT2UkBuild", [](const auto&) -> VMValue { return VMValue(0); });
     tsInstance->registerNative("isKoreanBuild", [](const auto&) -> VMValue { return VMValue(0); });
+    // Renderer supports windowed mode, so no driver is fullscreen-only.
+    tsInstance->registerNative("isDeviceFullScreenOnly", [](const auto&) -> VMValue { return VMValue(0); });
+    // No joystick support in this build — Settings keeps the joystick toggle off.
+    tsInstance->registerNative("isJoystickDetected", [](const auto&) -> VMValue { return VMValue(0); });
+    // Driver-info dialog: VENDOR\RENDERER\VERSION\EXTENSIONS captured at renderer init.
+    tsInstance->registerNative("getVideoDriverInfo", [](const auto&) -> VMValue {
+        const std::string& info = Engine::instance().renderer().gpuDriverInfo();
+        if (!info.empty()) return VMValue(info);
+        return VMValue("Unknown\tUnknown\tUnknown\t");
+    });
+    // Save/validate dialogs ask whether a file name could be written. The
+    // scripts pass either "prefs/xxx" or "base/prefs/xxx", so strip any data-
+    // root prefix ("base/", "data/") before joining against write roots.
+    // Check (in order): existing files must be writable; new files need a
+    // writable parent directory. Candidate roots are outputDir/base,
+    // outputDir, dataDir, and the raw path.
+    tsInstance->registerNative("isWriteableFileName", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string path = args[0].toString();
+        if (path.empty() || path.back() == '/' || path.back() == '\\') return VMValue(0);
+        std::string stripped = path;
+        if (stripped.rfind("base/", 0) == 0 || stripped.rfind("data/", 0) == 0)
+            stripped = stripped.substr(stripped.find('/') + 1);
+        std::string outDir = Console::instance().getStringVariable("outputDir", "");
+        std::string dataDir = Console::instance().getStringVariable("dataDir", "");
+        std::vector<std::string> candidates;
+        if (!outDir.empty()) candidates.push_back(outDir + "/base/" + stripped);
+        if (!outDir.empty()) candidates.push_back(outDir + "/" + stripped);
+        if (!dataDir.empty()) candidates.push_back(dataDir + "/" + stripped);
+        if (!outDir.empty()) candidates.push_back(outDir + "/base/" + path);
+        if (!dataDir.empty()) candidates.push_back(dataDir + "/" + path);
+        candidates.push_back(path);
+        for (auto& c : candidates) {
+            struct stat st;
+            if (stat(c.c_str(), &st) == 0)
+                return access(c.c_str(), W_OK) == 0 ? VMValue(1) : VMValue(0);
+            auto slash = c.rfind('/');
+            std::string dir = slash == std::string::npos ? "." : c.substr(0, slash);
+            if (dir.empty()) dir = ".";
+            if (stat(dir.c_str(), &st) == 0 && access(dir.c_str(), W_OK) == 0) return VMValue(1);
+        }
+        return VMValue(0);
+    });
     tsInstance->registerNative("videoSetGammaCorrection", [](const auto& args) -> VMValue {
         if (!args.empty()) Console::instance().setVariable("pref::gammaCorrection", args[0].toString().c_str());
         return VMValue(1);
@@ -3678,8 +3856,8 @@ bool ScriptEngine::init() {
     // When called as obj.method(), the VM passes the object name as args[0].
 
     // Map: (objectName, device, keyName) → command string
-    struct BindEntry { std::string cmdOn; std::string cmdOff; bool isCmd = false; };
-    static std::map<std::tuple<std::string, int, std::string>, BindEntry> s_actionBinds;
+    // Storage lives in the shared actionBindingStore() (see script_engine.h).
+    auto& s_actionBinds = actionBindingStore();
 
     auto parseDevice = [](const std::string& s) -> int {
         if (s == "keyboard" || s == "0") return 0;
@@ -3713,17 +3891,11 @@ bool ScriptEngine::init() {
         int device = parseDevice(args[start].toString());
         if (device < 0) { Console::instance().printf(LogLevel::Debug, "TS: bind unknown device '%s'", args[start].toString().c_str()); return VMValue(0); }
         std::string keyName = args[start + 1].toString();
-        // The command is the last arg; flags/modifier are ignored for now
-        std::string command = args[start + args.size() - start - 1 + start - 1].toString();
-        // Actually, the command is args[start + 2] for simple form, or last arg for flag form
-        // T2 forms: bind(dev, key, cmd) | bind(dev, key, flags, modifier, cmd) | bind(dev, key, flags, modifier, deadZone, sens, cmd)
         // The command is always the last non-flag arg. Simple approach: last arg is always the command.
-        command = args.back().toString();
+        std::string command = args.back().toString();
         // Store binding
         auto key = std::make_tuple(objName, device, keyName);
         s_actionBinds[key] = {command, "", false};
-        // Also store in simple action map for key lookups
-        std::string actionKey = keyName;
         Console::instance().printf(LogLevel::Debug, "TS: bind(%s, %d, '%s') = '%s'",
             objName.empty() ? "?" : objName.c_str(), device, keyName.c_str(), command.c_str());
         return VMValue(1);
@@ -3768,6 +3940,75 @@ bool ScriptEngine::init() {
         // copyBind(sourceMap, command) — copy a binding from sourceMap to this map
         // For now, just stub it
         return VMValue(1);
+    });
+
+    // ActionMap::save(fileName, isAppend) — serialize this map's binds into a
+    // reloadable .cs (exec-able). Header line must be exactly
+    // "// Tribes 2 Input Map File" for isMapFile() validation.
+    auto deviceName = [](int d) -> const char* {
+        switch (d) { case 0: return "keyboard"; case 1: return "mouse"; case 2: return "joystick"; default: return "keyboard"; }
+    };
+    auto actionMapWrite = [&s_actionBinds, deviceName](const std::string& objName, const std::string& path, bool append) -> int {
+        std::string outDir = Console::instance().getStringVariable("outputDir", "");
+        if (outDir.empty()) return 0;
+        std::string modPath = Console::instance().getStringVariable("modPath", "base");
+        std::string fullPath = outDir + "/" + modPath + "/" + path;
+        auto slash = fullPath.rfind('/');
+        if (slash != std::string::npos) {
+            std::string dir = fullPath.substr(0, slash);
+            struct stat st; if (stat(dir.c_str(), &st) != 0) mkdir(dir.c_str(), 0755);
+        }
+        FILE* f = fopen(fullPath.c_str(), append ? "a" : "w");
+        if (!f) return 0;
+        if (!append) fprintf(f, "// Tribes 2 Input Map File\n// ActionMap: %s\n", objName.c_str());
+        for (auto& [k, be] : s_actionBinds) {
+            const auto& [obj, dev, key] = k;
+            if (obj != objName) continue;
+            if (be.isCmd) {
+                // Commands are stored as script text; quote them (escaping any
+                // embedded quotes) so the line is valid, reloadable TS.
+                auto q = [](const std::string& s) -> std::string {
+                    std::string r = "\"";
+                    for (char c : s) { if (c == '"' || c == '\\') r += '\\'; r += c; }
+                    return r + "\"";
+                };
+                fprintf(f, "%s.bindCmd(%s, \"%s\", %s, %s);\n", obj.c_str(),
+                    deviceName(dev), key.c_str(), q(be.cmdOn).c_str(), q(be.cmdOff).c_str());
+            } else {
+                fprintf(f, "%s.bind(%s, \"%s\", %s);\n", obj.c_str(),
+                    deviceName(dev), key.c_str(), be.cmdOn.c_str());
+            }
+        }
+        fprintf(f, "// End\n");
+        fclose(f);
+        return 1;
+    };
+    tsInstance->registerNative("actionmap::save", [actionMapWrite](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string objName = args[0].toString();
+        std::string path = args.size() > 1 ? args[1].toString() : "";
+        if (path.empty()) return VMValue(0);
+        bool append = false;
+        if (args.size() > 2) {
+            std::string a = args[2].toString();
+            for (auto& ch : a) ch = (char)tolower((unsigned char)ch);
+            append = (a == "true" || a == "1");
+        }
+        return VMValue(actionMapWrite(objName, path, append));
+    });
+
+    // ActionMap::getBinding(action) — return "flags key" for the bound action
+    // (see saveMapFile: getField(%bind, 1) yields the key name)
+    tsInstance->registerNative("actionmap::getbinding", [&s_actionBinds](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        std::string objName = args[0].toString();
+        std::string action = args[1].toString();
+        for (auto& [k, be] : s_actionBinds) {
+            const auto& [obj, dev, key] = k;
+            if (obj == objName && be.cmdOn == action)
+                return VMValue(std::string("0\t") + key);
+        }
+        return VMValue("");
     });
 
     // getResolution — returns "width height"
@@ -3973,6 +4214,19 @@ bool ScriptEngine::init() {
         }
         return VMValue(name);
     });
+
+    // Ensure the always-present GlobalActionMap singleton exists from the
+    // start, so its binds record under "GlobalActionMap" (ActionMap::save /
+    // getBinding key off the object name).
+    {
+        auto& objs = ScriptEngine::instance().objects;
+        if (objs.find("GlobalActionMap") == objs.end()) {
+            auto* obj = new ScriptObject;
+            obj->name = "GlobalActionMap";
+            obj->className = "ActionMap";
+            objs["GlobalActionMap"] = obj;
+        }
+    }
 
     // removeTaggedString(id) — no-op (tagged strings are not stored)
     tsInstance->registerNative("removeTaggedString", [](const auto&) -> VMValue {

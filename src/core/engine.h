@@ -38,7 +38,7 @@ public:
     GuiRenderer& guiRenderer() { return *gui; }
     Timer& timer() { return *tim; }
 
-    void quit() { running = false; }
+    void quit() { running = false; quitRequested = true; }
 
     // Overlay (TORCH debug menu, triggered by Pause)
     void toggleOverlay() { showOverlay = !showOverlay; }
@@ -87,6 +87,7 @@ public: // TEST HARNESS: temporarily public so dts_one can install an empty FS
     GuiRenderer* gui{};
 
     bool running = false;
+    bool quitRequested = false;
     bool previewDone = false;
     std::string previewMap;
     std::string demoPath;

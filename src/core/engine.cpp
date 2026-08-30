@@ -218,6 +218,16 @@ bool Engine::init(int argc, char* argv[]) {
                 if (key == "dataDir") dataDir = val;
                 if (key == "outputDir") outputDir = val;
                 if (key == "initScript") initScriptSetting = val;
+                // New rendering configuration options
+                if (key == "terrainLightmapResolution") {
+                    Console::instance().setVariable("terrainLightmapResolution", val.c_str());
+                }
+                if (key == "enableDynamicShadows") {
+                    Console::instance().setVariable("enableDynamicShadows", val.c_str());
+                }
+                if (key == "detailTextureCount") {
+                    Console::instance().setVariable("detailTextureCount", val.c_str());
+                }
                 if (key == "previewImg") previewImgPath = val;
                 if (key == "canvasBg") canvasBgPath = val;
                 if (key == "preload") {
@@ -590,6 +600,48 @@ bool Engine::init(int argc, char* argv[]) {
     g->init();
 
     // Register console commands
+    con->addCommand("setDetailScale", [](int32_t argc, const char* const* argv) {
+        if (argc > 1) {
+            float v = atof(argv[1]);
+            Engine::instance().renderer().config().detailScale = v;
+            Console::instance().printf(LogLevel::Info, "detailScale set to %f", v);
+        }
+    }, "setDetailScale <float> - set texture tiling factor");
+
+    con->addCommand("enableNormalMap", [](int32_t argc, const char* const* argv) {
+        if (argc > 1) {
+            int v = atoi(argv[1]);
+            Engine::instance().renderer().config().useNormalMap = (v != 0);
+            Console::instance().printf(LogLevel::Info, "useNormalMap %s", v ? "ON" : "OFF");
+        }
+    }, "enableNormalMap <0|1> - toggle normal mapping");
+
+    con->addCommand("setShadowResolution", [](int32_t argc, const char* const* argv) {
+        if (argc > 1) {
+            int sz = atoi(argv[1]);
+            Engine::instance().renderer().config().shadowMapSize = sz;
+            Engine::instance().renderer().initShadowMap(sz);
+            Console::instance().printf(LogLevel::Info, "Shadow map size set to %d", sz);
+        }
+    }, "setShadowResolution <size> - set shadow map resolution");
+
+    con->addCommand("setFogDensity", [](int32_t argc, const char* const* argv) {
+        if (argc > 1) {
+            float d = atof(argv[1]);
+            Engine::instance().renderer().config().fogDensity = d;
+            Console::instance().printf(LogLevel::Info, "fogDensity set to %f", d);
+        }
+    }, "setFogDensity <float> - override mission fog density");
+
+    con->addCommand("setFogColor", [](int32_t argc, const char* const* argv) {
+        if (argc >= 5) {
+            ColorF c{(float)atof(argv[1]), (float)atof(argv[2]), (float)atof(argv[3]), (float)atof(argv[4])};
+            Engine::instance().renderer().config().fogColor = c;
+            Engine::instance().renderer().config().fogColorOverride = true;
+            Console::instance().printf(LogLevel::Info, "fogColor set to %.2f %.2f %.2f %.2f", c.r, c.g, c.b, c.a);
+        }
+    }, "setFogColor <r> <g> <b> <a> - override mission fog color");
+
     con->addCommand("quit", [this](int32_t argc, const char* const* argv) {
         // Persist prefs like the stock shell does in LoginDone — otherwise
         // warriors created in a session vanish on restart.
@@ -956,8 +1008,11 @@ bool Engine::init(int argc, char* argv[]) {
         });
         Console::instance().printf(LogLevel::Info, "Registered console commands as TS natives");
         // Override 'bind' native with ActionMap-aware version (console command version
-        // doesn't understand T2's moveMap.bind(device, key, command) signature)
+        // doesn't understand T2's moveMap.bind(device, key, command) signature).
+        // Binds are also recorded in actionBindingStore() so ActionMap::save /
+        // getBinding can serialize and query them.
         scr->ts()->registerNative("bind", [](const auto& args) -> VMValue {
+            auto& s_actionBinds = actionBindingStore();
             // Detect method call: args[0] is an ActionMap ScriptObject name
             size_t start = 0;
             std::string objName;
@@ -986,11 +1041,13 @@ bool Engine::init(int argc, char* argv[]) {
             if (device < 0) { Console::instance().printf(LogLevel::Debug, "TS: bind unknown device '%s'", devStr.c_str()); return VMValue(0); }
             std::string keyName = args[start + 1].toString();
             std::string command = args.back().toString();
+            s_actionBinds[{objName, device, keyName}] = {command, "", false};
             Console::instance().printf(LogLevel::Debug, "TS: bind(%s, %d, '%s') = '%s'",
                 objName.empty() ? "?" : objName.c_str(), device, keyName.c_str(), command.c_str());
             return VMValue(1);
         });
         scr->ts()->registerNative("bindcmd", [](const auto& args) -> VMValue {
+            auto& s_actionBinds = actionBindingStore();
             size_t start = 0;
             std::string objName;
             if (!args.empty()) {
@@ -1006,11 +1063,27 @@ bool Engine::init(int argc, char* argv[]) {
             std::string keyName = args[start + 1].toString();
             std::string cmdOn = args[start + 2].toString();
             std::string cmdOff = args[start + 3].toString();
+            s_actionBinds[{objName, device, keyName}] = {cmdOn, cmdOff, true};
             Console::instance().printf(LogLevel::Debug, "TS: bindcmd(%s, %d, '%s') on='%s' off='%s'",
                 objName.empty() ? "?" : objName.c_str(), device, keyName.c_str(), cmdOn.c_str(), cmdOff.c_str());
             return VMValue(1);
         });
         scr->ts()->registerNative("unbind", [](const auto& args) -> VMValue {
+            auto& s_actionBinds = actionBindingStore();
+            size_t start = 0;
+            std::string objName;
+            if (!args.empty()) {
+                auto* obj = ScriptEngine::instance().findObject(args[0].toString().c_str());
+                if (obj) { objName = args[0].toString(); start = 1; }
+            }
+            if (args.size() - start < 2) return VMValue(0);
+            std::string devStr = args[start].toString();
+            int device = -1;
+            if (devStr == "keyboard" || devStr == "0") device = 0;
+            else if (devStr == "mouse" || devStr == "1") device = 1;
+            else if (devStr == "joystick" || devStr == "2") device = 2;
+            std::string keyName = args[start + 1].toString();
+            s_actionBinds.erase({objName, device, keyName});
             return VMValue(1);
         });
         scr->ts()->registerNative("copybind", [](const auto& args) -> VMValue {
@@ -1118,18 +1191,6 @@ bool Engine::init(int argc, char* argv[]) {
     // seeder runs there and seeds the $Host* globals the stock onSelect reads.
     // No explicit call needed here.
 
-    // DEBUG: LaunchGui subtree probe
-    {
-        int nkids = 0, linked = 0;
-        for (auto& [n, obj] : scr->objects) {
-            auto pit = obj->internals.find("parent");
-            if (pit != obj->internals.end() && pit->second.toString() == "LaunchGui") {
-                nkids++;
-                if (scr->findObject(n.c_str())) linked++;
-            }
-        }
-        Console::instance().printf(LogLevel::Info, "[LG] objects with parent=LaunchGui: %d", nkids);
-    }
     // Initialize GUI renderer from script-created objects
     gui->init();
 
@@ -1292,6 +1353,9 @@ bool Engine::init(int argc, char* argv[]) {
 }
 
 void Engine::run() {
+    // A quit() issued before the loop starts (e.g. the final line of an
+    // -exec script) must not be lost by forcing running=true below.
+    if (quitRequested) { running = false; return; }
     running = true;
 
     fprintf(stderr, "TORCH-RUN-START\n");

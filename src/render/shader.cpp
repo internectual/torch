@@ -196,10 +196,13 @@ in vec4 vColor;
 in vec3 vWorldPos;
 
 uniform sampler2D uSplatMap;
+uniform sampler2D uSplatMap2;
 uniform sampler2D uDetail0;
 uniform sampler2D uDetail1;
 uniform sampler2D uDetail2;
 uniform sampler2D uDetail3;
+uniform sampler2D uDetail4;
+uniform sampler2D uDetail5;
 uniform sampler2D uLightmap;
 uniform bool uUseLightmap = false;
 uniform bool uUseVertexColor = false;
@@ -209,6 +212,8 @@ uniform float uDetailTiling0 = 32.0;
 uniform float uDetailTiling1 = 32.0;
 uniform float uDetailTiling2 = 32.0;
 uniform float uDetailTiling3 = 32.0;
+uniform float uDetailTiling4 = 32.0;
+uniform float uDetailTiling5 = 32.0;
 
 uniform bool uFogEnabled = false;
 uniform vec3 uFogColor = vec3(0.75, 0.8, 0.85);
@@ -218,6 +223,9 @@ uniform vec3 uCamPos = vec3(0);
 uniform sampler2DShadow uShadowMap;
 uniform mat4 uShadowMatrix;
 uniform float uShadowStrength = 0.5;
+
+uniform bool uUseNormalMap = false;
+uniform sampler2D uNormal0;
 
 out vec4 FragColor;
 
@@ -247,19 +255,38 @@ void main() {
         vec4 c2 = texture(uDetail2, vUV * uDetailTiling2);
         vec4 c3 = texture(uDetail3, vUV * uDetailTiling3);
         base = c0 * weights.r + c1 * weights.g + c2 * weights.b + c3 * weights.a;
+        // Layers 4-5 via second splat map
+        vec4 weights2 = texture(uSplatMap2, vUV);
+        float total2 = weights2.r + weights2.g;
+        if (total2 > 0.0) weights2 /= total2;
+        vec4 c4 = texture(uDetail4, vUV * uDetailTiling4);
+        vec4 c5 = texture(uDetail5, vUV * uDetailTiling5);
+        base = base + c4 * weights2.r + c5 * weights2.g;
+        // Clamp the blended result back into range
+        base = clamp(base, 0.0, 1.0);
     }
 
     vec3 N = normalize(vNormal);
+    if (uUseNormalMap) {
+        vec3 nMap = texture(uNormal0, vUV).rgb * 2.0 - 1.0;
+        N = normalize(N + nMap * 0.5);
+    }
     float ndotl = max(dot(N, normalize(uLightDir)), 0.0);
     float shadowFactor = 1.0;
     if (uShadowStrength > 0.0) {
         vec4 shadowCoord = uShadowMatrix * vec4(vWorldPos, 1.0);
         shadowFactor = mix(terrainShadowPCF(shadowCoord), 1.0, 1.0 - uShadowStrength);
     }
-    vec3 lighting = vec3(0.3 + 0.7 * ndotl * shadowFactor);
+    // Dynamic sun (live NdotL + shadow map) combined with the baked self-shadowing
+    // lightmap. The baked lightmap (2px/square) provides soft, ray-marched self
+    // shadowing and a smooth normal light; the live term keeps the sun reacting
+    // to time-of-day and object shadows.
+    vec3 lighting;
     if (uUseLightmap) {
         vec4 lm = texture(uLightmap, vUV);
-        lighting *= lm.r;
+        lighting = vec3(0.3 + 0.7 * lm.r) * vec3(0.6 + 0.4 * ndotl * shadowFactor);
+    } else {
+        lighting = vec3(0.3 + 0.7 * ndotl * shadowFactor);
     }
     vec3 lit = base.rgb * lighting;
     if (uFogEnabled) {

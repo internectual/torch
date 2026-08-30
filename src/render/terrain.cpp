@@ -78,13 +78,21 @@ void TerrainBlock::generateMesh() {
 
     for (int32_t z = 0; z < gridRes - 1; z++) {
         for (int32_t x = 0; x < gridRes - 1; x++) {
-            int idx = z * gridRes + x;
-            idxs.push_back(idx);
-            idxs.push_back(idx + gridRes);
-            idxs.push_back(idx + 1);
-            idxs.push_back(idx + 1);
-            idxs.push_back(idx + gridRes);
-            idxs.push_back(idx + gridRes + 1);
+            // Torque-style alternating diagonals to avoid diagonal-cracks.
+            // Quad corners (row z, col x): a=idx, b=idx+1, c=idx+gridRes, d=idx+gridRes+1
+            int a = z * gridRes + x;
+            int b = a + 1;
+            int c = a + gridRes;
+            int d = c + 1;
+            if (((x ^ z) & 1) == 0) {
+                // Split45: diagonal a->d, triangles (a,c,d) and (a,d,b)
+                idxs.push_back(a); idxs.push_back(c); idxs.push_back(d);
+                idxs.push_back(a); idxs.push_back(d); idxs.push_back(b);
+            } else {
+                // Split135: diagonal b->c, triangles (a,c,b) and (b,c,d)
+                idxs.push_back(a); idxs.push_back(c); idxs.push_back(b);
+                idxs.push_back(b); idxs.push_back(c); idxs.push_back(d);
+            }
         }
     }
 
@@ -93,6 +101,85 @@ void TerrainBlock::generateMesh() {
     mesh.indices = std::move(idxs);
     mesh.upload();
     meshes.push_back(std::move(mesh));
+}
+
+void TerrainBlock::bakeLightmap() {
+    // Generate a 512x512 terrain lightmap (2 px per terrain square) with smooth
+    // bilinearly-sampled normals and ray-marched self-shadowing, matching the
+    // approach used in t2-mapper / Torque's relight(). The result is NdotL*shadow
+    // stored as the R channel, multiplied as lighting in the terrain shader.
+    if (heights.empty()) return;
+    // Lightmap resolution configurable via torch.cfg (default 512)
+    int LM = 512;
+    const char* lmRes = Console::instance().getStringVariable("terrainLightmapResolution");
+    if (lmRes) {
+        int parsed = atoi(lmRes);
+        if (parsed > 0) LM = parsed;
+    }
+    std::vector<uint8_t> lm(LM * LM);
+    auto hAt = [&](float col, float row) -> float {
+        int cc = (int)std::floor(col);
+        int rr = (int)std::floor(row);
+        cc = Math::clamp((float)cc, 0.0f, (float)(size - 1));
+        rr = Math::clamp((float)rr, 0.0f, (float)(size - 1));
+        int c1 = std::min(cc + 1, size - 1);
+        int r1 = std::min(rr + 1, size - 1);
+        float fx = col - cc, fy = row - rr;
+        float h00 = heights[rr * size + cc];
+        float h10 = heights[rr * size + c1];
+        float h01 = heights[r1 * size + cc];
+        float h11 = heights[r1 * size + c1];
+        float h0 = h00 + (h10 - h00) * fx;
+        float h1 = h01 + (h11 - h01) * fx;
+        return h0 + (h1 - h0) * fy;
+    };
+    // Sun direction (world, Y-up, pointing FROM scene toward sun => direction light travels).
+    Point3F L = lightDir;
+    float len = std::sqrt(L.x*L.x + L.y*L.y + L.z*L.z);
+    if (len > 0) { L.x/=len; L.y/=len; L.z/=len; } else { L = {0.5f,0.8f,0.6f}; }
+    // Ray-march self-shadow
+    auto rayShadow = [&](float sc, float sr, float sh) -> float {
+        float dCol = L.z / squareSize;       // col ~ world +Z
+        float dRow = L.x / squareSize;       // row ~ world +X
+        float dHeight = L.y;                 // height ~ world +Y
+        float hz = std::sqrt(dCol*dCol + dRow*dRow);
+        if (hz < 0.0001f) return 1.0f;
+        float scale = 0.5f / hz;
+        dCol *= scale; dRow *= scale; dHeight *= scale;
+        float col = sc, row = sr, h = sh + 0.1f;
+        for (int i = 0; i < size * 3; i++) {
+            col += dCol; row += dRow; h += dHeight;
+            if (col < 0 || col >= size || row < 0 || row >= size) return 1.0f;
+            if (h > 65535.0f) return 1.0f;
+            if (h < hAt(col, row)) return 0.0f;
+        }
+        return 1.0f;
+    };
+    const float eps = 0.5f;
+    for (int lr = 0; lr < LM; lr++) {
+        for (int lc = 0; lc < LM; lc++) {
+            float col = lc / 2.0f + 0.25f;
+            float row = lr / 2.0f + 0.25f;
+            float h = hAt(col, row);
+            float hL = hAt(col - eps, row), hR = hAt(col + eps, row);
+            float hU = hAt(col, row - eps), hD = hAt(col, row + eps);
+            float dCol = (hR - hL) / (2 * eps);
+            float dRow = (hD - hU) / (2 * eps);
+            Point3F N{-dRow, squareSize, -dCol}; // world normal (row~X, col~Z)
+            float nl = std::sqrt(N.x*N.x + N.y*N.y + N.z*N.z);
+            if (nl > 0) { N.x/=nl; N.y/=nl; N.z/=nl; }
+            float ndl = N.x*L.x + N.y*L.y + N.z*L.z;
+            if (ndl < 0) ndl = 0;
+            float shadow = 1.0f;
+            if (ndl > 0) shadow = rayShadow(col, row, h);
+            lm[lr * LM + lc] = (uint8_t)(ndl * shadow * 255);
+        }
+    }
+    // Store as an RGBA texture (R channel holds intensity)
+    std::vector<uint8_t> rgba(LM * LM * 4);
+    for (int i = 0; i < LM * LM; i++) { rgba[i*4+0] = lm[i]; rgba[i*4+1] = lm[i]; rgba[i*4+2] = lm[i]; rgba[i*4+3] = 255; }
+    lightmap.loadRaw(rgba.data(), LM, LM, 4);
+    Console::instance().printf(LogLevel::Info, "Terrain: baked %dx%d self-shadowing lightmap", LM, LM);
 }
 
 bool TerrainBlock::load(const uint8_t* data, size_t size) {
@@ -189,17 +276,11 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
 
     Console::instance().printf(LogLevel::Info, "Terrain: loaded .ter v%u, max height=%.1f", version, maxH);
 
-    // Read lightmap (SIZE*SIZE bytes — single channel, white=lit, black=shadow)
+    // The region immediately after the heightfield is per-square flag data
+    // (not a lightmap). It encodes terrain square attributes (e.g. empty/hole
+    // flags, small-range values). We consume and skip it rather than misreading
+    // it as a baked lightmap (which would corrupt terrain lighting).
     if (pos + TERRAIN_SIZE * TERRAIN_SIZE <= size) {
-        std::vector<uint8_t> lmPixels(TERRAIN_SIZE * TERRAIN_SIZE * 4);
-        for (uint32_t i = 0; i < TERRAIN_SIZE * TERRAIN_SIZE; i++) {
-            uint8_t v = data[pos + i];
-            lmPixels[i * 4 + 0] = v;
-            lmPixels[i * 4 + 1] = v;
-            lmPixels[i * 4 + 2] = v;
-            lmPixels[i * 4 + 3] = 255;
-        }
-        lightmap.loadRaw(lmPixels.data(), TERRAIN_SIZE, TERRAIN_SIZE, 4);
         pos += TERRAIN_SIZE * TERRAIN_SIZE;
     }
 
@@ -218,14 +299,23 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
     }
 
     // Read alpha maps (nonEmptyCount × 256 × 256 bytes)
-    // Build RGBA splat texture from first 4 alpha channels
+    // Build two RGBA splat textures: layers 0-3 (RGBA) and layers 4-5 (RGBA).
+    // Up to 6 detail layers are supported; real T2 terrains commonly have 5-6.
     const uint32_t S = TERRAIN_SIZE;
-    std::vector<uint8_t> splatPixels(S * S * 4, 0);
-    for (int layer = 0; layer < nonEmptyCount && layer < 4 && pos + S * S <= size; layer++) {
+    std::vector<uint8_t> splatPixels0(S * S * 4, 0);
+    std::vector<uint8_t> splatPixels1(S * S * 4, 0);
+    int maxLayer = nonEmptyCount;
+    if (maxLayer > 6) maxLayer = 6;
+    const char* detailCapStr = Console::instance().getStringVariable("detailTextureCount", "0");
+    int detailCap = detailCapStr ? atoi(detailCapStr) : 0;
+    if (detailCap > 0 && detailCap < maxLayer) maxLayer = detailCap;
+    for (int layer = 0; layer < maxLayer && pos + S * S <= size; layer++) {
+        std::vector<uint8_t>& dst = (layer < 4) ? splatPixels0 : splatPixels1;
+        int ch = layer % 4;
         for (uint32_t z = 0; z < S; z++) {
             for (uint32_t x = 0; x < S; x++) {
                 uint8_t alpha = data[pos + z * S + x];
-                splatPixels[(z * S + x) * 4 + layer] = alpha;
+                dst[(z * S + x) * 4 + ch] = alpha;
             }
         }
         pos += S * S;
@@ -233,17 +323,26 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
     // Ensure at least one layer has full weight where all are 0
     {
         bool anyNonZero = false;
-        for (size_t i = 0; i < S * S * 4; i++) if (splatPixels[i] > 0) { anyNonZero = true; break; }
-        if (!anyNonZero && nonEmptyCount > 0) {
-            for (uint32_t i = 0; i < S * S; i++) splatPixels[i * 4] = 255;
+        for (size_t i = 0; i < S * S * 4; i++) if (splatPixels0[i] > 0) { anyNonZero = true; break; }
+        if (!anyNonZero && maxLayer > 0) {
+            for (uint32_t i = 0; i < S * S; i++) splatPixels0[i * 4] = 255;
         }
     }
-    splatMap.loadRaw(splatPixels.data(), S, S, 4);
+    splatMap.loadRaw(splatPixels0.data(), S, S, 4);
+    if (maxLayer > 4) {
+        bool anyNonZero1 = false;
+        for (size_t i = 0; i < S * S * 4; i++) if (splatPixels1[i] > 0) { anyNonZero1 = true; break; }
+        if (!anyNonZero1) for (uint32_t i = 0; i < S * S; i++) splatPixels1[i * 4] = 255;
+        splatMap2.loadRaw(splatPixels1.data(), S, S, 4);
+    }
 
     // Load detail textures from filesystem
     auto& fs = Engine::instance().fs();
     static const char* exts[] = {".png", ".bm8", ".jpg", ".gif", ".bmp"};
-    for (int i = 0; i < nonEmptyCount && i < 4; i++) {
+    int loadLayers = nonEmptyCount;
+    if (loadLayers > 6) loadLayers = 6;
+    if (detailCap > 0 && detailCap < loadLayers) loadLayers = detailCap;
+    for (int i = 0; i < loadLayers; i++) {
         Texture tex;
         // Convert terrain.X.Y.Z → textures/terrain/X.Y.Z
         std::string search = textureNames[i];
@@ -282,8 +381,57 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
             Console::instance().printf(LogLevel::Debug, "  terrain tex not found: %s", search.c_str());
         detailTextures.push_back(std::move(tex));
     }
-    // Pad with white textures if less than 4 layers
-    while (detailTextures.size() < 4) {
+
+    // Load optional normal maps for each layer (independent of detail textures)
+    for (int i = 0; i < loadLayers; i++) {
+        Texture tex;
+        std::string baseName = textureNames[i];
+        // Convert terrain.X.Y.Z → textures/terrain/X.Y.Z
+        if (baseName.compare(0, 8, "terrain.") == 0)
+            baseName = "textures/terrain/" + baseName.substr(8);
+        else
+            baseName = "textures/" + baseName;
+        // Try normal map variant: <base>_normal
+        std::string normalSearch = baseName + "_normal";
+        for (auto* ext : exts) {
+            auto d = fs.read((normalSearch + ext).c_str());
+            if (!d.empty()) {
+                if (std::strcmp(ext, ".bm8") == 0)
+                    tex.loadBM8(d.data(), d.size());
+                else
+                    tex.load(d.data(), d.size());
+                break;
+            }
+        }
+        // Fallback to lowercase name
+        if (!tex.loaded) {
+            std::string lower = normalSearch;
+            for (auto& c : lower) c = std::tolower(c);
+            for (auto* ext : exts) {
+                auto d = fs.read((lower + ext).c_str());
+                if (!d.empty()) {
+                    if (std::strcmp(ext, ".bm8") == 0)
+                        tex.loadBM8(d.data(), d.size());
+                    else
+                        tex.load(d.data(), d.size());
+                    break;
+                }
+            }
+        }
+        if (tex.loaded)
+            Console::instance().printf(LogLevel::Debug, "  terrain normal tex loaded: %s", normalSearch.c_str());
+        else
+            Console::instance().printf(LogLevel::Debug, "  terrain normal tex not found: %s", normalSearch.c_str());
+        normalTextures.push_back(std::move(tex));
+    }
+    // Pad normalTextures to match detail texture count (max 6)
+    while (normalTextures.size() < 6) {
+        Texture empty;
+        normalTextures.push_back(std::move(empty));
+    }
+
+    // Pad with white textures if less than 6 layers
+    while (detailTextures.size() < 6) {
         Texture white;
         std::vector<uint8_t> whitePx(4 * 4 * 4, 255);
         white.loadRaw(whitePx.data(), 4, 4, 4);
@@ -291,6 +439,7 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
     }
 
     generateMesh();
+    bakeLightmap();
     loaded = true;
     return true;
 }
@@ -306,15 +455,29 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
     }
 
     if (splatMap.loaded) splatMap.bind(0);
+    if (splatMap2.loaded) splatMap2.bind(7);
     if (detailTextures.size() >= 1 && detailTextures[0].loaded) detailTextures[0].bind(1);
     if (detailTextures.size() >= 2 && detailTextures[1].loaded) detailTextures[1].bind(2);
     if (detailTextures.size() >= 3 && detailTextures[2].loaded) detailTextures[2].bind(3);
     if (detailTextures.size() >= 4 && detailTextures[3].loaded) detailTextures[3].bind(4);
+    if (detailTextures.size() >= 5 && detailTextures[4].loaded) detailTextures[4].bind(8);
+    if (detailTextures.size() >= 6 && detailTextures[5].loaded) detailTextures[5].bind(9);
     shader->setUniform("uSplatMap", (int32_t)0);
+    shader->setUniform("uSplatMap2", (int32_t)7);
     shader->setUniform("uDetail0", (int32_t)1);
     shader->setUniform("uDetail1", (int32_t)2);
     shader->setUniform("uDetail2", (int32_t)3);
     shader->setUniform("uDetail3", (int32_t)4);
+    shader->setUniform("uDetail4", (int32_t)8);
+    shader->setUniform("uDetail5", (int32_t)9);
+    // Bind normal map if enabled and available
+    if (Engine::instance().renderer().config().useNormalMap && normalTextures.size() >= 1 && normalTextures[0].loaded) {
+        normalTextures[0].bind(10);
+        shader->setUniform("uNormal0", (int32_t)10);
+        shader->setUniform("uUseNormalMap", (int32_t)1);
+    } else {
+        shader->setUniform("uUseNormalMap", (int32_t)0);
+    }
 
     if (lightmap.loaded) {
         lightmap.bind(6);
@@ -331,12 +494,14 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
     // Calculate detail tiling based on terrain world size
     // Detail textures should tile at a consistent ~8-unit world-space density
     float worldSize = (float)size * squareSize;
-    float defaultTiling = worldSize / 8.0f;
+    float defaultTiling = (worldSize / 8.0f) * Engine::instance().renderer().config().detailScale;
     shader->setUniform("uDetailTiling", defaultTiling);
     shader->setUniform("uDetailTiling0", detailTilings[0] > 0 ? detailTilings[0] : defaultTiling);
     shader->setUniform("uDetailTiling1", detailTilings[1] > 0 ? detailTilings[1] : defaultTiling);
     shader->setUniform("uDetailTiling2", detailTilings[2] > 0 ? detailTilings[2] : defaultTiling);
     shader->setUniform("uDetailTiling3", detailTilings[3] > 0 ? detailTilings[3] : defaultTiling);
+    shader->setUniform("uDetailTiling4", detailTilings[4] > 0 ? detailTilings[4] : defaultTiling);
+    shader->setUniform("uDetailTiling5", detailTilings[5] > 0 ? detailTilings[5] : defaultTiling);
 
     auto& renderer = Engine::instance().renderer();
     MatrixF model;
@@ -1089,7 +1254,7 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     shader->setUniform("uView", r.view);
     shader->setUniform("uCamPos", r.cameraPos);
 
-    if (shader) shader->setUniform("uShadowStrength", 0.0f);
+    if (shader) shader->setUniform("uShadowStrength", r.shadowsActive ? 0.6f : 0.0f);
 
     // Build effective node transforms, applying any overrides
     std::vector<MatrixF> nodeWorld = defaultTransforms;
@@ -1448,7 +1613,7 @@ void DTSShape::renderAnimation(const char* animName, float time) {
     shader->setUniform("uProjection", r.projection);
     shader->setUniform("uView", r.view);
     shader->setUniform("uCamPos", r.cameraPos);
-    if (shader) shader->setUniform("uShadowStrength", 0.0f);
+    if (shader) shader->setUniform("uShadowStrength", r.shadowsActive ? 0.6f : 0.0f);
 
     const MatrixF baseModel = r.modelMatrix();
     glEnable(GL_CULL_FACE);

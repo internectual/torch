@@ -26,6 +26,12 @@ struct RenderConfig {
     float farPlane = 1000.0f;
     int32_t maxLights = 8;
     float gamma = 1.0f;
+    float detailScale = 1.0f; // texture tiling factor
+    bool useNormalMap = false; // enable per-pixel normal mapping
+    int32_t shadowMapSize = 2048; // default shadow map resolution
+    float fogDensity = -1.0f; // exponential fog density override (-1 = not set)
+    ColorF fogColor = {0.5f, 0.6f, 0.7f, 1.0f}; // default fog color
+    bool fogColorOverride = false; // true once setFogColor has been used
 };
 
 struct Vertex {
@@ -212,16 +218,21 @@ struct TerrainBlock {
     std::vector<float> heights;
     std::vector<MeshData> meshes;
     std::vector<Texture> detailTextures;
-    float detailTilings[4] = {0, 0, 0, 0}; // 0 = use default
-    Texture splatMap;
-    Texture lightmap;
+    std::vector<Texture> normalTextures; // optional normal maps per layer
+    float detailTilings[6] = {0, 0, 0, 0, 0, 0}; // 0 = use default
+    Texture splatMap;   // RGBA: layers 0-3 alpha weights
+    Texture splatMap2;  // RGBA: layers 4-5 alpha weights (R,G used)
+    Texture lightmap;   // baked self-shadowing NdotL lightmap (computed from heightfield)
     std::vector<std::string> textureNames;
     bool loaded = false;
 
     float sampleHeight(float wx, float wz) const;
     bool load(const uint8_t* data, size_t size);
     void generateMesh();
+    void bakeLightmap();
     void render(const Point3F& cameraPos, bool fogEnabled = false, const ColorF& fogColor = {0.5f, 0.6f, 0.7f, 1.0f}, float fogDensity = 0.005f, const Point3F* lightDir = nullptr);
+
+    Point3F lightDir{0.5f, 0.8f, 0.6f}; // normalized: points FROM scene toward sun; used for lightmap+bakeLightmap
 };
 
 struct Sky {
@@ -298,6 +309,13 @@ public:
     const MatrixF& shadowMatrix() const { return shadowBiasVP; }
     const MatrixF& lightViewProj() const { return shadowVP; }
     bool shadowEnabled() const { return shadowSize > 0; }
+    /// Tab-separated "VENDOR\RENDERER\VERSION\EXTENSIONS" for getVideoDriverInfo()
+    /// (populated on the first successful video init).
+    const std::string& gpuDriverInfo() const { return gpuInfo; }
+    /// True while a valid shadow map is bound for the main pass (set by game.cpp
+    /// before the world render, cleared outside gameplay). DTSShape::render uses
+    /// this to decide whether shapes should sample the shadow map.
+    bool shadowsActive = false;
     uint32_t shadowDepthTex = 0;
 
     Font* defaultFont{};
@@ -309,6 +327,7 @@ public:
     MatrixF view;
     Point3F cameraPos;
     Point3F sunDir{0.5f, 0.8f, 0.6f};
+    std::string gpuInfo;
 
     // Stats
     struct Stats {

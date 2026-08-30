@@ -178,14 +178,18 @@ void Console::execute(const char* script) {
     } else if (it != impl->items.end() && it->second.type == ConsoleItem::Variable) {
         printf(LogLevel::Info, "%s", it->second.value.c_str());
     } else {
-        // Try executing as a TorqueScript function call
+        // Try executing as TorqueScript. A bare identifier typed without
+        // parens ("foo") is treated as a zero-arg call "foo()". Anything that
+        // has parentheses or spans statements must run as a full program —
+        // GUI commands commonly look like "if (x) f(); g();", and slicing off
+        // just the first word ("if") produced an "if()" parse error.
         auto* ts = Engine::instance().script().ts();
         if (ts) {
-            std::string tsCmd = cmd + "()";
-            // Parse args from the original script string
-            if (*s == '(') {
-                tsCmd = script;  // use full script string with original args
-            }
+            std::string tsCmd;
+            if (*s == '(' || std::strchr(script, ';') != nullptr)
+                tsCmd = script;
+            else
+                tsCmd = cmd + "()";
             ts->execute(tsCmd, "console");
             return;
         }

@@ -490,6 +490,18 @@ bool World::load(const char* mapName) {
                 fog.density = 1.0f / fog.distance;
                 fog.enabled = true;
             }
+            // setFogDensity / setFogColor console overrides take precedence over
+            // the mission's Sky fog values.
+            auto& fogCfg = Engine::instance().renderer().config();
+            if (fogCfg.fogDensity >= 0.0f) {
+                fog.density = fogCfg.fogDensity;
+                fog.distance = (fogCfg.fogDensity > 0.0f) ? 1.0f / fogCfg.fogDensity : 0.0f;
+                fog.enabled = true;
+            }
+            if (fogCfg.fogColorOverride) {
+                fog.color = fogCfg.fogColor;
+                fog.enabled = true;
+            }
             Console::instance().printf(LogLevel::Debug, "  fog: enabled=%d color=(%.2f %.2f %.2f) density=%.4f dist=%.0f",
                 fog.enabled, fog.color.r, fog.color.g, fog.color.b, fog.density, fog.distance);
 
@@ -523,6 +535,12 @@ bool World::load(const char* mapName) {
             if (!colStr.empty()) {
                 sscanf(colStr.c_str(), "%f %f %f", &sunColor.r, &sunColor.g, &sunColor.b);
                 sunColorUsed = true;
+            }
+
+            // Terrain baked lightmap uses the mission sun direction
+            if (sunLightDirUsed && terrainBlock.loaded) {
+                terrainBlock.lightDir = sunLightDir;
+                terrainBlock.bakeLightmap();
             }
         }
 
@@ -2721,7 +2739,8 @@ void Game::render(float dt) {
 
     // Shadow pass and scene rendering — skip in shape viewer / test shape mode
     if (!shapeViewerActive && !testShapeLoaded) {
-        if (r.shadowEnabled()) {
+        const char* dynShadows = Console::instance().getStringVariable("enableDynamicShadows", "1");
+        if (r.shadowEnabled() && (!dynShadows || atoi(dynShadows) != 0)) {
             // Compute scene bounds from terrain
             Point3F sceneCenter = {0, 0, 0};
             float sceneRadius = 500.0f;
@@ -2752,6 +2771,31 @@ void Game::render(float dt) {
                     shadowShader->setUniform("uLightMVP", r.lightViewProj());
                     mesh.render();
                 }
+            }
+
+            // Render placed world objects as shadow casters (same transform as World::render)
+            for (auto& obj : w->objects()) {
+                if (!obj.shape || !obj.shape->loaded) continue;
+                MatrixF model;
+                if (obj.rotAngleDeg != 0 && (obj.rot.x != 0 || obj.rot.y != 0 || obj.rot.z != 0)) {
+                    Point3F axis = {obj.rot.x, obj.rot.z, -obj.rot.y};
+                    float len = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+                    if (len > 0.0001f) {
+                        axis.x /= len; axis.y /= len; axis.z /= len;
+                        model.setRotationAxis(axis, Math::DEG2RAD(obj.rotAngleDeg));
+                    }
+                }
+                Point3F pos = {obj.pos.x, obj.pos.z, -obj.pos.y};
+                model.setTranslation(pos);
+                if (obj.scale.x != 1.0f || obj.scale.y != 1.0f || obj.scale.z != 1.0f) {
+                    MatrixF scaleMat;
+                    scaleMat.setScale(obj.scale);
+                    model = model * scaleMat;
+                }
+                MatrixF mvp = r.lightViewProj() * model * obj.shape->upOrientation();
+                shadowShader->setUniform("uLightMVP", mvp);
+                for (auto& mesh : obj.shape->meshes)
+                    mesh.render();
             }
 
             // Render bots
@@ -2789,6 +2833,10 @@ void Game::render(float dt) {
             terrShader->setUniform("uShadowStrength", shadowStrength);
             terrShader->setUniform("uShadowMatrix", r.shadowMatrix());
         }
+        r.shadowsActive = true;
+    }
+    else {
+        r.shadowsActive = false;
     }
 
     w->render(camPos);

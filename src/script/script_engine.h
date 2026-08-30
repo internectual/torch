@@ -7,6 +7,8 @@
 #include <stack>
 #include <functional>
 #include <cstdint>
+#include <map>
+#include <tuple>
 
 class ScriptEngine;
 class TorqueScript;
@@ -38,6 +40,19 @@ struct ScriptObject {
     std::unordered_map<std::string, VMValue> fields;
     std::unordered_map<std::string, VMValue> internals;
 };
+
+// Action-map binding store, shared by the TS bind/bindcmd natives and the
+// ActionMap::save / getBinding natives (engine.cpp re-registers bind/bindcmd
+// and must feed the same storage the save path reads).
+struct ActionBinding {
+    std::string cmdOn;
+    std::string cmdOff;
+    bool isCmd = false;
+};
+inline std::map<std::tuple<std::string, int, std::string>, ActionBinding>& actionBindingStore() {
+    static std::map<std::tuple<std::string, int, std::string>, ActionBinding> s_binds;
+    return s_binds;
+}
 
 class VirtualMachine {
 public:
