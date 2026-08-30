@@ -1679,6 +1679,11 @@ void Engine::run() {
                     if (scrolled) {
                         // Consume the wheel so the dev panel console does not also scroll
                         plat->input().mouseWheel = 0;
+                    } else if (my >= 482 || (mx >= 650 && my < 480)) {
+                        // Cursor is over the dev panel (bottom tab panel or the
+                        // object tree) — leave the wheel for the dev panel's own
+                        // scroll handling instead of cycling the weapon.
+                        scrolled = true;
                     }
                 }
                 if (!scrolled && weaponCycleCooldown <= 0) {
@@ -2136,14 +2141,18 @@ void Engine::run() {
                         prevTreeClick = treeClick;
                     }
 
-                    // Scroll with mouse wheel
+                    // Scroll with mouse wheel (only when the cursor is over the tree)
                     static int prevWheel = 0;
                     int wheel = plat->input().mouseWheel;
-                    if (wheel != prevWheel) {
-                        treeScroll -= (wheel - prevWheel);
-                        if (treeScroll < 0) treeScroll = 0;
-                        int maxScroll = std::max(0, (int)displayList.size() - maxItems);
-                        if (treeScroll > maxScroll) treeScroll = maxScroll;
+                    if (wheel != prevWheel && wheel != 0) {
+                        int mx = plat->input().mouseX, my = plat->input().mouseY;
+                        if (mx >= 650.0f && my < 480.0f) {
+                            treeScroll -= (wheel - prevWheel);
+                            if (treeScroll < 0) treeScroll = 0;
+                            int maxScroll = std::max(0, (int)displayList.size() - maxItems);
+                            if (treeScroll > maxScroll) treeScroll = maxScroll;
+                            plat->input().mouseWheel = 0;
+                        }
                     }
                     prevWheel = wheel;
 
@@ -2474,10 +2483,15 @@ void Engine::run() {
                                         prevHome = plat->input().keysDown[SCANCODE_HOME];
                                         prevEnd = plat->input().keysDown[SCANCODE_END];
                                     }
-                                    // Mouse wheel
-                                    int w = plat->input().mouseWheel;
-                                    if (w > 0) consoleScroll -= 3;
-                                    else if (w < 0) consoleScroll += 3;
+                                    // Mouse wheel: scroll the console only when the cursor is over the
+                                    // console content (and nothing higher consumed it).
+                                    int mxC = plat->input().mouseX, myC = plat->input().mouseY;
+                                    if (myC >= contentY && myC < inputY + inputH && mxC >= 2 && mxC <= w - 2) {
+                                        int wv = plat->input().mouseWheel;
+                                        if (wv > 0) consoleScroll -= 3;
+                                        else if (wv < 0) consoleScroll += 3;
+                                        if (wv != 0) plat->input().mouseWheel = 0;
+                                    }
                                     // Clamp; sticks only if already at bottom
                                     if (consoleScroll < 0) consoleScroll = 0;
                                     if (consoleScroll > bottomLine) consoleScroll = bottomLine;
