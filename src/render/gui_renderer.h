@@ -39,6 +39,7 @@ struct GuiControl {
     // scrollY=0 = at bottom (newest), scrollY=maxScroll = at top (oldest)
     float scrollX = 0, scrollY = 0;
     float contentW = 0, contentH = 0; // virtual content size
+    std::string hScrollBarMode, vScrollBarMode; // "dynamic" / "alwaysOn" / "never"
 
     // Tab group fields (for ShellTabGroupCtrl/GM_TabView/LaunchTabView)
     struct Tab { std::string text; bool active; int id = 0; int set = 0; };
@@ -141,6 +142,9 @@ public:
 
     GuiControl* getCanvas() { return canvas; }
     GuiControl* findControl(const std::string& name);
+    // T2 ActionMap key-name <-> SDL3 scancode mapping (see gui_renderer.cpp).
+    static const char* scancodeToKeyName(int sc);
+    static int keyNameToScancode(const std::string& name);
     GuiControl* soToGui(const std::string& name, GuiControl* parent);
     void callOnAddOnce(GuiControl* ctl);
     void pushDialog(const std::string& name);
@@ -156,6 +160,10 @@ public:
     void setContent(const std::string& name);
     void handleKeyboard(); // process keyboard input for focused text control
     bool isDialogActive(const std::string& name);
+    // If the topmost dialog contains a GuiInputCtrl (e.g. RemapDlg), return it
+    // so the "~" console toggle and other global keys can be suppressed while
+    // the user chooses a binding. Returns null when not capturing.
+    GuiControl* activeKeyCapture() const;
     GuiControl* activeDialog() { return dialogStack.empty() ? canvas : dialogStack.back(); }
     GuiControl* getDialog(size_t i) const { return i < dialogStack.size() ? dialogStack[i] : nullptr; }
     void update(float dt); // process scheduled events

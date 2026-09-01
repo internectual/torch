@@ -70,6 +70,11 @@ public:
     void saveBinds();
     void loadBinds();
 
+    // Fresh press of any key bound to "toggleConsole" on GlobalActionMap
+    // (default: ~ / grave). Per-key previous state is shared across all
+    // callers (main loop + nested event pump) so one press can't double-fire.
+    bool toggleConsoleKeyEdge();
+
     // Color-blind mode
     bool colorBlindMode = false;
 

@@ -1779,7 +1779,8 @@ VMValue TorqueScript::Impl::parsePrimary() {
             if (!args.empty()) obj->name = args[0].toString();
             // Auto-generate name for unnamed controls
             if (obj->name.empty() && (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 ||
-                                       obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl")) {
+                                       obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
+                                       obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl")) {
                 static uint32_t guiCounter = 0;
                 obj->name = "_unnamed" + std::to_string(guiCounter++);
             }
@@ -1788,7 +1789,9 @@ VMValue TorqueScript::Impl::parsePrimary() {
             bool isGuiControl = (obj->className.find("Gui") == 0) ||
                                 (obj->className.find("Shell") == 0) ||
                                 obj->className == "GameTSCtrl" ||
-                                obj->className.find("Hud") == 0;
+                                obj->className.find("Hud") == 0 ||
+                                obj->className == "VirtualScrollCtrl" ||
+                                obj->className == "VirtualScrollContentCtrl";
 
             if (peekToken().type == TSTokenType::LBrace) {
                 nextToken();
@@ -2056,14 +2059,9 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
         auto& gui = Engine::instance().guiRenderer();
         plat.processEvents();
         // Check for ~ or Pause during loading
-        {
-            static bool prevTilde = false;
-            bool tildeDown = plat.input().keysDown[53]; // SCANCODE_GRAVE
-            if (tildeDown && !prevTilde) {
-                if (gui.isDialogActive("ConsoleDlg")) gui.popDialog("ConsoleDlg");
-                else gui.pushDialog("ConsoleDlg");
-            }
-            prevTilde = tildeDown;
+        if (!gui.activeKeyCapture() && Engine::instance().toggleConsoleKeyEdge()) {
+            if (gui.isDialogActive("ConsoleDlg")) gui.popDialog("ConsoleDlg");
+            else gui.pushDialog("ConsoleDlg");
         }
         {
             static bool prevPause = false;

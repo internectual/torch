@@ -2112,10 +2112,9 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("popDialog", [](const auto& args) -> VMValue {
-        if (!args.empty()) {
-            std::string name = args.back().toString();
-            if (!name.empty()) Engine::instance().guiRenderer().popDialog(name);
-        }
+        std::string name = args.empty() ? "" : args.back().toString();
+        // Empty name pops everything (GuiRenderer::popDialog "" match).
+        Engine::instance().guiRenderer().popDialog(name);
         return VMValue(1);
     });
 
@@ -4008,6 +4007,20 @@ bool ScriptEngine::init() {
             if (obj == objName && be.cmdOn == action)
                 return VMValue(std::string("0\t") + key);
         }
+        return VMValue("");
+    });
+
+    tsInstance->registerNative("actionmap::getcommand", [&s_actionBinds, parseDevice](const auto& args) -> VMValue {
+        // getCommand(device, key) — return the command bound to (thisMap, device, key),
+        // or "" if the key is not bound on the calling map.
+        if (args.size() < 3) return VMValue("");
+        std::string objName = args[0].toString();
+        int device = parseDevice(args[1].toString());
+        std::string keyName = args[2].toString();
+        if (device < 0) return VMValue("");
+        auto key = std::make_tuple(objName, device, keyName);
+        auto it = s_actionBinds.find(key);
+        if (it != s_actionBinds.end()) return VMValue(it->second.cmdOn);
         return VMValue("");
     });
 

@@ -58,6 +58,34 @@ int Engine::nameToScancode(const char* name) const {
     return -1;
 }
 
+bool Engine::toggleConsoleKeyEdge() {
+    auto& input = platform().input();
+    // Shared per-scancode previous state so the main-loop handler and the
+    // nested event pump (executeNested during loading) agree on one edge.
+    static bool prevToggleSc[512]{};
+    // Resolve the set of scancodes bound to toggleConsole on the global map
+    // from the actionBindingStore (which RemapDlg remaps into).
+    std::vector<int> toggleScs;
+    for (auto& [k, be] : actionBindingStore()) {
+        const auto& [obj, dev, key] = k;
+        if (obj == "GlobalActionMap" && dev == 0 && be.cmdOn == "toggleConsole") {
+            int sc = GuiRenderer::keyNameToScancode(key);
+            if (sc >= 0) toggleScs.push_back(sc);
+        }
+    }
+    // Default: '~' (grave) when no toggleConsole bind exists yet (startup).
+    if (toggleScs.empty()) toggleScs.push_back(SCANCODE_GRAVE);
+    bool edge = false;
+    for (int sc : toggleScs) {
+        // A key consumed by a GuiInputCtrl capture (consumedSc set) must not
+        // toggle, even after the capture dialog is popped (still held).
+        if (input.keysDown[sc] && !input.consumedSc[sc] && !prevToggleSc[sc])
+            edge = true;
+    }
+    for (int i = 0; i < 512; ++i) prevToggleSc[i] = input.keysDown[i];
+    return edge;
+}
+
 void Engine::saveBinds() {
     FILE* f = fopen("bindings.cfg", "w");
     if (!f) return;
@@ -1041,6 +1069,19 @@ bool Engine::init(int argc, char* argv[]) {
             if (device < 0) { Console::instance().printf(LogLevel::Debug, "TS: bind unknown device '%s'", devStr.c_str()); return VMValue(0); }
             std::string keyName = args[start + 1].toString();
             std::string command = args.back().toString();
+            // Single binding per command on a map: remapping toggleConsole to a
+            // new key (RemapDlg) must drop the old key (e.g. the default '~'),
+            // otherwise both keys keep toggling the console.
+            if (objName == "GlobalActionMap") {
+                for (auto it = s_actionBinds.begin(); it != s_actionBinds.end();) {
+                    const auto& [k, be] = *it;
+                    const auto& [o, d, ke] = k;
+                    if (o == "GlobalActionMap" && be.cmdOn == command)
+                        it = s_actionBinds.erase(it);
+                    else
+                        ++it;
+                }
+            }
             s_actionBinds[{objName, device, keyName}] = {command, "", false};
             Console::instance().printf(LogLevel::Debug, "TS: bind(%s, %d, '%s') = '%s'",
                 objName.empty() ? "?" : objName.c_str(), device, keyName.c_str(), command.c_str());
@@ -1395,6 +1436,13 @@ void Engine::run() {
             static bool prevEsc = false;
             bool escDown = plat->input().keysDown[SCANCODE_ESCAPE];
             if (escDown && !prevEsc) {
+                // When a GuiInputCtrl key-capture (e.g. RemapDlg) is active the
+                // key belongs to the capture control: it will be forwarded to
+                // onInputEvent (which cancels on Escape). Don't also pop here or
+                // we'd tear down the dialog behind the stock handler's back.
+                if (gui && gui->activeKeyCapture() != nullptr) {
+                    // fall through to handleKeyboard capture
+                } else {
                 // ESC closes open popup menus first, then closes overlay dialogs.
                 // Only pop dialogs if there are more than just content+base toolbar on
                 // the stack; otherwise the base toolbar would disappear.
@@ -1416,13 +1464,15 @@ void Engine::run() {
                 if (!popupClosed && gui->dialogCount() > 2) {
                     // Pop the topmost overlay dialog; never pop base dialogs.
                     // Base dialogs are at index 0 (content) and 1 (first push).
-                    // Overlays start at index 2.
+                    // Overlays start at index 2.  Skip persistent chrome (the
+                    // LaunchToolbarDlg toolbar is kept on top of the stack and
+                    // never popped), so Escape closes the real modal (e.g.
+                    // RemapDlg / OptionsDlg) instead of hitting an unpoppable bar.
                     for (int i = (int)gui->dialogCount() - 1; i >= 2; --i) {
                         auto* dlg = gui->getDialog(i);
-                        if (dlg) {
-                            gui->popDialog(dlg->name);
-                            break;
-                        }
+                        if (!dlg || dlg->name == "LaunchToolbarDlg") continue;
+                        gui->popDialog(dlg->name);
+                        break;
                     }
                 } else if (g->isShapeViewerActive()) {
                     g->shapeViewerActive = false;
@@ -1431,6 +1481,7 @@ void Engine::run() {
                 } else if (g->state() != Game::MenuScreen) {
                     g->togglePauseGame();
                 }
+                } // end else (capture not active)
             }
             prevEsc = escDown;
 
@@ -1462,11 +1513,15 @@ void Engine::run() {
             prevQ = qDown;
         }
 
-        // ~ key toggles console via GUI ConsoleDlg
+        // Toggle console via GUI ConsoleDlg on any key bound to
+        // "toggleConsole" on GlobalActionMap (default: ~ / grave). This lets a
+        // key remapped in RemapDlg (Options->Controls) actually toggle.
         {
-            static bool prevTilde = false;
-            bool tildeDown = plat->input().keysDown[SCANCODE_GRAVE];
-            if (tildeDown && !prevTilde) {
+            // While a GuiInputCtrl capture (e.g. RemapDlg) is active, the key
+            // must be swallowed so it binds to the action instead of toggling
+            // the console.
+            bool capturing = gui && gui->activeKeyCapture() != nullptr;
+            if (!capturing && toggleConsoleKeyEdge()) {
                 if (gui->isDialogActive("ConsoleDlg")) {
                     gui->popDialog("ConsoleDlg");
                     plat->stopTextInput();
@@ -1481,7 +1536,6 @@ void Engine::run() {
                     plat->showMouse(true);
                 }
             }
-            prevTilde = tildeDown;
         }
 
         // Console text input handled by GuiConsoleEditCtrl

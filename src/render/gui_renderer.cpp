@@ -117,12 +117,57 @@ static std::string normalizeGuiClassName(const std::string& cn) {
         {"ShellPopupMenu",           "GuiPopUpMenuCtrl"},
         {"ShellFancyTextList",       "GuiTextListCtrl"},
         {"ShellFancyArrayScrollCtrl","GuiScrollCtrl"},
+        {"VirtualScrollCtrl",        "GuiScrollCtrl"},
         {"ShellChatMemberList",      "GuiTextListCtrl"},
         {"ShellLoadFileDlg",         "GuiFileDialogCtrl"},
         {"ShellSaveFileDlg",         "GuiFileDialogCtrl"},
     };
     auto it = sShellToGui.find(cn);
     return it != sShellToGui.end() ? it->second : cn;
+}
+
+// Map SDL3 scancodes to the Tribes 2 InputMap key names used by the ActionMap
+// scripts (GuiInputCtrl::onInputEvent, GlobalActionMap.bind etc.).
+static const std::map<int, const char*>& scancodeKeyNameTable() {
+    static const std::map<int, const char*> sKeyNames = {
+        {4, "a"}, {5, "b"}, {6, "c"}, {7, "d"}, {8, "e"}, {9, "f"}, {10, "g"},
+        {11, "h"}, {12, "i"}, {13, "j"}, {14, "k"}, {15, "l"}, {16, "m"}, {17, "n"},
+        {18, "o"}, {19, "p"}, {20, "q"}, {21, "r"}, {22, "s"}, {23, "t"}, {24, "u"},
+        {25, "v"}, {26, "w"}, {27, "x"}, {28, "y"}, {29, "z"},
+        {30, "1"}, {31, "2"}, {32, "3"}, {33, "4"}, {34, "5"}, {35, "6"}, {36, "7"},
+        {37, "8"}, {38, "9"}, {39, "0"},
+        {40, "enter"}, {41, "escape"}, {42, "backspace"}, {43, "tab"}, {44, "space"},
+        {45, "minus"}, {46, "equals"}, {47, "leftbracket"}, {48, "rightbracket"},
+        {49, "backslash"}, {51, "semicolon"}, {52, "apostrophe"}, {53, "grave"},
+        {54, "comma"}, {55, "period"}, {56, "slash"}, {57, "capslock"},
+        {58, "f1"}, {59, "f2"}, {60, "f3"}, {61, "f4"}, {62, "f5"}, {63, "f6"},
+        {64, "f7"}, {65, "f8"}, {66, "f9"}, {67, "f10"}, {68, "f11"}, {69, "f12"},
+        {73, "insert"}, {74, "home"}, {75, "pageup"}, {76, "delete"}, {77, "end"},
+        {78, "pagedown"}, {79, "right"}, {80, "left"}, {81, "down"}, {82, "up"},
+        {83, "numlock"}, {84, "numpaddivide"}, {85, "numpadmultiply"},
+        {86, "numpadminus"}, {87, "numpadplus"}, {88, "numpadenter"},
+        {89, "numpad1"}, {90, "numpad2"}, {91, "numpad3"}, {92, "numpad4"},
+        {93, "numpad5"}, {94, "numpad6"}, {95, "numpad7"}, {96, "numpad8"},
+        {97, "numpad9"}, {98, "numpad0"}, {99, "numpaddecimal"},
+        {224, "lctrl"}, {225, "lshift"}, {226, "lalt"}, {227, "lmeta"},
+        {228, "rctrl"}, {229, "rshift"}, {230, "ralt"}, {231, "rmeta"},
+    };
+    return sKeyNames;
+}
+
+const char* GuiRenderer::scancodeToKeyName(int sc) {
+    auto& t = scancodeKeyNameTable();
+    auto it = t.find(sc);
+    return it != t.end() ? it->second : "";
+}
+
+// Reverse lookup: T2 ActionMap key name (e.g. "grave", "f12") -> SDL3 scancode.
+// Used to resolve remapped binds (e.g. toggleConsole) into scancodes.
+int GuiRenderer::keyNameToScancode(const std::string& name) {
+    auto& t = scancodeKeyNameTable();
+    for (auto& [sc, nm] : t)
+        if (name == nm) return sc;
+    return -1;
 }
 
 void GuiRenderer::init() {
@@ -132,7 +177,8 @@ void GuiRenderer::init() {
     // First pass: create/adopt GuiControl objects for all GUI-related ScriptObjects
     std::unordered_map<std::string, GuiControl*> controlMap;
     for (auto& [name, obj] : objs) {
-        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl") {
+        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl" ||
+            obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
             GuiControl*& slot = createdControls()[lowerKey(name)];
             GuiControl* ctl = slot;
             if (ctl) {
@@ -185,6 +231,8 @@ void GuiRenderer::init() {
             it = obj->fields.find("sel"); if (it != obj->fields.end()) ctl->checked = it->second.toBool();
             it = obj->fields.find("variable"); if (it != obj->fields.end()) ctl->variable = it->second.toString();
             it = obj->fields.find("active"); if (it != obj->fields.end()) ctl->active = it->second.toBool();
+            it = obj->fields.find("vScrollBar"); if (it != obj->fields.end()) ctl->vScrollBarMode = it->second.toString();
+            it = obj->fields.find("hScrollBar"); if (it != obj->fields.end()) ctl->hScrollBarMode = it->second.toString();
 
             controlMap[name] = ctl;
 
@@ -219,7 +267,8 @@ void GuiRenderer::init() {
 
     // Second pass: link parent-child relationships
     for (auto& [name, obj] : objs) {
-        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl") {
+        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl" ||
+            obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
             auto ctl = controlMap.find(name);
             if (ctl == controlMap.end()) continue;
             auto pit = obj->internals.find("parent");
@@ -252,7 +301,8 @@ void GuiRenderer::init() {
 void GuiRenderer::refresh() {
     auto& objs = ScriptEngine::instance().objects;
     for (auto& [name, obj] : objs) {
-        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl") {
+        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl" ||
+            obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
             if (findControl(name)) continue;
             GuiControl*& slot = createdControls()[lowerKey(name)];
             GuiControl* ctl = slot;
@@ -275,8 +325,10 @@ void GuiRenderer::refresh() {
             it = obj->fields.find("groupNum"); if (it != obj->fields.end()) ctl->groupNum = (int)it->second.toDouble();
             it = obj->fields.find("sel"); if (it != obj->fields.end()) ctl->checked = it->second.toBool();
             it = obj->fields.find("variable"); if (it != obj->fields.end()) ctl->variable = it->second.toString();
+            it = obj->fields.find("vScrollBar"); if (it != obj->fields.end()) ctl->vScrollBarMode = it->second.toString();
+            it = obj->fields.find("hScrollBar"); if (it != obj->fields.end()) ctl->hScrollBarMode = it->second.toString();
             if (ctl->className == "GuiCanvas") canvas = ctl;
-    bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl";
+            bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl";
             if (!ctl->command.empty() && isClickable) { std::string cmd = ctl->command; ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); }; }
             auto pit = obj->internals.find("parent");
             if (pit != obj->internals.end()) {
@@ -290,6 +342,22 @@ void GuiRenderer::refresh() {
                 ctl->extentX = smallX && smallY ? canvas->extentX : ctl->extentX;
                 ctl->extentY = smallX && smallY ? canvas->extentY : ctl->extentY;
             }
+        }
+    }
+
+    // Link pass #2: map iteration order is arbitrary, so a child can be
+    // processed before its parent and skipped. Re-link any control that still
+    // has no parent.
+    for (auto& [name, obj] : objs) {
+        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl" ||
+            obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
+            GuiControl* ctl = findControl(name);
+            if (!ctl || ctl->parent) continue;
+            auto pit = obj->internals.find("parent");
+            if (pit != obj->internals.end()) {
+                GuiControl* parent = findControl(pit->second.toString());
+                if (parent) parent->addChild(ctl);
+            } else if (ctl != canvas && canvas) { canvas->addChild(ctl); }
         }
     }
 }
@@ -776,6 +844,47 @@ static const std::vector<T2Cell>* t2SkinArray(Renderer& r, const char* name, Tex
     return &t2BitmapArray(pixels.data(), tw, th, outTex->id);
 }
 
+// ---------------------------------------------------------------------------
+// Shell scrollbar skins (shll_scroll_vertfield/vertbar/vertbuttons/horz*).
+// t2BitmapArray above already derives their cell rects exactly like T2's
+// createBitmapArray: PIECES are horizontal bands, STATES are the columns at
+// pitch = cells[0].w + 2. These wrappers attach the piece/state counts and
+// select cells the way T2's ShellScrollCtrl does (cells[piece * states + state]).
+struct ScrollTex {
+    uint32_t tex = 0;
+    int tw = 0, th = 0;
+    int states = 0, pieces = 0;
+    const std::vector<T2Cell>* cells = nullptr;
+    const T2Cell* cell(int piece, int state) const {
+        if (!tex || !cells || piece < 0 || piece >= pieces || state < 0 || state >= states)
+            return nullptr;
+        return &(*cells)[piece * states + state];
+    }
+};
+
+static ScrollTex getScrollTex(Renderer& r, const char* name) {
+    ScrollTex st;
+    Texture* t = nullptr;
+    const std::vector<T2Cell>* c = t2SkinArray(r, name, t);
+    if (!t || !t->loaded || !c || c->empty()) return st;
+    st.tex = t->id; st.tw = t->width; st.th = t->height; st.cells = c;
+    int pitch = (*c)[0].w + 2;              // state-column pitch before 1px inset
+    st.states = pitch > 0 ? st.tw / pitch : 1;
+    st.pieces = st.states > 0 ? (int)c->size() / st.states : 0;
+    return st;
+}
+
+// Draw one bitmap-array cell stretched into (dx,dy) - (dx+dw, dy+dh).
+static void drawT2Cell(Renderer& r, const ScrollTex& st, int piece, int state,
+                       float dx, float dy, float dw, float dh) {
+    if (dw <= 0 || dh <= 0) return;
+    const T2Cell* c = st.cell(piece, state);
+    if (!c) return;
+    float u0 = (float)c->x / (float)st.tw, v0 = (float)c->y / (float)st.th;
+    float u1 = (float)(c->x + c->w) / (float)st.tw, v1 = (float)(c->y + c->h) / (float)st.th;
+    r.drawTexturedRectUV({dx, dy, 0}, {dx + dw, dy + dh, 0}, st.tex, u0, v0, u1, v1);
+}
+
 static const std::vector<BmpCell>& getBitmapCells(const uint8_t* rgba, int w, int h, uint32_t texId) {
     auto it = g_cellCache.find(texId);
     if (it != g_cellCache.end()) return it->second;
@@ -876,8 +985,29 @@ static void computeContentExtent(GuiControl* ctl) {
     float maxX = 0, maxY = 0;
     auto* font = Engine::instance().renderer().getFont();
     float textListLineH = font ? font->charHeight + 2 : 14;
-    std::function<void(GuiControl*)> recurse = [&](GuiControl* c) {
-        if (c->className == "GuiConsole") {
+    // T2 sizes the scroll region from DIRECT children only (a content control
+    // carries its own extent). Do not recurse into grandchildren — that would
+    // let a distant (e.g. 840-wide decor) child blow up sibling scrollbars.
+    // The one exception: a bare content wrapper (GuiScrollContentCtrl) around a
+    // GuiConsole. Console content is line-driven, not extent-driven, so a
+    // console reachable as a direct child of such a wrapper still sizes the
+    // scrollbar (the console's own height would otherwise be 0 and defeat the
+    // console scrollbar).
+    auto consoleLinesH = [](GuiControl* c) {
+        float h = 0;
+        std::function<void(GuiControl*)> walk = [&](GuiControl* n) {
+            if (n->className.find("Console") != std::string::npos) {
+                float linesH = (float)Console::instance().getLog().size() * 12.0f;
+                float nh = n->posY + std::max(n->extentY, linesH);
+                if (nh > h) h = nh;
+            }
+            for (auto* ch : n->children) walk(ch);
+        };
+        walk(c);
+        return h;
+    };
+    for (auto* c : ctl->children) {
+        if (c->className.find("Console") != std::string::npos) {
             float linesH = (float)Console::instance().getLog().size() * 12.0f;
             float cy = c->posY + std::max(c->extentY, linesH);
             if (cy > maxY) maxY = cy;
@@ -896,12 +1026,14 @@ static void computeContentExtent(GuiControl* ctl) {
         } else {
             float cx = c->posX + c->extentX;
             float cy = c->posY + c->extentY;
+            // Content wrapper containing a console: fall back to the console's
+            // line-driven height so the console scrollbar has a usable range.
+            float wrapH = consoleLinesH(c);
+            if (wrapH > cy) cy = wrapH;
             if (cx > maxX) maxX = cx;
             if (cy > maxY) maxY = cy;
         }
-        for (auto* ch : c->children) recurse(ch);
-    };
-    for (auto* ch : ctl->children) recurse(ch);
+    }
     ctl->contentH = maxY;
     ctl->contentW = maxX;
 }
@@ -2156,10 +2288,16 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (ctl->menuOpen && !ctl->menuItems.empty())
             s_openPopups.push_back(ctl);
     } else if (cn == "GuiScrollCtrl") {
+        // A scroll ctrl nested directly inside another scroll ctrl acts as the
+        // T2 VirtualScrollCtrl: a transparent overlay that draws only its own
+        // scrollbars over the parent's already-painted content, rather than
+        // painting an opaque fill that would hide it.
+        bool isVirtualScroll = ctl->parent && ctl->parent->className == "GuiScrollCtrl";
         ColorF sc{0.18f,0.18f,0.22f,1};
         auto* prof = getProfile(ctl->profileName);
         if (prof) { auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), sc); }
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, sc);
+        if (!isVirtualScroll)
+            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, sc);
 
         // Save old content height to detect if user was at bottom
         float oldContentH = ctl->contentH;
@@ -2202,9 +2340,15 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                       (GLint)childClip.w, (GLint)childClip.h);
         }
 
-        // Render children at normal positions (each control uses scrollY directly)
+        // Render children at normal positions (each control uses scrollY directly).
+        // Nested scroll controls (VirtualScrollCtrl overlays) are drawn last so
+        // their scrollbars paint OVER sibling content instead of under it.
         for (auto* child : ctl->children)
-            renderControlRec(gr, child, canvas, 0, 0, &childClip);
+            if (!(child->className == "GuiScrollCtrl" && child->parent == ctl))
+                renderControlRec(gr, child, canvas, 0, 0, &childClip);
+        for (auto* child : ctl->children)
+            if (child->className == "GuiScrollCtrl" && child->parent == ctl)
+                renderControlRec(gr, child, canvas, 0, 0, &childClip);
 
         // Restore scissor
         if (useScissor) {
@@ -2214,43 +2358,139 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 glDisable(GL_SCISSOR_TEST);
         }
 
-        // Scrollbar thumb (vertical) with shell texture
-        auto* vBarTex = getShellTex(r, "shll_scroll_vertbar.png");
-        auto* vFieldTex = getShellTex(r, "shll_scroll_vertfield.png");
-        if (maxScroll > 0) {
-            float thumbH = ctl->extentY * (ctl->extentY / ctl->contentH);
-            if (thumbH < 16) thumbH = 16;
-            if (thumbH > ctl->extentY) thumbH = ctl->extentY;
-            float thumbY = (ctl->scrollY / maxScroll) * (ctl->extentY - thumbH);
-            float sbW = 12;
-            // Scroll field background
-            if (vFieldTex && vFieldTex->loaded)
-                r.drawTexturedRect({x + ctl->extentX - sbW, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, vFieldTex->id);
-            // Scrollbar thumb
-            if (vBarTex && vBarTex->loaded)
-                r.drawTexturedRect({x + ctl->extentX - sbW, y + thumbY, 0}, {x + ctl->extentX, y + thumbY + thumbH, 0}, vBarTex->id);
-            else
-                r.drawRectFill({x + ctl->extentX - sbW, y + thumbY, 0}, {x + ctl->extentX, y + thumbY + thumbH, 0}, {0.5f, 0.5f, 0.6f, 0.7f});
-        }
-        // Horizontal scrollbar with shell texture
-        auto* hBarTex = getShellTex(r, "shll_scroll_horzbar.png");
-        auto* hFieldTex = getShellTex(r, "shll_scroll_horzfield.png");
+        // Scrollbar (T2 shell skin): arrow buttons + 3-piece track + 3-piece
+        // thumb + scale corner, matching Tribes 2's ShellScrollCtrl draw order
+        // and exact geometry. Control-local layout with glow g=4, thickness=16,
+        // arrowLen=16:
+        //   upArrowRect  = (extX-20, 4, 16, 16)
+        //   downArrowRect= (extX-20, extY-20-(hasH?17:0), 16, 16)
+        //   the 24x24 arrow bitmap cells render at arrowRect.point - (g,g), so
+        //   they sit flush against the control's top/bottom edges
+        //   track: top piece at (extX-20, 20), center stretches down to the
+        //   down arrow, bottom piece at downArrowRect.y (later covered by the
+        //   down button); horizontal mirrored (track = ex-g-thickness = 20px).
         float maxScrollX = ctl->contentW - ctl->extentX;
-        if (maxScrollX > 0) {
+        bool hasV = maxScroll > 0 || ctl->vScrollBarMode == "alwaysOn";
+        bool hasH = maxScrollX > 0 || ctl->hScrollBarMode == "alwaysOn";
+        const ScrollTex& vField = getScrollTex(r, "shll_scroll_vertfield.png");
+        const ScrollTex& vBar = getScrollTex(r, "shll_scroll_vertbar.png");
+        const ScrollTex& vBtn = getScrollTex(r, "shll_scroll_vertbuttons.png");
+        const ScrollTex& hField = getScrollTex(r, "shll_scroll_horzfield.png");
+        const ScrollTex& hBar = getScrollTex(r, "shll_scroll_horzbar.png");
+        const ScrollTex& hBtn = getScrollTex(r, "shll_scroll_horzbuttons.png");
+        const ScrollTex& scale = getScrollTex(r, "shll_scroll_scale.png");
+        const float g = 4.0f;
+        if (hasV) {
+            float thickness = vField.cell(1, 0) ? (float)vField.cell(1, 0)->w : 16.0f;
+            float btnS = vBtn.cell(0, 0) ? (float)vBtn.cell(0, 0)->w : thickness + 8.0f;
+            float arrowLen = btnS - 2.0f * g;
+            float trackX = x + ctl->extentX - g - thickness;
+            float btnX = trackX - g;
+            float downArrowY = ctl->extentY - g - arrowLen - (hasH ? thickness + 1.0f : 0.0f);
+            float topH = vField.cell(0, 0) ? (float)vField.cell(0, 0)->h : 4.0f;
+            float botH = vField.cell(2, 0) ? (float)vField.cell(2, 0)->h : 4.0f;
+
+            // Up arrow flush at the top, then the 3-piece track.
+            if (vBtn.tex) drawT2Cell(r, vBtn, 0, 0, btnX, y, btnS, btnS);
+            drawT2Cell(r, vField, 0, 0, trackX, y + g + arrowLen, thickness, topH);
+            float midY = y + g + arrowLen + topH;
+            float midH = downArrowY - arrowLen - topH - botH;
+            if (midH > 0) drawT2Cell(r, vField, 1, 0, trackX, midY, thickness, midH);
+            drawT2Cell(r, vField, 2, 0, trackX, y + downArrowY, thickness, botH);
+
+            // Thumb: T2 sizes it max(base 6, view/content * trackLen) and glows
+            // 4px past the track on every side (24-wide cells).
+            float thumbFrac = ctl->contentH > 0 ? ctl->extentY / ctl->contentH : 1.0f;
+            float capT = vBar.cell(0, 0) ? (float)vBar.cell(0, 0)->h : 7.0f;
+            float capB = vBar.cell(2, 0) ? (float)vBar.cell(2, 0)->h : 7.0f;
+            float trackTop = g + arrowLen;
+            float trackLen = downArrowY - trackTop;
+            float baseThumb = capT + capB - 2.0f * g;
+            if (baseThumb < 6) baseThumb = 6;
+            float thumbH = thumbFrac * trackLen;
+            if (thumbH < baseThumb) thumbH = baseThumb;
+            if (thumbH > trackLen) thumbH = trackLen;
+            if (maxScroll > 0 && vBar.tex) {
+                float scrollPath = ctl->scrollY / maxScroll;
+                if (scrollPath < 0) scrollPath = 0;
+                if (scrollPath > 1) scrollPath = 1;
+                // Console content is bottom-anchored (scrollY=0 = newest lines),
+                // so its thumb runs bottom-up; every other control is
+                // top-anchored (scrollY=0 = first rows) and runs top-down.
+                std::function<bool(GuiControl*)> hasConsoleChild = [&](GuiControl* c) {
+                    for (auto* ch : c->children) {
+                        if (ch->className.find("Console") != std::string::npos) return true;
+                        if (hasConsoleChild(ch)) return true;
+                    }
+                    return false;
+                };
+                if (hasConsoleChild(ctl)) scrollPath = 1.0f - scrollPath;
+                float thumbW = vBar.cell(0, 0) ? (float)vBar.cell(0, 0)->w : thickness + 8.0f;
+                float thumbPos = trackTop + scrollPath * (trackLen - thumbH);
+                if (thumbPos < trackTop) thumbPos = trackTop;
+                if (thumbPos + thumbH > downArrowY) thumbPos = downArrowY - thumbH;
+                float midHt = thumbH - capT - capB + 2.0f * g;
+                drawT2Cell(r, vBar, 0, 0, btnX, y + thumbPos - g, thumbW, capT);
+                if (midHt > 0) drawT2Cell(r, vBar, 1, 0, btnX, y + thumbPos - g + capT, thumbW, midHt);
+                drawT2Cell(r, vBar, 2, 0, btnX, y + thumbPos - g + capT + midHt, thumbW, capB);
+            }
+
+            // Down arrow last so it covers the track's bottom edge.
+            if (vBtn.tex) drawT2Cell(r, vBtn, 1, 0, btnX, y + downArrowY - g, btnS, btnS);
+        }
+        // Horizontal scrollbar: left/right arrows + 3-piece track + 3-piece thumb.
+        if (hasH) {
             ctl->scrollX = (ctl->scrollX < 0) ? 0 : ctl->scrollX;
             if (ctl->scrollX > maxScrollX) ctl->scrollX = maxScrollX;
-            float thumbW = ctl->extentX * (ctl->extentX / ctl->contentW);
-            if (thumbW < 16) thumbW = 16;
-            if (thumbW > ctl->extentX) thumbW = ctl->extentX;
-            float thumbX = (1.0f - ctl->scrollX / maxScrollX) * (ctl->extentX - thumbW);
-            float sbH = 12;
-            float sbY2 = y + ctl->extentY - sbH;
-            if (hFieldTex && hFieldTex->loaded)
-                r.drawTexturedRect({x, sbY2, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, hFieldTex->id);
-            if (hBarTex && hBarTex->loaded)
-                r.drawTexturedRect({x + thumbX, sbY2, 0}, {x + thumbX + thumbW, sbY2 + sbH, 0}, hBarTex->id);
-            else
-                r.drawRectFill({x + thumbX, sbY2, 0}, {x + thumbX + thumbW, sbY2 + sbH, 0}, {0.5f, 0.5f, 0.6f, 0.7f});
+            float thickness = hField.cell(1, 0) ? (float)hField.cell(1, 0)->h : 16.0f;
+            float btnS = hBtn.cell(0, 0) ? (float)hBtn.cell(0, 0)->h : thickness + 8.0f;
+            float arrowLen = btnS - 2.0f * g;
+            float trackY = y + ctl->extentY - g - thickness - 1.0f;
+            float rightArrowX = ctl->extentX - g - (hasV ? thickness : 0.0f) - arrowLen;
+            float trackL = g + arrowLen;
+            float leftW = hField.cell(0, 0) ? (float)hField.cell(0, 0)->w : 4.0f;
+            float rightW = hField.cell(2, 0) ? (float)hField.cell(2, 0)->w : 4.0f;
+            float btnY = y + trackY - g;
+
+            // Left arrow flush at the left, then the 3-piece track.
+            if (hBtn.tex) drawT2Cell(r, hBtn, 0, 0, x, btnY, btnS, btnS);
+            drawT2Cell(r, hField, 0, 0, x + trackL, y + trackY, leftW, thickness);
+            float midX = x + trackL + leftW;
+            float midW = rightArrowX - arrowLen - leftW - rightW;
+            if (midW > 0) drawT2Cell(r, hField, 1, 0, midX, y + trackY, midW, thickness);
+            drawT2Cell(r, hField, 2, 0, x + rightArrowX, y + trackY, rightW, thickness);
+
+            // Thumb: size = max(base 6, view/content * trackLen), scrollX=0 = left.
+            float thumbFrac = ctl->contentW > 0 ? ctl->extentX / ctl->contentW : 1.0f;
+            float capL = hBar.cell(0, 0) ? (float)hBar.cell(0, 0)->w : 7.0f;
+            float capR = hBar.cell(2, 0) ? (float)hBar.cell(2, 0)->w : 7.0f;
+            float trackLen = rightArrowX - trackL;
+            float baseThumb = capL + capR - 2.0f * g;
+            if (baseThumb < 6) baseThumb = 6;
+            float thumbW = thumbFrac * trackLen;
+            if (thumbW < baseThumb) thumbW = baseThumb;
+            if (thumbW > trackLen) thumbW = trackLen;
+            if (maxScrollX > 0 && hBar.tex) {
+                float scrollPath = ctl->scrollX / maxScrollX;
+                if (scrollPath < 0) scrollPath = 0;
+                if (scrollPath > 1) scrollPath = 1;
+                float thumbPos = trackL + scrollPath * (trackLen - thumbW);
+                if (thumbPos < trackL) thumbPos = trackL;
+                if (thumbPos + thumbW > rightArrowX) thumbPos = rightArrowX - thumbW;
+                float thumbH = hBar.cell(0, 0) ? (float)hBar.cell(0, 0)->h : thickness + 8.0f;
+                float midW2 = thumbW - capL - capR + 2.0f * g;
+                drawT2Cell(r, hBar, 0, 0, x + thumbPos - g, btnY, capL, thumbH);
+                if (midW2 > 0) drawT2Cell(r, hBar, 1, 0, x + thumbPos - g + capL, btnY, midW2, thumbH);
+                drawT2Cell(r, hBar, 2, 0, x + thumbPos - g + capL + midW2, btnY, capR, thumbH);
+            }
+
+            // Right arrow last, then the scale corner (T2 scale.png) joining the
+            // two bars at the bottom-right.
+            if (hBtn.tex) drawT2Cell(r, hBtn, 1, 0, x + rightArrowX - g, btnY, btnS, btnS);
+            if (hasV && scale.tex) {
+                const T2Cell* cc = scale.cell(0, 3);
+                if (cc) drawT2Cell(r, scale, 0, 3, x + rightArrowX + arrowLen - g, btnY, (float)cc->w, (float)cc->h);
+            }
         }
         return; // Don't do default child rendering below
     } else if (cn == "GuiServerBrowser") {
@@ -3460,6 +3700,62 @@ void GuiRenderer::handleDragRelease() {
 void GuiRenderer::handleKeyboard() {
     auto& input = Engine::instance().platform().input();
     static bool prevBS = false, prevEnter = false, prevEsc = false;
+    // Per-key previous-state tracking for the GuiInputCtrl capture below.
+    // Mirroring the engine's ESC/~ edge handling (keysDown + prevX) works even
+    // when the nested script event pump clears keyPressQueue in between frames
+    // (a plain queue-pop missed fast taps in deep dialog stacks).
+    static bool prevAnyKey[512]{};
+    static bool prevGotKey = false;
+
+    // GuiInputCtrl key capture (e.g. RemapDlg's RemapInputCtrl): while the
+    // topmost dialog contains a GuiInputCtrl, every freshly-pressed key is
+    // forwarded to <ctrl>::onInputEvent("keyboard", keyName) and consumed, so
+    // the stock script can cancel on Escape or assign the chosen key.
+    GuiControl* capture = activeKeyCapture();
+    if (capture) {
+        // Track edges over all scancodes (skip the small set of modifiers).
+        int hitSc = -1;
+        for (int s = 0; s < 512; ++s) {
+            if (s == SCANCODE_LCTRL || s == SCANCODE_RCTRL ||
+                s == SCANCODE_LSHIFT || s == SCANCODE_RSHIFT ||
+                s == SCANCODE_LALT || s == SCANCODE_RALT ||
+                s == SCANCODE_LGUI || s == SCANCODE_RGUI)
+                continue;
+            if (input.keysDown[s] && !prevAnyKey[s]) { hitSc = s; break; }
+        }
+        bool gotKey = (hitSc >= 0);
+        // When the capture is just starting (activeKeyCapture became true), we
+        // must not mis-read keys that were already held as a fresh binding;
+        // prevAnyKey is seeded by the prior no-capture frames, so only a new
+        // press this frame counts.
+        if (gotKey && !capture->name.empty()) {
+            const char* key = scancodeToKeyName(hitSc);
+            auto* ts = Engine::instance().script().ts();
+            if (key[0] && ts && ts->hasFunction(capture->name + "::onInputEvent")) {
+                ts->callFunction(capture->name + "::onInputEvent",
+                    {VMValue(capture->name), VMValue(std::string("keyboard")), VMValue(std::string(key))});
+            }
+            // Consume the key: mark it handled so it does not also trigger
+            // unrelated global handlers this frame, and clear the input fields
+            // so no other path acts on this keypress. The consumed flag stays
+            // set until the physical key is released, so global edge handlers
+            // (e.g. the ~ console toggle) don't re-trigger if the keydown is
+            // re-delivered after the capture dialog has already been popped.
+            input.keyPressQueue.clear();
+            input.keysDown[hitSc] = false;
+            input.consumedSc[hitSc] = true;
+            std::fill(std::begin(prevAnyKey), std::end(prevAnyKey), false);
+        }
+        prevGotKey = gotKey;
+        // Snapshot this frame's state for edge detection next frame.
+        for (int s = 0; s < 512; ++s) prevAnyKey[s] = input.keysDown[s];
+        return;
+    }
+    // Not capturing: keep prevAnyKey in sync so a later capture doesn't treat
+    // a currently-held key as a fresh binding.
+    if (!prevGotKey)
+        for (int s = 0; s < 512; ++s) prevAnyKey[s] = input.keysDown[s];
+    prevGotKey = false;
 
     // T2: Enter on a focused text control fires its altCommand/command/onClick
     if (focusedCtrl) {
@@ -3787,6 +4083,23 @@ bool GuiRenderer::isDialogActive(const std::string& name) {
     for (auto* dlg : dialogStack)
         if (dlg->name == name) return true;
     return false;
+}
+GuiControl* GuiRenderer::activeKeyCapture() const {
+    // The stack bottom-up is: content, base dialog(s), overlays, and finally
+    // the persistent LaunchToolbarDlg chrome (kept on top). A GuiInputCtrl
+    // capture lives in the topmost real overlay (e.g. RemapDlg), so search
+    // from the top down but skip the non-capturing chrome bar.
+    for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it) {
+        GuiControl* top = *it;
+        if (!top || top->name == "LaunchToolbarDlg") continue;
+        std::vector<GuiControl*> stack = top->children;
+        while (!stack.empty()) {
+            GuiControl* c = stack.back(); stack.pop_back();
+            if (c->className == "GuiInputCtrl") return c;
+            for (auto* ch : c->children) stack.push_back(ch);
+        }
+    }
+    return nullptr;
 }
 
 GuiControl* GuiRenderer::findControl(const std::string& name) {

@@ -39,7 +39,12 @@ constexpr int SCANCODE_RIGHT   = 79;
 constexpr int SCANCODE_DELETE  = 76;
 constexpr int SCANCODE_LCTRL  = 224;
 constexpr int SCANCODE_RCTRL  = 228;
-
+constexpr int SCANCODE_LSHIFT = 225;
+constexpr int SCANCODE_LALT   = 226;
+constexpr int SCANCODE_LGUI   = 227;
+constexpr int SCANCODE_RSHIFT = 229;
+constexpr int SCANCODE_RALT   = 230;
+constexpr int SCANCODE_RGUI   = 231;
 struct PlatformConfig {
     std::string title = "Tribes 2";
     int32_t width = 1024;
@@ -51,6 +56,11 @@ struct PlatformConfig {
 
 struct InputState {
     bool keysDown[512]{};
+    // Scancodes consumed for this key press (e.g. a GuiInputCtrl capture
+    // swallowed the key). Held until the physical key is released so global
+    // handlers (console ~ toggle, etc.) don't re-trigger on a re-delivered
+    // keydown event after the capture dialog has already been popped.
+    bool consumedSc[512]{};
     bool mouseButtons[8]{};
     int32_t mouseX{}, mouseY{}, mouseDeltaX{}, mouseDeltaY{};
     int32_t mouseWheel{};

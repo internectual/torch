@@ -88,7 +88,10 @@ bool Platform::processEvents() {
                 }
                 break;
             case SDL_EVENT_KEY_UP:
-                if (e.key.scancode < 512) inputState.keysDown[e.key.scancode] = false;
+                if (e.key.scancode < 512) {
+                    inputState.keysDown[e.key.scancode] = false;
+                    inputState.consumedSc[e.key.scancode] = false;
+                }
                 break;
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
                 if (e.button.button < 8) inputState.mouseButtons[e.button.button] = true;
