@@ -144,6 +144,7 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  -data <dir>        Tribes 2 data directory\n");
             fprintf(stdout, "  -demo <file.rec>   Play a demo recording\n");
             fprintf(stdout, "  -preview <map>     Load a map and take a screenshot\n");
+            fprintf(stdout, "  -mapper <map>      Load a map for inspection (t2mapper-style)\n");
             fprintf(stdout, "  -campos x y z      Preview camera position\n");
             fprintf(stdout, "  -camtarget x y z   Preview camera target\n");
             fprintf(stdout, "  -testshape <path>  Load and display a GLB shape\n");
@@ -173,6 +174,12 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  Pause              Debug overlay\n");
             fprintf(stdout, "  ESC                Pause / Quit\n");
             fprintf(stdout, "  1-0                Select weapon\n");
+            fprintf(stdout, "  -mapper mode:\n");
+            fprintf(stdout, "  WASD+Mouse         Free-fly camera\n");
+            fprintf(stdout, "  Shift              3x camera speed\n");
+            fprintf(stdout, "  Ctrl               0.25x camera speed\n");
+            fprintf(stdout, "  Space/Ctrl         Move up/down\n");
+            fprintf(stdout, "  ESC                Quit\n");
             std::exit(0);
         }
         if (strcmp(argv[i], "-version") == 0 || strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
@@ -320,6 +327,7 @@ bool Engine::init(int argc, char* argv[]) {
         if (strcmp(argv[i], "-nologin") == 0) noLogin = true;
         if (strcmp(argv[i], "-debug") == 0) Console::instance().setLogLevel(LogLevel::Debug);
         if (strcmp(argv[i], "-preview") == 0 && i + 1 < argc) previewMap = argv[i + 1];
+        if (strcmp(argv[i], "-mapper") == 0 && i + 1 < argc) { mapperMap = argv[i + 1]; mapperMode = true; noLogin = true; }
         if (strcmp(argv[i], "-campos") == 0 && i + 3 < argc) {
             previewCamPos.x = (float)atof(argv[i + 1]);
             previewCamPos.y = (float)atof(argv[i + 2]);
@@ -1149,14 +1157,19 @@ bool Engine::init(int argc, char* argv[]) {
             Console::instance().setVariable("$pref::AcceptedEULA", "1");
             Console::instance().setVariable("$LaunchMode", "Offline");
         }
-        std::string initPath = Console::instance().getStringVariable("initScript", "");
-        auto initData = fs.read(initPath.c_str());
-        if (!initData.empty()) {
-            std::string src((const char*)initData.data(), initData.size());
-            scr->ts()->executeNested(src, initPath);
-            Console::instance().printf(LogLevel::Info, "Init script: %s (%zu bytes)", initPath.c_str(), initData.size());
+        // -mapper: skip the init script entirely — no shell/GUI, just raw mission data
+        if (mapperMode) {
+            Console::instance().printf(LogLevel::Info, "Mapper mode: skipping init script (no shell/GUI)");
         } else {
-            Console::instance().printf(LogLevel::Warn, "Init script not found: %s", initPath.c_str());
+            std::string initPath = Console::instance().getStringVariable("initScript", "");
+            auto initData = fs.read(initPath.c_str());
+            if (!initData.empty()) {
+                std::string src((const char*)initData.data(), initData.size());
+                scr->ts()->executeNested(src, initPath);
+                Console::instance().printf(LogLevel::Info, "Init script: %s (%zu bytes)", initPath.c_str(), initData.size());
+            } else {
+                Console::instance().printf(LogLevel::Warn, "Init script not found: %s", initPath.c_str());
+            }
         }
     }
     // Boot scripts (incl. autoexec default-seeders) may export() before real
@@ -1345,10 +1358,13 @@ bool Engine::init(int argc, char* argv[]) {
         g->menu().setActive(false);
         gui->popDialog("NewWarriorDlg");
         plat->processEvents();
-        ren->beginFrame({0.15f, 0.15f, 0.2f, 1.0f});
-        if (gui) gui->render();
-        ren->endFrame();
-        plat->swapBuffers();
+        // In mapper mode, skip the dev panel render — we render the 3D world only
+        if (!mapperMode) {
+            ren->beginFrame({0.15f, 0.15f, 0.2f, 1.0f});
+            if (gui) gui->render();
+            ren->endFrame();
+            plat->swapBuffers();
+        }
     } else if (demoPath.empty() && previewMap.empty() && !shapeViewerMode) {
         Console::instance().printf(LogLevel::Info, "Pushing login dialog");
         gui->pushDialog("LoginDlg");
@@ -1385,6 +1401,48 @@ bool Engine::init(int argc, char* argv[]) {
     // -demo mode: load the demo (playback happens in the render loop)
     if (!demoPath.empty()) {
         g->playDemo(demoPath.c_str());
+    }
+
+    // -mapper mode: load a mission for inspection without gameplay
+    if (mapperMode) {
+        Console::instance().setVariable("$SkipLogin", "true");
+        Console::instance().setVariable("$pref::SkipIntro", "true");
+        Console::instance().setVariable("$pref::SkipGGIntro", "true");
+        Console::instance().setVariable("$LaunchMode", "Offline");
+        Console::instance().setVariable("$PlayingOnline", "0");
+        Console::instance().setVariable("Engine::noLogin", "1");
+        Console::instance().printf(LogLevel::Info, "Mapper mode: loading '%s' for inspection", mapperMap.c_str());
+        g->setMapperMode(true);
+        g->setState(Game::Loading);
+        if (g->world().load(mapperMap.c_str())) {
+            g->setState(Game::Playing);
+            // Set up camera over terrain center (like preview mode)
+            auto& tb = *g->world().terrain();
+            float half = tb.size * tb.squareSize * 0.5f;
+            float cx = tb.worldOffset.x + half;
+            float cz = tb.worldOffset.z + half;
+            float h = g->world().getHeight(cx, cz);
+            if (h < 0) h = 0;
+            previewCamTarget = {cx, h, cz};
+            previewCamPos = {cx, h + half * 0.5f, cz - half * 0.8f};
+            usePreviewCam = true;
+            // Initialize free-fly camera from preview camera position
+            g->setFreeCamActive(true);
+            g->setFreeCamPos(previewCamPos);
+            g->setFreeCamTarget(previewCamTarget);
+            Console::instance().printf(LogLevel::Info, "Mapper mode: free-fly camera active (WASD + mouse)");
+        } else {
+            Console::instance().printf(LogLevel::Error, "Mapper mode: failed to load map '%s'", mapperMap.c_str());
+            quit();
+        }
+        // Hide shell dialogs so only the 3D world is visible
+        if (gui) {
+            auto dialogs = gui->dialogStackForDebug();
+            for (auto it = dialogs.rbegin(); it != dialogs.rend(); ++it) {
+                GuiControl* d = *it;
+                if (d) gui->popDialog(d->name);
+            }
+        }
     }
 
     // Load key bindings
@@ -1478,6 +1536,9 @@ void Engine::run() {
                     g->shapeViewerActive = false;
                     g->shapeViewerShape = DTSShape{};
                     Console::instance().printf(LogLevel::Info, "Shape Viewer: closed");
+                } else if (g->isMapperMode()) {
+                    // In mapper mode, ESC quits (no pause menu or shell)
+                    quit();
                 } else if (g->state() != Game::MenuScreen) {
                     g->togglePauseGame();
                 }
@@ -1740,7 +1801,7 @@ void Engine::run() {
                         scrolled = true;
                     }
                 }
-                if (!scrolled && weaponCycleCooldown <= 0) {
+                if (!scrolled && weaponCycleCooldown <= 0 && !g->isMapperMode()) {
                     g->player().weaponCycle(wheel > 0 ? 1 : -1);
                     weaponCycleCooldown = 0.2f;
                 }
@@ -1779,7 +1840,7 @@ void Engine::run() {
                 static int lastNumKey = 0;
                 for (int nk = 0; nk < 9; nk++) {
                     if (keys[30 + nk]) {
-                        if (lastNumKey != nk + 1) { g->player().selectWeapon(nk); lastNumKey = nk + 1; }
+                        if (lastNumKey != nk + 1 && !g->isMapperMode()) { g->player().selectWeapon(nk); lastNumKey = nk + 1; }
                         break;
                     }
                     if (lastNumKey && !keys[29 + lastNumKey]) lastNumKey = 0;
@@ -1822,8 +1883,8 @@ void Engine::run() {
             }
         }
 
-        // Skip the 2D GUI/dev-panel pass for shape preview or shape viewer
-        if (g->isTestShapeLoaded() || g->isShapeViewerActive()) { plat->swapBuffers(); continue; }
+        // Skip the 2D GUI/dev-panel pass for shape preview, shape viewer, or mapper mode
+        if (g->isTestShapeLoaded() || g->isShapeViewerActive() || mapperMode) { plat->swapBuffers(); continue; }
 
         // ─── Dev panel (always rendered) ───────────────────────────────────
         g->menu().update(dt);
@@ -2663,7 +2724,10 @@ void Engine::run() {
         fpsTimer += dt;
         if (fpsTimer >= 1.0f) {
             char title[128];
-            snprintf(title, sizeof(title), "Torch - %d FPS tab=%d", frameCount, g_debugTab);
+            if (mapperMode)
+                snprintf(title, sizeof(title), "Torch Mapper Mode - %s - %d FPS", mapperMap.c_str(), frameCount);
+            else
+                snprintf(title, sizeof(title), "Torch - %d FPS tab=%d", frameCount, g_debugTab);
             plat->setTitle(title);
             //Console::instance().printf(LogLevel::Debug, "Heartbeat: %d FPS, dialogs=%zu", frameCount, gui ? gui->dialogCount() : 0);
             frameCount = 0;

@@ -55,6 +55,8 @@ public:
     std::string testShapePath;
     std::string testDifPath;
     bool shapeViewerMode = false;
+    std::string mapperMap;  // map name for -mapper mode
+    bool mapperMode = false;
     std::vector<std::string> preloadFiles;
     std::string cmdArgs;
     std::string previewImgPath;

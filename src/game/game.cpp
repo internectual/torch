@@ -1131,6 +1131,7 @@ void World::update(float dt) {
 
         // Check player proximity
         auto& game = Engine::instance().game();
+        if (game.isMapperMode()) continue;  // No player in mapper mode
         const Point3F& ppos = game.player().position();
         float dx = item.pos.x - ppos.x;
         float dy = item.pos.y - ppos.y;
@@ -1251,6 +1252,7 @@ void World::update(float dt) {
             // Apply splash damage near impact
             if (p.hasImpacted && p.splashRadius > 0) {
             auto& game = Engine::instance().game();
+            if (!game.isMapperMode()) {  // No player in mapper mode
             const Point3F& ppos = game.player().position();
             float dx = p.pos.x - ppos.x;
             float dy = p.pos.y - ppos.y;
@@ -1260,6 +1262,7 @@ void World::update(float dt) {
                 float factor = 1.0f - dist / p.splashRadius;
                 game.player().applyDamage(p.damage * factor * 0.5f);
             }
+            } // end mapper mode guard
             // Splash damage bots
             for (auto& b : game.world().bots) {
                 if (!b.alive) continue;
@@ -1284,6 +1287,7 @@ void World::update(float dt) {
     );
 
     // Update bots
+    if (!Engine::instance().game().isMapperMode()) {
     auto& player = Engine::instance().game().player();
     Point3F ppos = player.position();
     for (auto& b : bots) {
@@ -1326,6 +1330,7 @@ void World::update(float dt) {
             }
         }
     }
+    } // end mapper mode guard for bots
 
     // Advance animation time for world objects
     for (auto& obj : worldObjects) {
@@ -2303,6 +2308,43 @@ void Game::update(float dt) {
             return; // skip normal game logic during demo playback
         }
 
+        // Mapper mode: free-fly camera only, no player gameplay
+        if (mapperMode) {
+            if (freeCamActive) {
+                float camSpeed = 50.0f * dt;
+                // Speed multipliers: Shift = 3x, Ctrl = 0.25x
+                auto& plat = Engine::instance().platform();
+                auto& keys = plat.input().keysDown;
+                if (keys[SCANCODE_LSHIFT] || keys[SCANCODE_RSHIFT]) camSpeed *= 3.0f;
+                if (keys[SCANCODE_LCTRL] || keys[SCANCODE_RCTRL]) camSpeed *= 0.25f;
+                float yaw = freeCamRot.z;
+                float pitch = freeCamRot.x;
+                yaw += currentInput.lookDelta.y;
+                pitch -= currentInput.lookDelta.x;
+                if (pitch > 1.5f) pitch = 1.5f;
+                if (pitch < -1.5f) pitch = -1.5f;
+                freeCamRot = {pitch, 0, yaw};
+                Point3F fwd = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+                Point3F right = {std::cos(yaw), 0, -std::sin(yaw)};
+                if (currentInput.forward) { freeCamPos.x += fwd.x * camSpeed; freeCamPos.y += fwd.y * camSpeed; freeCamPos.z += fwd.z * camSpeed; }
+                if (currentInput.backward) { freeCamPos.x -= fwd.x * camSpeed; freeCamPos.y -= fwd.y * camSpeed; freeCamPos.z -= fwd.z * camSpeed; }
+                if (currentInput.left) { freeCamPos.x -= right.x * camSpeed; freeCamPos.z -= right.z * camSpeed; }
+                if (currentInput.right) { freeCamPos.x += right.x * camSpeed; freeCamPos.z += right.z * camSpeed; }
+                if (currentInput.jump) freeCamPos.y += camSpeed;
+                if (currentInput.jet) freeCamPos.y -= camSpeed;
+                freeCamTarget = {freeCamPos.x + fwd.x, freeCamPos.y + fwd.y, freeCamPos.z + fwd.z};
+            }
+            // Update world (projectiles, items, etc.)
+            w->update(dt);
+            // Update audio listener from camera
+            auto& audio = Engine::instance().audio();
+            if (audio.config().enabled) {
+                Point3F fwd = {std::sin(freeCamRot.z) * std::cos(freeCamRot.x), std::sin(freeCamRot.x), std::cos(freeCamRot.z) * std::cos(freeCamRot.x)};
+                audio.update(freeCamPos, {0,0,0}, fwd, {0,1,0});
+            }
+            return;
+        }
+
         // F1 toggle for free camera (edge-triggered)
         static bool prevFreeCam = false;
         if (currentInput.freeCam && !prevFreeCam) {
@@ -2843,7 +2885,7 @@ void Game::render(float dt) {
     if (pl && !freeCamActive && !demoPlaying && !testShapeLoaded) pl->render();
     } // end if (!shapeViewerActive && !testShapeLoaded)
 
-    if (hud && gameState == Playing) hud->render(this);
+    if (hud && gameState == Playing && !mapperMode) hud->render(this);
 
     // Connection status overlay
     if (cfg.online && activeConn && activeConn->isConnected() && liveGhosts.size() == 0) {

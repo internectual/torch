@@ -280,6 +280,14 @@ public:
     World& world() { return *w; }
     bool isTestShapeLoaded() const { return testShapeLoaded; }
 
+    // Mapper mode access
+    bool isMapperMode() const { return mapperMode; }
+    void setMapperMode(bool m) { mapperMode = m; }
+    void setFreeCamPos(const Point3F& p) { freeCamPos = p; }
+    void setFreeCamTarget(const Point3F& t) { freeCamTarget = t; }
+    void setFreeCamActive(bool a) { freeCamActive = a; }
+    bool isFreeCamActive() const { return freeCamActive; }
+
     enum State {
         MenuScreen,
         Loading,
@@ -389,6 +397,7 @@ private:
     Point3F freeCamPos{0, 10, 0};
     Point3F freeCamTarget{0, 10, -1};
     Point3F freeCamRot{0, 0, 0};
+    bool mapperMode = false;  // -mapper: no player, free-fly camera only
     GameServer server;
     Connection* activeConn{};
 
