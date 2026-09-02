@@ -2319,8 +2319,8 @@ void Game::update(float dt) {
                 if (keys[SCANCODE_LCTRL] || keys[SCANCODE_RCTRL]) camSpeed *= 0.25f;
                 float yaw = freeCamRot.z;
                 float pitch = freeCamRot.x;
-                yaw += currentInput.lookDelta.y;
-                pitch -= currentInput.lookDelta.x;
+                yaw -= currentInput.lookDelta.y;        // mouse X (horiz) → yaw (negated = natural left/right)
+                pitch -= currentInput.lookDelta.x;      // mouse Y (vert) → pitch
                 if (pitch > 1.5f) pitch = 1.5f;
                 if (pitch < -1.5f) pitch = -1.5f;
                 freeCamRot = {pitch, 0, yaw};
@@ -2328,8 +2328,8 @@ void Game::update(float dt) {
                 Point3F right = {std::cos(yaw), 0, -std::sin(yaw)};
                 if (currentInput.forward) { freeCamPos.x += fwd.x * camSpeed; freeCamPos.y += fwd.y * camSpeed; freeCamPos.z += fwd.z * camSpeed; }
                 if (currentInput.backward) { freeCamPos.x -= fwd.x * camSpeed; freeCamPos.y -= fwd.y * camSpeed; freeCamPos.z -= fwd.z * camSpeed; }
-                if (currentInput.left) { freeCamPos.x -= right.x * camSpeed; freeCamPos.z -= right.z * camSpeed; }
-                if (currentInput.right) { freeCamPos.x += right.x * camSpeed; freeCamPos.z += right.z * camSpeed; }
+                if (currentInput.left) { freeCamPos.x += right.x * camSpeed; freeCamPos.z += right.z * camSpeed; }
+                if (currentInput.right) { freeCamPos.x -= right.x * camSpeed; freeCamPos.z -= right.z * camSpeed; }
                 if (currentInput.jump) freeCamPos.y += camSpeed;
                 if (currentInput.jet) freeCamPos.y -= camSpeed;
                 freeCamTarget = {freeCamPos.x + fwd.x, freeCamPos.y + fwd.y, freeCamPos.z + fwd.z};

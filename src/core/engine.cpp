@@ -1424,7 +1424,9 @@ bool Engine::init(int argc, char* argv[]) {
             float h = g->world().getHeight(cx, cz);
             if (h < 0) h = 0;
             previewCamTarget = {cx, h, cz};
-            previewCamPos = {cx, h + half * 0.5f, cz - half * 0.8f};
+            // Position camera at a reasonable height above terrain for inspection view
+            float camHeight = h + 80.0f;
+            previewCamPos = {cx, camHeight, cz - half * 0.4f};
             usePreviewCam = true;
             // Initialize free-fly camera from preview camera position
             g->setFreeCamActive(true);

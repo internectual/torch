@@ -266,8 +266,11 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
             if (pos + 2 <= size) {
                 uint16_t raw = data[pos] | ((uint16_t)data[pos + 1] << 8);
                 pos += 2;
-                // Convert from T2 height units (usually 0-65535) to world units
-                float h = (float)raw / 65535.0f * 200.0f - 100.0f;
+                // Convert from T2 11.5 fixed-point heightfield to world units.
+                // Tribes2.exe multiplies stored shorts by exactly 0.03125 (= 1/32),
+                // NOT by 1/65535 normalization. Using the wrong scale produced
+                // terrain with ~200x exaggeration and inverted elevations.
+                float h = (float)raw / 32.0f;
                 heights[z * TERRAIN_SIZE + x] = h;
                 if (std::abs(h) > maxH) maxH = std::abs(h);
             }
@@ -345,40 +348,46 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
     for (int i = 0; i < loadLayers; i++) {
         Texture tex;
         // Convert terrain.X.Y.Z → textures/terrain/X.Y.Z
+        // Also try textures/terrain/ prefix for names like "LushWorld.RockLight"
         std::string search = textureNames[i];
+        std::vector<std::string> searchPaths;
         if (search.compare(0, 8, "terrain.") == 0)
-            search = "textures/terrain/" + search.substr(8);
-        else
-            search = "textures/" + search;
-        // Try original case first, then lowercase
-        for (auto* ext : exts) {
-            auto d = fs.read((search + ext).c_str());
-            if (!d.empty()) {
-                if (std::strcmp(ext, ".bm8") == 0)
-                    tex.loadBM8(d.data(), d.size());
-                else
-                    tex.load(d.data(), d.size());
-                break;
-            }
+            searchPaths.push_back("textures/terrain/" + search.substr(8));
+        else {
+            searchPaths.push_back("textures/terrain/" + search);
+            searchPaths.push_back("textures/" + search);
         }
-        if (!tex.loaded) {
-            std::string lower = search;
-            for (auto& c : lower) c = std::tolower(c);
+        // Try each search path with each extension, in original case then lowercase
+        for (const auto& sp : searchPaths) {
+            bool found = false;
             for (auto* ext : exts) {
-                auto d = fs.read((lower + ext).c_str());
+                auto d = fs.read((sp + ext).c_str());
                 if (!d.empty()) {
                     if (std::strcmp(ext, ".bm8") == 0)
                         tex.loadBM8(d.data(), d.size());
                     else
                         tex.load(d.data(), d.size());
+                    found = true;
                     break;
                 }
             }
+            if (!found) {
+                std::string lower = sp;
+                for (auto& c : lower) c = std::tolower(c);
+                for (auto* ext : exts) {
+                    auto d = fs.read((lower + ext).c_str());
+                    if (!d.empty()) {
+                        if (std::strcmp(ext, ".bm8") == 0)
+                            tex.loadBM8(d.data(), d.size());
+                        else
+                            tex.load(d.data(), d.size());
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (tex.loaded) break;
         }
-        if (tex.loaded)
-            Console::instance().printf(LogLevel::Debug, "  terrain tex loaded: %s", search.c_str());
-        else
-            Console::instance().printf(LogLevel::Debug, "  terrain tex not found: %s", search.c_str());
         detailTextures.push_back(std::move(tex));
     }
 
@@ -387,41 +396,46 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
         Texture tex;
         std::string baseName = textureNames[i];
         // Convert terrain.X.Y.Z → textures/terrain/X.Y.Z
+        // Also try textures/terrain/ prefix for names like "LushWorld.RockLight"
+        std::vector<std::string> searchPaths;
         if (baseName.compare(0, 8, "terrain.") == 0)
-            baseName = "textures/terrain/" + baseName.substr(8);
-        else
-            baseName = "textures/" + baseName;
-        // Try normal map variant: <base>_normal
-        std::string normalSearch = baseName + "_normal";
-        for (auto* ext : exts) {
-            auto d = fs.read((normalSearch + ext).c_str());
-            if (!d.empty()) {
-                if (std::strcmp(ext, ".bm8") == 0)
-                    tex.loadBM8(d.data(), d.size());
-                else
-                    tex.load(d.data(), d.size());
-                break;
-            }
+            searchPaths.push_back("textures/terrain/" + baseName.substr(8));
+        else {
+            searchPaths.push_back("textures/terrain/" + baseName);
+            searchPaths.push_back("textures/" + baseName);
         }
-        // Fallback to lowercase name
-        if (!tex.loaded) {
-            std::string lower = normalSearch;
-            for (auto& c : lower) c = std::tolower(c);
+        std::string normalSuffix = "_normal";
+        for (const auto& sp : searchPaths) {
+            std::string normalSearch = sp + normalSuffix;
+            bool found = false;
             for (auto* ext : exts) {
-                auto d = fs.read((lower + ext).c_str());
+                auto d = fs.read((normalSearch + ext).c_str());
                 if (!d.empty()) {
                     if (std::strcmp(ext, ".bm8") == 0)
                         tex.loadBM8(d.data(), d.size());
                     else
                         tex.load(d.data(), d.size());
+                    found = true;
                     break;
                 }
             }
+            if (!found) {
+                std::string lower = normalSearch;
+                for (auto& c : lower) c = std::tolower(c);
+                for (auto* ext : exts) {
+                    auto d = fs.read((lower + ext).c_str());
+                    if (!d.empty()) {
+                        if (std::strcmp(ext, ".bm8") == 0)
+                            tex.loadBM8(d.data(), d.size());
+                        else
+                            tex.load(d.data(), d.size());
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (tex.loaded) break;
         }
-        if (tex.loaded)
-            Console::instance().printf(LogLevel::Debug, "  terrain normal tex loaded: %s", normalSearch.c_str());
-        else
-            Console::instance().printf(LogLevel::Debug, "  terrain normal tex not found: %s", normalSearch.c_str());
         normalTextures.push_back(std::move(tex));
     }
     // Pad normalTextures to match detail texture count (max 6)
@@ -846,6 +860,8 @@ void Sky::load(const std::vector<std::string>& faces) {
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+    loaded = true;
 
     // Skybox cube
     float skyVerts[] = {
