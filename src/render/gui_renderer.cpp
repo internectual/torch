@@ -986,53 +986,65 @@ static void computeContentExtent(GuiControl* ctl) {
     auto* font = Engine::instance().renderer().getFont();
     float textListLineH = font ? font->charHeight + 2 : 14;
     // T2 sizes the scroll region from DIRECT children only (a content control
-    // carries its own extent). Do not recurse into grandchildren — that would
-    // let a distant (e.g. 840-wide decor) child blow up sibling scrollbars.
-    // The one exception: a bare content wrapper (GuiScrollContentCtrl) around a
-    // GuiConsole. Console content is line-driven, not extent-driven, so a
-    // console reachable as a direct child of such a wrapper still sizes the
-    // scrollbar (the console's own height would otherwise be 0 and defeat the
-    // console scrollbar).
-    auto consoleLinesH = [](GuiControl* c) {
-        float h = 0;
-        std::function<void(GuiControl*)> walk = [&](GuiControl* n) {
-            if (n->className.find("Console") != std::string::npos) {
-                float linesH = (float)Console::instance().getLog().size() * 12.0f;
-                float nh = n->posY + std::max(n->extentY, linesH);
-                if (nh > h) h = nh;
+    // carries its own extent). Do not recurse through a nested GuiScrollCtrl —
+    // that would let a distant (e.g. 840-wide decor) child blow up sibling
+    // scrollbars. The exceptions, handled below:
+    //   - A content wrapper (GuiScrollContentCtrl / VirtualScrollContentCtrl)
+    //     is a layout scaffold: its own extent is not the real content size
+    //     (e.g. a fixed 210x239 around a mission list that grows with rows).
+    //     Measure its DIRECT children instead so the wrapper's scrollbar
+    //     reflects the actual list rows / wide content inside.
+    //   - A GuiConsole is line-driven, not extent-driven, so log lines size
+    //     the scrollbar (the console's own height would otherwise be 0).
+    //     Its width stays clamped to the viewport so long lines can't create
+    //     a bogus horizontal scroll.
+    std::function<void(GuiControl*, float&, float&, bool&)> measure =
+        [&](GuiControl* n, float& w, float& h, bool& hasConsole) {
+        w = n->extentX;
+        h = n->extentY;
+        hasConsole = false;
+        if (n->className == "GuiScrollContentCtrl" || n->className == "VirtualScrollContentCtrl") {
+            // Content wrapper: its declared extent is a starting viewport, not
+            // content — union sizes of its direct children (relative positions
+            // are child coords re-anchored by the caller's posX/posY).
+            float cw = 0, ch = 0;
+            for (auto* gc : n->children) {
+                float gw, gh; bool gCon = false;
+                measure(gc, gw, gh, gCon);
+                if (gCon) hasConsole = true;
+                if (gc->posX + gw > cw) cw = gc->posX + gw;
+                if (gc->posY + gh > ch) ch = gc->posY + gh;
             }
-            for (auto* ch : n->children) walk(ch);
-        };
-        walk(c);
-        return h;
-    };
-    for (auto* c : ctl->children) {
-        if (c->className.find("Console") != std::string::npos) {
+            if (cw > w) w = cw;
+            if (ch > h) h = ch;
+        } else if (n->className.find("Console") != std::string::npos) {
+            hasConsole = true;
             float linesH = (float)Console::instance().getLog().size() * 12.0f;
-            float cy = c->posY + std::max(c->extentY, linesH);
-            if (cy > maxY) maxY = cy;
-            // Content width from longest log line (approx 8px per char at scale 1.5)
+            if (linesH > h) h = linesH;
             size_t maxLen = 0;
             for (auto& ln : Console::instance().getLog())
                 if (ln.size() > maxLen) maxLen = ln.size();
-            float cw = c->posX + std::max(c->extentX, (float)maxLen * 10.0f);
-            if (cw > maxX) maxX = cw;
-        } else if (c->className == "GuiListBoxCtrl" || c->className == "GuiTextListCtrl") {
-            float listH = (float)c->listRows.size() * textListLineH;
-            float cy = c->posY + std::max(c->extentY, listH);
-            if (cy > maxY) maxY = cy;
-            float cx = c->posX + c->extentX;
-            if (cx > maxX) maxX = cx;
-        } else {
-            float cx = c->posX + c->extentX;
-            float cy = c->posY + c->extentY;
-            // Content wrapper containing a console: fall back to the console's
-            // line-driven height so the console scrollbar has a usable range.
-            float wrapH = consoleLinesH(c);
-            if (wrapH > cy) cy = wrapH;
-            if (cx > maxX) maxX = cx;
-            if (cy > maxY) maxY = cy;
+            float srcW = (float)maxLen * 10.0f;
+            if (srcW > w) w = srcW;
+        } else if (n->className == "GuiListBoxCtrl" || n->className == "GuiTextListCtrl") {
+            float listH = (float)n->listRows.size() * textListLineH;
+            if (listH > h) h = listH;
         }
+    };
+    for (auto* c : ctl->children) {
+        float cw, ch; bool cCon = false;
+        measure(c, cw, ch, cCon);
+        if (cCon) {
+            // A console (or a subtree containing one) is line-driven and
+            // scrolls vertically only: clamp the width contribution to the
+            // viewport so long lines can't create a bogus horizontal scroll.
+            cw = ctl->extentX;
+            if (c->posX + cw > maxX) maxX = c->posX + cw;
+        } else {
+            if (c->posX + cw > maxX) maxX = c->posX + cw;
+        }
+        float cy = c->posY + ch;
+        if (cy > maxY) maxY = cy;
     }
     ctl->contentH = maxY;
     ctl->contentW = maxX;
@@ -1897,26 +1909,37 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bg);
         r.drawRectFill({x, y, 0}, {x + ctl->extentX * 0.5f, y + ctl->extentY, 0}, fg);
     } else if (cn == "GuiConsole") {
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0, 0, 0, 0.75f});
-        if (font) {
-            float scrollOfsY = 0, scrollOfsX = 0;
-            GuiControl* sp = ctl->parent;
-            while (sp) {
+        // The console's own extent is unreliable (unset controls get a default
+        // 100x30). Size the translucent bg and line count to the enclosing
+        // GuiScrollCtrl's viewport, matching T2's line-driven console layout.
+        float scrollOfsY = 0;
+        float cw = ctl->extentX, ch = ctl->extentY;
+        GuiControl* sp = ctl->parent;
+        while (sp) {
             if (sp->className == "GuiScrollCtrl") {
-                    scrollOfsY = sp->scrollY;
-                    scrollOfsX = sp->scrollX;
-                    break;
-                }
-                sp = sp->parent;
+                scrollOfsY = sp->scrollY;
+                cw = sp->extentX;
+                ch = sp->extentY;
+                break;
             }
+            sp = sp->parent;
+        }
+        r.drawRectFill({x, y, 0}, {x + cw, y + ch, 0}, {0, 0, 0, 0.75f});
+        // Use the console profile's font (Lucida Console) at its native size so
+        // the console text renders crisp instead of the default overlay font
+        // blown up by a 1.5x scale.
+        Font* consFont = getProfileFont(getProfile(ctl->profileName));
+        if (consFont) {
             auto& lines = Console::instance().getLog();
-            float lh = 12;
-            int visLines = (int)(ctl->extentY / lh);
+            float lh = (float)consFont->charHeight;
+            if (lh < 1.f) lh = 12;
+            int visLines = (int)(ch / lh);
             int totalLines = (int)lines.size();
             int topLine = totalLines - visLines - (int)(scrollOfsY / lh);
             if (topLine < 0) topLine = 0;
+            int maxChars = (int)(cw / lh);
+            if (maxChars < 1) maxChars = 1;
             float ly = y;
-            float hScroll = scrollOfsX;
             for (int i = topLine; i < totalLines && (i - topLine) < visLines; i++, ly += lh) {
                 ColorF col{0.7f, 0.7f, 0.7f, 0.9f};
                 const std::string& line = lines[i];
@@ -1924,7 +1947,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 else if (line.find("[WARN]") == 0)   col = {1, 0.8f, 0.2f, 0.9f};
                 else if (line.find("[INFO]") == 0)   col = {0.7f, 0.7f, 1, 0.9f};
                 else if (line.find("[DEBUG]") == 0)  col = {0.5f, 0.5f, 0.5f, 0.7f};
-                font->render(line.c_str(), x + 4 - hScroll, ly, col, 1.5f);
+                if ((int)line.size() > maxChars)
+                    consFont->render(line.c_str(), x + 4, ly, col, 1.0f, false, maxChars);
+                else
+                    consFont->render(line.c_str(), x + 4, ly, col, 1.0f);
             }
         }
     } else if (cn == "GuiConsoleEditCtrl") {
@@ -2440,12 +2466,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         // Horizontal scrollbar: left/right arrows + 3-piece track + 3-piece thumb.
         if (hasH) {
+            if (maxScrollX < 0) maxScrollX = 0;
             ctl->scrollX = (ctl->scrollX < 0) ? 0 : ctl->scrollX;
             if (ctl->scrollX > maxScrollX) ctl->scrollX = maxScrollX;
             float thickness = hField.cell(1, 0) ? (float)hField.cell(1, 0)->h : 16.0f;
             float btnS = hBtn.cell(0, 0) ? (float)hBtn.cell(0, 0)->h : thickness + 8.0f;
             float arrowLen = btnS - 2.0f * g;
-            float trackY = y + ctl->extentY - g - thickness - 1.0f;
+            float trackY = ctl->extentY - g - thickness - 1.0f;
             float rightArrowX = ctl->extentX - g - (hasV ? thickness : 0.0f) - arrowLen;
             float trackL = g + arrowLen;
             float leftW = hField.cell(0, 0) ? (float)hField.cell(0, 0)->w : 4.0f;
@@ -3219,6 +3246,13 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
         auto* font = Engine::instance().renderer().getFont();
         float lineH = font ? font->charHeight + 2 : 14;
         extY = std::max(extY, (float)ctl->listRows.size() * lineH);
+    } else if (ctl->className == "GuiConsole") {
+        // The console's own extent is unreliable (default 100x30); size its
+        // hit area to the enclosing scroll viewport so clicks and the wheel
+        // respond anywhere over the text, not just a thin top strip.
+        for (auto* p = ctl->parent; p && p != canvas; p = p->parent) {
+            if (p->className == "GuiScrollCtrl") { extX = p->extentX; extY = p->extentY; break; }
+        }
     }
     if (mx >= x && mx < x + extX && my >= y && my < y + extY) {
         // Later-defined children are top-most (T2 z-order): test them first.
@@ -3291,7 +3325,85 @@ GuiControl* GuiRenderer::popupMenuAt(int mx, int my) {
     return nullptr;
 }
 
+// Determine which part of a GuiScrollCtrl's scrollbars (if any) sits under
+// absolute screen point (mx,my). Returns "vup"/"vdown"/"vpage"/"hleft"/
+// "hright"/"hpage" for arrow/track clicks, or "" when not on a scrollbar.
+// Geometry mirrors the draw path in renderControlRec's GuiScrollCtrl branch.
+static std::string scrollBarHit(GuiControl* ctl, float ax, float ay, int mx, int my) {
+    const float g = 4.0f;
+    bool hasV = ctl->contentH > ctl->extentY || ctl->vScrollBarMode == "alwaysOn";
+    bool hasH = ctl->contentW > ctl->extentX || ctl->hScrollBarMode == "alwaysOn";
+    if (!hasV && !hasH) return "";
+    float x = ax, y = ay;
+    if (hasV) {
+        float thickness = 16.0f, btnS = 24.0f;
+        float trackX = x + ctl->extentX - g - thickness;
+        float btnX = trackX - g;
+        float downArrowY = ctl->extentY - g - (btnS - 2.0f * g) - (hasH ? thickness + 1.0f : 0.0f);
+        float trackTop = g + (btnS - 2.0f * g);
+        float trackLen = downArrowY - trackTop;
+        float thumbFrac = ctl->contentH > 0 ? ctl->extentY / ctl->contentH : 1.0f;
+        float capT = 7.0f, capB = 7.0f;
+        float baseThumb = capT + capB - 2.0f * g; if (baseThumb < 6) baseThumb = 6;
+        float thumbH = thumbFrac * trackLen; if (thumbH < baseThumb) thumbH = baseThumb; if (thumbH > trackLen) thumbH = trackLen;
+        float maxScroll = std::max(ctl->contentH - ctl->extentY, 0.0f);
+        float sPath = maxScroll > 0 ? ctl->scrollY / maxScroll : 0.0f;
+        if (sPath < 0) sPath = 0; if (sPath > 1) sPath = 1;
+        float thumbPos = trackTop + sPath * (trackLen - thumbH);
+        if (thumbPos < trackTop) thumbPos = trackTop;
+        if (thumbPos + thumbH > downArrowY) thumbPos = downArrowY - thumbH;
+        if (my >= y + g && my < y + g + (btnS - 2.0f * g)) return "vup";
+        if (my >= y + downArrowY - (btnS - 2.0f * g) && my < y + downArrowY) return "vdown";
+        if (mx >= btnX && mx < btnX + (btnS > thickness ? btnS : thickness)) {
+            if (my >= y + thumbPos && my < y + thumbPos + thumbH) return "vthumb";
+            if (my >= y + trackTop && my < y + downArrowY) return "vpage";
+        }
+    }
+    if (hasH) {
+        float thickness = 16.0f, btnS = 24.0f;
+        float trackY = ctl->extentY - g - thickness - 1.0f;
+        float rightArrowX = ctl->extentX - g - (hasV ? thickness : 0.0f) - (btnS - 2.0f * g);
+        float trackL = g + (btnS - 2.0f * g);
+        float trackLen = rightArrowX - trackL;
+        float thumbFrac = ctl->contentW > 0 ? ctl->extentX / ctl->contentW : 1.0f;
+        float capL = 7.0f, capR = 7.0f;
+        float baseThumb = capL + capR - 2.0f * g; if (baseThumb < 6) baseThumb = 6;
+        float thumbW = thumbFrac * trackLen; if (thumbW < baseThumb) thumbW = baseThumb; if (thumbW > trackLen) thumbW = trackLen;
+        float maxScrollX = std::max(ctl->contentW - ctl->extentX, 0.0f);
+        float sPath = maxScrollX > 0 ? ctl->scrollX / maxScrollX : 0.0f;
+        if (sPath < 0) sPath = 0; if (sPath > 1) sPath = 1;
+        float thumbPos = trackL + sPath * (trackLen - thumbW);
+        if (my >= y + trackY && my < y + trackY + thickness) {
+            if (mx >= x && mx < x + (btnS - 2.0f * g)) return "hleft";
+            if (mx >= x + rightArrowX && mx < x + rightArrowX + (btnS - 2.0f * g)) return "hright";
+            if (mx >= x + thumbPos && mx < x + thumbPos + thumbW) return "hthumb";
+            if (mx >= x + trackL && mx < x + rightArrowX) return "hpage";
+        }
+    }
+    return "";
+}
+
 bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
+    // When the ingame console is open, scroll it directly regardless of cursor
+    // position (the console has focus: `~` opens it and deactivates relative
+    // mouse). In relative-mouse games the reported cursor may be stale/centered
+    // and fall outside the console's screen rect, so a position hit-test alone
+    // would miss it.
+    if (isDialogActive("ConsoleDlg")) {
+        std::function<GuiControl*(GuiControl*)> findConsole = [&](GuiControl* c) -> GuiControl* {
+            if (!c) return nullptr;
+            if (c->className == "GuiConsole") return c;
+            for (auto* ch : c->children) { auto* r = findConsole(ch); if (r) return r; }
+            return nullptr;
+        };
+        GuiControl* console = findConsole(activeDialog());
+        GuiControl* consScroll = console ? console->parent : nullptr;
+        while (consScroll && consScroll->className != "GuiScrollCtrl") consScroll = consScroll->parent;
+        if (consScroll) {
+            consScroll->scrollY += (wheelDelta < 0 ? 30 : -30);
+            return true;
+        }
+    }
     // Check all dialogs from top to bottom
     GuiControl* hit = nullptr;
     for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it) {
@@ -3339,6 +3451,41 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         popupHit->menuOpen = false;
         popupHit->hoveredItem = -1;
         return true;
+    }
+    // Scrollbar clicks: any animated/fixed scrollbar (arrow buttons, track,
+    // or thumb) on the topmost GuiScrollCtrl under the cursor.
+    {
+        GuiControl* sc = nullptr;
+        for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it) {
+            if (sc = hitTest(*it, x, y)) break;
+        }
+        if (!sc && canvas) sc = hitTest(canvas, x, y);
+        while (sc) {
+            if (sc->className == "GuiScrollCtrl") {
+                float ax = sc->posX, ay = sc->posY;
+                for (auto* p = sc->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+                std::string sb = scrollBarHit(sc, ax, ay, x, y);
+                if (sb == "vup") sc->scrollY += sc->extentY * 0.1f;
+                else if (sb == "vdown") sc->scrollY -= sc->extentY * 0.1f;
+                else if (sb == "vpage") sc->scrollY += (y < ay + sc->extentY * 0.5f ? 1 : -1) * sc->extentY * 0.8f;
+                else if (sb == "hleft") sc->scrollX -= 8;
+                else if (sb == "hright") sc->scrollX += 8;
+                else if (sb == "hpage") sc->scrollX -= sc->extentX * 0.8f;
+                else if (sb == "vthumb") {
+                    sc->vThumbDragging = true;
+                    sc->vThumbDragStartY = (float)y;
+                    sc->vThumbStartScrollY = sc->scrollY;
+                }
+                else if (sb == "hthumb") {
+                    sc->hThumbDragging = true;
+                    sc->hThumbDragStartX = (float)x;
+                    sc->hThumbStartScrollX = sc->scrollX;
+                }
+                if (!sb.empty()) return true;
+                break;
+            }
+            sc = sc->parent;
+        }
     }
     GuiControl* hit = nullptr;
     // Check all dialogs from top to bottom so clicks pass through transparent overlays
@@ -3676,6 +3823,71 @@ bool GuiRenderer::handleDrag(int x, int y) {
             ctl->dragOffsetY = y - (ctl->posY);
             return true;
         }
+        // Scrollbar thumb drag: compute new scroll from mouse position along the track.
+        if (ctl->className == "GuiScrollCtrl" && ctl->vThumbDragging) {
+            float delta = (float)y - ctl->vThumbDragStartY;
+            float maxScroll = ctl->contentH - ctl->extentY;
+            if (maxScroll < 0) maxScroll = 0;
+            // Thumb moves proportionally to its size relative to track;
+            // the drag ratio is delta scaled by track length / thumb length.
+            float btnS = 24.0f;
+            float g = 4.0f;
+            float arrowLen = btnS - 2.0f * g;
+            float thickness = 16.0f;
+            bool hasH = ctl->contentW > ctl->extentX || ctl->hScrollBarMode == "alwaysOn";
+            float downArrowY = ctl->extentY - g - arrowLen - (hasH ? thickness + 1.0f : 0.0f);
+            float trackTop = g + arrowLen;
+            float trackLen = downArrowY - trackTop;
+            float thumbFrac = ctl->contentH > 0 ? ctl->extentY / ctl->contentH : 1.0f;
+            float thumbH = thumbFrac * trackLen;
+            float baseThumb = 14.0f;
+            if (thumbH < baseThumb) thumbH = baseThumb;
+            if (thumbH > trackLen) thumbH = trackLen;
+            float trackRange = trackLen - thumbH;
+            float scrollRange = maxScroll;
+            // Check for console child (bottom-anchored: invert)
+            std::function<bool(GuiControl*)> hasConsoleChild = [&](GuiControl* c) {
+                for (auto* ch : c->children) {
+                    if (ch->className.find("Console") != std::string::npos) return true;
+                    if (hasConsoleChild(ch)) return true;
+                }
+                return false;
+            };
+            bool invert = hasConsoleChild(ctl);
+            float dragScale = (trackRange > 0 && scrollRange > 0) ? scrollRange / trackRange : 0;
+            float scrollDelta = delta * dragScale;
+            if (invert) scrollDelta = -scrollDelta;
+            ctl->scrollY = ctl->vThumbStartScrollY + scrollDelta;
+            if (ctl->scrollY > maxScroll) ctl->scrollY = maxScroll;
+            if (ctl->scrollY < 0) ctl->scrollY = 0;
+            return true;
+        }
+        if (ctl->className == "GuiScrollCtrl" && ctl->hThumbDragging) {
+            float delta = (float)x - ctl->hThumbDragStartX;
+            float maxScrollX = ctl->contentW - ctl->extentX;
+            if (maxScrollX < 0) maxScrollX = 0;
+            float btnS = 24.0f;
+            float g = 4.0f;
+            float arrowLen = btnS - 2.0f * g;
+            float thickness = 16.0f;
+            bool hasV = ctl->contentH > ctl->extentY || ctl->vScrollBarMode == "alwaysOn";
+            float rightArrowX = ctl->extentX - g - (hasV ? thickness : 0.0f) - arrowLen;
+            float trackL = g + arrowLen;
+            float trackLen = rightArrowX - trackL;
+            float thumbFrac = ctl->contentW > 0 ? ctl->extentX / ctl->contentW : 1.0f;
+            float thumbW = thumbFrac * trackLen;
+            float baseThumb = 14.0f;
+            if (thumbW < baseThumb) thumbW = baseThumb;
+            if (thumbW > trackLen) thumbW = trackLen;
+            float trackRange = trackLen - thumbW;
+            float scrollRange = maxScrollX;
+            float dragScale = (trackRange > 0 && scrollRange > 0) ? scrollRange / trackRange : 0;
+            float scrollDelta = delta * dragScale;
+            ctl->scrollX = ctl->hThumbStartScrollX + scrollDelta;
+            if (ctl->scrollX > maxScrollX) ctl->scrollX = maxScrollX;
+            if (ctl->scrollX < 0) ctl->scrollX = 0;
+            return true;
+        }
         for (auto* c : ctl->children) if (findDrag(c)) return true;
         return false;
     };
@@ -3690,6 +3902,8 @@ void GuiRenderer::handleDragRelease() {
         ctl->sliderDragging = false;
         ctl->windowDragging = false;
         ctl->modelRotating = false;
+        ctl->vThumbDragging = false;
+        ctl->hThumbDragging = false;
         ctl->lastDragX = -1;
         for (auto* c : ctl->children) clearDrag(c);
     };
@@ -3976,7 +4190,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
             // Persistent chrome: keep LaunchToolbarDlg on TOP of the stack so
             // the bar stays visible and clickable over OptionsDlg,
             // RecordingsDlg, etc.  (Rendered last = on top.)
-            if (name != "LaunchToolbarDlg") {
+            if (name != "LaunchToolbarDlg" && name != "ConsoleDlg") {
                 for (auto it = dialogStack.begin(); it != dialogStack.end(); ++it) {
                     if ((*it) && (*it)->name == "LaunchToolbarDlg" && it + 1 != dialogStack.end()) {
                         GuiControl* bar = *it;

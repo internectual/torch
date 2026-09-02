@@ -2524,6 +2524,12 @@ void Engine::run() {
                                     int lh = std::max(1, (int)(baseLh * consoleFontScale));
                                     int visibleLines = logH / lh;
                                     int bottomLine = std::max(0, totalLines - visibleLines);
+                                    // Auto-follow: if we were at the bottom last frame,
+                                    // stick to the new bottom as content grows.
+                                    static int prevBottomLine = -1;
+                                    if (consoleScroll == prevBottomLine && bottomLine > prevBottomLine)
+                                        consoleScroll = bottomLine;
+                                    prevBottomLine = bottomLine;
                                     // Scroll keys (only when input not focused)
                                     if (!bottomInputActive) {
                                         static bool prevPgUp = false, prevPgDn = false;

@@ -83,6 +83,14 @@ struct GuiControl {
     bool windowDragging = false;
     float dragOffsetX = 0, dragOffsetY = 0;
 
+    // Scrollbar thumb drag state
+    bool vThumbDragging = false;
+    bool hThumbDragging = false;
+    float vThumbDragStartY = 0;  // screen Y at drag start
+    float vThumbStartScrollY = 0;
+    float hThumbDragStartX = 0;  // screen X at drag start
+    float hThumbStartScrollX = 0;
+
     // GuiServerBrowser fields
     struct ServerBrowserColumn {
         std::string name;

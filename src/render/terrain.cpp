@@ -690,7 +690,7 @@ bool Font::load(const uint8_t* data, size_t size) {
     return true;
 }
 
-void Font::render(const char* text, float x, float y, const ColorF& color, float scale, bool exactColor) {
+void Font::render(const char* text, float x, float y, const ColorF& color, float scale, bool exactColor, int maxChars) {
     if (!loaded || !text) return;
     scale *= defaultScale;
     // Honor the requested color exactly. T2 profiles pair dark font colors
@@ -698,6 +698,7 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
     // brightness clamping — the old clamp also turned black text into solid
     // boxes when combined with the atlas alpha bug.
     ColorF col = color;
+    if (maxChars < 0) maxChars = 2147483647;
 
     // Flush any pending sprite batch before we bind our own shader/projection
     Engine::instance().renderer().flushSpriteBatch();
@@ -738,7 +739,10 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
     float penX = x;
     float penY = y;
 
+    int ctr = 0;
     for (const char* p = text; *p; p++) {
+        if (ctr >= maxChars) break;
+        ctr++;
         unsigned char c = (unsigned char)*p;
         if (c == '\n') {
             penX = x;
