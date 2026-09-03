@@ -139,6 +139,13 @@ public:
     // Sky material list
     std::string skyMaterialList;
 
+    // Mission area bounding box (from MissionArea object in .mis)
+    struct MissionAreaParams {
+        bool valid = false;
+        float x, z, width, height;
+    };
+    MissionAreaParams missionArea;
+
     // Datablock class name -> shape file path mapping (from .mis)
     std::unordered_map<std::string, std::string> datablockShapeMap;
 

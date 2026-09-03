@@ -15,7 +15,7 @@
 
 float TerrainBlock::sampleHeight(float wx, float wz) const {
     float fx = (wx - worldOffset.x) / squareSize;
-    float fz = (wz - worldOffset.z) / squareSize;
+    float fz = (worldOffset.z - wz) / squareSize;
     int ix = (int)std::floor(fx);
     int iz = (int)std::floor(fz);
     float tx = fx - ix;
@@ -46,7 +46,7 @@ void TerrainBlock::generateMesh() {
     for (int32_t z = 0; z < gridRes; z++) {
         for (int32_t x = 0; x < gridRes; x++) {
             float wx = (float)x * step + worldOffset.x;
-            float wz = (float)z * step + worldOffset.z;
+            float wz = worldOffset.z - (float)z * step;
             float h = sampleHeight(wx, wz);
 
             float eps = 0.5f;
@@ -139,8 +139,8 @@ void TerrainBlock::bakeLightmap() {
     if (len > 0) { L.x/=len; L.y/=len; L.z/=len; } else { L = {0.5f,0.8f,0.6f}; }
     // Ray-march self-shadow
     auto rayShadow = [&](float sc, float sr, float sh) -> float {
-        float dCol = L.z / squareSize;       // col ~ world +Z
-        float dRow = L.x / squareSize;       // row ~ world +X
+        float dCol = L.x / squareSize;       // col ~ world +X (east)
+        float dRow = L.z / squareSize;       // row ~ world +Z (south = increasing row after Y-up flip)
         float dHeight = L.y;                 // height ~ world +Y
         float hz = std::sqrt(dCol*dCol + dRow*dRow);
         if (hz < 0.0001f) return 1.0f;
@@ -270,7 +270,7 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
                 // Tribes2.exe multiplies stored shorts by exactly 0.03125 (= 1/32),
                 // NOT by 1/65535 normalization. Using the wrong scale produced
                 // terrain with ~200x exaggeration and inverted elevations.
-                float h = (float)raw / 32.0f;
+                float h = (float)raw / 32.0f * heightScale;
                 heights[z * TERRAIN_SIZE + x] = h;
                 if (std::abs(h) > maxH) maxH = std::abs(h);
             }

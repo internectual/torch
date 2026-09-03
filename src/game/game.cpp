@@ -393,7 +393,7 @@ bool World::load(const char* mapName) {
             if (!posStr.empty()) {
                 float px, py, pz;
                 if (sscanf(posStr.c_str(), "%f %f %f", &px, &py, &pz) == 3) {
-                    terrainBlock.worldOffset = {px, py, pz};
+                    terrainBlock.worldOffset = {px, pz, -py};
                     Console::instance().printf(LogLevel::Debug, "  terrain position: %.1f %.1f %.1f", px, py, pz);
                 }
             }
@@ -548,6 +548,28 @@ bool World::load(const char* mapName) {
             if (sunLightDirUsed && terrainBlock.loaded) {
                 terrainBlock.lightDir = sunLightDir;
                 terrainBlock.bakeLightmap();
+            }
+        }
+
+        // Parse MissionArea from mission (for boundary visualization)
+        for (auto& obj : objects) {
+            if (obj.className == "MissionArea") {
+                std::string areaStr = getProp(obj.props, "area");
+                if (!areaStr.empty()) {
+                    float ax, ay, aw, ah;
+                    if (sscanf(areaStr.c_str(), "%f %f %f %f", &ax, &ay, &aw, &ah) == 4) {
+                        // T2: x=east, y=north/south, z=up → engine: x=east, y=up, z=south
+                        missionArea.valid = true;
+                        missionArea.x = ax;
+                        missionArea.z = -ay;  // T2 y → engine Z (negated: north↔south)
+                        missionArea.width = aw;
+                        missionArea.height = ah;
+                        Console::instance().printf(LogLevel::Info,
+                            "  mission area: x=%.0f z=%.0f w=%.0f h=%.0f",
+                            missionArea.x, missionArea.z, missionArea.width, missionArea.height);
+                    }
+                }
+                break;
             }
         }
 
@@ -1097,11 +1119,13 @@ bool World::loadTerrain(const char* mapName) {
     std::string terrainFile = getProp(terrainObj->props, "terrainfile");
     std::string sqStr = getProp(terrainObj->props, "squaresize");
     if (!sqStr.empty()) terrainBlock.squareSize = (float)std::atof(sqStr.c_str());
+    std::string hsStr = getProp(terrainObj->props, "heightscale");
+    if (!hsStr.empty()) terrainBlock.heightScale = (float)std::atof(hsStr.c_str());
     std::string posStr = getProp(terrainObj->props, "position");
     if (!posStr.empty()) {
         float px, py, pz;
         if (sscanf(posStr.c_str(), "%f %f %f", &px, &py, &pz) == 3)
-            terrainBlock.worldOffset = {px, py, pz};
+            terrainBlock.worldOffset = {px, pz, -py};
     }
 
     std::vector<std::string> terPaths = {
@@ -1430,6 +1454,42 @@ void World::render(const Point3F& cameraPos) {
             else
                 obj.shape->render(0);
         }
+    }
+
+        // Render mission area boundary (yellow grid box) in mapper mode
+    if (missionArea.valid && Engine::instance().game().isMapperMode()) {
+        ColorF gridCol{1.0f, 1.0f, 0.3f, 0.8f};  // yellow, semi-transparent
+
+        // In engine Y-up: T2 y → engine Z = -y, so Z decreases from north to south
+        float gx0 = missionArea.x;
+        float gz_north = missionArea.z;                       // = -T2_y (north = higher Z)
+        float gx1 = gx0 + missionArea.width;
+        float gz_south = gz_north - missionArea.height;       // = -(T2_y + T2_height) (south = lower Z)
+
+        // Get terrain height at corners
+        float h00 = terrainBlock.sampleHeight(gx0, gz_north);
+        float h10 = terrainBlock.sampleHeight(gx1, gz_north);
+        float h01 = terrainBlock.sampleHeight(gx0, gz_south);
+        float h11 = terrainBlock.sampleHeight(gx1, gz_south);
+
+        // Ground grid lines at ~64-unit intervals
+        float gridStep = 64.0f;
+        for (float gx = gx0 + gridStep; gx < gx1; gx += gridStep) {
+            float h = terrainBlock.sampleHeight(gx, gz_north);
+            float h2 = terrainBlock.sampleHeight(gx, gz_south);
+            r.drawLine({gx, h, gz_north}, {gx, h2, gz_south}, gridCol);
+        }
+        for (float gz = gz_south + gridStep; gz < gz_north; gz += gridStep) {
+            float h = terrainBlock.sampleHeight(gx0, gz);
+            float h2 = terrainBlock.sampleHeight(gx1, gz);
+            r.drawLine({gx0, h, gz}, {gx1, h2, gz}, gridCol);
+        }
+
+        // Wireframe box around mission area (extruded above terrain)
+        float maxHeight = std::max({h00, h10, h01, h11});
+        float boxTop = maxHeight + 200.0f;
+        Box3F mBox{{gx0, maxHeight, gz_south}, {gx1, boxTop, gz_north}};
+        r.drawBox(mBox, gridCol);
     }
 
     // Render item pickups
@@ -2808,10 +2868,10 @@ void Game::render(float dt) {
             auto* tb = w->terrain();
             if (tb && tb->loaded) {
                 sceneCenter.x = tb->worldOffset.x + tb->size * tb->squareSize * 0.5f;
-                sceneCenter.z = tb->worldOffset.z + tb->size * tb->squareSize * 0.5f;
+                sceneCenter.z = tb->worldOffset.z - tb->size * tb->squareSize * 0.5f;
                 float maxH = 0;
                 for (auto h : tb->heights) if (h > maxH) maxH = h;
-                sceneCenter.y = maxH * tb->heightScale * 0.5f;
+                sceneCenter.y = maxH * 0.5f;
                 sceneRadius = tb->size * tb->squareSize * 0.8f;
         }
         Point3F lightDir = r.sunDir;

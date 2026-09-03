@@ -1270,7 +1270,7 @@ bool Engine::init(int argc, char* argv[]) {
             auto& tb = *g->world().terrain();
             float half = tb.size * tb.squareSize * 0.5f;
             float cx = tb.worldOffset.x + half;
-            float cz = tb.worldOffset.z + half;
+            float cz = tb.worldOffset.z - half;
             float h = g->world().getHeight(cx, cz);
             if (h < 0) h = 0;
             previewCamTarget = {cx, h, cz};
@@ -1420,7 +1420,7 @@ bool Engine::init(int argc, char* argv[]) {
             auto& tb = *g->world().terrain();
             float half = tb.size * tb.squareSize * 0.5f;
             float cx = tb.worldOffset.x + half;
-            float cz = tb.worldOffset.z + half;
+            float cz = tb.worldOffset.z - half;
             float h = g->world().getHeight(cx, cz);
             if (h < 0) h = 0;
             previewCamTarget = {cx, h, cz};

@@ -214,7 +214,7 @@ struct TerrainBlock {
     int32_t size{256};
     float heightScale{1.0f};
     float squareSize{8.0f};
-    Point3F worldOffset{-1024,-1024,0};
+    Point3F worldOffset{-1024, 0, 1024};
     std::vector<float> heights;
     std::vector<MeshData> meshes;
     std::vector<Texture> detailTextures;
