@@ -62,13 +62,17 @@ static void fanToTriangles(const std::vector<uint32_t>& windings,
 
     uint32_t center = windings[fan.windingStart];
     for (uint32_t j = 2; j < fan.windingCount; j++) {
-        // bit (j-2) of fanMask controls whether center switches to vertex (j-1)
-        if (fanMask && (fanMask[(j - 2) >> 3] & (1 << ((j - 2) & 7)))) {
-            center = windings[fan.windingStart + j - 1];
-        }
+        uint32_t vJm1 = windings[fan.windingStart + j - 1];
+        uint32_t vJ   = windings[fan.windingStart + j];
+        // Emit triangle using the CURRENT center, THEN advance if fanMask bit (j-2)
+        // says to.  (Switching center before emitting produced degenerate
+        // {v(j-1), v(j-1), v(j)} triangles — zero area, silently dropped.)
         outIndices.push_back(baseIndex + center);
-        outIndices.push_back(baseIndex + windings[fan.windingStart + j - 1]);
-        outIndices.push_back(baseIndex + windings[fan.windingStart + j]);
+        outIndices.push_back(baseIndex + vJm1);
+        outIndices.push_back(baseIndex + vJ);
+        if (fanMask && (fanMask[(j - 2) >> 3] & (1 << ((j - 2) & 7)))) {
+            center = vJm1;
+        }
     }
 }
 
@@ -621,29 +625,78 @@ static bool interiorToMeshes(DIFInterior& interior,
         }
     }
 
-    // Build lightmap index per material (normalLMapIndices is indexed by surface, not material)
-    outMatLMIndex.assign(interior.matNames.size(), -1);
-    for (size_t si = 0; si < interior.surfaces.size(); si++) {
-        auto& surf = interior.surfaces[si];
-        int matIdx = surf.textureIndex;
-        if (matIdx >= 0 && matIdx < (int)outMatLMIndex.size()) {
-            int lmIdx = si < interior.normalLMapIndices.size()
-                ? interior.normalLMapIndices[si] : -1;
-            if (lmIdx >= 0 && lmIdx < (int)outLightmaps.size()) {
-                if (outMatLMIndex[matIdx] < 0)
-                    outMatLMIndex[matIdx] = (int8_t)lmIdx;
-            }
-        }
-    }
-
-    // Group surfaces by material index
-    std::unordered_map<int, std::vector<int>> surfGroups;
+    // Group surfaces by (texture slot, lightmap) pair.  A DIF building's
+    // surfaces each reference their OWN lightmap image and lightmap UV space; by
+    // keying each mesh on both texture AND lightmap we guarantee every surface in
+    // a mesh samples the single bound lightmap it was authored against.  (Grouping
+    // only by texture shared one lightmap across surfaces with incompatible lm UVs,
+    // which made many pieces go dark/"not render".)
+    struct GroupKey {
+        int texIdx;   // texture slot -> materialIndex (texture binding)
+        int lmIdx;    // lightmap index -> lightmap binding
+        int group;    // sequential id -> materialIdx (lightmap binding lookup)
+    };
+    std::vector<GroupKey> groupKeys;
+    std::unordered_map<int, int> keyToGroup; // key = texIdx*256 + (lmIdx+1)
     for (size_t si = 0; si < interior.surfaces.size(); si++) {
         auto& surf = interior.surfaces[si];
         if (surf.windingCount < 3) continue;
         int matIdx = surf.textureIndex;
         int texIdx = (matIdx >= 0 && matIdx < (int)matSlots.size()) ? matSlots[matIdx].texIdx : -1;
-        surfGroups[texIdx].push_back((int)si);
+        if (texIdx < 0) continue; // no resolved texture for this material
+        int lmIdx = si < interior.normalLMapIndices.size()
+            ? interior.normalLMapIndices[si] : -1;
+        if (lmIdx < 0 || lmIdx >= (int)outLightmaps.size()) lmIdx = -1;
+        int hash = texIdx * 256 + (lmIdx + 1);
+        auto it = keyToGroup.find(hash);
+        if (it == keyToGroup.end()) {
+            int g = (int)groupKeys.size();
+            groupKeys.push_back({texIdx, lmIdx, g});
+            keyToGroup[hash] = g;
+        }
+    }
+
+    // materialLightmapIndex is indexed by the per-group id (mesh.materialIdx).
+    outMatLMIndex.assign(groupKeys.size(), -1);
+    for (auto& gk : groupKeys)
+        if (gk.lmIdx >= 0)
+            outMatLMIndex[gk.group] = (int8_t)gk.lmIdx;
+
+    // Group surface indices the same way
+    std::unordered_map<int, std::vector<int>> surfGroups; // key = texIdx*256 + (lmIdx+1)
+    size_t dbgSurfGeo = 0, dbgSurfNoTex = 0, dbgSurfFew = 0;
+    for (size_t si = 0; si < interior.surfaces.size(); si++) {
+        auto& surf = interior.surfaces[si];
+        if (surf.windingCount < 3) { dbgSurfFew++; continue; }
+        dbgSurfGeo++;
+        int matIdx = surf.textureIndex;
+        int texIdx = (matIdx >= 0 && matIdx < (int)matSlots.size()) ? matSlots[matIdx].texIdx : -1;
+        if (texIdx < 0) { dbgSurfNoTex++; continue; }
+        int lmIdx = si < interior.normalLMapIndices.size()
+            ? interior.normalLMapIndices[si] : -1;
+        if (lmIdx < 0 || lmIdx >= (int)outLightmaps.size()) lmIdx = -1;
+        int hash = texIdx * 256 + (lmIdx + 1);
+        surfGroups[hash].push_back((int)si);
+    }
+    Console::instance().printf(LogLevel::Info,
+        "DIFDIAG totalSurfaces=%zu geometrySurfaces=%zu noTexture=%zu fewVerts=%zu matNames=%zu lightmaps=%zu",
+        interior.surfaces.size(), dbgSurfGeo, dbgSurfNoTex, dbgSurfFew, interior.matNames.size(), outLightmaps.size());
+    if (dbgSurfNoTex > 0) {
+        std::unordered_map<std::string,int> noTexMats;
+        for (size_t si = 0; si < interior.surfaces.size(); si++) {
+            auto& surf = interior.surfaces[si];
+            if (surf.windingCount < 3) continue;
+            int matIdx = surf.textureIndex;
+            int texIdx = (matIdx >= 0 && matIdx < (int)matSlots.size()) ? matSlots[matIdx].texIdx : -1;
+            if (texIdx >= 0) continue;
+            if (matIdx >= 0 && matIdx < (int)interior.matNames.size())
+                noTexMats[interior.matNames[matIdx]]++;
+        }
+        int shown = 0;
+        for (auto& [name, cnt] : noTexMats) {
+            Console::instance().printf(LogLevel::Info, "DIFDIAG noTex '%s' x%d", name.c_str(), cnt);
+            if (++shown > 20) break;
+        }
     }
 
     if (surfGroups.empty()) {
@@ -705,26 +758,36 @@ static bool interiorToMeshes(DIFInterior& interior,
     };
 
     // Build meshes
-    for (auto& [texGroup, surfIdxs] : surfGroups) {
+    for (auto& [keyHash, surfIdxs] : surfGroups) {
+        int texIdx = keyHash / 256;
+        int lmIdx = (keyHash % 256) - 1;
+        int group = -1;
+        for (auto& gk : groupKeys)
+            if (gk.texIdx == texIdx && gk.lmIdx == lmIdx) { group = gk.group; break; }
+        if (group < 0) group = 0;
+
         MeshData mesh;
-        mesh.materialIndex = texGroup;
-        mesh.materialIdx = texGroup;
+        mesh.materialIndex = texIdx;   // texture binding
+        mesh.materialIdx = group;      // lightmap binding (looks up materialLightmapIndex)
 
         struct VertKey {
             float x, y, z;
             float nx, ny, nz;
             float u, v;
+            float u2, v2; // lightmap UV — must be unique per vertex too
             bool operator==(const VertKey& o) const {
                 return fabsf(x-o.x)<1e-6f && fabsf(y-o.y)<1e-6f && fabsf(z-o.z)<1e-6f
                     && fabsf(nx-o.nx)<1e-4f && fabsf(ny-o.ny)<1e-4f && fabsf(nz-o.nz)<1e-4f
-                    && fabsf(u-o.u)<1e-5f && fabsf(v-o.v)<1e-5f;
+                    && fabsf(u-o.u)<1e-5f && fabsf(v-o.v)<1e-5f
+                    && fabsf(u2-o.u2)<1e-5f && fabsf(v2-o.v2)<1e-5f;
             }
         };
         struct VertHash {
             size_t operator()(const VertKey& k) const {
                 size_t h1 = std::hash<float>()(k.x) ^ std::hash<float>()(k.y) ^ std::hash<float>()(k.z);
                 size_t h2 = std::hash<float>()(k.u) ^ std::hash<float>()(k.v);
-                return h1 ^ (h2 << 1);
+                size_t h3 = std::hash<float>()(k.u2) ^ std::hash<float>()(k.v2);
+                return h1 ^ (h2 << 1) ^ (h3 << 2);
             }
         };
         std::unordered_map<VertKey, uint32_t, VertHash> vertMap;
@@ -758,7 +821,7 @@ static bool interiorToMeshes(DIFInterior& interior,
                         pos.x * lmGY[0] + pos.y * lmGY[1] + pos.z * lmGY[2] + lmGY[3]
                     };
 
-                    VertKey vk = {pos.x, pos.y, pos.z, normal.x, normal.y, normal.z, uv.x, uv.y};
+                    VertKey vk = {pos.x, pos.y, pos.z, normal.x, normal.y, normal.z, uv.x, uv.y, uv2.x, uv2.y};
                     auto it = vertMap.find(vk);
                     uint32_t idx;
                     if (it != vertMap.end()) {
@@ -788,6 +851,34 @@ static bool interiorToMeshes(DIFInterior& interior,
         mesh.indices = std::move(triIndices);
         // upload() called later when renderer is ready (DTSShape::render)
         outMeshes.push_back(std::move(mesh));
+    }
+
+    {
+        static bool dbgDump = false;
+        if (!dbgDump) { dbgDump = true; }
+        // histogram of triangle counts per mesh
+        size_t zeros=0, small=0, reg=0, big=0; size_t totTris=0; size_t degen=0;
+        size_t surfMask=0, surfMaskDeg=0;
+        for (auto& m : outMeshes) {
+            size_t t = m.indices.size()/3; totTris += t;
+            if (t==0) zeros++; else if (t<20) small++; else if (t<500) reg++; else big++;
+            for (size_t k=0; k+3<=m.indices.size(); k+=3) {
+                uint32_t a=m.indices[k], b=m.indices[k+1], c=m.indices[k+2];
+                if (a==b||b==c||a==c) degen++;
+            }
+        }
+        for (auto& s : interior.surfaces) if ((s.fanMask & 0xFFFFFFFFu)!=0) surfMask++;
+        Console::instance().printf(LogLevel::Info, "DIFDIAG meshes=%zu tris=%zu degen=%zu [empty=%zu tiny<20=%zu reg=%zu big=%zu] concaveSurf=%zu/%zu",
+            outMeshes.size(), totTris, degen, zeros, small, reg, big, surfMask, interior.surfaces.size());
+        if (getenv("TORCH_DUMPMASK")) {
+            int shown=0;
+            for (auto& s : interior.surfaces) {
+                Console::instance().printf(LogLevel::Info, "MASK wc=%u fan=0x%08X planeIdx=%u texIdx=%u texGen=%u",
+                    (unsigned)s.windingCount, (unsigned)(s.fanMask&0xFFFFFFFFu), (unsigned)s.planeIndex,
+                    (unsigned)s.textureIndex, (unsigned)s.texGenIndex);
+                if (++shown>=15) break;
+            }
+        }
     }
 
     if (!outMeshes.empty() && outCollVerts && outCollIndices) {

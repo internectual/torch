@@ -536,6 +536,13 @@ bool World::load(const char* mapName) {
                 sscanf(colStr.c_str(), "%f %f %f", &sunColor.r, &sunColor.g, &sunColor.b);
                 sunColorUsed = true;
             }
+            std::string ambStr = getProp(sunObj->props, "ambient");
+            if (!ambStr.empty()) {
+                float ar, ag, ab;
+                if (sscanf(ambStr.c_str(), "%f %f %f", &ar, &ag, &ab) >= 1) {
+                    sunAmbient = {ar, ag, ab, 1.0f};
+                }
+            }
 
             // Terrain baked lightmap uses the mission sun direction
             if (sunLightDirUsed && terrainBlock.loaded) {
@@ -1362,7 +1369,8 @@ void World::render(const Point3F& cameraPos) {
     if (terrainBlock.loaded) {
         ShaderManager::getTerrainShader()->bind();
         Point3F terrainLight = sunLightDirUsed ? sunLightDir : Point3F{0.5f, 0.7f, 0.5f};
-        terrainBlock.render(cameraPos, fog.enabled, fog.color, fog.density, &terrainLight);
+        bool mapperNoFog = Engine::instance().game().isMapperMode();
+        terrainBlock.render(cameraPos, fog.enabled && !mapperNoFog, fog.color, fog.density, &terrainLight);
     }
 
     // Render world objects with default shader
@@ -1380,9 +1388,13 @@ void World::render(const Point3F& cameraPos) {
     // Apply sun lighting direction from mission data (or default for demo/procedural)
     if (sunLightDirUsed) {
         defShader->setUniform("uLightDir", sunLightDir);
+        defShader->setUniform("uSunColor", Point3F{sunColor.r, sunColor.g, sunColor.b});
+        defShader->setUniform("uAmbient", Point3F{sunAmbient.r, sunAmbient.g, sunAmbient.b});
     } else {
         // Default sun: 45 degrees elevation, from upper-right
         defShader->setUniform("uLightDir", Point3F{0.5f, 0.7f, 0.5f});
+        defShader->setUniform("uSunColor", Point3F{1.0f, 1.0f, 1.0f});
+        defShader->setUniform("uAmbient", Point3F{sunAmbient.r, sunAmbient.g, sunAmbient.b});
     }
 
     // Bind environment map from sky (for reflections on shapes)
@@ -2771,6 +2783,13 @@ void Game::render(float dt) {
     }
     // Apply camera shake
     Point3F finalCam = {camPos.x + shakeOffset.x, camPos.y + shakeOffset.y, camPos.z + shakeOffset.z};
+    // Diagnostic camera override for mapper analysis (TORCH_CAM=px,py,pz,tx,ty,tz)
+    if (const char* camOv = getenv("TORCH_CAM")) {
+        float v[6] = {0,0,0,0,0,0};
+        sscanf(camOv, "%f,%f,%f,%f,%f,%f", &v[0],&v[1],&v[2],&v[3],&v[4],&v[5]);
+        finalCam = {v[0], v[1], v[2]};
+        camTarget = {v[3], v[4], v[5]};
+    }
     // Apply FOV from demo stream if available
     float savedFov = r.config().fov;
     if (demoPlaying && demoCameraFov > 0 && demoCameraFov < 180) {

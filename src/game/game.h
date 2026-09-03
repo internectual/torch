@@ -123,6 +123,7 @@ public:
     // Sun lighting from mission (public for demo playback override)
     Point3F sunLightDir{0.5f, 0.8f, 0.6f};
     ColorF sunColor{1, 1, 1, 1};
+    ColorF sunAmbient{0.3f, 0.3f, 0.4f, 1.0f}; // scene ambient light (from Sun.ambient)
     bool sunLightDirUsed = false;
     bool sunColorUsed = false;
 

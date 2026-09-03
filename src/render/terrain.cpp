@@ -830,7 +830,31 @@ void Sky::load(const std::vector<std::string>& faces) {
     glGenTextures(1, &cubemap);
     glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap);
 
-    for (int i = 0; i < 6 && i < (int)faces.size(); i++) {
+    // Tribes 2 .dml sky lists are ordered F, R, B, L, T, D (front/right/back/
+    // left/top/down).  This assignment matches the authoritative t2-mapper
+    // reference (Sky.tsx): it maps the DML faces into the OpenGL cube faces via
+    //  +X=dml[1], -X=dml[3], +Y=dml[4], -Y=dml[5], +Z=dml[0], -Z=dml[2].
+    static const GLenum kCubemapFaceForDML[6] = {
+        GL_TEXTURE_CUBE_MAP_POSITIVE_Z, // dml[0] front  -> +Z
+        GL_TEXTURE_CUBE_MAP_POSITIVE_X, // dml[1] right  -> +X
+        GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, // dml[2] back   -> -Z
+        GL_TEXTURE_CUBE_MAP_NEGATIVE_X, // dml[3] left   -> -X
+        GL_TEXTURE_CUBE_MAP_POSITIVE_Y, // dml[4] top    -> +Y
+        GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, // dml[5] down   -> -Y
+    };
+
+    // A GL_TEXTURE_CUBE_MAP is only complete (sampleable) when all 6 faces share
+    // the same resolution. T2's DML "down" face (e.g. desert/skies/dd2) is a tiny
+    // 4x4 placeholder, which would otherwise make the whole cubemap incomplete and
+    // sample as black. Decode every face, record the max size, then upscale any
+    // smaller face (nearest-neighbor) before uploading.
+    const int kMaxFaces = 6;
+    std::vector<uint8_t> facePixels[kMaxFaces];
+    int faceW[kMaxFaces] = {0}, faceH[kMaxFaces] = {0};
+    bool faceLoaded[kMaxFaces] = {false};
+    int maxSize = 0;
+
+    for (int i = 0; i < kMaxFaces && i < (int)faces.size(); i++) {
         auto data = Engine::instance().fs().read(faces[i].c_str());
         if (!data.empty()) {
             int w = 0, h = 0, ch = 0;
@@ -849,9 +873,46 @@ void Sky::load(const std::vector<std::string>& faces) {
                 pixels = stbi_load_from_memory(data.data(), (int)data.size(), &w, &h, &ch, 4);
             }
             if (pixels) {
-                glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+                faceW[i] = w; faceH[i] = h;
+                facePixels[i].assign(pixels, pixels + (size_t)w * h * 4);
+                faceLoaded[i] = true;
+                if (w > maxSize) maxSize = w;
+                if (h > maxSize) maxSize = h;
                 if (!isBM8) stbi_image_free(pixels);
             }
+        }
+    }
+
+    for (int i = 0; i < kMaxFaces; i++) {
+        int size = maxSize > 0 ? maxSize : 256;
+        if (!faceLoaded[i]) {
+            // Missing/decode-failed face: fill with a mid-sky color so the cubemap
+            // stays complete instead of rendering black.
+            std::vector<uint8_t> fill(size * size * 4, 0);
+            for (size_t p = 0; p < fill.size(); p += 4) {
+                fill[p] = 138; fill[p + 1] = 172; fill[p + 2] = 216; fill[p + 3] = 255;
+            }
+            glTexImage2D(kCubemapFaceForDML[i], 0, GL_RGBA, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, fill.data());
+            continue;
+        }
+        // Upscale small faces (e.g. the 4x4 down face) to cubemap-complete size.
+        if (faceW[i] != size || faceH[i] != size) {
+            std::vector<uint8_t> scaled(size * size * 4);
+            for (int y = 0; y < size; y++) {
+                int sy = std::min((int)((int64_t)y * faceH[i] / size), faceH[i] - 1);
+                for (int x = 0; x < size; x++) {
+                    int sx = std::min((int)((int64_t)x * faceW[i] / size), faceW[i] - 1);
+                    size_t src = ((size_t)sy * faceW[i] + sx) * 4;
+                    size_t dst = ((size_t)y * size + x) * 4;
+                    scaled[dst + 0] = facePixels[i][src + 0];
+                    scaled[dst + 1] = facePixels[i][src + 1];
+                    scaled[dst + 2] = facePixels[i][src + 2];
+                    scaled[dst + 3] = facePixels[i][src + 3];
+                }
+            }
+            glTexImage2D(kCubemapFaceForDML[i], 0, GL_RGBA, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, scaled.data());
+        } else {
+            glTexImage2D(kCubemapFaceForDML[i], 0, GL_RGBA, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, facePixels[i].data());
         }
     }
 
@@ -863,14 +924,13 @@ void Sky::load(const std::vector<std::string>& faces) {
 
     loaded = true;
 
-    // Skybox cube
+    // Skybox fullscreen triangle: covers the whole screen in NDC regardless of
+    // FOV/aspect (the old unit cube only covered ~90 degrees of view and left
+    // the periphery showing the clear color).
     float skyVerts[] = {
-        -1,-1,-1, 1,-1,-1, 1, 1,-1, -1, 1,-1,
-        -1,-1, 1, 1,-1, 1, 1, 1, 1, -1, 1, 1,
-        -1,-1,-1, -1, 1,-1, -1, 1, 1, -1,-1, 1,
-        1,-1,-1, 1, 1,-1, 1, 1, 1, 1,-1, 1,
-        -1,-1,-1, -1,-1, 1, 1,-1, 1, 1,-1,-1,
-        -1, 1,-1, -1, 1, 1, 1, 1, 1, 1, 1,-1
+        -1.0f, -1.0f, 0.0f,
+         3.0f, -1.0f, 0.0f,
+        -1.0f,  3.0f, 0.0f,
     };
 
     glGenVertexArrays(1, &vao);
@@ -889,8 +949,10 @@ void Sky::render(const MatrixF& view, const MatrixF& proj) {
     shader->bind();
 
     glDepthFunc(GL_LEQUAL);
-    shader->setUniform("uProjection", proj);
-    shader->setUniform("uView", view);
+    // Invert the full view-projection so the fullscreen skybox pass can recover
+    // a per-pixel world-space ray that is independent of FOV and aspect ratio.
+    MatrixF invVP = (proj * view).inverse();
+    shader->setUniform("uInvViewProj", invVP);
 
     if (loaded && cubemap) {
         // Cubemap sky
@@ -907,13 +969,13 @@ void Sky::render(const MatrixF& view, const MatrixF& proj) {
 
     // Ensure VAO exists (create on first render if needed)
     if (!vao) {
+        // Fullscreen triangle: covers the whole screen in NDC with 3 vertices,
+        // unlike the old unit cube which only covered a ~90 degree FOV and left
+        // the periphery showing the clear color.
         float skyVerts[] = {
-            -1,-1,-1, 1,-1,-1, 1,1,-1, -1,1,-1,
-            -1,-1,1, 1,-1,1, 1,1,1, -1,1,1,
-            -1,-1,-1, -1,1,-1, -1,1,1, -1,-1,1,
-            1,-1,-1, 1,1,-1, 1,1,1, 1,-1,1,
-            -1,-1,-1, -1,-1,1, 1,-1,1, 1,-1,-1,
-            -1,1,-1, -1,1,1, 1,1,1, 1,1,-1,
+            -1.0f, -1.0f, 0.0f,
+             3.0f, -1.0f, 0.0f,
+            -1.0f,  3.0f, 0.0f,
         };
         glGenVertexArrays(1, &vao);
         glGenBuffers(1, &vbo);
@@ -924,8 +986,14 @@ void Sky::render(const MatrixF& view, const MatrixF& proj) {
         glEnableVertexAttribArray(0);
     }
 
+    // A skybox must never be face-culled.
+    GLboolean skyCullWasOn = glIsEnabled(GL_CULL_FACE);
+    glDisable(GL_CULL_FACE);
+
     glBindVertexArray(vao);
-    glDrawArrays(GL_TRIANGLES, 0, 36);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    if (skyCullWasOn) glEnable(GL_CULL_FACE);
 
     // Render cloud layers (scrolling textured quads at sky distance)
     if (!cloudLayers.empty()) {
@@ -1275,6 +1343,7 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     shader->setUniform("uCamPos", r.cameraPos);
 
     if (shader) shader->setUniform("uShadowStrength", r.shadowsActive ? 0.6f : 0.0f);
+    shader->setUniform("uDebugInterior", (int32_t)(getenv("TORCH_DIF_RED") ? 1 : 0));
 
     // Build effective node transforms, applying any overrides
     std::vector<MatrixF> nodeWorld = defaultTransforms;
@@ -1287,10 +1356,25 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     const MatrixF baseModel = r.modelMatrix();
 
     if (isInterior) {
-        glCullFace(GL_FRONT);
+        // DIF interior surfaces have inconsistent per-surface winding and may be
+        // viewed from outside (mapper). Render both faces so no surface fragment
+        // disappears due to culling.
+        glDisable(GL_CULL_FACE);
     } else {
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
+    }
+
+    // Diagnostic: print world-space AABB of interiors for camera framing
+    if (isInterior && getenv("TORCH_AABB")) {
+        Point3F mn{1e30f,1e30f,1e30f}, mx{-1e30f,-1e30f,-1e30f};
+        for (auto& m : meshes) for (auto& v : m.vertices) {
+            Point3F wp = baseModel.transform(v.pos);
+            mn.x=fminf(mn.x,wp.x); mn.y=fminf(mn.y,wp.y); mn.z=fminf(mn.z,wp.z);
+            mx.x=fmaxf(mx.x,wp.x); mx.y=fmaxf(mx.y,wp.y); mx.z=fmaxf(mx.z,wp.z);
+        }
+        fprintf(stderr, "AABB '%s' min=(%.1f %.1f %.1f) max=(%.1f %.1f %.1f)\n",
+                name.c_str(), mn.x,mn.y,mn.z, mx.x,mx.y,mx.z);
     }
 
     // Reset GL state
@@ -1402,6 +1486,7 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     // Pass 1: Opaque meshes
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
+    if (isInterior) glDepthFunc(GL_LEQUAL);
     for (size_t mi : renderList) {
         if (!needsTranslucent(mi))
             renderMesh(mi, false);

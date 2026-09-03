@@ -57,6 +57,8 @@ uniform bool uUseLightmap = false;
 uniform bool uUseEnvMap = false;
 uniform bool uSelfIlluminated = false;
 uniform vec3 uLightDir = vec3(0.5, 0.8, 0.6);
+uniform vec3 uSunColor = vec3(1.0);
+uniform vec3 uAmbient = vec3(0.3);
 uniform vec3 uCamPos = vec3(0);
 uniform vec4 uTint = vec4(1.0);
 
@@ -72,6 +74,7 @@ uniform float uShadowStrength = 0.5;
 uniform float uMetallic = 0.0;
 uniform float uRoughness = 0.5;
 uniform bool uAlphaTest = false;
+uniform bool uDebugInterior = false;
 
 out vec4 FragColor;
 
@@ -91,12 +94,40 @@ float shadowPCF(vec4 shadowCoord) {
 void main() {
     vec4 texColor = uUseTexture ? texture(uTexture, vUV) : vec4(1.0);
     vec4 col = vColor * texColor * uTint;
-    if (uUseLightmap) {
-        vec4 lm = texture(uLightmap, vUV2);
-        col.rgb = col.rgb * (0.5 + 0.5 * lm.rgb);
+    if (uDebugInterior) {
+        FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+        return;
     }
     if (uSelfIlluminated) {
         FragColor = vec4(col.rgb, col.a);
+    } else if (uUseLightmap) {
+        // Torque interior (.dif) formula — output = clamp(lighting * texture).
+        // lighting = clamp(sceneLighting) + lightmap  (sceneLighting in gamma
+        // space: sunColor*NdotL + ambient). Matches t2-mapper interiorMaterial.ts.
+        vec3 N = normalize(vNormal);
+        vec3 L = normalize(uLightDir);
+        float NdotL = max(dot(N, L), 0.0);
+
+        // Scene lighting, clamped to [0,1] BEFORE adding the lightmap
+        vec3 sceneLighting = clamp(uSunColor * NdotL + uAmbient, 0.0, 1.0);
+
+        float shadowFactor = 1.0;
+        if (uShadowStrength > 0.0) {
+            vec4 shadowCoord = uShadowMatrix * vec4(vWorldPos, 1.0);
+            shadowFactor = mix(shadowPCF(shadowCoord), 1.0, 1.0 - uShadowStrength);
+        }
+        sceneLighting *= shadowFactor;
+
+        vec3 lightmap = texture(uLightmap, vUV2).rgb;
+        vec3 lighting = clamp(sceneLighting + lightmap, 0.0, 1.0);
+        vec3 lit = clamp(lighting * col.rgb, 0.0, 1.0);
+
+        if (uFogEnabled) {
+            float dist = length(vWorldPos - uCamPos);
+            float fogFactor = clamp(uFogDensity * dist, 0.0, 1.0);
+            lit = mix(lit, uFogColor, fogFactor);
+        }
+        FragColor = vec4(lit, col.a);
     } else {
         vec3 N = normalize(vNormal);
         vec3 V = normalize(uCamPos - vWorldPos);
@@ -301,20 +332,23 @@ void main() {
 static const char* skyVert = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
-uniform mat4 uProjection;
-uniform mat4 uView;
-out vec3 vUV;
+uniform mat4 uInvViewProj;
+out vec3 vWorldDir;
 
 void main() {
-    vec4 p = uProjection * mat4(mat3(uView)) * vec4(aPos, 1.0);
-    gl_Position = p.xyww;
-    vUV = aPos;
+    // Fullscreen triangle: aPos spans [-1,3] in NDC, so gl_Position covers the
+    // entire screen at the far plane regardless of FOV/aspect. Unproject each
+    // vertex through the inverse view-projection to recover a world-space ray,
+    // which is interpolated across the screen and sampled as a cube direction.
+    vec4 p = uInvViewProj * vec4(aPos.xy, 1.0, 1.0);
+    vWorldDir = p.xyz / p.w;
+    gl_Position = vec4(aPos.xy, 1.0, 1.0);
 }
 )";
 
 static const char* skyFrag = R"(
 #version 330 core
-in vec3 vUV;
+in vec3 vWorldDir;
 uniform samplerCube uSkybox;
 uniform bool uUseGradient = false;
 uniform vec3 uGradTop = vec3(0.3, 0.5, 0.8);
@@ -322,11 +356,12 @@ uniform vec3 uGradBot = vec3(0.7, 0.8, 0.9);
 out vec4 FragColor;
 
 void main() {
+    vec3 dir = normalize(vWorldDir);
     if (uUseGradient) {
-        float t = abs(vUV.y) * 0.8 + 0.1;
+        float t = abs(dir.y) * 0.8 + 0.1;
         FragColor = vec4(mix(uGradBot, uGradTop, t), 1.0);
     } else {
-        FragColor = texture(uSkybox, vUV);
+        FragColor = texture(uSkybox, dir);
     }
 }
 )";

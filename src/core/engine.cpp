@@ -1886,7 +1886,16 @@ void Engine::run() {
         }
 
         // Skip the 2D GUI/dev-panel pass for shape preview, shape viewer, or mapper mode
-        if (g->isTestShapeLoaded() || g->isShapeViewerActive() || mapperMode) { plat->swapBuffers(); continue; }
+        if (g->isTestShapeLoaded() || g->isShapeViewerActive() || mapperMode) {
+            // Auto-screenshot on first frame in mapper mode
+            static bool mapperScreenshotTaken = false;
+            if (mapperMode && !mapperScreenshotTaken) {
+                char path[256];
+                snprintf(path, sizeof(path), "/tmp/torch_mapper.png");
+                if (ren->screenshot(path)) Console::instance().printf(LogLevel::Info, "Mapper screenshot saved: %s", path);
+                mapperScreenshotTaken = true;
+            }
+            plat->swapBuffers(); continue; }
 
         // ─── Dev panel (always rendered) ───────────────────────────────────
         g->menu().update(dt);
