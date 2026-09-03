@@ -10,6 +10,8 @@ build/
 .idea/
 CMakeUserPresets.json
 glb/
+snapshot.png
+*.ter_cache
 fuzz/check_v23
 fuzz/crash_test
 fuzz/debug_fail2

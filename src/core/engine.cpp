@@ -1892,8 +1892,63 @@ void Engine::run() {
             if (mapperMode && !mapperScreenshotTaken) {
                 char path[256];
                 snprintf(path, sizeof(path), "/tmp/torch_mapper.png");
-                if (ren->screenshot(path)) Console::instance().printf(LogLevel::Info, "Mapper screenshot saved: %s", path);
+                // Build metadata string for reproducibility
+                char meta[1024];
+                auto& cam = ren->cameraPos;
+                auto& camTarget = ren->cameraTarget;
+                auto* tb = g->world().terrain();
+                const char* missionName = mapperMap.c_str();
+                if (tb && tb->loaded) {
+                    snprintf(meta, sizeof(meta),
+                        "TORCH_CAM=%.1f,%.1f,%.1f,%.1f,%.1f,%.1f;MISSION=%s;TEXCOORD=%.1f,%.1f,%.1f;SIZE=%.0f;SQ=%f",
+                        (float)cam.x, (float)cam.y, (float)cam.z,
+                        (float)camTarget.x, (float)camTarget.y, (float)camTarget.z,
+                        missionName,
+                        (float)tb->worldOffset.x, (float)tb->worldOffset.z, (float)tb->worldOffset.y,
+                        (float)(tb->size * tb->squareSize), (float)tb->squareSize);
+                } else {
+                    snprintf(meta, sizeof(meta),
+                        "TORCH_CAM=%.1f,%.1f,%.1f,%.1f,%.1f,%.1f;MISSION=%s",
+                        (float)cam.x, (float)cam.y, (float)cam.z,
+                        (float)camTarget.x, (float)camTarget.y, (float)camTarget.z,
+                        missionName);
+                }
+                if (ren->screenshot(path, meta)) Console::instance().printf(LogLevel::Info, "Mapper screenshot saved: %s", path);
                 mapperScreenshotTaken = true;
+            }
+            // F12: manual snapshot of current camera position
+            {
+                static bool prevF12 = false;
+                bool f12Down = plat->input().keysDown[SCANCODE_F12];
+                if (f12Down && !prevF12) {
+                    char snapPath[256];
+                    snprintf(snapPath, sizeof(snapPath), "snapshot.png");
+                    char meta[1024];
+                    auto& cam = ren->cameraPos;
+                    auto& camTarget = ren->cameraTarget;
+                    auto* tb = g->world().terrain();
+                    const char* missionName = mapperMap.c_str();
+                    if (tb && tb->loaded) {
+                        snprintf(meta, sizeof(meta),
+                            "TORCH_CAM=%.1f,%.1f,%.1f,%.1f,%.1f,%.1f;MISSION=%s;TEXCOORD=%.1f,%.1f,%.1f;SIZE=%.0f;SQ=%f",
+                            (float)cam.x, (float)cam.y, (float)cam.z,
+                            (float)camTarget.x, (float)camTarget.y, (float)camTarget.z,
+                            missionName,
+                            (float)tb->worldOffset.x, (float)tb->worldOffset.z, (float)tb->worldOffset.y,
+                            (float)(tb->size * tb->squareSize), (float)tb->squareSize);
+                    } else {
+                        snprintf(meta, sizeof(meta),
+                            "TORCH_CAM=%.1f,%.1f,%.1f,%.1f,%.1f,%.1f;MISSION=%s",
+                            (float)cam.x, (float)cam.y, (float)cam.z,
+                            (float)camTarget.x, (float)camTarget.y, (float)camTarget.z,
+                            missionName);
+                    }
+                    if (ren->screenshot(snapPath, meta))
+                        Console::instance().printf(LogLevel::Info, "Snapshot saved: %s", snapPath);
+                    else
+                        Console::instance().printf(LogLevel::Error, "Snapshot failed: %s", snapPath);
+                }
+                prevF12 = f12Down;
             }
             plat->swapBuffers(); continue; }
 

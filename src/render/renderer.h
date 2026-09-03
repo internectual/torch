@@ -222,6 +222,7 @@ struct TerrainBlock {
     float detailTilings[6] = {0, 0, 0, 0, 0, 0}; // 0 = use default
     Texture splatMap;   // RGBA: layers 0-3 alpha weights
     Texture splatMap2;  // RGBA: layers 4-5 alpha weights (R,G used)
+    Texture gameGrid;   // MissionArea boundary overlay texture
     Texture lightmap;   // baked self-shadowing NdotL lightmap (computed from heightfield)
     std::vector<std::string> textureNames;
     bool loaded = false;
@@ -301,7 +302,7 @@ public:
     RenderConfig& config() { return cfg; }
     void onResize(int32_t w, int32_t h);
     bool screenshot(const char* path);
-
+    bool screenshot(const char* path, const char* metaData);
     // Shadow mapping
     void initShadowMap(int32_t size = 2048);
     void beginShadowPass(const Point3F& lightDir, const Point3F& sceneCenter, float sceneRadius);
@@ -326,6 +327,7 @@ public:
     MatrixF projection;
     MatrixF view;
     Point3F cameraPos;
+    Point3F cameraTarget;
     Point3F sunDir{0.5f, 0.8f, 0.6f};
     std::string gpuInfo;
 

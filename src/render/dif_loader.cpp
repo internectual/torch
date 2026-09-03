@@ -607,10 +607,13 @@ static bool interiorToMeshes(DIFInterior& interior,
                 outTextures.push_back(std::move(tex));
                 outMatFlags.push_back(0);
                 outMatNames.push_back(interior.matNames[i]);
+            } else {
+                if (getenv("TORCH_DIF_DIAG"))
+                    Console::instance().printf(LogLevel::Warn, "TEXDIAG '%s' not found",
+                        interior.matNames[i].c_str());
             }
         }
     }
-
     // Load lightmaps (skip GPU ops if skipGpu)
     if (!skipGpu) {
         for (auto& lme : interior.lightmapEntries) {

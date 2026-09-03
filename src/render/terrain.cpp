@@ -517,6 +517,10 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
     shader->setUniform("uDetailTiling4", detailTilings[4] > 0 ? detailTilings[4] : defaultTiling);
     shader->setUniform("uDetailTiling5", detailTilings[5] > 0 ? detailTilings[5] : defaultTiling);
 
+    // Z-flip in generateMesh reverses triangle winding order; disable culling
+    glDisable(GL_CULL_FACE);
+
+
     auto& renderer = Engine::instance().renderer();
     MatrixF model;
     shader->setUniform("uProjection", renderer.projection);

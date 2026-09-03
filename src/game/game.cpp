@@ -469,6 +469,16 @@ bool World::load(const char* mapName) {
             }
         }
 
+        // Load GameGrid texture for mission area boundary rendering
+        {
+            auto gridData = fs.read("textures/special/GameGrid.png");
+            if (!gridData.empty()) {
+                terrainBlock.gameGrid.load(gridData.data(), gridData.size());
+                if (!terrainBlock.gameGrid.loaded)
+                    Console::instance().printf(LogLevel::Warn, "Failed to load GameGrid.png");
+            }
+        }
+
         // Find Sky
         MisObject* skyObj = findObject(objects, "Sky");
         if (skyObj) {
@@ -1148,6 +1158,30 @@ bool World::loadTerrain(const char* mapName) {
     }
     if (terrainBlock.loaded)
         Console::instance().printf(LogLevel::Info, "Server terrain loaded from '%s'", mapName);
+    else
+        return false;
+
+    // Server needs MissionArea for boundary checks
+    MisObject* maObj = findObject(objects, "MissionArea");
+    if (maObj) {
+        std::string areaStr = getProp(maObj->props, "area");
+        if (!areaStr.empty()) {
+            float ax, ay, aw, ah;
+            if (sscanf(areaStr.c_str(), "%f %f %f %f", &ax, &ay, &aw, &ah) == 4) {
+                missionArea.valid = true;
+                missionArea.x = ax;
+                missionArea.z = -ay;
+                missionArea.width = aw;
+                missionArea.height = ah;
+            }
+            // Load GameGrid texture
+            auto gridData = fs.read("textures/special/GameGrid.png");
+            if (!gridData.empty()) {
+                terrainBlock.gameGrid.load(gridData.data(), gridData.size());
+            }
+        }
+    }
+
     return terrainBlock.loaded;
 }
 
@@ -1456,41 +1490,90 @@ void World::render(const Point3F& cameraPos) {
         }
     }
 
-        // Render mission area boundary (yellow grid box) in mapper mode
+        // Render mission area boundary (grid lines) in mapper mode
     if (missionArea.valid && Engine::instance().game().isMapperMode()) {
-        ColorF gridCol{1.0f, 1.0f, 0.3f, 0.8f};  // yellow, semi-transparent
+        // T2 GameGrid.png color: yellowish-green
+        ColorF gridCol{1.0f, 1.0f, 0.2f, 1.0f};  // bright yellow (GameGrid color)
 
-        // In engine Y-up: T2 y → engine Z = -y, so Z decreases from north to south
         float gx0 = missionArea.x;
-        float gz_north = missionArea.z;                       // = -T2_y (north = higher Z)
+        float gz_north = missionArea.z;
         float gx1 = gx0 + missionArea.width;
-        float gz_south = gz_north - missionArea.height;       // = -(T2_y + T2_height) (south = lower Z)
+        float gz_south = gz_north - missionArea.height;
 
-        // Get terrain height at corners
-        float h00 = terrainBlock.sampleHeight(gx0, gz_north);
-        float h10 = terrainBlock.sampleHeight(gx1, gz_north);
-        float h01 = terrainBlock.sampleHeight(gx0, gz_south);
-        float h11 = terrainBlock.sampleHeight(gx1, gz_south);
+        // Only visible when camera is within 100m of the boundary
+        float camX = cameraPos.x, camZ = cameraPos.z;
+        float distToLeft = std::abs(camX - gx0);
+        float distToRight = std::abs(camX - gx1);
+        float distToTop = std::abs(camZ - gz_north);
+        float distToBottom = std::abs(camZ - gz_south);
+        float minDist = std::min({distToLeft, distToRight, distToTop, distToBottom});
+        if (minDist > 100.0f) goto skip_grid;
 
-        // Ground grid lines at ~64-unit intervals
-        float gridStep = 64.0f;
-        for (float gx = gx0 + gridStep; gx < gx1; gx += gridStep) {
-            float h = terrainBlock.sampleHeight(gx, gz_north);
-            float h2 = terrainBlock.sampleHeight(gx, gz_south);
-            r.drawLine({gx, h, gz_north}, {gx, h2, gz_south}, gridCol);
+        auto& r = Engine::instance().renderer();
+        float gridSize = 64.0f;
+
+        // Set up visible line rendering
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);  // don't occlude other geometry
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        GLfloat oldLineWidth;
+        glGetFloatv(GL_LINE_WIDTH, &oldLineWidth);
+        glLineWidth(3.0f);
+
+        // Get terrain heights at the four corners
+        float hNW = terrainBlock.sampleHeight(gx0, gz_north);
+        float hNE = terrainBlock.sampleHeight(gx1, gz_north);
+        float hSW = terrainBlock.sampleHeight(gx0, gz_south);
+        float hSE = terrainBlock.sampleHeight(gx1, gz_south);
+        float maxHeight = std::max({hNW, hNE, hSW, hSE});
+        float ceilingH = maxHeight + 150.0f;
+
+        // Draw grid lines on each wall (north/south/east/west) + ceiling perimeter
+        // Using GameGrid.png color (T2 yellowish-green), no floor (terrain is ground)
+
+        // North wall: vertical lines + horizontal lines at terrain/ceiling height
+        for (float gx = gx0; gx <= gx1; gx += gridSize) {
+            float frac = (gx - gx0) / missionArea.width;
+            float h = hNW + frac * (hNE - hNW);
+            r.drawLine(Point3F{gx, h, gz_north}, Point3F{gx, ceilingH, gz_north}, gridCol);
         }
-        for (float gz = gz_south + gridStep; gz < gz_north; gz += gridStep) {
-            float h = terrainBlock.sampleHeight(gx0, gz);
-            float h2 = terrainBlock.sampleHeight(gx1, gz);
-            r.drawLine({gx0, h, gz}, {gx1, h2, gz}, gridCol);
+        // South wall
+        for (float gx = gx0; gx <= gx1; gx += gridSize) {
+            float frac = (gx - gx0) / missionArea.width;
+            float h = hSW + frac * (hSE - hSW);
+            r.drawLine(Point3F{gx, h, gz_south}, Point3F{gx, ceilingH, gz_south}, gridCol);
         }
+        // West wall
+        for (float gz = gz_south; gz <= gz_north; gz += gridSize) {
+            float frac = (gz - gz_south) / missionArea.height;
+            float h = hSW + frac * (hNW - hSW);
+            r.drawLine(Point3F{gx0, h, gz}, Point3F{gx0, ceilingH, gz}, gridCol);
+        }
+        // East wall
+        for (float gz = gz_south; gz <= gz_north; gz += gridSize) {
+            float frac = (gz - gz_south) / missionArea.height;
+            float h = hSE + frac * (hNE - hSE);
+            r.drawLine(Point3F{gx1, h, gz}, Point3F{gx1, ceilingH, gz}, gridCol);
+        }
+        // Ceiling perimeter (top edges of north/south/east/west walls)
+        r.drawLine(Point3F{gx0, ceilingH, gz_north}, Point3F{gx1, ceilingH, gz_north}, gridCol);
+        r.drawLine(Point3F{gx0, ceilingH, gz_south}, Point3F{gx1, ceilingH, gz_south}, gridCol);
+        r.drawLine(Point3F{gx0, ceilingH, gz_north}, Point3F{gx0, ceilingH, gz_south}, gridCol);
+        r.drawLine(Point3F{gx1, ceilingH, gz_north}, Point3F{gx1, ceilingH, gz_south}, gridCol);
+        // Ceiling grid lines
+        for (float gx = gx0 + gridSize; gx < gx1; gx += gridSize)
+            r.drawLine(Point3F{gx, ceilingH, gz_north}, Point3F{gx, ceilingH, gz_south}, gridCol);
+        for (float gz = gz_south + gridSize; gz < gz_north; gz += gridSize)
+            r.drawLine(Point3F{gx0, ceilingH, gz}, Point3F{gx1, ceilingH, gz}, gridCol);
 
-        // Wireframe box around mission area (extruded above terrain)
-        float maxHeight = std::max({h00, h10, h01, h11});
-        float boxTop = maxHeight + 200.0f;
-        Box3F mBox{{gx0, maxHeight, gz_south}, {gx1, boxTop, gz_north}};
-        r.drawBox(mBox, gridCol);
+        // Restore GL state
+        glLineWidth(oldLineWidth);
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
     }
+skip_grid:
 
     // Render item pickups
     float time = Engine::instance().game().gameTime();
@@ -2960,7 +3043,7 @@ void Game::render(float dt) {
         r.shadowsActive = false;
     }
 
-    w->render(camPos);
+    w->render(finalCam);
     if (pl && !freeCamActive && !demoPlaying && !testShapeLoaded) pl->render();
     } // end if (!shapeViewerActive && !testShapeLoaded)
 

@@ -10,6 +10,7 @@ constexpr int SCANCODE_M       = 16;  // M key (SDL3: 16, was 50 in SDL2)
 constexpr int SCANCODE_PAUSE   = 72;  // Pause/Break (SDL3: 72, was 110 in SDL2)
 constexpr int SCANCODE_RETURN  = 40;
 constexpr int SCANCODE_ESCAPE  = 41;
+constexpr int SCANCODE_F12     = 69;  // F12 key (SDL3)
 constexpr int SCANCODE_BACKSPACE = 42;
 constexpr int SCANCODE_SPACE   = 44;
 constexpr int SCANCODE_TAB     = 43;

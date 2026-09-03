@@ -7,6 +7,9 @@
 #include <GL/glew.h>
 #include <SDL3/SDL.h>
 #include "../stb_image_write.h"
+#include <zlib.h>
+// Forward-declare stbi_write_png_to_mem (defined in stb_image_write_impl.cpp)
+extern "C" unsigned char* stbi_write_png_to_mem(const unsigned char* pixels, int stride_bytes, int x, int y, int n, int* out_len);
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
@@ -218,6 +221,7 @@ const MatrixF& Renderer::modelMatrix() const {
 
 void Renderer::setCamera(const Point3F& pos, const Point3F& target, const Point3F& up) {
     cameraPos = pos;
+    cameraTarget = target;
     MatrixF v;
     v.lookAt(pos, target, up);
     setView(v);
@@ -851,10 +855,80 @@ void Renderer::setFontScale(float scale) {
 }
 
 bool Renderer::screenshot(const char* path) {
+    return screenshot(path, nullptr);
+}
+
+bool Renderer::screenshot(const char* path, const char* metaData) {
     int w = cfg.width, h = cfg.height;
     std::vector<uint8_t> pixels(w * h * 3);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
     stbi_flip_vertically_on_write(1);
-    return stbi_write_png(path, w, h, 3, pixels.data(), w * 3) != 0;
+
+    if (!metaData || strlen(metaData) == 0) {
+        return stbi_write_png(path, w, h, 3, pixels.data(), w * 3) != 0;
+    }
+
+    // Write PNG to memory, inject tEXt chunk before IEND, write to file
+    int len = 0;
+    stbi_uc* pngData = stbi_write_png_to_mem(pixels.data(), w * 3, w, h, 3, &len);
+    unsigned char* pngBytes = (unsigned char*)pngData;
+    if (!pngData) return false;
+
+    // Build tEXt chunk: keyword\0value
+    std::string chunkData = "TorchMapper";
+    chunkData.push_back('\0');
+    chunkData += metaData;
+
+    uint32_t dataLen = (uint32_t)chunkData.size();
+    std::vector<uint8_t> out;
+    // Walk PNG chunks to find IEND
+    const unsigned char* iend = nullptr;
+    size_t pos = 8; // skip 8-byte PNG signature
+    while (pos + 8 <= (size_t)len) {
+        uint32_t clen = (pngBytes[pos] << 24) | (pngBytes[pos+1] << 16) | (pngBytes[pos+2] << 8) | pngBytes[pos+3];
+        if (memcmp(pngBytes + pos + 4, "IEND", 4) == 0) {
+            iend = pngBytes + pos;
+            break;
+        }
+        pos += 12 + clen; // 4(len) + 4(type) + data + 4(crc)
+    }
+    if (!iend) {
+        // Fallback: just write normally
+        bool ok = stbi_write_png(path, w, h, 3, pixels.data(), w * 3) != 0;
+        stbi_image_free(pngData);
+        return ok;
+    }
+
+    // Copy data before IEND
+    size_t beforeLen = iend - pngBytes;
+    out.assign(pngBytes, pngBytes + beforeLen);
+
+    // Insert tEXt chunk
+    uint8_t lenBytes[4] = {
+        (dataLen >> 24) & 0xFF, (dataLen >> 16) & 0xFF,
+        (dataLen >> 8) & 0xFF, dataLen & 0xFF
+    };
+    out.insert(out.end(), lenBytes, lenBytes + 4);
+    const char tEXt[] = "tEXt";
+    out.insert(out.end(), reinterpret_cast<const uint8_t*>(tEXt), reinterpret_cast<const uint8_t*>(tEXt) + 4);
+    out.insert(out.end(), chunkData.begin(), chunkData.end());
+    uint32_t crc = crc32(0L, Z_NULL, 0);
+    crc = crc32(crc, reinterpret_cast<const uint8_t*>(tEXt), 4);
+    crc = crc32(crc, reinterpret_cast<const uint8_t*>(chunkData.data()), dataLen);
+    uint8_t crcBytes[4] = {
+        (crc >> 24) & 0xFF, (crc >> 16) & 0xFF,
+        (crc >> 8) & 0xFF, crc & 0xFF
+    };
+    out.insert(out.end(), crcBytes, crcBytes + 4);
+
+    // Copy IEND and rest
+    out.insert(out.end(), (uint8_t*)iend, (uint8_t*)(pngBytes + len));
+
+    FILE* f = fopen(path, "wb");
+    if (!f) { stbi_image_free(pngData); return false; }
+    fwrite(out.data(), 1, out.size(), f);
+    fclose(f);
+    stbi_image_free(pngData);
+    return true;
 }
