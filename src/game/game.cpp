@@ -22,6 +22,130 @@
 
 // Forward declarations
 static const char* weaponShapeForDataBlock(int dbIndex);
+static const char* shapePathForClass(const std::string& className, const std::string& skinName);
+
+// ─── Mission shape helpers ─────────────────────────────────────────
+// Scan TorqueScript .cs files for datablock ClassName(InstanceName) { shapeFile = "path" }
+// definitions and build an InstanceName -> "shapes/path" lookup.
+static void scanDatablockShapesFromCS(World& world) {
+    auto& fs = Engine::instance().fs();
+    std::vector<std::string> allFiles;
+    fs.listFiles(nullptr, allFiles);
+    int found = 0;
+    for (auto& path : allFiles) {
+        if (path.size() < 3 || path.compare(path.size() - 3, 3, ".cs") != 0) continue;
+        auto data = fs.read(path.c_str());
+        if (data.empty()) continue;
+        std::string content((const char*)data.data(), data.size());
+        size_t pos = 0;
+        while ((pos = content.find("datablock", pos)) != std::string::npos) {
+            pos += 9; // skip "datablock"
+            // Skip whitespace
+            while (pos < content.size() && (content[pos]==' '||content[pos]=='\t'||content[pos]=='\n'||content[pos]=='\r')) pos++;
+            // Read class name
+            size_t clsStart = pos;
+            while (pos < content.size() && content[pos] != '(' && content[pos] != ' ' &&
+                   content[pos] != '\t' && content[pos] != '{' && content[pos] != '\n' && content[pos] != '\r') pos++;
+            // Expect ( InstanceName )
+            if (pos >= content.size() || content[pos] != '(') { continue; }
+            pos++; // skip '('
+            while (pos < content.size() && (content[pos]==' '||content[pos]=='\t')) pos++;
+            size_t nameStart = pos;
+            while (pos < content.size() && content[pos]!=')' && content[pos]!=' ' && content[pos]!='\t' && content[pos]!='\n' && content[pos]!='\r') pos++;
+            std::string instanceName = content.substr(nameStart, pos - nameStart);
+            if (instanceName.empty()) continue;
+            // Skip to {
+            while (pos < content.size() && content[pos] != '{') pos++;
+            if (pos >= content.size()) break;
+            pos++; // skip '{'
+            // Find matching } with depth counting
+            int depth = 1;
+            size_t bodyStart = pos;
+            while (pos < content.size() && depth > 0) {
+                if (content[pos] == '{') depth++;
+                else if (content[pos] == '}') depth--;
+                if (depth > 0) pos++;
+            }
+            std::string body = content.substr(bodyStart, pos - bodyStart);
+            // Look for shapeFile = "path" (case-insensitive search)
+            std::string lowerBody; lowerBody.reserve(body.size());
+            for (char c : body) lowerBody += (char)std::tolower((unsigned char)c);
+            size_t sfKey = lowerBody.find("shapefile");
+            if (sfKey != std::string::npos) {
+                size_t eq = body.find('=', sfKey);
+                if (eq != std::string::npos) {
+                    size_t q1 = body.find('"', eq);
+                    if (q1 != std::string::npos) {
+                        size_t q2 = body.find('"', q1 + 1);
+                        if (q2 != std::string::npos) {
+                            std::string sf = body.substr(q1 + 1, q2 - q1 - 1);
+                            if (!sf.empty()) {
+                                std::string fullPath = sf;
+                                if (fullPath.find("shapes/") != 0 && fullPath.find("interiors/") != 0)
+                                    fullPath = "shapes/" + fullPath;
+                                world.datablockShapes[instanceName] = fullPath;
+                                found++;
+                            }
+                        }
+                    }
+                }
+            }
+            if (pos < content.size()) pos++; // skip '}'
+        }
+    }
+    Console::instance().printf(LogLevel::Debug, "  scanned datablock shapes from .cs: %d found", found);
+}
+
+// Check if a .mis mission object class should be rendered as a shape
+static bool isRenderableMissionShape(const std::string& className) {
+    if (className == "InteriorInstance" || className == "TSStatic" ||
+        className == "StaticShape" || className == "ScopeAlwaysShape" ||
+        className == "Turret" || className == "Item" ||
+        className == "Camera" || className == "WayPoint" || className == "Marker" ||
+        className == "BeaconObject" || className == "Debris" ||
+        className == "WheeledVehicle" || className == "HoverVehicle" ||
+        className == "FlyingVehicle" || className == "ForceFieldBare" ||
+        className == "Sentry" || className == "Shrike" || className == "Turbograv" ||
+        className == "Wildcat" || className == "Shield" || className == "Vehicle")
+        return true;
+    // Vehicle subclasses (VehicleData-derived)
+    if (className.size() > 9 && className.compare(className.size() - 9, 9, "Vehicle") == 0)
+        return true;
+    if (className.size() > 5 && className.compare(className.size() - 5, 5, "Turret") == 0)
+        return true;
+    return false;
+}
+
+// Resolve the shape file path for a mission object.
+// Priority: object shapename/interiorFile -> datablock InstanceName lookup
+//           -> shapePathForClass fallback.
+static std::string resolveShapePath(const MisObject& obj,
+                                    const std::unordered_map<std::string, std::string>& datablockShapes) {
+    std::string shape = getProp(obj.props, "shapename");
+    if (!shape.empty()) {
+        if (!shape.empty() && shape.back() == '"') shape.pop_back();
+        return shape;
+    }
+    shape = getProp(obj.props, "interiorFile");
+    if (!shape.empty()) {
+        if (!shape.empty() && shape.back() == '"') shape.pop_back();
+        if (shape.find("interiors/") != 0 && shape.find("shapes/") != 0)
+            shape = "interiors/" + shape;
+        return shape;
+    }
+    // Try datablock InstanceName lookup
+    std::string db = getProp(obj.props, "datablock");
+    if (!db.empty()) {
+        // Property values may have trailing quotes from parser
+        if (!db.empty() && db.back() == '"') db.pop_back();
+        auto it = datablockShapes.find(db);
+        if (it != datablockShapes.end()) return it->second;
+    }
+    // Fallback: class-based default shape
+    const char* clsPath = shapePathForClass(obj.className, "");
+    if (clsPath) return std::string(clsPath);
+    return "";
+}
 
 // ─── Sound helpers ────────────────────────────────────────────────
 static void playChatBeep() {
@@ -653,30 +777,41 @@ bool World::load(const char* mapName) {
         std::vector<std::string> shapeNames;
         auto addShapeName = [&](const std::string& n) {
             if (n.empty()) return;
-            // Clean trailing quote from mis parsing
             std::string clean = n;
+            // Clean trailing quote from mis parsing
             if (!clean.empty() && clean.back() == '"') clean.pop_back();
+            // Strip directory prefix so the loader can add the correct one
+            if (clean.starts_with("shapes/")) clean = clean.substr(7);
+            else if (clean.starts_with("interiors/")) clean = clean.substr(10);
             if (clean.empty()) return;
             bool found = false;
             for (auto& s : shapeNames) if (s == clean) { found = true; break; }
             if (!found) shapeNames.push_back(clean);
         };
 
-        for (auto& obj : objects) {
-            if (obj.className == "InteriorInstance" || obj.className == "TSStatic" ||
-                obj.className == "StaticShape") {
-                addShapeName(getProp(obj.props, "shapename"));
-                addShapeName(getProp(obj.props, "interiorFile"));
-            }
-        }
+        // Scan TorqueScript .cs files for datablock definitions (InstanceName -> shapeFile)
+        scanDatablockShapesFromCS(*this);
 
-        // Extract shapeFile paths from datablock definitions
+        // Also extract inline datablock definitions from the .mis file itself
+        // (datablock ClassName(InstanceName) { shapeFile = "path" })
         for (auto& obj : objects) {
             std::string shapeFile = getProp(obj.props, "shapefile");
             if (!shapeFile.empty()) {
-                datablockShapeMap[obj.className] = shapeFile;
-                addShapeName(shapeFile);
+                // obj.objName is the InstanceName
+                std::string fullPath = shapeFile;
+                if (fullPath.find("shapes/") != 0 && fullPath.find("interiors/") != 0)
+                    fullPath = "shapes/" + fullPath;
+                datablockShapes[obj.objName] = fullPath;
+                addShapeName(fullPath);
             }
+        }
+
+        // Collect shape paths for all renderable mission objects
+        // (TSStatic, InteriorInstance, StaticShape, Turret, Item, Camera, etc.)
+        for (auto& obj : objects) {
+            if (!isRenderableMissionShape(obj.className)) continue;
+            std::string shapePath = resolveShapePath(obj, datablockShapes);
+            if (!shapePath.empty()) addShapeName(shapePath);
         }
 
         // Load all unique shapes
@@ -764,51 +899,108 @@ bool World::load(const char* mapName) {
 
         // Place objects from mission, mapping to loaded shapes
         for (auto& obj : objects) {
-            if (obj.className == "InteriorInstance" || obj.className == "TSStatic" ||
-                obj.className == "StaticShape") {
-                WorldObject wo;
-                wo.pos = parsePos(getProp(obj.props, "position"));
-                {
-                    std::string rotStr = getProp(obj.props, "rotation");
-                    float vals[4] = {0,0,1,0};
-                    int count = sscanf(rotStr.c_str(), "%f %f %f %f", &vals[0], &vals[1], &vals[2], &vals[3]);
-                    if (count >= 3) {
-                        wo.rot = {vals[0], vals[1], vals[2]};
-                        wo.rotAngleDeg = (count >= 4) ? vals[3] : 0;
-                    }
-                }
-                {
-                    std::string scaleStr = getProp(obj.props, "scale");
-                    if (!scaleStr.empty()) {
-                        float sx, sy, sz;
-                        if (sscanf(scaleStr.c_str(), "%f %f %f", &sx, &sy, &sz) == 3)
-                            wo.scale = {sx, sy, sz};
-                    }
-                }
-                wo.shapeName = getProp(obj.props, "shapename");
-                if (wo.shapeName.empty())
-                    wo.shapeName = getProp(obj.props, "interiorFile");
-                // Clean trailing quote
-                if (!wo.shapeName.empty() && wo.shapeName.back() == '"')
-                    wo.shapeName.pop_back();
-                wo.collidable = true;
+            // Skip infrastructure / non-renderable classes (handled elsewhere)
+            if (obj.className == "SimGroup" || obj.className == "MissionArea" ||
+                obj.className == "TerrainBlock" || obj.className == "Sky" ||
+                obj.className == "Sun" || obj.className == "WaterBlock" ||
+                obj.className == "AudioEmitter" || obj.className == "MissionMarker" ||
+                obj.className == "SpawnSphere" || obj.className == "NavigationGraph" ||
+                obj.className == "AIObjective" || obj.className == "Trigger" ||
+                obj.className == "PhysicalZone" || obj.className == "Precipitation" ||
+                obj.className == "ParticleEmitter" || obj.className == "ParticleEmissionDummy" ||
+                obj.className == "Explosion" || obj.className == "Lightning")
+                continue;
 
-                // Find matching shape
-                for (auto& s : shapes) {
-                    if (s.name == wo.shapeName) {
-                        wo.shape = &s;
-                        // Auto-detect animation: use first animation if present
-                        if (!s.animations.empty())
-                            wo.animName = s.animations[0].name;
-                        break;
-                    }
-                }
-                addObject(wo);
-                if (wo.shape) {
-                    Console::instance().printf(LogLevel::Debug, "  placed: %s at (%.1f, %.1f, %.1f)",
-                        wo.shapeName.c_str(), wo.pos.x, wo.pos.y, wo.pos.z);
+            if (!isRenderableMissionShape(obj.className)) continue;
+
+            WorldObject wo;
+            wo.pos = parsePos(getProp(obj.props, "position"));
+            {
+                std::string rotStr = getProp(obj.props, "rotation");
+                float vals[4] = {0,0,1,0};
+                int count = sscanf(rotStr.c_str(), "%f %f %f %f", &vals[0], &vals[1], &vals[2], &vals[3]);
+                if (count >= 3) {
+                    wo.rot = {vals[0], vals[1], vals[2]};
+                    wo.rotAngleDeg = (count >= 4) ? vals[3] : 0;
                 }
             }
+            {
+                std::string scaleStr = getProp(obj.props, "scale");
+                if (!scaleStr.empty()) {
+                    float sx, sy, sz;
+                    if (sscanf(scaleStr.c_str(), "%f %f %f", &sx, &sy, &sz) == 3)
+                        wo.scale = {sx, sy, sz};
+                }
+            }
+            wo.shapeName = resolveShapePath(obj, datablockShapes);
+            if (!wo.shapeName.empty() && wo.shapeName.back() == '"')
+                wo.shapeName.pop_back();
+            // Strip directory prefix so it matches loaded shape names
+            if (wo.shapeName.starts_with("shapes/")) wo.shapeName = wo.shapeName.substr(7);
+            else if (wo.shapeName.starts_with("interiors/")) wo.shapeName = wo.shapeName.substr(10);
+            wo.collidable = true;
+
+            // Find matching shape
+            for (auto& s : shapes) {
+                if (s.name == wo.shapeName) {
+                    wo.shape = &s;
+                    // Auto-detect animation: use first animation if present
+                    if (!s.animations.empty())
+                        wo.animName = s.animations[0].name;
+                    break;
+                }
+            }
+            addObject(wo);
+            if (wo.shape) {
+                Console::instance().printf(LogLevel::Debug, "  placed: %s (%s) at (%.1f, %.1f, %.1f)",
+                    wo.shapeName.c_str(), obj.className.c_str(), wo.pos.x, wo.pos.y, wo.pos.z);
+            } else if (!wo.shapeName.empty()) {
+                Console::instance().printf(LogLevel::Debug, "  placed (no shape): %s (%s) at (%.1f, %.1f, %.1f)",
+                    wo.shapeName.c_str(), obj.className.c_str(), wo.pos.x, wo.pos.y, wo.pos.z);
+            }
+        }
+
+        // Parse item pickups — only for items whose shapes failed to load
+        // (items with loaded shapes are rendered as WorldObjects)
+        for (auto& obj : objects) {
+            if (obj.className != "Item") continue;
+            std::string db = getProp(obj.props, "datablock");
+            std::string posStr = getProp(obj.props, "position");
+
+            // Check if this item was already placed as a WorldObject with a shape
+            bool hasShape = false;
+            Point3F itemPos = parsePos(posStr);
+            for (auto& wo : worldObjects) {
+                if (wo.shape && wo.shape->loaded &&
+                    std::abs(wo.pos.x - itemPos.x) < 0.01f &&
+                    std::abs(wo.pos.y - itemPos.y) < 0.01f &&
+                    std::abs(wo.pos.z - itemPos.z) < 0.01f) {
+                    hasShape = true;
+                    break;
+                }
+            }
+            if (hasShape) continue; // rendered as WorldObject
+
+            ItemPickup::Type type;
+            std::string dbLower;
+            for (auto& c : db) dbLower += (char)std::tolower((unsigned char)c);
+            if (dbLower.find("health") != std::string::npos || dbLower.find("repair") != std::string::npos)
+                type = ItemPickup::Health;
+            else if (dbLower.find("energy") != std::string::npos)
+                type = ItemPickup::Energy;
+            else if (dbLower.find("ammo") != std::string::npos)
+                type = ItemPickup::Ammo;
+            else
+                continue;
+
+            ItemPickup item;
+            item.pos = itemPos;
+            item.type = type;
+            item.respawnTimer = 0;
+            item.active = true;
+            items.push_back(item);
+            Console::instance().printf(LogLevel::Debug, "  item (box): %s at (%.1f, %.1f, %.1f)",
+                db.c_str(), item.pos.x, item.pos.y, item.pos.z);
         }
 
         // Build collision mesh from world objects with per-object transforms applied
@@ -3274,7 +3466,7 @@ void Game::render(float dt) {
             DTSShape* shape = const_cast<DTSShape*>(g->shape);
             if (!shape && g->className.empty() == false) {
                 GhostEntry* mutableG = const_cast<GhostEntry*>(g);
-                mutableG->shape = getOrLoadDemoShape(g->className, g->skinName);
+                mutableG->shape = getOrLoadDemoShape(g->className, g->skinName, g->shapeName);
                 shape = mutableG->shape;
             }
 
@@ -3737,7 +3929,7 @@ void Game::render(float dt) {
 
             // Try to load a shape for this ghost class
             if (!g->shape) {
-                g->shape = getOrLoadDemoShape(g->className, g->skinName);
+                g->shape = getOrLoadDemoShape(g->className, g->skinName, g->shapeName);
             }
 
             if (g->shape && g->shape->loaded) {
@@ -4272,7 +4464,8 @@ static bool isRenderableGhostClass(const std::string& className) {
     return true;
 }
 
-DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::string& skinName) {
+DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::string& skinName,
+                                   const std::string& datablockInstance) {
     // Build a cache key that differentiates armor variants for the same class
     std::string cacheKey = className;
     if ((className == "Player" || className == "MPB") && !skinName.empty()) {
@@ -4294,13 +4487,11 @@ DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::stri
 
     // Find the shape path for this class
     auto& fs = Engine::instance().fs();
-    // First try datablock shape map from .mis
+    // First try datablock InstanceName lookup (from .cs scripts + .mis)
     std::string dbShapePath;
-    auto dbIt = w->datablockShapeMap.find(className);
-    if (dbIt != w->datablockShapeMap.end()) {
-        dbShapePath = dbIt->second;
-        // Clean trailing quote
-        if (!dbShapePath.empty() && dbShapePath.back() == '"') dbShapePath.pop_back();
+    if (!datablockInstance.empty()) {
+        auto dbIt = w->datablockShapes.find(datablockInstance);
+        if (dbIt != w->datablockShapes.end()) dbShapePath = dbIt->second;
     }
     const char* path = !dbShapePath.empty() ? dbShapePath.c_str() : shapePathForClass(className, skinName);
     if (!path) {

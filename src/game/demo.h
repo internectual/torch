@@ -337,9 +337,33 @@ struct InitialBlockData {
     std::string missionName;
     uint32_t missionCRC{};
     bool phase2Valid{};
-    std::string phase2Error;
-    int phase2TrailingBits{};
     std::map<uint32_t, std::string> datablockWeaponShapes; // datablock index → weapon shape path
+
+    // Match and mission metadata parsed from demoValues (matching t2-mapper)
+    std::string missionDisplayName;
+    std::string missionTypeDisplayName;
+    std::string gameClassName;
+    std::string serverDisplayName;
+    std::string modName;
+    std::string recorderName;
+    int recorderClientId = -1;
+    std::string recordingDate;
+};
+
+// ─── HUD State (ported from t2-mapper StreamEngine) ───────────────
+struct WeaponsHudState {
+    std::map<int, int> slots; // slot index -> ammo (-1 = none/infinite)
+    int activeIndex = -1;
+};
+
+struct BackpackHudState {
+    int packIndex = -1;
+    bool active = false;
+    std::string text;
+};
+
+struct InventoryHudState {
+    std::map<int, int> slots; // slot index -> amount
 };
 
 struct PathManagerRecord {
@@ -466,6 +490,13 @@ public:
     const std::vector<PlayerInfo>& getPlayerInfo() const { return playerInfo_; }
     const std::string& getPlayerNameForSkin(const std::string& skin) const;
 
+    // HUD state (ported from t2-mapper StreamEngine)
+    const WeaponsHudState& getWeaponsHud() const { return weaponsHud_; }
+    const BackpackHudState& getBackpackHud() const { return backpackHud_; }
+    const InventoryHudState& getInventoryHud() const { return inventoryHud_; }
+    void handleHudRemoteCommand(const std::string& funcName, const std::vector<std::string>& args);
+    void extractMissionInfo();
+
 private:
     const uint8_t* buf{};
     size_t bufSize{};
@@ -496,7 +527,12 @@ private:
     std::vector<PlayerInfo> playerInfo_;
     std::map<std::string, std::string> skinToPlayer_; // skinName → playerName
 
-    // File path for Node.js reference parser fallback
+    // HUD state
+    WeaponsHudState weaponsHud_;
+    BackpackHudState backpackHud_;
+    InventoryHudState inventoryHud_;
+
+    // Native extraction
     std::string recFilePath_;
     void extractScoreboardData(const char* recPath);
 

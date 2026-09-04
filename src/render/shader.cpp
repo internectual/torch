@@ -75,6 +75,11 @@ uniform float uMetallic = 0.0;
 uniform float uRoughness = 0.5;
 uniform bool uAlphaTest = false;
 uniform bool uDebugInterior = false;
+uniform bool uDebugLightmap = false;
+uniform bool uDebugTex = false;
+uniform bool uDebugTexColor = false;
+uniform bool uDebugTexOnly = false;
+uniform bool uDebugLightmapContent = false;
 
 out vec4 FragColor;
 
@@ -96,6 +101,43 @@ void main() {
     vec4 col = vColor * texColor * uTint;
     if (uDebugInterior) {
         FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    if (uDebugLightmap) {
+        // Show lightmap UVs as color: red=U, green=V, blue=0
+        // Output raw UV2 (not fract) to see actual values
+        FragColor = vec4(clamp(vUV2.x, 0.0, 1.0), clamp(vUV2.y, 0.0, 1.0), 0.0, 1.0);
+        return;
+    }
+    if (uDebugTex) {
+        // Show raw UV1 values: red=U, green=V (wrapped to [0,1] for visualization)
+        float u = fract(vUV.x);
+        float vv = fract(vUV.y);
+        FragColor = vec4(u, vv, 0.0, 1.0);
+        return;
+    }
+    if (uDebugTexColor) {
+        vec4 texColor = uUseTexture ? texture(uTexture, vUV) : vec4(1.0);
+        if (uUseTexture) {
+            vec2 ts = textureSize(uTexture, 0);
+            // Encode: R = fract(UV.x)*255/256, G = fract(UV.y)*255/256, B = texColor.r
+            FragColor = vec4(fract(vUV.x), fract(vUV.y), texColor.r, 1.0);
+        } else
+            FragColor = vec4(0.5, 0.5, 0.5, 1.0);
+        return;
+    }
+    if (uDebugTexOnly) {
+        // Render texture only, no lightmap
+        vec4 texColor = uUseTexture ? texture(uTexture, vUV) : vec4(1.0);
+        FragColor = vec4(texColor.rgb * 0.3, texColor.a);
+        return;
+    }
+    if (uDebugLightmapContent) {
+        vec3 lm = texture(uLightmap, vUV2).rgb;
+        if (uUseLightmap)
+            FragColor = vec4(lm, 1.0);
+        else
+            FragColor = vec4(0.5, 0.5, 0.5, 1.0);
         return;
     }
     if (uSelfIlluminated) {

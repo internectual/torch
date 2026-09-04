@@ -1348,6 +1348,12 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
 
     if (shader) shader->setUniform("uShadowStrength", r.shadowsActive ? 0.6f : 0.0f);
     shader->setUniform("uDebugInterior", (int32_t)(getenv("TORCH_DIF_RED") ? 1 : 0));
+    shader->setUniform("uDebugLightmap", (int32_t)(getenv("TORCH_DIF_LMUV") ? 1 : 0));
+    // Also check lightmap-only mode for debugging
+    shader->setUniform("uDebugTex", (int32_t)(getenv("TORCH_DIF_TEXUV") ? 1 : 0));
+    shader->setUniform("uDebugTexColor", (int32_t)(getenv("TORCH_DIF_TEXCOL") ? 1 : 0));
+    shader->setUniform("uDebugTexOnly", (int32_t)(getenv("TORCH_DIF_TEXONLY") ? 1 : 0));
+    shader->setUniform("uDebugLightmapContent", (int32_t)(getenv("TORCH_DIF_LMCONTENT") ? 1 : 0));
 
     // Build effective node transforms, applying any overrides
     std::vector<MatrixF> nodeWorld = defaultTransforms;
@@ -1379,11 +1385,25 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
         }
         fprintf(stderr, "AABB '%s' min=(%.1f %.1f %.1f) max=(%.1f %.1f %.1f)\n",
                 name.c_str(), mn.x,mn.y,mn.z, mx.x,mx.y,mx.z);
+        // Per-mesh world-space AABB
+        for (size_t mi=0; mi<meshes.size(); mi++) {
+            auto& m = meshes[mi];
+            Point3F mmn{1e30f,1e30f,1e30f}, mmx{-1e30f,-1e30f,-1e30f};
+            for (auto& v : m.vertices) {
+                Point3F wp = baseModel.transform(v.pos);
+                mmn.x=fminf(mmn.x,wp.x); mmn.y=fminf(mmn.y,wp.y); mmn.z=fminf(mmn.z,wp.z);
+                mmx.x=fmaxf(mmx.x,wp.x); mmx.y=fmaxf(mmx.y,wp.y); mmx.z=fmaxf(mmx.z,wp.z);
+            }
+            fprintf(stderr, "MESHW[%zu] tris=%zu aabb(min %.1f %.1f %.1f max %.1f %.1f %.1f)\n",
+                    mi, m.indices.size()/3, mmn.x,mmn.y,mmn.z, mmx.x,mmx.y,mmx.z);
+        }
     }
 
     // Reset GL state
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
+    if (getenv("TORCH_NODEPTHTEST")) glDepthFunc(GL_ALWAYS);
+    if (getenv("TORCH_WIRE")) glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 
     // T2 fadeSet: force alpha test + translucent blending for ALL materials.
     // For RGB textures (alpha=255), this changes nothing. For RGBA textures,
@@ -1406,7 +1426,21 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
             auto& tex = materialTextures[mesh.materialIndex];
             if (tex.loaded) {
                 tex.bind(0);
+                if (shader) shader->setUniform("uTexture", (int32_t)0);
                 if (shader) shader->setUniform("uUseTexture", (int32_t)1);
+                if (getenv("TORCH_TEXDIAG") && materialLightmapIndex.size() == 102)
+                    Console::instance().printf(LogLevel::Debug,
+                        "TEXBIND mesh=%d matIdx=%d matIdx2=%d texId=%u %dx%d "
+                        "matLMIndex_size=%zu matLMIndex[%d]=%d lmIdx=%d name='%s'",
+                        (int)mi, (int)mesh.materialIndex, (int)mesh.materialIdx, tex.id,
+                        tex.width, tex.height,
+                        materialLightmapIndex.size(),
+                        (int)mesh.materialIdx,
+                        (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
+                            ? materialLightmapIndex[mesh.materialIdx] : -999,
+                        (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
+                            ? materialLightmapIndex[mesh.materialIdx] : -1,
+                        (mesh.materialIndex < (int)materialNames.size() ? materialNames[mesh.materialIndex].c_str() : "?"));
             } else {
                 if (shader) shader->setUniform("uUseTexture", (int32_t)0);
             }
@@ -1423,6 +1457,7 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
 
         int lmIdx = (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
             ? materialLightmapIndex[mesh.materialIdx] : -1;
+        if (getenv("TORCH_NOLMMAP")) lmIdx = -1; // diagnostic: disable lightmaps
         if (lmIdx >= 0 && lmIdx < (int)lightmaps.size() && lightmaps[lmIdx].loaded) {
             lightmaps[lmIdx].bind(1);
             if (shader) shader->setUniform("uLightmap", (int32_t)1);
@@ -1759,7 +1794,21 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             auto& tex = materialTextures[mesh.materialIndex];
             if (tex.loaded) {
                 tex.bind(0);
+                if (shader) shader->setUniform("uTexture", (int32_t)0);
                 if (shader) shader->setUniform("uUseTexture", (int32_t)1);
+                if (getenv("TORCH_TEXDIAG") && materialLightmapIndex.size() == 102)
+                    Console::instance().printf(LogLevel::Debug,
+                        "TEXBIND mesh=%d matIdx=%d matIdx2=%d texId=%u %dx%d "
+                        "matLMIndex_size=%zu matLMIndex[%d]=%d lmIdx=%d name='%s'",
+                        (int)mi, (int)mesh.materialIndex, (int)mesh.materialIdx, tex.id,
+                        tex.width, tex.height,
+                        materialLightmapIndex.size(),
+                        (int)mesh.materialIdx,
+                        (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
+                            ? materialLightmapIndex[mesh.materialIdx] : -999,
+                        (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
+                            ? materialLightmapIndex[mesh.materialIdx] : -1,
+                        (mesh.materialIndex < (int)materialNames.size() ? materialNames[mesh.materialIndex].c_str() : "?"));
             } else {
                 if (shader) shader->setUniform("uUseTexture", (int32_t)0);
             }
@@ -1776,6 +1825,7 @@ void DTSShape::renderAnimation(const char* animName, float time) {
         // Lightmap
         int lmIdx = (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
             ? materialLightmapIndex[mesh.materialIdx] : -1;
+        if (getenv("TORCH_NOLMMAP")) lmIdx = -1; // diagnostic: disable lightmaps
         if (lmIdx >= 0 && lmIdx < (int)lightmaps.size() && lightmaps[lmIdx].loaded) {
             lightmaps[lmIdx].bind(1);
             if (shader) shader->setUniform("uLightmap", (int32_t)1);

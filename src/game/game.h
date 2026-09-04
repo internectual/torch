@@ -146,8 +146,8 @@ public:
     };
     MissionAreaParams missionArea;
 
-    // Datablock class name -> shape file path mapping (from .mis)
-    std::unordered_map<std::string, std::string> datablockShapeMap;
+    // Datablock InstanceName -> shapeFile path (from .cs scripts + inline .mis datablock defs)
+    std::unordered_map<std::string, std::string> datablockShapes;
 
     // Object management
     struct WorldObject {
@@ -364,7 +364,8 @@ public:
     Menu& menu() { return *mMenu; }
     int getDemoBlocksDone() const { return demoBlocksDone; }
     int getDemoBlocksTotal() const { return demoBlocksTotal; }
-    DTSShape* getOrLoadDemoShape(const std::string& className, const std::string& skinName = "");
+    DTSShape* getOrLoadDemoShape(const std::string& className, const std::string& skinName = "",
+                                 const std::string& datablockInstance = "");
 
     // Live ghost accessors for HUD/scoreboard
     bool isConnected() const { return activeConn && activeConn->isConnected(); }

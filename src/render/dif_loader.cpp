@@ -45,34 +45,36 @@ static const uint32_t kMaxDIFCount = 1u << 20; // 1M elements per array
 static const uint32_t kMaxDetailLevels = 64;
 static inline uint32_t capU32(uint32_t v) { return v > kMaxDIFCount ? kMaxDIFCount : v; }
 
-// ─── Helper: triangle fan → indexed triangles ──────────────────
+// ─── Helper: triangle strip → indexed triangles (matching TGE emitPrimitive) ──
 
 struct TriFan {
     uint32_t windingStart;
     uint32_t windingCount;
 };
 
-static void fanToTriangles(const std::vector<uint32_t>& windings,
-                           const TriFan& fan,
-                           const uint8_t* fanMask,
-                           std::vector<uint32_t>& outIndices,
-                           uint32_t baseIndex)
+static void stripToTriangles(const std::vector<uint32_t>& windVerts,
+                             std::vector<uint32_t>& outIndices,
+                             uint32_t baseIndex = 0)
 {
-    if (fan.windingCount < 3) return;
+    uint32_t numPoints = (uint32_t)windVerts.size();
+    if (numPoints < 3) return;
 
-    uint32_t center = windings[fan.windingStart];
-    for (uint32_t j = 2; j < fan.windingCount; j++) {
-        uint32_t vJm1 = windings[fan.windingStart + j - 1];
-        uint32_t vJ   = windings[fan.windingStart + j];
-        // Emit triangle using the CURRENT center, THEN advance if fanMask bit (j-2)
-        // says to.  (Switching center before emitting produced degenerate
-        // {v(j-1), v(j-1), v(j)} triangles — zero area, silently dropped.)
-        outIndices.push_back(baseIndex + center);
-        outIndices.push_back(baseIndex + vJm1);
-        outIndices.push_back(baseIndex + vJ);
-        if (fanMask && (fanMask[(j - 2) >> 3] & (1 << ((j - 2) & 7)))) {
-            center = vJm1;
-        }
+    uint32_t last = 2;
+    while (last < numPoints) {
+        // First triangle: (last-2, last-1, last)
+        outIndices.push_back(baseIndex + windVerts[last - 2]);
+        outIndices.push_back(baseIndex + windVerts[last - 1]);
+        outIndices.push_back(baseIndex + windVerts[last - 0]);
+        last++;
+
+        if (last == numPoints)
+            break;
+
+        // Second triangle: (last-1, last-2, last) - alternating to preserve CCW winding
+        outIndices.push_back(baseIndex + windVerts[last - 1]);
+        outIndices.push_back(baseIndex + windVerts[last - 2]);
+        outIndices.push_back(baseIndex + windVerts[last - 0]);
+        last++;
     }
 }
 
@@ -599,7 +601,17 @@ static bool interiorToMeshes(DIFInterior& interior,
     struct MatSlot { int texIdx = -1; };
     std::vector<MatSlot> matSlots(interior.matNames.size());
 
+    int fallbackTexIdx = -1;
     if (!skipGpu) {
+        // Fallback 1x1 neutral texture so missing textures never drop surfaces
+        Texture fallbackTex;
+        uint8_t whitePixel[4] = {200, 200, 200, 255};
+        fallbackTex.loadRaw(whitePixel, 1, 1, 4);
+        fallbackTexIdx = (int)outTextures.size();
+        outTextures.push_back(std::move(fallbackTex));
+        outMatFlags.push_back(0);
+        outMatNames.push_back("__fallback__");
+
         for (size_t i = 0; i < interior.matNames.size(); i++) {
             Texture tex = resolveDIFTexture(interior.matNames[i]);
             if (tex.loaded) {
@@ -608,11 +620,17 @@ static bool interiorToMeshes(DIFInterior& interior,
                 outMatFlags.push_back(0);
                 outMatNames.push_back(interior.matNames[i]);
             } else {
+                matSlots[i].texIdx = fallbackTexIdx;
                 if (getenv("TORCH_DIF_DIAG"))
-                    Console::instance().printf(LogLevel::Warn, "TEXDIAG '%s' not found",
+                    Console::instance().printf(LogLevel::Warn, "TEXDIAG '%s' not found (using fallback)",
                         interior.matNames[i].c_str());
             }
         }
+    } else {
+        // skipGpu: assign virtual indices so offline analysis/collision works
+        for (size_t i = 0; i < interior.matNames.size(); i++)
+            matSlots[i].texIdx = (int)i;
+        fallbackTexIdx = 0;
     }
     // Load lightmaps (skip GPU ops if skipGpu)
     if (!skipGpu) {
@@ -628,12 +646,7 @@ static bool interiorToMeshes(DIFInterior& interior,
         }
     }
 
-    // Group surfaces by (texture slot, lightmap) pair.  A DIF building's
-    // surfaces each reference their OWN lightmap image and lightmap UV space; by
-    // keying each mesh on both texture AND lightmap we guarantee every surface in
-    // a mesh samples the single bound lightmap it was authored against.  (Grouping
-    // only by texture shared one lightmap across surfaces with incompatible lm UVs,
-    // which made many pieces go dark/"not render".)
+    // Group surfaces by (texture slot, lightmap) pair.
     struct GroupKey {
         int texIdx;   // texture slot -> materialIndex (texture binding)
         int lmIdx;    // lightmap index -> lightmap binding
@@ -645,8 +658,8 @@ static bool interiorToMeshes(DIFInterior& interior,
         auto& surf = interior.surfaces[si];
         if (surf.windingCount < 3) continue;
         int matIdx = surf.textureIndex;
-        int texIdx = (matIdx >= 0 && matIdx < (int)matSlots.size()) ? matSlots[matIdx].texIdx : -1;
-        if (texIdx < 0) continue; // no resolved texture for this material
+        int texIdx = (matIdx >= 0 && matIdx < (int)matSlots.size()) ? matSlots[matIdx].texIdx : fallbackTexIdx;
+        if (texIdx < 0) texIdx = fallbackTexIdx >= 0 ? fallbackTexIdx : 0;
         int lmIdx = si < interior.normalLMapIndices.size()
             ? interior.normalLMapIndices[si] : -1;
         if (lmIdx < 0 || lmIdx >= (int)outLightmaps.size()) lmIdx = -1;
@@ -673,8 +686,13 @@ static bool interiorToMeshes(DIFInterior& interior,
         if (surf.windingCount < 3) { dbgSurfFew++; continue; }
         dbgSurfGeo++;
         int matIdx = surf.textureIndex;
-        int texIdx = (matIdx >= 0 && matIdx < (int)matSlots.size()) ? matSlots[matIdx].texIdx : -1;
-        if (texIdx < 0) { dbgSurfNoTex++; continue; }
+        int texIdx = (matIdx >= 0 && matIdx < (int)matSlots.size()) ? matSlots[matIdx].texIdx : fallbackTexIdx;
+        if (texIdx < 0) {
+            texIdx = fallbackTexIdx >= 0 ? fallbackTexIdx : 0;
+            dbgSurfNoTex++;
+        } else if (matIdx >= 0 && matIdx < (int)matSlots.size() && matSlots[matIdx].texIdx == fallbackTexIdx) {
+            dbgSurfNoTex++;
+        }
         int lmIdx = si < interior.normalLMapIndices.size()
             ? interior.normalLMapIndices[si] : -1;
         if (lmIdx < 0 || lmIdx >= (int)outLightmaps.size()) lmIdx = -1;
@@ -805,11 +823,6 @@ static bool interiorToMeshes(DIFInterior& interior,
             float* lmGX = lmtg.first;
             float* lmGY = lmtg.second;
 
-            uint8_t fanMaskBytes[32] = {};
-            for (int b = 0; b < 4 && b < 32; b++) {
-                fanMaskBytes[b] = (uint8_t)((surf.fanMask >> (b * 8)) & 0xFF);
-            }
-
             std::vector<uint32_t> windVerts;
             for (uint32_t j = 0; j < surf.windingCount && (surf.windingStart + j) < interior.windings.size(); j++) {
                 uint32_t ptIdx = interior.windings[surf.windingStart + j];
@@ -843,10 +856,9 @@ static bool interiorToMeshes(DIFInterior& interior,
                     windVerts.push_back(idx);
                 }
             }
-
             if (windVerts.size() < 3) continue;
 
-            fanToTriangles(windVerts, {0, (uint32_t)windVerts.size()}, fanMaskBytes, triIndices, 0);
+            stripToTriangles(windVerts, triIndices, 0);
         }
 
         if (triIndices.empty()) continue;
@@ -859,20 +871,49 @@ static bool interiorToMeshes(DIFInterior& interior,
     {
         static bool dbgDump = false;
         if (!dbgDump) { dbgDump = true; }
+        if (getenv("TORCH_DIF_DIAG")) {
+            for (size_t mi=0; mi<outMeshes.size(); mi++) {
+                auto& m = outMeshes[mi];
+                Point3F mn{1e30f,1e30f,1e30f}, mx{-1e30f,-1e30f,-1e30f};
+                for (auto& v : m.vertices) {
+                    mn.x=fminf(mn.x,v.pos.x); mn.y=fminf(mn.y,v.pos.y); mn.z=fminf(mn.z,v.pos.z);
+                    mx.x=fmaxf(mx.x,v.pos.x); mx.y=fmaxf(mx.y,v.pos.y); mx.z=fmaxf(mx.z,v.pos.z);
+                }
+                Console::instance().printf(LogLevel::Info,
+                    "MESH[%zu] verts=%zu tris=%zu aabb(min %.1f %.1f %.1f max %.1f %.1f %.1f)",
+                    mi, m.vertices.size(), m.indices.size()/3,
+                    mn.x,mn.y,mn.z, mx.x,mx.y,mx.z);
+            }
+        }
         // histogram of triangle counts per mesh
-        size_t zeros=0, small=0, reg=0, big=0; size_t totTris=0; size_t degen=0;
+        size_t zeros=0, small=0, reg=0, big=0; size_t totTris=0; size_t degen=0; size_t geoDeg=0;
         size_t surfMask=0, surfMaskDeg=0;
-        for (auto& m : outMeshes) {
+        for (size_t mi=0; mi<outMeshes.size(); mi++) {
+            auto& m = outMeshes[mi];
             size_t t = m.indices.size()/3; totTris += t;
             if (t==0) zeros++; else if (t<20) small++; else if (t<500) reg++; else big++;
             for (size_t k=0; k+3<=m.indices.size(); k+=3) {
                 uint32_t a=m.indices[k], b=m.indices[k+1], c=m.indices[k+2];
-                if (a==b||b==c||a==c) degen++;
+                if (a==b||b==c||a==c) { degen++; continue; }
+                // Geometric (zero-area) degeneracy: distinct indices but collinear points
+                if (a>=m.vertices.size()||b>=m.vertices.size()||c>=m.vertices.size()) continue;
+                const auto& va=m.vertices[a].pos; const auto& vb=m.vertices[b].pos; const auto& vc=m.vertices[c].pos;
+                float abx=vb.x-va.x, aby=vb.y-va.y, abz=vb.z-va.z;
+                float acx=vc.x-va.x, acy=vc.y-va.y, acz=vc.z-va.z;
+                float nx=aby*acz-abz*acy, ny=abz*acx-abx*acz, nz=abx*acy-aby*acx;
+                float area2 = nx*nx+ny*ny+nz*nz;
+                if (area2 < 1e-10f) {
+                    geoDeg++;
+                    if (getenv("TORCH_DIF_DIAG"))
+                        Console::instance().printf(LogLevel::Info,
+                            "GEODEGEN mesh[%zu] tri[%zu] idx %u/%u/%u pos (%.3f %.3f %.3f)/(%.3f %.3f %.3f)/(%.3f %.3f %.3f) area2=%.2e",
+                            mi, k/3, a,b,c, va.x,va.y,va.z, vb.x,vb.y,vb.z, vc.x,vc.y,vc.z, area2);
+                }
             }
         }
         for (auto& s : interior.surfaces) if ((s.fanMask & 0xFFFFFFFFu)!=0) surfMask++;
-        Console::instance().printf(LogLevel::Info, "DIFDIAG meshes=%zu tris=%zu degen=%zu [empty=%zu tiny<20=%zu reg=%zu big=%zu] concaveSurf=%zu/%zu",
-            outMeshes.size(), totTris, degen, zeros, small, reg, big, surfMask, interior.surfaces.size());
+        Console::instance().printf(LogLevel::Info, "DIFDIAG meshes=%zu tris=%zu degen=%zu geoDeg=%zu [empty=%zu tiny<20=%zu reg=%zu big=%zu] concaveSurf=%zu/%zu",
+            outMeshes.size(), totTris, degen, geoDeg, zeros, small, reg, big, surfMask, interior.surfaces.size());
         if (getenv("TORCH_DUMPMASK")) {
             int shown=0;
             for (auto& s : interior.surfaces) {
@@ -895,21 +936,18 @@ static bool interiorToMeshes(DIFInterior& interior,
                 totalSurfs++;
                 auto& surf = interior.surfaces[surfIdx];
                 if (surf.windingCount < 3) continue;
-                uint32_t baseVert = (uint32_t)outCollVerts->size() / 3;
+                std::vector<uint32_t> collVerts;
                 for (uint32_t k = 0; k < surf.windingCount && (surf.windingStart + k) < interior.windings.size(); k++) {
                     uint32_t ptIdx = interior.windings[surf.windingStart + k];
                     if (ptIdx * 3 + 2 < interior.points.size()) {
+                        uint32_t vi = (uint32_t)outCollVerts->size() / 3;
                         outCollVerts->push_back(interior.points[ptIdx * 3]);
                         outCollVerts->push_back(interior.points[ptIdx * 3 + 1]);
                         outCollVerts->push_back(interior.points[ptIdx * 3 + 2]);
+                        collVerts.push_back(vi);
                     }
                 }
-                // Triangle fan from baseVert
-                for (uint32_t k = 2; k < surf.windingCount; k++) {
-                    outCollIndices->push_back(baseVert);
-                    outCollIndices->push_back(baseVert + k - 1);
-                    outCollIndices->push_back(baseVert + k);
-                }
+                stripToTriangles(collVerts, *outCollIndices, 0);
             }
         }
         Console::instance().printf(LogLevel::Info, "  DIF: %zu hull surfaces processed, %zu collision verts, %zu indices",
@@ -996,6 +1034,13 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
 
     Console::instance().printf(LogLevel::Info, "DIF: loaded '%s' (%zu meshes, %zu textures, %zu lightmaps)",
         name, result.meshes.size(), result.textures.size(), result.lightmaps.size());
+    if (getenv("TORCH_DIF_DIAG")) {
+        Console::instance().printf(LogLevel::Debug,
+            "  materialLightmapIndex: %zu entries", result.materialLightmapIndex.size());
+        for (size_t i = 0; i < result.materialLightmapIndex.size() && i < 20; i++)
+            Console::instance().printf(LogLevel::Debug,
+                "  matLMIndex[%zu] = %d", i, (int)result.materialLightmapIndex[i]);
+    }
     result.loaded = true;
     return result;
 }
