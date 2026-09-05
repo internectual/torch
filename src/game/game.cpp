@@ -944,15 +944,14 @@ bool World::load(const char* mapName) {
             for (auto& s : shapes) {
                 if (s.name == wo.shapeName) {
                     wo.shape = &s;
-                    // Auto-detect animation: use first animation if present
-                    if (!s.animations.empty())
-                        wo.animName = s.animations[0].name;
+                    // In mapper mode, render shapes statically (no auto-animation).
+                    // The 'Activate' sequence hides the turret barrel at animTime=0.
                     break;
                 }
             }
             addObject(wo);
             if (wo.shape) {
-                Console::instance().printf(LogLevel::Debug, "  placed: %s (%s) at (%.1f, %.1f, %.1f)",
+                Console::instance().printf(LogLevel::Info, "  placed: %s (%s) at (%.1f, %.1f, %.1f)",
                     wo.shapeName.c_str(), obj.className.c_str(), wo.pos.x, wo.pos.y, wo.pos.z);
             } else if (!wo.shapeName.empty()) {
                 Console::instance().printf(LogLevel::Debug, "  placed (no shape): %s (%s) at (%.1f, %.1f, %.1f)",
@@ -3360,13 +3359,30 @@ void Game::render(float dt) {
         r.setCamera({0, 0, 2.6f}, {0, 0, 0}, {0, 1, 0});
 
         bool animated = false;
-        if (!shapeViewerShape.animations.empty()) {
-            shapeViewerAnimTime += dt;
-            const auto& anim = shapeViewerShape.animations[0];
-            shapeViewerShape.renderAnimation(anim.name.c_str(), fmodf(shapeViewerAnimTime, anim.duration));
+        const char* svAnim = getenv("SV_ANIM");
+        const char* svStatic = getenv("SV_STATIC");
+        if (!svStatic && !shapeViewerShape.animations.empty()) {
+            // Allow selecting a specific animation via SV_ANIM env var
+            int animIdx = 0;
+            if (svAnim) {
+                for (size_t ai = 0; ai < shapeViewerShape.animations.size(); ai++)
+                    if (shapeViewerShape.animations[ai].name == svAnim) { animIdx = (int)ai; break; }
+            }
+            const auto& anim = shapeViewerShape.animations[animIdx];
+            float animTime = shapeViewerAnimTime;
+            if (const char* svTime = getenv("SV_TIME"))
+                animTime = atof(svTime) * anim.duration;
+            shapeViewerShape.renderAnimation(anim.name.c_str(), fmodf(animTime, anim.duration));
             animated = true;
+            shapeViewerAnimTime += dt;
         }
         if (!animated) shapeViewerShape.render(0);
+        // Auto-screenshot + exit on first frame (for headless testing)
+        if (const char* svShot = getenv("SV_SHOT")) {
+            Engine::instance().renderer().screenshot(svShot);
+            Console::instance().printf(LogLevel::Info, "SV shot saved: %s", svShot);
+            Engine::instance().quit();
+        }
 
         // HUD overlay
         auto* font = r.getFont();
@@ -3377,9 +3393,12 @@ void Game::render(float dt) {
             font->render(buf, 20, 20, {1, 1, 0, 1}, 1.5f);
 
             if (!shapeViewerShape.animations.empty()) {
-                const auto& anim = shapeViewerShape.animations[0];
-                snprintf(buf, sizeof(buf), "Anim: %s (%.1fs)", anim.name.c_str(), anim.duration);
-                font->render(buf, 20, 45, {0.7f, 0.9f, 1, 1}, 1.2f);
+                for (size_t ai = 0; ai < shapeViewerShape.animations.size(); ai++) {
+                    const auto& a = shapeViewerShape.animations[ai];
+                    snprintf(buf, sizeof(buf), "Anim[%zu]: %s (%.1fs)%s", ai, a.name.c_str(), a.duration,
+                        (svAnim && a.name == svAnim) ? " <<<" : "");
+                    font->render(buf, 20, 45 + (int)ai * 25, {0.7f, 0.9f, 1, 1}, 1.2f);
+                }
             }
             snprintf(buf, sizeof(buf), "Left/Right: cycle  Mouse: orbit  Esc: exit");
             font->render(buf, 20, 65, {0.5f, 0.7f, 0.8f, 1}, 1.0f);
@@ -4905,12 +4924,13 @@ void Game::enterShapeViewer() {
 
     Console::instance().printf(LogLevel::Info, "Shape Viewer: found %zu .dts files", shapeViewerFiles.size());
 
-    // Start on bioderm if found
-    for (int i = 0; i < (int)shapeViewerFiles.size(); i++) {
-        if (shapeViewerFiles[i].find("bioderm") != std::string::npos) {
-            shapeViewerIndex = i;
-            break;
-        }
+    // Start on SV_START if specified, otherwise bioderm
+    if (const char* svStart = getenv("SV_START")) {
+        for (int i = 0; i < (int)shapeViewerFiles.size(); i++)
+            if (shapeViewerFiles[i].find(svStart) != std::string::npos) { shapeViewerIndex = i; break; }
+    } else {
+        for (int i = 0; i < (int)shapeViewerFiles.size(); i++)
+            if (shapeViewerFiles[i].find("bioderm") != std::string::npos) { shapeViewerIndex = i; break; }
     }
 
     shapeViewerLoadCurrent();
