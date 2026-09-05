@@ -383,6 +383,10 @@ public:
     bool shapeViewerBoundsInit = false;
     Point3F shapeViewerCenter{0,0,0};
     float shapeViewerFitScale = 1.0f;
+    bool shapeViewerAutoCycle = false;
+    int shapeViewerCycleDelay = 0;
+    int shapeViewerFramesRemaining = 0;
+
     void enterShapeViewer();
     void shapeViewerNext();
     void shapeViewerPrev();

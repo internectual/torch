@@ -46,11 +46,19 @@ struct DTSBuf {
     }
     Point3F readPoint3F() {
         float x = readF32(), y = readF32(), z = readF32();
-        return {x, y, z};
+        // T2 DTS stores positions in Z-up (X=right, Y=forward, Z=up).
+        // Swap Y/Z to convert to Y-up (X=right, Y=up, Z=forward) for OpenGL.
+        // czUpToYUp at render time is NOT applied (upConvert=false), so the
+        // swap here is the sole Z-up→Y-up conversion — no double rotation.
+        return {x, z, y};
     }
     QuatF readQuat16() {
         int16_t x = readS16(), y = readS16(), z = readS16(), w = readS16();
-        return {(float)x/32767.f, (float)y/32767.f, (float)z/32767.f, (float)w/32767.f};
+        // Swap Y/Z in quaternion axis to match the position swap above.
+        // Z-up axis (x,y,z) → Y-up axis (x,z,y). This converts rotations like
+        // a 89° Y-rotation (roll) into a 89° Z-rotation (yaw), keeping
+        // characters upright instead of on their side.
+        return {(float)x/32767.f, (float)z/32767.f, (float)y/32767.f, (float)w/32767.f};
     }
     // allocShape*(n) does NOT advance input; copyToShape*(n) advances input by n; get*(n) advances input by n
     void checkGuard() {
@@ -872,7 +880,11 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     for (int i = 0; i < numNodeUScale; i++) nodeUScales[i] = buf.readF32();
     for (int i = 0; i < numNodeAScale; i++) { Point3F s; s.x = buf.readF32(); s.y = buf.readF32(); s.z = buf.readF32(); nodeAScales[i] = s; }
     for (int i = 0; i < numNodeArbScale; i++) nodeAScaleRots[i] = buf.readQuat16();
-    if (ver >= 22) { buf.align8(); buf.checkGuard(); } // 9 (only exists for v > 21)
+    // v>=22: guard 9. NO align8() here — no 8-bit data was read between guard 8
+    // and guard 9 (only buf32 and buf16 data). Aligning pos8 would skip guard
+    // values 9/10/11 that live in the 8-bit stream, corrupting all subsequent
+    // 8-bit reads (encoded normals, etc.).
+    if (ver >= 22) buf.checkGuard(); // 9
     // v > 23: ground transforms stored separately (restores what v22/v23 accidentally dropped)
     if (ver > 23) {
         for (int i = 0; i < numGroundFrames; i++) buf.readPoint3F(); // groundTranslations
@@ -1701,6 +1713,72 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         int p = dtsNodes[i].pi;
         if (p >= 0 && p < i) result.defaultTransforms[i] = result.defaultTransforms[p] * local;
         else result.defaultTransforms[i] = local;
+    }
+
+    // Debug: dump node transforms for player/bioderm shapes
+    {
+        std::string lower = name;
+        for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
+        if (lower.find("bioderm") != std::string::npos || lower.find("player") != std::string::npos || lower.find("turret") != std::string::npos || lower.find("sentry") != std::string::npos) {
+            auto& con = Console::instance();
+            con.printf(LogLevel::Info, "DTS DEBUG '%s' (v%d, numNodes=%d):", name, (int)ver, numNodes);
+            for (int i = 0; i < std::min(numNodes, 15); i++) {
+                MatrixF& m = result.defaultTransforms[i];
+                Point3F t = {m.m[0][3], m.m[1][3], m.m[2][3]};
+                con.printf(LogLevel::Info,
+                    "  node[%d] '%s' parent=%d defRot=(%.4f %.4f %.4f %.4f) defTrans=(%.3f %.3f %.3f) worldT=(%.3f %.3f %.3f)",
+                    i, result.nodes[i].name.c_str(), dtsNodes[i].pi,
+                    defRot[i].x, defRot[i].y, defRot[i].z, defRot[i].w,
+                    defTrans[i].x, defTrans[i].y, defTrans[i].z,
+                    t.x, t.y, t.z);
+            }
+            // Also dump first mesh's vertex range
+            if (!result.meshes.empty()) {
+                auto& mesh0 = result.meshes[0];
+                con.printf(LogLevel::Info, "  mesh[0] node=%d verts=%zu indices=%zu skins=%zu",
+                    mesh0.nodeIndex, mesh0.vertices.size(), mesh0.indices.size(),
+                    result.skins.size());
+                // Count skinned meshes
+                int skinnedCount = 0;
+                for (size_t si = 0; si < result.skins.size(); si++)
+                    if (result.skins[si].hasSkin) skinnedCount++;
+                con.printf(LogLevel::Info, "  total skinned meshes: %d, total skins: %zu", skinnedCount, result.skins.size());
+            if (!mesh0.vertices.empty()) {
+                    Point3F mn{1e9f,1e9f,1e9f}, mx{-1e9f,-1e9f,-1e9f};
+                    for (auto& v : mesh0.vertices) {
+                        mn.x=fminf(mn.x,v.pos.x); mn.y=fminf(mn.y,v.pos.y); mn.z=fminf(mn.z,v.pos.z);
+                        mx.x=fmaxf(mx.x,v.pos.x); mx.y=fmaxf(mx.y,v.pos.y); mx.z=fmaxf(mx.z,v.pos.z);
+                    }
+                    con.printf(LogLevel::Info, "  mesh[0] bounds: (%.3f,%.3f,%.3f)-(%.3f,%.3f,%.3f) dY=%.3f dZ=%.3f",
+                        mn.x,mn.y,mn.z, mx.x,mx.y,mx.z, mx.y-mn.y, mx.z-mn.z);
+                }
+                // Dump animation names for turret shapes
+                if (!result.animations.empty()) {
+                    con.printf(LogLevel::Info, "  animations:");
+                    for (size_t ai = 0; ai < result.animations.size(); ai++) {
+                        con.printf(LogLevel::Info, "    anim[%zu]: '%s' duration=%.3f looping=%d",
+                            ai, result.animations[ai].name.c_str(),
+                            result.animations[ai].duration, result.animations[ai].looping ? 1 : 0);
+                    }
+                }
+                // Dump all node names for turret shapes
+                con.printf(LogLevel::Info, "  nodes:");
+                for (size_t ni = 0; ni < result.nodes.size(); ni++) {
+                    con.printf(LogLevel::Info, "    node[%zu]: '%s' parent=%d",
+                        ni, result.nodes[ni].name.c_str(), result.nodes[ni].parentIndex);
+                }
+                // Dump detail levels
+                con.printf(LogLevel::Info, "  details: %zu", result.details.size());
+                for (size_t di = 0; di < result.details.size(); di++) {
+                    con.printf(LogLevel::Info, "    detail[%zu] size=%.1f meshIdx=%d meshes=%zu",
+                        di, result.details[di].size, result.details[di].meshIndex, result.details[di].meshIndices.size());
+                    for (size_t mi = 0; mi < result.details[di].meshIndices.size() && mi < 30; mi++)
+                        con.printf(LogLevel::Info, "      mesh[%d] node=%d",
+                            result.details[di].meshIndices[mi],
+                            (int)result.meshes[result.details[di].meshIndices[mi]].nodeIndex);
+                }
+            }
+        }
     }
 
     result.loaded = !result.meshes.empty() && !result.nodes.empty();
