@@ -1,4 +1,5 @@
 #include "fs/file_system.h"
+#include "fs/asset_policy.h"
 #include "core/console.h"
 #include <algorithm>
 #include <filesystem>
@@ -43,6 +44,11 @@ void FileSystem::addPath(const char* path) {
 
 bool FileSystem::readFile(const char* path, std::vector<uint8_t>& data) {
     if (!path || !path[0]) return false;
+    if (originalOnly && !TorchAssets::isOriginalRuntimePath(path)) {
+        Console::instance().printf(LogLevel::Error,
+            "Asset rejected by original-only policy: %s", path);
+        return false;
+    }
     if (path[0] == '/') {
         std::ifstream f(path, std::ios::binary);
         if (f) {
@@ -53,9 +59,10 @@ bool FileSystem::readFile(const char* path, std::vector<uint8_t>& data) {
             return true;
         }
     }
-    // Check archives
-    for (auto a : impl->archives) {
-        if (a->readFile(path, data)) return true;
+    // Later mounted archives override earlier ones. Stock T2 relies on this
+    // for patch/mod VL2 layering, so never let the first archive win.
+    for (auto it = impl->archives.rbegin(); it != impl->archives.rend(); ++it) {
+        if ((*it)->readFile(path, data)) return true;
     }
 
     // Check filesystem paths
@@ -110,8 +117,9 @@ bool FileSystem::readTextFile(const char* path, std::string& text) {
 }
 
 bool FileSystem::fileExists(const char* path) const {
-    for (auto a : impl->archives)
-        if (a->fileExists(path)) return true;
+    if (originalOnly && (!path || !TorchAssets::isOriginalRuntimePath(path))) return false;
+    for (auto it = impl->archives.rbegin(); it != impl->archives.rend(); ++it)
+        if ((*it)->fileExists(path)) return true;
     for (auto& p : impl->searchPaths)
         if (fs::exists(p + "/" + path)) return true;
     return false;

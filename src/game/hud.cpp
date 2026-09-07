@@ -518,7 +518,8 @@ void Menu::update(float dt) {
     static bool prevUp = false, prevDown = false, prevEnter = false, prevEsc = false;
     bool up = input.keysDown[SCANCODE_UP];
     bool down = input.keysDown[SCANCODE_DOWN];
-    bool enter = input.keysDown[SCANCODE_RETURN];
+    bool enter = input.keysDown[SCANCODE_RETURN] &&
+                 !input.consumedSc[SCANCODE_RETURN];
     bool esc = input.keysDown[SCANCODE_ESCAPE];
 
     // Mouse hover: update selectedItem based on mouse Y position
@@ -541,7 +542,7 @@ void Menu::update(float dt) {
         // SDL reports the left button as index 1 (SDL_BUTTON_LEFT), matching the
         // engine's GUI click path (engine.cpp uses mouseButtons[1]).
         bool mouseBtn = input.mouseButtons[1] != 0;
-        if (mouseBtn && !prevMouseBtn) {
+        if (mouseBtn && !prevMouseBtn && !input.consumedMouse[1]) {
             for (int i = 0; i < itemCount; i++) {
                 float iy = startY + i * itemH;
                 if (my >= iy && my < iy + itemH && mx >= leftX && mx <= rightX) {

@@ -10,6 +10,7 @@
 #include <sstream>
 #include <fstream>
 #include <set>
+#include <filesystem>
 
 static void syncGuiField(const std::string& objName, const std::string& field, const VMValue& val);
 #include <cctype>
@@ -183,6 +184,7 @@ struct TorqueScript::Impl {
     VMValue parseContinue();
     VMValue parseFunctionDecl();
     VMValue parsePackage();
+    VMValue parseDatablock();
     VMValue parseExpressionStatement();
 
     VMValue parseExpression();
@@ -403,6 +405,7 @@ void TorqueScript::Impl::tokenize(const std::string& source) {
             else if (tok.text == "continue") tok.type = TSTokenType::Continue;
             else if (tok.text == "function") tok.type = TSTokenType::Function;
             else if (tok.text == "package") tok.type = TSTokenType::Package;
+            else if (tok.text == "datablock") tok.type = TSTokenType::Datablock;
             else if (tok.text == "new") tok.type = TSTokenType::New;
             else if (tok.text == "parent") tok.type = TSTokenType::Parent;
             else if (tok.text == "this") tok.type = TSTokenType::This;
@@ -597,11 +600,72 @@ VMValue TorqueScript::Impl::parseStatement() {
         case TSTokenType::Continue: return parseContinue();
         case TSTokenType::Function: return parseFunctionDecl();
         case TSTokenType::Package: return parsePackage();
+        case TSTokenType::Datablock: return parseDatablock();
         case TSTokenType::LBrace: return parseBlock();
         case TSTokenType::Semicolon: nextToken(); return {};
         case TSTokenType::Eof: return {};
         default: return parseExpressionStatement();
     }
+}
+
+VMValue TorqueScript::Impl::parseDatablock() {
+    nextToken(); // datablock
+    TSToken classToken = nextToken();
+    if (classToken.type != TSTokenType::Ident)
+        return {};
+    expect(TSTokenType::LParen);
+    TSToken nameToken = nextToken();
+    if (nameToken.type != TSTokenType::Ident && nameToken.type != TSTokenType::String)
+        return {};
+    expect(TSTokenType::RParen);
+    std::string parentName;
+    if (match(TSTokenType::Colon)) {
+        TSToken parentToken = nextToken();
+        if (parentToken.type != TSTokenType::Ident && parentToken.type != TSTokenType::String)
+            return {};
+        parentName = parentToken.text;
+    }
+
+    auto* object = new ScriptObject;
+    object->className = classToken.text;
+    object->name = nameToken.text;
+    if (!parentName.empty()) {
+        auto parent = ScriptEngine::instance().objects.find(parentName);
+        if (parent != ScriptEngine::instance().objects.end() && parent->second)
+            object->fields = parent->second->fields;
+    }
+
+    if (match(TSTokenType::LBrace)) {
+        while (peekToken().type != TSTokenType::RBrace &&
+               peekToken().type != TSTokenType::Eof && running) {
+            if (match(TSTokenType::Semicolon)) continue;
+            TSToken field = nextToken();
+            if (field.type != TSTokenType::Ident) {
+                while (peekToken().type != TSTokenType::Semicolon &&
+                       peekToken().type != TSTokenType::RBrace &&
+                       peekToken().type != TSTokenType::Eof)
+                    nextToken();
+                match(TSTokenType::Semicolon);
+                continue;
+            }
+            if (!match(TSTokenType::Eq)) {
+                while (peekToken().type != TSTokenType::Semicolon &&
+                       peekToken().type != TSTokenType::RBrace &&
+                       peekToken().type != TSTokenType::Eof)
+                    nextToken();
+                match(TSTokenType::Semicolon);
+                continue;
+            }
+            object->fields[field.text] = parseExpression();
+            match(TSTokenType::Semicolon);
+        }
+        match(TSTokenType::RBrace);
+    }
+
+    ScriptEngine::instance().objects[object->name] = object;
+    outer->setGlobal("$" + object->name, VMValue(object->name));
+    outer->setGlobal(object->name, VMValue(object->name));
+    return VMValue(object->name);
 }
 
 VMValue TorqueScript::Impl::parseBlock() {
@@ -1658,6 +1722,30 @@ VMValue TorqueScript::Impl::parsePrimary() {
                     if (data.empty()) {
                         data = Engine::instance().fs().read(execPath.c_str());
                     }
+                    if (data.empty()) {
+                        std::string outDir = Console::instance().getStringVariable("outputDir", "");
+                        std::filesystem::path current = std::filesystem::path(outDir) / modPath;
+                        std::string component;
+                        std::stringstream parts(execPath);
+                        while (std::getline(parts, component, '/') && !component.empty()) {
+                            std::filesystem::path match;
+                            std::error_code ec;
+                            for (const auto& entry : std::filesystem::directory_iterator(current, ec)) {
+                                std::string name = entry.path().filename().string();
+                                std::string wanted = component;
+                                for (char& c : name) c = (char)std::tolower((unsigned char)c);
+                                for (char& c : wanted) c = (char)std::tolower((unsigned char)c);
+                                if (name == wanted) { match = entry.path(); break; }
+                            }
+                            if (match.empty()) { current.clear(); break; }
+                            current = match;
+                        }
+                        if (!current.empty()) {
+                            std::ifstream pref(current);
+                            if (pref) data.assign(std::istreambuf_iterator<char>(pref),
+                                                  std::istreambuf_iterator<char>());
+                        }
+                    }
                     if (!data.empty()) {
                         std::string src((const char*)data.data(), data.size());
                         return outer->executeNested(src, execPath);
@@ -1932,7 +2020,7 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
 
     // Try loading DSO cache before parsing source (.cs, .gui, .mis)
     // Only cache .cs/.mis files — .gui files have no functions
-    if (isCompilableExt(path) && !isPrefsScript(path) && path.substr(path.size()-3) != ".gui") {
+    if (false && isCompilableExt(path) && !isPrefsScript(path) && path.substr(path.size()-3) != ".gui") {
         std::string modPath = Console::instance().getStringVariable("modPath", "base");
         std::string outDir = Console::instance().getStringVariable("outputDir", "");
         if (!outDir.empty()) {
@@ -2039,7 +2127,7 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
     }
 
     // Write source-cache DSO for .cs/.mis files only (.gui files have no functions to cache)
-    if (isCompilableExt(path) && !isPrefsScript(path) && path.find('/') != std::string::npos && path.substr(path.size()-3) != ".gui") {
+    if (false && isCompilableExt(path) && !isPrefsScript(path) && path.find('/') != std::string::npos && path.substr(path.size()-3) != ".gui") {
         std::string modPath = Console::instance().getStringVariable("modPath", "base");
         std::string outDir = Console::instance().getStringVariable("outputDir", "");
         if (!outDir.empty()) {

@@ -18,6 +18,7 @@
 #include <array>
 #include <map>
 #include <set>
+#include <filesystem>
 
 // === VMValue ===
 int32_t VMValue::toInt() const {
@@ -1951,7 +1952,6 @@ bool ScriptEngine::init() {
         std::vector<std::string> paths = {
             dir + name,
             dir + name + (isInterior ? ".dif" : ".dts"),
-            dir + name + ".glb"
         };
         for (auto& p : paths) {
             auto data = fs.read(p.c_str());
@@ -2107,7 +2107,21 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("pushDialog", [](const auto& args) -> VMValue {
         if (!args.empty()) {
             std::string name = args.back().toString();
-            if (!name.empty()) Engine::instance().guiRenderer().pushDialog(name);
+            if (!name.empty()) {
+                auto& gui = Engine::instance().guiRenderer();
+                if (!gui.findControl(name)) {
+                    std::string path = "gui/" + name + ".gui";
+                    auto data = Engine::instance().fs().read(path.c_str());
+                    if (!data.empty()) {
+                        auto* ts = Engine::instance().script().ts();
+                        if (ts) {
+                            ts->executeNested(std::string((const char*)data.data(), data.size()), path);
+                            gui.refresh();
+                        }
+                    }
+                }
+                gui.pushDialog(name);
+            }
         }
         return VMValue(1);
     });
@@ -2162,7 +2176,19 @@ bool ScriptEngine::init() {
         // In method form args = ["Canvas", "Gui"], direct form args = ["Gui"]
         if (!args.empty()) {
             std::string name = args.back().toString();
-            if (!name.empty()) Engine::instance().guiRenderer().setContent(name);
+            if (!name.empty()) {
+                auto& gui = Engine::instance().guiRenderer();
+                if (!gui.findControl(name)) {
+                    std::string path = "gui/" + name + ".gui";
+                    auto data = Engine::instance().fs().read(path.c_str());
+                    auto* ts = Engine::instance().script().ts();
+                    if (!data.empty() && ts) {
+                        ts->executeNested(std::string((const char*)data.data(), data.size()), path);
+                        gui.refresh();
+                    }
+                }
+                gui.setContent(name);
+            }
         }
         return VMValue(1);
     });
@@ -2271,7 +2297,8 @@ bool ScriptEngine::init() {
         auto slash = fullPath.rfind('/');
         if (slash != std::string::npos) {
             std::string dir = fullPath.substr(0, slash);
-            struct stat st; if (stat(dir.c_str(), &st) != 0) mkdir(dir.c_str(), 0755);
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
         }
         if (fullPath.find("ClientPrefs") != std::string::npos && !clientPrefsExportAllowed()) {
             Console::instance().printf(LogLevel::Info,
@@ -2308,6 +2335,34 @@ bool ScriptEngine::init() {
         auto data = fs.read(execPath.c_str());
         if (data.empty()) data = fs.read(("base/" + execPath).c_str());
         if (data.empty()) data = fs.read(("scripts/" + execPath).c_str());
+        // Preferences are exported outside the game data search paths. Resolve
+        // them through the active output/mod root after defaults have loaded,
+        // preserving the stock script execution order.
+        if (data.empty()) {
+            std::string outDir = Console::instance().getStringVariable("outputDir", "");
+            std::string modPath = Console::instance().getStringVariable("modPath", "base");
+            std::filesystem::path current = std::filesystem::path(outDir) / modPath;
+            std::string component;
+            std::stringstream parts(execPath);
+            while (std::getline(parts, component, '/') && !component.empty()) {
+                std::filesystem::path match;
+                std::error_code ec;
+                for (const auto& entry : std::filesystem::directory_iterator(current, ec)) {
+                    std::string name = entry.path().filename().string();
+                    std::string wanted = component;
+                    for (char& c : name) c = (char)std::tolower((unsigned char)c);
+                    for (char& c : wanted) c = (char)std::tolower((unsigned char)c);
+                    if (name == wanted) { match = entry.path(); break; }
+                }
+                if (match.empty()) { current.clear(); break; }
+                current = match;
+            }
+            if (!current.empty()) {
+                std::ifstream pref(current);
+                if (pref) data.assign(std::istreambuf_iterator<char>(pref),
+                                      std::istreambuf_iterator<char>());
+            }
+        }
         if (!data.empty()) {
             std::string src((const char*)data.data(), data.size());
             auto* ts = Engine::instance().script().ts();
@@ -2442,6 +2497,9 @@ bool ScriptEngine::init() {
     });
 
     // Missing startup function stubs
+    tsInstance->registerNative("activateDirectInput", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
     tsInstance->registerNative("deactivateDirectInput", [](const auto&) -> VMValue {
         return VMValue(1);
     });
@@ -2540,7 +2598,7 @@ bool ScriptEngine::init() {
             } else tok += c;
         }
     };
-    tsInstance->registerNative("buildMissionList", [toLowerStr, trimStr, splitWords](const auto&) -> VMValue {
+    tsInstance->registerNative("TorchBuildMissionList", [toLowerStr, trimStr, splitWords](const auto&) -> VMValue {
         auto& fs = Engine::instance().fs();
 
         // Discover .mis / .misPK files across the mounted archives.

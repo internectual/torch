@@ -146,6 +146,12 @@ public:
     };
     MissionAreaParams missionArea;
 
+    struct ObserverCamera {
+        Point3F pos;
+        Point3F axis;
+        float angleDeg = 0;
+    };
+
     // Datablock InstanceName -> shapeFile path (from .cs scripts + inline .mis datablock defs)
     std::unordered_map<std::string, std::string> datablockShapes;
 
@@ -157,6 +163,8 @@ public:
         Point3F scale{1,1,1};
         std::string shapeName;
         DTSShape* shape{};
+        std::string mountedShapeName;
+        DTSShape* mountedShape{};
         bool collidable = true;
         std::string animName; // empty = static render; non-empty = play this animation
         float animTime = 0;
@@ -164,6 +172,7 @@ public:
 
     void addObject(const WorldObject& obj);
     const std::vector<WorldObject>& objects() const { return worldObjects; }
+    const std::vector<ObserverCamera>& observerCameras() const { return cameras; }
 
     float getHeight(float x, float z) const;
     const CollisionMesh& collision() const { return interiorCollision; }
@@ -191,6 +200,7 @@ private:
     Sky skyBox;
     CollisionMesh interiorCollision;
     std::vector<WorldObject> worldObjects;
+    std::vector<ObserverCamera> cameras;
     std::vector<DTSShape> shapes;
     std::vector<Projectile> projList;
 
@@ -292,9 +302,19 @@ public:
     bool isMapperMode() const { return mapperMode; }
     void setMapperMode(bool m) { mapperMode = m; }
     void setFreeCamPos(const Point3F& p) { freeCamPos = p; }
-    void setFreeCamTarget(const Point3F& t) { freeCamTarget = t; }
+    void setFreeCamTarget(const Point3F& t) {
+        freeCamTarget = t;
+        const Point3F d{t.x - freeCamPos.x, t.y - freeCamPos.y, t.z - freeCamPos.z};
+        const float horizontal = std::sqrt(d.x * d.x + d.z * d.z);
+        const float distance = std::sqrt(horizontal * horizontal + d.y * d.y);
+        if (distance > 0.0001f) {
+            freeCamRot.z = std::atan2(d.x, d.z);
+            freeCamRot.x = std::asin(Math::clamp(d.y / distance, -1.0f, 1.0f));
+        }
+    }
     void setFreeCamActive(bool a) { freeCamActive = a; }
     bool isFreeCamActive() const { return freeCamActive; }
+    void selectMapperObserverCamera(int index);
 
     enum State {
         MenuScreen,
@@ -476,6 +496,7 @@ private:
         std::vector<uint8_t> payload;
     };
     std::map<uint32_t, std::vector<ReceivedDatablock>> receivedDatablocks;
+    std::map<uint16_t, std::string> nativeDatablockShapes;
     const std::vector<ReceivedDatablock>* getDatablocksForClass(uint32_t classId) const {
         auto it = receivedDatablocks.find(classId);
         return it != receivedDatablocks.end() ? &it->second : nullptr;

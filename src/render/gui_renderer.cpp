@@ -99,7 +99,6 @@ GuiRenderer::~GuiRenderer() {
     };
     if (canvas) del(del, canvas);
     createdControls().clear();
-    delete checkerTex;
 }
 
 // Normalize Shell* class names to their Gui* equivalents.
@@ -256,14 +255,9 @@ void GuiRenderer::init() {
         }
     }
 
-    // Ensure canvas exists
-    if (!canvas) {
-        canvas = new GuiControl;
-        canvas->name = "Canvas";
-        canvas->className = "GuiCanvas";
-        canvas->extentX = 1024;
-        canvas->extentY = 768;
-    }
+    if (!canvas)
+        Console::instance().printf(LogLevel::Error,
+            "GUI: stock GuiCanvas was not created by TorqueScript");
 
     // Second pass: link parent-child relationships
     for (auto& [name, obj] : objs) {
@@ -286,16 +280,6 @@ void GuiRenderer::init() {
 
     // Third pass: no extent propagation — each control keeps its declared extent.
 
-    // Checkerboard texture
-    std::vector<uint8_t> cb(16*16*4);
-    for (int y = 0; y < 16; y++)
-        for (int x = 0; x < 16; x++) {
-            bool bright = ((x/4)+(y/4))%2==0;
-            cb[(y*16+x)*4+0]=bright?255:0; cb[(y*16+x)*4+1]=0;
-            cb[(y*16+x)*4+2]=bright?255:0; cb[(y*16+x)*4+3]=255;
-        }
-    checkerTex = new Texture;
-    checkerTex->loadRaw(cb.data(), 16, 16, 4);
 }
 
 void GuiRenderer::refresh() {
@@ -585,6 +569,9 @@ static void drawBmpArrayButton(Renderer& r, const Point3F& dstA, const Point3F& 
     }
 }
 
+// Historical procedural shell generator retained only as reference while the
+// native bitmap-array path is completed. It is not part of production code.
+#if 0
 // Generated shell texture cache (for textures not found in archives)
 static std::unordered_map<std::string, Texture*> g_genShellTex;
 
@@ -753,14 +740,10 @@ static Texture* generateShellTexture(Renderer& r, const char* name) {
     }
     return nullptr;
 }
+#endif
 
-// Shell texture cache - tries .bm8 first, generates procedurally if not found
+// Shell texture cache - resolve only the original bitmap resources.
 static Texture* getShellTex(Renderer& r, const char* name) {
-    // Check generated cache first
-    {
-        auto git = g_genShellTex.find(name);
-        if (git != g_genShellTex.end()) return git->second;
-    }
     std::string base = std::string("textures/gui/") + name;
     auto tryExt = [&](const std::string& ext) -> Texture* {
         std::string stem = base.substr(0, base.rfind('.'));
@@ -779,8 +762,6 @@ static Texture* getShellTex(Renderer& r, const char* name) {
     };
     Texture* t = tryExt(".bm8");
     if (!t) t = tryExt(".png");
-    // If not found on disk, generate procedurally
-    if (!t) t = generateShellTexture(r, name);
     return t;
 }
 
@@ -2891,7 +2872,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 for (auto& c : lower) c = (char)tolower((unsigned char)c);
                 std::vector<std::string> paths = {
                     "shapes/" + ctl->modelShape + ".dts",
-                    "shapes/" + ctl->modelShape + ".glb",
                     "shapes/" + ctl->modelShape
                 };
                 for (auto& p : paths) {
@@ -3975,16 +3955,18 @@ void GuiRenderer::handleKeyboard() {
     if (focusedCtrl) {
         // Check if focused control is still valid (still in the tree)
         bool found = false;
+        std::function<bool(GuiControl*)> owns = [&](GuiControl* root) {
+            if (!root) return false;
+            if (root == focusedCtrl) return true;
+            for (auto* child : root->children)
+                if (owns(child)) return true;
+            return false;
+        };
         for (auto* d : dialogStack) {
-            if (d == focusedCtrl || d->findChild(focusedCtrl->name)) { found = true; break; }
-            std::vector<GuiControl*> stack = d->children;
-            while (!stack.empty()) {
-                auto* c = stack.back(); stack.pop_back();
-                if (c == focusedCtrl) { found = true; break; }
-                for (auto* ch : c->children) stack.push_back(ch);
-            }
+            if (owns(d)) { found = true; break; }
             if (found) break;
         }
+        if (!found) found = owns(canvas);
         if (!found) { focusedCtrl = nullptr; }
     }
 
@@ -4022,6 +4004,8 @@ void GuiRenderer::handleKeyboard() {
             } else if (focusedCtrl->onClick) {
                 focusedCtrl->onClick();
             }
+            input.consumedSc[SCANCODE_RETURN] = true;
+            input.keyPressQueue.clear();
         }
 
         if (input.keysDown[SCANCODE_ESCAPE] && !prevEsc) {
@@ -4054,6 +4038,14 @@ void GuiRenderer::handleKeyboard() {
                     Console::instance().execute(b->command.c_str());
                 else if (b->onClick)
                     b->onClick();
+                input.consumedSc[SCANCODE_RETURN] = true;
+                input.keyPressQueue.clear();
+            }
+            // A dialog owns Return even if it has no explicit accelerator.
+            // This prevents the same keydown from reaching menu/game logic.
+            if (!input.consumedSc[SCANCODE_RETURN]) {
+                input.consumedSc[SCANCODE_RETURN] = true;
+                input.keyPressQueue.clear();
             }
         }
     }

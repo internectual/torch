@@ -199,6 +199,5 @@ private:
     std::unordered_map<std::string, FadeState> fadeStates;
     void updateFades(float dt);
 
-    Texture* checkerTex{};
     std::set<std::string> onAddCalled; // track which controls have received onAdd
 };

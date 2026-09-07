@@ -22,7 +22,7 @@ enum class TSTokenType {
     PlusPlus, MinusMinus,
     PlusEq, MinusEq, StarEq, SlashEq, BitOrEq,
     Hash, New, If, Else, For, While, Do, Switch, Case, Default,
-    Return, Break, Continue, Function, Package, Parent, This,
+    Return, Break, Continue, Function, Package, Datablock, Parent, This,
     True, False, Null, SwitchStr
 };
 

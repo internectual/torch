@@ -92,4 +92,31 @@ namespace Math {
         c.m[3][0] = 0; c.m[3][1] = 0; c.m[3][2] = 0;  c.m[3][3] = 1;
         return c;
     }
+
+    inline Point3F torquePointToYUp(const Point3F& point) {
+        return czUpToYUp().transform(point);
+    }
+
+    inline MatrixF torqueScaleToYUp(const Point3F& scale) {
+        MatrixF torqueScale;
+        torqueScale.setScale(scale);
+        MatrixF basis = czUpToYUp();
+        return basis * torqueScale * basis.inverse();
+    }
+
+    inline MatrixF torqueQuaternionToYUp(const QuatF& rotation) {
+        MatrixF basis = czUpToYUp();
+        return basis * rotation.toMatrix() * basis.inverse();
+    }
+
+    // Convert a rotation expressed in the Torque Z-up frame into the
+    // renderer's Y-up frame. Rotations must be conjugated by the basis
+    // change; swapping the axis components or negating the angle is not
+    // equivalent for arbitrary axis-angle rotations.
+    inline MatrixF torqueRotationToYUp(const Point3F& axis, float angle) {
+        MatrixF torqueRotation;
+        torqueRotation.setRotationAxis(axis, angle);
+        MatrixF basis = czUpToYUp();
+        return basis * torqueRotation * basis.inverse();
+    }
 }

@@ -45,19 +45,13 @@ struct DTSBuf {
         return buf8[pos8++];
     }
     Point3F readPoint3F() {
+        // Native T2 DTS model space uses the established model basis. World
+        // placement applies the separate proper Torque-world conversion.
         float x = readF32(), y = readF32(), z = readF32();
-        // T2 DTS stores positions in Z-up (X=right, Y=forward, Z=up).
-        // Swap Y/Z to convert to Y-up (X=right, Y=up, Z=forward) for OpenGL.
-        // czUpToYUp at render time is NOT applied (upConvert=false), so the
-        // swap here is the sole Z-up→Y-up conversion — no double rotation.
         return {x, z, y};
     }
     QuatF readQuat16() {
         int16_t x = readS16(), y = readS16(), z = readS16(), w = readS16();
-        // Swap Y/Z in quaternion axis to match the position swap above.
-        // Z-up axis (x,y,z) → Y-up axis (x,z,y). This converts rotations like
-        // a 89° Y-rotation (roll) into a 89° Z-rotation (yaw), keeping
-        // characters upright instead of on their side.
         return {(float)x/32767.f, (float)z/32767.f, (float)y/32767.f, (float)w/32767.f};
     }
     // allocShape*(n) does NOT advance input; copyToShape*(n) advances input by n; get*(n) advances input by n
@@ -693,9 +687,32 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
                 if (texName.empty()) continue;
                 std::string texLower = texName;
                 for (auto& c : texLower) c = (char)std::tolower((unsigned char)c);
-                std::vector<std::string> texCands = {prefix + texLower, "textures/" + texLower};
+                size_t iflSlash = lower.rfind('/');
+                std::string relativeTexture = iflSlash == std::string::npos
+                    ? texLower : lower.substr(0, iflSlash + 1) + texLower;
+                std::vector<std::string> texCands = {
+                    prefix + relativeTexture, "textures/" + relativeTexture,
+                    prefix + texLower, "textures/" + texLower
+                };
                 for (auto& tc : texCands) {
                     if (loaded) break;
+                    auto exactTextureData = fs.read(tc.c_str());
+                    if (getenv("TORCH_DTS_TEXDIAG") && lower.ends_with("plasmaturret"))
+                        Console::instance().printf(LogLevel::Info,
+                            "DTS TEXDIAG: IFL candidate '%s' bytes=%zu",
+                            tc.c_str(), exactTextureData.size());
+                    if (!exactTextureData.empty()) {
+                        Texture t;
+                        t.load(exactTextureData.data(), exactTextureData.size());
+                        if (t.loaded) {
+                            matSlots[i].texIdx = (int)result.textures.size();
+                            uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
+                            result.materialFlags.push_back(flags);
+                            result.textures.push_back(std::move(t));
+                            loaded = true;
+                            break;
+                        }
+                    }
                     for (auto* e : texExts) {
                         auto d = fs.read((tc + e).c_str());
                         if (!d.empty()) {
@@ -731,9 +748,28 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
                 if (!texName.empty()) {
                     std::string texLower = texName;
                     for (auto& ch : texLower) ch = (char)std::tolower((unsigned char)ch);
-                    std::vector<std::string> texCands = {"textures/" + texLower, texLower};
+                    size_t iflSlash = c.rfind('/');
+                    std::string relativeTexture = iflSlash == std::string::npos
+                        ? texLower : c.substr(0, iflSlash + 1) + texLower;
+                    std::vector<std::string> texCands = {
+                        "textures/" + relativeTexture, relativeTexture,
+                        "textures/" + texLower, texLower
+                    };
                     for (auto& tc : texCands) {
                         if (loaded) break;
+                        auto exactTextureData = fs.read(tc.c_str());
+                        if (!exactTextureData.empty()) {
+                            Texture t;
+                            t.load(exactTextureData.data(), exactTextureData.size());
+                            if (t.loaded) {
+                                matSlots[i].texIdx = (int)result.textures.size();
+                                uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
+                                result.materialFlags.push_back(flags);
+                                result.textures.push_back(std::move(t));
+                                loaded = true;
+                                break;
+                            }
+                        }
                         for (auto* e : texExts) {
                             auto d = fs.read((tc + e).c_str());
                             if (!d.empty()) {
@@ -795,8 +831,9 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     uint16_t ver = *(const uint16_t*)(data);
 
     // v15-v18: old sequential format
-    if (ver >= 15 && ver <= 18)
+    if (ver >= 15 && ver <= 18) {
         return loadDTSOld(data, size, name);
+    }
 
     int32_t szAll = *(const int32_t*)(data+4);
     int32_t s16   = *(const int32_t*)(data+8);
@@ -1248,8 +1285,6 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     };
 
     int32_t numSeqs = capCount(prS32());
-    // Accumulate base offsets across sequences (T2 appends keyframes sequentially)
-    int32_t accumBaseRot = 0, accumBaseTrans = 0, accumBaseScale = 0;
     for (int s = 0; s < numSeqs; s++) {
         // Sequence::read(s, readNameIndex=true)
         int32_t nameIdx = capCount(prS32());
@@ -1262,14 +1297,16 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         capCount(prS32()); // firstGroundFrame
         capCount(prS32()); // numGroundFrames
         int32_t baseObjState = 0;
+        int32_t baseRot = 0, baseTrans = 0, baseScale = 0;
         if (ver > 21) {
-            capCount(prS32()); // baseRotation
-            capCount(prS32()); // baseTranslation
-            capCount(prS32()); // baseScale
+            baseRot = capCount(prS32());
+            baseTrans = capCount(prS32());
+            baseScale = capCount(prS32());
             baseObjState = capCount(prS32()); // baseObjectState
             capCount(prS32()); // baseDecalState
         } else if (ver >= 17) {
-            capCount(prS32()); // baseRotation (baseTranslation = baseRotation for v<22)
+            baseRot = capCount(prS32());
+            baseTrans = baseRot; // baseTranslation = baseRotation for v<22
             baseObjState = capCount(prS32()); // baseObjectState
             capCount(prS32()); // baseDecalState
         }
@@ -1302,17 +1339,9 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         anim.looping = (flags & 1) != 0;
 
         if (numKFrames > 0 && dur > 0.0f) {
-            int32_t baseRot = accumBaseRot;
-            int32_t baseTrans = accumBaseTrans;
-            int32_t baseScale = accumBaseScale;
-
             int32_t rotCount = (int32_t)rotMatters.size();
             int32_t transCount = (ver >= 22) ? (int32_t)transMatters.size() : rotCount;
             int32_t scaleCount = (ver >= 22) ? (int32_t)scaleMatters.size() : 0;
-
-            accumBaseRot += rotCount * numKFrames;
-            accumBaseTrans += transCount * numKFrames;
-            accumBaseScale += scaleCount * numKFrames;
 
             // For each animated node, create keyframes
             // Initialize defaults from the node's default local transform
@@ -1399,10 +1428,29 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
 
         // Generate object keyframes for vis/frame animation
         if (numKFrames > 0 && dur > 0.0f && (!visMatters.empty() || !frameMatters.empty() || !matFrameMatters.empty())) {
+            // Torque packs object states using the union of all object-state
+            // memberships, rather than a separate index per membership set.
+            std::vector<int32_t> objectMatters;
+            auto addObjectMatters = [&](const std::vector<int32_t>& matters) {
+                for (int32_t object : matters) {
+                    if (std::find(objectMatters.begin(), objectMatters.end(), object) == objectMatters.end())
+                        objectMatters.push_back(object);
+                }
+            };
+            addObjectMatters(visMatters);
+            addObjectMatters(frameMatters);
+            addObjectMatters(matFrameMatters);
+            std::sort(objectMatters.begin(), objectMatters.end());
+            auto objectStateNumber = [&](int32_t object) -> int32_t {
+                auto it = std::find(objectMatters.begin(), objectMatters.end(), object);
+                return it == objectMatters.end() ? -1 : (int32_t)(it - objectMatters.begin());
+            };
             for (int j = 0; j < (int)visMatters.size(); j++) {
                 int32_t objIdx = visMatters[j];
+                int32_t stateObject = objectStateNumber(objIdx);
+                if (stateObject < 0) continue;
                 for (int k = 0; k < numKFrames; k++) {
-                    int32_t stateIdx = baseObjState + j * numKFrames + k;
+                    int32_t stateIdx = baseObjState + stateObject * numKFrames + k;
                     if (stateIdx < 0 || stateIdx >= (int)objStates.size()) continue;
                     DTSShape::ObjectKeyframe okf;
                     okf.objectIndex = objIdx;
@@ -1421,8 +1469,10 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                     if (visMatters[v] == objIdx) { alreadyAdded = true; break; }
                 }
                 if (alreadyAdded) continue;
+                int32_t stateObject = objectStateNumber(objIdx);
+                if (stateObject < 0) continue;
                 for (int k = 0; k < numKFrames; k++) {
-                    int32_t stateIdx = baseObjState + j * numKFrames + k;
+                    int32_t stateIdx = baseObjState + stateObject * numKFrames + k;
                     if (stateIdx < 0 || stateIdx >= (int)objStates.size()) continue;
                     DTSShape::ObjectKeyframe okf;
                     okf.objectIndex = objIdx;
@@ -1442,36 +1492,6 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         }
 
         result.animations.push_back(anim);
-    }
-
-    // Post-process: for animations with no object keyframes, copy object keyframes
-    // from the first animation that has them. This ensures all animations have proper
-    // object visibility (e.g., sensor_pulse deploy states).
-    {
-        // Find the best source animation (one with the most object keyframes)
-        int bestSourceIdx = -1;
-        size_t bestSourceCount = 0;
-        for (size_t i = 0; i < result.animations.size(); i++) {
-            if (result.animations[i].objectKeyframes.size() > bestSourceCount) {
-                bestSourceCount = result.animations[i].objectKeyframes.size();
-                bestSourceIdx = (int)i;
-            }
-        }
-        if (bestSourceIdx >= 0 && bestSourceCount > 0) {
-            for (size_t i = 0; i < result.animations.size(); i++) {
-                if (result.animations[i].objectKeyframes.empty() && !result.animations[i].keyframes.empty()) {
-                    // Copy object keyframes with time remapped to target animation's duration
-                    float srcDur = result.animations[bestSourceIdx].duration;
-                    float dstDur = result.animations[i].duration;
-                    for (auto& okf : result.animations[bestSourceIdx].objectKeyframes) {
-                        DTSShape::ObjectKeyframe newOkf = okf;
-                        if (srcDur > 0.0f && dstDur > 0.0f)
-                            newOkf.time = okf.time * (dstDur / srcDur);
-                        result.animations[i].objectKeyframes.push_back(newOkf);
-                    }
-                }
-            }
-        }
     }
 
     // Materials
@@ -1547,9 +1567,28 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                 if (texName.empty()) continue;
                 std::string texLower = texName;
                 for (auto& c : texLower) c = (char)std::tolower((unsigned char)c);
-                std::vector<std::string> texCands = {prefix + texLower, "textures/" + texLower};
+                size_t iflSlash = lower.rfind('/');
+                std::string relativeTexture = iflSlash == std::string::npos
+                    ? texLower : lower.substr(0, iflSlash + 1) + texLower;
+                std::vector<std::string> texCands = {
+                    prefix + relativeTexture, "textures/" + relativeTexture,
+                    prefix + texLower, "textures/" + texLower
+                };
                 for (auto& tc : texCands) {
                     if (loaded) break;
+                    auto exactTextureData = fs.read(tc.c_str());
+                    if (!exactTextureData.empty()) {
+                        Texture t;
+                        t.load(exactTextureData.data(), exactTextureData.size());
+                        if (t.loaded) {
+                            matSlots[i].texIdx = (int)result.textures.size();
+                            uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
+                            result.materialFlags.push_back(flags);
+                            result.textures.push_back(std::move(t));
+                            loaded = true;
+                            break;
+                        }
+                    }
                     for (auto* e : texExts) {
                         auto d = fs.read((tc + e).c_str());
                         if (!d.empty()) {
@@ -1585,9 +1624,28 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                 if (!texName.empty()) {
                     std::string texLower = texName;
                     for (auto& ch : texLower) ch = (char)std::tolower((unsigned char)ch);
-                    std::vector<std::string> texCands = {"textures/" + texLower, texLower};
+                    size_t iflSlash = c.rfind('/');
+                    std::string relativeTexture = iflSlash == std::string::npos
+                        ? texLower : c.substr(0, iflSlash + 1) + texLower;
+                    std::vector<std::string> texCands = {
+                        "textures/" + relativeTexture, relativeTexture,
+                        "textures/" + texLower, texLower
+                    };
                     for (auto& tc : texCands) {
                         if (loaded) break;
+                        auto exactTextureData = fs.read(tc.c_str());
+                        if (!exactTextureData.empty()) {
+                            Texture t;
+                            t.load(exactTextureData.data(), exactTextureData.size());
+                            if (t.loaded) {
+                                matSlots[i].texIdx = (int)result.textures.size();
+                                uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
+                                result.materialFlags.push_back(flags);
+                                result.textures.push_back(std::move(t));
+                                loaded = true;
+                                break;
+                            }
+                        }
                         for (auto* e : texExts) {
                             auto d = fs.read((tc + e).c_str());
                             if (!d.empty()) {
@@ -1607,6 +1665,11 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                     }
                 }
             }
+        }
+        if (!loaded && getenv("TORCH_DTS_TEXDIAG") && lower.ends_with("plasmaturret")) {
+            Console::instance().printf(LogLevel::Info,
+                "DTS TEXDIAG: IFL material '%s' did not resolve",
+                result.materialNames[i].c_str());
         }
         // Then try regular texture files
         if (!loaded) for (auto& c : cands) {
@@ -1637,6 +1700,17 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     for (auto& mesh : result.meshes) {
         int mi = mesh.materialIdx;
         if (mi >= 0 && mi < (int)matSlots.size()) mesh.materialIndex = matSlots[mi].texIdx;
+    }
+    if (getenv("TORCH_DTS_TEXDIAG")) {
+        Console::instance().printf(LogLevel::Info,
+            "DTS TEXDIAG '%s': %zu materials, %zu resolved textures",
+            name, result.materialNames.size(), result.textures.size());
+        for (size_t i = 0; i < result.materialNames.size(); ++i) {
+            int textureIndex = i < matSlots.size() ? matSlots[i].texIdx : -1;
+            Console::instance().printf(LogLevel::Info,
+                "  material[%zu] '%s' -> texture[%d]",
+                i, result.materialNames[i].c_str(), textureIndex);
+        }
     }
 
     // ─── Build nodes ─────────────────────────────────────────────────
@@ -1719,7 +1793,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     {
         std::string lower = name;
         for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
-        if (lower.find("bioderm") != std::string::npos || lower.find("player") != std::string::npos || lower.find("turret") != std::string::npos || lower.find("sentry") != std::string::npos) {
+        if (lower.find("bioderm") != std::string::npos || lower.find("player") != std::string::npos || lower.find("turret") != std::string::npos || lower.find("sentry") != std::string::npos || lower.find("station_inv") != std::string::npos) {
             auto& con = Console::instance();
             con.printf(LogLevel::Info, "DTS DEBUG '%s' (v%d, numNodes=%d):", name, (int)ver, numNodes);
             for (int i = 0; i < std::min(numNodes, 15); i++) {

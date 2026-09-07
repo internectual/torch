@@ -44,14 +44,24 @@ public:
     void setStringBufferEnabled(bool en) { stringBufferEnabled = en; if (!en) stringBuffer.clear(); }
 
     int  getCurPos() const { return bitNum; }
-    void setCurPos(int pos) { bitNum = pos; }
+    void setCurPos(int pos) {
+        if (pos < 0 || pos > maxReadBitNum) { error = true; return; }
+        bitNum = pos;
+    }
     int  getBytePosition() const { return (bitNum + 7) >> 3; }
     bool isError() const { return error; }
     int  getRemainingBits() const { return maxReadBitNum - bitNum; }
     int  getMaxPos() const { return maxReadBitNum; }
     int  savePos() const { return bitNum; }
-    void restorePos(int pos) { bitNum = pos; error = false; }
-    void skipBits(int count) { bitNum += count; }
+    void restorePos(int pos) {
+        if (pos < 0 || pos > maxReadBitNum) { error = true; return; }
+        bitNum = pos;
+        error = false;
+    }
+    void skipBits(int count) {
+        if (count < 0 || count > maxReadBitNum - bitNum) { error = true; return; }
+        bitNum += count;
+    }
     const uint8_t* getBuffer() const { return data; }
     size_t getBufferSize() const { return dataLen; }
 
@@ -128,7 +138,7 @@ namespace T2Demo {
     constexpr uint32_t ProtocolV25034 = 0x00330004;
 
     // Tagged strings
-    constexpr int TaggedStringCount = 4096;
+    constexpr int TaggedStringCount = 1024;
 
     // Deterministic ghost class names for T2 (sorted by strcmp order,
     // matching AbstractClassRep::initialize). Index = classId.
@@ -265,7 +275,8 @@ struct ConnectionProtocolState {
 struct DnetHeader {
     bool gameFlag{};
     int connectSeqBit{}, seqNumber{}, highestAck{};
-    int packetType{}, ackByteCount{}, ackMask{};
+    int packetType{}, ackByteCount{};
+    uint64_t ackMask{};
 };
 
 struct GameState {
@@ -301,6 +312,10 @@ struct NetEventInfo {
     std::string message;    // parsed text for chat/server messages
     std::string eventName;  // class name for display
     int audioProfileId = -1; // for audio events
+    bool directAudioProfile = false;
+    int targetId = -1;
+    Vec3 audioPosition{};
+    bool hasAudioPosition = false;
 };
 
 struct DemoTimedEvent {
@@ -379,6 +394,15 @@ struct PathManagerEntry {
 struct DTSShape; // forward decl
 
 struct GhostEntry {
+    struct ThreadState {
+        int sequence = -1;
+        int state = 0;
+        float timescale = 1.0f;
+        float position = 0.0f;
+        bool forward = true;
+        bool atEnd = false;
+        bool valid = false;
+    };
     int classId{};
     std::string className;
     Vec3 position{};
@@ -386,6 +410,8 @@ struct GhostEntry {
     Vec4 rotation{};
     Vec4 renderRotation{};
     bool hasRotation{};
+    int datablockId = -1;
+    bool hasDatablock = false;
     std::string skinName;
     std::string shapePath;
     DTSShape* shape{};
@@ -403,6 +429,7 @@ struct GhostEntry {
     std::string playerName;
     int teamId{-1};
     std::string shapeName; // from datablock
+    ThreadState threads[4]{};
 
     // Mounted image (weapon) slots
     struct MountedImage {
@@ -463,6 +490,7 @@ public:
     const GhostTracker& getGhostTracker() const { return ghostTracker; }
 
     int getBlockCount();
+    int getMoveBlockCount() const;
     int getBlockCursor() const { return blockCursor_; }
 
     DemoBlock* nextBlock();
@@ -532,10 +560,6 @@ private:
     BackpackHudState backpackHud_;
     InventoryHudState inventoryHud_;
 
-    // Native extraction
-    std::string recFilePath_;
-    void extractScoreboardData(const char* recPath);
-
     // Packet parser state
     Vec3 compressionPoint;
     uint32_t lastSeqRecvdAtSend[32]{};
@@ -547,9 +571,9 @@ private:
 
     // ─── Internal parsing methods ───
     void readHeader();
-    void readInitialBlock(const uint8_t* data, size_t size);
+    bool readInitialBlock(const uint8_t* data, size_t size);
     void readTaggedStrings(BitStream& bs);
-    void readDataBlocks(BitStream& bs);
+    bool readDataBlocks(BitStream& bs);
     ScoreEntry readScoreEntry(BitStream& bs);
     std::vector<std::string> readDemoValues(BitStream& bs);
     void readComplexTargetManager(BitStream& bs);
@@ -557,13 +581,13 @@ private:
     void readConnectionProtocol(BitStream& bs);
     std::vector<PathManagerEntry> readPathManager(BitStream& bs);
     void readEventStartBlock(BitStream& bs);
-    void readGhostStartBlock(BitStream& bs, bool useIBTracker);
+    bool readGhostStartBlock(BitStream& bs, bool useIBTracker);
     InfoBlock readInfoBlock(const uint8_t* data, size_t size);
 
     // Packet parsing
     DnetHeader readDnetHeader(BitStream& bs);
     GameState readGameState(BitStream& bs);
-    void readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents);
+    void readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents, const Vec3& compressionPoint);
     void readGhosts(BitStream& bs, std::vector<GhostUpdate>& outGhosts, int seqNumber, const Vec3* compressionPoint = nullptr);
 
     // Apply protocol header
@@ -577,6 +601,7 @@ private:
 public:
     DemoMove readRawMove(const uint8_t* data, size_t size);
     PacketData parsePacket(const uint8_t* data, size_t size, int blockIndex = -1);
+    void onSendPacketTrigger();
 
     // Pending explosion events from projectile parsers
     struct PendingExplosion {

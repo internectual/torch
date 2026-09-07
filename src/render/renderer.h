@@ -5,6 +5,18 @@
 #include <vector>
 #include <unordered_map>
 
+// Native Torque material flags are shared by DTS, DIF, and renderer code.
+// They must not live in the diagnostic GLB loader.
+enum MaterialFlag : uint32_t {
+    MatFlag_None = 0,
+    MatFlag_Translucent = 1,
+    MatFlag_Additive = 2,
+    MatFlag_SelfIlluminating = 4,
+    MatFlag_NeverEnvMap = 8,
+    MatFlag_SWrap = 16,
+    MatFlag_TWrap = 32,
+};
+
 struct SkinInfo {
     bool hasSkin = false;
     std::vector<Point3F> initialPositions;
@@ -185,25 +197,28 @@ struct DTSShape {
     std::vector<Texture> lightmaps;
     std::vector<int8_t> materialLightmapIndex; // per-material: -1 no lightmap, >=0 index into lightmaps[]
     bool isInterior = false;
+    bool nativeDTS = false;
     bool loaded = false;
-    /// True = shape mesh is authored Z-up and needs Math::czUpToYUp() applied at
-    /// render time to stand upright in the Y-up engine. False = the shape's own
-    /// node transforms already yield a Y-up model (e.g. skinned player/shared
-    /// meshes), so czUpToYUp would double-rotate it flat. Computed at load time.
+    /// Legacy orientation hook for non-native imported assets. Native DTS is
+    /// canonicalized to Y-up by the loader and therefore returns identity.
     bool upConvert = true;
-    MatrixF upOrientation() const { return upConvert ? Math::czUpToYUp() : MatrixF{}; }
+    MatrixF upOrientation() const {
+        if (nativeDTS) return MatrixF{};
+        return upConvert ? Math::czUpToYUp() : MatrixF{};
+    }
     // Hull collision data (from DIF files)
     std::vector<float> collisionVerts;
     std::vector<uint32_t> collisionIndices;
     bool load(const uint8_t* data, size_t size);
-    bool loadGLB(const uint8_t* data, size_t size);
     // Node overrides: per-instance transform modifications (e.g., turret barrel aiming)
     struct NodeOverride {
         int nodeIndex;
         MatrixF transform;
     };
     void render(int32_t detailLevel = 0, const NodeOverride* overrides = nullptr, int numOverrides = 0);
-    void renderAnimation(const char* animName, float time);
+    void renderAnimation(const char* animName, float time,
+                         const NodeOverride* overrides = nullptr,
+                         int numOverrides = 0);
     bool applySkin(const std::string& skinName);
 
     // Find node index by name (-1 if not found)

@@ -80,6 +80,15 @@ static void stripToTriangles(const std::vector<uint32_t>& windVerts,
 
 // ─── Texture resolution ────────────────────────────────────────
 
+static bool isDIFMarkerMaterial(const std::string& matName) {
+    std::string name = matName;
+    for (char& c : name) c = (char)std::tolower((unsigned char)c);
+    const auto slash = name.rfind('/');
+    const std::string marker = slash == std::string::npos ? name : name.substr(slash + 1);
+    return marker == "null" || marker == "origin" ||
+           marker == "trigger" || marker == "forcefield";
+}
+
 static Texture resolveDIFTexture(const std::string& matName) {
     Texture tex;
     if (matName.empty()) return tex;
@@ -93,7 +102,7 @@ static Texture resolveDIFTexture(const std::string& matName) {
     candidates.push_back(lower);
 
     std::string base = lower;
-    for (auto* se : {".lbioderm", ".ifl", ".iflod", ".dml", ".mis", ".png", ".bm8", ".jpg", ".dds"}) {
+    for (auto* se : {".lbioderm", ".ifl", ".iflod", ".dml", ".mis", ".png", ".bm8", ".jpg", ".tga", ".dds"}) {
         size_t seLen = strlen(se);
         if (base.size() > seLen && base.rfind(se) == base.size() - seLen) {
             base = base.substr(0, base.size() - seLen);
@@ -105,8 +114,15 @@ static Texture resolveDIFTexture(const std::string& matName) {
         candidates.push_back(base);
     }
 
-    static const char* exts[] = {".png", ".bm8", ".jpg", ".jpeg", ".gif", ".bmp", ".dds"};
+    static const char* exts[] = {".png", ".bm8", ".jpg", ".jpeg", ".gif", ".bmp", ".tga", ".dds"};
     for (auto& cand : candidates) {
+        auto exactData = fs.read(cand.c_str());
+        if (!exactData.empty()) {
+            Texture exactTexture;
+            exactTexture.load(exactData.data(), exactData.size());
+            if (exactTexture.loaded)
+                return exactTexture;
+        }
         for (auto* ext : exts) {
             auto data = fs.read((cand + ext).c_str());
             if (!data.empty()) {
@@ -601,17 +617,7 @@ static bool interiorToMeshes(DIFInterior& interior,
     struct MatSlot { int texIdx = -1; };
     std::vector<MatSlot> matSlots(interior.matNames.size());
 
-    int fallbackTexIdx = -1;
     if (!skipGpu) {
-        // Fallback 1x1 neutral texture so missing textures never drop surfaces
-        Texture fallbackTex;
-        uint8_t whitePixel[4] = {200, 200, 200, 255};
-        fallbackTex.loadRaw(whitePixel, 1, 1, 4);
-        fallbackTexIdx = (int)outTextures.size();
-        outTextures.push_back(std::move(fallbackTex));
-        outMatFlags.push_back(0);
-        outMatNames.push_back("__fallback__");
-
         for (size_t i = 0; i < interior.matNames.size(); i++) {
             Texture tex = resolveDIFTexture(interior.matNames[i]);
             if (tex.loaded) {
@@ -619,18 +625,16 @@ static bool interiorToMeshes(DIFInterior& interior,
                 outTextures.push_back(std::move(tex));
                 outMatFlags.push_back(0);
                 outMatNames.push_back(interior.matNames[i]);
-            } else {
-                matSlots[i].texIdx = fallbackTexIdx;
-                if (getenv("TORCH_DIF_DIAG"))
-                    Console::instance().printf(LogLevel::Warn, "TEXDIAG '%s' not found (using fallback)",
-                        interior.matNames[i].c_str());
+            } else if (!isDIFMarkerMaterial(interior.matNames[i])) {
+                Console::instance().printf(LogLevel::Error,
+                    "DIF: required texture '%s' could not be loaded",
+                    interior.matNames[i].c_str());
             }
         }
     } else {
         // skipGpu: assign virtual indices so offline analysis/collision works
         for (size_t i = 0; i < interior.matNames.size(); i++)
             matSlots[i].texIdx = (int)i;
-        fallbackTexIdx = 0;
     }
     // Load lightmaps (skip GPU ops if skipGpu)
     if (!skipGpu) {
@@ -658,8 +662,8 @@ static bool interiorToMeshes(DIFInterior& interior,
         auto& surf = interior.surfaces[si];
         if (surf.windingCount < 3) continue;
         int matIdx = surf.textureIndex;
-        int texIdx = (matIdx >= 0 && matIdx < (int)matSlots.size()) ? matSlots[matIdx].texIdx : fallbackTexIdx;
-        if (texIdx < 0) texIdx = fallbackTexIdx >= 0 ? fallbackTexIdx : 0;
+        int texIdx = (matIdx >= 0 && matIdx < (int)matSlots.size()) ? matSlots[matIdx].texIdx : -1;
+        if (texIdx < 0) continue;
         int lmIdx = si < interior.normalLMapIndices.size()
             ? interior.normalLMapIndices[si] : -1;
         if (lmIdx < 0 || lmIdx >= (int)outLightmaps.size()) lmIdx = -1;
@@ -686,12 +690,10 @@ static bool interiorToMeshes(DIFInterior& interior,
         if (surf.windingCount < 3) { dbgSurfFew++; continue; }
         dbgSurfGeo++;
         int matIdx = surf.textureIndex;
-        int texIdx = (matIdx >= 0 && matIdx < (int)matSlots.size()) ? matSlots[matIdx].texIdx : fallbackTexIdx;
+        int texIdx = (matIdx >= 0 && matIdx < (int)matSlots.size()) ? matSlots[matIdx].texIdx : -1;
         if (texIdx < 0) {
-            texIdx = fallbackTexIdx >= 0 ? fallbackTexIdx : 0;
             dbgSurfNoTex++;
-        } else if (matIdx >= 0 && matIdx < (int)matSlots.size() && matSlots[matIdx].texIdx == fallbackTexIdx) {
-            dbgSurfNoTex++;
+            continue;
         }
         int lmIdx = si < interior.normalLMapIndices.size()
             ? interior.normalLMapIndices[si] : -1;

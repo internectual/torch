@@ -1,8 +1,11 @@
 #pragma once
+#include "net/v12_protocol.h"
+#include "net/v12_ghost_packet.h"
 #include <cstdint>
 #include <string>
 #include <vector>
 #include <functional>
+#include <utility>
 
 enum class PacketType : uint8_t {
     Connect = 0x01,
@@ -51,6 +54,8 @@ public:
     ~Connection();
 
     bool connect(const char* host, uint16_t port);
+    void setPlayerName(const char* name) { playerName = name ? name : "Observer"; }
+    void setJoinPassword(const char* password) { joinPassword = password ? password : ""; }
     void disconnect();
     void update();
 
@@ -61,10 +66,27 @@ public:
 
     void sendPacket(PacketType type, const uint8_t* data, size_t size);
     void sendGamePacket(const uint8_t* data, size_t size, bool reliable = false);
+    void sendNativeMove(uint32_t moveStart, const V12::ClientMove& move);
     void sendCommandPacket(const char* command);
 
     using PacketCallback = std::function<void(PacketType type, const uint8_t* data, size_t size)>;
     void setPacketCallback(PacketCallback cb) { packetCb = cb; }
+
+    using CommandCallback = std::function<void(const std::string&)>;
+    void setCommandCallback(CommandCallback cb) { commandCb = cb; }
+
+    using GhostCallback = std::function<void(
+        const V12::GhostUpdate&, const V12::PlayerGhostState*)>;
+    void setGhostCallback(GhostCallback cb) { ghostCb = cb; }
+
+    using DatablockCallback = std::function<void(
+        uint16_t objectId, uint8_t classId, uint16_t index, uint16_t total,
+        const std::string& className,
+        const V12::DecodedDataBlock& data)>;
+    void setDatablockCallback(DatablockCallback cb) { datablockCb = std::move(cb); }
+
+    using StateCallback = std::function<void(const V12::ServerGameState&)>;
+    void setStateCallback(StateCallback cb) { stateCb = std::move(cb); }
 
     void setConnectCallback(std::function<void(bool)> cb) { connectCb = cb; }
 
@@ -77,7 +99,13 @@ private:
     NetAddress remoteAddr;
     uint32_t currentPing = 0;
     PacketCallback packetCb;
+    CommandCallback commandCb;
+    GhostCallback ghostCb;
+    DatablockCallback datablockCb;
+    StateCallback stateCb;
     std::function<void(bool)> connectCb;
+    std::string playerName = "Observer";
+    std::string joinPassword;
 };
 
 class NetworkManager {

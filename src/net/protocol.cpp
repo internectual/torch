@@ -1,4 +1,5 @@
 #include "net/protocol.h"
+#include "net/v12_registry.h"
 #include "net/network.h"
 #include "core/console.h"
 #include "core/engine.h"
@@ -12,6 +13,7 @@
 #include <map>
 #include <set>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <sys/time.h>
@@ -141,14 +143,127 @@ size_t T2Protocol::encodeDatablock(uint8_t* buf, size_t bufSize,
 // ─── Helpers ──────────────────────────────────────────────────────
 // Map className from mission to classId using the NetObjectClassNames table
 static int32_t classNameToClassId(const std::string& name) {
-    for (int i = 0; i < T2Demo::NetObjectClassCount; i++) {
-        if (name == T2Demo::NetObjectClassNames[i])
+    for (size_t i = 0; i < V12::GhostClassCount; i++) {
+        if (name == V12::GhostClassNames[i])
             return i;
     }
     return -1;
 }
 
 // ─── Server ───────────────────────────────────────────────────────
+
+static void writePlayerGhost(V12BitWriter& writer, float x, float y, float z,
+                             float rotX, float rotZ, float energy) {
+    auto writeFloat = [&writer](float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        writer.writeUnsigned(bits, 32);
+    };
+    writer.writeFlag(false); // GameBase mask 1
+    writer.writeFlag(false); // GameBase mask 2
+    writer.writeFlag(false); // ShapeBase mask
+    writer.writeFlag(false); // ImpactMask
+    writer.writeFlag(false); // ActionMask
+    writer.writeFlag(false); // ArmAction
+    writer.writeFlag(false); // control-object shortcut
+    writer.writeFlag(true);  // MoveMask
+    writer.writeUnsigned(0, 3); // stopped
+    writer.writeFlag(false); // recover state
+    writer.writeFlag(false); // move flag 1
+    writer.writeFlag(false); // move flag 2
+    writer.writeUnsigned(3, 2); // full position
+    writeFloat(x);
+    writeFloat(y);
+    writeFloat(z);
+    writer.writeFlag(false);
+    writer.writeUnsigned((uint32_t)std::clamp((int)std::lround((rotX / 3.1415926535f * 0.5f + 0.5f) * 63.0f), 0, 63), 6);
+    writer.writeUnsigned(32, 6);
+    writer.writeUnsigned((uint32_t)std::clamp((int)std::lround(rotZ * 127.0f / 6.283185307f), 0, 127), 7);
+    for (int i = 0; i < 3; ++i) writer.writeFlag(false);
+    writer.writeUnsigned(16, 6);
+    writer.writeUnsigned(16, 6);
+    writer.writeUnsigned(16, 6);
+    writer.writeFlag(false);
+    for (int i = 0; i < 6; ++i) writer.writeFlag(false);
+    writer.writeFlag(false);
+    writer.writeUnsigned((uint32_t)std::clamp((int)std::lround(energy * 31.0f / 100.0f), 0, 31), 5);
+}
+
+static void writeStaticShapeGhost(V12BitWriter& writer, float x, float y, float z,
+                                  float rotX, float rotZ) {
+    auto writeFloat = [&writer](float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        writer.writeUnsigned(bits, 32);
+    };
+    writer.writeFlag(false); // GameBase datablock
+    writer.writeFlag(false); // GameBase target
+    writer.writeFlag(false); // ShapeBase masks
+    writer.writeFlag(true);  // StaticShape position mask
+    writer.writeUnsigned(3, 2); // absolute position
+    writeFloat(x); writeFloat(y); writeFloat(z);
+    const float half = rotZ * 0.5f;
+    writeFloat(0.0f);
+    writeFloat((float)std::sin(half));
+    writeFloat(0.0f);
+    writer.writeFlag(false);
+    writeFloat(1.0f); writeFloat(1.0f); writeFloat(1.0f);
+    writer.writeFlag(false); // not powered
+    (void)rotX;
+}
+
+static void writeMissionMarkerGhost(V12BitWriter& writer, float x, float y, float z,
+                                    float rotZ, uint8_t classId) {
+    auto writeFloat = [&writer](float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        writer.writeUnsigned(bits, 32);
+    };
+    writer.writeFlag(false);
+    writer.writeFlag(false);
+    writer.writeFlag(false);
+    writer.writeFlag(true);
+    writer.writeUnsigned(3, 2);
+    writeFloat(x); writeFloat(y); writeFloat(z);
+    const float half = rotZ * 0.5f;
+    writeFloat(0.0f); writeFloat((float)std::sin(half)); writeFloat(0.0f);
+    writer.writeFlag(false);
+    writeFloat(1.0f); writeFloat(1.0f); writeFloat(1.0f);
+    if (classId == 37) {
+        writer.writeFlag(false); // no SpawnSphere-specific update
+    } else if (classId == 51) {
+        writer.writeFlag(false); // no name
+        writer.writeFlag(false); // no team
+        writer.writeFlag(false); // not hidden
+    }
+}
+
+static void writeGameBaseGhost(V12BitWriter& writer) {
+    writer.writeFlag(false); // no datablock update
+    writer.writeFlag(false); // no target update
+}
+
+static void writePointGhost(V12BitWriter& writer, float x, float y, float z) {
+    auto writeFloat = [&writer](float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        writer.writeUnsigned(bits, 32);
+    };
+    writeFloat(x); writeFloat(y); writeFloat(z);
+}
+
+static void writeSplashGhost(V12BitWriter& writer, float x, float y, float z) {
+    writeGameBaseGhost(writer);
+    writer.writeFlag(true);
+    writePointGhost(writer, x, y, z);
+}
+
+static void writeShockwaveGhost(V12BitWriter& writer, float x, float y, float z) {
+    writeGameBaseGhost(writer);
+    writer.writeFlag(true);
+    writePointGhost(writer, x, y, z);
+    writePointGhost(writer, 0.0f, 1.0f, 0.0f);
+}
 
 struct GameServer::Impl {
     int sock = -1;
@@ -196,6 +311,12 @@ struct GameServer::Impl {
         std::vector<PosSample> posHistory;
         static constexpr int maxPosHistory = 64;
         uint32_t expectedResp[2]{};
+        uint32_t clientConnectSequence = 0;
+        uint32_t serverConnectSequence = 0;
+        V12::ProtocolState nativeProtocol;
+        V12::NetStringTable nativeStrings;
+        bool native = false;
+        bool ghosting = false;
         // Ghost tracking
         std::set<uint32_t> knownGhosts;
         uint32_t playerGhostIndex = 0; // index of this client's player ghost
@@ -626,27 +747,9 @@ bool GameServer::loadMission(const char* missionPath) {
     std::string content((const char*)data.data(), data.size());
     auto objects = parseMisFile(content);
 
-    // Class name aliases for mission objects
-    struct ClassAlias { const char* misName; int32_t classId; };
-    static const ClassAlias aliases[] = {
-        {"Item", 20}, {"Player", 31}, {"Camera", 5},
-        {"Turret", 57}, {"FlyingVehicle", 13}, {"HoverVehicle", 17},
-        {"WheeledVehicle", 62}, {"Vehicle", 58}, {"BeaconObject", 2},
-        {"Debris", 6}, {"Marker", 24}, {"WayPoint", 61},
-        {"SpawnSphere", 46}, {"Flag", -1}, {"Projectile", 33},
-        {"EnergyProjectile", 9}, {"Sensor", -1},
-    };
-
-    // Also build a quick alias map from classNameToClassId for net classes
     int spawned = 0;
     for (auto& obj : objects) {
-        int32_t cid = -1;
-        // Try aliases first
-        for (auto& a : aliases) {
-            if (obj.className == a.misName) { cid = a.classId; break; }
-        }
-        // Fall back to NetObjectClassNames lookup
-        if (cid < 0) cid = classNameToClassId(obj.className);
+        int32_t cid = classNameToClassId(obj.className);
         if (cid < 0) {
             Console::instance().printf(LogLevel::Debug, "Server: skipping unknown mission class '%s'", obj.className.c_str());
             continue;
@@ -675,7 +778,7 @@ bool GameServer::loadMission(const char* missionPath) {
         impl->serverGhosts.push_back(sg);
 
         // Collect spawn points for respawn
-        if (cid == 46) { // SpawnSphere
+        if (cid == 37) { // SpawnSphere
             Impl::SpawnPoint sp;
             // Use the object's worldPosition with rotation offset if available
             sp.x = pos.x; sp.y = pos.y; sp.z = pos.z;
@@ -889,6 +992,298 @@ void GameServer::update() {
         if (n <= 0) break;
 
         double now = Engine::instance().timer().now();
+
+        if (buf[0] == V12::OobGamePingRequest && n >= 6) {
+            V12BitStream query(buf + 1, (size_t)n - 1);
+            const uint8_t flags = query.readU8();
+            const uint32_t key = query.readU32();
+            if (!query.failed()) {
+                const auto response = V12::buildGamePingResponse(
+                    flags, key, "Torch Server");
+                impl->sendTo(from, response.data(), response.size());
+            }
+            continue;
+        }
+
+        if (buf[0] == V12::OobGameInfoRequest && n >= 6) {
+            V12BitStream query(buf + 1, (size_t)n - 1);
+            const uint8_t flags = query.readU8();
+            const uint32_t key = query.readU32();
+            if (!query.failed()) {
+                const char* mission = Console::instance().getStringVariable("sv_mission");
+                const uint8_t players = (uint8_t)std::min<size_t>(255,
+                    std::count_if(impl->clients.begin(), impl->clients.end(),
+                        [](const Impl::Client& client) { return client.active && !client.isBot; }));
+                const auto response = V12::buildGameInfoResponse(
+                    flags, key, "base", impl->gameMode == 1 ? "Team Deathmatch" : "Deathmatch",
+                    mission ? mission : "", 0, players, 32, 0);
+                impl->sendTo(from, response.data(), response.size());
+            }
+            continue;
+        }
+
+        if (buf[0] == V12::OobConnectChallengeRequest) {
+            V12BitStream request(buf + 1, (size_t)n - 1);
+            const uint32_t protocolVersion = request.readU32();
+            const uint32_t clientSequence = request.readU32();
+            request.readHuffmanString(); // join password
+            request.readFlag();          // optional authentication
+            if (request.failed() || protocolVersion != V12::ProtocolVersion)
+                continue;
+            int ci = impl->findClient(from);
+            if (ci < 0) {
+                Impl::Client client{};
+                client.addr = from;
+                client.addrLen = fromLen;
+                client.lastReceive = now;
+                client.posY = 5;
+                client.health = 100;
+                client.energy = 100;
+                client.active = true;
+                impl->clients.push_back(client);
+                ci = (int)impl->clients.size() - 1;
+            }
+            auto& client = impl->clients[ci];
+            client.clientConnectSequence = clientSequence;
+            client.serverConnectSequence = (uint32_t)rand();
+            if (client.serverConnectSequence == 0) client.serverConnectSequence = 1;
+            client.native = true;
+            client.lastReceive = now;
+            const auto response = V12::buildConnectChallengeResponse(
+                client.serverConnectSequence, client.clientConnectSequence);
+            impl->sendTo(from, response.data(), response.size());
+            continue;
+        }
+
+        if (buf[0] == V12::OobConnectRequest) {
+            int ci = impl->findClient(from);
+            if (ci < 0) continue;
+            V12BitStream request(buf + 1, (size_t)n - 1);
+            const uint32_t serverSequence = request.readU32();
+            const uint32_t clientSequence = request.readU32();
+            const uint32_t protocolVersion = request.readU32();
+            request.readFlag(); // authenticated
+            const uint32_t argc = request.readU32();
+            if (request.failed() || protocolVersion != V12::ProtocolVersion ||
+                argc > 20) continue;
+            std::vector<std::string> argv;
+            for (uint32_t i = 0; i < argc; ++i)
+                argv.push_back(request.readHuffmanString());
+            auto& client = impl->clients[ci];
+            if (request.failed() || serverSequence != client.serverConnectSequence ||
+                clientSequence != client.clientConnectSequence) continue;
+            if (!argv.empty() && !argv[0].empty()) client.playerName = argv[0];
+            client.active = true;
+            client.lastReceive = now;
+            const auto accept = V12::buildConnectAccept(
+                client.serverConnectSequence, client.clientConnectSequence);
+            impl->sendTo(from, accept.data(), accept.size());
+            client.nativeProtocol.reset(
+                client.serverConnectSequence ^ client.clientConnectSequence);
+            client.nativeStrings.clear();
+            if (client.playerGhostIndex == 0) {
+                Impl::ServerGhost ghost;
+                ghost.index = impl->nextGhostIndex++;
+                ghost.classId = T2Protocol::CLASS_PLAYER;
+                ghost.posX = client.posX;
+                ghost.posY = client.posY;
+                ghost.posZ = client.posZ;
+                ghost.health = client.health;
+                ghost.energy = client.energy;
+                impl->serverGhosts.push_back(ghost);
+                client.playerGhostIndex = ghost.index;
+            }
+            V12::ServerPacketOptions initialPacket;
+            initialPacket.events.push_back(
+                V12::makeGhostingMessageEvent(0, 0, 0));
+            initialPacket.events.front().sequence = 0;
+            initialPacket.ghosts.push_back({
+                (uint16_t)client.playerGhostIndex, 25, true, false,
+                [x = client.posX, y = client.posY, z = client.posZ,
+                 rx = client.rotX, rz = client.rotZ, energy = client.energy](V12BitWriter& writer) {
+                    writePlayerGhost(writer, x, y, z, rx, rz, energy);
+                }});
+            const auto dataPacket = client.nativeProtocol.buildServerPacket(initialPacket);
+            if (std::find(initialPacket.emittedGhosts.begin(),
+                          initialPacket.emittedGhosts.end(),
+                          client.playerGhostIndex) != initialPacket.emittedGhosts.end())
+                client.knownGhosts.insert(client.playerGhostIndex);
+            impl->sendTo(from, dataPacket.data(), dataPacket.size());
+            continue;
+        }
+
+        if (buf[0] == V12::OobDisconnect) {
+            const int ci = impl->findClient(from);
+            if (ci < 0 || n < 9) continue;
+            V12BitStream disconnectStream(buf + 1, (size_t)n - 1);
+            const uint32_t serverSequence = disconnectStream.readU32();
+            const uint32_t clientSequence = disconnectStream.readU32();
+            if (disconnectStream.failed()) continue;
+            auto& client = impl->clients[ci];
+            if (serverSequence != client.serverConnectSequence ||
+                clientSequence != client.clientConnectSequence) continue;
+            client.active = false;
+            const auto response = V12::buildDisconnectPacket(
+                serverSequence, clientSequence);
+            impl->sendTo(from, response.data(), response.size());
+            continue;
+        }
+
+        if ((buf[0] & 1) != 0) {
+            const int ci = impl->findClient(from);
+            if (ci >= 0 && impl->clients[ci].native) {
+                auto& client = impl->clients[ci];
+                V12BitStream stream(buf, (size_t)n);
+                V12::DnetHeader header;
+                if (V12::readDnetHeader(stream, header)) {
+                    const auto result = client.nativeProtocol.processReceived(header);
+                    client.lastReceive = now;
+                    if (result.accepted && header.packetType == V12::PacketType::Ping) {
+                        const auto ack = client.nativeProtocol.buildPacket(V12::PacketType::Ack);
+                        impl->sendTo(from, ack.data(), ack.size());
+                    } else if (result.accepted &&
+                               header.packetType == V12::PacketType::Data) {
+                        stream.readFlag(); // current rate changed
+                        if (stream.readFlag()) {
+                            stream.readUnsigned(10);
+                            stream.readUnsigned(10);
+                        }
+                        stream.readFlag(); // first person
+                        stream.readUnsigned(32); // control object checksum
+                        const uint32_t moveStart = stream.readUnsigned(32);
+                        const uint32_t moveCount = stream.readUnsigned(5);
+                        if (moveCount > 31) continue;
+                        for (uint32_t i = 0; i < moveCount && !stream.failed(); ++i) {
+                            int16_t yaw = 0, pitch = 0, roll = 0;
+                            if (stream.readFlag()) yaw = (int16_t)stream.readUnsigned(16);
+                            if (stream.readFlag()) pitch = (int16_t)stream.readUnsigned(16);
+                            if (stream.readFlag()) roll = (int16_t)stream.readUnsigned(16);
+                            const int x = (int)stream.readUnsigned(6) - 16;
+                            const int y = (int)stream.readUnsigned(6) - 16;
+                            const int z = (int)stream.readUnsigned(6) - 16;
+                            stream.readFlag(); // free look
+                            bool triggers[6]{};
+                            for (bool& trigger : triggers) trigger = stream.readFlag();
+                            if (stream.failed()) break;
+                            T2Protocol::MoveMessage move = client.lastMove;
+                            move.seq = moveStart + i;
+                            move.rotZ = client.rotZ += (float)yaw * 6.283185307f / 65536.0f;
+                            move.rotX = client.rotX += (float)pitch * 6.283185307f / 65536.0f;
+                            move.lookX = (float)roll * 6.283185307f / 65536.0f;
+                            move.lookY = 0;
+                            move.flags = (y > 0 ? 1 : 0) | (z > 0 ? 2 : 0) |
+                                (z < 0 ? 4 : 0) | (triggers[0] ? 8 : 0) |
+                                (triggers[2] ? 16 : 0) | (x < 0 ? 32 : 0) |
+                                (x > 0 ? 64 : 0);
+                            client.lastMove = move;
+                            client.moveSeq = (uint16_t)move.seq;
+                        }
+                        if (!stream.failed()) {
+                            stream.readFlag(); // FOV unchanged
+                            stream.setStringBuffer(true);
+                            std::vector<V12::ServerEvent> events;
+                            if (V12::readServerEvents(stream, client.nativeStrings, events)) {
+                                for (const auto& event : events) {
+                                    if (event.hasGhostingMessage && event.ghostMessage == 1 &&
+                                        event.ghostSequence == 0)
+                                        client.ghosting = true;
+                                    if (event.classId == 9 && !event.message.empty())
+                                        Console::instance().execute(event.message.c_str());
+                                }
+                            }
+                        }
+                        if (!stream.failed()) {
+                            V12::ServerPacketOptions response;
+                            response.lastMoveAck = client.moveSeq;
+                            if (!client.ghosting) {
+                                response.events.push_back(
+                                    V12::makeGhostingMessageEvent(0, 0, 0));
+                                response.events.front().sequence = 0;
+                                for (const auto& serverGhost : impl->serverGhosts) {
+                                    if (serverGhost.index != client.playerGhostIndex ||
+                                        !serverGhost.active) continue;
+                                    response.ghosts.push_back({
+                                        (uint16_t)serverGhost.index, 25, true, false,
+                                        [x = serverGhost.posX, y = serverGhost.posY,
+                                         z = serverGhost.posZ, rx = serverGhost.rotX,
+                                         rz = serverGhost.rotZ, energy = serverGhost.energy](V12BitWriter& writer) {
+                                            writePlayerGhost(writer, x, y, z, rx, rz, energy);
+                                        }});
+                                    break;
+                                }
+                            } else {
+                                std::set<uint32_t> nativeVisible;
+                                for (const auto& serverGhost : impl->serverGhosts) {
+                                    if (!serverGhost.active || serverGhost.index > 1023) continue;
+                                    if (serverGhost.classId == T2Protocol::CLASS_PLAYER ||
+                                        serverGhost.classId == 25 || serverGhost.classId == 29 ||
+                                        serverGhost.classId == 39 || serverGhost.classId == 22 ||
+                                        serverGhost.classId == 37 || serverGhost.classId == 51 ||
+                                        serverGhost.classId == 12 || serverGhost.classId == 20 ||
+                                        serverGhost.classId == 21 || serverGhost.classId == 27 ||
+                                        serverGhost.classId == 33 || serverGhost.classId == 38)
+                                        nativeVisible.insert(serverGhost.index);
+                                }
+                                for (uint32_t index : client.knownGhosts) {
+                                    if (!nativeVisible.contains(index))
+                                        response.ghosts.push_back({(uint16_t)index, 0, false, true, {}});
+                                }
+                                for (const auto& serverGhost : impl->serverGhosts) {
+                                    if (!serverGhost.active || serverGhost.index > 1023) continue;
+                                    uint8_t nativeClass = 0;
+                                    if (serverGhost.classId == T2Protocol::CLASS_PLAYER ||
+                                        serverGhost.classId == 25) nativeClass = 25;
+                                    else if (serverGhost.classId == 29 || serverGhost.classId == 39)
+                                        nativeClass = (uint8_t)serverGhost.classId;
+                                    else if (serverGhost.classId == 22 || serverGhost.classId == 37 ||
+                                             serverGhost.classId == 51)
+                                        nativeClass = (uint8_t)serverGhost.classId;
+                                    else if (serverGhost.classId == 12 || serverGhost.classId == 20 ||
+                                             serverGhost.classId == 21 || serverGhost.classId == 27 ||
+                                             serverGhost.classId == 33 || serverGhost.classId == 38)
+                                        nativeClass = (uint8_t)serverGhost.classId;
+                                    else continue;
+                                    const bool known = client.knownGhosts.contains(serverGhost.index);
+                                    response.ghosts.push_back({
+                                        (uint16_t)serverGhost.index, nativeClass, !known, false,
+                                        [nativeClass, x = serverGhost.posX, y = serverGhost.posY,
+                                         z = serverGhost.posZ, rx = serverGhost.rotX,
+                                         rz = serverGhost.rotZ, energy = serverGhost.energy](V12BitWriter& writer) {
+                                            if (nativeClass == 25)
+                                                writePlayerGhost(writer, x, y, z, rx, rz, energy);
+                                             else if (nativeClass == 22 || nativeClass == 37 ||
+                                                      nativeClass == 51)
+                                                 writeMissionMarkerGhost(writer, x, y, z, rz, nativeClass);
+                                             else if (nativeClass == 20)
+                                                 writePointGhost(writer, x, y, z);
+                                             else if (nativeClass == 33)
+                                                 writeShockwaveGhost(writer, x, y, z);
+                                             else if (nativeClass == 38)
+                                                 writeSplashGhost(writer, x, y, z);
+                                             else if (nativeClass == 21)
+                                                 writer.writeFlag(false);
+                                             else if (nativeClass == 12 || nativeClass == 27)
+                                                 writeGameBaseGhost(writer);
+                                             else
+                                                 writeStaticShapeGhost(writer, x, y, z, rx, rz);
+                                        }});
+                                }
+                            }
+                            const auto packet = client.nativeProtocol.buildServerPacket(response);
+                            for (uint16_t index : response.emittedGhosts) {
+                                for (const auto& ghost : response.ghosts) {
+                                    if (ghost.index != index) continue;
+                                    if (ghost.deleted) client.knownGhosts.erase(index);
+                                    else if (ghost.hasClass) client.knownGhosts.insert(index);
+                                }
+                            }
+                            impl->sendTo(from, packet.data(), packet.size());
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
 
         // Parse wire header (15 bytes) to get packet type
         PacketType ptype;
@@ -1881,6 +2276,12 @@ void GameServer::update() {
 
         // Send datablocks/ghost updates (skip bots — they have no socket)
         if (!cl.isBot) {
+            if (cl.native) {
+                // Native clients use the V12 packet path above; the legacy
+                // byte-oriented sender would corrupt their dnet stream.
+                ci++;
+                continue;
+            }
             impl->sendDatablocksTo((int)ci);
             impl->sendGhostsTo((int)ci);
         }

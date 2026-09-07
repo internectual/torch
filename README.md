@@ -1,7 +1,12 @@
-# Torch - Torque2D Engine Reimplementation
+# Torch - Tribes 2 Engine Reimplementation
 
 A cross-platform reimplementation of the Tribes 2 / Torque Game Engine
 networking and gameplay core.
+
+Runtime assets come exclusively from an untouched Tribes 2 installation. Torch
+does not use GLB conversions, generated replacement assets, or substitute
+models and textures. Unsupported native assets fail explicitly so rendering
+bugs can be fixed against the original DTS, DIF, TER, GUI, and script data.
 
 ## Building
 

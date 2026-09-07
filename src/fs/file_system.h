@@ -29,6 +29,11 @@ public:
     bool init(const std::vector<std::string>& dataPaths);
     void shutdown();
 
+    // Production always uses the stock Tribes 2 resource set. Diagnostic
+    // tools may disable this only when they intentionally inspect a format.
+    void setOriginalOnly(bool enabled) { originalOnly = enabled; }
+    bool isOriginalOnly() const { return originalOnly; }
+
     void addArchive(Archive* archive);
     void addPath(const char* path);
 
@@ -44,4 +49,5 @@ public:
 private:
     struct Impl;
     Impl* impl;
+    bool originalOnly = true;
 };

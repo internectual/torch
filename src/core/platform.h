@@ -63,6 +63,7 @@ struct InputState {
     // keydown event after the capture dialog has already been popped.
     bool consumedSc[512]{};
     bool mouseButtons[8]{};
+    bool consumedMouse[8]{};
     int32_t mouseX{}, mouseY{}, mouseDeltaX{}, mouseDeltaY{};
     int32_t mouseWheel{};
     std::string textInput; // consumed text this frame (SDL_TEXT_INPUT)

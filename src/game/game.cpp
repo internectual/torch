@@ -1,16 +1,17 @@
 #include "game/game.h"
 #include <GL/glew.h>
 #include "game/demo.h"
+#include "net/v12_registry.h"
 #include "game/hud.h"
 #include "game/physics.h"
 #include "game/mission_parser.h"
 #include "render/renderer.h"
 #include "render/shader.h"
-#include "render/glb_loader.h"
 #include "render/gui_renderer.h"
 #include "core/console.h"
 #include "core/config.h"
 #include "core/engine.h"
+#include "script/torquescript.h"
 #include <algorithm>
 #include "fs/file_system.h"
 #include <cstdio>
@@ -21,79 +22,22 @@
 #include <cstdlib>
 
 // Forward declarations
-static const char* weaponShapeForDataBlock(int dbIndex);
-static const char* shapePathForClass(const std::string& className, const std::string& skinName);
 
 // ─── Mission shape helpers ─────────────────────────────────────────
-// Scan TorqueScript .cs files for datablock ClassName(InstanceName) { shapeFile = "path" }
-// definitions and build an InstanceName -> "shapes/path" lookup.
+// Read shapeFile values from datablocks created by executed TorqueScript.
 static void scanDatablockShapesFromCS(World& world) {
-    auto& fs = Engine::instance().fs();
-    std::vector<std::string> allFiles;
-    fs.listFiles(nullptr, allFiles);
     int found = 0;
-    for (auto& path : allFiles) {
-        if (path.size() < 3 || path.compare(path.size() - 3, 3, ".cs") != 0) continue;
-        auto data = fs.read(path.c_str());
-        if (data.empty()) continue;
-        std::string content((const char*)data.data(), data.size());
-        size_t pos = 0;
-        while ((pos = content.find("datablock", pos)) != std::string::npos) {
-            pos += 9; // skip "datablock"
-            // Skip whitespace
-            while (pos < content.size() && (content[pos]==' '||content[pos]=='\t'||content[pos]=='\n'||content[pos]=='\r')) pos++;
-            // Read class name
-            size_t clsStart = pos;
-            while (pos < content.size() && content[pos] != '(' && content[pos] != ' ' &&
-                   content[pos] != '\t' && content[pos] != '{' && content[pos] != '\n' && content[pos] != '\r') pos++;
-            // Expect ( InstanceName )
-            if (pos >= content.size() || content[pos] != '(') { continue; }
-            pos++; // skip '('
-            while (pos < content.size() && (content[pos]==' '||content[pos]=='\t')) pos++;
-            size_t nameStart = pos;
-            while (pos < content.size() && content[pos]!=')' && content[pos]!=' ' && content[pos]!='\t' && content[pos]!='\n' && content[pos]!='\r') pos++;
-            std::string instanceName = content.substr(nameStart, pos - nameStart);
-            if (instanceName.empty()) continue;
-            // Skip to {
-            while (pos < content.size() && content[pos] != '{') pos++;
-            if (pos >= content.size()) break;
-            pos++; // skip '{'
-            // Find matching } with depth counting
-            int depth = 1;
-            size_t bodyStart = pos;
-            while (pos < content.size() && depth > 0) {
-                if (content[pos] == '{') depth++;
-                else if (content[pos] == '}') depth--;
-                if (depth > 0) pos++;
-            }
-            std::string body = content.substr(bodyStart, pos - bodyStart);
-            // Look for shapeFile = "path" (case-insensitive search)
-            std::string lowerBody; lowerBody.reserve(body.size());
-            for (char c : body) lowerBody += (char)std::tolower((unsigned char)c);
-            size_t sfKey = lowerBody.find("shapefile");
-            if (sfKey != std::string::npos) {
-                size_t eq = body.find('=', sfKey);
-                if (eq != std::string::npos) {
-                    size_t q1 = body.find('"', eq);
-                    if (q1 != std::string::npos) {
-                        size_t q2 = body.find('"', q1 + 1);
-                        if (q2 != std::string::npos) {
-                            std::string sf = body.substr(q1 + 1, q2 - q1 - 1);
-                            if (!sf.empty()) {
-                                std::string fullPath = sf;
-                                if (fullPath.find("shapes/") != 0 && fullPath.find("interiors/") != 0)
-                                    fullPath = "shapes/" + fullPath;
-                                world.datablockShapes[instanceName] = fullPath;
-                                found++;
-                            }
-                        }
-                    }
-                }
-            }
-            if (pos < content.size()) pos++; // skip '}'
-        }
+    for (const auto& [name, object] : ScriptEngine::instance().objects) {
+        if (!object) continue;
+        auto shape = object->fields.find("shapeFile");
+        if (shape == object->fields.end() || shape->second.toString().empty()) continue;
+        std::string path = shape->second.toString();
+        if (path.find("shapes/") != 0 && path.find("interiors/") != 0)
+            path = "shapes/" + path;
+        world.datablockShapes[name] = path;
+        found++;
     }
-    Console::instance().printf(LogLevel::Debug, "  scanned datablock shapes from .cs: %d found", found);
+    Console::instance().printf(LogLevel::Debug, "  loaded datablock shapes from script objects: %d found", found);
 }
 
 // Check if a .mis mission object class should be rendered as a shape
@@ -116,34 +60,78 @@ static bool isRenderableMissionShape(const std::string& className) {
     return false;
 }
 
-// Resolve the shape file path for a mission object.
-// Priority: object shapename/interiorFile -> datablock InstanceName lookup
-//           -> shapePathForClass fallback.
+static const std::string* findDatablockShape(
+    const std::unordered_map<std::string, std::string>& shapes,
+    const std::string& datablock) {
+    auto exact = shapes.find(datablock);
+    if (exact != shapes.end()) return &exact->second;
+    for (const auto& [name, path] : shapes) {
+        if (name.size() != datablock.size()) continue;
+        bool equal = true;
+        for (size_t i = 0; i < name.size(); i++) {
+            if (std::tolower((unsigned char)name[i]) !=
+                std::tolower((unsigned char)datablock[i])) {
+                equal = false;
+                break;
+            }
+        }
+        if (equal) return &path;
+    }
+    return nullptr;
+}
+
+static std::string normalizeShapePath(std::string path) {
+    if (!path.empty() && path.back() == '"') path.pop_back();
+    if (path.empty()) return {};
+    if (path.starts_with("shapes/") || path.starts_with("interiors/")) return path;
+    std::string lower = path;
+    for (char& c : lower) c = (char)std::tolower((unsigned char)c);
+    return lower.ends_with(".dif") ? "interiors/" + path : "shapes/" + path;
+}
+
+static const DTSShape::Animation* findAnimation(const DTSShape& shape,
+                                                const char* wanted) {
+    if (!wanted) return nullptr;
+    std::string name = wanted;
+    for (char& c : name) c = (char)std::tolower((unsigned char)c);
+    for (const auto& animation : shape.animations) {
+        std::string candidate = animation.name;
+        for (char& c : candidate) c = (char)std::tolower((unsigned char)c);
+        if (candidate == name) return &animation;
+    }
+    return nullptr;
+}
+
+static std::string defaultMissionAnimation(const DTSShape* shape) {
+    if (!shape || !shape->loaded) return {};
+    // Torque's client-side ambient thread runs for mission ShapeBase objects.
+    // Prefer it over arbitrary sequence 0; sequence 0 may be an activation
+    // sequence whose time-zero pose intentionally hides part of the object.
+    if (findAnimation(*shape, "ambient")) return "ambient";
+    if (findAnimation(*shape, "power")) return "power";
+    return {};
+}
+
+// Resolve the shape file path for a mission object. The mission or its
+// datablock must identify the asset; class-name guesses are not faithful.
 static std::string resolveShapePath(const MisObject& obj,
                                     const std::unordered_map<std::string, std::string>& datablockShapes) {
     std::string shape = getProp(obj.props, "shapename");
     if (!shape.empty()) {
-        if (!shape.empty() && shape.back() == '"') shape.pop_back();
-        return shape;
+        return normalizeShapePath(shape);
     }
     shape = getProp(obj.props, "interiorFile");
     if (!shape.empty()) {
-        if (!shape.empty() && shape.back() == '"') shape.pop_back();
-        if (shape.find("interiors/") != 0 && shape.find("shapes/") != 0)
-            shape = "interiors/" + shape;
-        return shape;
+        return normalizeShapePath(shape);
     }
     // Try datablock InstanceName lookup
     std::string db = getProp(obj.props, "datablock");
     if (!db.empty()) {
         // Property values may have trailing quotes from parser
         if (!db.empty() && db.back() == '"') db.pop_back();
-        auto it = datablockShapes.find(db);
-        if (it != datablockShapes.end()) return it->second;
+        if (const auto* path = findDatablockShape(datablockShapes, db))
+            return *path;
     }
-    // Fallback: class-based default shape
-    const char* clsPath = shapePathForClass(obj.className, "");
-    if (clsPath) return std::string(clsPath);
     return "";
 }
 
@@ -232,8 +220,8 @@ static Point3F worldToScreen(const Point3F& worldPos, const MatrixF& view, const
 }
 
 // Forward declarations for demo ghost shape helpers
-static const char* shapePathForClass(const std::string& className, const std::string& skinName);
 static bool isRenderableGhostClass(const std::string& className);
+static bool isEffectOnlyGhostClass(const std::string& className);
 
 Player::Player() {
     for (int i = 0; i < gWeaponCount; i++) {
@@ -259,34 +247,71 @@ void Player::loadModel() {
     if (modelLoaded) return;
 
     auto& fs = Engine::instance().fs();
-    std::vector<std::string> paths = {
-        "shapes/bioderm_light.dts",
-        "shapes/bioderm_light.glb",
-        "shapes/bioderm_medium.dts",
-        "shapes/bioderm_medium.glb",
-        "shapes/bioderm_light",
-        "shapes/bioderm_medium",
-    };
-    for (auto& p : paths) {
-        auto data = fs.read(p.c_str());
-        if (!data.empty()) {
-            modelShape.name = p;
-            if (modelShape.load(data.data(), data.size())) {
-                // Require reasonable mesh count for a character model
-                if (modelShape.meshes.size() < (modelShape.nodes.size() / 4)) {
-                    Console::instance().printf(LogLevel::Debug,
-                        "Player: '%s' incomplete (%zu meshes), trying next", p.c_str(), modelShape.meshes.size());
-                    modelShape = DTSShape{};
-                    continue;
-                }
-                modelLoaded = true;
-                Console::instance().printf(LogLevel::Info, "Player: loaded model '%s'", p.c_str());
-                return;
-            }
+    auto* ts = ScriptEngine::instance().ts();
+    if (!ts) return;
+
+    const std::string currentName = ts->getGlobal("$pref::Player::Current").toString();
+    const std::string profile = ts->getGlobal(
+        "$pref::Player[" + currentName + "]").toString();
+    if (profile.empty()) {
+        Console::instance().printf(LogLevel::Error,
+            "Player: script did not provide the active player profile");
+        return;
+    }
+
+    const std::string raceGender = ts->callFunction(
+        "getField", {VMValue(profile), VMValue(1)}).toString();
+    const std::string sex = ts->callFunction(
+        "getWord", {VMValue(raceGender), VMValue(1)}).toString();
+    const std::string race = ts->callFunction(
+        "getWord", {VMValue(raceGender), VMValue(0)}).toString();
+    const std::string armorSize = ts->getGlobal("$DefaultPlayerArmor").toString();
+    if (!ts->hasFunction("getArmorDatablock")) {
+        Console::instance().printf(LogLevel::Error,
+            "Player: script armor resolver is not loaded");
+        return;
+    }
+
+    static uint32_t resolverId = 0;
+    const std::string resolverName =
+        "__torch_player_resolver_" + std::to_string(++resolverId);
+    auto* resolver = new ScriptObject;
+    resolver->name = resolverName;
+    resolver->fields["race"] = VMValue(race);
+    resolver->fields["sex"] = VMValue(sex);
+    ScriptEngine::instance().objects[resolverName] = resolver;
+    const std::string datablockName = ts->callFunction(
+        "getArmorDatablock", {VMValue(resolverName), VMValue(armorSize)}).toString();
+    ScriptEngine::instance().objects.erase(resolverName);
+    delete resolver;
+
+    auto datablock = ScriptEngine::instance().objects.find(datablockName);
+    if (datablock == ScriptEngine::instance().objects.end() || !datablock->second) {
+        Console::instance().printf(LogLevel::Error,
+            "Player: script armor resolver returned no PlayerData object");
+        return;
+    }
+    auto shapeField = datablock->second->fields.find("shapeFile");
+    if (shapeField == datablock->second->fields.end() || shapeField->second.toString().empty()) {
+        Console::instance().printf(LogLevel::Error,
+            "Player: resolved PlayerData has no shapeFile");
+        return;
+    }
+
+    const std::string path = normalizeShapePath(shapeField->second.toString());
+    auto data = fs.read(path.c_str());
+    if (!data.empty()) {
+        modelShape.name = path;
+        if (modelShape.load(data.data(), data.size())) {
+            modelLoaded = true;
+            Console::instance().printf(LogLevel::Info,
+                "Player: loaded script-selected model '%s'", path.c_str());
+            return;
         }
     }
-    Console::instance().printf(LogLevel::Warn, "Player: no model found, using box fallback");
-    modelLoaded = true;
+    Console::instance().printf(LogLevel::Error,
+        "Player: native script-selected DTS model '%s' could not be loaded",
+        path.c_str());
 }
 
 void Player::updateAnimation(float dt, bool jetting) {
@@ -341,12 +366,6 @@ void Player::render() {
         } else {
             modelShape.render(0);
         }
-    } else {
-        // Placeholder - render a simple box
-        auto& r = Engine::instance().renderer();
-        Box3F box = {{pos.x - 0.4f, pos.y - 1.0f, pos.z - 0.4f},
-                     {pos.x + 0.4f, pos.y + 1.0f, pos.z + 0.4f}};
-        r.drawBox(box, {0, 1, 0, 1});
     }
 }
 
@@ -469,6 +488,8 @@ World::~World() {}
 bool World::load(const char* mapName) {
     Console::instance().printf(LogLevel::Info, "Loading map: %s", mapName);
 
+    cameras.clear();
+
     auto& fs = Engine::instance().fs();
 
     // Try to load mission file
@@ -490,6 +511,27 @@ bool World::load(const char* mapName) {
             misData.substr(0, 30).c_str());
 
         auto objects = parseMisFile(misData);
+
+        for (const auto& obj : objects) {
+            if (obj.className != "Camera") continue;
+            std::string dataBlock = getProp(obj.props, "datablock");
+            for (char& c : dataBlock)
+                c = (char)std::tolower((unsigned char)c);
+            if (dataBlock != "observer") continue;
+
+            ObserverCamera camera;
+            camera.pos = parsePos(getProp(obj.props, "position"));
+            float values[4] = {0, 0, 1, 0};
+            const std::string rotation = getProp(obj.props, "rotation");
+            if (sscanf(rotation.c_str(), "%f %f %f %f",
+                       &values[0], &values[1], &values[2], &values[3]) >= 3) {
+                camera.axis = {values[0], values[1], values[2]};
+                camera.angleDeg = values[3];
+            }
+            cameras.push_back(camera);
+        }
+        Console::instance().printf(LogLevel::Info,
+            "  observer cameras: %zu", cameras.size());
 
         // Find TerrainBlock
         MisObject* terrainObj = findObject(objects, "TerrainBlock");
@@ -781,8 +823,7 @@ bool World::load(const char* mapName) {
             // Clean trailing quote from mis parsing
             if (!clean.empty() && clean.back() == '"') clean.pop_back();
             // Strip directory prefix so the loader can add the correct one
-            if (clean.starts_with("shapes/")) clean = clean.substr(7);
-            else if (clean.starts_with("interiors/")) clean = clean.substr(10);
+             clean = normalizeShapePath(clean);
             if (clean.empty()) return;
             bool found = false;
             for (auto& s : shapeNames) if (s == clean) { found = true; break; }
@@ -812,6 +853,11 @@ bool World::load(const char* mapName) {
             if (!isRenderableMissionShape(obj.className)) continue;
             std::string shapePath = resolveShapePath(obj, datablockShapes);
             if (!shapePath.empty()) addShapeName(shapePath);
+            if (obj.className == "Turret") {
+                std::string barrel = getProp(obj.props, "initialbarrel");
+                if (const auto* barrelPath = findDatablockShape(datablockShapes, barrel))
+                    addShapeName(*barrelPath);
+            }
         }
 
         // Load all unique shapes
@@ -819,55 +865,12 @@ bool World::load(const char* mapName) {
             DTSShape shape;
             shape.name = shapeName;
 
-            size_t dot = shapeName.rfind('.');
-            std::string base = (dot != std::string::npos) ? shapeName.substr(0, dot) : shapeName;
-            std::string ext = (dot != std::string::npos) ? shapeName.substr(dot) : "";
+             std::string lowerShapeName = shapeName;
+             for (char& c : lowerShapeName) c = (char)std::tolower((unsigned char)c);
+             shape.isInterior = lowerShapeName.ends_with(".dif");
 
-            shape.isInterior = (ext == ".dif");
-
-            // Search paths in priority order: native DTS/DIF first, then GLB conversion
-            std::vector<std::string> searchPaths;
-            std::string dir = shape.isInterior ? "interiors/" : "shapes/";
-
-            // Try native format with original extension
-            searchPaths.push_back(dir + base + ext);
-            // Try native format with .dts/.dif extension matching type
-            searchPaths.push_back(dir + base + (shape.isInterior ? ".dif" : ".dts"));
-            // Try GLB conversion path
-            searchPaths.push_back(dir + base + ".glb");
-            // Try alternative dir
-            if (!shape.isInterior)
-                searchPaths.push_back("interiors/" + base + ".glb");
-            // Try stripping TR2 prefix
-            if (base.compare(0, 3, "TR2") == 0) {
-                std::string stripped = base.substr(3);
-                searchPaths.push_back(dir + stripped + ".glb");
-                searchPaths.push_back(dir + stripped + ".dts");
-                if (!shape.isInterior)
-                    searchPaths.push_back("interiors/" + stripped + ".glb");
-            }
-
-            // Try loading without extensions (let DTSShape::load auto-detect)
-            searchPaths.push_back(dir + base);
-
-            // For interiors, also try explicit GLB paths that are skipped by the !shape.isInterior guards
-            if (shape.isInterior) {
-                searchPaths.push_back("interiors/" + base + ".glb");
-                searchPaths.push_back(std::string("@vl2/interiors.vl2/interiors/") + base + ".glb");
-            }
-
-            std::vector<uint8_t> shapeData;
-            std::string foundPath;
-            for (auto& p : searchPaths) {
-                shapeData = Engine::instance().fs().read(p.c_str());
-                if (!shapeData.empty()) {
-                    shape.load(shapeData.data(), shapeData.size());
-                    if (shape.loaded) {
-                        foundPath = p;
-                        break;
-                    }
-                }
-            }
+             std::vector<uint8_t> shapeData = Engine::instance().fs().read(shapeName.c_str());
+             if (!shapeData.empty()) shape.load(shapeData.data(), shapeData.size());
 
     if (shape.loaded) {
         Console::instance().printf(LogLevel::Debug, "  loaded world shape: %s", shapeName.c_str());
@@ -933,22 +936,49 @@ bool World::load(const char* mapName) {
                 }
             }
             wo.shapeName = resolveShapePath(obj, datablockShapes);
-            if (!wo.shapeName.empty() && wo.shapeName.back() == '"')
-                wo.shapeName.pop_back();
-            // Strip directory prefix so it matches loaded shape names
-            if (wo.shapeName.starts_with("shapes/")) wo.shapeName = wo.shapeName.substr(7);
-            else if (wo.shapeName.starts_with("interiors/")) wo.shapeName = wo.shapeName.substr(10);
+             wo.shapeName = normalizeShapePath(wo.shapeName);
             wo.collidable = true;
 
             // Find matching shape
             for (auto& s : shapes) {
                 if (s.name == wo.shapeName) {
                     wo.shape = &s;
-                    // In mapper mode, render shapes statically (no auto-animation).
-                    // The 'Activate' sequence hides the turret barrel at animTime=0.
+                    // The DTS sequence owns default object visibility and
+                    // assembled geometry for mission shapes such as turrets
+                    // and stations. Use its native default sequence in all
+                    // world modes; do not infer an animation name externally.
+                    wo.animName = defaultMissionAnimation(wo.shape);
+                    if (Engine::instance().game().isMapperMode() && !wo.animName.empty()) {
+                        if (const auto* animation = findAnimation(*wo.shape, wo.animName.c_str()))
+                            wo.animTime = animation->duration;
+                    }
                     break;
                 }
             }
+            if (obj.className == "Turret") {
+                wo.mountedShapeName = getProp(obj.props, "initialbarrel");
+                const auto* barrelPath = findDatablockShape(datablockShapes, wo.mountedShapeName);
+                std::string mountedPath = barrelPath ? *barrelPath : "";
+                if (!mountedPath.empty()) {
+                    std::string name = mountedPath;
+                     name = normalizeShapePath(name);
+                    for (auto& s : shapes)
+                        if (s.name == name) { wo.mountedShape = &s; break; }
+                }
+                Console::instance().printf(LogLevel::Info,
+                    "  turret mount: base=%s barrel=%s resolved=%s loaded=%s mount0=%d mountpoint=%d",
+                    wo.shapeName.c_str(), wo.mountedShapeName.c_str(), mountedPath.c_str(),
+                    wo.mountedShape && wo.mountedShape->loaded ? "yes" : "no",
+                     wo.shape ? wo.shape->findNode("mount0") : -1,
+                     wo.mountedShape ? wo.mountedShape->findNode("Mountpoint") : -1);
+                Console::instance().printf(LogLevel::Info,
+                    "  turret transform axis=(%.3f %.3f %.3f) angle=%.1f",
+                    wo.rot.x, wo.rot.y, wo.rot.z, wo.rotAngleDeg);
+            }
+            if (wo.shapeName.find("station_inv") != std::string::npos)
+                Console::instance().printf(LogLevel::Info,
+                    "  station transform axis=(%.3f %.3f %.3f) angle=%.1f",
+                    wo.rot.x, wo.rot.y, wo.rot.z, wo.rotAngleDeg);
             addObject(wo);
             if (wo.shape) {
                 Console::instance().printf(LogLevel::Info, "  placed: %s (%s) at (%.1f, %.1f, %.1f)",
@@ -1015,21 +1045,18 @@ bool World::load(const char* mapName) {
                 MatrixF xform;
                 xform.identity();
                 if (wo.rotAngleDeg != 0 && (wo.rot.x != 0 || wo.rot.y != 0 || wo.rot.z != 0)) {
-                    Point3F axis = {wo.rot.x, wo.rot.z, -wo.rot.y};
+                    Point3F axis = wo.rot;
                     float len = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
                     if (len > 0.0001f) {
                         axis.x /= len; axis.y /= len; axis.z /= len;
-                        xform.setRotationAxis(axis, Math::DEG2RAD(wo.rotAngleDeg));
+                        xform = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(wo.rotAngleDeg));
                     }
                 }
                 if (wo.scale.x != 1.0f || wo.scale.y != 1.0f || wo.scale.z != 1.0f) {
-                    MatrixF scaleMat;
-                    scaleMat.setScale(wo.scale);
-                    xform = xform * scaleMat;
+                    xform = xform * Math::torqueScaleToYUp(wo.scale);
                 }
-                Point3F pos = {wo.pos.x, wo.pos.z, -wo.pos.y};
-                xform.setTranslation(pos);
-                // Apply czUpToYUp so collision matches rendering
+                xform.setTranslation(Math::torquePointToYUp(wo.pos));
+                // DIF collision vertices remain in their native Torque frame.
                 MatrixF fullXform = xform * Math::czUpToYUp();
 
                 auto addCollisionVerts = [&](const std::vector<float>& cVerts, const std::vector<uint32_t>& cIndices) {
@@ -1189,7 +1216,6 @@ bool World::load(const char* mapName) {
     // Fallback if DML-based loading failed
     if (skyFaces.size() < 6) {
         Console::instance().printf(LogLevel::Error, "Sky: failed to load cubemap faces from materialList '%s'. Expected 6 face textures in the DML.", skyMaterialList.c_str());
-        Console::instance().printf(LogLevel::Error, "Sky: falling back to procedural gradient sky");
     }
 
     if (skyFaces.size() >= 6) {
@@ -1225,29 +1251,9 @@ bool World::load(const char* mapName) {
                     }
                 }
             }
-            // Fallback: extract basename and search common sky directories
-            if (!skyBox.emap.loaded && !emapPath.empty()) {
-                size_t slash = emapPath.rfind('/');
-                std::string baseName = (slash != std::string::npos) ? emapPath.substr(slash + 1) : emapPath;
-                const char* searchDirs[] = {"ice/skies", "desert/skies", "badlands/skies",
-                    "lush/skies", "lava/skies", "alpine/skies", "skies"};
-                for (auto& dir : searchDirs) {
-                    for (auto& ext : exts) {
-                        std::string p = std::string("textures/") + dir + "/" + baseName + ext;
-                        Console::instance().printf(LogLevel::Debug, "  trying emap fallback: %s", p.c_str());
-                        auto ed = fs.read(p.c_str());
-                        if (!ed.empty()) {
-                            skyBox.emap.load(ed.data(), ed.size());
-                            Console::instance().printf(LogLevel::Info, "  emap loaded (fallback): %s (%zu bytes)", p.c_str(), ed.size());
-                            break;
-                        }
-                    }
-                    if (skyBox.emap.loaded) break;
-                }
-            }
-
             if (!skyBox.emap.loaded) {
-                Console::instance().printf(LogLevel::Debug, "  emap NOT FOUND: %s", emapPath.c_str());
+                Console::instance().printf(LogLevel::Warn,
+                    "  native environment map not found: %s", emapPath.c_str());
             }
 
             // Load cloud layers from DML lines 7-9
@@ -1656,12 +1662,14 @@ void World::render(const Point3F& cameraPos) {
         if (obj.shape && obj.shape->loaded) {
             MatrixF model;
             if (obj.rotAngleDeg != 0 && (obj.rot.x != 0 || obj.rot.y != 0 || obj.rot.z != 0)) {
-                // Axis-angle rotation: convert axis from T2 Z-up to Y-up
-                Point3F axis = {obj.rot.x, obj.rot.z, -obj.rot.y};
+                // Convert the complete Torque-frame rotation. Applying the
+                // basis change to the matrix preserves arbitrary axis-angle
+                // rotations without modifying the native DTS model frame.
+                Point3F axis = obj.rot;
                 float len = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
                 if (len > 0.0001f) {
                     axis.x /= len; axis.y /= len; axis.z /= len;
-                    model.setRotationAxis(axis, Math::DEG2RAD(obj.rotAngleDeg));
+                    model = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(obj.rotAngleDeg));
                 }
             }
             // Convert position from T2 Z-up to Y-up: (x,y,z) -> (x, z, -y)
@@ -1669,15 +1677,55 @@ void World::render(const Point3F& cameraPos) {
             model.setTranslation(pos);
             // Apply non-unit scale if present
             if (obj.scale.x != 1.0f || obj.scale.y != 1.0f || obj.scale.z != 1.0f) {
-                MatrixF scaleMat;
-                scaleMat.setScale(obj.scale);
-                model = model * scaleMat;
+                model = model * Math::torqueScaleToYUp(obj.scale);
+            }
+            if (obj.shape->nativeDTS) {
+                // Native DTS vertices use (x,z,y), while mission coordinates
+                // use the proper Z-up-to-Y-up basis (x,z,-y).
+                MatrixF shapeFrame;
+                shapeFrame.setRotationY(Math::PI);
+                model = model * shapeFrame;
             }
             r.setModel(model * obj.shape->upOrientation());
             if (!obj.animName.empty())
                 obj.shape->renderAnimation(obj.animName.c_str(), obj.animTime);
             else
                 obj.shape->render(0);
+
+            // TurretImageData is a separate DTS shape mounted at the turret's
+            // mount0 node. Align its Mountpoint back to that node, matching
+            // Torque's mounted-image transform instead of drawing only the
+            // turret base.
+            if (obj.mountedShape && obj.mountedShape->loaded) {
+                int mountNode = obj.shape->findNode("mount0");
+                int pointNode = obj.mountedShape->findNode("Mountpoint");
+                if (pointNode < 0) pointNode = obj.mountedShape->findNode("mountPoint");
+                if (pointNode < 0) pointNode = obj.mountedShape->findNode("mount0");
+                if (mountNode >= 0 && mountNode < (int)obj.shape->defaultTransforms.size() &&
+                    pointNode >= 0 && pointNode < (int)obj.mountedShape->defaultTransforms.size()) {
+                    MatrixF mountedModel = model * obj.shape->defaultTransforms[mountNode] *
+                        obj.mountedShape->defaultTransforms[pointNode].inverse();
+                    // Mounted images use their native mountpoint frame; the
+                    // ordinary DTS shape correction must not be applied again.
+                    r.setModel(mountedModel);
+                    if (Engine::instance().game().isMapperMode()) {
+                        const DTSShape::Animation* settled =
+                            findAnimation(*obj.mountedShape, "deploy");
+                        if (!settled) settled = findAnimation(*obj.mountedShape, "visibility");
+                        if (settled)
+                            obj.mountedShape->renderAnimation(
+                                settled->name.c_str(), settled->duration);
+                        else
+                            obj.mountedShape->render(0);
+                    } else {
+                        obj.mountedShape->render(0);
+                    }
+                } else {
+                    Console::instance().printf(LogLevel::Error,
+                        "Mounted shape '%s' has no compatible native mount frames",
+                        obj.mountedShape->name.c_str());
+                }
+            }
         }
     }
 
@@ -1824,7 +1872,7 @@ skip_grid:
         if (!b.shape) {
             // Load shape on first render
             auto& fs = Engine::instance().fs();
-            for (auto* p : {"shapes/bioderm_light.glb", "shapes/bioderm_light.dts", "shapes/light_male.glb"}) {
+            for (auto* p : {"shapes/bioderm_light.dts", "shapes/bioderm_medium.dts", "shapes/bioderm_heavy.dts"}) {
                 auto d = fs.read(p);
                 if (!d.empty()) {
                     DTSShape* s = new DTSShape;
@@ -1846,13 +1894,6 @@ skip_grid:
             shader->setUniform("uUseTexture", (int32_t)0);
             shader->setUniform("uUseLightmap", (int32_t)0);
             b.shape->render(0);
-        } else {
-            // Fallback: colored box
-            float hs = 0.8f;
-            Box3F box = {{b.pos.x - hs, b.pos.y - 1.0f, b.pos.z - hs},
-                         {b.pos.x + hs, b.pos.y + 1.0f, b.pos.z + hs}};
-            ColorF col = b.health > 50 ? ColorF{0, 0.6f, 0, 1} : ColorF{0.8f, 0.2f, 0, 1};
-            Engine::instance().renderer().drawBox(box, col);
         }
         // Health bar above bot
         {
@@ -1893,6 +1934,24 @@ void World::spawnBots(int count) {
 
 void World::addObject(const WorldObject& obj) {
     worldObjects.push_back(obj);
+}
+
+void Game::selectMapperObserverCamera(int index) {
+    if (!mapperMode || index < 1 || index > (int)w->observerCameras().size())
+        return;
+    const auto& camera = w->observerCameras()[index - 1];
+    freeCamPos = Math::torquePointToYUp(camera.pos);
+    MatrixF rotation = Math::torqueRotationToYUp(
+        camera.axis, -Math::DEG2RAD(camera.angleDeg));
+    Point3F forward = rotation.transform({0, 0, -1});
+    freeCamTarget = {
+        freeCamPos.x + forward.x * 100.0f,
+        freeCamPos.y + forward.y * 100.0f,
+        freeCamPos.z + forward.z * 100.0f,
+    };
+    setFreeCamTarget(freeCamTarget);
+    Console::instance().printf(LogLevel::Info,
+        "Mapper: using observer camera %d", index);
 }
 
 void World::spawnProjectile(const Projectile& p) {
@@ -2214,7 +2273,7 @@ bool Game::init() {
     }, "listdemos - List available demo files");
 
     con.addCommand("testshape", [this](int32_t argc, const char* const* argv) {
-        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: testshape <glb_path>"); return; }
+        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: testshape <dts_path>"); return; }
         auto& fs = Engine::instance().fs();
         auto data = fs.read(argv[1]);
         if (data.empty()) {
@@ -2236,7 +2295,7 @@ bool Game::init() {
             for (auto& a : testShape.animations)
                 Console::instance().printf(LogLevel::Info, "    %s (%.1fs)", a.name.c_str(), a.duration);
         }
-    }, "testshape <path> - Load and display a DTS/GLB shape");
+    }, "testshape <path> - Load and display a native DTS shape");
 
     // ── Shape Viewer ─────────────────────────────────────────────────────
     con.addCommand("shapeviewer", [this](int32_t, const char* const*) {
@@ -2398,7 +2457,9 @@ void Game::update(float dt) {
                 demoJetHeld = false;
                 return;
             }
-            demoTime += dt;
+            const bool stepDemo = demoStepRequest;
+            const float playbackRate = (demoFastForward || currentInput.jet) ? 4.0f : 1.0f;
+            if (!stepDemo) demoTime += dt * playbackRate;
             // Decay camera shake
             if (shakeIntensity > 0) {
                 shakeIntensity = std::max(0.0f, shakeIntensity - dt * 8.0f);
@@ -2422,7 +2483,8 @@ void Game::update(float dt) {
                 demoStepRequest = false;
             } else if (demoFastForward || currentInput.jet) {
                 demoJetHeld = currentInput.jet;
-                blocksThisFrame = (int)(demoBlocksTotal * dt / (demoTotalTime > 0 ? demoTotalTime : 1.0f));
+                blocksThisFrame = (int)(demoBlocksTotal * dt * playbackRate /
+                                        (demoTotalTime > 0 ? demoTotalTime : 1.0f));
             } else {
                 demoJetHeld = false;
                 // Match real-time: catch up to target position
@@ -2459,21 +2521,22 @@ void Game::update(float dt) {
                     };
                     demoMoveBlend = 0.0f;
                     demoHasPos = true;
-                    demoPath.push_back({move.x, move.y, move.z});
+                    demoPath.push_back(Math::torquePointToYUp({move.x, move.y, move.z}));
                     demoPathCount = (int)demoPath.size();
                     // Move the player to demo position so physics/collision use it
-                    pl->setPosition(demoCameraPos);
+                    pl->setPosition(Math::torquePointToYUp(demoCameraPos));
                     pl->setRotation({move.pitch, 0, move.yaw});
                 }
 
                 // Parse packet blocks (GameState, ghost updates, events)
-                if (block->type == T2Demo::BlockTypePacket ||
-                    block->type == T2Demo::BlockTypeSendPacket) {
+                if (block->type == T2Demo::BlockTypeSendPacket) {
+                    demoParser->onSendPacketTrigger();
+                } else if (block->type == T2Demo::BlockTypePacket) {
                     PacketData pd = demoParser->parsePacket(block->data.data(), block->data.size(), demoBlocksDone - 1);
                     // Collect chat/server events for the event pane
                     for (const auto& ev : pd.events) {
                         // Handle audio events
-                        if (ev.audioProfileId >= 0) {
+                        if (ev.directAudioProfile && ev.audioProfileId >= 0) {
                             auto& audio = Engine::instance().audio();
                             if (audio.config().enabled && audio.config().sfxVolume > 0) {
                                 scanAudioProfiles();
@@ -2484,6 +2547,12 @@ void Game::update(float dt) {
                                         auto* src = audio.createSource();
                                         if (src) {
                                             src->setVolume(0.3f);
+                                            if (ev.hasAudioPosition &&
+                                                ev.classId == T2Demo::NetEventClassFirst + 18) {
+                                                src->setPosition(Math::torquePointToYUp({
+                                                    ev.audioPosition.x, ev.audioPosition.y,
+                                                    ev.audioPosition.z}));
+                                            }
                                             src->play(buf);
                                         }
                                     }
@@ -2847,13 +2916,14 @@ void Game::update(float dt) {
                     }
                     static bool prevEnter = false;
                     if (enterDown && !prevEnter && !chatBuf.empty()) {
-                        // Send chat message
-                        T2Protocol::ChatMessage chat;
-                        snprintf(chat.sender, sizeof(chat.sender), "Player");
-                        snprintf(chat.text, sizeof(chat.text), "%s", chatBuf.c_str());
-                        uint8_t buf[512];
-                        size_t len = T2Protocol::encodeChat(buf, sizeof(buf), chat);
-                        if (len > 0) activeConn->sendGamePacket(buf, len, false);
+                        // Native Tribes 2 routes chat through commandToServer.
+                        std::string command = "messageSent \"";
+                        for (char c : chatBuf) {
+                            if (c == '\\' || c == '"') command.push_back('\\');
+                            command.push_back(c);
+                        }
+                        command.push_back('"');
+                        activeConn->sendCommandPacket(command.c_str());
                         chatBuf.clear();
                         chatActive = false;
                         plat.stopTextInput();
@@ -2890,28 +2960,19 @@ void Game::update(float dt) {
                 if (pendingMoves.size() > 128)
                     pendingMoves.pop_front();
 
-                T2Protocol::MoveMessage moveMsg;
-                Point3F ppos = pl->position();
-                Point3F prot = pl->rotation();
-                moveMsg.posX = ppos.x;
-                moveMsg.posY = ppos.y;
-                moveMsg.posZ = ppos.z;
-                moveMsg.rotZ = prot.z;
-                moveMsg.rotX = prot.x;
-                moveMsg.flags = (currentInput.forward ? 1 : 0) |
-                                (currentInput.jump ? 2 : 0) |
-                                (currentInput.jet ? 4 : 0) |
-                                (currentInput.fire ? 8 : 0) |
-                                (currentInput.reload ? 16 : 0) |
-                                (currentInput.left ? 32 : 0) |
-                                (currentInput.right ? 64 : 0);
-                moveMsg.lookX = currentInput.lookDelta.x;
-                moveMsg.lookY = currentInput.lookDelta.y;
-                moveMsg.seq = thisSeq;
-
-                uint8_t buf[64];
-                size_t moveLen = T2Protocol::encodeMove(buf, sizeof(buf), moveMsg);
-                if (moveLen > 0) activeConn->sendGamePacket(buf, (int)moveLen, false);
+                V12::ClientMove nativeMove;
+                nativeMove.x = (currentInput.right ? 1.0f : 0.0f) -
+                                (currentInput.left ? 1.0f : 0.0f);
+                nativeMove.y = (currentInput.forward ? 1.0f : 0.0f) -
+                                (currentInput.backward ? 1.0f : 0.0f);
+                nativeMove.z = (currentInput.jump ? 1.0f : 0.0f) -
+                                (currentInput.jet ? 1.0f : 0.0f);
+                nativeMove.yaw = currentInput.lookDelta.y;
+                nativeMove.pitch = currentInput.lookDelta.x;
+                nativeMove.trigger[0] = currentInput.fire;
+                nativeMove.trigger[1] = currentInput.altFire;
+                nativeMove.trigger[2] = currentInput.reload;
+                activeConn->sendNativeMove(thisSeq, nativeMove);
             }
 
             // Reload
@@ -3117,12 +3178,18 @@ void Game::render(float dt) {
     }
     // Apply camera shake
     Point3F finalCam = {camPos.x + shakeOffset.x, camPos.y + shakeOffset.y, camPos.z + shakeOffset.z};
+    bool cameraOverride = false;
     // Diagnostic camera override for mapper analysis (TORCH_CAM=px,py,pz,tx,ty,tz)
     if (const char* camOv = getenv("TORCH_CAM")) {
         float v[6] = {0,0,0,0,0,0};
         sscanf(camOv, "%f,%f,%f,%f,%f,%f", &v[0],&v[1],&v[2],&v[3],&v[4],&v[5]);
         finalCam = {v[0], v[1], v[2]};
         camTarget = {v[3], v[4], v[5]};
+        cameraOverride = true;
+    }
+    if (demoPlaying && !cameraOverride) {
+        finalCam = Math::torquePointToYUp(finalCam);
+        camTarget = Math::torquePointToYUp(camTarget);
     }
     // Apply FOV from demo stream if available
     float savedFov = r.config().fov;
@@ -3173,19 +3240,22 @@ void Game::render(float dt) {
                 if (!obj.shape || !obj.shape->loaded) continue;
                 MatrixF model;
                 if (obj.rotAngleDeg != 0 && (obj.rot.x != 0 || obj.rot.y != 0 || obj.rot.z != 0)) {
-                    Point3F axis = {obj.rot.x, obj.rot.z, -obj.rot.y};
+                    Point3F axis = obj.rot;
                     float len = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
                     if (len > 0.0001f) {
                         axis.x /= len; axis.y /= len; axis.z /= len;
-                        model.setRotationAxis(axis, Math::DEG2RAD(obj.rotAngleDeg));
+                        model = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(obj.rotAngleDeg));
                     }
                 }
-                Point3F pos = {obj.pos.x, obj.pos.z, -obj.pos.y};
-                model.setTranslation(pos);
+                model.setTranslation(Math::torquePointToYUp(obj.pos));
                 if (obj.scale.x != 1.0f || obj.scale.y != 1.0f || obj.scale.z != 1.0f) {
-                    MatrixF scaleMat;
-                    scaleMat.setScale(obj.scale);
-                    model = model * scaleMat;
+                    model = model * Math::torqueScaleToYUp(obj.scale);
+                }
+                if (obj.shape->nativeDTS) {
+                    // Keep shadow placement identical to the visible shape.
+                    MatrixF shapeFrame;
+                    shapeFrame.setRotationY(Math::PI);
+                    model = model * shapeFrame;
                 }
                 MatrixF mvp = r.lightViewProj() * model * obj.shape->upOrientation();
                 shadowShader->setUniform("uLightMVP", mvp);
@@ -3483,9 +3553,15 @@ void Game::render(float dt) {
 
             // Try to get or load the DTS shape for this ghost class
             DTSShape* shape = const_cast<DTSShape*>(g->shape);
-            if (!shape && g->className.empty() == false) {
+             if (!shape && !isEffectOnlyGhostClass(g->className) && g->className.empty() == false) {
                 GhostEntry* mutableG = const_cast<GhostEntry*>(g);
-                mutableG->shape = getOrLoadDemoShape(g->className, g->skinName, g->shapeName);
+                std::string shapeRef = g->shapeName;
+                if (shapeRef.empty() && g->hasDatablock && demoParser) {
+                    const auto& dataBlocks = demoParser->getInitialBlock().datablockWeaponShapes;
+                    auto shapeIt = dataBlocks.find((uint32_t)g->datablockId);
+                    if (shapeIt != dataBlocks.end()) shapeRef = normalizeShapePath(shapeIt->second);
+                }
+                mutableG->shape = getOrLoadDemoShape(g->className, g->skinName, shapeRef);
                 shape = mutableG->shape;
             }
 
@@ -3508,56 +3584,29 @@ void Game::render(float dt) {
                 MatrixF model;
                 if (g->hasRotation) {
                     QuatF q(mg->renderRotation.x, mg->renderRotation.y, mg->renderRotation.z, mg->renderRotation.w);
-                    model = q.toMatrix();
+                    model = Math::torqueQuaternionToYUp(q);
                 } else if (mg->isMoving || isPlayer) {
                     float yaw = mg->moveYaw;
                     model.setRotationAxis({0, 1, 0}, -yaw);
                 } else {
                     model.identity();
                 }
+                if (shape->nativeDTS) {
+                    MatrixF shapeFrame;
+                    shapeFrame.setRotationY(Math::PI);
+                    model = model * shapeFrame;
+                }
                 // Hover bob for stationary vehicles
                 float hoverY = 0.0f;
                 if (isVehicle && !mg->isMoving) {
                     hoverY = sinf(demoTime * 2.0f + idx * 1.7f) * 0.15f;
                 }
-                model.setTranslation({rp.x, rp.y + hoverY, rp.z});
+                Point3F renderPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
+                model.setTranslation({renderPosition.x, renderPosition.y + hoverY, renderPosition.z});
                 r.setModel(model * shape->upOrientation());
 
-                // Apply skin-based tint color for player ghosts
-                {
-                    ColorF tint = {1, 1, 1, 1};
-                    if (g->className == "Player" || g->className == "MPB") {
-                        const std::string& sn = g->skinName;
-                        // Only tint if skin textures weren't applied (white tint = no tint)
-                        if (!mg->skinApplied) {
-                            if (sn.find("red") != std::string::npos)
-                                tint = {1.0f, 0.2f, 0.2f, 1.0f};
-                            else if (sn.find("blue") != std::string::npos)
-                                tint = {0.2f, 0.3f, 1.0f, 1.0f};
-                            else if (sn.find("green") != std::string::npos)
-                                tint = {0.2f, 0.8f, 0.2f, 1.0f};
-                            else if (sn.find("yellow") != std::string::npos)
-                                tint = {1.0f, 0.9f, 0.1f, 1.0f};
-                            else if (sn.find("purple") != std::string::npos)
-                                tint = {0.7f, 0.2f, 0.8f, 1.0f};
-                            else if (sn.find("orange") != std::string::npos)
-                                tint = {1.0f, 0.5f, 0.1f, 1.0f};
-                            else if (sn.find("black") != std::string::npos)
-                                tint = {0.3f, 0.3f, 0.3f, 1.0f};
-                            else if (sn.find("white") != std::string::npos)
-                                tint = {0.9f, 0.9f, 0.9f, 1.0f};
-                        }
-                        // Blend towards red when damaged
-                        float hpFrac = mg->health / mg->maxHealth;
-                        if (hpFrac < 0.5f) {
-                            float dmg = 1.0f - hpFrac * 2.0f; // 0 at 50%, 1 at 0%
-                            tint.r = tint.r + (1.0f - tint.r) * dmg * 0.6f;
-                            tint.g = tint.g * (1.0f - dmg * 0.4f);
-                            tint.b = tint.b * (1.0f - dmg * 0.4f);
-                        }
-                    }
-                    if (defShader) defShader->setUniform("uTint", tint);
-                }
+                // Appearance comes from native material and skin data only.
+                if (defShader) defShader->setUniform("uTint", ColorF{1, 1, 1, 1});
 
                 // Apply cloak transparency
                 if (g->cloaked) {
@@ -3567,16 +3616,22 @@ void Game::render(float dt) {
                     if (defShader) defShader->setUniform("uScreenDoor", 0.0f);
                 }
 
-                // Pick animation: try multiple animation names per class
-                const char* animName = nullptr;
-                const char* altName = nullptr;
+                // Select the sequence by the index transmitted in the
+                // ShapeBase thread state. The DTS owns its sequence names.
+                const DTSShape::Animation* animation = nullptr;
+                float animationPosition = 0.0f;
                 bool isTurret = (g->className == "Turret" || g->className == "Sentry");
-                if (isPlayer) {
-                    animName = mg->isMoving ? "run" : "stand";
-                    altName  = mg->isMoving ? "run" : "idle";
-                } else if (isVehicle) {
-                    animName = mg->isMoving ? "hover" : "float";
-                    altName  = mg->isMoving ? "float" : "still";
+                for (const auto& thread : g->threads) {
+                    if (!thread.valid || thread.sequence < 0 ||
+                        thread.sequence >= (int)shape->animations.size()) continue;
+                    if (thread.state == 1 || thread.state == 3) continue;
+                    animation = &shape->animations[thread.sequence];
+                    animationPosition = std::clamp(thread.position, 0.0f, 1.0f);
+                    if (thread.state == 0 && !thread.atEnd && animation->duration > 0.0f)
+                        animationPosition = std::clamp(
+                            animationPosition + dt * thread.timescale / animation->duration,
+                            0.0f, 1.0f);
+                    break;
                 }
 
                 // Node overrides for turret barrel and player head
@@ -3616,11 +3671,11 @@ void Game::render(float dt) {
                     }
                 }
 
-                if (animName) {
-                    bool found = false;
-                    for (auto& a : shape->animations)
-                        if (a.name == animName) { found = true; break; }
-                    shape->renderAnimation(found ? animName : (altName ? altName : animName), mg->animTime);
+                if (animation) {
+                    shape->renderAnimation(animation->name.c_str(),
+                                           animationPosition * animation->duration,
+                                           numOverrides > 0 ? overrides : nullptr,
+                                           numOverrides);
                 } else {
                     shape->render(0, numOverrides > 0 ? overrides : nullptr, numOverrides);
                 }
@@ -3630,7 +3685,7 @@ void Game::render(float dt) {
                     for (int img = 0; img < 8; img++) {
                         int16_t dbId = g->mountedImages[img].datablockId;
                         if (dbId < 0) continue;
-                        // Try dynamic mapping from demo stream first, then hardcoded fallback
+                        // Weapon images must resolve from the streamed datablock.
                         const char* wPath = nullptr;
                         std::string dynamicPath;
                         if (demoParser) {
@@ -3641,7 +3696,6 @@ void Game::render(float dt) {
                                 wPath = dynamicPath.c_str();
                             }
                         }
-                        if (!wPath) wPath = weaponShapeForDataBlock(dbId);
                         if (!wPath) continue;
 
                         // Load weapon shape (cached)
@@ -3732,23 +3786,6 @@ void Game::render(float dt) {
                         }
                     }
                 }
-            } else {
-                // Fallback: colored box with size based on class
-                float size = 0.8f;
-                if (g->className == "Shrike" || g->className == "FlyingVehicle" ||
-                    g->className == "Turbograv" || g->className == "HoverVehicle" ||
-                    g->className == "Shield" || g->className == "Vehicle")
-                    size = 2.0f;
-                else if (g->className == "Turret" || g->className == "Sentry" ||
-                         g->className == "Generator")
-                    size = 1.5f;
-                Box3F box;
-                box.min = {rp.x - size, rp.y - size, rp.z - size};
-                box.max = {rp.x + size, rp.y + size, rp.z + size};
-                float rcol = 0.3f + 0.7f * ((g->classId * 37) % 255) / 255.0f;
-                float gcol = 0.3f + 0.7f * ((g->classId * 73) % 255) / 255.0f;
-                float bcol = 0.3f + 0.7f * ((g->classId * 131) % 255) / 255.0f;
-                r.drawBox(box, {rcol, gcol, bcol, 1.0f});
             }
 
             // Shield effect: render a pulsing translucent bubble when shielded
@@ -3760,27 +3797,29 @@ void Game::render(float dt) {
                 sAlpha *= pulse;
                 ColorF shieldCol = {0.3f, 0.6f, 1.0f, sAlpha};
                 // Render layered boxes at different scales for sphere approximation
+                Point3F shieldPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
                 for (int i = 0; i < 3; i++) {
                     float scale = 1.0f - i * 0.15f;
                     float a = sAlpha * (1.0f - i * 0.25f);
-                    r.drawBox({{rp.x - sSize * scale, rp.y - sSize * scale, rp.z - sSize * scale},
-                               {rp.x + sSize * scale, rp.y + sSize * scale, rp.z + sSize * scale}},
+                    r.drawBox({{shieldPosition.x - sSize * scale, shieldPosition.y - sSize * scale, shieldPosition.z - sSize * scale},
+                               {shieldPosition.x + sSize * scale, shieldPosition.y + sSize * scale, shieldPosition.z + sSize * scale}},
                               {0.3f, 0.6f, 1.0f, a});
                 }
             }
 
             // Ground shadow for all renderable ghosts
             if (isRenderableGhostClass(g->className)) {
+                Point3F shadowPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
                 float groundH = 0.0f;
                 if (w->terrain() && w->terrain()->loaded)
-                    groundH = w->getHeight(rp.x, rp.z);
+                    groundH = w->getHeight(shadowPosition.x, shadowPosition.z);
                 float shadowY = std::max(groundH, 0.0f);
                 float shadowSize = (g->className == "Player" || g->className == "MPB") ? 0.8f : 1.5f;
-                float distAboveGround = rp.y - shadowY;
+                float distAboveGround = shadowPosition.y - shadowY;
                 if (distAboveGround > 0 && distAboveGround < 50.0f) {
                     float shadowAlpha = std::max(0.05f, 0.4f - distAboveGround * 0.008f);
-                    r.drawBox({{rp.x - shadowSize, shadowY + 0.1f, rp.z - shadowSize},
-                               {rp.x + shadowSize, shadowY + 0.1f, rp.z + shadowSize}},
+                    r.drawBox({{shadowPosition.x - shadowSize, shadowY + 0.1f, shadowPosition.z - shadowSize},
+                               {shadowPosition.x + shadowSize, shadowY + 0.1f, shadowPosition.z + shadowSize}},
                               {0, 0, 0, shadowAlpha});
                 }
             }
@@ -3788,13 +3827,14 @@ void Game::render(float dt) {
             // Highlight ring for control object (recording player)
             if (idx == controlGhostIndex) {
                 float pulse = sinf(demoTime * 4.0f) * 0.3f + 0.7f;
-                float ringY = rp.y - 0.5f;
+                Point3F ringPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
+                float ringY = ringPosition.y - 0.5f;
                 float ringR = 1.2f + pulse * 0.3f;
                 int segments = 20;
                 std::vector<Point3F> ring;
                 for (int i = 0; i <= segments; i++) {
                     float a = (float)i / (float)segments * 6.28318f;
-                    ring.push_back({rp.x + cosf(a) * ringR, ringY, rp.z + sinf(a) * ringR});
+                    ring.push_back({ringPosition.x + cosf(a) * ringR, ringY, ringPosition.z + sinf(a) * ringR});
                 }
                 r.drawLineStrip(ring, {0.3f, 1.0f, 0.5f, 0.7f + pulse * 0.3f});
             }
@@ -3817,7 +3857,8 @@ void Game::render(float dt) {
                 else if (g->className.find("Shock") != std::string::npos)
                     trailCol = {0.8f, 0.2f, 1.0f, 1.0f}; // purple
                 auto& trail = demoTrails[idx];
-                trail.push_back({rp.x, rp.y, rp.z, 1.0f, trailCol});
+                Point3F trailPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
+                trail.push_back({trailPosition.x, trailPosition.y, trailPosition.z, 1.0f, trailCol});
                 if (trail.size() > 30) trail.erase(trail.begin());
             }
         }
@@ -3867,7 +3908,8 @@ void Game::render(float dt) {
                     if (!g) continue;
                     if (g->position.x == 0 && g->position.y == 0 && g->position.z == 0) continue;
                     if (!isRenderableGhostClass(g->className)) continue;
-                    Point3F above = {g->renderPos.x, g->renderPos.y + 2.5f, g->renderPos.z};
+                    Point3F above = Math::torquePointToYUp({g->renderPos.x, g->renderPos.y, g->renderPos.z});
+                    above.y += 2.5f;
                     Point3F screen = worldToScreen(above, r.viewMatrix(), r.projectionMatrix(), screenW, screenH);
                     if (screen.x < 0 || screen.x > screenW || screen.y < 0 || screen.y > screenH) continue;
                     ColorF col{1, 1, 1, 1};
@@ -3947,7 +3989,7 @@ void Game::render(float dt) {
             rp = g->renderPos;
 
             // Try to load a shape for this ghost class
-            if (!g->shape) {
+             if (!g->shape && !isEffectOnlyGhostClass(g->className)) {
                 g->shape = getOrLoadDemoShape(g->className, g->skinName, g->shapeName);
             }
 
@@ -3955,21 +3997,17 @@ void Game::render(float dt) {
                 MatrixF model;
                 if (g->hasRotation) {
                     QuatF q(g->renderRotation.x, g->renderRotation.y, g->renderRotation.z, g->renderRotation.w);
-                    model = q.toMatrix();
+                    model = Math::torqueQuaternionToYUp(q);
                 }
-                model.setTranslation({rp.x, rp.y, rp.z});
+                if (g->shape->nativeDTS) {
+                    MatrixF shapeFrame;
+                    shapeFrame.setRotationY(Math::PI);
+                    model = model * shapeFrame;
+                }
+                Point3F renderPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
+                model.setTranslation(renderPosition);
                 r.setModel(model * g->shape->upOrientation());
                 g->shape->render(0);
-            } else {
-                // Fallback box
-                float size = 0.8f;
-                Box3F box;
-                box.min = {rp.x - size, rp.y - size, rp.z - size};
-                box.max = {rp.x + size, rp.y + size, rp.z + size};
-                float rcol = 0.3f + 0.7f * ((g->classId * 37) % 255) / 255.0f;
-                float gcol = 0.3f + 0.7f * ((g->classId * 73) % 255) / 255.0f;
-                float bcol = 0.3f + 0.7f * ((g->classId * 131) % 255) / 255.0f;
-                r.drawBox(box, {rcol, gcol, bcol, 1.0f});
             }
         }
 
@@ -3985,7 +4023,8 @@ void Game::render(float dt) {
                     if (!g) continue;
                     if (g->position.x == 0 && g->position.y == 0 && g->position.z == 0) continue;
                     if (!isRenderableGhostClass(g->className)) continue;
-                    Point3F above = {g->renderPos.x, g->renderPos.y + 2.5f, g->renderPos.z};
+                    Point3F above = Math::torquePointToYUp({g->renderPos.x, g->renderPos.y, g->renderPos.z});
+                    above.y += 2.5f;
                     Point3F screen = worldToScreen(above, r.viewMatrix(), r.projectionMatrix(), screenW, screenH);
                     if (screen.x < 0 || screen.x > screenW || screen.y < 0 || screen.y > screenH) continue;
                     ColorF col{1, 1, 1, 1};
@@ -4014,8 +4053,9 @@ void Game::render(float dt) {
         r.drawLineStrip(demoPath, {0.2f, 0.8f, 0.2f, 0.6f});
     }
 
-    // GUI overlay (console, dialogs, etc.)
-    {
+    // Mapper uses the normal script bootstrap for asset/datablock definitions,
+    // but its output is a world-only inspection frame.
+    if (!mapperMode) {
         auto& eng2 = Engine::instance();
         glDisable(GL_DEPTH_TEST);
         glEnable(GL_BLEND);
@@ -4124,6 +4164,7 @@ void Game::connectToServer(const char* host, uint16_t port) {
     cfg.serverHost = host;
     cfg.serverPort = port;
     cfg.online = true;
+    nativeDatablockShapes.clear();
 
     Console::instance().printf(LogLevel::Info, "Connecting to %s:%d...", host, port);
     // Show connecting message
@@ -4131,24 +4172,17 @@ void Game::connectToServer(const char* host, uint16_t port) {
 
     auto& net = Engine::instance().network();
     activeConn = net.createConnection();
+    activeConn->setPlayerName(cfg.playerName.c_str());
     if (activeConn->connect(host, port)) {
         activeConn->setConnectCallback([this](bool success) {
             if (success) {
                 Console::instance().printf(LogLevel::Info, "Connected!");
-                // Send player name to server
-                std::string nameCmd = std::string("sv_name ") + cfg.playerName;
-                uint8_t buf[256];
-                buf[0] = T2Protocol::GDT_Command;
-                uint16_t nl = (uint16_t)nameCmd.size();
-                buf[1] = (uint8_t)(nl & 0xFF);
-                buf[2] = (uint8_t)(nl >> 8);
-                memcpy(buf + 3, nameCmd.data(), nl);
-                activeConn->sendGamePacket(buf, 3 + nl, false);
             } else {
                 Console::instance().printf(LogLevel::Info, "Connection failed");
                 liveSpectateInit = false;
                 spectateGhostIndex = -1;
                 liveGhosts.clear();
+                nativeDatablockShapes.clear();
                 setState(MenuScreen);
             }
         });
@@ -4228,8 +4262,7 @@ void Game::connectToServer(const char* host, uint16_t port) {
                         } else if (gm.type == T2Protocol::Ghost_Create) {
                             if (!liveGhosts.hasGhost((int)gm.index)) {
                                 std::string cn;
-                                if (gm.classId >= 0 && gm.classId < T2Demo::NetObjectClassCount)
-                                    cn = T2Demo::NetObjectClassNames[gm.classId];
+                                if (const char* name = V12::ghostClassName((size_t)gm.classId)) cn = name;
                                 else
                                     cn = "Class" + std::to_string(gm.classId);
                                 liveGhosts.createGhost((int)gm.index, gm.classId, cn);
@@ -4360,6 +4393,61 @@ void Game::connectToServer(const char* host, uint16_t port) {
                 }
             }
         });
+        activeConn->setCommandCallback([](const std::string& command) {
+            if (!command.empty()) Console::instance().execute(command.c_str());
+        });
+        activeConn->setStateCallback([this](const V12::ServerGameState& state) {
+            if (state.controlPresent && !state.controlDirty) {
+                serverPlayerGhostIndex = state.controlGhost;
+                serverPlayerGhostSynced = true;
+            }
+            if (state.damageFlash > 0) damageFlash = state.damageFlash;
+            if (state.whiteOut > 0) whiteOut = state.whiteOut;
+        });
+        activeConn->setDatablockCallback(
+            [this](uint16_t objectId, uint8_t, uint16_t, uint16_t,
+                   const std::string&, const V12::DecodedDataBlock& data) {
+                if (!data.shapeFile.empty())
+                    nativeDatablockShapes[objectId] = data.shapeFile;
+            });
+        activeConn->setGhostCallback([this](const V12::GhostUpdate& update,
+                                             const V12::PlayerGhostState* state) {
+            if (update.operation == V12::GhostUpdate::Operation::Delete) {
+                liveGhosts.deleteGhost((int)update.index);
+                return;
+            }
+            if (!liveGhosts.hasGhost((int)update.index)) {
+                const char* name = V12::ghostClassName(update.classId);
+                liveGhosts.createGhost((int)update.index, update.classId,
+                                       name ? name : "Player");
+            }
+            if (!state) return;
+            GhostEntry* ghost = liveGhosts.getMutableGhost((int)update.index);
+            if (!ghost) return;
+            ghost->position = {state->position.x, state->position.y, state->position.z};
+            ghost->rotation = {state->rotation.x, state->rotation.y,
+                               state->rotation.z, state->rotationW};
+            ghost->hasRotation = state->hasRotation;
+            ghost->health = state->health;
+            ghost->energy = state->energy;
+             ghost->headPitch = state->headPitch;
+             ghost->headYaw = state->headYaw;
+             ghost->isMoving = state->moving;
+             for (int i = 0; i < 4; ++i) {
+                 ghost->threads[i].sequence = state->threads[i].sequence;
+                 ghost->threads[i].state = state->threads[i].state;
+                 ghost->threads[i].timescale = state->threads[i].timescale;
+                 ghost->threads[i].position = state->threads[i].position;
+                 ghost->threads[i].forward = state->threads[i].timescale >= 0.0f;
+                 ghost->threads[i].atEnd = state->threads[i].atEnd;
+                 ghost->threads[i].valid = state->threads[i].valid;
+             }
+             if (state->hasDatablock) {
+                 auto shapeIt = nativeDatablockShapes.find(state->datablockId);
+                 if (shapeIt != nativeDatablockShapes.end())
+                     ghost->shapeName = shapeIt->second;
+             }
+        });
     }
 }
 
@@ -4395,82 +4483,6 @@ static std::string extractMapName(const std::string& missionPath) {
     return name;
 }
 
-// ─── Demo ghost shape mapping ─────────────────────────────────
-// Maps T2 ghost class names to DTS/GLB shape file paths
-static const char* shapePathForClass(const std::string& className, const std::string& skinName) {
-    if (className == "Player" || className == "MPB") {
-        if (skinName.find("medium") != std::string::npos ||
-            skinName.find("Medium") != std::string::npos)
-            return "shapes/bioderm_medium.dts";
-        if (skinName.find("heavy") != std::string::npos ||
-            skinName.find("Heavy") != std::string::npos)
-            return "shapes/bioderm_heavy.dts";
-        return "shapes/bioderm_light.dts";
-    }
-    if (className == "FlyingVehicle" || className == "Shrike")
-        return "shapes/vehicle_air_scout.dts";
-    if (className == "HoverVehicle" || className == "Turbograv" || className == "Wildcat")
-        return "shapes/vehicle_grav_scout.dts";
-    if (className == "WheeledVehicle" || className == "Shield" || className == "Vehicle")
-        return "shapes/vehicle_land_mpbase.dts";
-    if (className == "Item" || className == "Mine")
-        return "shapes/deploy_inventory.dts";
-    if (className == "Turret" || className == "Sentry")
-        return "shapes/turret_sentry.dts";
-    if (className == "Sensor")
-        return "shapes/deploy_sensor_pulse.dts";
-    if (className == "Camera")
-        return "shapes/camera.dts";
-    if (className == "BeaconObject")
-        return "shapes/beacon.dts";
-    if (className == "Debris")
-        return "shapes/debris_generic.dts";
-    if (className == "Generator")
-        return "shapes/station_generator_large.dts";
-    if (className == "ForceFieldBare")
-        return "shapes/station_inv_human.dts";
-    if (className == "Marker" || className == "WayPoint" || className == "SpawnSphere")
-        return "shapes/gravemarker_1.dts";
-    if (className == "WaterBlock" || className == "MissionArea")
-        return nullptr;
-    if (className == "Projectile" || className == "EnergyProjectile")
-        return "shapes/energy_bolt.dts";
-    if (className == "GrenadeProjectile" || className == "FlareProjectile")
-        return "shapes/grenade.dts";
-    if (className == "BombProjectile")
-        return "shapes/bomb.dts";
-    if (className == "Flag")
-        return "shapes/flag.dts";
-    if (className == "LinearProjectile" || className == "TracerProjectile" ||
-        className == "LinearFlareProjectile" || className == "SeekerProjectile" ||
-        className == "SniperProjectile" || className == "ShockLanceProjectile")
-        return "shapes/energy_bolt.dts";
-    if (className == "RepairProjectile" || className == "ELFProjectile")
-        return "shapes/energy_bolt.dts";
-    if (className == "Splash")
-        return "shapes/effect_plasma_explosion.dts";
-    // For unknown classes, try a path based on the class name
-    return nullptr;
-}
-
-// Maps T2 weapon datablock indices to shape file paths
-// These are approximate — actual indices depend on the game's datablock setup
-static const char* weaponShapeForDataBlock(int dbIndex) {
-    switch (dbIndex) {
-        case 0: return "shapes/weapons/blaster.dts";
-        case 1: return "shapes/weapons/chaingun.dts";
-        case 2: return "shapes/weapons/disc.dts";
-        case 3: return "shapes/weapons/grenade_launcher.dts";
-        case 4: return "shapes/weapons/laser_rifle.dts";
-        case 5: return "shapes/weapons/mortar.dts";
-        case 6: return "shapes/weapons/shocklance.dts";
-        case 7: return "shapes/weapons/sniper_rifle.dts";
-        case 8: return "shapes/weapons/targeting_laser.dts";
-        case 9: return "shapes/weapons/repair_pack.dts";
-        default: return nullptr;
-    }
-}
-
 // Returns true if a ghost with this class name should be rendered as a 3D model
 // (as opposed to being a world-level object already rendered by World::render)
 static bool isRenderableGhostClass(const std::string& className) {
@@ -4478,26 +4490,23 @@ static bool isRenderableGhostClass(const std::string& className) {
         className == "ScopeAlwaysShape" || className == "TSStatic" ||
         className == "TerrainBlock" || className == "Sky" || className == "Sun" ||
         className == "Lightning" || className == "WaterBlock" ||
-        className == "MissionArea")
+        className == "MissionArea" || className == "ForceFieldBare")
         return false;
     return true;
 }
 
+static bool isEffectOnlyGhostClass(const std::string& className) {
+    return className.find("Projectile") != std::string::npos ||
+           className == "EnergyBolt" || className == "LinearFlare" ||
+           className == "Splash";
+}
+
 DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::string& skinName,
                                    const std::string& datablockInstance) {
-    // Build a cache key that differentiates armor variants for the same class
-    std::string cacheKey = className;
-    if ((className == "Player" || className == "MPB") && !skinName.empty()) {
-        // Include armor type in cache key to avoid mixing light/medium/heavy for same class
-        if (skinName.find("medium") != std::string::npos ||
-            skinName.find("Medium") != std::string::npos)
-            cacheKey = "Player_medium";
-        else if (skinName.find("heavy") != std::string::npos ||
-                 skinName.find("Heavy") != std::string::npos)
-            cacheKey = "Player_heavy";
-        else
-            cacheKey = "Player_light";
-    }
+    // Datablock and skin references determine identity. Do not infer an asset
+    // variant from a name fragment; scripts and streamed datablocks own that
+    // relationship.
+    std::string cacheKey = className + "\n" + datablockInstance + "\n" + skinName;
 
     // Use cached shape if available
     auto it = demoShapeCache.find(cacheKey);
@@ -4511,163 +4520,34 @@ DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::stri
     if (!datablockInstance.empty()) {
         auto dbIt = w->datablockShapes.find(datablockInstance);
         if (dbIt != w->datablockShapes.end()) dbShapePath = dbIt->second;
+        else dbShapePath = datablockInstance;
     }
-    const char* path = !dbShapePath.empty() ? dbShapePath.c_str() : shapePathForClass(className, skinName);
+    const char* path = dbShapePath.empty() ? nullptr : dbShapePath.c_str();
     if (!path) {
-        // Try class-name-based paths for unknown classes
-        std::string lower = className;
-        for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
-        std::vector<std::string> candidates = {
-            "shapes/" + lower + ".dts",
-            "shapes/" + lower + ".glb",
-            "shapes/" + lower,
-            "shapes/" + className + ".dts",
-            "shapes/" + className + ".glb",
-        };
-        for (auto& c : candidates) {
-            auto d = fs.read(c.c_str());
-            if (!d.empty()) {
-                DTSShape s;
-                s.name = className;
-                if (s.load(d.data(), d.size())) {
-                    auto ins = demoShapeCache.emplace(cacheKey, std::move(s));
-                    return ins.first->second.loaded ? &ins.first->second : nullptr;
-                }
-            }
-        }
-        // Try generic fallback shapes
-        for (auto& f : {"shapes/bioderm_light.glb", "shapes/bomb.dts"}) {
-            auto d = fs.read(f);
-            if (!d.empty()) {
-                DTSShape s;
-                s.name = className;
-                if (s.load(d.data(), d.size())) {
-                    auto ins = demoShapeCache.emplace(cacheKey, std::move(s));
-                    return ins.first->second.loaded ? &ins.first->second : nullptr;
-                }
-            }
-        }
         demoShapeCache[cacheKey] = DTSShape{};
-        Console::instance().printf(LogLevel::Debug, "Demo: no shape for class '%s'", className.c_str());
+        Console::instance().printf(LogLevel::Error,
+            "Demo: no native shapeFile datablock for class '%s'", className.c_str());
         return nullptr;
     }
 
-    // Try loading with auto-detection (DTS or GLB)
+    // Load only the native asset named by the mission/datablock.
     std::vector<uint8_t> data = fs.read(path);
     if (data.empty()) {
-        // Try common variations
-        std::string base = path;
-        auto dot = base.rfind('.');
-        if (dot != std::string::npos) base = base.substr(0, dot);
-        std::vector<std::string> variants = {
-            base,                    // auto-detect
-            base + ".dts",
-            base + ".glb",
-            std::string("shapes/") + className + "/" + className + ".dts",
-            std::string("shapes/") + className + "/" + className + ".glb",
-        };
-        for (auto& v : variants) {
-            data = fs.read(v.c_str());
-            if (!data.empty()) break;
-        }
-    }
-
-    if (data.empty()) {
         demoShapeCache[cacheKey] = DTSShape{};
-        Console::instance().printf(LogLevel::Debug, "Demo: no shape found for class '%s' (key=%s)", className.c_str(), cacheKey.c_str());
+        Console::instance().printf(LogLevel::Error,
+            "Demo: native shapeFile '%s' could not be loaded for class '%s'",
+            path, className.c_str());
         return nullptr;
     }
 
     DTSShape shape;
     shape.name = className;
     if (!shape.load(data.data(), data.size())) {
-        bool glbLoaded = false;
-        // Extract base shape name from the DTS path
-        std::string shapeName = path;
-        {
-            auto dot = shapeName.rfind('.');
-            if (dot != std::string::npos) shapeName = shapeName.substr(0, dot);
-            auto slash = shapeName.rfind('/');
-            if (slash != std::string::npos) shapeName = shapeName.substr(slash + 1);
-        }
-        // Try several GLB paths
-        std::vector<std::string> glbPaths = {
-            std::string("@vl2/TR2final105-client.vl2/shapes/TR2") + shapeName + ".glb",
-            std::string("@vl2/TR2final105-client.vl2/shapes/") + shapeName + ".glb",
-            std::string("shapes/") + shapeName + ".glb",
-        };
-        for (auto& gp : glbPaths) {
-            auto glbData = fs.read(gp.c_str());
-            if (!glbData.empty() && shape.load(glbData.data(), glbData.size())) {
-                glbLoaded = true;
-                break;
-            }
-        }
-        if (!glbLoaded) {
-            // On-demand DTS→GLB conversion via Blender (like .cs→.dso compilation)
-            std::string tmpDir = torchTempDir();
-            std::string glbCachePath = tmpDir + "/torch_glb_" + shapeName + ".glb";
-            // Check if already cached from a previous conversion
-            auto cachedGlb = fs.read(glbCachePath.c_str());
-            if (!cachedGlb.empty()) {
-                if (shape.load(cachedGlb.data(), cachedGlb.size())) glbLoaded = true;
-            }
-            if (!glbLoaded) {
-                // Try running Blender to convert the DTS file
-                std::string dtsPath = std::string("shapes/") + shapeName + ".dts";
-                auto dtsData = fs.read(dtsPath.c_str());
-                if (!dtsData.empty()) {
-                    // Write DTS to temp file for Blender
-                    std::string tmpDts = tmpDir + "/torch_convert_" + shapeName + ".dts";
-                    FILE* tf = fopen(tmpDts.c_str(), "wb");
-                    if (tf) {
-                        fwrite(dtsData.data(), 1, dtsData.size(), tf);
-                        fclose(tf);
-                        // Check if Blender is available
-                        int blenderAvail = system("which blender >/dev/null 2>&1");
-                        if (blenderAvail == 0) {
-                            const char* mapperDir = getenv("TORCH_MAPPER_DIR");
-                            std::string blenderScript;
-                            if (mapperDir) {
-                                blenderScript = std::string(mapperDir) + "/scripts/blender/dts2gltf.py";
-                            } else {
-                                const char* home = getenv("HOME");
-                                std::string homeDir = home ? home : tmpDir;
-                                blenderScript = homeDir + "/t2-mapper/scripts/blender/dts2gltf.py";
-                            }
-                            std::string cmd = "blender --background --python \"" + blenderScript + "\" -- \"" + tmpDts + "\" 2>/dev/null";
-                            int ret = system(cmd.c_str());
-                            if (ret == 0) {
-                                // Read the generated GLB (Blender outputs beside the DTS)
-                                std::string genGlb = tmpDir + "/torch_convert_" + shapeName + ".glb";
-                                FILE* gf = fopen(genGlb.c_str(), "rb");
-                                if (gf) {
-                                    fseek(gf, 0, SEEK_END);
-                                    size_t gs = ftell(gf);
-                                    fseek(gf, 0, SEEK_SET);
-                                    std::vector<uint8_t> glbData(gs);
-                                    fread(glbData.data(), 1, gs, gf);
-                                    fclose(gf);
-                                    if (shape.load(glbData.data(), glbData.size())) {
-                                        glbLoaded = true;
-                                        // Cache for next time
-                                        FILE* cf = fopen(glbCachePath.c_str(), "wb");
-                                        if (cf) { fwrite(glbData.data(), 1, glbData.size(), cf); fclose(cf); }
-                                    }
-                                    unlink(genGlb.c_str());
-                                }
-                            }
-                        } else {
-                            Console::instance().printf(LogLevel::Debug, "  Blender not found - install Blender + io_scene_dtst3d for auto DTS→GLB conversion");
-                        }
-                        unlink(tmpDts.c_str());
-                    }
-                }
-            }
-            demoShapeCache[cacheKey] = DTSShape{};
-            Console::instance().printf(LogLevel::Debug, "Demo: failed to load shape for class '%s'", className.c_str());
-            return nullptr;
-        }
+        demoShapeCache[cacheKey] = DTSShape{};
+        Console::instance().printf(LogLevel::Error,
+            "Demo: native DTS failed to load for class '%s' (%s)",
+            className.c_str(), path);
+        return nullptr;
     }
 
     Console::instance().printf(LogLevel::Debug, "Demo: loaded shape for '%s' (%zu meshes)",
@@ -4698,99 +4578,61 @@ void Game::playDemo(const char* path) {
     Console::instance().printf(LogLevel::Info, "  InitBlock: %u bytes", (unsigned)hdr.initialBlockSize);
     Console::instance().printf(LogLevel::Info, "  Mission: %s", ib.missionName.empty() ? "(unknown)" : ib.missionName.c_str());
 
-    // Try to load the mission terrain for visual playback
-    // Fall back to Training1 if mission name is unknown or unavailable
-    std::string loadMap;
-    if (!ib.missionName.empty()) {
-        loadMap = extractMapName(ib.missionName);
-        // Verify the mission file actually exists
-        if (!loadMap.empty()) {
-            auto& fs = Engine::instance().fs();
-            std::string testPath = std::string("missions/") + loadMap + ".mis";
-            if (!fs.fileExists(testPath.c_str())) {
-                loadMap.clear();
-            }
-        }
-    }
-    // Try to guess mission from demo filename
+    std::string loadMap = extractMapName(ib.missionName);
     if (loadMap.empty()) {
-        std::string fname = path;
-        auto slash = fname.rfind('/');
-        if (slash != std::string::npos) fname = fname.substr(slash + 1);
-        auto dot = fname.rfind('.');
-        if (dot != std::string::npos) fname = fname.substr(0, dot);
+        Console::instance().printf(LogLevel::Error,
+            "Demo: initial block did not provide a mission name");
+        delete demoParser;
+        demoParser = nullptr;
+        return;
+    }
+    auto& demoFs = Engine::instance().fs();
+    std::string missionPath = "missions/" + loadMap + ".mis";
+    if (!demoFs.fileExists(missionPath.c_str())) {
+        std::string suffix = loadMap;
+        const auto separator = suffix.rfind('_');
+        if (separator != std::string::npos && separator + 1 < suffix.size())
+            suffix = suffix.substr(separator + 1);
 
-        // Try: text before first underscore (common: Map_Player_vs_Player.rec)
-        std::string candidate;
-        auto us = fname.find('_');
-        if (us != std::string::npos) candidate = fname.substr(0, us);
-        // Try: text after last underscore (common: Player_vs_Player_Map.rec)
-        auto lus = fname.rfind('_');
-        if (lus != std::string::npos && lus != us) {
-            std::string c2 = fname.substr(lus + 1);
-            // Prefer shorter (map names are usually shorter than player names)
-            if (candidate.empty() || c2.size() < candidate.size()) candidate = c2;
-        }
-        // Try: last space-separated word
-        auto sp = fname.rfind(' ');
-        if (sp != std::string::npos) {
-            std::string c3 = fname.substr(sp + 1);
-            if (candidate.empty() || c3.size() < candidate.size()) candidate = c3;
-        }
-        if (!candidate.empty()) {
-            candidate[0] = (char)toupper((unsigned char)candidate[0]);
-            // Match known abbreviations to full mission names
-            static const char* abbrevMatch[][2] = {
-                {"Kata", "Katabatic"}, {"Mino", "Minotaur"}, {"Pande", "Pandemonium"},
-                {"Dessi", "Desiccator"}, {"Boss", "Boss"}, {"BB", "BeachBlitz"},
-                {"DX", "DeathBirdsFly"}, {"Drifts", "Drifts"}, {"RC", "Rollercoaster"},
-                {"SH", "Stonehenge"}, {"HO", "Haven"}, {"LD", "LastDance"},
-                {"DOTA", "DeathOfTheAges"}, {"DBS", "DeathBirdsFly"},
-                {"TWL", "TWL"}, {"WO", "Whiteout"}, {"DBF", "DeathBirdsFly"},
-                {"Mag", "Magmatic"}, {"Kata", "Katabatic"}, {"Beggars", "BeggarsRun"},
-                {"Stone", "Stonehenge"}, {"Slap", "Slapdash"},
-                {"Tomb", "Tombstone"}, {"Quag", "Quagmire"},
-                {"River", "RiverDance"}, {"Wild", "Wilderzone"},
-                {"Sanc", "Sanctuary"}, {"Cine", "Cinerous"},
-                {"Feign", "Feign"}, {"Drorck", "Drorck"},
-                {"Harp", "Harvester"}, {"Ramp", "Ramparts"},
-                {"Dam", "Damnation"}, {"Soul", "SoulFire"},
-                {nullptr, nullptr}
-            };
-            for (int i = 0; abbrevMatch[i][0]; i++) {
-                bool match = true;
-                for (size_t ci = 0; abbrevMatch[i][0][ci]; ci++) {
-                    if (ci >= candidate.size() || tolower((unsigned char)candidate[ci]) != tolower((unsigned char)abbrevMatch[i][0][ci])) { match = false; break; }
-                }
-                if (match && candidate.size() == strlen(abbrevMatch[i][0])) {
-                    candidate = abbrevMatch[i][1];
+        std::vector<std::string> missionFiles;
+        demoFs.listFiles("missions/*.mis", missionFiles);
+        std::string matchedMission;
+        for (const auto& candidate : missionFiles) {
+            const auto slash = candidate.rfind('/');
+            const auto dot = candidate.rfind('.');
+            const std::string base = candidate.substr(
+                slash == std::string::npos ? 0 : slash + 1,
+                dot == std::string::npos ? std::string::npos : dot - slash - 1);
+            if (strcasecmp(base.c_str(), suffix.c_str()) == 0) {
+                if (!matchedMission.empty()) {
+                    matchedMission.clear();
                     break;
                 }
+                matchedMission = base;
             }
-            loadMap = candidate;
+        }
+        if (!matchedMission.empty()) {
+            loadMap = matchedMission;
+            missionPath = "missions/" + loadMap + ".mis";
         }
     }
-    // If extraction gave garbage, try the demo filename
-    if (loadMap.empty() || loadMap.find_first_of("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") == std::string::npos) {
-        std::string fname = path;
-        auto slash = fname.rfind('/');
-        if (slash != std::string::npos) fname = fname.substr(slash + 1);
-        auto dot = fname.rfind('.');
-        if (dot != std::string::npos) fname = fname.substr(0, dot);
-        // Check if filename looks like a mission name (starts with uppercase letter)
-        if (!fname.empty() && isalpha((unsigned char)fname[0])) {
-            fname[0] = (char)toupper((unsigned char)fname[0]);
-            loadMap = fname;
-        }
+    if (!demoFs.fileExists(missionPath.c_str())) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: native mission '%s' is not mounted", missionPath.c_str());
+        delete demoParser;
+        demoParser = nullptr;
+        return;
     }
-    // Note: no fallback to other missions - wrong .ter geometry would be worse than no terrain
-
     Console::instance().printf(LogLevel::Info, "Loading mission map: %s", loadMap.c_str());
     State prevState = gameState;
     startLocalGame(loadMap.c_str());
     if (gameState != Playing) {
         gameState = prevState;
-        Console::instance().printf(LogLevel::Warn, "Mission load failed, playing without terrain");
+        Console::instance().printf(LogLevel::Error,
+            "Demo: native mission '%s' failed to load", missionPath.c_str());
+        delete demoParser;
+        demoParser = nullptr;
+        return;
     }
 
     // Reset demo path history
@@ -4803,12 +4645,15 @@ void Game::playDemo(const char* path) {
     demoTime = 0;
     demoEventLog.clear();
     int totalBlocks = demoParser->getBlockCount();
-    demoTotalTime = totalBlocks > 0 ? totalBlocks / 250.0f : 1.0f;
+    const int moveBlocks = demoParser->getMoveBlockCount();
+    demoTotalTime = moveBlocks > 0 ? moveBlocks * 0.032f : 1.0f;
     demoBlocksTotal = totalBlocks;
     demoBlocksDone = 0;
     demoFastForward = false; // real-time when invoked from console
 
-    Console::instance().printf(LogLevel::Info, "  Total blocks: %d (est. %.1f seconds)", totalBlocks, demoTotalTime);
+    Console::instance().printf(LogLevel::Info,
+        "  Total blocks: %d, move ticks: %d (%.1f seconds)",
+        totalBlocks, moveBlocks, demoTotalTime);
     Console::instance().printf(LogLevel::Info, "Demo loaded, starting playback...");
     demoPlaying = true;
     setState(Playing);
@@ -4924,13 +4769,10 @@ void Game::enterShapeViewer() {
 
     Console::instance().printf(LogLevel::Info, "Shape Viewer: found %zu .dts files", shapeViewerFiles.size());
 
-    // Start on SV_START if specified, otherwise bioderm
+    // An optional viewer selection may identify any native DTS asset.
     if (const char* svStart = getenv("SV_START")) {
         for (int i = 0; i < (int)shapeViewerFiles.size(); i++)
             if (shapeViewerFiles[i].find(svStart) != std::string::npos) { shapeViewerIndex = i; break; }
-    } else {
-        for (int i = 0; i < (int)shapeViewerFiles.size(); i++)
-            if (shapeViewerFiles[i].find("bioderm") != std::string::npos) { shapeViewerIndex = i; break; }
     }
 
     shapeViewerLoadCurrent();

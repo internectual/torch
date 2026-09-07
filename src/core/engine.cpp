@@ -144,10 +144,11 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  -data <dir>        Tribes 2 data directory\n");
             fprintf(stdout, "  -demo <file.rec>   Play a demo recording\n");
             fprintf(stdout, "  -preview <map>     Load a map and take a screenshot\n");
-            fprintf(stdout, "  -mapper <map>      Load a map for inspection (t2mapper-style)\n");
+             fprintf(stdout, "  -mapper <map>      Load a map for inspection (t2mapper-style)\n");
+             fprintf(stdout, "  -mapper-camera <n> Use authored Observer camera n\n");
             fprintf(stdout, "  -campos x y z      Preview camera position\n");
             fprintf(stdout, "  -camtarget x y z   Preview camera target\n");
-            fprintf(stdout, "  -testshape <path>  Load and display a GLB shape\n");
+            fprintf(stdout, "  -testshape <path>  Load and display a native DTS shape\n");
             fprintf(stdout, "  -testdif <path>    Load and dump DIF interior stats\n");
             fprintf(stdout, "  -preload,-p <files> Comma-separated scripts/guis to preload\n");
             fprintf(stdout, "  -version,-v         Show version\n");
@@ -165,8 +166,9 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  Right Click        Alt fire\n");
             fprintf(stdout, "  Space              Jump / Jet\n");
             fprintf(stdout, "  F1                 Free camera toggle\n");
-            fprintf(stdout, "  F2                 Orbit camera (demo)\n");
-            fprintf(stdout, "  R                  Cycle spectate target (demo)\n");
+             fprintf(stdout, "  F2                 Orbit camera (demo)\n");
+             fprintf(stdout, "  1-3                Select authored camera (mapper)\n");
+             fprintf(stdout, "  R                  Cycle spectate target (demo)\n");
             fprintf(stdout, "  P                  Pause demo\n");
             fprintf(stdout, "  .                  Step demo frame\n");
             fprintf(stdout, "  Tab                Scoreboard\n");
@@ -315,6 +317,8 @@ bool Engine::init(int argc, char* argv[]) {
 
     // Parse args
     bool noLogin = false;
+    bool explicitPreviewCamera = false;
+    int mapperCamera = 0;
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-data") == 0) && i + 1 < argc) dataDir = argv[i + 1];
         if ((strcmp(argv[i], "-width") == 0) && i + 1 < argc)
@@ -328,17 +332,21 @@ bool Engine::init(int argc, char* argv[]) {
         if (strcmp(argv[i], "-debug") == 0) Console::instance().setLogLevel(LogLevel::Debug);
         if (strcmp(argv[i], "-preview") == 0 && i + 1 < argc) previewMap = argv[i + 1];
         if (strcmp(argv[i], "-mapper") == 0 && i + 1 < argc) { mapperMap = argv[i + 1]; mapperMode = true; noLogin = true; }
+        if (strcmp(argv[i], "-mapper-camera") == 0 && i + 1 < argc)
+            mapperCamera = atoi(argv[i + 1]);
         if (strcmp(argv[i], "-campos") == 0 && i + 3 < argc) {
             previewCamPos.x = (float)atof(argv[i + 1]);
             previewCamPos.y = (float)atof(argv[i + 2]);
             previewCamPos.z = (float)atof(argv[i + 3]);
             usePreviewCam = true;
+            explicitPreviewCamera = true;
         }
         if (strcmp(argv[i], "-camtarget") == 0 && i + 3 < argc) {
             previewCamTarget.x = (float)atof(argv[i + 1]);
             previewCamTarget.y = (float)atof(argv[i + 2]);
             previewCamTarget.z = (float)atof(argv[i + 3]);
             usePreviewCam = true;
+            explicitPreviewCamera = true;
         }
         if ((strcmp(argv[i], "-demo") == 0 || strcmp(argv[i], "--demo") == 0) && i + 1 < argc)
             demoPath = argv[i + 1];
@@ -448,16 +456,14 @@ bool Engine::init(int argc, char* argv[]) {
     pconfig.height = Console::instance().getIntVariable("videoHeight", 1080);
     if (!plat->init(pconfig)) { releaseLock(); return false; }
 
-    // File System - add data paths relative to executable
+    // File System - only the configured stock Tribes 2 installation is a
+    // production resource source. Project-local assets and generated output
+    // must not silently alter startup or map rendering.
     std::vector<std::string> paths = {
-        dataDir, dataDir + "/base", exeDir + "/base", exeDir + "/data"
+        dataDir, dataDir + "/base"
     };
-    // Add outputDir paths for DSO loading
-    if (!outputDir.empty()) {
-        paths.push_back(outputDir);
-        paths.push_back(outputDir + "/base");
-    }
     filesys->init(paths);
+    filesys->setOriginalOnly(true);
 
     // Mount all game archives
     auto& fs = *filesys;
@@ -544,20 +550,6 @@ bool Engine::init(int argc, char* argv[]) {
     ren->config().height = plat->height();
     plat->setResizeCallback([this](int w, int h) { ren->onResize(w, h); });
 
-    // Overlay font — generated at 16px for readability
-    overlayFont = new Font;
-    if (overlayFont->loadDefault(16)) {
-        overlayFontOwned = true;
-        ren->defaultFont = overlayFont;
-    } else if (overlayFont->loadDefault(8)) {
-        overlayFontOwned = true;
-        ren->defaultFont = overlayFont;
-    } else {
-        delete overlayFont;
-        overlayFont = nullptr;
-        Console::instance().printf(LogLevel::Warn, "Failed to load overlay font");
-    }
-
     // Load GFT fonts from data directory
     Font* lucidaFont = nullptr;
     {
@@ -611,15 +603,15 @@ bool Engine::init(int argc, char* argv[]) {
         }
         // Scale the dev panel overlay font for modern displays; leave game canvas fonts at 1.0
         float fontScale = 1.0f; (void)fontScale;
-        // Use Lucida Console 12 — the only available monospace GFT
+        // Use an original GFT only. Never synthesize a font when stock
+        // resources are unavailable.
         if (panelHeaderFont && !panelHeaderFont->loaded) panelHeaderFont = nullptr;
         if (lucidaFont && lucidaFont->loaded) {
-            if (overlayFont && overlayFontOwned) { delete overlayFont; overlayFontOwned = false; }
             overlayFont = lucidaFont;
             overlayFont->defaultScale = 1.0f;
             overlayFontOwned = false;
             ren->defaultFont = overlayFont;
-            Console::instance().printf(LogLevel::Info, "Dev panel font: Lucida Console 12");
+            Console::instance().printf(LogLevel::Info, "Overlay font: Lucida Console 12.gft");
         }
     }
 
@@ -869,7 +861,7 @@ bool Engine::init(int argc, char* argv[]) {
     }, "dumpstack - print dialog stack");
 
     // Login flow commands
-    con->addCommand("LoginDone", [this, noLogin](int32_t, const char* const*) {
+    con->addCommand("TorchLoginDone", [this, noLogin](int32_t, const char* const*) {
         // Boot scripts schedule LoginDone after their (stubbed) login flow.
         // In -nologin there is no game to join — starting one from a stale
         // login callback yanked the shell into an empty mission (black).
@@ -880,11 +872,13 @@ bool Engine::init(int argc, char* argv[]) {
         gui->popDialog("LoginDlg");
         Console::instance().printf(LogLevel::Info, "Login complete, starting game");
         g->startLocalGame();
-    }, "LoginDone() - transition from login to game");
+    }, "TorchLoginDone() - diagnostic transition helper");
 
     con->addCommand("LoginProcess", [](int32_t, const char* const*) {
-        Console::instance().printf(LogLevel::Info, "LoginProcess called (stub)");
-        Console::instance().execute("LoginDone()");
+        // Do not auto-complete login. The stock script must retain control of
+        // this transition until the native account/offline flow is complete.
+        Console::instance().printf(LogLevel::Warn,
+            "LoginProcess is not implemented; login remains open");
     }, "LoginProcess - attempt login");
 
     con->addCommand("CreateAccount", [](int32_t, const char* const*) {
@@ -1157,19 +1151,41 @@ bool Engine::init(int argc, char* argv[]) {
             Console::instance().setVariable("$pref::AcceptedEULA", "1");
             Console::instance().setVariable("$LaunchMode", "Offline");
         }
-        // -mapper: skip the init script entirely — no shell/GUI, just raw mission data
         if (mapperMode) {
-            Console::instance().printf(LogLevel::Info, "Mapper mode: skipping init script (no shell/GUI)");
+            // Mapper still needs the normal script bootstrap: datablocks and
+            // their asset references are created by TorqueScript. The mapper
+            // renderer can remain headless with respect to interaction while
+            // using the same script-owned data as the game.
+            Console::instance().setVariable("$SkipLogin", "true");
+            Console::instance().setVariable("$LaunchMode", "Offline");
+        }
+        std::string initPath = Console::instance().getStringVariable("initScript", "");
+        auto initData = fs.read(initPath.c_str());
+        if (!initData.empty()) {
+            std::string src((const char*)initData.data(), initData.size());
+            scr->ts()->executeNested(src, initPath);
+            Console::instance().printf(LogLevel::Info, "Init script: %s (%zu bytes)", initPath.c_str(), initData.size());
         } else {
-            std::string initPath = Console::instance().getStringVariable("initScript", "");
-            auto initData = fs.read(initPath.c_str());
-            if (!initData.empty()) {
-                std::string src((const char*)initData.data(), initData.size());
-                scr->ts()->executeNested(src, initPath);
-                Console::instance().printf(LogLevel::Info, "Init script: %s (%zu bytes)", initPath.c_str(), initData.size());
-            } else {
-                Console::instance().printf(LogLevel::Warn, "Init script not found: %s", initPath.c_str());
+            Console::instance().printf(LogLevel::Warn, "Init script not found: %s", initPath.c_str());
+        }
+        if (mapperMode) {
+            std::vector<std::string> scriptFiles;
+            fs.listFiles(nullptr, scriptFiles);
+            std::sort(scriptFiles.begin(), scriptFiles.end());
+            int executed = 0;
+            for (const auto& path : scriptFiles) {
+                if (!path.starts_with("scripts/") || path.size() < 3 ||
+                    path.compare(path.size() - 3, 3, ".cs") != 0)
+                    continue;
+                auto scriptData = fs.read(path.c_str());
+                if (scriptData.empty()) continue;
+                const std::string source((const char*)scriptData.data(), scriptData.size());
+                if (source.find("datablock") == std::string::npos) continue;
+                scr->ts()->executeNested(source, path);
+                executed++;
             }
+            Console::instance().printf(LogLevel::Info,
+                "Mapper: executed %d discovered asset scripts", executed);
         }
     }
     // Boot scripts (incl. autoexec default-seeders) may export() before real
@@ -1184,7 +1200,7 @@ bool Engine::init(int argc, char* argv[]) {
     // lands under Show: Custom Skins via the stock filter.
     if (scr->ts()) {
         scr->ts()->execute(
-            "function GMW_SkinPopup::fillList( %this, %raceGender )\n"
+            "function Torch_GMW_SkinPopup::fillList( %this, %raceGender )\n"
             "{\n"
             "   for ( %i = 0; %i < %this.size(); %i++ )\n"
             "      %this.realSkin[%i] = \"\";\n"
@@ -1341,22 +1357,8 @@ bool Engine::init(int argc, char* argv[]) {
                 }
             }
         }
-        if (auto* ts = scr->ts()) {
-            double cnt = ts->getGlobal("$pref::Player::Count").toDouble();
-            if (cnt < 1) {
-                // Seed a COMPLETE default warrior record. A bare Count=1 with
-                // an empty Player[0] made GM_WarriorPane::onActivate render an
-                // empty, unselected popup (the add-loop skips blank slots).
-                ts->setGlobal("$pref::Player[0]",
-                    VMValue(std::string("Warrior\tHuman Male\tbeagle\tMale1")));
-                ts->setGlobal("$pref::Player::Count", VMValue((double)1));
-                ts->setGlobal("$pref::Player::Current", VMValue((double)0));
-            }
-        }
-        // The legacy C++ placeholder menu polls raw keys and would steal
-        // Enter anywhere on the shell (starting a local game mid-typing).
-        g->menu().setActive(false);
-        gui->popDialog("NewWarriorDlg");
+        // Do not fabricate a warrior or dismiss stock dialogs here. The
+        // original scripts own profile creation and shell transitions.
         plat->processEvents();
         // In mapper mode, skip the dev panel render — we render the 3D world only
         if (!mapperMode) {
@@ -1365,13 +1367,9 @@ bool Engine::init(int argc, char* argv[]) {
             ren->endFrame();
             plat->swapBuffers();
         }
-    } else if (demoPath.empty() && previewMap.empty() && !shapeViewerMode) {
-        Console::instance().printf(LogLevel::Info, "Pushing login dialog");
-        gui->pushDialog("LoginDlg");
-        Console::instance().setVariable("RubyEnabled", "1");
     }
 
-    // -testshape: load a GLB shape for preview
+    // -testshape: load a native DTS shape for preview
     if (!testShapePath.empty()) {
         Console::instance().execute(("testshape(" + testShapePath + ")").c_str());
     }
@@ -1413,20 +1411,40 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().setVariable("Engine::noLogin", "1");
         Console::instance().printf(LogLevel::Info, "Mapper mode: loading '%s' for inspection", mapperMap.c_str());
         g->setMapperMode(true);
-        g->setState(Game::Loading);
+            g->setState(Game::Loading);
         if (g->world().load(mapperMap.c_str())) {
             g->setState(Game::Playing);
-            // Set up camera over terrain center (like preview mode)
-            auto& tb = *g->world().terrain();
-            float half = tb.size * tb.squareSize * 0.5f;
-            float cx = tb.worldOffset.x + half;
-            float cz = tb.worldOffset.z - half;
-            float h = g->world().getHeight(cx, cz);
-            if (h < 0) h = 0;
-            previewCamTarget = {cx, h, cz};
-            // Position camera at a reasonable height above terrain for inspection view
-            float camHeight = h + 80.0f;
-            previewCamPos = {cx, camHeight, cz - half * 0.4f};
+            if (!explicitPreviewCamera && mapperCamera > 0 &&
+                mapperCamera <= (int)g->world().observerCameras().size()) {
+                const auto& camera = g->world().observerCameras()[mapperCamera - 1];
+                previewCamPos = Math::torquePointToYUp(camera.pos);
+                MatrixF rotation = Math::torqueRotationToYUp(
+                    camera.axis, -Math::DEG2RAD(camera.angleDeg));
+                Point3F forward = rotation.transform({0, 0, -1});
+                previewCamTarget = {
+                    previewCamPos.x + forward.x * 100.0f,
+                    previewCamPos.y + forward.y * 100.0f,
+                    previewCamPos.z + forward.z * 100.0f,
+                };
+                Console::instance().printf(LogLevel::Info,
+                    "Mapper: using observer camera %d", mapperCamera);
+            } else if (!explicitPreviewCamera) {
+                if (mapperCamera > 0)
+                    Console::instance().printf(LogLevel::Warn,
+                        "Mapper: authored camera %d is unavailable; using terrain center",
+                        mapperCamera);
+                // Set up camera over terrain center (like preview mode)
+                auto& tb = *g->world().terrain();
+                float half = tb.size * tb.squareSize * 0.5f;
+                float cx = tb.worldOffset.x + half;
+                float cz = tb.worldOffset.z - half;
+                float h = g->world().getHeight(cx, cz);
+                if (h < 0) h = 0;
+                previewCamTarget = {cx, h, cz};
+                // Position camera at a reasonable height above terrain for inspection view
+                float camHeight = h + 80.0f;
+                previewCamPos = {cx, camHeight, cz - half * 0.4f};
+            }
             usePreviewCam = true;
             // Initialize free-fly camera from preview camera position
             g->setFreeCamActive(true);
@@ -1503,6 +1521,11 @@ void Engine::run() {
                 if (gui && gui->activeKeyCapture() != nullptr) {
                     // fall through to handleKeyboard capture
                 } else {
+                if (g->isShapeViewerActive()) {
+                    g->shapeViewerActive = false;
+                    g->shapeViewerShape = DTSShape{};
+                    quit();
+                } else {
                 // ESC closes open popup menus first, then closes overlay dialogs.
                 // Only pop dialogs if there are more than just content+base toolbar on
                 // the stack; otherwise the base toolbar would disappear.
@@ -1534,15 +1557,12 @@ void Engine::run() {
                         gui->popDialog(dlg->name);
                         break;
                     }
-                } else if (g->isShapeViewerActive()) {
-                    g->shapeViewerActive = false;
-                    g->shapeViewerShape = DTSShape{};
-                    Console::instance().printf(LogLevel::Info, "Shape Viewer: closed");
                 } else if (g->isMapperMode()) {
                     // In mapper mode, ESC quits (no pause menu or shell)
                     quit();
                 } else if (g->state() != Game::MenuScreen) {
                     g->togglePauseGame();
+                }
                 }
                 } // end else (capture not active)
             }
@@ -1768,7 +1788,8 @@ void Engine::run() {
             bool pressed = plat->input().mouseButtons[1] != 0;
             static bool prevPressed = false;
             if (pressed && !prevPressed) {
-                gui->handleInput(mx, my, true);
+                if (gui->handleInput(mx, my, true))
+                    plat->input().consumedMouse[1] = true;
             } else if (pressed) {
                 gui->handleDrag(mx, my);
             } else if (!pressed && prevPressed) {
@@ -1842,7 +1863,13 @@ void Engine::run() {
                 static int lastNumKey = 0;
                 for (int nk = 0; nk < 9; nk++) {
                     if (keys[30 + nk]) {
-                        if (lastNumKey != nk + 1 && !g->isMapperMode()) { g->player().selectWeapon(nk); lastNumKey = nk + 1; }
+                        if (lastNumKey != nk + 1) {
+                            if (g->isMapperMode() && nk < 3)
+                                g->selectMapperObserverCamera(nk + 1);
+                            else if (!g->isMapperMode())
+                                g->player().selectWeapon(nk);
+                            lastNumKey = nk + 1;
+                        }
                         break;
                     }
                     if (lastNumKey && !keys[29 + lastNumKey]) lastNumKey = 0;
@@ -1885,7 +1912,7 @@ void Engine::run() {
             }
         }
 
-        // Skip the 2D GUI/dev-panel pass for shape preview, shape viewer, or mapper mode
+        // Special 3D modes own the full window; the dev panel is disabled there.
         if (g->isTestShapeLoaded() || g->isShapeViewerActive() || mapperMode) {
             // Auto-screenshot on first frame in mapper mode
             static bool mapperScreenshotTaken = false;
@@ -1950,7 +1977,9 @@ void Engine::run() {
                 }
                 prevF12 = f12Down;
             }
-            plat->swapBuffers(); continue; }
+            plat->swapBuffers();
+            continue;
+        }
 
         // ─── Dev panel (always rendered) ───────────────────────────────────
         g->menu().update(dt);
@@ -2804,6 +2833,11 @@ void Engine::run() {
 
 void Engine::shutdown() {
     Console::instance().printf(LogLevel::Info, "Shutting down...");
+
+    // Window-close and SDL quit events bypass the console quit command. Save
+    // the live warrior/preferences state before the script VM is destroyed.
+    if (scr && scr->ts() && clientPrefsExportAllowed())
+        scr->ts()->execute("export(\"$pref::*\", \"prefs/ClientPrefs.cs\", false);", "shutdown-export");
 
     g->shutdown();
     net->shutdown();

@@ -1,4 +1,6 @@
 #include "game/demo.h"
+#include "net/v12_datablocks.h"
+#include "net/v12_registry.h"
 #include "core/console.h"
 #include "core/config.h"
 #include "core/timer.h"
@@ -146,40 +148,45 @@ bool BitStream::readFlag() {
 }
 
 int BitStream::readInt(int bitCount) {
-    if (bitCount <= 0) return 0;
+    if (bitCount <= 0 || bitCount > 32) { error = true; return 0; }
     if (bitNum + bitCount > maxReadBitNum) { error = true; return 0; }
     int startByte = bitNum >> 3;
     int downShift = bitNum & 7;
     bitNum += bitCount;
-    unsigned int val = 0;
+    uint64_t val = 0;
     int bytesNeeded = (bitCount + downShift + 7) >> 3;
     for (int i = 0; i < bytesNeeded && (startByte + i) < (int)dataLen; i++)
-        val |= (unsigned int)data[startByte + i] << (i * 8);
+        val |= (uint64_t)data[startByte + i] << (i * 8);
     val >>= downShift;
     if (bitCount < 32) val &= (1u << bitCount) - 1;
-    else if (bitCount == 32) val &= 0xFFFFFFFFu;
-    return (int)val;
+    return (int)(uint32_t)val;
 }
 
 int BitStream::readSignedInt(int bitCount) {
+    if (bitCount < 1 || bitCount > 32) { error = true; return 0; }
     bool neg = readFlag();
     int mag = readInt(bitCount - 1);
     return neg ? -mag : mag;
 }
 
 float BitStream::readFloat(int bitCount) {
-    return (float)readInt(bitCount) / (float)((1 << bitCount) - 1);
+    if (bitCount < 1 || bitCount > 31) { error = true; return 0.0f; }
+    return (float)readInt(bitCount) / (float)((1u << bitCount) - 1u);
 }
 
 float BitStream::readSignedFloat(int bitCount) {
-    return ((float)readInt(bitCount) * 2.0f) / (float)((1 << bitCount) - 1) - 1.0f;
+    if (bitCount < 1 || bitCount > 31) { error = true; return 0.0f; }
+    return ((float)readInt(bitCount) * 2.0f) / (float)((1u << bitCount) - 1u) - 1.0f;
 }
 
 int BitStream::readRangedU32(int rangeStart, int rangeEnd) {
+    if (rangeEnd < rangeStart) { error = true; return rangeStart; }
     int rangeSize = rangeEnd - rangeStart + 1;
     int bits = 1;
-    while ((1 << bits) < rangeSize) bits++;
-    return readInt(bits) + rangeStart;
+    while (bits < 31 && (1u << bits) < (unsigned)rangeSize) bits++;
+    int value = readInt(bits) + rangeStart;
+    if (value > rangeEnd) { error = true; return rangeEnd; }
+    return value;
 }
 
 uint8_t BitStream::readU8() { return (uint8_t)readInt(8); }
@@ -220,15 +227,15 @@ Vec3 BitStream::readNormalVector(int bitCount) {
 }
 
 Vec3 BitStream::readCompressedPoint(const Vec3& cp, float scale) {
-    (void)scale;
+    if (!std::isfinite(scale) || scale <= 0.0f) { error = true; return cp; }
     int type = readInt(2);
     if (type == 3) return readPoint3F();
     static const int bitCounts[] = {16, 18, 20};
     int bits = bitCounts[type];
     Vec3 v;
-    v.x = cp.x + (float)readSignedInt(bits) * 0.01f;
-    v.y = cp.y + (float)readSignedInt(bits) * 0.01f;
-    v.z = cp.z + (float)readSignedInt(bits) * 0.01f;
+    v.x = cp.x + (float)readSignedInt(bits) * scale;
+    v.y = cp.y + (float)readSignedInt(bits) * scale;
+    v.z = cp.z + (float)readSignedInt(bits) * scale;
     return v;
 }
 
@@ -258,12 +265,11 @@ std::string BitStream::readString() {
 std::string BitStream::readRawString() {
     // Raw string format: U8 length + raw bytes (used in v24834)
     int len = readInt(8);
-    if (len <= 0 || len > 256 || isError()) return "";
+    if (len < 0 || len > 256 || isError()) return "";
     std::string r;
     r.resize(len);
     for (int i = 0; i < len; i++)
         r[i] = (char)readU8();
-    if (!r.empty()) r.back() = '\0';
     return r;
 }
 
@@ -320,8 +326,16 @@ GhostEntry* GhostTracker::getMutableGhost(int index) {
     auto it = ghosts.find(index); return it != ghosts.end() ? &it->second : nullptr;
 }
 void GhostTracker::createGhost(int index, int classId, const std::string& cn) {
+    const char* registeredName = (index >= 0 && classId >= 0)
+        ? V12::ghostClassName((size_t)classId) : nullptr;
+    if (index >= T2Demo::MaxGhostCount || !registeredName) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: rejecting invalid ghost index/class (%d/%d)", index, classId);
+        return;
+    }
     GhostEntry e;
-    e.classId = classId; e.className = cn;
+    e.classId = classId;
+    e.className = registeredName;
     ghosts[index] = e;
 }
 void GhostTracker::deleteGhost(int index) { ghosts.erase(index); }
@@ -341,7 +355,6 @@ DemoParser::~DemoParser() {
 }
 
 bool DemoParser::loadFile(const char* path) {
-    recFilePath_ = path;
     FILE* f = fopen(path, "rb");
     if (!f) { Console::instance().printf(LogLevel::Error, "Demo: cannot open %s", path); return false; }
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
@@ -390,6 +403,12 @@ std::vector<std::string> DemoParser::readDemoValues(BitStream& bs) {
     std::vector<std::string> values;
     while (bs.readFlag()) values.push_back(bs.readString());
     return values;
+}
+
+void DemoParser::readTaggedStrings(BitStream& bs) {
+    for (int id = 0; id < T2Demo::TaggedStringCount && !bs.isError(); ++id)
+        if (bs.readFlag())
+            initialBlock.taggedStrings[id] = bs.readString();
 }
 
 void DemoParser::readComplexTargetManager(BitStream& bs) {
@@ -452,6 +471,9 @@ std::vector<PathManagerEntry> DemoParser::readPathManager(BitStream& bs) {
     return entries;
 }
 
+static bool readGhostClassData(BitStream& bs, int classId, bool isInitial,
+                               const Vec3& cp, GhostEntry* entry);
+
 void DemoParser::readEventStartBlock(BitStream& bs) {
     initialBlock.nextRecvEventSeq = bs.readU32();
     while (bs.readFlag() && !bs.isError()) {
@@ -464,222 +486,175 @@ void DemoParser::readEventStartBlock(BitStream& bs) {
     }
 }
 
-void DemoParser::readGhostStartBlock(BitStream& bs, bool useIBTracker) {
-    if (bs.getRemainingBits() < 32) return;
+bool DemoParser::readGhostStartBlock(BitStream& bs, bool useIBTracker) {
+    if (bs.getRemainingBits() < 32) return false;
     initialBlock.ghostingSequence = bs.readU32();
     int created = 0;
+    int lastGhostIndex = -1;
+    int lastGhostClass = -1;
     while (bs.readFlag() && !bs.isError()) {
         GhostUpdate gu{};
         gu.index = bs.readInt(T2Demo::GhostIdBitSize);
         gu.classId = bs.readInt(T2Demo::NetObjectClassBitSize) + T2Demo::NetObjectClassFirst;
+        lastGhostIndex = gu.index;
+        lastGhostClass = gu.classId;
         std::string cn;
-        if (gu.classId >= 0 && gu.classId < T2Demo::NetObjectClassCount)
-            cn = T2Demo::NetObjectClassNames[gu.classId];
+        if (const char* name = V12::ghostClassName((size_t)gu.classId)) cn = name;
         else
             cn = "Class" + std::to_string(gu.classId);
         GhostTracker& tracker = useIBTracker ? ibGhostTracker : ghostTracker;
         tracker.createGhost(gu.index, gu.classId, cn);
+        GhostEntry* entry = tracker.getMutableGhost(gu.index);
+        if (!entry) return false;
         gu.type = GhostUpdate::Create;
         gu.updateBitsStart = bs.getCurPos();
+        if (!readGhostClassData(bs, gu.classId, true, Vec3{}, entry)) {
+            Console::instance().printf(LogLevel::Error,
+                "Demo: unsupported initial ghost class %d (%s)",
+                gu.classId, cn.c_str());
+            return false;
+        }
+        gu.updateBitsEnd = bs.getCurPos();
         initialBlock.initialGhosts.push_back(gu);
         created++;
     }
-    if (!bs.isError())
-        initialBlock.controlObjectGhostIndex = bs.readS32();
-    else
-        initialBlock.controlObjectGhostIndex = -1;
+    if (bs.isError()) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: ghost loop exhausted at bit %d after %d ghosts (last %d/%d)",
+            bs.getCurPos(), created, lastGhostIndex, lastGhostClass);
+        return false;
+    }
+
     Console::instance().printf(LogLevel::Debug, "GhostStartBlock: %d ghosts created, seq=%u, ctrlIdx=%d",
-        created, initialBlock.ghostingSequence, initialBlock.controlObjectGhostIndex);
+        created, initialBlock.ghostingSequence, -1);
+    return true;
 }
 
-void DemoParser::readDataBlocks(BitStream& bs) {
-    initialBlock.dataBlockCount = (int)bs.readU32();
-    Console::instance().printf(LogLevel::Debug, "DataBlocks: %d blocks", initialBlock.dataBlockCount);
-    int payloadStartBits = bs.getCurPos();
-    for (int i = 0; i < initialBlock.dataBlockCount && !bs.isError(); i++) {
-        DataBlockHeader hdr;
-        hdr.classId  = bs.readU32();
-        hdr.objectId = bs.readU32();
-        hdr.index    = bs.readU32();
-        hdr.total    = bs.readU32();
-        hdr.dataBitsStart = bs.getCurPos();
-        initialBlock.dataBlockHeaders.push_back(hdr);
-        // Skip payload: read flag bits until end of this datablock's data
-        // Each datablock payload is self-describing — we skip by reading the
-        // top-level struct fields. Without class-specific parsers we conservatively
-        // skip all remaining bits in the initial block after headers.
+static bool readInitialControlPacket(BitStream& bs, const GhostEntry& ghost) {
+    if (ghost.classId != 4 && ghost.classId != 25) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: initial control packet parser missing for class %d (%s)",
+            ghost.classId, ghost.className.c_str());
+        return false;
     }
-    // Attempt to extract shape paths from datablock payloads by scanning raw bytes
-    {
-        int payloadStart = (payloadStartBits + 7) / 8;
-        int payloadEnd = (bs.getCurPos()) / 8;
-        for (auto& hdr : initialBlock.dataBlockHeaders) {
-            int dbStart = (hdr.dataBitsStart + 7) / 8;
-            int dbEnd = (hdr.total < (int)initialBlock.dataBlockHeaders.size() - 1)
-                ? (initialBlock.dataBlockHeaders[hdr.total + 1].dataBitsStart + 7) / 8
-                : payloadEnd;
-            if (dbStart >= payloadEnd || dbEnd > payloadEnd) continue;
-            for (int b = dbStart; b < dbEnd - 10; b++) {
-                if (b < 0 || b >= (int)bs.getBufferSize()) break;
-                const uint8_t* raw = bs.getBuffer();
-                if (!raw) break;
-                if (raw[b] == 's' && raw[b+1] == 'h' && raw[b+2] == 'a' &&
-                    raw[b+3] == 'p' && raw[b+4] == 'e' && raw[b+5] == 's' && raw[b+6] == '/') {
-                    int j = b;
-                    while (j < dbEnd && j < (int)bs.getBufferSize() && raw[j] >= 32 && raw[j] < 127) j++;
-                    if (j - b > 5) {
-                        std::string path((const char*)&raw[b], j - b);
-                        initialBlock.datablockWeaponShapes[hdr.index] = path;
-                    }
-                }
+
+    bs.readF32(); // energy level
+    bs.readF32(); // recharge rate
+    if (ghost.classId == 4) {
+        bs.readPoint3F();
+        bs.readF32(); // rotation X
+        bs.readF32(); // rotation Z
+        const int mode = bs.readInt(3);
+        if (mode == 3 || mode == 4) {
+            bs.readF32();
+            bs.readF32();
+            bs.readF32();
+            if (mode == 3) {
+                bs.readFlag();
+                bs.readInt(T2Demo::GhostIdBitSize);
+            } else {
+                bs.readCompressedPoint({});
+            }
+        } else if (mode == 5) {
+            bs.readInt(T2Demo::GhostIdBitSize);
+        }
+    } else {
+        // Player::readPacketData after ShapeBase::readPacketData.
+        bs.readInt(3); // action state
+        if (bs.readFlag()) bs.readInt(7); // recover ticks
+        if (bs.readFlag()) bs.readInt(7); // jump delay
+        if (bs.readFlag()) {
+            bs.readPoint3F(); // compression point
+            bs.readPoint3F(); // velocity
+            bs.readInt(4); // jump surface last contact
+        }
+        bs.readF32(); // head X
+        bs.readF32(); // head Z
+        bs.readF32(); // rotation Z
+
+        if (bs.readFlag()) {
+            const int pilotedIndex = bs.readInt(T2Demo::GhostIdBitSize);
+            // A Player can recursively delegate to its piloted Vehicle. The
+            // initial stream must consume that virtual readPacketData too.
+            if (pilotedIndex >= 0) {
+                bs.readF32(); // vehicle energy level
+                bs.readF32(); // vehicle recharge rate
+                bs.readF32(); // steering X
+                bs.readF32(); // steering Y
+                bs.readPoint3F(); // vehicle position
+                bs.readF32(); bs.readF32(); bs.readF32(); bs.readF32(); // orientation
+                bs.readPoint3F(); // linear momentum
+                bs.readPoint3F(); // angular momentum
+                bs.readFlag(); // disable move
+                bs.readFlag(); // frozen
             }
         }
+        bs.readFlag(); // disable move
+        bs.readFlag(); // pilot
     }
-    if (!initialBlock.datablockWeaponShapes.empty()) {
-        Console::instance().printf(LogLevel::Info, "DataBlocks: mapped %zu weapon shapes from payloads",
-            initialBlock.datablockWeaponShapes.size());
-        for (auto& [idx, path] : initialBlock.datablockWeaponShapes)
-            Console::instance().printf(LogLevel::Info, "  db[%u] -> %s", idx, path.c_str());
+    return !bs.isError();
+}
+
+bool DemoParser::readDataBlocks(BitStream& bs) {
+    int count = 0;
+    while (bs.readFlag()) {
+        if (++count > 4096) {
+            Console::instance().printf(LogLevel::Error,
+                "Demo: too many initial datablocks");
+            return false;
+        }
+
+        // The outer flag is the event list entry. SimDataBlockEvent::pack
+        // writes its own process flag before the object metadata.
+        if (!bs.readFlag()) continue;
+
+        DataBlockHeader header{};
+        const uint32_t objectIndex = (uint32_t)bs.readInt(11);
+        header.objectId = objectIndex;
+        header.classId = (uint32_t)bs.readInt(7) + T2Demo::DataBlockClassFirst;
+        header.index = (uint32_t)bs.readInt(11);
+        header.total = (uint32_t)bs.readInt(12);
+        header.dataBitsStart = bs.getCurPos();
+
+        if (bs.isError()) return false;
+
+        V12::DecodedDataBlock decoded;
+        V12BitStream payload(bs.getBuffer(), bs.getBufferSize(),
+                             (size_t)header.dataBitsStart);
+        if (!V12::readDataBlockPayload(payload, header.classId, &decoded)) {
+            const char* className = V12::dataBlockClassName(header.classId - T2Demo::DataBlockClassFirst);
+            Console::instance().printf(LogLevel::Error,
+                "Demo: unsupported or malformed initial datablock class %u%s",
+                header.classId, className ? className : "");
+            return false;
+        }
+
+        const size_t consumed = payload.position() - (size_t)header.dataBitsStart;
+        if (consumed > (size_t)bs.getRemainingBits()) return false;
+        bs.setCurPos(header.dataBitsStart + (int)consumed);
+        initialBlock.dataBlockHeaders.push_back(header);
+        ParsedDataBlock parsed;
+        parsed.classId = header.classId;
+        if (const char* name = V12::dataBlockClassName(header.classId - T2Demo::DataBlockClassFirst))
+            parsed.className = name;
+        parsed.objectId = header.objectId;
+        if (!decoded.shapeFile.empty()) {
+            parsed.data["shapeFile"] = decoded.shapeFile;
+            initialBlock.datablockWeaponShapes[header.objectId] = decoded.shapeFile;
+        }
+        if (!decoded.debrisShape.empty()) parsed.data["debrisShape"] = decoded.debrisShape;
+        if (!decoded.cloakTexture.empty()) parsed.data["cloakTexture"] = decoded.cloakTexture;
+        initialBlock.dataBlocks[header.objectId] = std::move(parsed);
     }
-    if (!initialBlock.datablockWeaponShapes.empty()) {
-        Console::instance().printf(LogLevel::Info, "DataBlocks: mapped %zu weapon shapes from payloads",
-            initialBlock.datablockWeaponShapes.size());
-        for (auto& [idx, path] : initialBlock.datablockWeaponShapes)
-            Console::instance().printf(LogLevel::Info, "  db[%u] -> %s", idx, path.c_str());
-    }
-    Console::instance().printf(LogLevel::Debug, "DataBlocks: %zu headers read", initialBlock.dataBlockHeaders.size());
+
+    initialBlock.dataBlockCount = count;
+    Console::instance().printf(LogLevel::Debug,
+        "DataBlocks: %d decoded", initialBlock.dataBlockCount);
+    return !bs.isError();
 }
 
 // Forward declaration
 static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const Vec3& cp, GhostEntry* entry);
-
-// ─── Mission name extraction ──────────────────────────────
-// Try reference parser via Node.js for reliable extraction.
-static std::string extractMissionNameViaNode(const uint8_t* data, size_t size) {
-    // Write initial block to temp file for the Node.js script
-    std::string tmpPath = torchTempDir() + "/t2demo_ib_XXXXXX";
-    char tmpBuf[256];
-    snprintf(tmpBuf, sizeof(tmpBuf), "%s", tmpPath.c_str());
-    int fd = mkstemp(tmpBuf);
-    if (fd < 0) return "";
-    write(fd, data, size);
-    close(fd);
-    tmpPath = tmpBuf;
-
-    // Build the .rec file with just the header + initial block
-    // Need full .rec format: U8 strlen + "Tribes2 Recording" + U32 proto + U32 lenMs + U32 ibSize + ibData
-    std::string recPath = torchTempDir() + "/t2demo_rec_XXXXXX";
-    char recBuf[256];
-    snprintf(recBuf, sizeof(recBuf), "%s", recPath.c_str());
-    int rfd = mkstemp(recBuf);
-    if (rfd < 0) { unlink(tmpPath.c_str()); return ""; }
-    recPath = recBuf;
-    uint8_t hdr[256];
-    int hOff = 0;
-    const char* sig = "Tribes2 Recording";
-    hdr[hOff++] = (uint8_t)strlen(sig);
-    memcpy(hdr + hOff, sig, strlen(sig)); hOff += (int)strlen(sig);
-    auto put32 = [&](uint32_t v) { hdr[hOff++] = v & 0xff; hdr[hOff++] = (v>>8) & 0xff; hdr[hOff++] = (v>>16) & 0xff; hdr[hOff++] = (v>>24) & 0xff; };
-    put32(T2Demo::ProtocolV25034); // protocol v25034
-    put32(0);          // length ms
-    put32((uint32_t)size); // initial block size
-    write(rfd, hdr, hOff);
-    write(rfd, data, size);
-    close(rfd);
-
-    // Call Node.js script with timeout (prevents hanging on large or malformed demos)
-    std::string missionScript = torchTempDir() + "/mission_extract.js";
-    std::string cmd = std::string("timeout 5 node ") + missionScript + " " + recPath + " 2>/dev/null";
-    FILE* fp = popen(cmd.c_str(), "r");
-    if (!fp) { unlink(tmpPath.c_str()); unlink(recPath.c_str()); return ""; }
-    char buf[256];
-    std::string result;
-    if (fgets(buf, sizeof(buf), fp)) {
-        size_t len = strlen(buf);
-        if (len > 0 && buf[len-1] == '\n') buf[len-1] = 0;
-        result = buf;
-    }
-    pclose(fp);
-    unlink(tmpPath.c_str());
-    unlink(recPath.c_str());
-    return result;
-}
-
-// ─── Scoreboard data extraction via Node.js reference parser ──
-void DemoParser::extractScoreboardData(const char* recPath) {
-    playerInfo_.clear();
-    skinToPlayer_.clear();
-    std::string scoreScript = torchTempDir() + "/score_extract.js";
-    std::string cmd = std::string("timeout 5 node ") + scoreScript + " " + recPath + " 2>/dev/null";
-    FILE* fp = popen(cmd.c_str(), "r");
-    if (!fp) return;
-    char buf[65536];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
-    pclose(fp);
-    if (n == 0) return;
-    buf[n] = 0;
-    // Parse JSON output - simple manual parser (no dependency)
-    // Looking for: {"scores":[...],"targets":[{"name":"...","skin":"...",...},...],...}
-    auto findField = [&](const char* key, const char* src) -> std::string {
-        std::string search = std::string("\"") + key + "\":\"";
-        auto pos = std::string(src).find(search);
-        if (pos == std::string::npos) return "";
-        pos += search.size();
-        std::string val;
-        while (pos < n && src[pos] != '"') {
-            if (src[pos] == '\\' && pos + 1 < n) pos++; // skip escape
-            val += src[pos++];
-        }
-        return val;
-    };
-    // Simple state machine to parse target entries
-    const char* p = buf;
-    const char* end = buf + n;
-    // Find targets array
-    std::string s(buf);
-    auto targetsStart = s.find("\"targets\"");
-    if (targetsStart == std::string::npos) return;
-    auto arrStart = s.find('[', targetsStart);
-    if (arrStart == std::string::npos) return;
-    p = buf + arrStart;
-    while (p < end) {
-        // Find next {
-        while (p < end && *p != '{') p++;
-        if (p >= end) break;
-        const char* objEnd = p;
-        int braceDepth = 1;
-        objEnd++;
-        while (objEnd < end && braceDepth > 0) {
-            if (*objEnd == '{') braceDepth++;
-            else if (*objEnd == '}') braceDepth--;
-            objEnd++;
-        }
-        if (braceDepth != 0) break;
-        std::string obj(p, objEnd - p);
-        PlayerInfo pi;
-        pi.name = findField("name", obj.c_str());
-        pi.skin = findField("skin", obj.c_str());
-        // damage as number (not string)
-        {
-            auto dpos = obj.find("\"damage\"");
-            if (dpos != std::string::npos) {
-                dpos = obj.find(':', dpos);
-                if (dpos != std::string::npos) {
-                    dpos++;
-                    while (dpos < obj.size() && (obj[dpos] == ' ' || obj[dpos] == '\t')) dpos++;
-                    char* endp = nullptr;
-                    pi.damage = (float)strtod(obj.c_str() + dpos, &endp);
-                }
-            }
-        }
-        if (!pi.name.empty()) {
-            playerInfo_.push_back(pi);
-            if (!pi.skin.empty())
-                skinToPlayer_[pi.skin] = pi.name;
-        }
-        p = objEnd;
-    }
-}
 
 const std::string& DemoParser::getPlayerNameForSkin(const std::string& skin) const {
     static std::string empty;
@@ -687,242 +662,66 @@ const std::string& DemoParser::getPlayerNameForSkin(const std::string& skin) con
     return it != skinToPlayer_.end() ? it->second : empty;
 }
 
-// Scan the initial block for a plausible mission name near its end.
-// The mission name is a Huffman-compressed string followed by a U32 CRC.
-static std::string scanMissionName(const uint8_t* data, size_t size, uint32_t* outCRC) {
-    int totalBits = (int)size * 8;
-    *outCRC = 0;
-    std::string best; int bestScore = -999; uint32_t bestCRC = 0;
-    // Search only the last 30% of the block (mission name is before SimpleTargetManager)
-    int searchStart = totalBits - (int)(size * 0.30 * 8);
-    if (searchStart < 0) searchStart = 0;
-    for (int bitOff = searchStart; bitOff + 200 < totalBits; bitOff++) {
-        if ((bitOff % 8) != 0 && (bitOff % 13) != 0 && (bitOff % 17) != 0) continue;
-        BitStream bs(data, size, bitOff);
-        std::string s = bs.readString();
-        if (bs.isError()) continue;
-        uint32_t crc = bs.readU32();
-        if (bs.isError() || crc == 0 || s.size() < 4 || s.size() > 35) continue;
-        bool bad = false;
-        for (char c : s) { if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e) { bad = true; break; } }
-        if (bad) continue;
-        if (s.find(' ') != std::string::npos) continue;
-        if (s.find('/') != std::string::npos) continue;
-        if (s.find('.') != std::string::npos) continue;
-        if (s.find('<') != std::string::npos || s.find('>') != std::string::npos) continue;
-        // Reject runs of repeated chars
-        int maxRun = 1, curRun = 1;
-        for (size_t k = 1; k < s.size(); k++) {
-            if (s[k] == s[k-1]) { curRun++; if (curRun > maxRun) maxRun = curRun; }
-            else curRun = 1;
-        }
-        if (maxRun > 2) continue;
-        // Reject strings that have digits before the first uppercase letter
-        // (typical T2 missions start with uppercase: "Katabatic", "Training1")
-        size_t firstUpper = s.find_first_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
-        size_t firstDigit = s.find_first_of("0123456789");
-        if (firstDigit != std::string::npos && firstUpper != std::string::npos && firstDigit < firstUpper) continue;
-    // Score: high alpha ratio wins
-    int alnum = 0;
-    for (char c : s) if (isalnum((unsigned char)c)) alnum++;
-    double alphaRatio = (double)alnum / (double)s.size();
-    if (alphaRatio < 0.80) continue;
-    // First char must be alphanumeric and uppercase (most T2 missions)
-    if (!isalnum((unsigned char)s[0])) continue;
-    if (islower((unsigned char)s[0])) continue;
-    // Reject strings with runs of >3 same character case (e.g. "AAAA" is garbage)
-    int caseRun = 1;
-    for (size_t k = 1; k < s.size(); k++) {
-        if (isupper((unsigned char)s[k]) == isupper((unsigned char)s[k-1]))
-            { caseRun++; if (caseRun > 3) { bad = true; break; } }
-        else caseRun = 1;
-    }
-    if (bad) continue;
-    // Reject strings with more than 4 consecutive consonants (garbage)
-    int conRun = 1;
-    const char* vowels = "aeiouAEIOU";
-    for (size_t k = 1; k < s.size(); k++) {
-        bool isVowel = strchr(vowels, s[k]) != nullptr;
-        bool prevVowel = strchr(vowels, s[k-1]) != nullptr;
-        if (!isVowel && !prevVowel) { conRun++; if (conRun > 4) { bad = true; break; } }
-        else conRun = 1;
-    }
-    if (bad) continue;
-    int score = (int)(alphaRatio * 100) + (int)s.size();
-        if (score > bestScore) { bestScore = score; best = s; bestCRC = crc; }
-    }
-    if (bestScore > 0 && !best.empty()) {
-        *outCRC = bestCRC;
-        return best;
-    }
-    *outCRC = 0;
-    return "";
-}
-
-void DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
+bool DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
     BitStream bs(data, size);
-    int totalBits = (int)size * 8;
-
-    // ─── Tagged strings table (first section) ─────────────────
-    // Format: flag(1 bit) + ID(12 bits) + Huffman string, repeated until flag=0
-    while (!bs.isError()) {
-        if (!bs.readFlag()) break;
-        int id = bs.readInt(12);
-        if (id < 0 || id >= T2Demo::TaggedStringCount) break;
-        initialBlock.taggedStrings[id] = bs.readString();
+    auto fail = [&](const char* stage) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: initial block parse failed at %s (bit %d/%d)",
+            stage, bs.getCurPos(), bs.getMaxPos());
+        return false;
+    };
+    // Tribes 2's build-25034 GameConnection reader starts with the tagged
+    // string table and a separate datablock count. This is not the generic
+    // Torque3D start-block order.
+    readTaggedStrings(bs);
+    const uint32_t expectedDataBlocks = bs.readU32();
+    Console::instance().printf(LogLevel::Debug,
+        "Demo: initial tagged strings=%zu expected datablocks=%u bit=%d",
+        initialBlock.taggedStrings.size(), expectedDataBlocks, bs.getCurPos());
+    if (expectedDataBlocks > 4096) return fail("datablock count");
+    if (!readDataBlocks(bs)) return fail("datablocks");
+    if ((uint32_t)initialBlock.dataBlockCount != expectedDataBlocks) {
+        Console::instance().printf(LogLevel::Warn,
+            "Demo: datablock count header=%u entries=%d",
+            expectedDataBlocks, initialBlock.dataBlockCount);
     }
 
-    // ─── Second tagged strings section ─────────────────
-    // The initial block has two tagged strings sections. The second is inside
-    // NetConnection::readDemoStartBlock. We skip: data blocks, camera/moves,
-    // ConnectionProtocol, roundTrip/packetLoss, pathManager.
-    {
-        // Skip data blocks
-        while (bs.readFlag()) {
-            bs.readInt(7); bs.readInt(10); bs.readInt(10); bs.readInt(11);
-            while (bs.readFlag()) {}
-        }
-        // Skip firstPerson, camera, moves
-        bs.readFlag(); bs.readPoint3F(); bs.readFloat(32);
-        bs.readU32(); bs.readU32(); bs.readU32();
-        // Skip moveList
-        int moveCount = bs.readInt(32);
-        for (int i = 0; i < moveCount && !bs.isError(); i++) {
-            bs.readFlag(); if (bs.readFlag()) bs.readInt(16);
-            bs.readFlag(); if (bs.readFlag()) bs.readInt(16);
-            bs.readFlag(); if (bs.readFlag()) bs.readInt(16);
-            bs.readInt(6); bs.readInt(6); bs.readInt(6);
-            bs.readFlag();
-            for (int j = 0; j < 6; j++) bs.readFlag();
-        }
-        // Skip ConnectionProtocol
-        for (int i = 0; i < 39; i++) bs.readU32();
-        // Skip roundTripTime, packetLoss
-        bs.readFloat(32); bs.readFloat(32);
-        // Skip pathManager (from PathManager::readState)
-        uint32_t numPaths = bs.readU32();
-        for (uint32_t i = 0; i < numPaths && !bs.isError(); i++) {
-            bs.readU32(); // totalTime
-            uint32_t numPos = bs.readU32();
-            for (uint32_t j = 0; j < numPos && !bs.isError(); j++) {
-                bs.readFloat(32); bs.readFloat(32); bs.readFloat(32); // Point3F
-                bs.readU32(); // msToNext
-            }
-        }
-    }
+    initialBlock.firstPerson = bs.readU8() != 0;
+    initialBlock.connectionFields.clear();
+    for (int i = 0; i < 6; ++i) initialBlock.connectionFields.push_back(bs.readU32());
+    initialBlock.stateArray.clear();
+    for (int i = 0; i < 16; ++i) initialBlock.stateArray.push_back(bs.readU32());
 
-    // Read second tagged strings section (if present)
-    {
-        int pos = 0, sectionParsed = 0;
-        int skip = bs.readInt(32);
-        if (!bs.isError() && skip >= 0 && skip < T2Demo::TaggedStringCount) {
-            pos += skip;
-            while (pos < T2Demo::TaggedStringCount && !bs.isError()) {
-                int count = bs.readInt(32);
-                if (bs.isError() || count < 0 || count > 100) break;
-                for (int i = 0; i < count && !bs.isError(); i++) {
-                    std::string s = bs.readString();
-                    if (pos >= 0 && pos < T2Demo::TaggedStringCount)
-                        initialBlock.taggedStrings[pos] = s;
-                    sectionParsed++;
-                    pos++;
-                }
-                skip = bs.readInt(32);
-                if (bs.isError() || skip < 0 || skip > T2Demo::TaggedStringCount) break;
-                pos += skip;
-            }
-            if (sectionParsed > 0)
-                Console::instance().printf(LogLevel::Info, "  Second tagged strings: %d entries parsed", sectionParsed);
-        }
-    }
+    const uint32_t scoreCount = bs.readU32();
+    if (scoreCount > 256) return fail("score count");
+    initialBlock.scoreEntries.clear();
+    for (uint32_t i = 0; i < scoreCount; ++i)
+        initialBlock.scoreEntries.push_back(readScoreEntry(bs));
+    initialBlock.demoValues = readDemoValues(bs);
+    readComplexTargetManager(bs);
+    if (bs.isError()) return fail("target manager");
 
-    // ─── Find mission name ───────────────────────────────────
-    // 1. First try scanning tagged strings for a .mis path or mission name
-    std::string taggedMission;
-    for (auto& [tag, str] : initialBlock.taggedStrings) {
-        if (str.find(".mis") != std::string::npos || str.find("missions/") != std::string::npos) {
-            taggedMission = str;
-            break;
-        }
-    }
-    if (taggedMission.empty()) {
-        // Scan all tagged strings for mission-like patterns
-        for (auto& [tag, str] : initialBlock.taggedStrings) {
-            std::string lower = str;
-            for (auto& c : lower) c = (char)tolower((unsigned char)c);
-            if (lower.find("missions/") != std::string::npos ||
-                lower.find("levels/") != std::string::npos ||
-                lower.find(".mis") != std::string::npos) {
-                taggedMission = str;
-                break;
-            }
-            // Direct mission name match
-            if (lower == "katabatic" || lower == "damnation" || lower == "desert" ||
-                lower == "snow" || lower == "training1" || lower == "training2")
-                taggedMission = str;
-        }
-    }
-    // 2. Try path-like strings: extract base name
-    if (taggedMission.empty()) {
-        for (auto& [tag, str] : initialBlock.taggedStrings) {
-            if (str.size() > 6 && str.size() < 80 && str.find('/') != std::string::npos) {
-                size_t slash = str.rfind('/');
-                std::string base = (slash != std::string::npos) ? str.substr(slash + 1) : str;
-                size_t dot = base.rfind('.');
-                if (dot != std::string::npos) base = base.substr(0, dot);
-                if (base.size() >= 3 && isupper((unsigned char)base[0])) {
-                    taggedMission = base;
-                    break;
-                }
-            }
-        }
-    }
+    readConnectionProtocol(bs);
+    initialBlock.roundTripTime = bs.readF32();
+    initialBlock.packetLoss = bs.readF32();
+    readPathManager(bs);
+    initialBlock.notifyCount = bs.readU32();
+    readEventStartBlock(bs);
+    if (!readGhostStartBlock(bs, true) || bs.isError())
+        return fail("events or ghosts");
 
-    // ─── Data blocks ────────────────────────────────
-    // Read headers even if we skip payloads
-    readDataBlocks(bs);
-
-    // Skip the rest (connection state, scores, target manager, etc.) — we
-    // still can't consume datablock payloads without full class parsers.
-    bs.setCurPos(totalBits);
-
-    // 2. Try the C++ heuristic scan
-    uint32_t crc = 0;
-    std::string scanned = scanMissionName(data, size, &crc);
-    initialBlock.missionCRC = crc;
-
-    // 3. Prefer tagged string mission (more reliable) over heuristic scan
-    if (!taggedMission.empty()) {
-        initialBlock.missionName = taggedMission;
-    } else {
-        initialBlock.missionName = scanned;
+    initialBlock.controlObjectGhostIndex = bs.readS32();
+    if (initialBlock.controlObjectGhostIndex >= 0) {
+        const GhostEntry* control = ibGhostTracker.getGhost(
+            initialBlock.controlObjectGhostIndex);
+        if (!control || !readInitialControlPacket(bs, *control))
+            return fail("control object");
     }
-
-    // Fallback: reference parser via Node.js
-    if (initialBlock.missionName.empty()) {
-        initialBlock.missionName = extractMissionNameViaNode(data, size);
-    }
-
-    // Last resort: try to extract mission name from demo filename
-    if (initialBlock.missionName.empty() && !recFilePath_.empty()) {
-        std::string lower = recFilePath_;
-        for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
-        static const char* knownMissions[] = {
-            "katabatic", "damnation", "training1", "training2",
-            "oasis", "gauntlet", "icebound", "desiccator",
-            "crater71", "haven", "tombstone", "whiteout",
-            "treachery", "archipelago", "caldera",
-            nullptr
-        };
-        for (int i = 0; knownMissions[i]; i++) {
-            if (lower.find(knownMissions[i]) != std::string::npos) {
-                initialBlock.missionName = knownMissions[i];
-                // Capitalize first letter
-                initialBlock.missionName[0] = (char)std::toupper((unsigned char)initialBlock.missionName[0]);
-                break;
-            }
-        }
-    }
+    initialBlock.missionName = bs.readString();
+    initialBlock.missionCRC = bs.readU32();
+    readSimpleTargetManager(bs);
+    readSimpleTargetManager(bs);
+    return bs.isError() ? fail("mission tail") : true;
 }
 
 // ─── Block stream ────────────────────────────────────────────
@@ -931,7 +730,18 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
     decompressed = nullptr; decompressedSize = 0;
 
     readHeader();
-    if (header.identString != "Tribes2 Recording") return false;
+    if (header.identString != "Tribes2 Recording") {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: unsupported recording signature '%s'", header.identString.c_str());
+        return false;
+    }
+    if (header.protocolVersion != T2Demo::ProtocolV25034) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: unsupported protocol 0x%08X (native parser supports 0x%08X)",
+            (unsigned)header.protocolVersion,
+            (unsigned)T2Demo::ProtocolV25034);
+        return false;
+    }
 
     {
         const char* ver = "unknown";
@@ -941,8 +751,24 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
             (unsigned)header.protocolVersion, ver, (unsigned)header.initialBlockSize);
     }
 
-    if (offset + header.initialBlockSize > bufSize) return false;
-    readInitialBlock(buf + offset, header.initialBlockSize);
+    if (offset + header.initialBlockSize > bufSize) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: initial block exceeds file size");
+        return false;
+    }
+    if (!readInitialBlock(buf + offset, header.initialBlockSize)) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: invalid native initial block");
+        return false;
+    }
+    ghostTracker.clear();
+    for (int index : ibGhostTracker.getAllIndices()) {
+        const GhostEntry* source = ibGhostTracker.getGhost(index);
+        if (!source) continue;
+        ghostTracker.createGhost(index, source->classId, source->className);
+        if (GhostEntry* target = ghostTracker.getMutableGhost(index))
+            *target = *source;
+    }
     offset += header.initialBlockSize;
 
     // Decompress block stream (raw deflate)
@@ -988,25 +814,6 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
 
     scanMissionChanges();
 
-    // Extract scoreboard data via Node.js reference parser
-    if (!recFilePath_.empty()) {
-        extractScoreboardData(recFilePath_.c_str());
-    }
-
-    // FALLBACK: populate scoreboard from ghost tracker if Node.js didn't provide data
-    if (playerInfo_.empty()) {
-        for (int i : ghostTracker.getAllIndices()) {
-            const GhostEntry* g = ghostTracker.getGhost(i);
-            if (!g || (g->className != "Player" && g->className != "MPB")) continue;
-            PlayerInfo pi;
-            pi.name = g->playerName.empty() ? g->skinName : g->playerName;
-            pi.skin = g->skinName;
-            pi.teamId = g->teamId;
-            pi.damage = 1.0f - (g->health / 100.0f);
-            playerInfo_.push_back(pi);
-        }
-    }
-
     return true;
 }
 
@@ -1022,6 +829,21 @@ int DemoParser::getBlockCount() {
         count++;
     }
     blockCount_ = count;
+    return count;
+}
+
+int DemoParser::getMoveBlockCount() const {
+    if (!decompressed) return 0;
+    int count = 0;
+    int off = 0;
+    while (off + 2 <= (int)decompressedSize) {
+        const int header = decompressed[off] | (decompressed[off + 1] << 8);
+        const int type = header >> 12;
+        const int size = header & 0xfff;
+        off += 2 + size;
+        if (off > (int)decompressedSize) break;
+        if (type == T2Demo::BlockTypeMove) count++;
+    }
     return count;
 }
 
@@ -1045,6 +867,13 @@ void DemoParser::reset() {
     blockStreamOffset = 0; blockCursor_ = 0; blockCount_ = -1;
     compressionPoint = {0,0,0};
     ghostTracker.clear();
+    for (int index : ibGhostTracker.getAllIndices()) {
+        const GhostEntry* source = ibGhostTracker.getGhost(index);
+        if (!source) continue;
+        ghostTracker.createGhost(index, source->classId, source->className);
+        if (GhostEntry* target = ghostTracker.getMutableGhost(index))
+            *target = *source;
+    }
 }
 
 int DemoParser::processBlocks(int count) {
@@ -1157,15 +986,14 @@ InfoBlock DemoParser::readInfoBlock(const uint8_t* d, size_t sz) {
 DnetHeader DemoParser::readDnetHeader(BitStream& bs) {
     DnetHeader dh{};
     dh.gameFlag = bs.readFlag();
-    int connSeqBits = bs.readInt(4);
-    dh.connectSeqBit = connSeqBits;
-    dh.seqNumber = bs.readInt(connSeqBits);
-    dh.highestAck = bs.readInt(connSeqBits);
-    if (dh.highestAck > dh.seqNumber)
-        dh.highestAck -= (1 << connSeqBits);
+    dh.connectSeqBit = bs.readInt(1);
+    dh.seqNumber = bs.readInt(9);
+    dh.highestAck = bs.readInt(9);
     dh.packetType = bs.readInt(2);
     dh.ackByteCount = bs.readInt(3);
-    dh.ackMask = bs.readInt(dh.ackByteCount * 8);
+    dh.ackMask = 0;
+    for (int i = 0; i < dh.ackByteCount; ++i)
+        dh.ackMask |= (uint64_t)(uint32_t)bs.readInt(8) << (i * 8);
     return dh;
 }
 
@@ -1221,7 +1049,61 @@ GameState DemoParser::readGameState(BitStream& bs) {
             // ShapeBase::readPacketData reads: energy (f32) + rechargeRate (f32)
             gs.energy = bs.readF32();
             gs.rechargeRate = bs.readF32();
-            // Derived class readPacketData may follow (e.g. Player)
+            const GhostEntry* control = ghostTracker.getGhost(gs.controlObjectGhostIndex);
+            if (control && control->classId == 4) {
+                gs.compressionPoint = {bs.readF32(), bs.readF32(), bs.readF32()};
+                bs.readF32(); // rotation X
+                bs.readF32(); // rotation Z
+                const int mode = bs.readInt(3);
+                if (mode == 3 || mode == 4) {
+                    bs.readF32();
+                    bs.readF32();
+                    bs.readF32();
+                    if (mode == 3) {
+                        bs.readFlag();
+                        bs.readInt(T2Demo::GhostIdBitSize);
+                    } else {
+                        bs.readCompressedPoint(gs.compressionPoint);
+                    }
+                } else if (mode == 5) {
+                 bs.readInt(T2Demo::GhostIdBitSize);
+                }
+            } else if (control && control->classId == 25) {
+                // Player::readPacketData: ShapeBase state, movement, view,
+                // optional piloted object, and final movement flags.
+                bs.readInt(3); // action state
+                if (bs.readFlag()) bs.readInt(7); // recover ticks
+                if (bs.readFlag()) bs.readInt(7); // jump delay
+                if (bs.readFlag()) {
+                    gs.compressionPoint = {bs.readF32(), bs.readF32(), bs.readF32()};
+                    bs.readF32(); bs.readF32(); bs.readF32(); // velocity
+                    bs.readInt(4); // jump surface contact
+                }
+                bs.readF32(); // head X
+                bs.readF32(); // head Z
+                bs.readF32(); // rotation Z
+                if (bs.readFlag()) {
+                    const int pilotedIndex = bs.readInt(T2Demo::GhostIdBitSize);
+                    const GhostEntry* piloted = ghostTracker.getGhost(pilotedIndex);
+                    if (piloted && (piloted->classId == 4)) {
+                        bs.readF32(); bs.readF32();
+                        const Vec3 pos{bs.readF32(), bs.readF32(), bs.readF32()};
+                        gs.compressionPoint = pos;
+                        bs.readF32(); bs.readF32();
+                        const int mode = bs.readInt(3);
+                        if (mode == 3 || mode == 4) {
+                            bs.readF32(); bs.readF32(); bs.readF32();
+                            if (mode == 3) {
+                                bs.readFlag(); bs.readInt(T2Demo::GhostIdBitSize);
+                            } else {
+                                bs.readCompressedPoint(gs.compressionPoint);
+                            }
+                        }
+                    }
+                }
+                bs.readFlag(); // disable move
+                bs.readFlag(); // pilot
+            }
         } else {
             // Compression point only
             gs.compressionPoint.x = bs.readF32();
@@ -1245,17 +1127,34 @@ GameState DemoParser::readGameState(BitStream& bs) {
     return gs;
 }
 
-void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents) {
-    while (bs.readFlag() && !bs.isError()) {
+void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents, const Vec3& compressionPoint) {
+    bool guaranteedPhase = false;
+    bool more = bs.readFlag();
+    int previousGuaranteedSequence = -2;
+    while (!bs.isError()) {
+        if (!more) {
+            if (guaranteedPhase) break;
+            guaranteedPhase = true;
+            more = bs.readFlag();
+            if (!more || bs.isError()) break;
+        }
         NetEventInfo ev{};
+        ev.guaranteed = guaranteedPhase;
+        if (guaranteedPhase) {
+            if (bs.readFlag()) {
+                ev.sequenceNumber = (previousGuaranteedSequence + 1) & 0x7f;
+            } else {
+                ev.sequenceNumber = bs.readInt(7);
+            }
+            previousGuaranteedSequence = ev.sequenceNumber;
+        }
         int rawId = bs.readInt(T2Demo::NetEventClassBitSize);
         ev.classId = rawId + T2Demo::NetEventClassFirst;
-        if (rawId >= 0 && rawId < T2Demo::NetEventClassCount)
-            ev.eventName = T2Demo::NetEventClassNames[rawId];
-        else
+        if (rawId >= 0 && rawId < T2Demo::NetEventClassCount) {
+            if (const char* name = V12::eventClassName((size_t)rawId)) ev.eventName = name;
+        } else {
             ev.eventName = "Event" + std::to_string(rawId);
-        ev.guaranteed = bs.readFlag();
-        if (ev.guaranteed) ev.sequenceNumber = (int)bs.readU32();
+        }
         ev.dataBitsStart = bs.getCurPos();
         // Parse known event payloads
         if (ev.classId == T2Demo::NetEventClassFirst + 22) { // SimpleMessageEvent
@@ -1290,10 +1189,27 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents)
             int total_ = bs.readInt(T2Demo::SimDBEventTotalBits); (void)total_;
         } else if (ev.classId == T2Demo::NetEventClassFirst + 17 ||
                    ev.classId == T2Demo::NetEventClassFirst + 18) {
-            ev.audioProfileId = bs.readRangedU32(0, 1024);
+            ev.audioProfileId = bs.readInt(11);
+            ev.directAudioProfile = true;
+            if (ev.classId == T2Demo::NetEventClassFirst + 18 && bs.readFlag()) {
+                bs.readFloat(8); bs.readFloat(8); bs.readFloat(8);
+                bs.readFlag(); // quaternion W sign
+            }
+            if (ev.classId == T2Demo::NetEventClassFirst + 18) {
+                const Vec3 position = bs.readCompressedPoint(compressionPoint, 0.5f);
+                ev.audioPosition = {position.x, position.y, position.z};
+                ev.hasAudioPosition = true;
+            }
         } else if (ev.classId == T2Demo::NetEventClassFirst + 20) { // SimTargetAudioEvent
-            ev.audioProfileId = bs.readRangedU32(0, 1024);
-            bs.readRangedU32(0, T2Demo::MaxGhostCount - 1);
+            ev.targetId = bs.readInt(9);
+            bs.readInt(12); // file tag
+            bs.readRangedU32(3, 1026); // audio description ID
+            if (bs.readFlag()) {
+                const Vec3 position = bs.readCompressedPoint(compressionPoint, 0.5f);
+                ev.audioPosition = {position.x, position.y, position.z};
+                ev.hasAudioPosition = true;
+            }
+            bs.readFlag(); // update sound
         } else if (ev.classId == T2Demo::NetEventClassFirst + 5) { // GravityEvent
             bs.readF32();
         } else if (ev.classId == T2Demo::NetEventClassFirst + 6) { // LightningStrikeEvent
@@ -1316,6 +1232,7 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents)
         }
         ev.dataBitsEnd = bs.getCurPos();
         outEvents.push_back(ev);
+        more = bs.readFlag();
     }
 }
 
@@ -1324,13 +1241,19 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents)
 // Each reads the class-specific unpackUpdate data from the bitstream
 // and advances the stream past all data for that ghost.
 
-static void readGameBaseData(BitStream& bs, bool) {
-    if (bs.readFlag()) bs.readInt(11);
+static void readGameBaseData(BitStream& bs, bool, GhostEntry* entry = nullptr) {
+    if (bs.readFlag()) {
+        int datablockId = bs.readInt(11);
+        if (entry) {
+            entry->datablockId = datablockId;
+            entry->hasDatablock = true;
+        }
+    }
     if (bs.readFlag() && bs.readFlag()) bs.readInt(9);
 }
 
 static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry = nullptr) {
-    readGameBaseData(bs, isInitial);
+    readGameBaseData(bs, isInitial, entry);
     if (!bs.readFlag()) return;
     // DamageMask
     if (bs.readFlag()) {
@@ -1343,10 +1266,22 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
         for (int i = 0; i < 4; i++)
             if (bs.readFlag()) { bool playing = bs.readFlag(); if (playing) bs.readInt(11); }
     }
-    // ThreadMask (4 slots: flag → seq5 + state2 + forward + atEnd)
+    // ThreadMask: sequence/state plus compact direction/end flags.
     if (bs.readFlag()) {
         for (int i = 0; i < 4; i++)
-            if (bs.readFlag()) { bs.readInt(5); bs.readInt(2); bs.readFlag(); bs.readFlag(); }
+            if (bs.readFlag()) {
+                int sequence = bs.readInt(5);
+                int state = bs.readInt(2);
+                bool forward = bs.readFlag();
+                bool atEnd = bs.readFlag();
+                if (entry) {
+                    entry->threads[i].sequence = sequence;
+                    entry->threads[i].state = state;
+                    entry->threads[i].forward = forward;
+                    entry->threads[i].atEnd = atEnd;
+                    entry->threads[i].valid = true;
+                }
+            }
     }
     // ImageMask (8 mounted image slots)
     if (bs.readFlag()) {
@@ -1363,38 +1298,47 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
                             entry->skinName = s;
                     }
                 }
-                bool flags[5];
-                for (int f = 0; f < 5; f++) flags[f] = bs.readFlag();
+                bool triggerDown = bs.readFlag();
+                bool loaded = bs.readFlag();
+                bs.readFlag(); // ammo
+                bs.readFlag(); // wet
+                bs.readFlag(); // target
                 int fireCount = bs.readInt(3);
                 if (entry && i < 8) {
-                    entry->mountedImages[i].loaded = flags[3]; // "loaded" flag
+                    entry->mountedImages[i].loaded = loaded;
                     entry->mountedImages[i].isFiring = (fireCount > 0);
                 }
                 if (isInitial) bs.readFlag();
             }
         }
     }
-    // CloakMask + MountMask + ShieldMask
+    // CloakMask + state-B + invincibility state.
     if (bs.readFlag()) {
-        if (bs.readFlag()) { // hasCloakData
+        if (bs.readFlag()) {
             bool cloaked = bs.readFlag();
-            bs.readFlag(); // isControlled
+            bs.readFlag(); // controlled
             if (entry) entry->cloaked = cloaked;
-            if (bs.readFlag()) { bs.readFlag(); bs.readF32(); } // fading → fadeOut, fadeTime
+            if (bs.readFlag()) { bs.readFlag(); bs.readF32(); }
+            else bs.readFlag();
         }
-        if (bs.readFlag()) { // MountMask
-            bs.readFlag(); // mountNodeIndex
-            bs.readNormalVector(8); bs.readFloat(5);
-            if (bs.readFlag()) { bs.readU32(); bs.readU32(); }
+        if (bs.readFlag()) {
+            if (bs.readFlag()) {
+                bs.readFlag(); // state-B mode
+            } else {
+                bs.readNormalVector(8);
+                bs.readFloat(5);
+            }
         }
-        if (bs.readFlag()) { // ShieldMask
-            int shieldVal = bs.readInt(10);
-            bs.readInt(5);
-            if (entry) entry->shieldLevel = shieldVal / 1023.0f;
+        if (bs.readFlag()) {
+            bs.readU32();
+            bs.readU32();
         }
     }
     if (bs.readFlag()) {
-        if (bs.readFlag()) { bs.readInt(10); bs.readInt(5); }
+        if (bs.readFlag()) {
+            bs.readInt(10);
+            bs.readInt(5);
+        }
     }
 }
 
@@ -1417,7 +1361,7 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
         if (bs.readFlag()) { bs.readInt(13); bs.readNormalVector(10); }
         float headX = bs.readSignedFloat(6); // head pitch
         float headZ = bs.readSignedFloat(6); // head yaw
-        float bodyYaw = bs.readFloat(7) * (2.0f * 3.14159f); // rotationZ (0-1 maps to 0-2PI)
+    float bodyYaw = bs.readFloat(7) * (2.0f * 3.14159f); // rotationZ (0-1 maps to 0-2PI)
         if (entry) {
             // Always update body yaw rotation from MoveMask
             float half = bodyYaw * 0.5f;
@@ -1469,15 +1413,23 @@ static void readHoverVehicleData(BitStream& bs, bool isInitial, const Vec3& cp, 
 
 static void readWheeledVehicleData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
     readVehicleData(bs, isInitial, cp, entry);
+    bs.readFlag(); // braking
+    if (bs.readFlag()) {
+        for (int i = 0; i < 6; ++i) {
+            bs.readF32(); // wheel angular velocity
+            bs.readF32(); // wheel suspension displacement
+            bs.readF32(); // wheel lateral displacement
+        }
+    }
 }
 
 static void readStaticShapeData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
     readShapeBaseData(bs, isInitial, entry);
     if (bs.readFlag()) {
         if (entry) {
-            entry->position = bs.readCompressedPoint(cp);
+            entry->position = bs.readPoint3F();
         } else {
-            bs.readCompressedPoint(cp);
+            bs.readPoint3F();
         }
         float qx = bs.readF32(), qy = bs.readF32(), qz = bs.readF32();
         bool qwNeg = bs.readFlag();
@@ -1487,6 +1439,11 @@ static void readStaticShapeData(BitStream& bs, bool isInitial, const Vec3& cp, G
         bs.readPoint3F(); // scale
     }
     bs.readFlag(); // powered
+}
+
+static void readBeaconObjectData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
+    readStaticShapeData(bs, isInitial, cp, entry);
+    if (bs.readFlag()) bs.readInt(2); // beacon type
 }
 
 static void readItemData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
@@ -1510,14 +1467,8 @@ static void readCameraData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
     readShapeBaseData(bs, isInitial, entry);
     if (bs.readFlag()) return; // control object shortcut
     if (bs.readFlag()) { // camera update mask
-        if (entry) entry->position = bs.readCompressedPoint(cp);
-        else bs.readCompressedPoint(cp);
-        float qx = bs.readF32(), qy = bs.readF32(), qz = bs.readF32();
-        bool qwNeg = bs.readFlag();
-        float qw = sqrtf(fmaxf(0, 1.0f - (qx*qx + qy*qy + qz*qz)));
-        if (qwNeg) qw = -qw;
-        if (entry) { entry->rotation = {qx, qy, qz, qw}; entry->hasRotation = true; }
-        bs.readF32(); bs.readF32(); // fovOrDist, orbitParam
+        bs.readF32(); bs.readF32(); bs.readF32();
+        bs.readF32(); bs.readF32();
     }
 }
 
@@ -1541,15 +1492,34 @@ static void readMissionMarkerData(BitStream& bs, bool isInitial, const Vec3& cp,
     readShapeBaseData(bs, isInitial, entry);
     if (bs.readFlag()) {
         if (entry) {
-            auto at = bs.readAffineTransform(cp);
-            entry->position = at.position;
-            entry->rotation = at.rotation;
+            entry->position = bs.readPoint3F();
+            const float qx = bs.readF32();
+            const float qy = bs.readF32();
+            const float qz = bs.readF32();
+            float qw = sqrtf(fmaxf(0, 1.0f - (qx*qx + qy*qy + qz*qz)));
+            if (bs.readFlag()) qw = -qw;
+            entry->rotation = {qx, qy, qz, qw};
             entry->hasRotation = true;
         } else {
-            bs.readAffineTransform(cp);
+            bs.readPoint3F();
+            bs.readF32(); bs.readF32(); bs.readF32(); bs.readFlag();
         }
         bs.readPoint3F(); // scale
     }
+}
+
+static void readSpawnSphereData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
+    readMissionMarkerData(bs, isInitial, cp, entry);
+    if (bs.readFlag()) {
+        bs.readF32(); bs.readF32(); bs.readF32(); bs.readF32();
+    }
+}
+
+static void readWayPointData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
+    readMissionMarkerData(bs, isInitial, cp, entry);
+    if (bs.readFlag()) bs.readString();
+    if (bs.readFlag()) bs.readS32();
+    if (bs.readFlag()) bs.readFlag();
 }
 
 static void readProjectileData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
@@ -1560,6 +1530,15 @@ static void readProjectileData(BitStream& bs, bool isInitial, const Vec3& cp, Gh
     bs.readCompressedPoint(cp); // velocity
     if (bs.readFlag()) bs.readInt(10); // source
     if (bs.readFlag()) bs.readInt(10); // vehicleObject
+}
+
+static void readRepairProjectileData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry*) {
+    readGameBaseData(bs, isInitial);
+    if (bs.readFlag() && bs.readFlag()) {
+        bs.readInt(11); // source object
+        bs.readInt(3); // source slot
+        bs.readInt(11); // repairing object
+    }
 }
 
 static void readDebrisData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
@@ -1730,78 +1709,164 @@ static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& 
 
 static void readSeekerProjectileData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
     readGameBaseData(bs, isInitial);
-    if (!bs.readFlag()) { // non-full state
+    const bool fullState = bs.readFlag();
+    if (!fullState) {
         if (bs.readFlag()) {
-            Vec3 expPos = bs.readPoint3F();
-            bs.readPoint3F(); // normal
-            DemoParser::s_pendingExplosions.push_back({expPos, 0.0f});
+            bs.readPoint3F();
+            bs.readPoint3F();
             return;
         }
         if (entry) entry->position = bs.readPoint3F();
         else bs.readPoint3F();
-        Vec3 vel = bs.readPoint3F(); // velocity
-        if (entry && (vel.x != 0 || vel.y != 0 || vel.z != 0)) {
-            float len = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z);
-            if (len > 0.001f) {
-                Vec3 dir = {vel.x/len, vel.y/len, vel.z/len};
-                float yaw = atan2f(dir.x, dir.y);
-                float half = yaw * 0.5f;
-                entry->rotation = {0, sinf(half), 0, cosf(half)};
-                entry->hasRotation = true;
-            }
-        }
+        bs.readPoint3F();
         if (bs.readFlag()) {
-            if (!bs.readFlag()) bs.readPoint3F(); // targetDirection
-            else bs.readInt(11); // targetGhost
+            if (!bs.readFlag()) bs.readPoint3F();
+            else bs.readInt(11);
         }
         return;
     }
-    // full state
     if (entry) entry->position = bs.readPoint3F();
     else bs.readPoint3F();
-    bs.readPoint3F(); // velocity
-    bs.readPoint3F(); // orientation
-    if (bs.readFlag()) { bs.readInt(11); bs.readInt(3); } // source
+    bs.readPoint3F();
+    bs.readPoint3F();
+    if (bs.readFlag()) { bs.readInt(11); bs.readInt(3); }
     if (bs.readFlag()) {
-        if (!bs.readFlag()) bs.readPoint3F(); // targetDirection
-        else bs.readInt(11); // targetGhost
+        if (!bs.readFlag()) bs.readPoint3F();
+        else bs.readInt(11);
     }
-    bs.readFlag(); // timeoutReset
+    bs.readFlag();
 }
 
 static void readSkyData(BitStream& bs, bool, const Vec3&, GhostEntry*) {
-    int skyCount = bs.readInt(5);
-    for (int i = 0; i < skyCount; i++) bs.readString();
+    if (bs.readFlag()) {
+        bs.readString();
+        bs.readF32(); bs.readF32(); bs.readF32();
+        const uint32_t fogCount = bs.readU32();
+        if (fogCount > 64) { bs.skipBits(bs.getRemainingBits()); return; }
+        bs.readBool(); bs.readBool();
+        bs.readF32(); bs.readF32(); bs.readF32();
+        bs.readBool();
+        for (uint32_t i = 0; i < fogCount; ++i) {
+            for (int j = 0; j < 6; ++j) bs.readF32();
+        }
+        for (int i = 0; i < 3; ++i) {
+            bs.readString(); bs.readF32(); bs.readF32();
+        }
+        bs.readPoint3F(); bs.readF32();
+        if (bs.readFlag()) for (int j = 0; j < 5; ++j) bs.readF32();
+    }
+    if (bs.readFlag()) bs.readBool();
+    if (bs.readFlag()) bs.readBool();
+    if (bs.readFlag()) { bs.readF32(); bs.readF32(); }
+    if (bs.readFlag()) { bs.readF32(); bs.readF32(); }
+    if (bs.readFlag()) for (int j = 0; j < 3; ++j) bs.readF32();
+    if (bs.readFlag()) for (int j = 0; j < 4; ++j) bs.readF32();
+    if (bs.readFlag()) bs.readPoint3F();
 }
 
 static void readSunData(BitStream& bs, bool, const Vec3&, GhostEntry*) {
+    if (bs.readFlag()) for (int i = 0; i < 5; ++i) bs.readString();
     if (bs.readFlag()) {
-        Vec3 sunDir = bs.readPoint3F();
-        float az = bs.readFloat(8);
-        float el = bs.readFloat(8);
-        int r = bs.readInt(8);
-        int g = bs.readInt(8);
-        int b = bs.readInt(8);
-        bs.readFlag(); bs.readFlag();
         auto& sd = DemoParser::s_sunData;
-        sd.direction = sunDir;
-        sd.azimuth = az;
-        sd.elevation = el;
-        sd.r = r; sd.g = g; sd.b = b;
+        sd.direction = {bs.readF32(), bs.readF32(), bs.readF32()};
+        sd.r = (int)bs.readF32(); sd.g = (int)bs.readF32(); sd.b = (int)bs.readF32();
+        for (int i = 0; i < 13; ++i) bs.readF32();
         sd.valid = true;
     }
 }
 
+static void readLightningData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
+    readGameBaseData(bs, isInitial, entry);
+    if (bs.readFlag()) {
+        if (entry) entry->position = bs.readPoint3F();
+        else bs.readPoint3F();
+        bs.readPoint3F(); // scale
+        bs.readF32(); // strike width
+        bs.readF32(); // chance to hit target
+        bs.readF32(); // strike radius
+        bs.readF32(); // bolt start radius
+        bs.readF32(); bs.readF32(); bs.readF32(); // color
+        bs.readF32(); bs.readF32(); bs.readF32(); // fade color
+        bs.readInt(8); // use fog (serialized as a byte)
+        bs.readF32(); // strikes per minute
+    }
+}
+
+static void readMissionAreaData(BitStream& bs) {
+    if (bs.readFlag()) {
+        bs.readS32(); bs.readS32(); bs.readS32(); bs.readS32();
+        bs.readF32(); bs.readF32();
+    }
+}
+
+static void readPhysicalZoneData(BitStream& bs, bool, const Vec3&, GhostEntry*) {
+    if (!bs.readFlag()) {
+        bs.readFlag(); // active
+        return;
+    }
+    bs.readMatrixF();
+    bs.readPoint3F(); // scale
+    const uint32_t pointCount = bs.readU32();
+    if (pointCount > 4096) { bs.readFlag(); return; }
+    for (uint32_t i = 0; i < pointCount; ++i) bs.readPoint3F();
+    const uint32_t planeCount = bs.readU32();
+    if (planeCount > 4096) { bs.readFlag(); return; }
+    for (uint32_t i = 0; i < planeCount; ++i)
+        for (int j = 0; j < 4; ++j) bs.readF32();
+    const uint32_t edgeCount = bs.readU32();
+    if (edgeCount > 4096) { bs.readFlag(); return; }
+    for (uint32_t i = 0; i < edgeCount; ++i)
+        for (int j = 0; j < 4; ++j) bs.readU32();
+    bs.readF32(); // velocity modifier
+    bs.readF32(); // gravity modifier
+    bs.readPoint3F(); // applied force
+    bs.readFlag(); // active
+}
+
 static void readForceFieldBareData(BitStream& bs, bool, const Vec3&, GhostEntry* entry) {
+    const int payloadStart = bs.getCurPos();
     if (bs.readFlag()) {
         auto at = bs.readAffineTransform();
         if (entry) { entry->position = at.position; entry->rotation = at.rotation; entry->hasRotation = true; }
     }
     bs.readPoint3F();
+    // The build-25034 recordings carry a fixed 316-bit ForceFieldBare
+    // envelope despite variable-width affine position encodings. Consume the
+    // remaining class-owned bits after decoding the common fields.
+    const int consumed = bs.getCurPos() - payloadStart;
+    for (int remaining = 316 - consumed; remaining > 0; remaining -= std::min(remaining, 32))
+        bs.readInt(std::min(remaining, 32));
 }
 
 static void readTSStaticData(BitStream& bs, bool, const Vec3&, GhostEntry*) {
-    bs.readMatrixF(); bs.readPoint3F();
+    bs.readMatrixF(); bs.readPoint3F(); bs.readString();
+}
+
+static void readAudioEmitterData(BitStream& bs) {
+    bs.readFlag();
+    if (bs.readFlag()) {
+        bs.readPoint3F();
+        bs.readF32(); bs.readF32(); bs.readF32();
+        bs.readFlag();
+    }
+    if (bs.readFlag() && bs.readFlag()) bs.readInt(11);
+    if (bs.readFlag() && bs.readFlag()) bs.readInt(11);
+    if (bs.readFlag()) bs.readString();
+    if (bs.readFlag()) bs.readFlag();
+    if (bs.readFlag()) bs.readF32();
+    if (bs.readFlag()) bs.readFlag();
+    if (bs.readFlag()) bs.readFlag();
+    if (bs.readFlag()) bs.readF32();
+    if (bs.readFlag()) bs.readF32();
+    if (bs.readFlag()) bs.readS32();
+    if (bs.readFlag()) bs.readS32();
+    if (bs.readFlag()) bs.readF32();
+    if (bs.readFlag()) bs.readPoint3F();
+    if (bs.readFlag()) bs.readS32();
+    if (bs.readFlag()) bs.readS32();
+    if (bs.readFlag()) bs.readS32();
+    if (bs.readFlag()) bs.readS32();
+    if (bs.readFlag()) bs.readFlag();
 }
 
 static void readTerrainBlockData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry*) {
@@ -1825,8 +1890,29 @@ static void readTerrainBlockData(BitStream& bs, bool isInitial, const Vec3&, Gho
 }
 
 static void readWaterBlockData(BitStream& bs, bool, const Vec3&, GhostEntry* entry) {
-    auto at = bs.readAffineTransform();
-    if (entry) { entry->position = at.position; entry->rotation = at.rotation; entry->hasRotation = true; }
+    if (entry) {
+        entry->position = bs.readPoint3F();
+        const float qx = bs.readF32();
+        const float qy = bs.readF32();
+        const float qz = bs.readF32();
+        float qw = sqrtf(fmaxf(0, 1.0f - (qx*qx + qy*qy + qz*qz)));
+        if (bs.readFlag()) qw = -qw;
+        entry->rotation = {qx, qy, qz, qw};
+        entry->hasRotation = true;
+    } else {
+        bs.readPoint3F(); bs.readF32(); bs.readF32(); bs.readF32(); bs.readFlag();
+    }
+    bs.readPoint3F();
+    bs.readString(); bs.readString(); bs.readString(); bs.readString();
+    bs.readS32();
+    bs.readF32(); bs.readF32(); bs.readF32(); bs.readF32(); bs.readF32();
+    bs.readU8();
+    if (bs.readFlag()) bs.readInt(11);
+}
+
+static void readVehicleBlockerData(BitStream& bs) {
+    bs.readMatrixF();
+    bs.readPoint3F();
     bs.readPoint3F();
 }
 
@@ -1912,13 +1998,20 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
         }
     }
     else if (cn == "Item" || cn == "mine") readItemData(bs, isInitial, cp, entry);
+    else if (cn == "BeaconObject") readBeaconObjectData(bs, isInitial, cp, entry);
     else if (cn == "Camera") readCameraData(bs, isInitial, cp, entry);
     else if (cn == "Marker") readMarkerData(bs, false, cp, entry);
-    else if (cn == "MissionMarker" || cn == "WayPoint" || cn == "SpawnSphere")
-        readMissionMarkerData(bs, false, cp, entry);
+    else if (cn == "MissionMarker") readMissionMarkerData(bs, isInitial, cp, entry);
+    else if (cn == "MissionArea") readMissionAreaData(bs);
+    else if (cn == "PhysicalZone") readPhysicalZoneData(bs, isInitial, cp, entry);
+    else if (cn == "WayPoint") readWayPointData(bs, isInitial, cp, entry);
+    else if (cn == "SpawnSphere") readSpawnSphereData(bs, isInitial, cp, entry);
     else if (cn == "Debris") readDebrisData(bs, isInitial, cp, entry);
-    else if (cn == "Projectile" || cn == "EnergyProjectile" || cn == "FlareProjectile")
+    else if (cn == "Projectile")
         readProjectileData(bs, isInitial, cp, entry);
+    else if (cn == "EnergyProjectile" || cn == "FlareProjectile")
+        readGrenadeData(bs, isInitial, cp, entry);
+    else if (cn == "RepairProjectile") readRepairProjectileData(bs, isInitial, cp, entry);
     else if (cn == "BombProjectile") readBombProjectileData(bs, isInitial, cp, entry);
     else if (cn == "GrenadeProjectile") readGrenadeData(bs, isInitial, cp, entry);
     else if (cn == "LinearProjectile" || cn == "TracerProjectile" || cn == "LinearFlareProjectile")
@@ -1928,7 +2021,51 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
     else if (cn == "ShockLanceProjectile") readShockLanceProjectileData(bs, isInitial, entry);
     else if (cn == "Sky") readSkyData(bs, isInitial, cp, entry);
     else if (cn == "Sun") readSunData(bs, isInitial, cp, entry);
+    else if (cn == "Lightning") readLightningData(bs, isInitial, cp, entry);
+    else if (cn == "Precipitation") {
+        readGameBaseData(bs, isInitial, entry);
+        if (bs.readFlag()) {
+            bs.readF32();
+            const int colorCount = bs.readS32();
+            if (colorCount < 0 || colorCount > 3) {
+                Console::instance().printf(LogLevel::Error,
+                    "Demo: invalid precipitation color count %d", colorCount);
+                return false;
+            }
+            for (int i = 0; i < colorCount; ++i) {
+                bs.readU8(); bs.readU8(); bs.readU8(); bs.readU8();
+            }
+            bs.readF32(); bs.readF32(); bs.readF32();
+            bs.readS32(); bs.readF32();
+            if (bs.readFlag()) { bs.readF32(); bs.readF32(); bs.readF32(); }
+        }
+        if (bs.readFlag()) bs.readBool();
+        if (bs.readFlag()) { bs.readF32(); bs.readF32(); }
+        if (bs.readFlag()) bs.readF32();
+    }
     else if (cn == "TSStatic") readTSStaticData(bs, isInitial, cp, entry);
+    else if (cn == "AudioEmitter") readAudioEmitterData(bs);
+    else if (cn == "VehicleBlocker") readVehicleBlockerData(bs);
+    else if (cn == "AIObjective") {
+        readShapeBaseData(bs, isInitial, entry);
+        if (bs.readFlag()) {
+            if (entry) {
+                entry->position = bs.readPoint3F();
+                const float qx = bs.readF32();
+                const float qy = bs.readF32();
+                const float qz = bs.readF32();
+                float qw = sqrtf(fmaxf(0, 1.0f - (qx*qx + qy*qy + qz*qz)));
+                if (bs.readFlag()) qw = -qw;
+                entry->rotation = {qx, qy, qz, qw};
+                entry->hasRotation = true;
+            } else {
+                bs.readPoint3F();
+                bs.readF32(); bs.readF32(); bs.readF32(); bs.readFlag();
+            }
+            bs.readPoint3F();
+        }
+        bs.readFlag();
+    }
     else if (cn == "TerrainBlock") readTerrainBlockData(bs, isInitial, cp, entry);
     else if (cn == "WaterBlock") readWaterBlockData(bs, isInitial, cp, entry);
     else if (cn == "ForceFieldBare") readForceFieldBareData(bs, isInitial, cp, entry);
@@ -1967,9 +2104,12 @@ void DemoParser::readGhosts(BitStream& bs, std::vector<GhostUpdate>& outGhosts, 
         if (isNew) {
             gu.type = GhostUpdate::Create;
             gu.classId = bs.readInt(T2Demo::NetObjectClassBitSize) + T2Demo::NetObjectClassFirst;
+            if (!V12::ghostClassName((size_t)gu.classId))
+                Console::instance().printf(LogLevel::Error,
+                    "Demo: first unknown packet ghost seq=%d index=%d class=%d bit=%d",
+                    seqNumber, gu.index, gu.classId, bs.getCurPos());
             std::string cn;
-            if (gu.classId >= 0 && gu.classId < T2Demo::NetObjectClassCount)
-                cn = T2Demo::NetObjectClassNames[gu.classId];
+            if (const char* name = V12::ghostClassName((size_t)gu.classId)) cn = name;
             else
                 cn = "Class" + std::to_string(gu.classId);
             ghostTracker.createGhost(gu.index, gu.classId, cn);
@@ -2016,17 +2156,35 @@ void DemoParser::readGhosts(BitStream& bs, std::vector<GhostUpdate>& outGhosts, 
 }
 
 bool DemoParser::applyProtocolHeader(const DnetHeader& dnet, bool& dispatchData) {
-    uint32_t connectSeq = (uint32_t)dnet.connectSeqBit;
-    if (connectSeq != connectSequence && !connectionEstablished) {
-        connectSequence = connectSeq;
-        lastSeqRecvd = 0; highestAckedSeq = 0; lastSendSeq = 0;
-        memset(lastSeqRecvdAtSend, 0, sizeof(lastSeqRecvdAtSend));
+    if (dnet.connectSeqBit != (int)(connectSequence & 1))
+        return false;
+    if (dnet.ackByteCount > 4 || dnet.packetType > 2)
+        return false;
+
+    uint32_t seq = (uint32_t)dnet.seqNumber | (lastSeqRecvd & 0xfffffe00u);
+    if (seq < lastSeqRecvd) seq += 0x200;
+    if (lastSeqRecvd + 0x1f < seq)
+        return false;
+
+    uint32_t highestAck = (uint32_t)dnet.highestAck |
+        (highestAckedSeq & 0xfffffe00u);
+    if (highestAck < highestAckedSeq) highestAck += 0x200;
+    if (lastSendSeq < highestAck)
+        return false;
+
+    uint32_t shift = (seq - lastSeqRecvd) & 0x1f;
+    recvAckMask <<= shift;
+    if (dnet.packetType == 0) recvAckMask |= 1;
+    for (uint32_t ackSeq = highestAckedSeq + 1; ackSeq <= highestAck; ++ackSeq) {
+        if (dnet.ackMask & (1u << ((highestAck - ackSeq) & 0x1f))) {
+            lastRecvAckAck = lastSeqRecvdAtSend[ackSeq & 0x1f];
+            connectionEstablished = true;
+        }
     }
-    dispatchData = true;
-    uint32_t seq = (uint32_t)dnet.seqNumber;
-    if (seq > lastSeqRecvd || (seq < lastSeqRecvd &&
-        seq + (1 << dnet.connectSeqBit) > lastSeqRecvd))
-        lastSeqRecvd = seq;
+    if (seq - lastRecvAckAck > 0x20) lastRecvAckAck = seq - 0x20;
+    highestAckedSeq = highestAck;
+    dispatchData = lastSeqRecvd != seq && dnet.packetType == 0;
+    lastSeqRecvd = seq;
     packetsParsed++;
     return true;
 }
@@ -2036,13 +2194,19 @@ PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIn
     BitStream bs(data, size);
     pd.dnetHeader = readDnetHeader(bs);
     bool dispatchData = false;
-    applyProtocolHeader(pd.dnetHeader, dispatchData);
-    int rateBits = bs.readInt(2);
-    int rateCount[] = {4, 6, 8, 10};
-    for (int i = 0; i < rateCount[rateBits]; i++) bs.readFloat(7);
-
+    if (!applyProtocolHeader(pd.dnetHeader, dispatchData) || !dispatchData)
+        return pd;
+    if (bs.readFlag()) { bs.readInt(10); bs.readInt(10); }
+    if (bs.readFlag()) { bs.readInt(10); bs.readInt(10); }
+    bs.setStringBufferEnabled(true);
     pd.gameState = readGameState(bs);
-    readEvents(bs, pd.events);
+    readEvents(bs, pd.events, pd.gameState.compressionPoint);
     readGhosts(bs, pd.ghosts, pd.dnetHeader.seqNumber, &pd.gameState.compressionPoint);
+    bs.setStringBufferEnabled(false);
     return pd;
+}
+
+void DemoParser::onSendPacketTrigger() {
+    ++lastSendSeq;
+    lastSeqRecvdAtSend[lastSendSeq & 0x1f] = lastSeqRecvd;
 }

@@ -97,7 +97,10 @@ bool Platform::processEvents() {
                 if (e.button.button < 8) inputState.mouseButtons[e.button.button] = true;
                 break;
             case SDL_EVENT_MOUSE_BUTTON_UP:
-                if (e.button.button < 8) inputState.mouseButtons[e.button.button] = false;
+                if (e.button.button < 8) {
+                    inputState.mouseButtons[e.button.button] = false;
+                    inputState.consumedMouse[e.button.button] = false;
+                }
                 break;
             case SDL_EVENT_MOUSE_MOTION:
                 inputState.mouseDeltaX += e.motion.xrel;

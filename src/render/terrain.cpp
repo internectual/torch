@@ -1,6 +1,5 @@
 #include "render/renderer.h"
 #include "render/shader.h"
-#include "render/glb_loader.h"
 #include "render/dts_loader.h"
 #include "render/dif_loader.h"
 #include "core/engine.h"
@@ -36,7 +35,9 @@ float TerrainBlock::sampleHeight(float wx, float wz) const {
 void TerrainBlock::generateMesh() {
     if (heights.empty()) return;
 
-    int32_t gridRes = 128;
+    // Preserve the native terrain sample grid. Downsampling the 256x256 TER
+    // into a 128x128 mesh changes silhouettes and makes map comparisons fail.
+    int32_t gridRes = size;
     float totalWorldSize = (float)size * squareSize;
     float step = totalWorldSize / (float)gridRes;
 
@@ -59,20 +60,8 @@ void TerrainBlock::generateMesh() {
             if (nlen > 0) { n.x /= nlen; n.y /= nlen; n.z /= nlen; }
 
             verts.push_back({{wx, h, wz}, n, {(float)x / gridRes, (float)z / gridRes}, {0,0}, {1,1,1,1}});
-            float hn = (h + 10.0f) / 40.0f;
-            hn = std::max(0.0f, std::min(1.0f, hn));
-            ColorF vc;
-            if (hn < 0.3f) {
-                float t = hn / 0.3f;
-                vc = {0.2f + t * 0.2f, 0.4f + t * 0.3f, 0.1f + t * 0.1f, 1.0f};
-            } else if (hn < 0.6f) {
-                float t = (hn - 0.3f) / 0.3f;
-                vc = {0.4f + t * 0.2f, 0.7f - t * 0.3f, 0.2f - t * 0.1f, 1.0f};
-            } else {
-                float t = (hn - 0.6f) / 0.4f;
-                vc = {0.6f + t * 0.3f, 0.4f + t * 0.4f, 0.1f + t * 0.5f, 1.0f};
-            }
-            verts.back().color = vc;
+            // Terrain coloration comes from the native material layers and
+            // lightmap, not from an elevation-based replacement tint.
         }
     }
 
@@ -185,70 +174,9 @@ void TerrainBlock::bakeLightmap() {
 bool TerrainBlock::load(const uint8_t* data, size_t size) {
     Console::instance().printf(LogLevel::Debug, "Terrain load: %zu bytes", size);
     if (!data || size < 4) {
-        // Generate procedural terrain
-        Console::instance().printf(LogLevel::Info, "Terrain: generating procedural terrain");
-        uint32_t dim = 256;
-        if (data && size >= 4) {
-            uint32_t n = reinterpret_cast<const uint32_t*>(data)[0];
-            if (n > 0 && n < 8192) dim = n; // sanity bound to avoid bad_alloc
-        }
-        heights.resize((size_t)dim * dim, 0.0f);
-        uint32_t s = (uint32_t)std::sqrt((float)heights.size());
-        if (s > 0) this->size = s;
-        for (int32_t z = 0; z < this->size; z++)
-            for (int32_t x = 0; x < this->size; x++)
-                heights[z * this->size + x] = (std::sin(x * 0.03f) * std::cos(z * 0.04f) * 20.0f
-                    + std::sin(x * 0.07f + 1.3f) * std::cos(z * 0.08f + 0.7f) * 8.0f
-                    + std::sin(x * 0.15f + 3.1f) * std::cos(z * 0.12f + 2.3f) * 3.0f);
-        generateMesh();
-        // Generate procedural splatmap for texture blending
-        {
-            int S = 128;
-            std::vector<uint8_t> splatPixels(S * S * 4);
-            for (int y = 0; y < S; y++) {
-                for (int x = 0; x < S; x++) {
-                    float fx = (float)x / S, fy = (float)y / S;
-                    float n1 = sinf(fx * 12.0f + fy * 8.0f) * 0.5f + 0.5f;
-                    float n2 = sinf(fx * 5.0f + fy * 15.0f + 1.3f) * 0.5f + 0.5f;
-                    float n3 = sinf(fx * 20.0f - fy * 7.0f + 3.7f) * 0.5f + 0.5f;
-                    float n4 = sinf(fx * 0.3f + fy * 0.7f) * 0.5f + 0.5f;
-                    float total = n1 + n2 + n3 + n4;
-                    if (total < 0.01f) total = 0.01f;
-                    splatPixels[(y * S + x) * 4 + 0] = (uint8_t)(n1 / total * 255);
-                    splatPixels[(y * S + x) * 4 + 1] = (uint8_t)(n2 / total * 255);
-                    splatPixels[(y * S + x) * 4 + 2] = (uint8_t)(n3 / total * 255);
-                    splatPixels[(y * S + x) * 4 + 3] = (uint8_t)(n4 / total * 255);
-                }
-            }
-            splatMap.loadRaw(splatPixels.data(), S, S, 4);
-            // Try loading some default terrain textures
-            auto& fs = Engine::instance().fs();
-            const char* texNames[] = {
-                "textures/terrain/LushWorld.DirtMossy",
-                "textures/terrain/LushWorld.Dirt",
-                "textures/terrain/LushWorld.Grass",
-                "textures/terrain/LushWorld.Rock",
-            };
-            for (int i = 0; i < 4; i++) {
-                for (auto* ext : {".png", ".bm8", ".jpg"}) {
-                    auto d = fs.read((std::string(texNames[i]) + ext).c_str());
-                    if (!d.empty()) {
-                        Texture t;
-                        if (strcmp(ext, ".bm8") == 0) t.loadBM8(d.data(), d.size());
-                        else t.load(d.data(), d.size());
-                        if (t.loaded) { detailTextures.push_back(std::move(t)); break; }
-                    }
-                }
-                if ((int)detailTextures.size() <= i) {
-                    Texture white;
-                    std::vector<uint8_t> whitePx(16, 200);
-                    white.loadRaw(whitePx.data(), 2, 2, 4);
-                    detailTextures.push_back(std::move(white));
-                }
-            }
-        }
-        loaded = true;
-        return true;
+        Console::instance().printf(LogLevel::Error,
+            "Terrain: native .ter data is missing or truncated");
+        return false;
     }
 
     // Parse .ter heightmap format
@@ -442,14 +370,6 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
     while (normalTextures.size() < 6) {
         Texture empty;
         normalTextures.push_back(std::move(empty));
-    }
-
-    // Pad with white textures if less than 6 layers
-    while (detailTextures.size() < 6) {
-        Texture white;
-        std::vector<uint8_t> whitePx(4 * 4 * 4, 255);
-        white.loadRaw(whitePx.data(), 4, 4, 4);
-        detailTextures.push_back(std::move(white));
     }
 
     generateMesh();
@@ -890,14 +810,11 @@ void Sky::load(const std::vector<std::string>& faces) {
     for (int i = 0; i < kMaxFaces; i++) {
         int size = maxSize > 0 ? maxSize : 256;
         if (!faceLoaded[i]) {
-            // Missing/decode-failed face: fill with a mid-sky color so the cubemap
-            // stays complete instead of rendering black.
-            std::vector<uint8_t> fill(size * size * 4, 0);
-            for (size_t p = 0; p < fill.size(); p += 4) {
-                fill[p] = 138; fill[p + 1] = 172; fill[p + 2] = 216; fill[p + 3] = 255;
-            }
-            glTexImage2D(kCubemapFaceForDML[i], 0, GL_RGBA, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, fill.data());
-            continue;
+            Console::instance().printf(LogLevel::Error,
+                "Sky: required native sky face failed to load: %s",
+                i < (int)faces.size() ? faces[i].c_str() : "(missing DML face)");
+            loaded = false;
+            return;
         }
         // Upscale small faces (e.g. the 4x4 down face) to cubemap-complete size.
         if (faceW[i] != size || faceH[i] != size) {
@@ -958,18 +875,11 @@ void Sky::render(const MatrixF& view, const MatrixF& proj) {
     MatrixF invVP = (proj * view).inverse();
     shader->setUniform("uInvViewProj", invVP);
 
-    if (loaded && cubemap) {
-        // Cubemap sky
-        shader->setUniform("uUseGradient", (int32_t)0);
-        shader->setUniform("uSkybox", 0);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap);
-    } else {
-        // Gradient sky fallback (no cubemap available)
-        shader->setUniform("uUseGradient", (int32_t)1);
-        shader->setUniform("uGradTop", Point3F{0.2f, 0.4f, 0.7f});
-        shader->setUniform("uGradBot", Point3F{0.75f, 0.8f, 0.85f});
-    }
+    if (!loaded || !cubemap) return;
+    shader->setUniform("uUseGradient", (int32_t)0);
+    shader->setUniform("uSkybox", 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap);
 
     // Ensure VAO exists (create on first render if needed)
     if (!vao) {
@@ -1065,6 +975,7 @@ void Sky::render(const MatrixF& view, const MatrixF& proj) {
     glDepthFunc(GL_LESS);
 }
 
+#if 0 // GLB is a diagnostic/interchange format, never a production asset path.
 bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
     ::GLBMesh glb = ::loadGLB(data, size);
     if (glb.meshes.empty()) return false;
@@ -1174,6 +1085,7 @@ bool DTSShape::loadGLB(const uint8_t* data, size_t size) {
     loaded = true;
     return true;
 }
+#endif
 
 // DTS/DIF shape loader — parses Torque DTS binary or DIF interior format
 bool DTSShape::load(const uint8_t* data, size_t size) {
@@ -1201,6 +1113,7 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
 
     // Try native DTS loading
     try {
+    nativeDTS = false;
     DTSLoadResult dtsResult = loadDTS(data, size, name.c_str());
     if (dtsResult.loaded) {
         meshes = std::move(dtsResult.meshes);
@@ -1226,9 +1139,10 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
             details.push_back(dl);
         }
 
-        // DTS data is read with Y/Z swap in DTSBuf, converting from T2's native
-        // Z-up to OpenGL's Y-up. No render-time czUpToYUp needed.
+        // Native DTS data was canonicalized to the renderer basis by loadDTS.
+        // No additional render-time axis conversion is needed.
         upConvert = false;
+        nativeDTS = true;
 
         loaded = true;
         return true;
@@ -1326,9 +1240,22 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     // Build effective node transforms, applying any overrides
     std::vector<MatrixF> nodeWorld = defaultTransforms;
     if (overrides && numOverrides > 0) {
+        std::vector<MatrixF> nodeLocal = defaultLocalTransforms;
         for (int i = 0; i < numOverrides; i++) {
-            if (overrides[i].nodeIndex >= 0 && overrides[i].nodeIndex < (int)nodeWorld.size())
-                nodeWorld[overrides[i].nodeIndex] = overrides[i].transform;
+            const int32_t nodeIndex = overrides[i].nodeIndex;
+            if (nodeIndex < 0 || nodeIndex >= (int)nodeWorld.size()) continue;
+            const int32_t parentIndex = nodes[nodeIndex].parentIndex;
+            if (parentIndex >= 0 && parentIndex < (int)nodeWorld.size())
+                nodeLocal[nodeIndex] = defaultTransforms[parentIndex].inverse() * overrides[i].transform;
+            else
+                nodeLocal[nodeIndex] = overrides[i].transform;
+        }
+        for (int32_t i = 0; i < (int32_t)nodeWorld.size(); i++) {
+            const int32_t parentIndex = nodes[i].parentIndex;
+            if (parentIndex >= 0 && parentIndex < (int32_t)nodeWorld.size())
+                nodeWorld[i] = nodeWorld[parentIndex] * nodeLocal[i];
+            else
+                nodeWorld[i] = nodeLocal[i];
         }
     }
     const MatrixF baseModel = r.modelMatrix();
@@ -1523,18 +1450,32 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
 int DTSShape::findNode(const std::string& name) const {
     for (int i = 0; i < (int)nodes.size(); i++)
         if (nodes[i].name == name) return i;
+    std::string wanted = name;
+    for (char& c : wanted) c = (char)std::tolower((unsigned char)c);
+    for (int i = 0; i < (int)nodes.size(); i++) {
+        std::string candidate = nodes[i].name;
+        for (char& c : candidate) c = (char)std::tolower((unsigned char)c);
+        if (candidate == wanted) return i;
+    }
     return -1;
 }
 
-void DTSShape::renderAnimation(const char* animName, float time) {
+void DTSShape::renderAnimation(const char* animName, float time,
+                               const NodeOverride* overrides, int numOverrides) {
     if (!loaded) return;
 
     // Find the animation
     const Animation* anim = nullptr;
+    std::string wanted = animName ? animName : "";
+    for (char& c : wanted) c = (char)std::tolower((unsigned char)c);
     for (auto& a : animations) {
-        if (a.name == animName) { anim = &a; break; }
+        std::string candidate = a.name;
+        for (char& c : candidate) c = (char)std::tolower((unsigned char)c);
+        if (candidate == wanted) { anim = &a; break; }
     }
-    if (!anim) { render(0); return; }
+    if (!anim) { render(0, overrides, numOverrides); return; }
+
+    const Animation* objectAnim = anim;
 
     // Wrap time for looping animations
     float t = time;
@@ -1668,6 +1609,7 @@ void DTSShape::renderAnimation(const char* animName, float time) {
 
     // ── Step 3: Build local matrices and compose world transforms ──
     // T2: setMatrix(rot, trans, &local) then world[i] = world[parent] * local
+    std::vector<MatrixF> nodeLocal(numNodes);
     std::vector<MatrixF> nodeWorld(numNodes);
     for (int32_t i = 0; i < numNodes; i++) {
         MatrixF local;
@@ -1687,6 +1629,8 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             local = defaultLocalTransforms[i];
         }
 
+        nodeLocal[i] = local;
+
         // Compose with parent
         int32_t pi = nodes[i].parentIndex;
         if (pi >= 0 && pi < numNodes)
@@ -1695,21 +1639,44 @@ void DTSShape::renderAnimation(const char* animName, float time) {
             nodeWorld[i] = local;
     }
 
+    // Overrides are supplied as world transforms. Convert each one back into
+    // the node's local frame before composition so descendants inherit the
+    // changed parent transform instead of remaining in the old world frame.
+    if (overrides && numOverrides > 0) {
+        for (int i = 0; i < numOverrides; i++) {
+            const int32_t nodeIndex = overrides[i].nodeIndex;
+            if (nodeIndex < 0 || nodeIndex >= numNodes) continue;
+            const int32_t parentIndex = nodes[nodeIndex].parentIndex;
+            if (parentIndex >= 0 && parentIndex < numNodes)
+                nodeLocal[nodeIndex] = nodeWorld[parentIndex].inverse() * overrides[i].transform;
+            else
+                nodeLocal[nodeIndex] = overrides[i].transform;
+        }
+        for (int32_t i = 0; i < numNodes; i++) {
+            const int32_t parentIndex = nodes[i].parentIndex;
+            if (parentIndex >= 0 && parentIndex < numNodes)
+                nodeWorld[i] = nodeWorld[parentIndex] * nodeLocal[i];
+            else
+                nodeWorld[i] = nodeLocal[i];
+        }
+    }
+
     // ── Step 4: Handle object-level vis/frame/matFrame animation ──
     std::vector<bool> objectVisible(objectStartMesh.size() > 0 ? objectStartMesh.size() : defaultTransforms.size(), true);
     std::vector<int32_t> objectMatFrame(objectVisible.size(), 0);
-    if (!anim->objectKeyframes.empty()) {
-        for (size_t okfIdx = 0; okfIdx < anim->objectKeyframes.size(); ) {
-            const auto& okf = anim->objectKeyframes[okfIdx];
+    if (!objectAnim->objectKeyframes.empty()) {
+        const float objectTime = std::min(t, objectAnim->duration);
+        for (size_t okfIdx = 0; okfIdx < objectAnim->objectKeyframes.size(); ) {
+            const auto& okf = objectAnim->objectKeyframes[okfIdx];
             int32_t objIdx = okf.objectIndex;
             if (objIdx < 0 || objIdx >= (int32_t)objectVisible.size()) { okfIdx++; continue; }
             float lastVis = 1.0f;
             int32_t lastMatFrame = 0;
-            while (okfIdx < anim->objectKeyframes.size() &&
-                   anim->objectKeyframes[okfIdx].objectIndex == objIdx) {
-                if (anim->objectKeyframes[okfIdx].time <= t) {
-                    lastVis = anim->objectKeyframes[okfIdx].vis;
-                    lastMatFrame = anim->objectKeyframes[okfIdx].matFrameIndex;
+            while (okfIdx < objectAnim->objectKeyframes.size() &&
+                   objectAnim->objectKeyframes[okfIdx].objectIndex == objIdx) {
+                if (objectAnim->objectKeyframes[okfIdx].time <= objectTime) {
+                    lastVis = objectAnim->objectKeyframes[okfIdx].vis;
+                    lastMatFrame = objectAnim->objectKeyframes[okfIdx].matFrameIndex;
                 }
                 okfIdx++;
             }
@@ -1744,7 +1711,6 @@ void DTSShape::renderAnimation(const char* animName, float time) {
     // Two-pass render: opaque first (depth writes ON), then translucent (blending ON)
     auto renderAnimMesh = [&](size_t mi, bool doBlend) {
         MeshData& mesh = meshes[mi];
-
         // Apply skinned mesh deformation if needed
         if (mi < skins.size() && skins[mi].hasSkin) {
             updateSkinnedMesh(mesh, skins[mi], nodeWorld, defaultTransforms);
