@@ -79,7 +79,9 @@ Options:
 | Command | Description |
 |---------|-------------|
 | `connect <host> [port]` | Connect to a server |
+| `watchServer <host:port>` | Connect as an anonymous native UDP observer |
 | `playdemo <path>` | Play a .rec demo file |
+| `seekDemoBlock <index>` | Seek the active demo to a block index |
 | `testshape <path>` | Load a test DTS/GLB shape |
 | `quit` | Exit |
 
@@ -105,6 +107,11 @@ Options:
   authoritative movement, AI bots, and CTF/DM/Team DM game modes
 - **game/game.cpp** – Client with rendering, input, ghost tracking
 - **game/demo.h** – Ghost tracker, demo parser
+
+Native observer connections do not send player movement or arbitrary remote
+commands. They only send the required `setPlayerTeam 0`, `ScopeCommanderMap 1`,
+and `WatchOnly ImaWatcher` setup commands; demo playback remains local and does
+not require a relay or WebSocket dependency.
 
 ## License
 

@@ -7,8 +7,17 @@
 #include <cstdlib>
 #include <thread>
 #include <chrono>
+#include <fcntl.h>
+#include <unistd.h>
 
 int main(int argc, char* argv[]) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            printf("Torch Dedicated Server\n");
+            printf("Usage: torch_server [-p port] [-m mission] [-h]\n");
+            return 0;
+        }
+    }
     auto& engine = Engine::instance();
     if (!engine.init(argc, argv)) {
         fprintf(stderr, "Failed to initialize engine\n");
@@ -20,11 +29,6 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) port = (uint16_t)atoi(argv[++i]);
         else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) mission = argv[++i];
-        else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Torch Dedicated Server\n");
-            printf("Usage: torch_server [-p port] [-m mission] [-h]\n");
-            return 0;
-        }
     }
 
     Console::instance().printf(LogLevel::Info, "Torch Dedicated Server starting on port %d...", port);
@@ -49,6 +53,8 @@ int main(int argc, char* argv[]) {
 
     Console::instance().printf(LogLevel::Info, "Server running. Type 'quit' to stop.");
 
+    const int stdinFlags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    if (stdinFlags >= 0) fcntl(STDIN_FILENO, F_SETFL, stdinFlags | O_NONBLOCK);
     bool running = true;
     while (running) {
         server.update();
@@ -74,6 +80,7 @@ int main(int argc, char* argv[]) {
     }
 
     server.stop();
+    if (stdinFlags >= 0) fcntl(STDIN_FILENO, F_SETFL, stdinFlags);
     engine.shutdown();
     Console::instance().printf(LogLevel::Info, "Server shut down.");
     return 0;

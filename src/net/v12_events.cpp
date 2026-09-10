@@ -77,6 +77,7 @@ bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
                     const uint16_t id = (uint16_t)std::strtoul(arg.c_str() + 1, nullptr, 10);
                     if (const std::string* value = strings.get(id)) arg = *value;
                 }
+                event.arguments.push_back(arg);
                 if (!event.message.empty()) event.message.push_back(' ');
                 event.message += arg;
             }
@@ -112,7 +113,8 @@ bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
             stream.readUnsigned(4);
             stream.readUnsigned(32);
         } else if (header.classId == 13) {
-            stream.readUnsigned(32);
+            event.hasMissionCrc = true;
+            event.missionCrc = stream.readU32();
         } else if (header.classId == 17 || header.classId == 18) {
             stream.readRange(0, 1024);
         } else if (header.classId == 20) {
@@ -142,12 +144,48 @@ bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
             event.message = stream.readString();
         } else if (header.classId == 23) {
             stream.readUnsigned(4);
+        } else if (header.classId == 23) {
+            event.hasTargetFree = true;
+            event.targetFreeId = (uint16_t)stream.readUnsigned(9);
         } else if (header.classId == 24) {
-            stream.readUnsigned(4);
-            stream.readUnsigned(32);
+            event.hasTargetInfo = true;
+            event.targetInfo.targetId = (uint16_t)stream.readUnsigned(9);
+            auto readTag = [&](bool& present, std::string& value) {
+                if (!stream.readFlag()) return;
+                present = true;
+                const uint16_t tag = stream.readFlag()
+                    ? (uint16_t)stream.readUnsigned(10) : 0x400;
+                if (tag != 0x400) {
+                    if (const std::string* resolved = strings.get(tag)) value = *resolved;
+                }
+            };
+            readTag(event.targetInfo.hasName, event.targetInfo.name);
+            readTag(event.targetInfo.hasSkin, event.targetInfo.skin);
+            readTag(event.targetInfo.hasSkinPreference, event.targetInfo.skinPreference);
+            readTag(event.targetInfo.hasVoice, event.targetInfo.voice);
+            readTag(event.targetInfo.hasType, event.targetInfo.type);
+            if (stream.readFlag())
+                event.targetInfo.sensorGroup = (int)stream.readUnsigned(5);
+            if (stream.readFlag())
+                event.targetInfo.dataBlockId = stream.readFlag()
+                    ? (int)stream.readUnsigned(11) : -2;
+            if (stream.readFlag())
+                event.targetInfo.renderFlags = (int)stream.readUnsigned(9);
+            if (stream.readFlag())
+                event.targetInfo.voicePitch = stream.readFloat(7) * 1.5f + 0.5f;
         } else if (header.classId == 25) {
-            stream.readUnsigned(4);
-            stream.readUnsigned(4);
+            if (stream.readFlag()) {
+                stream.readUnsigned(9);
+            }
+            if (stream.readFlag()) {
+                stream.readF32();
+                stream.readF32();
+                stream.readF32();
+            }
+            stream.readFlag();
+        } else if (header.classId == 15) {
+            event.hasSensorGroup = true;
+            event.sensorGroup = (uint8_t)stream.readUnsigned(5);
         } else {
             // Unknown event payload lengths are class-specific; do not guess
             // and desynchronize the following event list.
@@ -247,6 +285,13 @@ bool NetStringTable::set(uint16_t id, std::string value) {
 const std::string* NetStringTable::get(uint16_t id) const {
     auto it = values.find(id);
     return it == values.end() ? nullptr : &it->second;
+}
+
+std::vector<std::pair<uint16_t, std::string>> NetStringTable::entries() const {
+    std::vector<std::pair<uint16_t, std::string>> result;
+    result.reserve(values.size());
+    for (const auto& [id, value] : values) result.emplace_back(id, value);
+    return result;
 }
 
 } // namespace V12

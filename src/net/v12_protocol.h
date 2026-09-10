@@ -127,6 +127,15 @@ struct ProtocolResult {
     std::vector<AckNotification> acknowledgements;
 };
 
+struct ProtocolStateSnapshot {
+    uint32_t connectSequence = 0;
+    uint32_t lastReceived = 0;
+    uint32_t highestAcknowledged = 0;
+    uint32_t lastSent = 0;
+    uint32_t receiveAckMask = 0;
+    bool established = false;
+};
+
 struct ClientMove {
     float x = 0;
     float y = 0;
@@ -192,7 +201,10 @@ public:
     uint32_t highestAcknowledged() const { return highestAcked; }
     uint32_t lastSent() const { return lastSentSequence; }
     uint32_t receiveAckMask() const { return receiveMask; }
+    uint32_t connectionSequence() const { return connectSequence; }
     bool established() const { return connectionEstablished; }
+    ProtocolStateSnapshot snapshot() const;
+    void restore(const ProtocolStateSnapshot& state);
 
 private:
     uint32_t connectSequence;

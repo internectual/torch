@@ -31,6 +31,7 @@ GuiControl* GuiControl::findChild(const std::string& name) {
 
 // GuiPlayerView shape cache (control name -> loaded shape)
 static std::unordered_map<std::string, DTSShape> s_playerViewShapes;
+static DTSShape s_playerViewSpinfusor;
 
 // Open popup dropdowns collected during the dialog pass; drawn last so they
 // render on top of sibling/overlay controls (T2 popups are topmost layers).
@@ -359,10 +360,25 @@ void GuiRenderer::render() {
     MatrixF savedView = r.view;
     auto& plat = Engine::instance().platform();
     int w = plat.width(), h = plat.height();
+    const bool gameCanvas = !dialogStack.empty() && dialogStack.front() &&
+                            dialogStack.front()->name == "PlayGui";
+    const int canvasW = gameCanvas && canvas->extentX > 0
+        ? std::min(w, (int)canvas->extentX) : w;
+    const int canvasH = gameCanvas && canvas->extentY > 0
+        ? std::min(h, (int)canvas->extentY) : h;
+    GLint oldViewport[4];
+    glGetIntegerv(GL_VIEWPORT, oldViewport);
+    GLint oldScissor[4];
+    glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
+    const GLboolean scissorWasOn = glIsEnabled(GL_SCISSOR_TEST);
+    if (gameCanvas) {
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(0, h - canvasH, canvasW, canvasH);
+    }
     MatrixF ortho;
     ortho.identity();
-    ortho.m[0][0] = 2.0f / w;
-    ortho.m[1][1] = -2.0f / h;
+    ortho.m[0][0] = 2.0f / canvasW;
+    ortho.m[1][1] = -2.0f / canvasH;
     ortho.m[0][3] = -1.0f;
     ortho.m[1][3] = 1.0f;
     r.setProjection(ortho);
@@ -398,6 +414,9 @@ void GuiRenderer::render() {
     // Restore GL state
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
+    glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+    glScissor(oldScissor[0], oldScissor[1], oldScissor[2], oldScissor[3]);
+    if (!scissorWasOn) glDisable(GL_SCISSOR_TEST);
     r.setProjection(savedProj);
     r.setView(savedView);
 }
@@ -1754,8 +1773,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc);
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
             auto sfi = prof->fields.find("selectionColor"); if (sfi != prof->fields.end()) parseColor(sfi->second.toString(), selFc);
+            auto sfci = prof->fields.find("fontColorSEL"); if (sfci != prof->fields.end()) parseColor(sfci->second.toString(), selTc);
         }
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
+        Texture* selectedBar = getShellTex(r, "shll_bar_act.png");
         // Find scroll offset from parent scroll container
         float listScrollY = 0, listScrollX = 0;
         GuiControl* sp = ctl->parent;
@@ -1786,10 +1807,23 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         for (int i = scrollRow; i < totalRows && (i - scrollRow) < visibleRows; i++, rowY += lineH) {
             bool isSel = (i == ctl->selectedRow);
             if (isSel) {
-                r.drawRectFill({x, rowY, 0}, {x + ctl->extentX, rowY + lineH, 0}, selFc);
-                font->render(ctl->listRows[i].c_str(), x + 3, rowY + 1, selTc, 1.0f);
-            } else {
-                font->render(ctl->listRows[i].c_str(), x + 3, rowY + 1, tc, 1.0f);
+                if (selectedBar && selectedBar->loaded) {
+                    for (float bx = x; bx < x + ctl->extentX; bx += 2.0f)
+                        drawTexRegion(r, selectedBar, 0, 0, 2, selectedBar->height,
+                                      bx, rowY, std::min(2.0f, x + ctl->extentX - bx), lineH);
+                } else {
+                    r.drawRectFill({x, rowY, 0}, {x + ctl->extentX, rowY + lineH, 0}, selFc);
+            }
+            }
+            const std::string& row = ctl->listRows[i];
+            const size_t tab = row.find('\t');
+            const std::string command = row.substr(0, tab);
+            const std::string key = tab == std::string::npos ? std::string() : row.substr(tab + 1);
+            const ColorF& rowColor = isSel ? selTc : tc;
+            if (font) {
+                font->render(command.c_str(), x + 3, rowY + 1, rowColor, 1.0f);
+                if (!key.empty())
+                    font->render(key.c_str(), x + 136, rowY + 1, rowColor, 1.0f);
             }
         }
     } else if (cn == "GuiCheckBoxCtrl" || cn == "GuiRadioCtrl") {
@@ -1806,16 +1840,9 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         float sz = 16;
         bool drewAtlas = false;
         Texture* cbTex = getShellTex(r, cn == "GuiCheckBoxCtrl" ? "shll_checkbox.png" : "shll_radio.png");
-        // T2 draws each radio choice inside a slim beveled box — draw it BEFORE
-        // the state art so selection stays fully visible.
-        {
-            float boxH = 20.0f;
-            float boxY = y + (ctl->extentY - boxH) * 0.5f;
-            r.drawRectFill({x - 2, boxY, 0}, {x + ctl->extentX, boxY + boxH, 0}, {0.09f, 0.11f, 0.15f, 0.9f});
-            r.drawRectFill({x - 2, boxY, 0}, {x + ctl->extentX, boxY + 1, 0}, {0.35f, 0.55f, 0.55f, 0.8f});
-            r.drawRectFill({x - 2, boxY + boxH - 1, 0}, {x + ctl->extentX, boxY + boxH, 0}, {0.15f, 0.28f, 0.28f, 0.8f});
-        }
-        if (cn == "GuiRadioCtrl" && cbTex && cbTex->loaded &&
+        if (cn == "GuiCheckBoxCtrl" && (!cbTex || !cbTex->loaded))
+            cbTex = getShellTex(r, "shll_radio.png");
+        if ((cn == "GuiRadioCtrl" || cn == "GuiCheckBoxCtrl") && cbTex && cbTex->loaded &&
             cbTex->height % 30 == 0 && cbTex->height >= 60) {
             // shll_radio atlas (29x150): five 29x30 cells — [0]=unchecked,
             // [1]=checked (bright green core = the selected indicator),
@@ -1842,7 +1869,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             }
         }
         if (font && !ctl->text.empty()) {
-            const ColorF& rtc = (ctl->hovered && tcHL.r >= 0) ? tcHL : tc;
+            const ColorF& rtc = ctl->checked ? tc : ((ctl->hovered && tcHL.r >= 0) ? tcHL : tc);
             float tx0 = x + sz + 4;
             float availW = ctl->extentX - (tx0 - x);
             float ttw = font->measure(ctl->text.c_str()).x;
@@ -2175,7 +2202,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                                 ctl->parent->className == "GuiTabBookCtrl"))
                 return;
             // Tab button: determine selected state from parent tab group
-            bool isSelected = ctl->selected;
+            bool isSelected = ctl->selected || ctl->checked;
             if (!isSelected && ctl->parent && ctl->parent->selectedTab >= 0) {
                 int btnIdx = 0;
                 for (auto* sib : ctl->parent->children) {
@@ -2204,38 +2231,41 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 if (!stateTex && ctl->menuOpen) stateTex = tryBmpBase("_act");
                 if (!stateTex) stateTex = tabTex; // fallback to base texture
             }
-            // Side tab (OptionsDlg-style vertical tab stack): T2 draws the
-            // left cap + stretched middle of the shell button — rounded
-            // left corners, STRAIGHT right edge that tucks under the pane
-            // — with black label text.  The selected tab pops a few px
-            // wider with a brighter gradient and a highlight bar.
-            // (Procedural: the shll_tabbutton atlas doesn't slice cleanly.)
+            // Side tab (OptionsDlg-style vertical tab stack). The native
+            // Settings side tabs use the same bitmap-array shell button art as
+            // the other stock shell buttons. Use the engine's native cell
+            // detection and state ordering rather than hand-slicing a PNG.
             {
                 float tw = ctl->extentX + (isSelected ? 6.f : 0.f);
                 float th = ctl->extentY;
-                bool hot = isSelected || ctl->hovered;
-                auto fill = [&](float fx, float fy, float fw, float fh, const ColorF& c) {
-                    r.drawRectFill({fx, fy, 0}, {fx + fw, fy + fh, 0}, c);
-                };
-                // Border frame (dark teal, like the shell palette)
-                fill(x, y, tw, th, {3 / 255.f, 54 / 255.f, 61 / 255.f, 1});
-                // Body: vertical gradient, rounded LEFT corners only
-                const float rad = 4.f;
-                int bodyH = (int)th - 2;
-                for (int i = 0; i < bodyH; i++) {
-                    float t = bodyH > 1 ? (float)i / (float)(bodyH - 1) : 0.f;
-                    float dTop = (float)i, dBot = (float)(bodyH - 1 - i);
-                    float ins = 0.f;
-                    if (dTop < rad) ins = rad - dTop;
-                    else if (dBot < rad) ins = rad - dBot;
-                    float g = hot ? (150.f + (196.f - 150.f) * t)
-                                  : (88.f + (52.f - 88.f) * t);
-                    fill(x + 1 + ins, y + 1 + i, tw - 2 - ins, 1.f,
-                         ColorF{2 / 255.f, g / 255.f, (g + 11.f) / 255.f, 1});
+                Texture* shellTex = nullptr;
+                const std::vector<T2Cell>* shellCells = t2SkinArray(r, "shll_button.png", shellTex);
+                if (shellTex && shellTex->loaded && shellCells && shellCells->size() >= 9) {
+                    constexpr int states = 3;
+                    // A selected tab is highlighted, not pressed. The pressed
+                    // column has the inward "n" shape used only while clicking;
+                    // the rollover column is the stock active-tab "c" bracket.
+                    const int state = (isSelected || ctl->hovered) ? 1 : 0;
+                    const T2Cell& left = (*shellCells)[state];
+                    const T2Cell& middle = (*shellCells)[states + state];
+                    const T2Cell& right = (*shellCells)[2 * states + state];
+                    const float scale = left.h > 0 ? th / (float)left.h : 1.0f;
+                    const float leftW = left.w * scale;
+                    const float rightW = right.w * scale;
+                    const float middleW = std::max(0.0f, tw - leftW - rightW);
+                    const float drawnH = left.h * scale;
+                    const float drawnY = y + (th - drawnH) * 0.5f;
+                    drawTexRegion(r, shellTex, left.x, left.y, left.w, left.h,
+                                  x, drawnY, leftW, drawnH);
+                    drawTexRegion(r, shellTex, middle.x, middle.y, middle.w, middle.h,
+                                  x + leftW, drawnY, middleW, drawnH);
+                    drawTexRegion(r, shellTex, right.x, right.y, right.w, right.h,
+                                  x + leftW + middleW, drawnY, rightW, drawnH);
+                } else {
+                    r.drawRectFill({x, y, 0}, {x + tw, y + th, 0},
+                                   isSelected ? ColorF{0.2f, 0.7f, 0.65f, 1}
+                                              : ColorF{0.05f, 0.35f, 0.32f, 1});
                 }
-                // Highlight bar along the top of the selected tab
-                if (isSelected)
-                    fill(x + 3, y + 2, tw - 6, 2.f, {196 / 255.f, 231 / 255.f, 255 / 255.f, 1});
             }
             if (font && !ctl->text.empty()) {
                 float tx2 = x + textOfsX;
@@ -2553,14 +2583,17 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     return sa < sb;
                 };
                 bool less = false;
-                switch (ctl->sbSortCol) {
-                    case 0: less = cmp(a.name, b.name); break;
-                    case 1: less = cmp(a.map, b.map); break;
-                    case 2: less = cmp(a.gameType, b.gameType); break;
-                    case 3: less = a.ping < b.ping; break;
-                    case 4: less = (a.numPlayers + a.maxPlayers * 1000) < (b.numPlayers + b.maxPlayers * 1000); break;
-                    default: less = a.name < b.name; break;
-                }
+                const std::string key = ctl->sbColumns[ctl->sbSortCol].name;
+                if (key == "Name") less = cmp(a.name, b.name);
+                else if (key == "Map") less = cmp(a.map, b.map);
+                else if (key == "Type" || key == "GameType") less = cmp(a.gameType, b.gameType);
+                else if (key == "Ping") less = a.ping < b.ping;
+                else if (key == "Players") less = (a.numPlayers + a.maxPlayers * 1000) < (b.numPlayers + b.maxPlayers * 1000);
+                else if (key == "Bots") less = a.numBots < b.numBots;
+                else if (key == "Address") less = a.addr.toString() < b.addr.toString();
+                else if (key == "Password") less = a.password < b.password;
+                else if (key == "Tournament") less = a.tournament < b.tournament;
+                else less = a.name < b.name;
                 return ctl->sbSortInc ? less : !less;
             });
         }
@@ -2574,14 +2607,16 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 float cw = ctl->sbColumns[ci].width;
                 if (ci == ctl->sbColumns.size() - 1) cw = availW - (rx - x);
                 std::string val;
-                switch (ci) {
-                    case 0: val = servers[i].name; break;
-                    case 1: val = servers[i].map; break;
-                    case 2: val = servers[i].gameType; break;
-                    case 3: snprintf(buf, sizeof(buf), "%d", servers[i].ping); val = buf; break;
-                    case 4: snprintf(buf, sizeof(buf), "%d/%d", servers[i].numPlayers, servers[i].maxPlayers); val = buf; break;
-                    default: val = ""; break;
-                }
+                const std::string& key = ctl->sbColumns[ci].name;
+                if (key == "Name") val = servers[i].name;
+                else if (key == "Map") val = servers[i].map;
+                else if (key == "Type" || key == "GameType") val = servers[i].gameType;
+                else if (key == "Ping") { snprintf(buf, sizeof(buf), "%d", servers[i].ping); val = buf; }
+                else if (key == "Players") { snprintf(buf, sizeof(buf), "%d/%d", servers[i].numPlayers, servers[i].maxPlayers); val = buf; }
+                else if (key == "Bots") { snprintf(buf, sizeof(buf), "%d", servers[i].numBots); val = buf; }
+                else if (key == "Address") val = servers[i].addr.toString();
+                else if (key == "Password") val = servers[i].password ? "Yes" : "";
+                else if (key == "Tournament") val = servers[i].tournament ? "Yes" : "";
                 if (!val.empty() && font)
                     font->render(val.c_str(), rx + 3, ry + 1, tc, 1.0f);
                 rx += cw;
@@ -2595,41 +2630,55 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (prof) { auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), scc); }
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, scc);
     } else if (cn == "ShellTabFrame") {
-        // Authentic T2 ShellTabFrame art (ShellHorzTabFrameProfile,
-        // bitmapBase gui/shll_horztabframe — no such single file exists;
-        // the game composes the frame from gradient strips instead).
-        // textures.vl2 ships shll_horztabframegrad(a).png: a 9x254 strip,
-        // solid color with alpha fading 255->0 top-to-bottom ('a' = gold
-        // active variant toggled by setAltColor, plain = green). Pixel-
-        // matched against a reference screenshot: a solid bar runs across
-        // the top edge and fade-out strips descend both side edges.
+        // ShellTabFrame is an open C-shaped frame. The stock art is supplied
+        // as separate horizontal and vertical gradient strips; the right
+        // edge is intentionally open where the selected side tab meets the
+        // pane.
         bool alt = false;
         { auto fit = ctl->fields.find("altColor"); if (fit != ctl->fields.end()) alt = (fit->second == "1"); }
         const char* sfx = alt ? "a" : "";
-        std::string basePath = std::string("textures/gui/shll_horztabframe");
-        // Solid 8x8 fill for the top bar; 9x254 fade strips for the sides
-        Texture* edge = r.loadTexture((basePath + "gradedge" + sfx + ".png").c_str());
-        if (!edge || !edge->loaded)
-            edge = r.loadTexture((basePath + "gradedgea.png").c_str());
-        Texture* strip = r.loadTexture((basePath + "grad" + sfx + ".png").c_str());
-        if (!strip || !strip->loaded)
-            strip = r.loadTexture((basePath + "grada.png").c_str());
-        float gw = 9.f, gh = 254.f;
-        float w = ctl->extentX, h = ctl->extentY;
-        if (h > gh) h = gh;                  // strips never outlive their fade
-        if (edge && edge->loaded) {
-            float ew = (float)edge->width;
-            drawTexRegion(r, edge, 0, 0, ew, ew, x, y, w, gw);
-        } else if (strip && strip->loaded) {
-            drawTexRegion(r, strip, 2, 2, 2, 2, x, y, w, gw); // solid rows fallback
+        const bool horizontalFrame = ctl->profileName == "ShellHorzTabFrameProfile";
+        if (horizontalFrame) {
+            const std::string basePath = "textures/gui/shll_horztabframe";
+            Texture* edgeTex = r.loadTexture((basePath + "gradedge" + sfx + ".png").c_str());
+            if (!edgeTex || !edgeTex->loaded)
+                edgeTex = r.loadTexture((basePath + "gradedgea.png").c_str());
+            Texture* stripTex = r.loadTexture((basePath + "grad" + sfx + ".png").c_str());
+            if (!stripTex || !stripTex->loaded)
+                stripTex = r.loadTexture((basePath + "grada.png").c_str());
+            const float edge = 9.f;
+            const float h = std::min(ctl->extentY, 254.f);
+            if (edgeTex && edgeTex->loaded)
+                drawTexRegion(r, edgeTex, 0, 0, edgeTex->width, edgeTex->width,
+                              x, y, ctl->extentX, edge);
+            if (stripTex && stripTex->loaded) {
+                drawTexRegion(r, stripTex, 0, 0, edge, 254,
+                              x, y, edge, h);
+                r.drawTexturedRectUV({x + ctl->extentX - edge, y, 0},
+                                     {x + ctl->extentX, y + h, 0}, stripTex->id,
+                                     1.0f, 0.0f, 0.0f, 1.0f);
+            }
+        } else {
+        const std::string basePath = "textures/gui/shll_horztabframe";
+        Texture* vertical = r.loadTexture((basePath + "grad" + sfx + ".png").c_str());
+        if (!vertical || !vertical->loaded)
+            vertical = r.loadTexture((basePath + "grada.png").c_str());
+        Texture* horizontal = r.loadTexture(("textures/gui/shll_tabframegrad" + std::string(sfx) + ".png").c_str());
+        if (!horizontal || !horizontal->loaded)
+            horizontal = r.loadTexture("textures/gui/shll_tabframegrad.png");
+        const float edge = 9.f;
+        if (horizontal && horizontal->loaded) {
+            drawTexRegion(r, horizontal, 0, 0, horizontal->width, horizontal->height,
+                          x, y, ctl->extentX, edge);
+            drawTexRegion(r, horizontal, 0, 0, horizontal->width, horizontal->height,
+                          x, y + ctl->extentY - edge, ctl->extentX, edge);
         }
-        if (strip && strip->loaded) {
-            // Side fade strips at natural size; their baked-in corner
-            // anti-aliasing rounds the frame's top corners authentically.
-            drawTexRegion(r, strip, 0, 0, gw, gh, x, y, gw, h);
-            // Right edge: same strip mirrored horizontally
-            r.drawTexturedRectUV({x + w - gw, y, 0}, {x + w, y + h, 0}, strip->id,
-                                 1.0f, 0.0f, 0.0f, 1.0f);
+        if (horizontal && horizontal->loaded) {
+            const float sampleX = 0.5f;
+            const float sampleY = (float)horizontal->height * 0.5f;
+            drawTexRegion(r, horizontal, sampleX, sampleY, 1, 1,
+                          x, y, edge, ctl->extentY);
+        }
         }
     } else if (cn == "ShellTabGroupCtrl" || cn == "GuiTabBookCtrl") {
         // Tab group: draw tab buttons along the top, then children below
@@ -2863,8 +2912,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (!ctl->modelShape.empty()) {
             // Load shape on demand (cached)
             auto& cache = s_playerViewShapes;
-            auto it = cache.find(ctl->name);
-            if (it == cache.end() || it->second.name != ctl->modelShape) {
+            const std::string viewKey = ctl->name + "\n" + ctl->modelShape +
+                                        "\n" + ctl->modelSkin;
+            auto it = cache.find(viewKey);
+            if (it == cache.end()) {
                 DTSShape shape;
                 shape.name = ctl->modelShape;
                 auto& fs = Engine::instance().fs();
@@ -2881,8 +2932,9 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                         break;
                     }
                 }
-                cache[ctl->name] = shape;
-                it = cache.find(ctl->name);
+                if (!ctl->modelSkin.empty()) shape.applySkin(ctl->modelSkin);
+                cache[viewKey] = shape;
+                it = cache.find(viewKey);
             }
             if (it != cache.end() && it->second.loaded) {
                 auto& shape = it->second;
@@ -2972,11 +3024,31 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 GLboolean modelCullWasOn = glIsEnabled(GL_CULL_FACE);
                 glDisable(GL_CULL_FACE);
                 shape.render(0);
+                if (!s_playerViewSpinfusor.loaded) {
+                    s_playerViewSpinfusor.name = "weapon_disc.dts";
+                    auto data = Engine::instance().fs().read("shapes/weapon_disc.dts");
+                    if (!data.empty())
+                        s_playerViewSpinfusor.load(data.data(), data.size());
+                }
+                if (s_playerViewSpinfusor.loaded) {
+                    int playerMount = shape.findNode("mount0");
+                    if (playerMount < 0) playerMount = shape.findNode("mount1");
+                    int weaponMount = s_playerViewSpinfusor.findNode("Mountpoint");
+                    if (weaponMount < 0) weaponMount = s_playerViewSpinfusor.findNode("mount0");
+                    MatrixF weaponModel = model;
+                    if (playerMount >= 0 && weaponMount >= 0 &&
+                        playerMount < (int)shape.defaultTransforms.size() &&
+                        weaponMount < (int)s_playerViewSpinfusor.defaultTransforms.size()) {
+                        weaponModel = model * shape.defaultTransforms[playerMount] *
+                            s_playerViewSpinfusor.defaultTransforms[weaponMount].inverse();
+                    }
+                    r.setModel(weaponModel);
+                    s_playerViewSpinfusor.render(0);
+                }
                 if (modelCullWasOn) glEnable(GL_CULL_FACE);
 
                 // Restore GL state
                 glViewport(oldVP[0], oldVP[1], oldVP[2], oldVP[3]);
-                if (!scissorWasOn) glDisable(GL_SCISSOR_TEST);
                 glScissor(oldScissor[0], oldScissor[1], oldScissor[2], oldScissor[3]);
                 glDisable(GL_DEPTH_TEST);
                 glDepthMask(GL_FALSE);
@@ -3559,6 +3631,8 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             std::string selName = hit->name + "::onSelect";
             if (ts && ts->hasFunction(selName))
                 ts->callFunction(selName, {VMValue(hit->name), VMValue(id), VMValue(hit->listRows[row])});
+            if (hit->name == "OP_RemapList" && ts && ts->hasFunction(hit->name + "::doRemap"))
+                ts->callFunction(hit->name + "::doRemap", {VMValue(hit->name)});
         }
         return true;
     }
@@ -3750,6 +3824,10 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         hit->onClick();
         return true;
     }
+    if (!hit->altCommand.empty()) {
+        Console::instance().execute(hit->altCommand.c_str());
+        return true;
+    }
     return false;
 }
 
@@ -3907,14 +3985,10 @@ void GuiRenderer::handleKeyboard() {
     // the stock script can cancel on Escape or assign the chosen key.
     GuiControl* capture = activeKeyCapture();
     if (capture) {
-        // Track edges over all scancodes (skip the small set of modifiers).
+        // Track edges over all scancodes, including modifiers. T2 permits
+        // bindings such as Left Shift for zoom and other actions.
         int hitSc = -1;
         for (int s = 0; s < 512; ++s) {
-            if (s == SCANCODE_LCTRL || s == SCANCODE_RCTRL ||
-                s == SCANCODE_LSHIFT || s == SCANCODE_RSHIFT ||
-                s == SCANCODE_LALT || s == SCANCODE_RALT ||
-                s == SCANCODE_LGUI || s == SCANCODE_RGUI)
-                continue;
             if (input.keysDown[s] && !prevAnyKey[s]) { hitSc = s; break; }
         }
         bool gotKey = (hitSc >= 0);
@@ -4239,6 +4313,15 @@ void GuiRenderer::popDialog(const std::string& name) {
     Console::instance().printf(LogLevel::Debug,
         "GUI: popDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
 }
+
+void GuiRenderer::clearDialogs() {
+    focusedCtrl = nullptr;
+    Engine::instance().platform().stopTextInput();
+    dialogStack.clear();
+    lastPushed.clear();
+    s_openPopups.clear();
+}
+
 void GuiRenderer::callOnAddOnce(GuiControl* ctl) {
     if (!ctl || onAddCalled.count(ctl->name)) return;
     onAddCalled.insert(ctl->name);

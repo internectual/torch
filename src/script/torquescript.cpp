@@ -4,6 +4,8 @@
 #include "core/console.h"
 #include "core/engine.h"
 #include <sys/stat.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <cmath>
 #include <cstring>
@@ -11,6 +13,8 @@
 #include <fstream>
 #include <set>
 #include <filesystem>
+
+extern char** environ;
 
 static void syncGuiField(const std::string& objName, const std::string& field, const VMValue& val);
 #include <cctype>
@@ -97,9 +101,18 @@ struct TorqueScript::Impl {
             fwrite(srcContent.data(), 1, srcContent.size(), f);
             fclose(f);
         }
-        std::string cmd = nodeBin + " " + compilerScript + " " + tmpPath + " " + dsoFullPath + " 2>/dev/null";
-        int ret = system(cmd.c_str());
-        if (ret != 0) {
+        std::vector<char*> argv;
+        argv.push_back(const_cast<char*>(nodeBin.c_str()));
+        argv.push_back(const_cast<char*>(compilerScript.c_str()));
+        argv.push_back(const_cast<char*>(tmpPath.c_str()));
+        argv.push_back(const_cast<char*>(dsoFullPath.c_str()));
+        argv.push_back(nullptr);
+        pid_t pid = 0;
+        const int spawnResult = posix_spawnp(&pid, nodeBin.c_str(), nullptr, nullptr,
+                                             argv.data(), environ);
+        int status = 0;
+        const int waitResult = spawnResult == 0 ? waitpid(pid, &status, 0) : -1;
+        if (spawnResult != 0 || waitResult < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
             unlink(tmpPath.c_str());
             return false;
         }
@@ -1555,8 +1568,13 @@ VMValue TorqueScript::Impl::parsePostfix() {
                     // Fall back to ClassName::method (e.g. moveMap.save →
                     // ActionMap::save). Matches stock T2 namespaced dispatch.
                     auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
-                    if (sobj && !sobj->className.empty()) {
-                        std::string clsFull = sobj->className + "::" + methodName;
+                    std::string className = sobj ? sobj->className : "";
+                    if (className.empty() && (objName == "moveMap" ||
+                                               objName == "GlobalActionMap" ||
+                                               objName == "observerMap"))
+                        className = "ActionMap";
+                    if (!className.empty()) {
+                        std::string clsFull = className + "::" + methodName;
                         auto clsFit = functions.find(clsFull);
                         if (clsFit != functions.end()) { val = outer->callFunction(clsFull, methodArgs); called = true; }
                         if (!called) {
@@ -2337,6 +2355,12 @@ int TorqueScript::dbgLine() const { return impl->srcLine; }
 VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VMValue>& args) {
     auto it = impl->functions.find(name);
     if (it == impl->functions.end()) {
+        std::string nativeName = name;
+        for (char& c : nativeName)
+            c = (char)tolower((unsigned char)c);
+        auto native = impl->natives.find(nativeName);
+        if (native != impl->natives.end())
+            return native->second(args);
         Console::instance().printf(LogLevel::Warn, "TS: function not found: '%s'", name.c_str());
         return {};
     }

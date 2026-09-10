@@ -1,5 +1,6 @@
 #include "fs/file_system.h"
 #include "fs/asset_policy.h"
+#include "fs/path_policy.h"
 #include "core/console.h"
 #include <algorithm>
 #include <filesystem>
@@ -43,7 +44,7 @@ void FileSystem::addPath(const char* path) {
 }
 
 bool FileSystem::readFile(const char* path, std::vector<uint8_t>& data) {
-    if (!path || !path[0]) return false;
+    if (!TorchPath::isSafeLogicalPath(path)) return false;
     if (originalOnly && !TorchAssets::isOriginalRuntimePath(path)) {
         Console::instance().printf(LogLevel::Error,
             "Asset rejected by original-only policy: %s", path);
@@ -68,6 +69,7 @@ bool FileSystem::readFile(const char* path, std::vector<uint8_t>& data) {
     // Check filesystem paths
     for (auto& p : impl->searchPaths) {
         std::string full = p + "/" + path;
+        if (!TorchPath::staysWithinRoot(p.c_str(), full.c_str())) continue;
         std::ifstream f(full, std::ios::binary);
         if (f) {
             f.seekg(0, std::ios::end);
@@ -96,6 +98,7 @@ bool FileSystem::readFile(const char* path, std::vector<uint8_t>& data) {
         }
         closedir(d);
         if (found) {
+            if (!TorchPath::staysWithinRoot(p.c_str(), real.c_str())) continue;
             std::ifstream f(real, std::ios::binary);
             if (f) {
                 f.seekg(0, std::ios::end);
@@ -117,15 +120,18 @@ bool FileSystem::readTextFile(const char* path, std::string& text) {
 }
 
 bool FileSystem::fileExists(const char* path) const {
-    if (originalOnly && (!path || !TorchAssets::isOriginalRuntimePath(path))) return false;
+    if (!TorchPath::isSafeLogicalPath(path)) return false;
+    if (originalOnly && !TorchAssets::isOriginalRuntimePath(path)) return false;
     for (auto it = impl->archives.rbegin(); it != impl->archives.rend(); ++it)
         if ((*it)->fileExists(path)) return true;
     for (auto& p : impl->searchPaths)
-        if (fs::exists(p + "/" + path)) return true;
+        if (TorchPath::staysWithinRoot(p.c_str(), (p + "/" + path).c_str()) &&
+            fs::exists(p + "/" + path)) return true;
     return false;
 }
 
 void FileSystem::listFiles(const char* pattern, std::vector<std::string>& out) const {
+    if (pattern && !TorchPath::isSafeLogicalPath(pattern)) return;
     for (auto a : impl->archives) a->listFiles(pattern, out);
     for (auto& p : impl->searchPaths) {
         if (fs::exists(p)) {

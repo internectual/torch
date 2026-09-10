@@ -1169,18 +1169,35 @@ bool DTSShape::applySkin(const std::string& skinName) {
         std::string matName = materialNames[i];
         if (matName.empty()) continue;
 
-        // Strip extension for searching
-        auto dot = matName.rfind('.');
-        if (dot != std::string::npos) matName = matName.substr(0, dot);
+        // Keep armor suffixes such as `.lmale`; strip only actual image
+        // extensions from material resource paths.
+        for (const char* ext : {".png", ".bm8", ".jpg", ".jpeg", ".gif", ".bmp", ".dds"}) {
+            if (matName.size() > std::strlen(ext) &&
+                matName.compare(matName.size() - std::strlen(ext), std::strlen(ext), ext) == 0) {
+                matName.resize(matName.size() - std::strlen(ext));
+                break;
+            }
+        }
 
         // Remove leading "textures/" prefix if present (it's added by texture search)
         if (matName.find("textures/") == 0) matName = matName.substr(9);
+
+        std::string materialFile = matName;
+        const auto slash = materialFile.rfind('/');
+        if (slash != std::string::npos) materialFile = materialFile.substr(slash + 1);
+        const auto materialDot = materialFile.find('.');
+        const std::string materialSuffix = materialDot == std::string::npos
+            ? std::string() : materialFile.substr(materialDot);
 
         // Try multiple candidate paths for the skin variant
         std::vector<std::string> candidates = {
             matName + "/" + skinName,                        // "skins/base/light_red"
             "skins/" + skinName + "/" + matName,             // "skins/light_red/skins/base"
             skinName + "/" + matName,                        // "light_red/skins/base"
+            "skins/" + skinName + "." + matName,             // "skins/beagle.lmale"
+            skinName + "." + matName,                         // "beagle.lmale"
+            "skins/" + skinName + materialSuffix,             // "skins/beagle.lmale"
+            skinName + materialSuffix,                         // "beagle.lmale"
             "skins/" + skinName,                             // "skins/light_red"
             skinName,                                        // "light_red"
         };
@@ -1595,12 +1612,16 @@ void DTSShape::renderAnimation(const char* animName, float time,
     // ── Step 2: Fill in defaults for unanimated components from bind pose ──
     for (int32_t i = 0; i < numNodes; i++) {
         if (!rotSet[i]) {
-            nodeRot[i] = QuatF::fromMatrix(defaultLocalTransforms[i]);
+            nodeRot[i] = objectAnim->blend
+                ? QuatF{0, 0, 0, 1}
+                : QuatF::fromMatrix(defaultLocalTransforms[i]);
         }
         if (!transSet[i]) {
-            nodeTrans[i] = {defaultLocalTransforms[i].m[0][3],
-                           defaultLocalTransforms[i].m[1][3],
-                           defaultLocalTransforms[i].m[2][3]};
+            nodeTrans[i] = objectAnim->blend
+                ? Point3F{0, 0, 0}
+                : Point3F{defaultLocalTransforms[i].m[0][3],
+                          defaultLocalTransforms[i].m[1][3],
+                          defaultLocalTransforms[i].m[2][3]};
         }
         if (!scaleSet[i]) {
             nodeScale[i] = {1, 1, 1};
@@ -1624,6 +1645,8 @@ void DTSShape::renderAnimation(const char* animName, float time,
             local.m[1][3] = nodeTrans[i].y;
             local.m[2][3] = nodeTrans[i].z;
             local.m[3][3] = 1.0f;
+            if (objectAnim->blend)
+                local = defaultLocalTransforms[i] * local;
         } else {
             // Fully unanimated — use bind-pose local transform directly
             local = defaultLocalTransforms[i];

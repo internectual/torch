@@ -69,8 +69,7 @@ public:
     void setBind(const char* action, int scancode);
     const char* scancodeName(int scancode) const;
     int nameToScancode(const char* name) const;
-    void saveBinds();
-    void loadBinds();
+    void syncBindsFromActionMap();
 
     // Fresh press of any key bound to "toggleConsole" on GlobalActionMap
     // (default: ~ / grave). Per-key previous state is shared across all

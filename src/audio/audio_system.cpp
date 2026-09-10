@@ -19,7 +19,11 @@ struct AudioSystem::Impl {
 };
 
 AudioSystem::AudioSystem() : impl(new Impl) {}
-AudioSystem::~AudioSystem() { delete impl; }
+AudioSystem::~AudioSystem() {
+    if (initialized || !impl->sources.empty() || !impl->buffers.empty())
+        shutdown();
+    delete impl;
+}
 
 bool AudioSystem::init() {
     impl->device = alcOpenDevice(nullptr);
@@ -49,15 +53,25 @@ bool AudioSystem::init() {
 }
 
 void AudioSystem::shutdown() {
-    stopAll();
+    for (auto* source : impl->sources) {
+        if (!source) continue;
+        source->stop();
+        source->destroy();
+        delete source;
+    }
+    impl->sources.clear();
     for (auto& [k, v] : impl->buffers) delete v;
     impl->buffers.clear();
 
     if (impl->context) {
         alcMakeContextCurrent(nullptr);
         alcDestroyContext(impl->context);
+        impl->context = nullptr;
     }
-    if (impl->device) alcCloseDevice(impl->device);
+    if (impl->device) {
+        alcCloseDevice(impl->device);
+        impl->device = nullptr;
+    }
     initialized = false;
 }
 
@@ -149,14 +163,16 @@ bool SoundBuffer::loadWav(const uint8_t* data, size_t size) {
     ptr += 12;
 
     // Find fmt chunk
-    while (ptr < data + size - 8) {
+    while (ptr <= data + size - 8) {
         if (memcmp(ptr, "fmt ", 4) == 0) break;
         uint32_t chunkSize = *(uint32_t*)(ptr + 4);
+        if (chunkSize > (size_t)(data + size - ptr - 8)) return false;
         ptr += 8 + chunkSize;
     }
     if (ptr >= data + size - 8) return false;
 
     uint32_t fmtSize = *(uint32_t*)(ptr + 4);
+    if (fmtSize < 16 || fmtSize > (size_t)(data + size - ptr - 8)) return false;
     uint16_t format = *(uint16_t*)(ptr + 8);
     uint16_t channels = *(uint16_t*)(ptr + 10);
     uint32_t sampleRate = *(uint32_t*)(ptr + 12);
@@ -164,9 +180,10 @@ bool SoundBuffer::loadWav(const uint8_t* data, size_t size) {
     ptr += 8 + fmtSize;
 
     // Find data chunk
-    while (ptr < data + size - 8) {
+    while (ptr <= data + size - 8) {
         if (memcmp(ptr, "data", 4) == 0) break;
         uint32_t chunkSize = *(uint32_t*)(ptr + 4);
+        if (chunkSize > (size_t)(data + size - ptr - 8)) return false;
         ptr += 8 + chunkSize;
     }
     if (ptr >= data + size - 8) return false;
@@ -197,10 +214,12 @@ bool SoundBuffer::loadWav(const uint8_t* data, size_t size) {
 bool SoundBuffer::loadOgg(const uint8_t* data, size_t size) {
     // OGG Vorbis loader using libvorbisfile
     struct MemFile {
+        const uint8_t* start;
         const uint8_t* ptr;
+        size_t size;
         size_t left;
     };
-    MemFile mf = {data, size};
+    MemFile mf = {data, data, size, size};
 
     ov_callbacks cb;
     cb.read_func = [](void* ptr, size_t sz, size_t nmemb, void* datasource) -> size_t {
@@ -213,15 +232,21 @@ bool SoundBuffer::loadOgg(const uint8_t* data, size_t size) {
         return want;
     };
     cb.seek_func = [](void* datasource, ogg_int64_t offset, int whence) -> int {
-        auto* m = (MemFile*)datasource; (void)m;
-        // Can't seek in memory without original start - return error
-        (void)offset; (void)whence;
-        return -1;
+        auto* m = (MemFile*)datasource;
+        ogg_int64_t base = 0;
+        if (whence == SEEK_CUR) base = (ogg_int64_t)(m->ptr - m->start);
+        else if (whence == SEEK_END) base = (ogg_int64_t)m->size;
+        else if (whence != SEEK_SET) return -1;
+        const ogg_int64_t target = base + offset;
+        if (target < 0 || (uint64_t)target > m->size) return -1;
+        m->ptr = m->start + target;
+        m->left = m->size - (size_t)target;
+        return 0;
     };
     cb.close_func = [](void*) -> int { return 0; };
     cb.tell_func = [](void* datasource) -> long {
         auto* m = (MemFile*)datasource;
-        return (long)(m->ptr - m->left); // approximate, not used by ov_read
+        return (long)(m->ptr - m->start);
     };
 
     OggVorbis_File vf;

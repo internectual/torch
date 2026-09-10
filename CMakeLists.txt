@@ -17,6 +17,7 @@ pkg_check_modules(GLU REQUIRED IMPORTED_TARGET glu)
 
 find_package(OpenGL REQUIRED)
 find_package(ZLIB REQUIRED)
+find_package(CURL REQUIRED)
 
 add_executable(torch
     src/main.cpp
@@ -30,6 +31,7 @@ add_executable(torch
     src/core/string_table.cpp
     src/fs/file_system.cpp
     src/fs/asset_policy.cpp
+    src/fs/path_policy.cpp
     src/fs/vol_archive.cpp
     src/fs/vl2_archive.cpp
     src/script/dso_reader.cpp
@@ -47,6 +49,7 @@ add_executable(torch
     src/render/gui_renderer.cpp
     src/audio/audio_system.cpp
     src/net/network.cpp
+    src/net/master_query.cpp
     src/net/v12_bitstream.cpp
     src/net/v12_protocol.cpp
     src/net/v12_registry.cpp
@@ -76,6 +79,7 @@ target_link_libraries(torch PRIVATE
     PkgConfig::GLEW
     PkgConfig::OpenAL
     PkgConfig::GLU
+    CURL::libcurl
     vorbisfile vorbis
     m
     dl
@@ -101,6 +105,7 @@ add_executable(torch_server
     src/core/string_table.cpp
     src/fs/file_system.cpp
     src/fs/asset_policy.cpp
+    src/fs/path_policy.cpp
     src/fs/vol_archive.cpp
     src/fs/vl2_archive.cpp
     src/script/dso_reader.cpp
@@ -118,6 +123,7 @@ add_executable(torch_server
     src/render/gui_renderer.cpp
     src/audio/audio_system.cpp
     src/net/network.cpp
+    src/net/master_query.cpp
     src/net/v12_bitstream.cpp
     src/net/v12_protocol.cpp
     src/net/v12_registry.cpp
@@ -147,6 +153,7 @@ target_link_libraries(torch_server PRIVATE
     PkgConfig::GLEW
     PkgConfig::OpenAL
     PkgConfig::GLU
+    CURL::libcurl
     vorbisfile vorbis
     m
     dl
@@ -185,6 +192,7 @@ add_executable(torch_asset_policy_test
     src/net/v12_ghost_packet.cpp
 )
 target_include_directories(torch_asset_policy_test PRIVATE src)
+target_compile_options(torch_asset_policy_test PRIVATE -UNDEBUG)
 add_test(NAME torch_asset_policy COMMAND torch_asset_policy_test)
 
 add_executable(torch_transform_test
@@ -192,4 +200,31 @@ add_executable(torch_transform_test
     src/core/math.cpp
 )
 target_include_directories(torch_transform_test PRIVATE src)
+target_compile_options(torch_transform_test PRIVATE -UNDEBUG)
 add_test(NAME torch_transform COMMAND torch_transform_test)
+
+add_executable(torch_safety_policy_test
+    tests/safety_policy_test.cpp
+    src/fs/path_policy.cpp
+    src/net/master_query.cpp
+)
+target_include_directories(torch_safety_policy_test PRIVATE src)
+add_test(NAME torch_safety_policy COMMAND torch_safety_policy_test)
+
+add_executable(torch_demo_snapshot_test
+    tests/demo_snapshot_test.cpp
+    src/game/demo.cpp
+    src/net/v12_bitstream.cpp
+    src/net/v12_protocol.cpp
+    src/net/v12_registry.cpp
+    src/net/v12_events.cpp
+    src/net/v12_datablocks.cpp
+    src/net/v12_ghosts.cpp
+    src/net/v12_ghost_packet.cpp
+)
+target_include_directories(torch_demo_snapshot_test PRIVATE src)
+target_link_libraries(torch_demo_snapshot_test PRIVATE ZLIB::ZLIB m)
+target_compile_options(torch_demo_snapshot_test PRIVATE -UNDEBUG)
+add_test(NAME torch_demo_snapshot
+    COMMAND torch_demo_snapshot_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/../t2-linux/treachery.rec)

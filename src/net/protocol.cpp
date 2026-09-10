@@ -18,17 +18,17 @@
 #include <fstream>
 #include <sys/time.h>
 #include <chrono>
+#include <random>
+
+namespace {
+constexpr size_t kMaxClients = 64;
+
+bool challengeMatches(const uint32_t expected[2], const uint32_t actual[2]) {
+    return ((expected[0] ^ actual[0]) | (expected[1] ^ actual[1])) == 0;
+}
+}
 
 // ─── Performance Stats ────────────────────────────────────────────
-
-// Wire header used by Connection for packet framing (same as network.cpp)
-struct WireHeader {
-    uint32_t sequence;
-    uint32_t ack;
-    uint32_t ackMask;
-    uint8_t type;
-    uint16_t checksum;
-};
 
 uint16_t T2Protocol::calculateChecksum(const uint8_t* data, size_t size) {
     uint32_t sum = 0;
@@ -44,36 +44,64 @@ bool T2Protocol::verifyChecksum(const uint8_t* data, size_t size) {
     return calculateChecksum(data, size - 2) == stored;
 }
 
+static void writeU32LE(uint8_t* out, uint32_t value) {
+    out[0] = (uint8_t)value;
+    out[1] = (uint8_t)(value >> 8);
+    out[2] = (uint8_t)(value >> 16);
+    out[3] = (uint8_t)(value >> 24);
+}
+
+static uint32_t readU32LE(const uint8_t* data) {
+    return (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+           ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+}
+
+static void writeF32LE(uint8_t* out, float value) {
+    uint32_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    writeU32LE(out, bits);
+}
+
+static float readF32LE(const uint8_t* data) {
+    const uint32_t bits = readU32LE(data);
+    float value = 0;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 // ─── Move Message ─────────────────────────────────────────────────
 
 size_t T2Protocol::encodeMove(uint8_t* buf, size_t bufSize, const MoveMessage& msg) {
     if (bufSize < 34) return 0;
     uint32_t pos = 0;
     buf[pos++] = GDT_Move;
-    memcpy(buf + pos, &msg.posX, 4); pos += 4;
-    memcpy(buf + pos, &msg.posY, 4); pos += 4;
-    memcpy(buf + pos, &msg.posZ, 4); pos += 4;
-    memcpy(buf + pos, &msg.rotZ, 4); pos += 4;
-    memcpy(buf + pos, &msg.rotX, 4); pos += 4;
+    writeF32LE(buf + pos, msg.posX); pos += 4;
+    writeF32LE(buf + pos, msg.posY); pos += 4;
+    writeF32LE(buf + pos, msg.posZ); pos += 4;
+    writeF32LE(buf + pos, msg.rotZ); pos += 4;
+    writeF32LE(buf + pos, msg.rotX); pos += 4;
     buf[pos++] = msg.flags;
-    memcpy(buf + pos, &msg.lookX, 4); pos += 4;
-    memcpy(buf + pos, &msg.lookY, 4); pos += 4;
-    memcpy(buf + pos, &msg.seq, 4); pos += 4;
+    writeF32LE(buf + pos, msg.lookX); pos += 4;
+    writeF32LE(buf + pos, msg.lookY); pos += 4;
+    writeU32LE(buf + pos, msg.seq); pos += 4;
     return pos;
 }
 
 bool T2Protocol::decodeMove(const uint8_t* data, size_t size, MoveMessage& msg) {
     if (size < 34 || data[0] != GDT_Move) return false;
     uint32_t pos = 1;
-    memcpy(&msg.posX, data + pos, 4); pos += 4;
-    memcpy(&msg.posY, data + pos, 4); pos += 4;
-    memcpy(&msg.posZ, data + pos, 4); pos += 4;
-    memcpy(&msg.rotZ, data + pos, 4); pos += 4;
-    memcpy(&msg.rotX, data + pos, 4); pos += 4;
+    msg.posX = readF32LE(data + pos); pos += 4;
+    msg.posY = readF32LE(data + pos); pos += 4;
+    msg.posZ = readF32LE(data + pos); pos += 4;
+    msg.rotZ = readF32LE(data + pos); pos += 4;
+    msg.rotX = readF32LE(data + pos); pos += 4;
     msg.flags = data[pos++];
-    memcpy(&msg.lookX, data + pos, 4); pos += 4;
-    memcpy(&msg.lookY, data + pos, 4); pos += 4;
-    memcpy(&msg.seq, data + pos, 4); pos += 4;
+    msg.lookX = readF32LE(data + pos); pos += 4;
+    msg.lookY = readF32LE(data + pos); pos += 4;
+    msg.seq = readU32LE(data + pos); pos += 4;
+    const float values[] = {msg.posX, msg.posY, msg.posZ, msg.rotZ, msg.rotX, msg.lookX, msg.lookY};
+    for (float value : values)
+        if (!std::isfinite(value) || std::fabs(value) > 10000000.0f) return false;
     return true;
 }
 
@@ -83,38 +111,44 @@ bool T2Protocol::encodeUpdate(uint8_t* buf, size_t bufSize, const UpdateMessage&
     if (bufSize < 40) return false;
     uint32_t pos = 0;
     buf[pos++] = GDT_Update;
-    memcpy(buf + pos, &msg.posX, 4); pos += 4;
-    memcpy(buf + pos, &msg.posY, 4); pos += 4;
-    memcpy(buf + pos, &msg.posZ, 4); pos += 4;
-    memcpy(buf + pos, &msg.rotZ, 4); pos += 4;
-    memcpy(buf + pos, &msg.rotX, 4); pos += 4;
-    memcpy(buf + pos, &msg.velX, 4); pos += 4;
-    memcpy(buf + pos, &msg.velY, 4); pos += 4;
-    memcpy(buf + pos, &msg.velZ, 4); pos += 4;
+    writeF32LE(buf + pos, msg.posX); pos += 4;
+    writeF32LE(buf + pos, msg.posY); pos += 4;
+    writeF32LE(buf + pos, msg.posZ); pos += 4;
+    writeF32LE(buf + pos, msg.rotZ); pos += 4;
+    writeF32LE(buf + pos, msg.rotX); pos += 4;
+    writeF32LE(buf + pos, msg.velX); pos += 4;
+    writeF32LE(buf + pos, msg.velY); pos += 4;
+    writeF32LE(buf + pos, msg.velZ); pos += 4;
     float hc = msg.health; if (hc < 0) hc = 0; else if (hc > 100) hc = 100;
     float ec = msg.energy; if (ec < 0) ec = 0; else if (ec > 100) ec = 100;
     buf[pos++] = (uint8_t)(hc * 2);
     buf[pos++] = (uint8_t)(ec * 2);
     buf[pos++] = msg.flags;
-    memcpy(buf + pos, &msg.lastMoveSeq, 4); pos += 4;
+    writeU32LE(buf + pos, msg.lastMoveSeq); pos += 4;
     return true;
 }
 
 bool T2Protocol::decodeUpdate(const uint8_t* data, size_t size, UpdateMessage& msg) {
     if (size < 40 || data[0] != GDT_Update) return false;
     uint32_t pos = 1;
-    memcpy(&msg.posX, data + pos, 4); pos += 4;
-    memcpy(&msg.posY, data + pos, 4); pos += 4;
-    memcpy(&msg.posZ, data + pos, 4); pos += 4;
-    memcpy(&msg.rotZ, data + pos, 4); pos += 4;
-    memcpy(&msg.rotX, data + pos, 4); pos += 4;
-    memcpy(&msg.velX, data + pos, 4); pos += 4;
-    memcpy(&msg.velY, data + pos, 4); pos += 4;
-    memcpy(&msg.velZ, data + pos, 4); pos += 4;
+    msg.posX = readF32LE(data + pos); pos += 4;
+    msg.posY = readF32LE(data + pos); pos += 4;
+    msg.posZ = readF32LE(data + pos); pos += 4;
+    msg.rotZ = readF32LE(data + pos); pos += 4;
+    msg.rotX = readF32LE(data + pos); pos += 4;
+    msg.velX = readF32LE(data + pos); pos += 4;
+    msg.velY = readF32LE(data + pos); pos += 4;
+    msg.velZ = readF32LE(data + pos); pos += 4;
     msg.health = data[pos++] / 2.0f;
     msg.energy = data[pos++] / 2.0f;
     msg.flags = data[pos++];
-    memcpy(&msg.lastMoveSeq, data + pos, 4); pos += 4;
+    msg.lastMoveSeq = readU32LE(data + pos); pos += 4;
+    const float values[] = {msg.posX, msg.posY, msg.posZ, msg.rotZ, msg.rotX,
+                            msg.velX, msg.velY, msg.velZ, msg.health, msg.energy};
+    for (float value : values)
+        if (!std::isfinite(value) || std::fabs(value) > 10000000.0f) return false;
+    if (msg.health < 0 || msg.health > 100 || msg.energy < 0 || msg.energy > 100)
+        return false;
     return true;
 }
 
@@ -127,10 +161,10 @@ size_t T2Protocol::encodeDatablock(uint8_t* buf, size_t bufSize,
     if (bufSize < needed) return 0;
     uint32_t pos = 0;
     buf[pos++] = GDT_Datablock;
-    memcpy(buf + pos, &hdr.classId,  4); pos += 4;
-    memcpy(buf + pos, &hdr.objectId, 4); pos += 4;
-    memcpy(buf + pos, &hdr.index,    4); pos += 4;
-    memcpy(buf + pos, &hdr.total,    4); pos += 4;
+    writeProtocolU32LE(buf + pos, hdr.classId); pos += 4;
+    writeProtocolU32LE(buf + pos, hdr.objectId); pos += 4;
+    writeProtocolU32LE(buf + pos, hdr.index); pos += 4;
+    writeProtocolU32LE(buf + pos, hdr.total); pos += 4;
     if (payload && payloadLen > 0) {
         memcpy(buf + pos, payload, payloadLen); pos += payloadLen;
     }
@@ -404,6 +438,17 @@ struct GameServer::Impl {
         sendto(sock, data, len, 0, (sockaddr*)&addr, sizeof(addr));
     }
 
+    void sendWireTo(const sockaddr_in& addr, const uint8_t* data, size_t len) {
+        if (!data || len < sizeof(WireHeader)) return;
+        std::vector<uint8_t> packet(data, data + len);
+        WireHeader header = decodeWireHeader(packet.data());
+        header.checksum = 0;
+        encodeWireHeader(packet.data(), header);
+        header.checksum = T2Protocol::calculateChecksum(packet.data(), packet.size());
+        encodeWireHeader(packet.data(), header);
+        sendTo(addr, packet.data(), packet.size());
+    }
+
     // Helper: send datablock headers to a client
     void sendDatablocksTo(int ci) {
         if (ci < 0 || ci >= (int)clients.size()) return;
@@ -423,9 +468,9 @@ struct GameServer::Impl {
                 db.payload.empty() ? nullptr : db.payload.data(), db.payload.size());
             if (dbLen == 0) continue;
             std::vector<uint8_t> pkt(sizeof(WireHeader) + dbLen);
-            memcpy(pkt.data(), &whdr, sizeof(WireHeader));
+            encodeWireHeader(pkt.data(), whdr);
             memcpy(pkt.data() + sizeof(WireHeader), dbBuf, dbLen);
-            sendTo(cl.addr, pkt.data(), pkt.size());
+            sendWireTo(cl.addr, pkt.data(), pkt.size());
             Console::instance().printf(LogLevel::Debug, "Server: sent datablock class=%u obj=%u idx=%u tot=%u",
                 (unsigned)db.classId, (unsigned)db.objectId, (unsigned)db.index, (unsigned)db.total);
         }
@@ -446,7 +491,7 @@ struct GameServer::Impl {
         if (ghLen == 0) return;
 
         std::vector<uint8_t> pkt(sizeof(WireHeader) + ghLen);
-        memcpy(pkt.data(), &whdr, sizeof(WireHeader));
+        encodeWireHeader(pkt.data(), whdr);
         memcpy(pkt.data() + sizeof(WireHeader), ghBuf, ghLen);
 
         for (size_t i = 0; i < clients.size(); i++) {
@@ -454,7 +499,7 @@ struct GameServer::Impl {
             if (!clients[i].active || clients[i].isBot) continue;
             clients[i].knownGhosts.erase(ghostIndex);
             clients[i].ghostFirstSent.erase(ghostIndex);
-            sendTo(clients[i].addr, pkt.data(), pkt.size());
+                sendWireTo(clients[i].addr, pkt.data(), pkt.size());
         }
     }
 
@@ -495,9 +540,9 @@ struct GameServer::Impl {
                 size_t ghLen = T2Protocol::encodeGhostHeader(ghBuf, sizeof(ghBuf), gm);
                 if (ghLen > 0) {
                     std::vector<uint8_t> pkt(sizeof(WireHeader) + ghLen);
-                    memcpy(pkt.data(), &whdr, sizeof(WireHeader));
+                    encodeWireHeader(pkt.data(), whdr);
                     memcpy(pkt.data() + sizeof(WireHeader), ghBuf, ghLen);
-                    sendTo(cl.addr, pkt.data(), pkt.size());
+                    sendWireTo(cl.addr, pkt.data(), pkt.size());
                 }
                 cl.ghostFirstSent.erase(*it);
                 cl.knownGhosts.erase(it++);
@@ -512,7 +557,7 @@ struct GameServer::Impl {
         whdr.type = (uint8_t)PacketType::GameData;
         whdr.checksum = 0;
         std::vector<uint8_t> batchPkt(sizeof(WireHeader));
-        memcpy(batchPkt.data(), &whdr, sizeof(WireHeader));
+        encodeWireHeader(batchPkt.data(), whdr);
         int batched = 0;
 
         for (auto& sg : serverGhosts) {
@@ -572,7 +617,7 @@ struct GameServer::Impl {
             }
         }
         if (batched > 0)
-            sendTo(cl.addr, batchPkt.data(), batchPkt.size());
+            sendWireTo(cl.addr, batchPkt.data(), batchPkt.size());
     }
 };
 
@@ -1026,12 +1071,17 @@ void GameServer::update() {
             V12BitStream request(buf + 1, (size_t)n - 1);
             const uint32_t protocolVersion = request.readU32();
             const uint32_t clientSequence = request.readU32();
-            request.readHuffmanString(); // join password
+            const std::string joinPassword = request.readHuffmanString();
             request.readFlag();          // optional authentication
             if (request.failed() || protocolVersion != V12::ProtocolVersion)
                 continue;
+            const char* requiredPassword = Console::instance().getStringVariable("sv_password", "");
+            if (requiredPassword && *requiredPassword && joinPassword != requiredPassword)
+                continue;
             int ci = impl->findClient(from);
             if (ci < 0) {
+                if (impl->clients.size() >= kMaxClients)
+                    continue;
                 Impl::Client client{};
                 client.addr = from;
                 client.addrLen = fromLen;
@@ -1039,13 +1089,14 @@ void GameServer::update() {
                 client.posY = 5;
                 client.health = 100;
                 client.energy = 100;
-                client.active = true;
+                client.active = false;
                 impl->clients.push_back(client);
                 ci = (int)impl->clients.size() - 1;
             }
             auto& client = impl->clients[ci];
             client.clientConnectSequence = clientSequence;
-            client.serverConnectSequence = (uint32_t)rand();
+            std::random_device random;
+            client.serverConnectSequence = random();
             if (client.serverConnectSequence == 0) client.serverConnectSequence = 1;
             client.native = true;
             client.lastReceive = now;
@@ -1188,7 +1239,8 @@ void GameServer::update() {
                                         event.ghostSequence == 0)
                                         client.ghosting = true;
                                     if (event.classId == 9 && !event.message.empty())
-                                        Console::instance().execute(event.message.c_str());
+                                        Console::instance().printf(LogLevel::Warn,
+                                            "Server: rejected client command event from %d", ci);
                                 }
                             }
                         }
@@ -1292,7 +1344,7 @@ void GameServer::update() {
 
         if ((size_t)n >= sizeof(WireHeader)) {
             WireHeader hdr;
-            memcpy(&hdr, buf, sizeof(WireHeader));
+            hdr = decodeWireHeader(buf);
             ptype = (PacketType)hdr.type;
             payload = buf + sizeof(WireHeader);
             payloadLen = n - sizeof(WireHeader);
@@ -1317,6 +1369,8 @@ void GameServer::update() {
                         inet_ntoa(from.sin_addr));
                     continue;
                 }
+                if (impl->clients.size() >= kMaxClients)
+                    continue;
                 Impl::Client c;
                 c.addr = from;
                 c.addrLen = fromLen;
@@ -1325,7 +1379,7 @@ void GameServer::update() {
                 c.posX = 0; c.posY = 5; c.posZ = 0;
                 c.rotZ = 0; c.rotX = 0;
                 c.health = 100; c.energy = 100;
-                c.active = true;
+                c.active = false;
                 impl->clients.push_back(c);
                 ci = (int)impl->clients.size() - 1;
                 // Assign team in TDM mode (alternate)
@@ -1338,8 +1392,9 @@ void GameServer::update() {
 
             // Send Challenge
             T2Protocol::ChallengeMessage chal;
-            chal.challenge[0] = (uint32_t)(rand() ^ (uintptr_t)&from);
-            chal.challenge[1] = (uint32_t)(rand() ^ (int)(now * 1000));
+            std::random_device random;
+            chal.challenge[0] = random();
+            chal.challenge[1] = random();
             impl->clients[ci].expectedResp[0] = chal.challenge[0];
             impl->clients[ci].expectedResp[1] = chal.challenge[1];
 
@@ -1348,9 +1403,9 @@ void GameServer::update() {
             whdr.sequence = 1; whdr.ack = 0; whdr.ackMask = 0;
             whdr.type = (uint8_t)PacketType::Challenge;
             whdr.checksum = 0;
-            memcpy(chalBuf, &whdr, sizeof(WireHeader));
+            encodeWireHeader(chalBuf, whdr);
             memcpy(chalBuf + sizeof(WireHeader), &chal, sizeof(chal));
-            impl->sendTo(from, chalBuf, sizeof(chalBuf));
+                impl->sendWireTo(from, chalBuf, sizeof(chalBuf));
         }
 
         if (ptype == PacketType::ChallengeResponse) {
@@ -1359,6 +1414,8 @@ void GameServer::update() {
                 T2Protocol::ChallengeResponse resp;
                 memcpy(&resp, payload, 8);
                 auto& cl = impl->clients[ci];
+                if (!challengeMatches(cl.expectedResp, resp.response) || cl.active)
+                    continue;
                 cl.active = true;
                 cl.lastReceive = now;
 
@@ -1369,9 +1426,9 @@ void GameServer::update() {
                 whdr.checksum = 0;
                 uint8_t ok = 1;
                 std::vector<uint8_t> okBuf(sizeof(WireHeader) + 1);
-                memcpy(okBuf.data(), &whdr, sizeof(WireHeader));
+                encodeWireHeader(okBuf.data(), whdr);
                 okBuf[sizeof(WireHeader)] = ok;
-                impl->sendTo(from, okBuf.data(), okBuf.size());
+                impl->sendWireTo(from, okBuf.data(), okBuf.size());
 
                 // Create a ghost entry for this new player
                 Impl::ServerGhost sg;
@@ -1399,9 +1456,9 @@ void GameServer::update() {
                         gsWhdr.type = (uint8_t)PacketType::GameData;
                         gsWhdr.checksum = 0;
                         std::vector<uint8_t> gsPkt(sizeof(WireHeader) + gsLen);
-                        memcpy(gsPkt.data(), &gsWhdr, sizeof(WireHeader));
+                        encodeWireHeader(gsPkt.data(), gsWhdr);
                         memcpy(gsPkt.data() + sizeof(WireHeader), gsBuf, gsLen);
-                        impl->sendTo(from, gsPkt.data(), gsPkt.size());
+                        impl->sendWireTo(from, gsPkt.data(), gsPkt.size());
                     }
                 }
                 Console::instance().printf(LogLevel::Info, "Server: client %s authenticated, ghost idx=%u",
@@ -1427,7 +1484,8 @@ void GameServer::update() {
                         client.playerName = cmd.substr(8, 255);
                         Console::instance().printf(LogLevel::Info, "Client %d set name: %s", ci, client.playerName.c_str());
                     } else {
-                        Console::instance().execute(cmd.c_str());
+                        Console::instance().printf(LogLevel::Warn,
+                            "Server: rejected remote command from client %d", ci);
                     }
                 }
                 continue;
@@ -1444,10 +1502,10 @@ void GameServer::update() {
                     uint8_t chatBuf[512];
                     if (T2Protocol::encodeChat(chatBuf, sizeof(chatBuf), chat)) {
                         std::vector<uint8_t> pkt(sizeof(WireHeader) + 4 + strlen(chat.sender) + strlen(chat.text));
-                        memcpy(pkt.data(), &whdr, sizeof(WireHeader));
+                        encodeWireHeader(pkt.data(), whdr);
                         memcpy(pkt.data() + sizeof(WireHeader), chatBuf, pkt.size() - sizeof(WireHeader));
                         for (auto& c : impl->clients)
-                            if (c.active && !c.isBot) impl->sendTo(c.addr, pkt.data(), pkt.size());
+                            if (c.active && !c.isBot) impl->sendWireTo(c.addr, pkt.data(), pkt.size());
                     }
                     Console::instance().printf(LogLevel::Info, "[CHAT] %s: %s", chat.sender, chat.text);
                 }
@@ -1568,10 +1626,10 @@ void GameServer::update() {
                 whdr.sequence = 1; whdr.ack = 0; whdr.ackMask = 0;
                 whdr.type = (uint8_t)PacketType::GameData;
                 whdr.checksum = 0;
-                memcpy(upBuf, &whdr, sizeof(WireHeader));
+                    encodeWireHeader(upBuf, whdr);
                 // Update message is exactly 40 bytes; only send if encode succeeded.
                 if (T2Protocol::encodeUpdate(upBuf + sizeof(WireHeader), sizeof(upBuf) - sizeof(WireHeader), update))
-                    impl->sendTo(from, upBuf, sizeof(WireHeader) + 40);
+                    impl->sendWireTo(from, upBuf, sizeof(WireHeader) + 40);
             }
         }
 
@@ -1771,10 +1829,10 @@ void GameServer::update() {
             size_t ghLen = T2Protocol::encodeGhostHeader(ghBuf, sizeof(ghBuf), gm);
             if (ghLen > 0) {
                 std::vector<uint8_t> pkt(sizeof(WireHeader) + ghLen);
-                memcpy(pkt.data(), &whdr, sizeof(WireHeader));
+                encodeWireHeader(pkt.data(), whdr);
                 memcpy(pkt.data() + sizeof(WireHeader), ghBuf, ghLen);
                 for (auto& c : impl->clients)
-                    if (c.active && !c.isBot) impl->sendTo(c.addr, pkt.data(), pkt.size());
+                    if (c.active && !c.isBot) impl->sendWireTo(c.addr, pkt.data(), pkt.size());
             }
             Console::instance().printf(LogLevel::Debug, "Item %u picked up by client %d (type %d)",
                 (unsigned)sg.index, (int)(&cl - &impl->clients[0]), sg.itemType);
@@ -1837,10 +1895,10 @@ void GameServer::update() {
                                     size_t ghLen = T2Protocol::encodeGhostHeader(ghBuf, sizeof(ghBuf), gm);
                                     if (ghLen > 0) {
                                         std::vector<uint8_t> pkt(sizeof(WireHeader) + ghLen);
-                                        memcpy(pkt.data(), &whdr, sizeof(WireHeader));
+                                        encodeWireHeader(pkt.data(), whdr);
                                         memcpy(pkt.data() + sizeof(WireHeader), ghBuf, ghLen);
                                         for (auto& c : impl->clients)
-                                            if (c.active && !c.isBot) impl->sendTo(c.addr, pkt.data(), pkt.size());
+                                            if (c.active && !c.isBot) impl->sendWireTo(c.addr, pkt.data(), pkt.size());
                                     }
                                 }
                                 break;
@@ -2201,10 +2259,10 @@ void GameServer::update() {
                                     whdr.sequence = 1; whdr.ack = 0; whdr.ackMask = 0;
                                     whdr.type = (uint8_t)PacketType::GameData; whdr.checksum = 0;
                                     std::vector<uint8_t> pkt(sizeof(WireHeader) + 4 + strlen(kf.sender) + 2 + strlen(kf.text));
-                                    memcpy(pkt.data(), &whdr, sizeof(WireHeader));
+                                    encodeWireHeader(pkt.data(), whdr);
                                     memcpy(pkt.data() + sizeof(WireHeader), kfBuf, pkt.size() - sizeof(WireHeader));
                                     for (auto& c : impl->clients)
-                                        if (c.active && !c.isBot) impl->sendTo(c.addr, pkt.data(), pkt.size());
+                                        if (c.active && !c.isBot) impl->sendWireTo(c.addr, pkt.data(), pkt.size());
                                 }
                             }
                         }

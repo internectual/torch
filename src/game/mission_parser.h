@@ -22,6 +22,16 @@ struct MisObject {
     std::vector<MisObject> children;
 };
 
+struct MisParseBudget {
+    static constexpr size_t MaxContentBytes = 64u * 1024u * 1024u;
+    static constexpr size_t MaxObjects = 100000;
+    static constexpr size_t MaxPropertiesPerObject = 4096;
+    static constexpr size_t MaxValueBytes = 1u * 1024u * 1024u;
+    static constexpr size_t MaxDepth = 128;
+    size_t objects = 0;
+    bool exceeded = false;
+};
+
 static std::string trim(const std::string& s) {
     size_t start = 0, end = s.size();
     while (start < end && (s[start] == ' ' || s[start] == '\t' || s[start] == '\r')) start++;
@@ -29,8 +39,14 @@ static std::string trim(const std::string& s) {
     return s.substr(start, end - start);
 }
 
-static MisObject parseMisObject(const std::string& input, size_t& pos) {
+static MisObject parseMisObject(const std::string& input, size_t& pos,
+                                MisParseBudget& budget, size_t depth = 0) {
     MisObject obj;
+    if (depth > MisParseBudget::MaxDepth || budget.objects >= MisParseBudget::MaxObjects) {
+        budget.exceeded = true;
+        return obj;
+    }
+    budget.objects++;
     // Skip whitespace
     while (pos < input.size() && input[pos] <= ' ') pos++;
 
@@ -76,7 +92,7 @@ static MisObject parseMisObject(const std::string& input, size_t& pos) {
 
         // Check for nested object (starts with "new")
         if (pos + 4 <= input.size() && input.substr(pos, 3) == "new") {
-            MisObject child = parseMisObject(input, pos);
+            MisObject child = parseMisObject(input, pos, budget, depth + 1);
             if (!child.className.empty()) {
                 obj.children.push_back(std::move(child));
             }
@@ -84,6 +100,11 @@ static MisObject parseMisObject(const std::string& input, size_t& pos) {
             while (pos < input.size() && input[pos] <= ' ') pos++;
             if (pos < input.size() && input[pos] == ';') pos++;
             continue;
+        }
+
+        if (obj.props.size() >= MisParseBudget::MaxPropertiesPerObject) {
+            budget.exceeded = true;
+            return MisObject{};
         }
 
         // Read property name (until = or { or space)
@@ -116,6 +137,11 @@ static MisObject parseMisObject(const std::string& input, size_t& pos) {
             propValue = trim(input.substr(start, pos - start));
         }
 
+        if (propValue.size() > MisParseBudget::MaxValueBytes) {
+            budget.exceeded = true;
+            return MisObject{};
+        }
+
         // Skip ;
         if (pos < input.size() && input[pos] == ';') pos++;
 
@@ -131,6 +157,8 @@ static MisObject parseMisObject(const std::string& input, size_t& pos) {
 
 static std::vector<MisObject> parseMisFile(const std::string& content) {
     std::vector<MisObject> objects;
+    MisParseBudget budget;
+    if (content.size() > MisParseBudget::MaxContentBytes) return objects;
     size_t pos = 0;
 
     // Remove // comments
@@ -149,6 +177,8 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
         size_t found = clean.find("new ", pos);
         size_t dbFound = clean.find("datablock ", pos);
         if (dbFound != std::string::npos && (found == std::string::npos || dbFound < found)) {
+            if (budget.objects >= MisParseBudget::MaxObjects) return {};
+            budget.objects++;
             // Parse datablock definition
             pos = dbFound + 10; // skip "datablock "
             while (pos < clean.size() && clean[pos] <= ' ') pos++;
@@ -183,6 +213,10 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
             while (pos < clean.size()) {
                 while (pos < clean.size() && clean[pos] <= ' ') pos++;
                 if (pos >= clean.size() || clean[pos] == '}') { if (pos < clean.size()) pos++; break; }
+                if (obj.props.size() >= MisParseBudget::MaxPropertiesPerObject) {
+                    budget.exceeded = true;
+                    return {};
+                }
                 // Read property name
                 start = pos;
                 while (pos < clean.size() && clean[pos] != '=' && clean[pos] > ' ' && clean[pos] != '{') pos++;
@@ -205,6 +239,10 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
                     while (pos < clean.size() && clean[pos] != ';' && clean[pos] != '}') pos++;
                     propValue = trim(clean.substr(start, pos - start));
                 }
+                if (propValue.size() > MisParseBudget::MaxValueBytes) {
+                    budget.exceeded = true;
+                    return {};
+                }
                 if (pos < clean.size() && clean[pos] == ';') pos++;
                 for (auto& c : propName) if (c >= 'A' && c <= 'Z') c += 32;
                 obj.props.push_back({propName, propValue});
@@ -218,7 +256,7 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
         if (found == std::string::npos) break;
         pos = found;
 
-        MisObject obj = parseMisObject(clean, pos);
+        MisObject obj = parseMisObject(clean, pos, budget);
         if (!obj.className.empty()) {
             objects.push_back(std::move(obj));
         }
@@ -227,11 +265,14 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
         if (pos < clean.size() && clean[pos] == ';') pos++;
     }
 
+    if (budget.exceeded) return {};
+
     // Flatten children into top-level objects (recursive breadth-first)
     size_t i = 0;
     while (i < objects.size()) {
         if (!objects[i].children.empty()) {
             for (auto& child : objects[i].children) {
+                if (objects.size() >= MisParseBudget::MaxObjects) return {};
                 objects.push_back(std::move(child));
             }
             objects[i].children.clear();

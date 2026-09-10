@@ -1,4 +1,5 @@
 #include "net/network.h"
+#include "net/master_query.h"
 #include "net/protocol.h"
 #include "net/v12_protocol.h"
 #include "core/console.h"
@@ -14,19 +15,13 @@
 #include <fcntl.h>
 #include <vector>
 #include <queue>
+#include <deque>
 #include <chrono>
 #include <map>
 #include <utility>
-
-// ─── Wire Header ──────────────────────────────────────────────────
-// Preprended to every UDP packet (15 bytes)
-struct WireHeader {
-    uint32_t sequence;
-    uint32_t ack;
-    uint32_t ackMask;
-    uint8_t type;
-    uint16_t checksum;
-};
+#include <sstream>
+#include <random>
+#include <curl/curl.h>
 
 static uint16_t wireChecksum(const uint8_t* data, size_t size) {
     uint32_t sum = 0;
@@ -44,10 +39,13 @@ struct Connection::Impl {
     // Sequence numbers (32-bit for proper ack tracking)
     uint32_t sendSeq = 1;
     uint32_t recvSeq = 0;
+    uint32_t recvMask = 0;
+    bool haveReceivedSequence = false;
 
     // Sent reliable packets keyed by sequence number
     struct SentPacket {
         std::vector<uint8_t> data;
+        PacketType type;
         double sendTime;
         int retries;
         bool reliable;
@@ -67,6 +65,26 @@ struct Connection::Impl {
     V12::ProtocolState nativeProtocol;
     V12::NetStringTable nativeStrings;
     V12::GhostTracker nativeGhosts;
+    std::map<uint16_t, V12::PlayerGhostState> nativePlayerStates;
+    std::map<uint16_t, V12::ServerEvent::TargetInfo> nativeTargets;
+    uint32_t nativeMissionCrc = 0;
+    std::map<uint16_t, std::string> nativeDatablockShapes;
+    std::deque<std::vector<uint8_t>> injectedObserverPackets;
+    std::map<int, Connection::ObserverSnapshot::TeamState> nativeTeamScores;
+    std::map<int, int> nativePlayerScores;
+    std::map<int, int> nativePlayerPings;
+    std::map<int, int> nativePlayerPacketLoss;
+    std::map<int, int> nativeClientTargets;
+    std::map<int, int> nativeClientTeams;
+    std::map<int, std::string> nativeClientNames;
+    V12Vec3 nativeCompressionPoint{};
+    uint16_t nativeControlGhost = 0;
+    uint32_t nativeLastMoveAck = 0;
+    uint8_t nativePlayerSensorGroup = 0;
+    bool nativeMatchStarted = false;
+    bool nativeMatchEnded = false;
+    uint32_t nativeClockRemainingMs = 0;
+    std::vector<std::string> nativeLoadInfoLines;
     std::map<uint32_t, std::vector<V12::ClientEvent>> sentNativeEventPackets;
     uint8_t nextNativeEventSequence = 0;
     bool nativeRateAdvertised = false;
@@ -112,37 +130,46 @@ struct Connection::Impl {
                (sockaddr*)&addr, sizeof(addr));
     }
 
-    // Send a pre-built payload (without wire header) with proper framing
-    void sendFramed(PacketType ptype, const uint8_t* payload, size_t payloadLen, bool reliable) {
-        if (sock < 0) return;
+    void sendFramedAt(PacketType ptype, uint32_t sequence,
+                      const uint8_t* payload, size_t payloadLen) {
+        constexpr size_t kMaxUdpPayload = 60 * 1024;
+        if (sock < 0 || payloadLen > kMaxUdpPayload || (payloadLen > 0 && !payload)) return;
 
         // Build wire header
         WireHeader hdr;
-        hdr.sequence = sendSeq++;
+        hdr.sequence = sequence;
         hdr.ack = recvSeq;
-        // Build ack mask: which of the last 32 packets before recvSeq did we receive?
-        // For simplicity, just set all bits for recent packets
-        hdr.ackMask = 0xFFFFFFFF;
+        // Advertise only packets actually received in the preceding 32 slots.
+        hdr.ackMask = recvMask;
         hdr.type = (uint8_t)ptype;
         hdr.checksum = 0; // placeholder
 
         // Assemble full packet: header + payload
         std::vector<uint8_t> packet;
         packet.resize(sizeof(WireHeader) + payloadLen);
-        memcpy(packet.data(), &hdr, sizeof(WireHeader));
+        encodeWireHeader(packet.data(), hdr);
         if (payload && payloadLen > 0)
             memcpy(packet.data() + sizeof(WireHeader), payload, payloadLen);
 
         // Calculate checksum over header + payload (with checksum=0)
         uint16_t csum = wireChecksum(packet.data(), packet.size());
-        memcpy(packet.data() + offsetof(WireHeader, checksum), &csum, sizeof(csum));
+        packet[13] = (uint8_t)(csum & 0xff);
+        packet[14] = (uint8_t)(csum >> 8);
 
         sendto(sock, packet.data(), packet.size(), 0, (sockaddr*)&addr, sizeof(addr));
+    }
+
+    // Send a pre-built payload (without wire header) with proper framing.
+    void sendFramed(PacketType ptype, const uint8_t* payload, size_t payloadLen, bool reliable) {
+        const uint32_t sequence = sendSeq++;
+        sendFramedAt(ptype, sequence, payload, payloadLen);
 
         // Track reliable packets for retransmission
         if (reliable) {
-            sentPackets[hdr.sequence] = {
-                std::vector<uint8_t>(payload, payload + payloadLen),
+            sentPackets[sequence] = {
+                payloadLen == 0 ? std::vector<uint8_t>{}
+                                : std::vector<uint8_t>(payload, payload + payloadLen),
+                ptype,
                 Engine::instance().timer().now(),
                 0,
                 true
@@ -160,6 +187,44 @@ Connection::~Connection() {
     delete impl;
 }
 
+void Connection::resetProtocolEpoch() {
+    impl->nativeProtocol.reset(impl->nativeProtocol.connectionSequence());
+    impl->nativeStrings.clear();
+    impl->nativeGhosts.clear();
+    impl->nativePlayerStates.clear();
+    impl->nativeTargets.clear();
+    impl->nativeMissionCrc = 0;
+    impl->nativeDatablockShapes.clear();
+    impl->nativeTeamScores.clear();
+    impl->nativePlayerScores.clear();
+    impl->nativePlayerPings.clear();
+    impl->nativePlayerPacketLoss.clear();
+    impl->nativeClientTargets.clear();
+    impl->nativeClientTeams.clear();
+    impl->nativeClientNames.clear();
+    impl->nativeCompressionPoint = {};
+    impl->nativeControlGhost = 0;
+    impl->nativeLastMoveAck = 0;
+    impl->nativePlayerSensorGroup = 0;
+    impl->nativeMatchStarted = false;
+    impl->nativeMatchEnded = false;
+    impl->nativeClockRemainingMs = 0;
+    impl->nativeLoadInfoLines.clear();
+    impl->connectRequest.clear();
+    impl->disconnectPacket.clear();
+    impl->disconnectAttempts = 0;
+    impl->nextNativeEventSequence = 0;
+    impl->nativeRateAdvertised = false;
+    impl->pendingNativeMove = false;
+    impl->pendingNativeEvents.clear();
+    impl->sentNativeEventPackets.clear();
+    impl->lastNativeDataSend = 0;
+    impl->recvSeq = 0;
+    impl->recvMask = 0;
+    impl->haveReceivedSequence = false;
+    ++epoch;
+}
+
 bool Connection::connect(const char* host, uint16_t port) {
     impl->sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (impl->sock < 0) {
@@ -171,41 +236,33 @@ bool Connection::connect(const char* host, uint16_t port) {
     int flags = fcntl(impl->sock, F_GETFL, 0);
     fcntl(impl->sock, F_SETFL, flags | O_NONBLOCK);
 
-    // Resolve hostname
-    hostent* he = gethostbyname(host);
-    if (!he) {
+    // Resolve an IPv4 hostname without the obsolete process-global resolver.
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    addrinfo* resolved = nullptr;
+    const std::string service = std::to_string(port);
+    if (getaddrinfo(host, service.c_str(), &hints, &resolved) != 0 || !resolved) {
         Console::instance().printf(LogLevel::Error, "Cannot resolve: %s", host);
         close(impl->sock);
         impl->sock = -1;
         return false;
     }
 
-    impl->addr.sin_family = AF_INET;
-    impl->addr.sin_port = htons(port);
-    memcpy(&impl->addr.sin_addr, he->h_addr, he->h_length);
+    memcpy(&impl->addr, resolved->ai_addr, sizeof(sockaddr_in));
+    freeaddrinfo(resolved);
 
     remoteAddr.ip = impl->addr.sin_addr.s_addr;
     remoteAddr.port = port;
 
     connState = Connecting;
     impl->connectTime = Engine::instance().timer().now();
-    impl->nativeProtocol.reset();
-    impl->nativeStrings.clear();
-    impl->nativeGhosts.clear();
-    impl->connectRequest.clear();
-    impl->disconnectPacket.clear();
-    impl->disconnectAttempts = 0;
-    impl->nextNativeEventSequence = 0;
-    impl->nativeRateAdvertised = false;
-    impl->pendingNativeMove = false;
-    impl->pendingNativeEvents.clear();
-    impl->sentNativeEventPackets.clear();
-    impl->lastNativeDataSend = 0;
+    resetProtocolEpoch();
 
     // Generate random challenge
-    srand((unsigned int)(time(nullptr) + (uintptr_t)this));
-    impl->challenge[0] = (uint32_t)rand();
-    impl->challenge[1] = (uint32_t)rand();
+    std::random_device random;
+    impl->challenge[0] = random();
+    impl->challenge[1] = random();
 
     impl->clientConnectSequence = impl->challenge[0];
     impl->serverConnectSequence = 0;
@@ -213,6 +270,152 @@ bool Connection::connect(const char* host, uint16_t port) {
         V12::ProtocolVersion, impl->clientConnectSequence, joinPassword));
 
     Console::instance().printf(LogLevel::Info, "Connecting to %s:%d", host, port);
+    return true;
+}
+
+Connection::ObserverSnapshot Connection::observerSnapshot() const {
+    ObserverSnapshot snapshot;
+    snapshot.epoch = epoch;
+    snapshot.missionCrc = impl->nativeMissionCrc;
+    snapshot.compressionPoint = impl->nativeCompressionPoint;
+    snapshot.controlGhost = impl->nativeControlGhost;
+    snapshot.lastMoveAck = impl->nativeLastMoveAck;
+    snapshot.playerSensorGroup = impl->nativePlayerSensorGroup;
+    snapshot.matchStarted = impl->nativeMatchStarted;
+    snapshot.matchEnded = impl->nativeMatchEnded;
+    snapshot.clockRemainingMs = impl->nativeClockRemainingMs;
+    snapshot.loadInfoLines = impl->nativeLoadInfoLines;
+    snapshot.protocol = impl->nativeProtocol.snapshot();
+    snapshot.strings = impl->nativeStrings.entries();
+    snapshot.datablockShapes = impl->nativeDatablockShapes;
+    snapshot.players.reserve(impl->nativePlayerStates.size());
+    for (const auto& [index, state] : impl->nativePlayerStates)
+        snapshot.players.emplace_back(index, state);
+    snapshot.ghostClasses.reserve(impl->nativePlayerStates.size());
+    for (const auto& [index, state] : impl->nativePlayerStates) {
+        if (const auto* ghost = impl->nativeGhosts.get(index))
+            snapshot.ghostClasses.emplace_back(index, ghost->classId);
+    }
+    snapshot.targets.reserve(impl->nativeTargets.size());
+    for (const auto& [id, target] : impl->nativeTargets)
+        snapshot.targets.push_back(target);
+    for (const auto& [id, team] : impl->nativeTeamScores)
+        snapshot.teams.push_back(team);
+    snapshot.playerScores = impl->nativePlayerScores;
+    snapshot.playerPings = impl->nativePlayerPings;
+    snapshot.playerPacketLoss = impl->nativePlayerPacketLoss;
+    snapshot.clientTargets = impl->nativeClientTargets;
+    snapshot.clientTeams = impl->nativeClientTeams;
+    snapshot.clientNames = impl->nativeClientNames;
+    return snapshot;
+}
+
+bool Connection::seedObserverSnapshot(const ObserverSnapshot& snapshot) {
+    if (snapshot.strings.size() > 4096 || snapshot.datablockShapes.size() > 2048 ||
+        snapshot.players.size() > 1024 || snapshot.targets.size() > 512)
+        return false;
+    for (const auto& [id, value] : snapshot.strings)
+        if (id >= 4096 || value.size() > 255) return false;
+    for (const auto& [id, value] : snapshot.datablockShapes)
+        if (id >= 2048 || value.size() > 1024) return false;
+    for (const auto& [index, state] : snapshot.players)
+        if (index >= 1024) return false;
+    for (size_t i = 0; i < snapshot.players.size(); ++i)
+        for (size_t j = i + 1; j < snapshot.players.size(); ++j)
+            if (snapshot.players[i].first == snapshot.players[j].first) return false;
+    for (const auto& [index, classId] : snapshot.ghostClasses)
+        if (index >= 1024 || classId >= V12::GhostClassCount) return false;
+    for (const auto& target : snapshot.targets)
+        if (target.targetId >= 512) return false;
+
+    impl->nativeStrings.clear();
+    epoch = snapshot.epoch;
+    impl->nativeProtocol.restore(snapshot.protocol);
+    impl->nativeGhosts.clear();
+    impl->nativePlayerStates.clear();
+    impl->nativeTargets.clear();
+    impl->nativeDatablockShapes = snapshot.datablockShapes;
+    impl->nativeMissionCrc = snapshot.missionCrc;
+    impl->nativeCompressionPoint = snapshot.compressionPoint;
+    impl->nativeControlGhost = snapshot.controlGhost;
+    impl->nativeLastMoveAck = snapshot.lastMoveAck;
+    impl->nativePlayerSensorGroup = snapshot.playerSensorGroup;
+    impl->nativeMatchStarted = snapshot.matchStarted;
+    impl->nativeMatchEnded = snapshot.matchEnded;
+    impl->nativeClockRemainingMs = snapshot.clockRemainingMs;
+    impl->nativeLoadInfoLines = snapshot.loadInfoLines;
+    impl->nativeTeamScores.clear();
+    for (const auto& team : snapshot.teams)
+        if (team.teamId > 0 && team.teamId < 64) impl->nativeTeamScores[team.teamId] = team;
+    impl->nativePlayerScores = snapshot.playerScores;
+    impl->nativePlayerPings = snapshot.playerPings;
+    impl->nativePlayerPacketLoss = snapshot.playerPacketLoss;
+    impl->nativeClientTargets = snapshot.clientTargets;
+    impl->nativeClientTeams = snapshot.clientTeams;
+    impl->nativeClientNames = snapshot.clientNames;
+    for (const auto& [id, value] : snapshot.strings)
+        impl->nativeStrings.set(id, value);
+    for (const auto& target : snapshot.targets)
+        impl->nativeTargets[target.targetId] = target;
+    for (const auto& [index, state] : snapshot.players) {
+        uint16_t classId = 25;
+        for (const auto& [classIndex, listedClass] : snapshot.ghostClasses) {
+            if (classIndex == index) { classId = listedClass; break; }
+        }
+        if (!impl->nativeGhosts.create(index, classId)) return false;
+        impl->nativePlayerStates[index] = state;
+    }
+    if (targetCb) {
+        for (const auto& target : snapshot.targets)
+            targetCb(&impl->nativeTargets[target.targetId], target.targetId);
+    }
+    if (serverMessageCb) {
+        if (snapshot.matchStarted) serverMessageCb({"ServerMessage", "MsgMissionStart"});
+        if (snapshot.matchEnded) serverMessageCb({"ServerMessage", "MsgDebriefResult"});
+        if (snapshot.clockRemainingMs > 0)
+            serverMessageCb({"ServerMessage", "MsgSystemClock", "", std::to_string(snapshot.clockRemainingMs)});
+        if (!snapshot.loadInfoLines.empty()) {
+            serverMessageCb({"ServerMessage", "MsgLoadInfo"});
+            for (const auto& line : snapshot.loadInfoLines)
+                serverMessageCb({"ServerMessage", "MsgLoadObjectiveLine", line});
+            serverMessageCb({"ServerMessage", "MsgLoadInfoDone"});
+        }
+        for (const auto& team : snapshot.teams) {
+            serverMessageCb({"ServerMessage", "MsgCTFAddTeam",
+                             std::to_string(team.teamId), team.name,
+                             team.flagStatus == "home" ? "<At Base>" :
+                             team.flagStatus == "field" ? "<In the Field>" : team.flagCarrier,
+                             std::to_string(team.score)});
+        }
+        for (const auto& [clientId, targetId] : snapshot.clientTargets) {
+            const auto name = snapshot.clientNames.find(clientId);
+            serverMessageCb({"ServerMessage", "MsgClientJoin",
+                             name == snapshot.clientNames.end() ? "" : name->second,
+                             std::to_string(clientId), std::to_string(targetId)});
+            const auto score = snapshot.playerScores.find(clientId);
+            if (score != snapshot.playerScores.end())
+            serverMessageCb({"ServerMessage", "MsgPlayerScore",
+                                 std::to_string(clientId), std::to_string(score->second),
+                                 std::to_string(snapshot.playerPings.contains(clientId)
+                                     ? snapshot.playerPings.at(clientId) : 0),
+                                 std::to_string(snapshot.playerPacketLoss.contains(clientId)
+                                     ? snapshot.playerPacketLoss.at(clientId) : 0)});
+            const auto team = snapshot.clientTeams.find(clientId);
+            if (team != snapshot.clientTeams.end())
+                serverMessageCb({"ServerMessage", "MsgClientJoinTeam", "", "",
+                                 std::to_string(clientId), std::to_string(team->second)});
+        }
+    }
+    if (ghostCb) {
+        for (const auto& [index, state] : snapshot.players) {
+            const auto* ghost = impl->nativeGhosts.get(index);
+            V12::GhostUpdate update;
+            update.operation = V12::GhostUpdate::Operation::Create;
+            update.index = index;
+            update.classId = ghost ? ghost->classId : 25;
+            ghostCb(update, &impl->nativePlayerStates[index]);
+        }
+    }
     return true;
 }
 
@@ -233,12 +436,27 @@ void Connection::disconnect() {
     }
     connState = Disconnected;
     impl->sentPackets.clear();
+    impl->injectedObserverPackets.clear();
 }
 
 void Connection::update() {
-    if (impl->sock < 0) return;
+    if (impl->sock < 0 && impl->injectedObserverPackets.empty()) return;
 
     double now = Engine::instance().timer().now();
+
+    if ((connState == Connecting || connState == Challenging) &&
+        now - impl->connectTime > 10.0) {
+        Console::instance().printf(LogLevel::Warn, "Connection timeout");
+        if (connectCb) connectCb(false);
+        disconnect();
+        return;
+    }
+    if (connState >= Connected && impl->lastReceive > 0 &&
+        now - impl->lastReceive > 15.0) {
+        Console::instance().printf(LogLevel::Warn, "Connection receive timeout");
+        disconnect();
+        return;
+    }
 
     if (!impl->disconnectPacket.empty()) {
         if (impl->disconnectAttempts < 3 && now >= impl->nextDisconnectSend) {
@@ -259,10 +477,22 @@ void Connection::update() {
     socklen_t fromLen = sizeof(from);
 
     while (true) {
-        int n = recvfrom(impl->sock, buf, sizeof(buf), 0, (sockaddr*)&from, &fromLen);
-        if (n <= 0) break;
-        if (from.sin_addr.s_addr != impl->addr.sin_addr.s_addr ||
+        int n = 0;
+        const bool injected = !impl->injectedObserverPackets.empty();
+        if (injected) {
+            const auto packet = std::move(impl->injectedObserverPackets.front());
+            impl->injectedObserverPackets.pop_front();
+            n = (int)packet.size();
+            memcpy(buf, packet.data(), packet.size());
+        } else if (impl->sock >= 0) {
+            n = recvfrom(impl->sock, buf, sizeof(buf), 0, (sockaddr*)&from, &fromLen);
+            if (n <= 0) break;
+        } else {
+            break;
+        }
+        if (!injected && (from.sin_addr.s_addr != impl->addr.sin_addr.s_addr ||
             from.sin_port != impl->addr.sin_port)
+        )
             continue;
 
         // Native V12 OOB packets are byte-discriminated from dnet packets by
@@ -286,7 +516,8 @@ void Connection::update() {
                         impl->clientConnectSequence,
                         V12::ProtocolVersion,
                         false,
-                        {playerName, "Male Human", "beagle", "male1", "1.0"});
+                        {observerMode ? "ImaWatcher" : playerName,
+                         "Male Human", "beagle", "male1", "1.0"});
                     impl->sendRaw(impl->connectRequest);
                     impl->connectTime = now;
                     connState = Challenging;
@@ -350,19 +581,131 @@ void Connection::update() {
                     V12Vec3 compressionPoint;
                     V12BitStream payload(buf, (size_t)n, stream.position());
                     if (V12::readServerPacketEvents(payload, impl->nativeStrings, events,
-                                                    &gameState,
-                                                    &compressionPoint, nullptr)) {
+                                                     &gameState,
+                                                     &compressionPoint, nullptr)) {
+                        bool endGhosting = false;
+                        impl->nativeLastMoveAck = gameState.lastMoveAck;
+                        if (gameState.hasCompressionPoint)
+                            impl->nativeCompressionPoint = gameState.compressionPoint;
+                        if (gameState.controlPresent && !gameState.controlDirty)
+                            impl->nativeControlGhost = gameState.controlGhost;
                         if (stateCb) stateCb(gameState);
                         for (const auto& event : events) {
+                            if (event.hasSensorGroup)
+                                impl->nativePlayerSensorGroup = event.sensorGroup;
                             if (event.classId == 9 && commandCb)
                                 commandCb(event.message);
-                            if (event.hasDatablock && datablockCb) {
-                                datablockCb(event.datablockObject,
-                                            event.datablockClass,
-                                            event.datablockIndex,
-                                            event.datablockTotal,
-                                            event.datablockClassName,
-                                            event.datablockData);
+                            if (event.classId == 9 && event.arguments.size() >= 2 &&
+                                event.arguments[0] == "ServerMessage") {
+                                const auto& args = event.arguments;
+                                const std::string& type = args[1];
+                                if (type == "MsgMissionStart") {
+                                    impl->nativeMatchStarted = true;
+                                    impl->nativeMatchEnded = false;
+                                } else if (type == "MsgClientReady") {
+                                    impl->nativeMatchStarted = false;
+                                    impl->nativeMatchEnded = false;
+                                } else if (type == "MsgClearDebrief" || type == "MsgDebriefResult") {
+                                    impl->nativeMatchEnded = true;
+                                } else if (type == "MsgSystemClock" && args.size() >= 4) {
+                                    impl->nativeClockRemainingMs = (uint32_t)std::max(0, atoi(args[3].c_str()));
+                                } else if (type == "MsgLoadInfo") {
+                                    impl->nativeLoadInfoLines.clear();
+                                } else if ((type == "MsgLoadQuoteLine" || type == "MsgLoadObjectiveLine" ||
+                                            type == "MsgLoadRulesLine") && args.size() >= 3 &&
+                                           impl->nativeLoadInfoLines.size() < 128) {
+                                    impl->nativeLoadInfoLines.push_back(args[2]);
+                                }
+                                if ((type == "MsgTeamScoreIs" || type == "MsgTeamScore") &&
+                                    args.size() >= 5) {
+                                    const int teamId = atoi(args[2].c_str());
+                                    if (teamId > 0 && teamId < 64) {
+                                        auto& team = impl->nativeTeamScores[teamId];
+                                        team.teamId = teamId;
+                                        team.score = atoi(args[3].c_str());
+                                    }
+                                } else if (type == "MsgCTFAddTeam" && args.size() >= 6) {
+                                    const int teamId = atoi(args[2].c_str());
+                                    if (teamId > 0 && teamId < 64) {
+                                        auto& team = impl->nativeTeamScores[teamId];
+                                        team.teamId = teamId;
+                                        team.name = args[3];
+                                        team.flagStatus = args[4].find("At Base") == 0 ? "home" :
+                                            args[4].find("In the Field") == 0 ? "field" : "held";
+                                        team.flagCarrier = team.flagStatus == "held" ? args[4] : "";
+                                        team.score = atoi(args[5].c_str());
+                                    }
+                                } else if ((type == "MsgCTFFlagTaken" ||
+                                            type == "MsgCTFFlagDropped" ||
+                                            type == "MsgCTFFlagReturned" ||
+                                            type == "MsgCTFFlagCapped") && args.size() >= 6) {
+                                    const int teamId = atoi(args[4].c_str());
+                                    if (teamId > 0 && teamId < 64) {
+                                        auto& team = impl->nativeTeamScores[teamId];
+                                        team.teamId = teamId;
+                                        team.flagStatus = type == "MsgCTFFlagTaken" ? "held" :
+                                            type == "MsgCTFFlagDropped" ? "field" : "home";
+                                        team.flagCarrier = team.flagStatus == "held" ? args[2] : "";
+                                    }
+                                } else if (type == "MsgPlayerScore" && args.size() >= 5) {
+                                    const int clientId = atoi(args[2].c_str());
+                                    if (clientId >= 0 && clientId < 1024)
+                                        impl->nativePlayerScores[clientId] = atoi(args[3].c_str());
+                                    if (clientId >= 0 && clientId < 1024 && args.size() >= 6) {
+                                        impl->nativePlayerPings[clientId] = atoi(args[4].c_str());
+                                        impl->nativePlayerPacketLoss[clientId] = atoi(args[5].c_str());
+                                    }
+                                } else if (type == "MsgClientJoin" && args.size() >= 5) {
+                                    const int clientId = atoi(args[3].c_str());
+                                    const int targetId = atoi(args[4].c_str());
+                                    if (clientId >= 0 && clientId < 1024 &&
+                                        targetId >= 0 && targetId < 1024) {
+                                        impl->nativeClientTargets[clientId] = targetId;
+                                        impl->nativeClientNames[clientId] = args[2];
+                                    }
+                                } else if (type == "MsgClientDrop" && args.size() >= 4) {
+                                    const int clientId = atoi(args[3].c_str());
+                                    impl->nativeClientTargets.erase(clientId);
+                                    impl->nativeClientNames.erase(clientId);
+                                    impl->nativePlayerScores.erase(clientId);
+                                    impl->nativePlayerPings.erase(clientId);
+                                    impl->nativePlayerPacketLoss.erase(clientId);
+                                } else if (type == "MsgClientNameChanged" && args.size() >= 5) {
+                                    const int clientId = atoi(args[4].c_str());
+                                    if (clientId >= 0 && clientId < 1024)
+                                        impl->nativeClientNames[clientId] = args[3];
+                                } else if (type == "MsgClientJoinTeam" && args.size() >= 6) {
+                                    const int clientId = atoi(args[4].c_str());
+                                    const int teamId = atoi(args[5].c_str());
+                                    if (clientId >= 0 && clientId < 1024 && teamId >= 0 && teamId < 64)
+                                        impl->nativeClientTeams[clientId] = teamId;
+                                }
+                            }
+                            if (event.classId == 9 && serverMessageCb && !event.arguments.empty())
+                                serverMessageCb(event.arguments);
+                            if (event.hasTargetInfo && targetCb)
+                                targetCb(&event.targetInfo, event.targetInfo.targetId);
+                            if (event.hasTargetInfo)
+                                impl->nativeTargets[event.targetInfo.targetId] = event.targetInfo;
+                            if (event.hasTargetFree && targetCb)
+                                targetCb(nullptr, event.targetFreeId);
+                            if (event.hasTargetFree)
+                                impl->nativeTargets.erase(event.targetFreeId);
+                            if (event.hasMissionCrc && missionCb)
+                                missionCb(event.missionCrc);
+                            if (event.hasMissionCrc)
+                                impl->nativeMissionCrc = event.missionCrc;
+                            if (event.hasDatablock) {
+                                if (!event.datablockData.shapeFile.empty())
+                                    impl->nativeDatablockShapes[event.datablockObject] =
+                                        event.datablockData.shapeFile;
+                                if (datablockCb)
+                                    datablockCb(event.datablockObject,
+                                                event.datablockClass,
+                                                event.datablockIndex,
+                                                event.datablockTotal,
+                                                event.datablockClassName,
+                                                event.datablockData);
                             }
                             if (event.hasGhostingMessage && event.ghostMessage == 0) {
                                 V12::ClientPacketOptions responseOptions;
@@ -375,6 +718,8 @@ void Connection::update() {
                                     std::move(responseOptions.events.front()));
                                 impl->flushNativeMove();
                             }
+                            if (event.hasGhostingMessage && event.ghostMessage == 2)
+                                endGhosting = true;
                         }
                         std::vector<V12::GhostUpdate> updates;
                         std::map<uint16_t, V12::PlayerGhostState> playerStates;
@@ -384,21 +729,40 @@ void Connection::update() {
                                 V12::PlayerGhostState state;
                                 const bool ok = V12::readGhostPayload(
                                     ghost, classId, initial, compressionPoint, &state);
-                                if (ok && (classId == 22 || classId == 25 || classId == 29 ||
+                                if (ok && (classId == 16 || classId == 22 || classId == 25 || classId == 29 ||
                                            classId == 37 || classId == 39 || classId == 51))
                                     playerStates[index] = state;
                                 return ok;
                             });
-                        if (ghostsOk && ghostCb) {
+                        if (ghostsOk) {
                             for (const auto& update : updates) {
                                 if (update.operation == V12::GhostUpdate::Operation::Delete) {
-                                    ghostCb(update, nullptr);
+                                    impl->nativePlayerStates.erase(update.index);
+                                    if (ghostCb) ghostCb(update, nullptr);
                                 } else {
                                     auto state = playerStates.find(update.index);
-                                    ghostCb(update, state == playerStates.end()
-                                        ? nullptr : &state->second);
+                                    if (state == playerStates.end()) {
+                                        if (ghostCb) ghostCb(update, nullptr);
+                                        continue;
+                                    }
+                                    if (update.operation == V12::GhostUpdate::Operation::Create) {
+                                        impl->nativePlayerStates[update.index] = state->second;
+                                    } else {
+                                        auto previous = impl->nativePlayerStates.find(update.index);
+                                        if (previous == impl->nativePlayerStates.end())
+                                            impl->nativePlayerStates[update.index] = state->second;
+                                        else
+                                            previous->second = V12::mergePlayerGhostState(
+                                                previous->second, state->second);
+                                    }
+                                    if (ghostCb)
+                                        ghostCb(update, &impl->nativePlayerStates[update.index]);
                                 }
                             }
+                        }
+                        if (endGhosting) {
+                            resetProtocolEpoch();
+                            if (epochCb) epochCb(epoch);
                         }
                     }
                 }
@@ -410,14 +774,14 @@ void Connection::update() {
 
         // Parse wire header
         WireHeader hdr;
-        memcpy(&hdr, buf, sizeof(WireHeader));
+        hdr = decodeWireHeader(buf);
 
         // Verify checksum
         uint16_t savedCsum = hdr.checksum;
         WireHeader hdrNoCsum = hdr;
         hdrNoCsum.checksum = 0;
         std::vector<uint8_t> tmp(sizeof(WireHeader) + n - sizeof(WireHeader));
-        memcpy(tmp.data(), &hdrNoCsum, sizeof(WireHeader));
+        encodeWireHeader(tmp.data(), hdrNoCsum);
         if (n > (int)sizeof(WireHeader))
             memcpy(tmp.data() + sizeof(WireHeader), buf + sizeof(WireHeader), n - sizeof(WireHeader));
         if (wireChecksum(tmp.data(), tmp.size()) != savedCsum)
@@ -446,9 +810,23 @@ void Connection::update() {
             ++it;
         }
 
-        // Update received sequence tracking
-        if (hdr.sequence > impl->recvSeq)
+        // Update the actual receive window used for future acknowledgements.
+        if (!impl->haveReceivedSequence) {
             impl->recvSeq = hdr.sequence;
+            impl->recvMask = 0;
+            impl->haveReceivedSequence = true;
+        } else if (hdr.sequence > impl->recvSeq) {
+            const uint32_t diff = hdr.sequence - impl->recvSeq;
+            if (diff < 32)
+                impl->recvMask = (impl->recvMask << diff) | (1u << (diff - 1));
+            else
+                impl->recvMask = 0;
+            impl->recvSeq = hdr.sequence;
+        } else if (hdr.sequence < impl->recvSeq) {
+            const uint32_t diff = impl->recvSeq - hdr.sequence;
+            if (diff <= 32)
+                impl->recvMask |= 1u << (diff - 1);
+        }
 
         PacketType ptype = (PacketType)hdr.type;
         const uint8_t* payload = buf + sizeof(WireHeader);
@@ -509,7 +887,7 @@ void Connection::update() {
             } else {
                 // Retransmit
                 sp.sendTime = now;
-                impl->sendFramed(PacketType::GameData, sp.data.data(), sp.data.size(), false);
+                impl->sendFramedAt(sp.type, seq, sp.data.data(), sp.data.size());
             }
         }
     }
@@ -534,6 +912,16 @@ void Connection::update() {
         impl->lastPing = now;
         sendPacket(PacketType::Ping, nullptr, 0);
     }
+}
+
+bool Connection::ingestObserverPacket(const uint8_t* data, size_t size) {
+    constexpr size_t MaxObserverPacket = 2048;
+    constexpr size_t MaxQueuedObserverPackets = 256;
+    if (!data || size == 0 || size > MaxObserverPacket ||
+        connState < Connected || impl->injectedObserverPackets.size() >= MaxQueuedObserverPackets)
+        return false;
+    impl->injectedObserverPackets.emplace_back(data, data + size);
+    return true;
 }
 
 void Connection::sendPacket(PacketType type, const uint8_t* data, size_t size) {
@@ -588,6 +976,11 @@ void Connection::sendCommandPacket(const char* command) {
         }
     }
     if (argv.empty()) return;
+    if (observerMode && !isObserverSetupCommand(argv)) {
+        Console::instance().printf(LogLevel::Warn,
+            "Ignored observer command: %s", argv.front().c_str());
+        return;
+    }
     auto events = V12::buildRemoteCommandEvents(
         impl->nativeStrings, argv.front(),
         std::vector<std::string>(argv.begin() + 1, argv.end()));
@@ -608,6 +1001,9 @@ struct NetworkManager::Impl {
     std::map<std::string, bool> nativeInfoRequested;
     double queryEndTime = 0;
     std::map<std::string, ServerInfo> seenServers; // dedup by addr string
+    std::vector<sockaddr_in> queryTargets;
+    int queryAttempts = 0;
+    double queryLastSent = 0;
 
     int ensureBroadcastSock() {
         if (broadcastSock >= 0) return broadcastSock;
@@ -668,6 +1064,16 @@ static void parseServerResponse(const uint8_t* data, size_t size, NetworkManager
     info.ping = r16();
 }
 
+static size_t masterResponseWrite(char* data, size_t size, size_t count, void* user) {
+    auto* response = static_cast<std::string*>(user);
+    const size_t bytes = size * count;
+    constexpr size_t kMaxMasterResponse = 1024 * 1024;
+    if (bytes > kMaxMasterResponse || response->size() > kMaxMasterResponse - bytes)
+        return 0;
+    response->append(data, bytes);
+    return bytes;
+}
+
 static bool parseNativePingResponse(const uint8_t* data, size_t size,
                                     NetworkManager::ServerInfo& info,
                                     double sentAt) {
@@ -695,9 +1101,10 @@ static bool parseNativeInfoResponse(const uint8_t* data, size_t size,
     const uint8_t status = stream.readU8();
     info.numPlayers = stream.readU8();
     info.maxPlayers = stream.readU8();
-    stream.readU8(); // bot count
+    info.numBots = stream.readU8();
     if (stream.failed()) return false;
     info.password = (status & 0x02) != 0;
+    info.tournament = (status & 0x04) != 0;
     return true;
 }
 
@@ -769,8 +1176,18 @@ void NetworkManager::update() {
     // Auto-stop query after 3 seconds
     if (impl->querying) {
         double now = Engine::instance().timer().now();
+        if (!impl->queryTargets.empty() && impl->queryAttempts < 3 &&
+            now - impl->queryLastSent >= 0.75) {
+            const auto queryPacket = V12::buildGameQuery(V12::OobGamePingRequest, 0, 0);
+            for (const auto& target : impl->queryTargets)
+                sendto(impl->broadcastSock, queryPacket.data(), queryPacket.size(), 0,
+                       (const sockaddr*)&target, sizeof(target));
+            ++impl->queryAttempts;
+            impl->queryLastSent = now;
+        }
         if (now - impl->queryStartTime > 3.0) {
             impl->querying = false;
+            impl->queryTargets.clear();
             if (serverListCb) serverListCb();
         }
     }
@@ -793,6 +1210,8 @@ void NetworkManager::queryLanServers() {
     servers.clear();
     impl->seenServers.clear();
     impl->nativeInfoRequested.clear();
+    impl->queryTargets.clear();
+    impl->queryAttempts = 0;
 
     // Native V12 servers answer GamePingRequest on both LAN and game ports.
     const auto queryPacket = V12::buildGameQuery(V12::OobGamePingRequest, 0, 0);
@@ -812,10 +1231,123 @@ void NetworkManager::queryLanServers() {
     impl->querying = true;
     impl->queryStartTime = Engine::instance().timer().now();
     impl->querySentAt = impl->queryStartTime;
+    impl->queryLastSent = impl->querySentAt;
 
     if (serverListCb) serverListCb();
 }
 
 void NetworkManager::queryMasterServer(const char* masterUrl) {
-    Console::instance().printf(LogLevel::Info, "Querying master: %s", masterUrl);
+    const std::string configured = masterUrl && *masterUrl
+        ? masterUrl : "http://master.tribesnext.com/list";
+    std::string url = configured;
+    if (url.find("http://") != 0 && url.find("https://") != 0)
+        url = "http://" + url;
+    if (url.find("/list", url.find("://") + 3) == std::string::npos)
+        url += "/list";
+
+    Console::instance().printf(LogLevel::Info, "Querying master: %s", url.c_str());
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        Console::instance().printf(LogLevel::Error, "Master query: libcurl unavailable");
+        return;
+    }
+    std::string body;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, masterResponseWrite);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 5000L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Torch/0.1 Tribes2 client");
+    const CURLcode result = curl_easy_perform(curl);
+    long httpStatus = 0;
+    if (result == CURLE_OK)
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpStatus);
+    curl_easy_cleanup(curl);
+    if (result != CURLE_OK || httpStatus < 200 || httpStatus >= 300) {
+        if (result == CURLE_OK)
+            Console::instance().printf(LogLevel::Warn,
+                "Master query failed with HTTP status %ld", httpStatus);
+        else
+        Console::instance().printf(LogLevel::Warn, "Master query failed: %s", curl_easy_strerror(result));
+        return;
+    }
+
+    servers.clear();
+    impl->seenServers.clear();
+    impl->nativeInfoRequested.clear();
+    int queried = 0;
+    if (impl->ensureBroadcastSock() < 0) {
+        Console::instance().printf(LogLevel::Error, "Master query: unable to create UDP query socket");
+        return;
+    }
+    std::istringstream lines(body);
+    std::string line;
+    const auto queryPacket = V12::buildGameQuery(V12::OobGamePingRequest, 0, 0);
+    while (std::getline(lines, line) && queried < 512) {
+        std::string host;
+        uint16_t port = 0;
+        if (!TorchMaster::parseAddressLine(line, host, port)) continue;
+        addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        addrinfo* resultAddr = nullptr;
+        const std::string service = std::to_string(port);
+        if (getaddrinfo(host.c_str(), service.c_str(), &hints, &resultAddr) != 0 || !resultAddr)
+            continue;
+        auto* target = reinterpret_cast<sockaddr_in*>(resultAddr->ai_addr);
+        impl->queryTargets.push_back(*target);
+        sendto(impl->broadcastSock, queryPacket.data(), queryPacket.size(), 0,
+               reinterpret_cast<sockaddr*>(target), sizeof(sockaddr_in));
+        freeaddrinfo(resultAddr);
+        queried++;
+    }
+    impl->querying = queried > 0;
+    impl->queryAttempts = queried > 0 ? 1 : 0;
+    impl->queryStartTime = Engine::instance().timer().now();
+    impl->querySentAt = impl->queryStartTime;
+    if (serverListCb) serverListCb();
+    Console::instance().printf(LogLevel::Info, "Master query dispatched %d server probes", queried);
+}
+
+void NetworkManager::stopServerQuery() {
+    impl->querying = false;
+    impl->nativeInfoRequested.clear();
+    impl->queryTargets.clear();
+    impl->queryAttempts = 0;
+    if (serverListCb) serverListCb();
+}
+
+void NetworkManager::querySingleServer(const char* address) {
+    if (!address || !*address) return;
+    std::string host;
+    uint16_t port = 0;
+    if (!TorchMaster::parseAddressLine(address, host, port)) {
+        Console::instance().printf(LogLevel::Warn, "Invalid server address: %s", address);
+        return;
+    }
+    if (impl->ensureBroadcastSock() < 0) return;
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    addrinfo* resolved = nullptr;
+    const std::string service = std::to_string(port);
+    if (getaddrinfo(host.c_str(), service.c_str(), &hints, &resolved) != 0 || !resolved)
+        return;
+    const auto packet = V12::buildGameQuery(V12::OobGamePingRequest, 0, 0);
+    impl->queryTargets.clear();
+    impl->queryTargets.push_back(*reinterpret_cast<sockaddr_in*>(resolved->ai_addr));
+    sendto(impl->broadcastSock, packet.data(), packet.size(), 0,
+           resolved->ai_addr, sizeof(sockaddr_in));
+    freeaddrinfo(resolved);
+    impl->querying = true;
+    impl->queryAttempts = 1;
+    impl->queryStartTime = Engine::instance().timer().now();
+    impl->querySentAt = impl->queryStartTime;
+    impl->queryLastSent = impl->querySentAt;
+    if (serverListCb) serverListCb();
+}
+
+bool NetworkManager::isServerQueryActive() const {
+    return impl->querying;
 }

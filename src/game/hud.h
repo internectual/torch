@@ -77,4 +77,8 @@ private:
     int32_t selectedItem = 0;
     std::vector<ServerEntry> servers;
     int32_t selServer = 0;
+    int remapAction = -1;
+    bool remapActive = false;
+    bool remapPrevMouse = false;
+    bool remapPrevKeys[512]{};
 };

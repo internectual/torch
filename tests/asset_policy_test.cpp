@@ -1393,5 +1393,96 @@ int main() {
     assert(disconnectStream.readHuffmanString().empty());
     assert(!disconnectStream.failed());
 
+    V12::PlayerGhostState fullState;
+    fullState.position = {10, 20, 30};
+    fullState.hasPosition = true;
+    fullState.health = 42;
+    fullState.hasHealth = true;
+    fullState.energy = 77;
+    fullState.hasEnergy = true;
+    fullState.threads[0].sequence = 3;
+    fullState.threads[0].valid = true;
+    V12::PlayerGhostState sparseUpdate;
+    sparseUpdate.position = {40, 50, 60};
+    sparseUpdate.hasPosition = true;
+    sparseUpdate.moving = true;
+    sparseUpdate.hasMovement = true;
+    const auto merged = V12::mergePlayerGhostState(fullState, sparseUpdate);
+    assert(merged.position.x == 40 && merged.position.y == 50 && merged.position.z == 60);
+    assert(merged.health == 42 && merged.energy == 77);
+    assert(merged.moving && merged.threads[0].sequence == 3);
+
+    V12::NetStringTable targetStrings;
+    assert(targetStrings.set(7, "Alice"));
+    V12BitWriter observerTargetWriter;
+    observerTargetWriter.writeFlag(true); // one unguaranteed event
+    observerTargetWriter.writeUnsigned(24, V12::EventClassBits); // TargetInfoEvent
+    observerTargetWriter.writeUnsigned(9, 9);
+    observerTargetWriter.writeFlag(true); observerTargetWriter.writeFlag(true); observerTargetWriter.writeUnsigned(7, 10);
+    for (int i = 0; i < 4; ++i) observerTargetWriter.writeFlag(false); // skin, pref, voice, type
+    observerTargetWriter.writeFlag(false); // sensor group
+    observerTargetWriter.writeFlag(false); // datablock
+    observerTargetWriter.writeFlag(false); // render flags
+    observerTargetWriter.writeFlag(false); // voice pitch
+    observerTargetWriter.writeFlag(false); // end unguaranteed events
+    observerTargetWriter.writeFlag(false); // end guaranteed events
+    std::vector<V12::ServerEvent> targetEvents;
+    V12BitStream observerTargetStream(observerTargetWriter.data().data(), observerTargetWriter.data().size());
+    assert(V12::readServerEvents(observerTargetStream, targetStrings, targetEvents));
+    assert(targetEvents.size() == 1 && targetEvents[0].hasTargetInfo);
+    assert(targetEvents[0].targetInfo.targetId == 9 &&
+           targetEvents[0].targetInfo.hasName && targetEvents[0].targetInfo.name == "Alice");
+
+    V12BitWriter missionWriter;
+    missionWriter.writeFlag(true);
+    missionWriter.writeUnsigned(13, V12::EventClassBits); // SetMissionCRCEvent
+    missionWriter.writeUnsigned(0x78563412u, 32);
+    missionWriter.writeFlag(false);
+    missionWriter.writeFlag(false);
+    V12BitStream missionStream(missionWriter.data().data(), missionWriter.data().size());
+    std::vector<V12::ServerEvent> missionEvents;
+    assert(V12::readServerEvents(missionStream, targetStrings, missionEvents));
+    assert(missionEvents.size() == 1 && missionEvents[0].hasMissionCrc &&
+           missionEvents[0].missionCrc == 0x78563412u);
+
+    V12::ProtocolState protocolState(17);
+    protocolState.noteSentDataPacket();
+    protocolState.noteSentDataPacket();
+    V12::DnetHeader receivedHeader;
+    receivedHeader.connectSequenceBit = true;
+    receivedHeader.sequence = 4;
+    receivedHeader.highestAck = 1;
+    receivedHeader.packetType = V12::PacketType::Data;
+    assert(protocolState.processReceived(receivedHeader).accepted);
+    const auto protocolSnapshot = protocolState.snapshot();
+    protocolState.reset(99);
+    protocolState.restore(protocolSnapshot);
+    const auto restoredProtocol = protocolState.snapshot();
+    assert(restoredProtocol.connectSequence == protocolSnapshot.connectSequence &&
+           restoredProtocol.lastReceived == protocolSnapshot.lastReceived &&
+           restoredProtocol.highestAcknowledged == protocolSnapshot.highestAcknowledged &&
+           restoredProtocol.lastSent == protocolSnapshot.lastSent &&
+           restoredProtocol.receiveAckMask == protocolSnapshot.receiveAckMask &&
+           restoredProtocol.established == protocolSnapshot.established);
+
+    V12::ProtocolState fixtureProtocolState(17);
+    V12::ServerPacketOptions fixtureOptions;
+    auto fixturePacket = fixtureProtocolState.buildServerPacket(fixtureOptions);
+    V12BitStream fixtureStream(fixturePacket.data(), fixturePacket.size());
+    V12::DnetHeader fixtureHeader;
+    assert(V12::readDnetHeader(fixtureStream, fixtureHeader));
+    V12::ProtocolState fixtureClientState(17);
+    const auto fixtureResult = fixtureClientState.processReceived(fixtureHeader);
+    assert(fixtureResult.accepted && fixtureResult.dispatchData);
+    V12BitStream fixturePayload(fixturePacket.data(), fixturePacket.size(),
+                                fixtureStream.position());
+    std::vector<V12::ServerEvent> fixtureEvents;
+    V12::ServerGameState fixtureGameState;
+    V12Vec3 fixtureCompressionPoint;
+    assert(V12::readServerPacketEvents(fixturePayload, targetStrings, fixtureEvents,
+                                       &fixtureGameState, &fixtureCompressionPoint));
+    assert(!V12::readServerPacketEvents(
+        fixturePayload, targetStrings, fixtureEvents, nullptr, nullptr));
+
     return 0;
 }

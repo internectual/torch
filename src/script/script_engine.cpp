@@ -6,6 +6,7 @@
 #include "core/string_table.h"
 #include "game/mission_parser.h"
 #include "game/demo.h"
+#include "net/master_query.h"
 #include <fstream>
 #include <sstream>
 #include <stack>
@@ -19,6 +20,7 @@
 #include <map>
 #include <set>
 #include <filesystem>
+#include <fnmatch.h>
 
 // === VMValue ===
 int32_t VMValue::toInt() const {
@@ -1545,7 +1547,22 @@ bool ScriptEngine::init() {
         auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
         if (!sobj) return VMValue(0);
         std::vector<uint8_t> data;
-        if (!Engine::instance().fs().readFile(path.c_str(), data)) return VMValue(0);
+        if (!Engine::instance().fs().readFile(path.c_str(), data)) {
+            const std::string outDir = Console::instance().getStringVariable("outputDir", "");
+            const std::string modPath = Console::instance().getStringVariable("modPath", "base");
+            if (outDir.empty()) return VMValue(0);
+            std::ifstream file(outDir + "/" + modPath + "/" + path, std::ios::binary);
+            if (!file) return VMValue(0);
+            data.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        }
+        if (path.find("prefs/") == 0) {
+            const std::string content(data.begin(), data.end());
+            if (content.find("// Tribes 2 Input Map File") == std::string::npos &&
+                content.find(".bind(") != std::string::npos) {
+                const std::string header = "// Tribes 2 Input Map File\n";
+                data.insert(data.begin(), header.begin(), header.end());
+            }
+        }
         sobj->internals["__fo_data"] = VMValue(std::string(data.begin(), data.end()));
         sobj->internals["__fo_pos"] = VMValue(0);
         return VMValue(1);
@@ -2045,9 +2062,13 @@ bool ScriptEngine::init() {
         return VMValue(Engine::instance().audio().isInitialized() ? 1 : 0);
     });
     vmInstance->registerNativeFunction("startAudio", [](const auto&) -> VMValue {
+#ifdef TORCH_DEDICATED
+        return VMValue(0);
+#else
         auto& audio = Engine::instance().audio();
         if (!audio.isInitialized()) audio.init();
         return VMValue(1);
+#endif
     });
     // Render/settings stubs that store values
     auto prefVM = [&](const char* name, const char* prefKey) {
@@ -2081,9 +2102,13 @@ bool ScriptEngine::init() {
         return VMValue(Engine::instance().audio().isInitialized() ? 1 : 0);
     });
     tsInstance->registerNative("startAudio", [](const auto&) -> VMValue {
+#ifdef TORCH_DEDICATED
+        return VMValue(0);
+#else
         auto& audio = Engine::instance().audio();
         if (!audio.isInitialized()) audio.init();
         return VMValue(1);
+#endif
     });
     auto prefTS = [&](const char* name, const char* prefKey) {
         tsInstance->registerNative(name, [prefKey](const auto& args) {
@@ -2214,7 +2239,12 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("isFile", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         auto& fs = Engine::instance().fs();
-        return VMValue(fs.fileExists(args[0].toString().c_str()) ? 1 : 0);
+        const std::string path = args[0].toString();
+        if (fs.fileExists(path.c_str())) return VMValue(1);
+        const std::string outDir = Console::instance().getStringVariable("outputDir", "");
+        const std::string modPath = Console::instance().getStringVariable("modPath", "base");
+        return VMValue(!outDir.empty() && std::filesystem::is_regular_file(
+            std::filesystem::path(outDir) / modPath / path));
     });
     tsInstance->registerNative("fileExt", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
@@ -2255,6 +2285,20 @@ bool ScriptEngine::init() {
             if (args.empty()) return VMValue("");
             std::string pattern = args[0].toString();
             Engine::instance().fs().listFiles(pattern.c_str(), s_fileList);
+            const std::string outDir = Console::instance().getStringVariable("outputDir", "");
+            const std::string modPath = Console::instance().getStringVariable("modPath", "base");
+            if (!outDir.empty()) {
+                const std::filesystem::path root = std::filesystem::path(outDir) / modPath;
+                std::error_code ec;
+                if (std::filesystem::exists(root, ec)) {
+                    for (const auto& entry : std::filesystem::recursive_directory_iterator(root, ec)) {
+                        if (!entry.is_regular_file()) continue;
+                        const auto relative = std::filesystem::relative(entry.path(), root, ec).generic_string();
+                        if (!ec && fnmatch(pattern.c_str(), relative.c_str(), FNM_PATHNAME) == 0)
+                            s_fileList.push_back(relative);
+                    }
+                }
+            }
             Console::instance().printf(LogLevel::Debug, "findFirstFile(\"%s\"): found %zu files, first=\"%s\"", pattern.c_str(), s_fileList.size(), s_fileList.empty() ? "" : s_fileList[0].c_str());
             // Sort to match T2 behavior
             std::sort(s_fileList.begin(), s_fileList.end());
@@ -3259,7 +3303,8 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("localConnect", [](const auto& args) -> VMValue {
-        std::string mission = args.empty() ? "" : args[0].toString();
+        auto* ts = Engine::instance().script().ts();
+        std::string mission = ts ? ts->getGlobal("$Host::Map").toString() : "";
         Console::instance().printf(LogLevel::Info, "localConnect: starting local game '%s'", mission.c_str());
         Engine::instance().game().startLocalGame(mission.empty() ? nullptr : mission.c_str());
         return VMValue(1);
@@ -3613,8 +3658,18 @@ bool ScriptEngine::init() {
         if (conn && conn->isConnected()) {
             conn->sendCommandPacket(cmd.c_str());
         } else {
-            // Local fallback: execute directly
-            Console::instance().execute(cmd.c_str());
+            // Local commands do not need to be reparsed as TorqueScript source.
+            // In particular, `cycleWeapon next` is console command syntax, not
+            // a valid TorqueScript function call.
+            if (auto* item = Console::instance().find(func.c_str()); item && item->cmd) {
+                std::vector<std::string> words{func};
+                for (size_t i = 1; i < args.size(); i++) words.push_back(args[i].toString());
+                std::vector<const char*> argv;
+                for (auto& word : words) argv.push_back(word.c_str());
+                item->cmd((int32_t)argv.size(), argv.data());
+            } else {
+                Console::instance().execute(cmd.c_str());
+            }
         }
         return VMValue(1);
     });
@@ -3626,17 +3681,33 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("stopServerQuery", [](const auto&) -> VMValue {
+        Engine::instance().network().stopServerQuery();
         return VMValue(1);
+    });
+    tsInstance->registerNative("getLiveMissionCRC", [](const auto&) -> VMValue {
+        return VMValue((int32_t)Engine::instance().game().getLiveMissionCrc());
+    });
+    tsInstance->registerNative("getLiveTargetInfo", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const int targetId = std::clamp(args[0].toInt(), 0, 0x1ff);
+        const auto* target = Engine::instance().game().getLiveTarget(
+            (uint16_t)targetId);
+        if (!target) return VMValue("");
+        return VMValue(target->name + "\t" + target->skin + "\t" + target->type);
     });
     tsInstance->registerNative("queryMasterServer", [](const auto& args) -> VMValue {
         std::string masterUrl = args.empty() ? "" : args[0].toString();
+        bool numericLegacyPort = !masterUrl.empty();
+        for (unsigned char c : masterUrl)
+            if (c < '0' || c > '9') { numericLegacyPort = false; break; }
+        if (numericLegacyPort) masterUrl.clear();
         if (!masterUrl.empty()) {
             Console::instance().printf(LogLevel::Info, "queryMasterServer: %s", masterUrl.c_str());
             Engine::instance().network().queryMasterServer(masterUrl.c_str());
         } else {
             // Default master: check TORCH_MASTER_SERVER env var, fall back to TribesNext
             const char* envMaster = getenv("TORCH_MASTER_SERVER");
-            std::string defaultMaster = envMaster ? envMaster : "tribesnext.com:28001";
+            std::string defaultMaster = envMaster ? envMaster : "http://master.tribesnext.com/list";
             Engine::instance().network().queryMasterServer(defaultMaster.c_str());
         }
         return VMValue(1);
@@ -3665,6 +3736,20 @@ bool ScriptEngine::init() {
         if (ctl) { ctl->listRows.clear(); ctl->selectedRow = -1; Console::instance().printf(LogLevel::Debug, "clearList: ctl='%s' ok", cname.c_str()); }
         else Console::instance().printf(LogLevel::Debug, "clearList: FAIL ctl=NULL cname='%s'", cname.c_str());
         return VMValue(1);
+    });
+    tsInstance->registerNative("setRowById", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        const int id = args[1].toInt();
+        const std::string text = args[2].toString();
+        for (size_t i = 0; i < ctl->listRowIds.size(); ++i) {
+            if (ctl->listRowIds[i] == id && i < ctl->listRows.size()) {
+                ctl->listRows[i] = text;
+                return VMValue(1);
+            }
+        }
+        return VMValue(0);
     });
     tsInstance->registerNative("sort", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
@@ -3707,7 +3792,14 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("refreshSelectedServer", [](const auto&) -> VMValue {
-        Console::instance().printf(LogLevel::Debug, "refreshSelectedServer");
+        auto* browser = Engine::instance().guiRenderer().findControl("GMJ_Browser");
+        if (browser && browser->sbSelected >= 0 && browser->sbSelected < (int)browser->sbServers.size())
+            Engine::instance().network().querySingleServer(browser->sbServers[browser->sbSelected].addr.toString().c_str());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("querySingleServer", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        Engine::instance().network().querySingleServer(args[0].toString().c_str());
         return VMValue(1);
     });
     tsInstance->registerNative("insertIPAddress", [](const auto& args) -> VMValue {
@@ -3717,7 +3809,10 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("findNextServer", [](const auto&) -> VMValue {
-        return VMValue(0);
+        auto* browser = Engine::instance().guiRenderer().findControl("GMJ_Browser");
+        if (!browser || browser->sbServers.empty()) return VMValue(0);
+        browser->sbSelected = (browser->sbSelected + 1) % (int)browser->sbServers.size();
+        return VMValue(1);
     });
     tsInstance->registerNative("getServerInfoString", [](const auto&) -> VMValue {
         auto& renderer = Engine::instance().guiRenderer();
@@ -3725,8 +3820,16 @@ bool ScriptEngine::init() {
         if (!browser || browser->sbSelected < 0 || browser->sbSelected >= (int)browser->sbServers.size())
             return VMValue("");
         auto& srv = browser->sbServers[browser->sbSelected];
+        std::string flags;
+        if (srv.password) flags += "Password ";
+        if (srv.tournament) flags += "Tournament ";
+        char serverInfo[160];
+        snprintf(serverInfo, sizeof(serverInfo), "Players: %d/%d  Bots: %d  Ping: %d ms",
+                 srv.numPlayers, srv.maxPlayers, srv.numBots, srv.ping);
         char buf[512];
-        snprintf(buf, sizeof(buf), "%s\t%s\t\t%d\t%d\t%d\t%s\t", srv.name.c_str(), srv.addr.toString().c_str(), srv.ping, srv.numPlayers, srv.maxPlayers, srv.gameType.c_str());
+        snprintf(buf, sizeof(buf), "%s\t%s\t\t%s\t%s\t%s\t%s\t",
+                 srv.name.c_str(), srv.addr.toString().c_str(), flags.c_str(),
+                 srv.gameType.c_str(), srv.map.c_str(), serverInfo);
         return VMValue(buf);
     });
     tsInstance->registerNative("getServerStatus", [](const auto&) -> VMValue {
@@ -3736,15 +3839,29 @@ bool ScriptEngine::init() {
             return VMValue("invalid");
         return VMValue("responded");
     });
+    tsInstance->registerNative("getServerContentString", [](const auto&) -> VMValue {
+        auto* browser = Engine::instance().guiRenderer().findControl("GMJ_Browser");
+        if (!browser || browser->sbSelected < 0 || browser->sbSelected >= (int)browser->sbServers.size())
+            return VMValue("");
+        const auto& server = browser->sbServers[browser->sbSelected];
+        char text[256];
+        snprintf(text, sizeof(text), "Players %d/%d\nBots %d\nPing %d ms",
+                 server.numPlayers, server.maxPlayers, server.numBots, server.ping);
+        return VMValue(text);
+    });
     tsInstance->registerNative("joinSelectedGame", [](const auto&) -> VMValue {
-        std::string addr = Console::instance().getStringVariable("JoinGameAddress", "");
+        auto* ts = ScriptEngine::instance().ts();
+        std::string addr = ts ? ts->getGlobal("$JoinGameAddress").toString() : "";
         if (!addr.empty()) {
             Console::instance().printf(LogLevel::Info, "joinSelectedGame: connecting to %s", addr.c_str());
             auto colon = addr.rfind(':');
             if (colon != std::string::npos) {
                 std::string host = addr.substr(0, colon);
                 int port = atoi(addr.substr(colon + 1).c_str());
-                Engine::instance().game().connectToServer(host.c_str(), (uint16_t)port);
+                const std::string password = ts
+                    ? ts->getGlobal("$JoinGamePassword").toString() : std::string();
+                Engine::instance().game().connectToServer(
+                    host.c_str(), (uint16_t)port, false, password.c_str());
             }
         }
         return VMValue(1);
@@ -3892,6 +4009,18 @@ bool ScriptEngine::init() {
         }
         return VMValue(0);
     });
+    // The stock save routine calls this with the current active config. An
+    // empty active name otherwise becomes prefs/.cs and is recreated on every
+    // save. Existing legacy bind-only files are safe to replace with a proper
+    // ActionMap file.
+    tsInstance->registerNative("isValidMapFileSaveName", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string path = args[0].toString();
+        const auto slash = path.find_last_of("/\\");
+        const std::string name = path.substr(slash == std::string::npos ? 0 : slash + 1);
+        if (name.empty() || name == ".cs") return VMValue(0);
+        return VMValue(1);
+    });
     tsInstance->registerNative("videoSetGammaCorrection", [](const auto& args) -> VMValue {
         if (!args.empty()) Console::instance().setVariable("pref::gammaCorrection", args[0].toString().c_str());
         return VMValue(1);
@@ -3935,7 +4064,9 @@ bool ScriptEngine::init() {
         // Detect method call: if first arg is an existing ScriptObject, it's the object name
         if (!args.empty()) {
             auto* obj = ScriptEngine::instance().findObject(args[0].toString().c_str());
-            if (obj) {
+            const std::string candidate = args[0].toString();
+            if (obj || candidate == "moveMap" || candidate == "GlobalActionMap" ||
+                candidate == "observerMap") {
                 objName = args[0].toString();
                 start = 1;
             }
@@ -3950,9 +4081,49 @@ bool ScriptEngine::init() {
         std::string keyName = args[start + 1].toString();
         // The command is always the last non-flag arg. Simple approach: last arg is always the command.
         std::string command = args.back().toString();
+        // A remap replaces the previous key for this command on the same map.
+        // Keeping both entries makes getBinding() return a stale key and causes
+        // saved maps to lose the newly selected binding.
+        for (auto it = s_actionBinds.begin(); it != s_actionBinds.end();) {
+            const auto& [existingKey, existingBind] = *it;
+            const auto& [existingMap, existingDevice, existingName] = existingKey;
+            if (existingMap == objName && existingDevice == device &&
+                existingBind.cmdOn == command)
+                it = s_actionBinds.erase(it);
+            else
+                ++it;
+        }
         // Store binding
         auto key = std::make_tuple(objName, device, keyName);
         s_actionBinds[key] = {command, "", false};
+        if (objName == "moveMap" || objName == "GlobalActionMap") {
+            const char* action = nullptr;
+            if (command == "moveforward") action = "forward";
+            else if (command == "movebackward") action = "backward";
+            else if (command == "moveleft") action = "left";
+            else if (command == "moveright") action = "right";
+            else if (command == "jump") action = "jump";
+            else if (command == "jet") action = "jet";
+            else if (command == "reload") action = "reload";
+            else if (command == "showScoreboard") action = "scoreboard";
+            else if (command == "toggleConsole") action = "console";
+            else if (command == "toggleZoom") action = "zoom";
+            if (action) {
+                int sc = -1;
+                bool valid = false;
+                if (device == 0) {
+                    sc = Engine::instance().nameToScancode(keyName.c_str());
+                    valid = sc >= 0;
+                } else if (device == 1 && keyName.rfind("button", 0) == 0) {
+                    const int button = atoi(keyName.c_str() + 6);
+                    sc = button == 0 ? -1 : button == 1 ? -3 : -button;
+                    valid = button >= 0 && button < 8;
+                }
+                if (valid) {
+                    Engine::instance().setBind(action, sc);
+                }
+            }
+        }
         Console::instance().printf(LogLevel::Debug, "TS: bind(%s, %d, '%s') = '%s'",
             objName.empty() ? "?" : objName.c_str(), device, keyName.c_str(), command.c_str());
         return VMValue(1);
@@ -3963,7 +4134,9 @@ bool ScriptEngine::init() {
         std::string objName;
         if (!args.empty()) {
             auto* obj = ScriptEngine::instance().findObject(args[0].toString().c_str());
-            if (obj) { objName = args[0].toString(); start = 1; }
+            const std::string candidate = args[0].toString();
+            if (obj || candidate == "moveMap" || candidate == "GlobalActionMap" ||
+                candidate == "observerMap") { objName = candidate; start = 1; }
         }
         if (args.size() - start < 4) return VMValue(0);
         int device = parseDevice(args[start].toString());
@@ -3983,7 +4156,9 @@ bool ScriptEngine::init() {
         std::string objName;
         if (!args.empty()) {
             auto* obj = ScriptEngine::instance().findObject(args[0].toString().c_str());
-            if (obj) { objName = args[0].toString(); start = 1; }
+            const std::string candidate = args[0].toString();
+            if (obj || candidate == "moveMap" || candidate == "GlobalActionMap" ||
+                candidate == "observerMap") { objName = candidate; start = 1; }
         }
         if (args.size() - start < 2) return VMValue(0);
         int device = parseDevice(args[start].toString());
@@ -4018,6 +4193,35 @@ bool ScriptEngine::init() {
         FILE* f = fopen(fullPath.c_str(), append ? "a" : "w");
         if (!f) return 0;
         if (!append) fprintf(f, "// Tribes 2 Input Map File\n// ActionMap: %s\n", objName.c_str());
+        // Native controls use the same movement state as the ActionMap. If a
+        // script-side map was only partially reconstructed, materialize the
+        // native movement bindings before serializing so the T2 prefs file is
+        // still complete and reloadable.
+        if (objName == "moveMap") {
+            const std::pair<const char*, const char*> actions[] = {
+                {"forward", "moveforward"}, {"backward", "movebackward"},
+                {"left", "moveleft"}, {"right", "moveright"},
+                {"jump", "jump"}, {"jet", "jet"}, {"zoom", "toggleZoom"},
+            };
+            for (const auto& [action, command] : actions) {
+                bool present = false;
+                for (const auto& [key, binding] : s_actionBinds) {
+                    if (std::get<0>(key) == objName && binding.cmdOn == command) {
+                        present = true;
+                        break;
+                    }
+                }
+                if (!present) {
+                    const int sc = Engine::instance().getBind(action);
+                    const char* keyName = GuiRenderer::scancodeToKeyName(sc);
+                    if (keyName && *keyName) {
+                        const auto key = std::make_tuple(objName, 0, std::string(keyName));
+                        if (s_actionBinds.find(key) == s_actionBinds.end())
+                            s_actionBinds[key] = {command, "", false};
+                    }
+                }
+            }
+        }
         for (auto& [k, be] : s_actionBinds) {
             const auto& [obj, dev, key] = k;
             if (obj != objName) continue;
@@ -4051,7 +4255,24 @@ bool ScriptEngine::init() {
             for (auto& ch : a) ch = (char)tolower((unsigned char)ch);
             append = (a == "true" || a == "1");
         }
-        return VMValue(actionMapWrite(objName, path, append));
+        const int result = actionMapWrite(objName, path, append);
+        return VMValue(result);
+    });
+    // The stock saveMapFile() wrapper can be shadowed by partially loaded
+    // shell scripts. Keep the persisted format native, but write the same T2
+    // map file that the wrapper is expected to produce.
+    tsInstance->registerNative("saveMapFile", [actionMapWrite](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string name = args[0].toString();
+        if (name.empty() || name == "." || name.find_first_of("\\/?*\"'<>|") != std::string::npos)
+            return VMValue(0);
+        const std::string path = "prefs/" + name + ".cs";
+        if (!actionMapWrite("moveMap", path, false)) return VMValue(0);
+        if (!actionMapWrite("observerMap", path, true)) return VMValue(0);
+        if (!actionMapWrite("GlobalActionMap", path, true)) return VMValue(0);
+        Console::instance().setVariable("$pref::Input::ActiveConfig", name.c_str());
+        Console::instance().printf(LogLevel::Info, "Saved input config: %s", path.c_str());
+        return VMValue(1);
     });
 
     // ActionMap::getBinding(action) — return "flags key" for the bound action
@@ -4063,7 +4284,7 @@ bool ScriptEngine::init() {
         for (auto& [k, be] : s_actionBinds) {
             const auto& [obj, dev, key] = k;
             if (obj == objName && be.cmdOn == action)
-                return VMValue(std::string("0\t") + key);
+                return VMValue(std::string("keyboard\t") + key);
         }
         return VMValue("");
     });
@@ -4364,9 +4585,42 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // selectRowByAddress(objName, addr) — no-op
-    tsInstance->registerNative("selectRowByAddress", [](const auto&) -> VMValue {
+    // selectRowByAddress(objName, addr) — select a native browser result
+    tsInstance->registerNative("selectRowByAddress", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* browser = Engine::instance().guiRenderer().findControl(args[0].toString());
+        if (!browser) return VMValue(0);
+        const std::string address = args[1].toString();
+        for (size_t i = 0; i < browser->sbServers.size(); ++i) {
+            if (browser->sbServers[i].addr.toString() == address) {
+                browser->sbSelected = (int)i;
+                return VMValue(1);
+            }
+        }
+        Engine::instance().network().querySingleServer(address.c_str());
         return VMValue(1);
+    });
+    // findServer(objName, pattern) — select the next matching native result
+    tsInstance->registerNative("findServer", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* browser = Engine::instance().guiRenderer().findControl(args[0].toString());
+        if (!browser) return VMValue(0);
+        std::string pattern = args[1].toString();
+        std::transform(pattern.begin(), pattern.end(), pattern.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
+        const int start = browser->sbSelected < 0 ? 0 : browser->sbSelected + 1;
+        for (int offset = 0; offset < (int)browser->sbServers.size(); ++offset) {
+            const int i = (start + offset) % (int)browser->sbServers.size();
+            std::string haystack = browser->sbServers[i].name + " " +
+                browser->sbServers[i].map + " " + browser->sbServers[i].addr.toString();
+            std::transform(haystack.begin(), haystack.end(), haystack.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            if (haystack.find(pattern) != std::string::npos) {
+                browser->sbSelected = i;
+                return VMValue(1);
+            }
+        }
+        return VMValue(0);
     });
 
     // resize(objName, x, y, w, h) — set position and extent
@@ -4393,14 +4647,27 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // queryFavoriteServers() — stub
+    // queryFavoriteServers() — probe the stock preference favorites
     tsInstance->registerNative("queryFavoriteServers", [](const auto&) -> VMValue {
-        return VMValue(0);
+        auto* ts = ScriptEngine::instance().ts();
+        if (!ts) return VMValue(0);
+        const int count = std::clamp(ts->getGlobal("$pref::ServerBrowser::FavoriteCount").toInt(), 0, 512);
+        int queried = 0;
+        for (int i = 0; i < count; ++i) {
+            const std::string entry = ts->getGlobal(
+                "$pref::ServerBrowser::Favorite[" + std::to_string(i) + "]").toString();
+            const auto tab = entry.find('\t');
+            const std::string address = tab == std::string::npos ? entry : entry.substr(tab + 1);
+            if (address.empty()) continue;
+            Engine::instance().network().querySingleServer(address.c_str());
+            ++queried;
+        }
+        return VMValue(queried > 0 ? 1 : 0);
     });
 
-    // isServerQueryActive() — return 0
+    // isServerQueryActive() — expose the native query lifecycle
     tsInstance->registerNative("isServerQueryActive", [](const auto&) -> VMValue {
-        return VMValue(0);
+        return VMValue(Engine::instance().network().isServerQueryActive() ? 1 : 0);
     });
 
     // getT2VersionNumber() — return version string
@@ -4418,13 +4685,67 @@ bool ScriptEngine::init() {
         return VMValue(Engine::instance().audio().isInitialized() ? 1 : 0);
     });
 
-    // connect(host, port) — stub
-    tsInstance->registerNative("connect", [](const auto&) -> VMValue {
-        return VMValue(0);
+    // connect(host, port) — native client connection entry point
+    tsInstance->registerNative("connect", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string address = args[0].toString();
+        if (address.empty()) return VMValue(0);
+        uint16_t port = T2Protocol::DEFAULT_PORT;
+        const auto colon = address.rfind(':');
+        if (colon != std::string::npos && colon + 1 < address.size()) {
+            char* end = nullptr;
+            const long parsed = std::strtol(address.c_str() + colon + 1, &end, 10);
+            if (end && *end == '\0' && parsed > 0 && parsed <= 65535) {
+                port = (uint16_t)parsed;
+                address.resize(colon);
+            }
+        } else if (args.size() > 1 && args[1].toInt() > 0) {
+            port = (uint16_t)args[1].toInt();
+        }
+        const std::string password = args.size() > 1 && colon != std::string::npos
+            ? args[1].toString() : std::string();
+        Engine::instance().game().connectToServer(address.c_str(), port, false, password.c_str());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("connectSpectator", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string host;
+        uint16_t port = T2Protocol::DEFAULT_PORT;
+        if (!TorchMaster::parseAddressLine(args[0].toString(), host, port)) {
+            host = args[0].toString();
+            if (host.empty()) return VMValue(0);
+            if (args.size() > 1 && args[1].toInt() > 0)
+                port = (uint16_t)args[1].toInt();
+        }
+        Engine::instance().game().connectToServer(host.c_str(), port, true);
+        return VMValue(1);
+    });
+    tsInstance->registerNative("watchServer", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const std::string address = args[0].toString();
+        const auto colon = address.rfind(':');
+        if (colon == std::string::npos || colon == 0) return VMValue(0);
+        const int port = atoi(address.substr(colon + 1).c_str());
+        if (port < 1 || port > 65535) return VMValue(0);
+        const std::string host = address.substr(0, colon);
+        Engine::instance().game().connectToServer(host.c_str(), (uint16_t)port, true);
+        return VMValue(1);
+    });
+    tsInstance->registerNative("watchSelectedServer", [](const auto&) -> VMValue {
+        auto* browser = Engine::instance().guiRenderer().findControl("GMJ_Browser");
+        if (!browser || browser->sbSelected < 0 || browser->sbSelected >= (int)browser->sbServers.size())
+            return VMValue(0);
+        const std::string address = browser->sbServers[browser->sbSelected].addr.toString();
+        Engine::instance().game().connectToServer(
+            address.substr(0, address.rfind(':')).c_str(),
+            browser->sbServers[browser->sbSelected].addr.port, true);
+        return VMValue(1);
     });
 
-    // disconnect() — stub
+    // disconnect() — native client connection entry point
     tsInstance->registerNative("disconnect", [](const auto&) -> VMValue {
+        if (auto* connection = Engine::instance().game().activeConnection())
+            connection->disconnect();
         return VMValue(1);
     });
 

@@ -8,6 +8,20 @@
 
 namespace V12 {
 
+ProtocolStateSnapshot ProtocolState::snapshot() const {
+    return {connectSequence, lastSeqReceived, highestAcked, lastSentSequence,
+            receiveMask, connectionEstablished};
+}
+
+void ProtocolState::restore(const ProtocolStateSnapshot& state) {
+    connectSequence = state.connectSequence;
+    lastSeqReceived = state.lastReceived;
+    highestAcked = state.highestAcknowledged;
+    lastSentSequence = state.lastSent;
+    receiveMask = state.receiveAckMask;
+    connectionEstablished = state.established;
+}
+
 bool readDnetHeader(V12BitStream& stream, DnetHeader& header) {
     header.gameFlag = stream.readFlag();
     header.connectSequenceBit = stream.readFlag();

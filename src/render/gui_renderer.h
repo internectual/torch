@@ -158,6 +158,7 @@ public:
     void pushDialog(const std::string& name);
 
     void popDialog(const std::string& name);
+    void clearDialogs();
     std::vector<GuiControl*>& dialogStackForDebug() { return dialogStack; }
 
     // Last instance pushed under each dialog name. A popped dialog leaves

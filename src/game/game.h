@@ -11,6 +11,7 @@
 #include <string>
 #include <deque>
 #include <unordered_map>
+#include <map>
 
 class Menu;
 class Game;
@@ -46,13 +47,15 @@ public:
     void setVelocity(const Point3F& v) { vel = v; }
     void setOnGround(bool g) { onGround = g; }
 
-    void applyMove(const Point3F& move, bool jump, bool jet);
+    void applyMove(const Point3F& move, bool jump, bool jet, float dt = 1.0f / 60.0f);
     void applyDamage(float amount);
     void respawn();
 
     float health() const { return hp; }
     float energy() const { return eng; }
     float armor() const { return arm; }
+    int team() const { return teamId; }
+    void setTeam(int team) { teamId = team; }
     bool isDead() const { return hp <= 0; }
     bool isOnGround() const { return onGround; }
     AnimState animState() const { return anim; }
@@ -81,6 +84,8 @@ public:
     // Player model
     DTSShape modelShape;
     bool modelLoaded = false;
+    DTSShape weaponShape;
+    bool weaponLoaded = false;
 
 private:
     Point3F pos{0, 5, 0};
@@ -89,6 +94,7 @@ private:
     float hp = 100.0f;
     float eng = 100.0f;
     float arm = 0.0f;
+    int teamId = 1;
     bool onGround = true;
     float eyeHeight = 1.5f;
     float radius = 0.5f;
@@ -99,6 +105,8 @@ private:
     std::vector<Weapon> weapons;
     int32_t curWeapon = 0;
     float fireCooldown = 0;
+    float weaponAnimTime = 0;
+    bool modelLoadAttempted = false;
 
     void loadModel();
 };
@@ -162,6 +170,9 @@ public:
         float rotAngleDeg = 0;
         Point3F scale{1,1,1};
         std::string shapeName;
+        std::string label;
+        Point3F labelAnchor;
+        bool labelAnchorValid = false;
         DTSShape* shape{};
         std::string mountedShapeName;
         DTSShape* mountedShape{};
@@ -290,7 +301,8 @@ public:
     void render(float dt);
 
     void startLocalGame(const char* map = nullptr);
-    void connectToServer(const char* host, uint16_t port);
+    void connectToServer(const char* host, uint16_t port, bool observer = false,
+                         const char* password = nullptr);
     void playDemo(const char* path);
 
     GameConfig& config() { return cfg; }
@@ -391,6 +403,26 @@ public:
     bool isConnected() const { return activeConn && activeConn->isConnected(); }
     std::vector<int> getLiveGhostIndices() const { return liveGhosts.getAllIndices(); }
     const GhostEntry* getLiveGhost(int idx) const { return liveGhosts.getGhost(idx); }
+    struct LiveTeamScore {
+        int teamId = 0;
+        std::string name;
+        int score = 0;
+        std::string flagStatus = "home";
+        std::string flagCarrier;
+    };
+    const std::map<int, LiveTeamScore>& getLiveTeamScores() const { return liveTeamScores; }
+    bool liveMatchStarted() const { return liveMatchStarted_; }
+    bool liveMatchEnded() const { return liveMatchEnded_; }
+    const std::string& liveMissionDisplayName() const { return liveMissionDisplayName_; }
+    const std::string& liveMissionType() const { return liveMissionType_; }
+    int liveClockRemainingMs() const;
+    const std::vector<std::string>& liveLoadInfoLines() const { return liveLoadInfoLines_; }
+    size_t getLiveTargetCount() const { return liveTargets.size(); }
+    const V12::ServerEvent::TargetInfo* getLiveTarget(uint16_t id) const {
+        auto it = liveTargets.find(id);
+        return it == liveTargets.end() ? nullptr : &it->second;
+    }
+    uint32_t getLiveMissionCrc() const { return liveMissionCrc; }
 
     // Shape viewer mode
     bool shapeViewerActive = false;
@@ -436,6 +468,7 @@ private:
 
     // Demo playback
     DemoParser* demoParser{};
+    std::map<int, DemoParserSnapshot> demoSnapshots;
     bool demoPlaying = false;
     bool gamePaused = false;
     bool demoPaused = false;
@@ -497,6 +530,20 @@ private:
     };
     std::map<uint32_t, std::vector<ReceivedDatablock>> receivedDatablocks;
     std::map<uint16_t, std::string> nativeDatablockShapes;
+    std::map<uint16_t, V12::ServerEvent::TargetInfo> liveTargets;
+    uint32_t liveMissionCrc = 0;
+    std::map<int, LiveTeamScore> liveTeamScores;
+    std::map<int, int> livePlayerScores;
+    std::map<int, int> liveClientTargetIds;
+    std::map<int, std::string> liveClientNames;
+    std::map<int, int> liveClientTeams;
+    bool liveMatchStarted_ = false;
+    bool liveMatchEnded_ = false;
+    std::string liveMissionDisplayName_;
+    std::string liveMissionType_;
+    int liveClockDurationMs_ = 0;
+    double liveClockReceivedAt_ = 0.0;
+    std::vector<std::string> liveLoadInfoLines_;
     const std::vector<ReceivedDatablock>* getDatablocksForClass(uint32_t classId) const {
         auto it = receivedDatablocks.find(classId);
         return it != receivedDatablocks.end() ? &it->second : nullptr;

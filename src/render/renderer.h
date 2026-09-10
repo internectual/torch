@@ -179,6 +179,7 @@ struct DTSShape {
         std::string name;
         float duration;
         bool looping = false;
+        bool blend = false;
         std::vector<Keyframe> keyframes;
         std::vector<ObjectKeyframe> objectKeyframes; // vis/frame animation
     };

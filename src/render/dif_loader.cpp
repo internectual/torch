@@ -701,7 +701,7 @@ static bool interiorToMeshes(DIFInterior& interior,
         int hash = texIdx * 256 + (lmIdx + 1);
         surfGroups[hash].push_back((int)si);
     }
-    Console::instance().printf(LogLevel::Info,
+    Console::instance().printf(LogLevel::Debug,
         "DIFDIAG totalSurfaces=%zu geometrySurfaces=%zu noTexture=%zu fewVerts=%zu matNames=%zu lightmaps=%zu",
         interior.surfaces.size(), dbgSurfGeo, dbgSurfNoTex, dbgSurfFew, interior.matNames.size(), outLightmaps.size());
     if (dbgSurfNoTex > 0) {
@@ -717,7 +717,7 @@ static bool interiorToMeshes(DIFInterior& interior,
         }
         int shown = 0;
         for (auto& [name, cnt] : noTexMats) {
-            Console::instance().printf(LogLevel::Info, "DIFDIAG noTex '%s' x%d", name.c_str(), cnt);
+        Console::instance().printf(LogLevel::Debug, "DIFDIAG noTex '%s' x%d", name.c_str(), cnt);
             if (++shown > 20) break;
         }
     }
@@ -914,7 +914,7 @@ static bool interiorToMeshes(DIFInterior& interior,
             }
         }
         for (auto& s : interior.surfaces) if ((s.fanMask & 0xFFFFFFFFu)!=0) surfMask++;
-        Console::instance().printf(LogLevel::Info, "DIFDIAG meshes=%zu tris=%zu degen=%zu geoDeg=%zu [empty=%zu tiny<20=%zu reg=%zu big=%zu] concaveSurf=%zu/%zu",
+        Console::instance().printf(LogLevel::Debug, "DIFDIAG meshes=%zu tris=%zu degen=%zu geoDeg=%zu [empty=%zu tiny<20=%zu reg=%zu big=%zu] concaveSurf=%zu/%zu",
             outMeshes.size(), totTris, degen, geoDeg, zeros, small, reg, big, surfMask, interior.surfaces.size());
         if (getenv("TORCH_DUMPMASK")) {
             int shown=0;

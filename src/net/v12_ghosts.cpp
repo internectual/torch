@@ -143,7 +143,10 @@ static bool readShapeBasePayload(V12BitStream& stream, bool initial,
     if (!stream.readFlag()) return !stream.failed();
     if (stream.readFlag()) {
         const float damage = stream.readFloat(6);
-        if (state) state->health = (1.0f - damage) * 100.0f;
+        if (state) {
+            state->health = (1.0f - damage) * 100.0f;
+            state->hasHealth = true;
+        }
         stream.readUnsigned(2);
         stream.readFlag();
         stream.readNormalVector(8);
@@ -257,6 +260,7 @@ static bool readStaticShapePayload(V12BitStream& stream, bool initial,
         const V12AffineTransform transform = stream.readAffineTransform(compressionPoint);
         if (state) {
             state->position = transform.position;
+            state->hasPosition = true;
             state->rotation = {transform.x, transform.y, transform.z};
             state->rotationW = transform.w;
             state->hasRotation = true;
@@ -268,13 +272,21 @@ static bool readStaticShapePayload(V12BitStream& stream, bool initial,
 }
 
 static bool readItemPayload(V12BitStream& stream, bool initial,
-                            const V12Vec3& compressionPoint) {
-    if (!readShapeBasePayload(stream, initial, nullptr)) return false;
+                            const V12Vec3& compressionPoint,
+                            PlayerGhostState* state) {
+    if (!readShapeBasePayload(stream, initial, state)) return false;
     if (stream.readFlag()) {
         stream.readFlag();
         stream.readFlag();
         stream.readFlag();
-        if (stream.readFlag()) stream.readPoint3F();
+        if (stream.readFlag()) {
+            if (state) {
+                state->position = stream.readPoint3F();
+                state->hasPosition = true;
+            } else {
+                stream.readPoint3F();
+            }
+        }
     }
     if (stream.readFlag()) stream.readUnsigned(10);
     if (stream.readFlag()) {
@@ -282,7 +294,12 @@ static bool readItemPayload(V12BitStream& stream, bool initial,
         stream.readF32();
     }
     if (stream.readFlag()) {
-        stream.readPoint3F();
+        if (state) {
+            state->position = stream.readPoint3F();
+            state->hasPosition = true;
+        } else {
+            stream.readPoint3F();
+        }
         const bool atRest = stream.readFlag();
         if (!atRest) stream.readPoint3F();
         stream.readFlag();
@@ -299,6 +316,7 @@ static bool readMissionMarkerPayload(V12BitStream& stream, bool initial,
         const V12AffineTransform transform = stream.readAffineTransform(compressionPoint);
         if (state) {
             state->position = transform.position;
+            state->hasPosition = true;
             state->rotation = {transform.x, transform.y, transform.z};
             state->rotationW = transform.w;
             state->hasRotation = true;
@@ -757,7 +775,7 @@ bool readGhostPayload(V12BitStream& stream, uint16_t classId, bool initial,
         return readShapeBasePayload(stream, initial, nullptr) &&
                readVehiclePayload(stream, compressionPoint) &&
                (stream.readUnsigned(3), !stream.failed());
-    case 16: return readItemPayload(stream, initial, compressionPoint);
+    case 16: return readItemPayload(stream, initial, compressionPoint, playerState);
     case 20: // Marker
         stream.readPoint3F(); return !stream.failed();
     case 21: return readMissionAreaPayload(stream);
@@ -829,12 +847,17 @@ bool readPlayerGhostPayload(V12BitStream& stream, bool initial,
     if (stream.readFlag()) return !stream.failed();
     if (stream.readFlag()) {
         const uint32_t actionState = stream.readUnsigned(3);
-        if (state) state->moving = actionState > 0;
+        if (state) {
+            state->moving = actionState > 0;
+            state->hasMovement = true;
+        }
         if (stream.readFlag()) stream.readUnsigned(7);
         stream.readFlag();
         stream.readFlag();
-        if (state) state->position = stream.readCompressedPoint(compressionPoint);
-        else stream.readCompressedPoint(compressionPoint);
+        if (state) {
+            state->position = stream.readCompressedPoint(compressionPoint);
+            state->hasPosition = true;
+        } else stream.readCompressedPoint(compressionPoint);
         if (stream.readFlag()) {
             stream.readUnsigned(13);
             stream.readNormalVector(10);
@@ -845,6 +868,7 @@ bool readPlayerGhostPayload(V12BitStream& stream, bool initial,
         if (state) {
             state->headPitch = headPitch;
             state->headYaw = headYaw;
+            state->hasHeadAngles = true;
             const float half = bodyYaw * 0.5f;
             state->rotation = {0.0f, (float)std::sin(half), 0.0f};
             state->rotationW = (float)std::cos(half);
@@ -860,8 +884,56 @@ bool readPlayerGhostPayload(V12BitStream& stream, bool initial,
         stream.readFlag();
     }
     const float energy = stream.readFloat(5);
-    if (state) state->energy = energy * 100.0f;
+    if (state) {
+        state->energy = energy * 100.0f;
+        state->hasEnergy = true;
+    }
     return !stream.failed();
+}
+
+bool readItemGhostPayload(V12BitStream& stream, bool initial,
+                          const V12Vec3& compressionPoint,
+                          PlayerGhostState* state) {
+    return readItemPayload(stream, initial, compressionPoint, state);
+}
+
+PlayerGhostState mergePlayerGhostState(const PlayerGhostState& base,
+                                       const PlayerGhostState& update) {
+    PlayerGhostState merged = base;
+    if (update.hasDatablock) {
+        merged.datablockId = update.datablockId;
+        merged.hasDatablock = true;
+    }
+    if (update.hasHealth) {
+        merged.health = update.health;
+        merged.hasHealth = true;
+    }
+    if (update.hasEnergy) {
+        merged.energy = update.energy;
+        merged.hasEnergy = true;
+    }
+    if (update.hasPosition) {
+        merged.position = update.position;
+        merged.hasPosition = true;
+    }
+    if (update.hasHeadAngles) {
+        merged.headPitch = update.headPitch;
+        merged.headYaw = update.headYaw;
+        merged.hasHeadAngles = true;
+    }
+    if (update.hasRotation) {
+        merged.rotation = update.rotation;
+        merged.rotationW = update.rotationW;
+        merged.hasRotation = true;
+    }
+    if (update.hasMovement) {
+        merged.moving = update.moving;
+        merged.hasMovement = true;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (update.threads[i].valid) merged.threads[i] = update.threads[i];
+    }
+    return merged;
 }
 
 bool GhostTracker::create(uint16_t index, uint16_t classId) {

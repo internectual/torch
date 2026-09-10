@@ -204,6 +204,7 @@ bool CollisionGrid::sphereCollide(const std::vector<CollisionTri>& tris, const P
 
     bool collided = false;
     pushOut = {0, 0, 0};
+    float bestPenetration = 0.0f;
 
     for (int dz = -range; dz <= range; dz++) {
         for (int dx = -range; dx <= range; dx++) {
@@ -215,16 +216,19 @@ bool CollisionGrid::sphereCollide(const std::vector<CollisionTri>& tris, const P
 
                 // Project onto normal
                 float nd = toCenter.x * tri.normal.x + toCenter.y * tri.normal.y + toCenter.z * tri.normal.z;
-                if (nd > radius || nd < -radius) continue;
+                float absDistance = std::fabs(nd);
+                if (absDistance > radius) continue;
 
                 // Check if point projects inside triangle
                 Point3F proj = {center.x - tri.normal.x * nd, center.y - tri.normal.y * nd, center.z - tri.normal.z * nd};
                 if (pointInTri2D(proj, tri)) {
-                    float pen = radius - nd;
-                    if (pen > 0) {
-                        pushOut.x += tri.normal.x * pen;
-                        pushOut.y += tri.normal.y * pen;
-                        pushOut.z += tri.normal.z * pen;
+                    float pen = radius - absDistance;
+                    if (pen > bestPenetration) {
+                        float direction = nd >= 0.0f ? 1.0f : -1.0f;
+                        pushOut.x = tri.normal.x * pen * direction;
+                        pushOut.y = tri.normal.y * pen * direction;
+                        pushOut.z = tri.normal.z * pen * direction;
+                        bestPenetration = pen;
                         collided = true;
                     }
                 }

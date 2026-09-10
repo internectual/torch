@@ -11,9 +11,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
 #include <vector>
 #include <glob.h>
 #include <chrono>
+#include <filesystem>
 #include <sys/file.h>
 #include <map>
 
@@ -31,6 +33,8 @@ static std::map<int, const char*> s_scancodeNames = {
     {20, "Q"}, {8, "E"}, {21, "R"}, {23, "T"},
     {44, "SPACE"}, {40, "ENTER"}, {53, "GRAVE"},
     {43, "TAB"}, {58, "F1"}, {59, "F2"}, {60, "F3"}, {61, "F4"},
+    {224, "LCTRL"}, {225, "LSHIFT"}, {226, "LALT"}, {227, "LGUI"},
+    {228, "RCTRL"}, {229, "RSHIFT"}, {230, "RALT"}, {231, "RGUI"},
     {-1, "MOUSE1"}, {-2, "MOUSE2"}, {-3, "MOUSE3"},
 };
 
@@ -86,21 +90,33 @@ bool Engine::toggleConsoleKeyEdge() {
     return edge;
 }
 
-void Engine::saveBinds() {
-    FILE* f = fopen("bindings.cfg", "w");
-    if (!f) return;
-    for (auto& [action, sc] : s_bindings)
-        fprintf(f, "bind \"%s\" %d\n", action.c_str(), sc);
-    fclose(f);
-}
-
-void Engine::loadBinds() {
-    FILE* f = fopen("bindings.cfg", "r");
-    if (!f) return;
-    char action[64]; int sc;
-    while (fscanf(f, "bind \"%63[^\"]\" %d", action, &sc) == 2)
-        s_bindings[action] = sc;
-    fclose(f);
+void Engine::syncBindsFromActionMap() {
+    const std::pair<const char*, const char*> actions[] = {
+        {"forward", "moveforward"}, {"backward", "movebackward"},
+        {"left", "moveleft"}, {"right", "moveright"},
+        {"jump", "jump"}, {"jet", "jet"}, {"zoom", "toggleZoom"},
+    };
+    auto& actionBinds = actionBindingStore();
+    for (const auto& [action, command] : actions) {
+        bool found = false;
+        for (const auto& [key, binding] : actionBinds) {
+            const auto& [obj, device, keyName] = key;
+            if (obj != "moveMap" || binding.cmdOn != command) continue;
+            int sc = -1;
+            if (device == 0) {
+                sc = GuiRenderer::keyNameToScancode(keyName);
+            } else if (device == 1 && keyName.rfind("button", 0) == 0) {
+                const int button = atoi(keyName.c_str() + 6);
+                sc = button == 0 ? -1 : button == 1 ? -3 : -button;
+            }
+            if (sc >= 0 || (device == 1 && sc < 0)) {
+                setBind(action, sc);
+                found = true;
+                break;
+            }
+        }
+        if (!found) setBind(action, -1);
+    }
 }
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -447,6 +463,7 @@ bool Engine::init(int argc, char* argv[]) {
     scr = new ScriptEngine;
     net = new NetworkManager;
     g = new Game;
+    g->menu().setActive(false);
     gui = new GuiRenderer;
 
     // Platform
@@ -454,7 +471,9 @@ bool Engine::init(int argc, char* argv[]) {
     pconfig.title = "TORCH";
     pconfig.width = Console::instance().getIntVariable("videoWidth", 1920);
     pconfig.height = Console::instance().getIntVariable("videoHeight", 1080);
+#ifndef TORCH_DEDICATED
     if (!plat->init(pconfig)) { releaseLock(); return false; }
+#endif
 
     // File System - only the configured stock Tribes 2 installation is a
     // production resource source. Project-local assets and generated output
@@ -544,7 +563,16 @@ bool Engine::init(int argc, char* argv[]) {
         }
     }
 
+#ifdef TORCH_DEDICATED
+    // The dedicated server does not need the client script/GUI/render/audio
+    // stack. Returning here also prevents startup GUI code from touching an
+    // uninitialized renderer or creating a window.
+    net->init();
+    return true;
+#endif
+
     // Renderer
+#ifndef TORCH_DEDICATED
     if (!ren->init(plat->nativeWindow())) { releaseLock(); return false; }
     ren->config().width = plat->width();
     ren->config().height = plat->height();
@@ -617,6 +645,7 @@ bool Engine::init(int argc, char* argv[]) {
 
     // Audio
     aud->init();
+#endif
 
     // Script engine
     scr->init();
@@ -932,7 +961,7 @@ bool Engine::init(int argc, char* argv[]) {
     }, "/queryLan - broadcast LAN server query");
 
     con->addCommand("bind", [this](int32_t argc, const char* const* argv) {
-        // Legacy bind <action> <key> from bindings.cfg
+        // Legacy standalone bind <action> <key> console command.
         if (argc < 3) { Console::instance().printf(LogLevel::Warn, "Usage: bind <action> <key>"); return; }
         int sc = nameToScancode(argv[2]);
         if (sc < 0) { Console::instance().printf(LogLevel::Warn, "Unknown key: %s", argv[2]); return; }
@@ -1048,7 +1077,12 @@ bool Engine::init(int argc, char* argv[]) {
             std::string objName;
             if (!args.empty()) {
                 auto* obj = ScriptEngine::instance().findObject(args[0].toString().c_str());
-                if (obj) { objName = args[0].toString(); start = 1; }
+                const std::string candidate = args[0].toString();
+                if (obj || candidate == "moveMap" || candidate == "GlobalActionMap" ||
+                    candidate == "observerMap") {
+                    objName = candidate;
+                    start = 1;
+                }
             }
             // T2 bind(device, key, [flags, modifier,] command) — device is "keyboard"/"mouse"/"joystick"/0/1/2
             if (args.size() - start < 3) {
@@ -1071,20 +1105,48 @@ bool Engine::init(int argc, char* argv[]) {
             if (device < 0) { Console::instance().printf(LogLevel::Debug, "TS: bind unknown device '%s'", devStr.c_str()); return VMValue(0); }
             std::string keyName = args[start + 1].toString();
             std::string command = args.back().toString();
-            // Single binding per command on a map: remapping toggleConsole to a
-            // new key (RemapDlg) must drop the old key (e.g. the default '~'),
-            // otherwise both keys keep toggling the console.
-            if (objName == "GlobalActionMap") {
+            // Remapping an action replaces its previous key on that map. This
+            // also keeps ActionMap::getBinding from returning a stale key.
+            if (!objName.empty()) {
                 for (auto it = s_actionBinds.begin(); it != s_actionBinds.end();) {
                     const auto& [k, be] = *it;
                     const auto& [o, d, ke] = k;
-                    if (o == "GlobalActionMap" && be.cmdOn == command)
+                    if (o == objName && d == device && be.cmdOn == command)
                         it = s_actionBinds.erase(it);
                     else
                         ++it;
                 }
             }
             s_actionBinds[{objName, device, keyName}] = {command, "", false};
+            if (objName == "moveMap" || objName == "GlobalActionMap") {
+                const char* action = nullptr;
+                if (command == "moveforward") action = "forward";
+                else if (command == "movebackward") action = "backward";
+                else if (command == "moveleft") action = "left";
+                else if (command == "moveright") action = "right";
+                else if (command == "jump") action = "jump";
+                else if (command == "jet") action = "jet";
+                else if (command == "reload") action = "reload";
+                else if (command == "showScoreboard") action = "scoreboard";
+                else if (command == "toggleConsole") action = "console";
+                else if (command == "toggleZoom") action = "zoom";
+                if (action) {
+                    int sc = -1;
+                    bool valid = false;
+                    if (device == 0) {
+                        sc = Engine::instance().nameToScancode(keyName.c_str());
+                        valid = sc >= 0;
+                    }
+                    else if (device == 1 && keyName.rfind("button", 0) == 0) {
+                        const int button = atoi(keyName.c_str() + 6);
+                        sc = button == 0 ? -1 : button == 1 ? -3 : -button;
+                        valid = button >= 0 && button < 8;
+                    }
+                    if (valid) {
+                        Engine::instance().setBind(action, sc);
+                    }
+                }
+            }
             Console::instance().printf(LogLevel::Debug, "TS: bind(%s, %d, '%s') = '%s'",
                 objName.empty() ? "?" : objName.c_str(), device, keyName.c_str(), command.c_str());
             return VMValue(1);
@@ -1095,7 +1157,12 @@ bool Engine::init(int argc, char* argv[]) {
             std::string objName;
             if (!args.empty()) {
                 auto* obj = ScriptEngine::instance().findObject(args[0].toString().c_str());
-                if (obj) { objName = args[0].toString(); start = 1; }
+                const std::string candidate = args[0].toString();
+                if (obj || candidate == "moveMap" || candidate == "GlobalActionMap" ||
+                    candidate == "observerMap") {
+                    objName = candidate;
+                    start = 1;
+                }
             }
             if (args.size() - start < 4) return VMValue(0);
             std::string devStr = args[start].toString();
@@ -1117,7 +1184,12 @@ bool Engine::init(int argc, char* argv[]) {
             std::string objName;
             if (!args.empty()) {
                 auto* obj = ScriptEngine::instance().findObject(args[0].toString().c_str());
-                if (obj) { objName = args[0].toString(); start = 1; }
+                const std::string candidate = args[0].toString();
+                if (obj || candidate == "moveMap" || candidate == "GlobalActionMap" ||
+                    candidate == "observerMap") {
+                    objName = candidate;
+                    start = 1;
+                }
             }
             if (args.size() - start < 2) return VMValue(0);
             std::string devStr = args[start].toString();
@@ -1200,7 +1272,7 @@ bool Engine::init(int argc, char* argv[]) {
     // lands under Show: Custom Skins via the stock filter.
     if (scr->ts()) {
         scr->ts()->execute(
-            "function Torch_GMW_SkinPopup::fillList( %this, %raceGender )\n"
+             "function GMW_SkinPopup::fillList( %this, %raceGender )\n"
             "{\n"
             "   for ( %i = 0; %i < %this.size(); %i++ )\n"
             "      %this.realSkin[%i] = \"\";\n"
@@ -1223,7 +1295,8 @@ bool Engine::init(int argc, char* argv[]) {
             "         %slF = strlen( %file );\n"
             "         %slPat = strlen( %pattern );\n"
             "         %skin = getSubStr( %file, %slP, %slF - %slP - %slPat );\n"
-            "         if ( %skin !$= \"basebot\" && %skin !$= \"basebbot\" )\n"
+             "         if ( %skin !$= \"basebot\" && %skin !$= \"basebbot\" &&\n"
+             "              %skin !$= \"databasedir\" && %skin !$= \"datadirroot\" )\n"
             "         {\n"
             "            %baseSkin = false;\n"
             "            for ( %i = 0; %i < $SkinCount; %i++ )\n"
@@ -1262,7 +1335,9 @@ bool Engine::init(int argc, char* argv[]) {
     // No explicit call needed here.
 
     // Initialize GUI renderer from script-created objects
+#ifndef TORCH_DEDICATED
     gui->init();
+#endif
 
     // -exec: execute a file at startup (after gui init so Canvas calls work)
     if (scr->ts() && !execFile.empty()) {
@@ -1450,6 +1525,8 @@ bool Engine::init(int argc, char* argv[]) {
             g->setFreeCamActive(true);
             g->setFreeCamPos(previewCamPos);
             g->setFreeCamTarget(previewCamTarget);
+            plat->setRelativeMouse(true);
+            plat->showMouse(false);
             Console::instance().printf(LogLevel::Info, "Mapper mode: free-fly camera active (WASD + mouse)");
         } else {
             Console::instance().printf(LogLevel::Error, "Mapper mode: failed to load map '%s'", mapperMap.c_str());
@@ -1465,8 +1542,40 @@ bool Engine::init(int argc, char* argv[]) {
         }
     }
 
-    // Load key bindings
-    loadBinds();
+    // Load key bindings. ClientPrefs may have reset ActiveConfig to empty, so
+    // select the user's named map only after all persisted prefs are loaded.
+    const std::string outDir = Console::instance().getStringVariable("outputDir", "");
+    const std::string activeModPath = Console::instance().getStringVariable("modPath", "base");
+    const std::filesystem::path prefs = std::filesystem::path(outDir) / activeModPath / "prefs";
+    std::string activeName = Console::instance().getStringVariable(
+        "$pref::Input::ActiveConfig", "");
+    std::filesystem::path activePath = prefs / (activeName + ".cs");
+    if (activeName.empty() || activeName == "MyConfig" ||
+        !std::filesystem::is_regular_file(activePath)) {
+        const auto wasd = prefs / "WASD.cs";
+        if (std::filesystem::is_regular_file(wasd)) {
+            activeName = "WASD";
+            Console::instance().setVariable("$pref::Input::ActiveConfig", activeName.c_str());
+            Console::instance().printf(LogLevel::Info, "Input config: using %s", activeName.c_str());
+        }
+    }
+    const char* activeConfig = Console::instance().getStringVariable(
+        "$pref::Input::ActiveConfig", "");
+    if (activeConfig && *activeConfig && strcmp(activeConfig, ".") != 0) {
+        bool safe = true;
+        for (const unsigned char c : std::string(activeConfig)) {
+            if (!(std::isalnum(c) || c == '_' || c == '-')) { safe = false; break; }
+        }
+        if (safe) {
+            std::string path = "prefs/" + std::string(activeConfig) + ".cs";
+            if (scr && scr->ts())
+                scr->ts()->execute("exec(\"" + path + "\", true);", "active-input-config");
+        }
+    }
+    // Script bootstrap files install the stock ESDF defaults. Re-apply the
+    // persisted native bindings after the active config so those defaults do
+    // not override the user's controls during startup.
+    syncBindsFromActionMap();
 
     return true;
 }
@@ -1510,7 +1619,9 @@ void Engine::run() {
         }
 
         // ESC toggles pause menu (when not in console)
-        if (!gui->isDialogActive("ConsoleDlg")) {
+        if (!gui->isDialogActive("ConsoleDlg") &&
+            !(g->state() == Game::Playing && scr && scr->ts() &&
+              scr->ts()->hasFunction("escapeFromGame"))) {
             static bool prevEsc = false;
             bool escDown = plat->input().keysDown[SCANCODE_ESCAPE];
             if (escDown && !prevEsc) {
@@ -1561,7 +1672,10 @@ void Engine::run() {
                     // In mapper mode, ESC quits (no pause menu or shell)
                     quit();
                 } else if (g->state() != Game::MenuScreen) {
-                    g->togglePauseGame();
+                    g->setState(Game::MenuScreen);
+                    g->menu().setActive(false);
+                    gui->clearDialogs();
+                    gui->setContent("LaunchGui");
                 }
                 }
                 } // end else (capture not active)
@@ -1839,34 +1953,119 @@ void Engine::run() {
                 Game::InputMove input;
                 auto& keys = plat->input().keysDown;
                 auto& mButtons = plat->input().mouseButtons;
-                input.forward = keys[s_bindings["forward"]] != 0;
-                input.backward = keys[s_bindings["backward"]] != 0;
-                input.left = keys[s_bindings["left"]] != 0;
-                input.right = keys[s_bindings["right"]] != 0;
-                input.jump = keys[s_bindings["jump"]] != 0;
-                input.jet = keys[s_bindings["jet"]] != 0;
-                input.freeCam = keys[s_bindings["f1"]] != 0;
-                input.orbitCam = keys[s_bindings["f2"]] != 0;
-                input.fire = mButtons[1] != 0;
-                input.altFire = mButtons[3] != 0;
-                input.zoom = mButtons[2] != 0;
-                input.reload = keys[s_bindings["reload"]] != 0;
-                input.showScoreboard = keys[s_bindings["scoreboard"]] != 0;
+                auto* tsInput = scr ? scr->ts() : nullptr;
+                static bool previousActionInputs[520]{};
+                if (tsInput && !g->isMapperMode()) {
+                    for (const auto& [binding, action] : actionBindingStore()) {
+                        const auto& [mapName, device, keyName] = binding;
+                        if (action.cmdOn.empty() ||
+                            (mapName != "moveMap" && mapName != "observerMap")) continue;
+                        if (device == 1 && (keyName == "xaxis" || keyName == "yaxis")) {
+                            const float value = keyName == "xaxis"
+                                ? (float)plat->input().mouseDeltaX * 0.002f
+                                : (float)plat->input().mouseDeltaY * 0.002f;
+                            if (value != 0.0f && !action.isCmd && tsInput->hasFunction(action.cmdOn))
+                                tsInput->callFunction(action.cmdOn, {VMValue(value)});
+                            continue;
+                        }
+                        int inputIndex = -1;
+                        bool down = false;
+                        if (device == 0) {
+                            std::string key = keyName;
+                            const auto space = key.rfind(' ');
+                            if (space != std::string::npos) key = key.substr(space + 1);
+                            inputIndex = GuiRenderer::keyNameToScancode(key);
+                            if (inputIndex < 0 || inputIndex >= 512) continue;
+                            down = keys[inputIndex];
+                        } else if (device == 1 && keyName.rfind("button", 0) == 0) {
+                            const int button = atoi(keyName.c_str() + 6);
+                            // SDL button numbering uses 1 for left and 3 for right.
+                            inputIndex = 512 + button;
+                            const int platformButton = button == 0 ? 1 : button == 1 ? 3 : button;
+                            if (platformButton < 0 || platformButton >= (int)sizeof(plat->input().mouseButtons)) continue;
+                            down = plat->input().mouseButtons[platformButton];
+                        } else {
+                            continue;
+                        }
+                        if (down == previousActionInputs[inputIndex]) continue;
+                        previousActionInputs[inputIndex] = down;
+                        const std::string& command = action.isCmd
+                            ? (down ? action.cmdOn : action.cmdOff)
+                            : action.cmdOn;
+                        if (command.empty()) continue;
+                        if (command == "moveforward" || command == "movebackward" ||
+                            command == "moveleft" || command == "moveright" ||
+                            command == "jump" || command == "jet")
+                            continue;
+                        if (action.isCmd)
+                            tsInput->execute(command);
+                        else if (tsInput->hasFunction(command))
+                            tsInput->callFunction(command, {VMValue(down ? 1 : 0)});
+                    }
+                }
+                const bool scriptInput = false;
+                auto boundKeyDown = [&](const char* action) {
+                    const int scancode = s_bindings[action];
+                    return scancode >= 0 && scancode < (int)(sizeof(keys) / sizeof(keys[0])) && keys[scancode] != 0;
+                };
+                if (scriptInput) {
+                    input.forward = tsInput->getGlobal("$mvForwardAction").toBool();
+                    input.backward = tsInput->getGlobal("$mvBackwardAction").toBool();
+                    input.left = tsInput->getGlobal("$mvLeftAction").toBool();
+                    input.right = tsInput->getGlobal("$mvRightAction").toBool();
+                    input.jump = (tsInput->getGlobal("$mvTriggerCount2").toInt() & 1) != 0;
+                    input.jet = (tsInput->getGlobal("$mvTriggerCount3").toInt() & 1) != 0;
+                } else {
+                    input.forward = boundKeyDown("forward");
+                    input.backward = boundKeyDown("backward");
+                    input.left = boundKeyDown("left");
+                    input.right = boundKeyDown("right");
+                    input.jump = boundKeyDown("jump");
+                    input.jet = boundKeyDown("jet");
+                }
+                input.freeCam = boundKeyDown("f1");
+                input.orbitCam = boundKeyDown("f2");
+                if (scriptInput) {
+                    input.fire = (tsInput->getGlobal("$mvTriggerCount0").toInt() & 1) != 0;
+                    input.altFire = (tsInput->getGlobal("$mvTriggerCount1").toInt() & 1) != 0;
+                    input.zoom = false;
+                } else {
+                    auto boundActionDown = [&](const char* action) {
+                        const int binding = s_bindings[action];
+                        if (binding >= 0 && binding < (int)(sizeof(keys) / sizeof(keys[0])))
+                            return keys[binding] != 0;
+                        const int button = -binding;
+                        return binding < 0 && button > 0 &&
+                               button < (int)(sizeof(mButtons) / sizeof(mButtons[0])) &&
+                               mButtons[button] != 0;
+                    };
+                    input.fire = boundActionDown("fire");
+                    input.altFire = boundActionDown("altfire");
+                    input.zoom = boundActionDown("zoom");
+                }
+                input.reload = boundKeyDown("reload");
+                input.showScoreboard = boundKeyDown("scoreboard");
                 input.demoPause = keys[SCANCODE_P] != 0;
                 input.demoStepFrame = keys[SCANCODE_PERIOD] != 0;
                 input.demoShowEvents = keys[SCANCODE_E] != 0;
-                input.lookDelta = {
-                    (float)plat->input().mouseDeltaY * 0.002f,
-                    (float)plat->input().mouseDeltaX * 0.002f,
-                    0
-                };
+                if (scriptInput) {
+                    input.lookDelta = {
+                        tsInput->getGlobal("$mvPitch").toFloat(),
+                        tsInput->getGlobal("$mvYaw").toFloat(), 0};
+                    tsInput->setGlobal("$mvPitch", VMValue(0.0f));
+                    tsInput->setGlobal("$mvYaw", VMValue(0.0f));
+                } else {
+                    input.lookDelta = {
+                        (float)plat->input().mouseDeltaY * 0.002f,
+                        -(float)plat->input().mouseDeltaX * 0.002f, 0};
+                }
                 static int lastNumKey = 0;
                 for (int nk = 0; nk < 9; nk++) {
                     if (keys[30 + nk]) {
                         if (lastNumKey != nk + 1) {
                             if (g->isMapperMode() && nk < 3)
                                 g->selectMapperObserverCamera(nk + 1);
-                            else if (!g->isMapperMode())
+                            else if (!scriptInput && !g->isMapperMode())
                                 g->player().selectWeapon(nk);
                             lastNumKey = nk + 1;
                         }
@@ -1981,9 +2180,16 @@ void Engine::run() {
             continue;
         }
 
+        // Gameplay owns the 3D frame and PlayGui HUD. Do not draw the legacy
+        // dev panel/menu over it; those controls belong to the shell only.
+        if (isPlaying) {
+            g->menu().setActive(false);
+            if (gui) gui->render();
+            plat->swapBuffers();
+            continue;
+        }
+
         // ─── Dev panel (always rendered) ───────────────────────────────────
-        g->menu().update(dt);
-        g->menu().render();
         plat->setRelativeMouse(false);
         plat->showMouse(true);
         {
@@ -2842,10 +3048,14 @@ void Engine::shutdown() {
     g->shutdown();
     net->shutdown();
     scr->shutdown();
+#ifndef TORCH_DEDICATED
     aud->shutdown();
     ren->shutdown();
+#endif
     filesys->shutdown();
+#ifndef TORCH_DEDICATED
     plat->shutdown();
+#endif
 
     delete g; g = nullptr;
     delete net; net = nullptr;

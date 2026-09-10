@@ -45,6 +45,31 @@ struct ServerEvent {
     uint16_t ghostAlwaysIndex = 0;
     uint8_t ghostAlwaysClass = 0;
     bool ghostAlwaysHasData = false;
+    struct TargetInfo {
+        uint16_t targetId = 0;
+        bool hasName = false;
+        bool hasSkin = false;
+        bool hasSkinPreference = false;
+        bool hasVoice = false;
+        bool hasType = false;
+        std::string name;
+        std::string skin;
+        std::string skinPreference;
+        std::string voice;
+        std::string type;
+        int sensorGroup = 0;
+        int dataBlockId = -2;
+        int renderFlags = 0;
+        float voicePitch = 1.0f;
+    } targetInfo;
+    bool hasTargetInfo = false;
+    bool hasTargetFree = false;
+    uint16_t targetFreeId = 0;
+    bool hasMissionCrc = false;
+    uint32_t missionCrc = 0;
+    std::vector<std::string> arguments;
+    bool hasSensorGroup = false;
+    uint8_t sensorGroup = 0;
 };
 
 struct ServerGameState {
@@ -71,6 +96,7 @@ public:
     std::pair<uint16_t, bool> getOrAdd(const std::string& value);
     bool set(uint16_t id, std::string value);
     const std::string* get(uint16_t id) const;
+    std::vector<std::pair<uint16_t, std::string>> entries() const;
     void clear() { values.clear(); }
     size_t size() const { return values.size(); }
 

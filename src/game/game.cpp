@@ -13,6 +13,7 @@
 #include "core/engine.h"
 #include "script/torquescript.h"
 #include <algorithm>
+#include <numeric>
 #include "fs/file_system.h"
 #include <cstdio>
 #include <cmath>
@@ -30,6 +31,17 @@ static void scanDatablockShapesFromCS(World& world) {
     for (const auto& [name, object] : ScriptEngine::instance().objects) {
         if (!object) continue;
         auto shape = object->fields.find("shapeFile");
+        if (shape == object->fields.end()) {
+            for (auto it = object->fields.begin(); it != object->fields.end(); ++it) {
+                std::string fieldName = it->first;
+                for (char& c : fieldName)
+                    c = (char)std::tolower((unsigned char)c);
+                if (fieldName == "shapefile") {
+                    shape = it;
+                    break;
+                }
+            }
+        }
         if (shape == object->fields.end() || shape->second.toString().empty()) continue;
         std::string path = shape->second.toString();
         if (path.find("shapes/") != 0 && path.find("interiors/") != 0)
@@ -205,15 +217,15 @@ static void playChatBeep() {
 // ─── 3D to screen projection ─────────────────────────────────
 static Point3F worldToScreen(const Point3F& worldPos, const MatrixF& view, const MatrixF& proj, int screenW, int screenH) {
     const float* v = &view.m[0][0];
-    float cx = worldPos.x*v[0]+worldPos.y*v[4]+worldPos.z*v[8]+v[12];
-    float cy = worldPos.x*v[1]+worldPos.y*v[5]+worldPos.z*v[9]+v[13];
-    float cz = worldPos.x*v[2]+worldPos.y*v[6]+worldPos.z*v[10]+v[14];
-    float cw = worldPos.x*v[3]+worldPos.y*v[7]+worldPos.z*v[11]+v[15];
+    float cx = worldPos.x*v[0]+worldPos.y*v[1]+worldPos.z*v[2]+v[3];
+    float cy = worldPos.x*v[4]+worldPos.y*v[5]+worldPos.z*v[6]+v[7];
+    float cz = worldPos.x*v[8]+worldPos.y*v[9]+worldPos.z*v[10]+v[11];
+    float cw = worldPos.x*v[12]+worldPos.y*v[13]+worldPos.z*v[14]+v[15];
     const float* p = &proj.m[0][0];
-    float nx = cx*p[0]+cy*p[4]+cz*p[8]+cw*p[12];
-    float ny = cx*p[1]+cy*p[5]+cz*p[9]+cw*p[13];
-    float nz = cx*p[2]+cy*p[6]+cz*p[10]+cw*p[14];
-    float nw = cx*p[3]+cy*p[7]+cz*p[11]+cw*p[15];
+    float nx = cx*p[0]+cy*p[1]+cz*p[2]+cw*p[3];
+    float ny = cx*p[4]+cy*p[5]+cz*p[6]+cw*p[7];
+    float nz = cx*p[8]+cy*p[9]+cz*p[10]+cw*p[11];
+    float nw = cx*p[12]+cy*p[13]+cz*p[14]+cw*p[15];
     if (nw == 0) return {-999, -999, 0};
     float invW = 1.0f / nw;
     return {(nx*invW*0.5f+0.5f)*screenW, (-ny*invW*0.5f+0.5f)*screenH, nz*invW};
@@ -259,13 +271,32 @@ void Player::loadModel() {
         return;
     }
 
-    const std::string raceGender = ts->callFunction(
-        "getField", {VMValue(profile), VMValue(1)}).toString();
-    const std::string sex = ts->callFunction(
-        "getWord", {VMValue(raceGender), VMValue(1)}).toString();
-    const std::string race = ts->callFunction(
-        "getWord", {VMValue(raceGender), VMValue(0)}).toString();
-    const std::string armorSize = ts->getGlobal("$DefaultPlayerArmor").toString();
+    auto field = [](const std::string& value, int index) {
+        size_t start = 0;
+        for (int i = 0; i < index; i++) {
+            start = value.find('\t', start);
+            if (start == std::string::npos) return std::string();
+            start++;
+        }
+        size_t end = value.find('\t', start);
+        return value.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    };
+    auto word = [](const std::string& value, int index) {
+        size_t start = 0;
+        for (int i = 0; i <= index; i++) {
+            start = value.find_first_not_of(" \t", start);
+            if (start == std::string::npos) return std::string();
+            size_t end = value.find_first_of(" \t", start);
+            if (i == index) return value.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            start = end == std::string::npos ? value.size() : end;
+        }
+        return std::string();
+    };
+    const std::string raceGender = field(profile, 1);
+    const std::string sex = word(raceGender, 1).empty() ? "Male" : word(raceGender, 1);
+    const std::string race = word(raceGender, 0).empty() ? "Human" : word(raceGender, 0);
+    const std::string armorSize = ts->getGlobal("$DefaultPlayerArmor").toString().empty()
+        ? "Light" : ts->getGlobal("$DefaultPlayerArmor").toString();
     if (!ts->hasFunction("getArmorDatablock")) {
         Console::instance().printf(LogLevel::Error,
             "Player: script armor resolver is not loaded");
@@ -280,18 +311,65 @@ void Player::loadModel() {
     resolver->fields["race"] = VMValue(race);
     resolver->fields["sex"] = VMValue(sex);
     ScriptEngine::instance().objects[resolverName] = resolver;
-    const std::string datablockName = ts->callFunction(
-        "getArmorDatablock", {VMValue(resolverName), VMValue(armorSize)}).toString();
+    std::string datablockName;
+    if (race == "Bioderm")
+        datablockName = armorSize + "MaleBiodermArmor";
+    else
+        datablockName = armorSize + sex + race + "Armor";
+    auto findDataBlock = [&](const std::string& name) {
+        auto it = ScriptEngine::instance().objects.find(name);
+        if (it != ScriptEngine::instance().objects.end()) return it;
+        std::string wanted = name;
+        for (char& c : wanted) c = (char)tolower((unsigned char)c);
+        for (auto candidate = ScriptEngine::instance().objects.begin();
+             candidate != ScriptEngine::instance().objects.end(); ++candidate) {
+            std::string key = candidate->first;
+            for (char& c : key) c = (char)tolower((unsigned char)c);
+            if (key == wanted) return candidate;
+        }
+        return ScriptEngine::instance().objects.end();
+    };
+    if (findDataBlock(datablockName) == ScriptEngine::instance().objects.end()) {
+        datablockName = ts->callFunction(
+            "getArmorDatablock", {VMValue(resolverName), VMValue(armorSize)}).toString();
+    }
     ScriptEngine::instance().objects.erase(resolverName);
     delete resolver;
 
-    auto datablock = ScriptEngine::instance().objects.find(datablockName);
+    auto datablock = findDataBlock(datablockName);
     if (datablock == ScriptEngine::instance().objects.end() || !datablock->second) {
-        Console::instance().printf(LogLevel::Error,
-            "Player: script armor resolver returned no PlayerData object");
+        Console::instance().printf(LogLevel::Warn,
+            "Player: PlayerData '%s' unavailable; using stock armor path", datablockName.c_str());
+        const std::string size = armorSize == "Medium" || armorSize == "Heavy" ? armorSize : "Light";
+        const std::string gender = sex == "Female" ? "female" : "male";
+        const std::string racePrefix = race == "Bioderm" ? "bioderm_" : "";
+        const std::string path = "shapes/" + racePrefix +
+            std::string(size == "Light" ? "light" : size == "Medium" ? "medium" : "heavy") +
+            "_" + gender + ".dts";
+        auto data = fs.read(path.c_str());
+        if (!data.empty() && modelShape.load(data.data(), data.size())) {
+            modelShape.name = path;
+            const std::string skin = field(profile, 2);
+            if (!skin.empty()) modelShape.applySkin(skin);
+            modelLoaded = true;
+            auto weaponData = fs.read("shapes/weapon_disc.dts");
+            if (!weaponData.empty()) {
+                weaponShape.name = "shapes/weapon_disc.dts";
+                weaponLoaded = weaponShape.load(weaponData.data(), weaponData.size());
+            }
+        }
         return;
     }
     auto shapeField = datablock->second->fields.find("shapeFile");
+    if (shapeField == datablock->second->fields.end()) {
+        for (auto it = datablock->second->fields.begin();
+             it != datablock->second->fields.end(); ++it) {
+            std::string fieldName = it->first;
+            for (char& c : fieldName)
+                c = (char)tolower((unsigned char)c);
+            if (fieldName == "shapefile") { shapeField = it; break; }
+        }
+    }
     if (shapeField == datablock->second->fields.end() || shapeField->second.toString().empty()) {
         Console::instance().printf(LogLevel::Error,
             "Player: resolved PlayerData has no shapeFile");
@@ -306,6 +384,11 @@ void Player::loadModel() {
             modelLoaded = true;
             Console::instance().printf(LogLevel::Info,
                 "Player: loaded script-selected model '%s'", path.c_str());
+            auto weaponData = fs.read("shapes/weapon_disc.dts");
+            if (!weaponData.empty()) {
+                weaponShape.name = "shapes/weapon_disc.dts";
+                weaponLoaded = weaponShape.load(weaponData.data(), weaponData.size());
+            }
             return;
         }
     }
@@ -316,6 +399,7 @@ void Player::loadModel() {
 
 void Player::updateAnimation(float dt, bool jetting) {
     animTime += dt;
+    weaponAnimTime += dt;
 
     AnimState newAnim;
     if (hp <= 0) {
@@ -341,35 +425,85 @@ void Player::render() {
 
     if (modelLoaded) {
         auto& r = Engine::instance().renderer();
+        auto& game = Engine::instance().game();
+        const bool firstPerson = game.state() == Game::Playing &&
+            !game.isMapperMode() && !game.isDemoPlaying() && !game.isFreeCamActive();
 
         // Build model transform
         MatrixF model;
         Point3F ax = {0, 1, 0};
         model.setRotationAxis(ax, -rot.z);
         model.setTranslation(pos);
-        // DTS shapes are Z-up (or already Y-up via their own transforms); C
-        // converts to Y-up before the Y-up world transform when needed
-        r.setModel(model * modelShape.upOrientation());
 
-        // Map animation state to animation name
-        const char* animNames[] = { "stand", "run", "jump", "jet", "death" };
-        const char* altNames[]  = { "idle",  "run", "jump", "jet", "die"   };
-        int idx = (int)anim;
+        if (!firstPerson) {
+            r.setModel(model * modelShape.upOrientation());
+            const char* animNames[] = { "stand", "run", "jump", "jet", "death" };
+            const char* altNames[]  = { "idle",  "run", "jump", "jet", "die"   };
+            int idx = (int)anim;
+            if (idx >= 0 && idx <= 4) {
+                bool found = false;
+                for (auto& a : modelShape.animations)
+                    if (a.name == animNames[idx]) { found = true; break; }
+                modelShape.renderAnimation(found ? animNames[idx] : altNames[idx], animTime);
+            } else {
+                modelShape.render(0);
+            }
+        }
 
-        if (idx >= 0 && idx <= 4) {
-            // Search for primary animation; fall back to alt if missing
-            auto& animList = modelShape.animations;
-            bool found = false;
-            for (auto& a : animList)
-                if (a.name == animNames[idx]) { found = true; break; }
-            modelShape.renderAnimation(found ? animNames[idx] : altNames[idx], animTime);
-        } else {
-            modelShape.render(0);
+        if (weaponLoaded) {
+            int weaponMount = weaponShape.findNode("Mountpoint");
+            if (weaponMount < 0) weaponMount = weaponShape.findNode("mount0");
+            MatrixF weaponModel;
+            if (firstPerson) {
+                weaponModel = r.viewMatrix().inverse();
+                Point3F camera = r.cameraPos;
+                Point3F right = weaponModel.transform({1, 0, 0});
+                right.x -= camera.x; right.y -= camera.y; right.z -= camera.z;
+                Point3F forward = {r.cameraTarget.x - camera.x,
+                                   r.cameraTarget.y - camera.y,
+                                   r.cameraTarget.z - camera.z};
+                float length = std::sqrt(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
+                if (length > 0.0001f) {
+                    forward.x /= length; forward.y /= length; forward.z /= length;
+                }
+                Point3F weaponPos = {camera.x + forward.x * 0.55f + right.x * 0.35f,
+                                     camera.y + forward.y * 0.55f + right.y * 0.35f - 0.18f,
+                                     camera.z + forward.z * 0.55f + right.z * 0.35f};
+                weaponModel.setTranslation(weaponPos);
+                MatrixF weaponFrame;
+                weaponFrame.setRotationY(Math::PI);
+                weaponModel = weaponModel * weaponFrame;
+            } else {
+                int playerMount = modelShape.findNode("Mount0");
+                if (playerMount < 0) playerMount = modelShape.findNode("Mount1");
+                weaponModel = model;
+                if (playerMount >= 0 && weaponMount >= 0 &&
+                    playerMount < (int)modelShape.defaultTransforms.size() &&
+                    weaponMount < (int)weaponShape.defaultTransforms.size()) {
+                    weaponModel = model * modelShape.defaultTransforms[playerMount] *
+                        weaponShape.defaultTransforms[weaponMount].inverse();
+                }
+            }
+            r.setModel(weaponModel);
+            const DTSShape::Animation* spin = findAnimation(weaponShape, "discSpin");
+            if (spin)
+                weaponShape.renderAnimation(spin->name.c_str(), weaponAnimTime);
+            else
+                weaponShape.render(0);
         }
     }
 }
 
-void Player::applyMove(const Point3F& move, bool jump, bool jet) {
+void Player::applyMove(const Point3F& move, bool jump, bool jet, float dt) {
+    Game::InputMove input;
+    input.left = move.x < -0.001f;
+    input.right = move.x > 0.001f;
+    input.backward = move.y < -0.001f;
+    input.forward = move.y > 0.001f;
+    input.jump = jump;
+    input.jet = jet;
+    Physics physics;
+    physics.update(this, std::max(0.0f, dt), input);
 }
 
 void Player::selectWeapon(int32_t idx) {
@@ -384,6 +518,7 @@ void Player::fireWeapon(bool alt) {
     if (curWeapon < 0 || curWeapon >= (int32_t)weapons.size()) return;
     Weapon& w = weapons[curWeapon];
     const WeaponData& wd = gWeaponTable[w.type];
+    if (alt != wd.altFire) return;
     if (!w.canFire(eng)) return;
 
     eng -= wd.energyCost;
@@ -937,6 +1072,23 @@ bool World::load(const char* mapName) {
             }
             wo.shapeName = resolveShapePath(obj, datablockShapes);
              wo.shapeName = normalizeShapePath(wo.shapeName);
+            std::string datablock = getProp(obj.props, "datablock");
+            std::string datablockLower = datablock;
+            for (char& c : datablockLower)
+                c = (char)std::tolower((unsigned char)c);
+            if (obj.className == "Item" && datablockLower == "flag") {
+                int team = obj.objName.starts_with("Team2") ? 2 : 1;
+                std::string teamName;
+                if (auto* ts = ScriptEngine::instance().ts()) {
+                    teamName = ts->getGlobal(
+                        "$Host::teamName[" + std::to_string(team) + "]").toString();
+                }
+                if (teamName.empty())
+                    teamName = team == 2 ? "Inferno" : "Storm";
+                wo.label = teamName + " Flag";
+                if (Engine::instance().game().isMapperMode())
+                    wo.animName.clear();
+            }
             wo.collidable = true;
 
             // Find matching shape
@@ -950,7 +1102,9 @@ bool World::load(const char* mapName) {
                     wo.animName = defaultMissionAnimation(wo.shape);
                     if (Engine::instance().game().isMapperMode() && !wo.animName.empty()) {
                         if (const auto* animation = findAnimation(*wo.shape, wo.animName.c_str()))
-                            wo.animTime = animation->duration;
+                            wo.animTime = animation->looping
+                                ? animation->duration * 0.5f
+                                : animation->duration;
                     }
                     break;
                 }
@@ -1660,6 +1814,12 @@ void World::render(const Point3F& cameraPos) {
 
     for (auto& obj : worldObjects) {
         if (obj.shape && obj.shape->loaded) {
+            const bool mapperMarker = Engine::instance().game().isMapperMode() &&
+                                      !obj.label.empty();
+            if (mapperMarker) {
+                glDisable(GL_DEPTH_TEST);
+                glDepthMask(GL_FALSE);
+            }
             MatrixF model;
             if (obj.rotAngleDeg != 0 && (obj.rot.x != 0 || obj.rot.y != 0 || obj.rot.z != 0)) {
                 // Convert the complete Torque-frame rotation. Applying the
@@ -1686,11 +1846,50 @@ void World::render(const Point3F& cameraPos) {
                 shapeFrame.setRotationY(Math::PI);
                 model = model * shapeFrame;
             }
+            if (!obj.label.empty()) {
+                Point3F mn{1e30f, 1e30f, 1e30f};
+                Point3F mx{-1e30f, -1e30f, -1e30f};
+                std::vector<int32_t> labelMeshes;
+                if (!obj.shape->details.empty() &&
+                    !obj.shape->details[0].meshIndices.empty()) {
+                    labelMeshes = obj.shape->details[0].meshIndices;
+                } else {
+                    labelMeshes.resize(obj.shape->meshes.size());
+                    std::iota(labelMeshes.begin(), labelMeshes.end(), 0);
+                }
+                for (int32_t meshIndex : labelMeshes) {
+                    if (meshIndex < 0 || meshIndex >= (int32_t)obj.shape->meshes.size())
+                        continue;
+                    const auto& mesh = obj.shape->meshes[meshIndex];
+                    MatrixF node = (mesh.nodeIndex >= 0 &&
+                                    mesh.nodeIndex < (int)obj.shape->defaultTransforms.size())
+                        ? obj.shape->defaultTransforms[mesh.nodeIndex]
+                        : MatrixF();
+                    for (const auto& vertex : mesh.vertices) {
+                        Point3F point = node.transform(vertex.pos);
+                        mn.x = std::min(mn.x, point.x);
+                        mn.y = std::min(mn.y, point.y);
+                        mn.z = std::min(mn.z, point.z);
+                        mx.x = std::max(mx.x, point.x);
+                        mx.y = std::max(mx.y, point.y);
+                        mx.z = std::max(mx.z, point.z);
+                    }
+                }
+                const float flagHeight = mx.y - mn.y;
+                obj.labelAnchor = model.transform({
+                    (mn.x + mx.x) * 0.5f, mn.y + flagHeight,
+                    (mn.z + mx.z) * 0.5f});
+                obj.labelAnchorValid = mn.x < mx.x || mn.y < mx.y || mn.z < mx.z;
+            }
             r.setModel(model * obj.shape->upOrientation());
             if (!obj.animName.empty())
                 obj.shape->renderAnimation(obj.animName.c_str(), obj.animTime);
             else
                 obj.shape->render(0);
+            if (mapperMarker) {
+                glDepthMask(GL_TRUE);
+                glEnable(GL_DEPTH_TEST);
+            }
 
             // TurretImageData is a separate DTS shape mounted at the turret's
             // mount0 node. Align its Mountpoint back to that node, matching
@@ -2221,10 +2420,33 @@ bool Game::init() {
     con.addCommand("startLocal", [this](int32_t argc, const char* const* argv) {
         startLocalGame();
     });
+    con.addCommand("selectWeaponSlot", [this](int32_t argc, const char* const* argv) {
+        if (argc > 1) player().selectWeapon(atoi(argv[1]));
+    }, "selectWeaponSlot <index> - script-owned weapon selection bridge");
+    con.addCommand("cycleWeapon", [this](int32_t argc, const char* const* argv) {
+        if (argc > 1 && strcmp(argv[1], "prev") == 0) player().weaponCycle(-1);
+        else player().weaponCycle(1);
+    }, "cycleWeapon <next|prev> - script-owned weapon cycling bridge");
+    con.addCommand("setFov", [this](int32_t argc, const char* const* argv) {
+        if (argc > 1) {
+            const float fov = (float)atof(argv[1]);
+            Engine::instance().renderer().config().fov = fov > 1.0f && fov < 180.0f ? fov : 90.0f;
+        }
+    }, "setFov <degrees> - script-owned camera FOV bridge");
 
     con.addCommand("connect", [this](int32_t argc, const char* const* argv) {
         if (argc > 1) connectToServer(argv[1], argc > 2 ? (uint16_t)atoi(argv[2]) : T2Protocol::DEFAULT_PORT);
     });
+    con.addCommand("watchServer", [this](int32_t argc, const char* const* argv) {
+        if (argc < 2) return;
+        std::string address = argv[1];
+        const auto colon = address.rfind(':');
+        if (colon == std::string::npos || colon == 0) return;
+        const int port = atoi(address.substr(colon + 1).c_str());
+        if (port < 1 || port > 65535) return;
+        const std::string host = address.substr(0, colon);
+        connectToServer(host.c_str(), (uint16_t)port, true);
+    }, "watchServer <host:port> - connect as an anonymous observer");
 
     con.addCommand("startServer", [this](int32_t argc, const char* const* argv) {
         uint16_t port = (argc > 1) ? (uint16_t)atoi(argv[1]) : T2Protocol::DEFAULT_PORT;
@@ -2237,12 +2459,6 @@ bool Game::init() {
         }, &w);
         server.start(port);
     }, "startServer [port] [mission] - Start a game server on the given port");
-
-    con.addCommand("CreateServer", [this](int32_t argc, const char* const* argv) {
-        // T2 script compatibility: CreateServer <mission> <type>
-        const char* mission = (argc > 1) ? argv[1] : "test";
-        startLocalGame(mission);
-    }, "CreateServer <mission> [type] - Start a local server with mission");
 
     con.addCommand("loadMission", [this](int32_t argc, const char* const* argv) {
         if (argc < 2) return;
@@ -2258,6 +2474,34 @@ bool Game::init() {
         if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: playdemo <path>"); return; }
         playDemo(argv[1]);
     }, "playdemo <path> - Load and play a Tribes 2 demo file");
+    con.addCommand("seekDemoBlock", [this](int32_t argc, const char* const* argv) {
+        if (!demoParser || argc < 2) return;
+        const int target = std::max(0, atoi(argv[1]));
+        auto snapshot = demoSnapshots.upper_bound(target);
+        if (snapshot != demoSnapshots.begin()) {
+            --snapshot;
+            if (!demoParser->restoreSnapshot(snapshot->second)) {
+                Console::instance().printf(LogLevel::Warn, "seekDemoBlock: snapshot restore failed");
+                return;
+            }
+        } else {
+            demoParser->reset();
+        }
+        if (!demoParser->seekToBlock(target)) {
+            Console::instance().printf(LogLevel::Warn,
+                "seekDemoBlock: unable to seek to block %d", target);
+            return;
+        }
+        demoBlocksDone = target;
+        demoTime = demoBlocksTotal > 0 && demoTotalTime > 0
+            ? demoTotalTime * (float)target / (float)demoBlocksTotal : 0;
+        demoHasPos = false;
+        demoMoveBlend = 1.0f;
+        demoPath.clear();
+        demoPathCount = 0;
+        Console::instance().printf(LogLevel::Info,
+            "Demo seeked to block %d", target);
+    }, "seekDemoBlock <index> - seek parser state to a demo block");
 
     con.addCommand("listdemos", [this](int32_t argc, const char* const* argv) {
         auto& fs = Engine::instance().fs();
@@ -2628,6 +2872,8 @@ void Game::update(float dt) {
                     }
                 }
                 delete block;
+                if (demoPlaying && demoParser && (demoBlocksDone % 500) == 0)
+                    demoSnapshots[demoBlocksDone] = demoParser->captureSnapshot();
             }
 
             // Try to load terrain from ghost data if not yet loaded
@@ -2734,7 +2980,7 @@ void Game::update(float dt) {
                 if (keys[SCANCODE_LCTRL] || keys[SCANCODE_RCTRL]) camSpeed *= 0.25f;
                 float yaw = freeCamRot.z;
                 float pitch = freeCamRot.x;
-                yaw -= currentInput.lookDelta.y;        // mouse X (horiz) → yaw (negated = natural left/right)
+                yaw += currentInput.lookDelta.y;        // normalized mouse X → yaw
                 pitch -= currentInput.lookDelta.x;      // mouse Y (vert) → pitch
                 if (pitch > 1.5f) pitch = 1.5f;
                 if (pitch < -1.5f) pitch = -1.5f;
@@ -2892,7 +3138,8 @@ void Game::update(float dt) {
             }
 
             // ─── Chat input ──────────────────────────────────────
-            if (cfg.online && activeConn && activeConn->state() >= Connection::Connected) {
+            if (cfg.online && activeConn && !activeConn->isObserverMode() &&
+                activeConn->state() >= Connection::Connected) {
                 static bool chatActive = false;
                 static std::string chatBuf;
                 auto& plat = Engine::instance().platform();
@@ -3007,13 +3254,23 @@ void Game::update(float dt) {
     } else if (gameState == Dead) {
         // Spectator mode when online
         if (cfg.online && activeConn && activeConn->isConnected()) {
+            auto isSpectatable = [this](int index) {
+                const GhostEntry* ghost = liveGhosts.getGhost(index);
+                if (!ghost) return false;
+                return ghost->className == "Player" ||
+                       ghost->className == "FlyingVehicle" ||
+                       ghost->className == "HoverVehicle" ||
+                       ghost->className == "WheeledVehicle" ||
+                       ghost->className == "Vehicle";
+            };
             if (!liveSpectateInit) {
-                liveSpectateInit = true;
-                freeCamActive = false;
                 // Find first live ghost to spectate
                 auto indices = liveGhosts.getAllIndices();
-                if (!indices.empty()) {
-                    spectateGhostIndex = indices[0];
+                auto first = std::find_if(indices.begin(), indices.end(), isSpectatable);
+                if (first != indices.end()) {
+                    liveSpectateInit = true;
+                    freeCamActive = false;
+                    spectateGhostIndex = *first;
                     // If it's our own ghost, skip to next
                     if ((uint32_t)spectateGhostIndex == serverPlayerGhostIndex && indices.size() > 1)
                         spectateGhostIndex = indices[1];
@@ -3024,6 +3281,11 @@ void Game::update(float dt) {
             bool cycleNow = currentInput.fire || currentInput.reload;
             if (cycleNow && !prevCycle) {
                 auto indices = liveGhosts.getAllIndices();
+                if (!indices.empty()) {
+                    indices.erase(std::remove_if(indices.begin(), indices.end(),
+                                                 [&](int index) { return !isSpectatable(index); }),
+                                  indices.end());
+                }
                 if (!indices.empty()) {
                     int cur = 0;
                     for (size_t i = 0; i < indices.size(); i++)
@@ -3136,9 +3398,19 @@ void Game::render(float dt) {
             camTarget.y += 10.0f; // look slightly above center
         } else if (!demoPlaying && cfg.online && gameState == Dead && liveGhosts.size() > 0) {
             // Live spectator: follow spectated ghost
-            if (!liveGhosts.hasGhost(spectateGhostIndex)) {
+            auto isSpectatable = [](const GhostEntry* ghost) {
+                if (!ghost) return false;
+                return ghost->className == "Player" ||
+                       ghost->className == "FlyingVehicle" ||
+                       ghost->className == "HoverVehicle" ||
+                       ghost->className == "WheeledVehicle" ||
+                       ghost->className == "Vehicle";
+            };
+            if (!isSpectatable(liveGhosts.getGhost(spectateGhostIndex))) {
                 auto idxs = liveGhosts.getAllIndices();
-                if (!idxs.empty()) spectateGhostIndex = idxs[0];
+                auto first = std::find_if(idxs.begin(), idxs.end(),
+                    [&](int index) { return isSpectatable(liveGhosts.getGhost(index)); });
+                spectateGhostIndex = first == idxs.end() ? -1 : *first;
             }
             const GhostEntry* g = liveGhosts.getGhost(spectateGhostIndex);
             if (g && (g->position.x != 0 || g->position.y != 0 || g->position.z != 0)) {
@@ -3219,6 +3491,12 @@ void Game::render(float dt) {
         float llen = std::sqrt(lightDir.x * lightDir.x + lightDir.y * lightDir.y + lightDir.z * lightDir.z);
         if (llen > 0) { lightDir.x /= llen; lightDir.y /= llen; lightDir.z /= llen; }
 
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
         r.beginShadowPass(lightDir, sceneCenter, sceneRadius);
 
         // Render shadow casters with shadow depth shader
@@ -3304,11 +3582,35 @@ void Game::render(float dt) {
         r.shadowsActive = false;
     }
 
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
     w->render(finalCam);
     if (pl && !freeCamActive && !demoPlaying && !testShapeLoaded) pl->render();
     } // end if (!shapeViewerActive && !testShapeLoaded)
 
-    if (hud && gameState == Playing && !mapperMode) hud->render(this);
+    if (mapperMode || gameState == Playing) {
+        auto* font = r.getFont();
+        if (font) {
+            for (const auto& obj : w->objects()) {
+                if (obj.label.empty()) continue;
+                Point3F anchor = obj.labelAnchorValid
+                    ? obj.labelAnchor
+                    : Math::torquePointToYUp(obj.pos);
+                Point3F screen = worldToScreen(anchor, r.viewMatrix(),
+                    r.projectionMatrix(), r.config().width, r.config().height);
+                if (screen.z < -1.0f || screen.z > 1.0f ||
+                    screen.x < 0 || screen.x > r.config().width ||
+                    screen.y < 0 || screen.y > r.config().height)
+                    continue;
+                font->render(obj.label.c_str(), screen.x - 35, screen.y - 12,
+                    {1, 1, 1, 1}, 1.0f);
+            }
+        }
+    }
+
+    if (hud && gameState == Playing && demoPlaying && !mapperMode) hud->render(this);
 
     // Connection status overlay
     if (cfg.online && activeConn && activeConn->isConnected() && liveGhosts.size() == 0) {
@@ -4118,6 +4420,7 @@ void Game::startLocalGame(const char* map) {
 
     if (w->load(missionPath.c_str())) {
         pl->respawn();
+        pl->setTeam(1);
         // Use mission spawn point, or fall back to above terrain center
         Point3F spawnPos = w->spawnPoint();
         float h = w->getHeight(spawnPos.x, spawnPos.z);
@@ -4127,13 +4430,10 @@ void Game::startLocalGame(const char* map) {
         setState(Playing);
         Console::instance().printf(LogLevel::Info, "Game started on '%s'", missionPath.c_str());
 
-        // Spawn practice bots
-        w->spawnBots(6);
-
         // Clear TS GUI dialogs and switch to in-game view
         auto& gui = Engine::instance().guiRenderer();
+        gui.clearDialogs();
         gui.setContent("PlayGui");
-        gui.pushDialog("PlayGui");
 
         // Start ambient audio
         auto& audio = Engine::instance().audio();
@@ -4160,7 +4460,7 @@ void Game::startLocalGame(const char* map) {
     }
 }
 
-void Game::connectToServer(const char* host, uint16_t port) {
+void Game::connectToServer(const char* host, uint16_t port, bool observer, const char* password) {
     cfg.serverHost = host;
     cfg.serverPort = port;
     cfg.online = true;
@@ -4173,10 +4473,17 @@ void Game::connectToServer(const char* host, uint16_t port) {
     auto& net = Engine::instance().network();
     activeConn = net.createConnection();
     activeConn->setPlayerName(cfg.playerName.c_str());
+    activeConn->setJoinPassword(password ? password : "");
+    activeConn->setObserverMode(observer);
     if (activeConn->connect(host, port)) {
         activeConn->setConnectCallback([this](bool success) {
             if (success) {
                 Console::instance().printf(LogLevel::Info, "Connected!");
+                if (activeConn->isObserverMode()) {
+                    activeConn->sendCommandPacket("setPlayerTeam 0");
+                    activeConn->sendCommandPacket("ScopeCommanderMap 1");
+                    activeConn->sendCommandPacket("WatchOnly ImaWatcher");
+                }
             } else {
                 Console::instance().printf(LogLevel::Info, "Connection failed");
                 liveSpectateInit = false;
@@ -4192,15 +4499,24 @@ void Game::connectToServer(const char* host, uint16_t port) {
             if (type == PacketType::ConnectOK) {
                 activeConn->setState(Connection::Connected);
                 Console::instance().printf(LogLevel::Info, "Connection established, entering game");
-                startLocalGame();
+                if (activeConn->isObserverMode()) {
+                    liveSpectateInit = false;
+                    spectateGhostIndex = -1;
+                    setState(Dead);
+                    auto& gui = Engine::instance().guiRenderer();
+                    gui.clearDialogs();
+                    gui.setContent("PlayGui");
+                } else {
+                    startLocalGame();
+                }
             } else if (type == PacketType::GameData && size > 0) {
                 // Check for command packet
                 if (data[0] == T2Protocol::GDT_Command && size >= 3) {
                     uint16_t cmdLen = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
                     if (cmdLen > 0 && (size_t)(3 + cmdLen) <= size) {
                         std::string cmd((const char*)data + 3, cmdLen);
-                        Console::instance().printf(LogLevel::Debug, "Net received command: %s", cmd.c_str());
-                        Console::instance().execute(cmd.c_str());
+                        Console::instance().printf(LogLevel::Warn,
+                            "Ignored untrusted legacy server command: %s", cmd.c_str());
                     }
                     return;
                 }
@@ -4394,7 +4710,10 @@ void Game::connectToServer(const char* host, uint16_t port) {
             }
         });
         activeConn->setCommandCallback([](const std::string& command) {
-            if (!command.empty()) Console::instance().execute(command.c_str());
+            if (!command.empty()) {
+                Console::instance().printf(LogLevel::Warn,
+                    "Ignored untrusted server command: %s", command.c_str());
+            }
         });
         activeConn->setStateCallback([this](const V12::ServerGameState& state) {
             if (state.controlPresent && !state.controlDirty) {
@@ -4404,12 +4723,215 @@ void Game::connectToServer(const char* host, uint16_t port) {
             if (state.damageFlash > 0) damageFlash = state.damageFlash;
             if (state.whiteOut > 0) whiteOut = state.whiteOut;
         });
+        activeConn->setEpochCallback([this](uint64_t epoch) {
+            Console::instance().printf(LogLevel::Info,
+                "Observer protocol epoch reset: %llu",
+                (unsigned long long)epoch);
+            liveGhosts.clear();
+            nativeDatablockShapes.clear();
+            liveTargets.clear();
+            liveMissionCrc = 0;
+            liveTeamScores.clear();
+            livePlayerScores.clear();
+            liveClientTargetIds.clear();
+            liveClientNames.clear();
+            liveClientTeams.clear();
+            liveMatchStarted_ = false;
+            liveMatchEnded_ = false;
+            liveMissionDisplayName_.clear();
+            liveMissionType_.clear();
+            liveClockDurationMs_ = 0;
+            liveClockReceivedAt_ = 0.0;
+            liveLoadInfoLines_.clear();
+            liveSpectateInit = false;
+            spectateGhostIndex = -1;
+        });
         activeConn->setDatablockCallback(
             [this](uint16_t objectId, uint8_t, uint16_t, uint16_t,
                    const std::string&, const V12::DecodedDataBlock& data) {
-                if (!data.shapeFile.empty())
-                    nativeDatablockShapes[objectId] = data.shapeFile;
+                 if (!data.shapeFile.empty())
+                     nativeDatablockShapes[objectId] = data.shapeFile;
+             });
+        activeConn->setTargetCallback(
+            [this](const V12::ServerEvent::TargetInfo* info, uint16_t targetId) {
+                if (!info) {
+                    liveTargets.erase(targetId);
+                    return;
+                }
+                liveTargets[targetId] = *info;
+                if (GhostEntry* ghost = liveGhosts.getMutableGhost((int)targetId)) {
+                    if (info->hasName && !info->name.empty()) ghost->playerName = info->name;
+                    if (info->hasSkin && !info->skin.empty()) ghost->skinName = info->skin;
+                }
             });
+        activeConn->setMissionCallback([this](uint32_t crc) {
+            liveMissionCrc = crc;
+        });
+        activeConn->setServerMessageCallback([this](const std::vector<std::string>& argv) {
+            if (argv.size() < 1 || argv[0] != "ServerMessage") return;
+            if (argv.size() >= 2 && argv[1] == "MsgMissionStart") {
+                liveMatchStarted_ = true;
+                liveMatchEnded_ = false;
+                return;
+            }
+            if (argv.size() >= 2 && argv[1] == "MsgClientReady") {
+                liveMatchStarted_ = false;
+                liveMatchEnded_ = false;
+                return;
+            }
+            if (argv.size() >= 2 &&
+                (argv[1] == "MsgClearDebrief" || argv[1] == "MsgDebriefResult")) {
+                liveMatchEnded_ = true;
+                return;
+            }
+            if (argv.size() >= 5 && argv[1] == "MsgMissionDropInfo") {
+                liveMissionDisplayName_ = argv[2];
+                liveMissionType_ = argv[3];
+                return;
+            }
+            if (argv.size() >= 4 && argv[1] == "MsgSystemClock") {
+                liveClockDurationMs_ = std::max(0, atoi(argv[3].c_str()));
+                liveClockReceivedAt_ = Engine::instance().timer().now();
+                return;
+            }
+            if (argv.size() >= 2 && argv[1] == "MsgLoadInfo") {
+                liveLoadInfoLines_.clear();
+                return;
+            }
+            if (argv.size() >= 3 &&
+                (argv[1] == "MsgLoadQuoteLine" || argv[1] == "MsgLoadObjectiveLine" ||
+                 argv[1] == "MsgLoadRulesLine")) {
+                if (liveLoadInfoLines_.size() < 128)
+                    liveLoadInfoLines_.push_back(argv[2]);
+                return;
+            }
+            if (argv.size() >= 2 && argv[1] == "MsgLoadInfoDone") return;
+            if (argv.size() >= 4 &&
+                (argv[1] == "MsgTeamScoreIs" || argv[1] == "MsgTeamScore")) {
+                const int teamId = atoi(argv[2].c_str());
+                const int score = atoi(argv[3].c_str());
+                if (teamId > 0 && teamId < 64) {
+                    liveTeamScores[teamId].teamId = teamId;
+                    liveTeamScores[teamId].score = score;
+                }
+                return;
+            }
+            if (argv.size() >= 6 && argv[1] == "MsgCTFAddTeam") {
+                const int teamId = atoi(argv[2].c_str());
+                if (teamId <= 0 || teamId >= 64) return;
+                auto& team = liveTeamScores[teamId];
+                team.teamId = teamId;
+                team.name = argv[3];
+                team.flagStatus = argv[4].find("At Base") == 0 ? "home" :
+                                   argv[4].find("In the Field") == 0 ? "field" : "held";
+                team.flagCarrier = team.flagStatus == "held" ? argv[4] : "";
+                team.score = atoi(argv[5].c_str());
+                return;
+            }
+            if (argv.size() >= 5 &&
+                (argv[1] == "MsgCTFFlagTaken" || argv[1] == "MsgCTFFlagDropped" ||
+                 argv[1] == "MsgCTFFlagReturned" || argv[1] == "MsgCTFFlagCapped")) {
+                const int teamId = atoi(argv[4].c_str());
+                if (teamId <= 0 || teamId >= 64) return;
+                auto& team = liveTeamScores[teamId];
+                team.teamId = teamId;
+                team.flagStatus = argv[1] == "MsgCTFFlagTaken" ? "held" :
+                                   argv[1] == "MsgCTFFlagDropped" ? "field" : "home";
+                team.flagCarrier = team.flagStatus == "held" ? argv[2] : "";
+                return;
+            }
+            if (argv.size() >= 4 && argv[1] == "MsgPlayerScore") {
+                const int clientId = atoi(argv[2].c_str());
+                if (clientId >= 0 && clientId < 1024) {
+                    livePlayerScores[clientId] = atoi(argv[3].c_str());
+                    auto target = liveClientTargetIds.find(clientId);
+                    if (target != liveClientTargetIds.end()) {
+                        if (GhostEntry* ghost = liveGhosts.getMutableGhost(target->second))
+                            ghost->score = livePlayerScores[clientId];
+                    }
+                }
+            } else if (argv.size() >= 8 && argv[1] == "SetLineHud") {
+                auto applyScore = [this](const std::string& name, int score) {
+                    for (const auto& [clientId, clientName] : liveClientNames) {
+                        if (clientName != name) continue;
+                        livePlayerScores[clientId] = score;
+                        auto target = liveClientTargetIds.find(clientId);
+                        if (target != liveClientTargetIds.end()) {
+                            if (GhostEntry* ghost = liveGhosts.getMutableGhost(target->second))
+                                ghost->score = score;
+                        }
+                        break;
+                    }
+                };
+                const int firstScore = atoi(argv[7].c_str());
+                if (argv[6].size() > 0) applyScore(argv[6], firstScore);
+                if (argv.size() >= 10) {
+                    char* end = nullptr;
+                    std::strtol(argv[8].c_str(), &end, 10);
+                    if (end && *end != '\0')
+                        applyScore(argv[8], atoi(argv[9].c_str()));
+                }
+            } else if (argv.size() >= 6 && argv[1] == "MsgDebriefAddLine") {
+                const std::string& name = argv[4];
+                char* end = nullptr;
+                std::strtol(argv[5].c_str(), &end, 10);
+                const bool singleTeam = end && *end == '\0';
+                const int scoreIndex = singleTeam ? 5 : 6;
+                if ((size_t)scoreIndex < argv.size()) {
+                    const int score = atoi(argv[scoreIndex].c_str());
+                    for (const auto& [clientId, clientName] : liveClientNames) {
+                        if (clientName != name) continue;
+                        livePlayerScores[clientId] = score;
+                        auto target = liveClientTargetIds.find(clientId);
+                        if (target != liveClientTargetIds.end()) {
+                            if (GhostEntry* ghost = liveGhosts.getMutableGhost(target->second))
+                                ghost->score = score;
+                        }
+                        break;
+                    }
+                }
+            } else if (argv.size() >= 5 && argv[1] == "MsgClientJoin") {
+                const int clientId = atoi(argv[3].c_str());
+                const int targetId = atoi(argv[4].c_str());
+                if (clientId >= 0 && clientId < 1024 && targetId >= 0 && targetId < 1024) {
+                    liveClientTargetIds[clientId] = targetId;
+                    liveClientNames[clientId] = argv[2];
+                    if (GhostEntry* ghost = liveGhosts.getMutableGhost(targetId))
+                        ghost->playerName = argv[2];
+                    auto score = livePlayerScores.find(clientId);
+                    if (score != livePlayerScores.end()) {
+                        if (GhostEntry* ghost = liveGhosts.getMutableGhost(targetId))
+                            ghost->score = score->second;
+                    }
+                }
+            } else if (argv.size() >= 4 && argv[1] == "MsgClientDrop") {
+                const int clientId = atoi(argv[3].c_str());
+                liveClientTargetIds.erase(clientId);
+                liveClientNames.erase(clientId);
+                liveClientTeams.erase(clientId);
+            } else if (argv.size() >= 5 && argv[1] == "MsgClientNameChanged") {
+                const int clientId = atoi(argv[4].c_str());
+                if (clientId >= 0 && clientId < 1024) {
+                    liveClientNames[clientId] = argv[3];
+                    auto target = liveClientTargetIds.find(clientId);
+                    if (target != liveClientTargetIds.end()) {
+                        if (GhostEntry* ghost = liveGhosts.getMutableGhost(target->second))
+                            ghost->playerName = argv[3];
+                    }
+                }
+            } else if (argv.size() >= 6 && argv[1] == "MsgClientJoinTeam") {
+                const int clientId = atoi(argv[4].c_str());
+                const int teamId = atoi(argv[5].c_str());
+                if (clientId >= 0 && clientId < 1024 && teamId >= 0 && teamId < 64) {
+                    liveClientTeams[clientId] = teamId;
+                    auto target = liveClientTargetIds.find(clientId);
+                    if (target != liveClientTargetIds.end()) {
+                        if (GhostEntry* ghost = liveGhosts.getMutableGhost(target->second))
+                            ghost->teamId = teamId;
+                    }
+                }
+            }
+        });
         activeConn->setGhostCallback([this](const V12::GhostUpdate& update,
                                              const V12::PlayerGhostState* state) {
             if (update.operation == V12::GhostUpdate::Operation::Delete) {
@@ -4422,9 +4944,27 @@ void Game::connectToServer(const char* host, uint16_t port) {
                                        name ? name : "Player");
             }
             if (!state) return;
-            GhostEntry* ghost = liveGhosts.getMutableGhost((int)update.index);
-            if (!ghost) return;
-            ghost->position = {state->position.x, state->position.y, state->position.z};
+             GhostEntry* ghost = liveGhosts.getMutableGhost((int)update.index);
+             if (!ghost) return;
+             for (const auto& [clientId, targetId] : liveClientTargetIds) {
+                 if (targetId == (int)update.index) {
+                     auto name = liveClientNames.find(clientId);
+                     if (name != liveClientNames.end()) ghost->playerName = name->second;
+                     auto team = liveClientTeams.find(clientId);
+                     if (team != liveClientTeams.end()) ghost->teamId = team->second;
+                    auto score = livePlayerScores.find(clientId);
+                     if (score != livePlayerScores.end()) ghost->score = score->second;
+                     break;
+                 }
+             }
+             auto target = liveTargets.find((uint16_t)update.index);
+             if (target != liveTargets.end()) {
+                 if (target->second.hasName && !target->second.name.empty())
+                     ghost->playerName = target->second.name;
+                 if (target->second.hasSkin && !target->second.skin.empty())
+                     ghost->skinName = target->second.skin;
+             }
+             ghost->position = {state->position.x, state->position.y, state->position.z};
             ghost->rotation = {state->rotation.x, state->rotation.y,
                                state->rotation.z, state->rotationW};
             ghost->hasRotation = state->hasRotation;
@@ -4449,6 +4989,12 @@ void Game::connectToServer(const char* host, uint16_t port) {
              }
         });
     }
+}
+
+int Game::liveClockRemainingMs() const {
+    if (liveClockDurationMs_ <= 0 || liveClockReceivedAt_ <= 0.0) return 0;
+    const double elapsed = Engine::instance().timer().now() - liveClockReceivedAt_;
+    return std::max(0, liveClockDurationMs_ - (int)(elapsed * 1000.0));
 }
 
 void Game::reconcile(const Point3F& serverPos, const Point3F& serverVel, uint32_t lastProcessedSeq) {
@@ -4649,6 +5195,8 @@ void Game::playDemo(const char* path) {
     demoTotalTime = moveBlocks > 0 ? moveBlocks * 0.032f : 1.0f;
     demoBlocksTotal = totalBlocks;
     demoBlocksDone = 0;
+    demoSnapshots.clear();
+    demoSnapshots[0] = demoParser->captureSnapshot();
     demoFastForward = false; // real-time when invoked from console
 
     Console::instance().printf(LogLevel::Info,

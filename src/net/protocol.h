@@ -42,6 +42,18 @@
 //
 // ─── End Protocol Overview ─────────────────────────────────────────
 namespace T2Protocol {
+    inline void writeProtocolU32LE(uint8_t* out, uint32_t value) {
+        out[0] = (uint8_t)value;
+        out[1] = (uint8_t)(value >> 8);
+        out[2] = (uint8_t)(value >> 16);
+        out[3] = (uint8_t)(value >> 24);
+    }
+
+    inline uint32_t readProtocolU32LE(const uint8_t* data) {
+        return (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+               ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+    }
+
     constexpr uint16_t DEFAULT_PORT = 28000;
     constexpr uint16_t LAN_QUERY_PORT = 28002;
     constexpr uint32_t PROTOCOL_VERSION = 3;
@@ -237,10 +249,10 @@ namespace T2Protocol {
                                 const uint8_t*& payload, size_t& payloadLen) {
         if (size < 1 + 4*4 || data[0] != GDT_Datablock) return false;
         uint32_t pos = 1;
-        memcpy(&hdr.classId,  data + pos, 4); pos += 4;
-        memcpy(&hdr.objectId, data + pos, 4); pos += 4;
-        memcpy(&hdr.index,    data + pos, 4); pos += 4;
-        memcpy(&hdr.total,    data + pos, 4); pos += 4;
+         hdr.classId = readProtocolU32LE(data + pos); pos += 4;
+         hdr.objectId = readProtocolU32LE(data + pos); pos += 4;
+         hdr.index = readProtocolU32LE(data + pos); pos += 4;
+         hdr.total = readProtocolU32LE(data + pos); pos += 4;
         payload = data + pos;
         payloadLen = size - pos;
         return true;
@@ -251,10 +263,10 @@ namespace T2Protocol {
         if (bufSize < needed) return 0;
         buf[0] = GDT_Ghost;
         uint32_t pos = 1;
-        memcpy(buf + pos, &msg.index,   4); pos += 4;
+        writeProtocolU32LE(buf + pos, msg.index); pos += 4;
         buf[pos++] = (uint8_t)msg.type;
         int32_t cid = msg.type == Ghost_Create ? msg.classId : 0;
-        memcpy(buf + pos, &cid, 4); pos += 4;
+        writeProtocolU32LE(buf + pos, (uint32_t)cid); pos += 4;
         return pos;
     }
 
@@ -262,10 +274,10 @@ namespace T2Protocol {
         if (size < 1 + 4 + 1 + 4) return false;
         if (data[0] != GDT_Ghost && data[0] != GDT_GhostAlways) return false;
         uint32_t pos = 1;
-        memcpy(&msg.index, data + pos, 4); pos += 4;
+        msg.index = readProtocolU32LE(data + pos); pos += 4;
         msg.type = (GhostUpdateType)data[pos++];
         int32_t cid = 0;
-        memcpy(&cid, data + pos, 4); pos += 4;
+        cid = (int32_t)readProtocolU32LE(data + pos); pos += 4;
         msg.classId = msg.type == Ghost_Create ? cid : -1;
         return true;
     }
@@ -274,35 +286,38 @@ namespace T2Protocol {
         if (bufSize < 1 + 4 + 4 + 1 + 4 + 4) return 0;
         uint32_t pos = 0;
         buf[pos++] = GDT_GameState;
-        memcpy(buf + pos, &msg.controlObjectGhostIndex, 4); pos += 4;
+        writeProtocolU32LE(buf + pos, msg.controlObjectGhostIndex); pos += 4;
         memcpy(buf + pos, &msg.energy, 4); pos += 4;
         buf[pos++] = msg.flags;
-        memcpy(buf + pos, &msg.gameMode, 4); pos += 4;
-        memcpy(buf + pos, &msg.scoreLimit, 4); pos += 4;
+        writeProtocolU32LE(buf + pos, (uint32_t)msg.gameMode); pos += 4;
+        writeProtocolU32LE(buf + pos, (uint32_t)msg.scoreLimit); pos += 4;
         return pos;
     }
 
     inline bool decodeGameState(const uint8_t* data, size_t size, GameStateMessage& msg) {
         if (size < 1 + 4 + 4 + 1 + 4 + 4 || data[0] != GDT_GameState) return false;
         uint32_t pos = 1;
-        memcpy(&msg.controlObjectGhostIndex, data + pos, 4); pos += 4;
+        msg.controlObjectGhostIndex = readProtocolU32LE(data + pos); pos += 4;
         memcpy(&msg.energy, data + pos, 4); pos += 4;
         msg.flags = data[pos++];
-        memcpy(&msg.gameMode, data + pos, 4); pos += 4;
-        memcpy(&msg.scoreLimit, data + pos, 4); pos += 4;
+        msg.gameMode = (int32_t)readProtocolU32LE(data + pos); pos += 4;
+        msg.scoreLimit = (int32_t)readProtocolU32LE(data + pos); pos += 4;
         return true;
     }
 
     inline size_t encodeChat(uint8_t* buf, size_t bufSize, const ChatMessage& msg) {
-        size_t needed = 1 + 1 + strlen(msg.sender) + 2 + strlen(msg.text);
+        const size_t senderLen = strnlen(msg.sender, sizeof(msg.sender));
+        const size_t textLen = strnlen(msg.text, sizeof(msg.text));
+        size_t needed = 1 + 1 + senderLen + 2 + textLen;
         if (bufSize < needed) return 0;
         uint32_t pos = 0;
         buf[pos++] = GDT_ChatMessage;
-        uint8_t slen = (uint8_t)strlen(msg.sender);
+        uint8_t slen = (uint8_t)senderLen;
         buf[pos++] = slen;
         memcpy(buf + pos, msg.sender, slen); pos += slen;
-        uint16_t tlen = (uint16_t)strlen(msg.text);
-        memcpy(buf + pos, &tlen, 2); pos += 2;
+        uint16_t tlen = (uint16_t)textLen;
+        buf[pos++] = (uint8_t)tlen;
+        buf[pos++] = (uint8_t)(tlen >> 8);
         memcpy(buf + pos, msg.text, tlen); pos += tlen;
         return pos;
     }
@@ -311,13 +326,14 @@ namespace T2Protocol {
         if (size < 4 || data[0] != GDT_ChatMessage) return false;
         uint32_t pos = 1;
         uint8_t slen = data[pos++];
-        if (slen > (uint8_t)(sizeof(msg.sender) - 1)) slen = (uint8_t)(sizeof(msg.sender) - 1);
+        if (slen >= sizeof(msg.sender)) return false;
         if (pos + slen + 2 > size) return false;
         memset(msg.sender, 0, sizeof(msg.sender));
         if (slen > 0) { memcpy(msg.sender, data + pos, slen); } pos += slen;
         uint16_t tlen;
-        memcpy(&tlen, data + pos, 2); pos += 2;
-        if (tlen > (uint16_t)(sizeof(msg.text) - 1)) tlen = (uint16_t)(sizeof(msg.text) - 1);
+        tlen = (uint16_t)data[pos] | ((uint16_t)data[pos + 1] << 8);
+        pos += 2;
+        if (tlen >= sizeof(msg.text)) return false;
         if (pos + tlen > size) return false;
         memset(msg.text, 0, sizeof(msg.text));
         if (tlen > 0) memcpy(msg.text, data + pos, tlen);

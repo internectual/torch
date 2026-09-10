@@ -316,6 +316,16 @@ struct NetEventInfo {
     int targetId = -1;
     Vec3 audioPosition{};
     bool hasAudioPosition = false;
+    bool hasTargetInfo = false;
+    bool hasTargetFree = false;
+    bool hasMissionCrc = false;
+    std::string targetName, targetSkin, targetSkinPreference;
+    std::string targetVoice, targetType;
+    int targetSensorGroup = 0;
+    int targetDataBlockId = -2;
+    int targetRenderFlags = 0;
+    float targetVoicePitch = 1.0f;
+    uint32_t missionCrc = 0;
 };
 
 struct DemoTimedEvent {
@@ -426,6 +436,7 @@ struct GhostEntry {
     float energy{100.0f};
     int32_t kills{};
     int32_t deaths{};
+    int32_t score{};
     std::string playerName;
     int teamId{-1};
     std::string shapeName; // from datablock
@@ -476,6 +487,39 @@ struct DemoBlock {
     std::vector<uint8_t> data;
 };
 
+struct DemoPlayerInfo {
+    std::string name, skin;
+    int teamId{-1};
+    float damage{0};
+    int clientId{-1};
+    int score{0};
+};
+
+struct DemoParserSnapshot {
+    size_t blockStreamOffset{};
+    int blockCount{-1};
+    int blockCursor{};
+    GhostTracker ghostTracker;
+    Vec3 compressionPoint{};
+    uint32_t lastSeqRecvdAtSend[32]{};
+    uint32_t lastSeqRecvd{}, highestAckedSeq{}, lastSendSeq{};
+    uint32_t recvAckMask{}, connectSequence{}, lastRecvAckAck{};
+    bool connectionEstablished{};
+    uint32_t nextRecvEventSeq{};
+    uint32_t packetsParsed{};
+    std::vector<std::pair<int, std::string>> missionChanges;
+    std::map<int, std::string> taggedStrings;
+    uint32_t currentMissionCrc{};
+    std::string currentMission;
+    int nextChangeIdx{};
+    std::vector<DemoTimedEvent> eventLog;
+    std::vector<DemoPlayerInfo> playerInfo;
+    std::map<std::string, std::string> skinToPlayer;
+    WeaponsHudState weaponsHud;
+    BackpackHudState backpackHud;
+    InventoryHudState inventoryHud;
+};
+
 // ─── DemoParser ─────────────────────────────────────────────────
 class DemoParser {
 public:
@@ -496,13 +540,17 @@ public:
     DemoBlock* nextBlock();
     void reset();
     int processBlocks(int count);
+    bool seekToBlock(int blockIndex);
 
     // Convenience: parse all blocks into memory
     bool parseFull(std::vector<DemoBlock>& outBlocks);
+    DemoParserSnapshot captureSnapshot() const;
+    bool restoreSnapshot(const DemoParserSnapshot& snapshot);
 
     // Cross-map mission tracking: scan block stream for .mis paths
     void scanMissionChanges();
     const std::string& currentMission() const { return currentMission_; }
+    uint32_t currentMissionCrc() const { return currentMissionCrc_; }
     void setCurrentBlock(int blockIndex);
 
     // Demo event log
@@ -510,11 +558,7 @@ public:
     void clearEventLog() { eventLog_.clear(); }
 
     // Scoreboard data (player names, scores)
-    struct PlayerInfo {
-        std::string name, skin;
-        int teamId{-1};
-        float damage{0};
-    };
+    using PlayerInfo = DemoPlayerInfo;
     const std::vector<PlayerInfo>& getPlayerInfo() const { return playerInfo_; }
     const std::string& getPlayerNameForSkin(const std::string& skin) const;
 
@@ -546,6 +590,7 @@ private:
     // Mission change tracking
     std::vector<std::pair<int, std::string>> missionChanges_;
     std::string currentMission_;
+    uint32_t currentMissionCrc_{};
     int nextChangeIdx_{};
 
     // Demo event log
@@ -553,6 +598,8 @@ private:
 
     // Scoreboard data
     std::vector<PlayerInfo> playerInfo_;
+    std::map<int, std::string> initialTaggedStrings_;
+    std::vector<PlayerInfo> initialPlayerInfo_;
     std::map<std::string, std::string> skinToPlayer_; // skinName → playerName
 
     // HUD state

@@ -162,6 +162,14 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     auto rU8 = [&]() -> uint8_t { if (pos >= size) { return 0; } return data[pos++]; };
     auto skip = [&](size_t n) { pos = (pos + n <= size) ? pos + n : size; };
     auto eof = [&]() { return pos >= size; };
+    auto readCount = [&](int32_t maximum) -> int32_t {
+        const int32_t value = rS32();
+        if (value < 0 || value > maximum) {
+            pos = size;
+            return 0;
+        }
+        return value;
+    };
 
     uint16_t ver16 = rU16();
     uint16_t verPad = rU16();
@@ -178,7 +186,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     float bmaxx = rF32(), bmaxy = rF32(), bmaxz = rF32();
 
     // Header counts (read sequentially from stream, stored at output positions [0]-[14])
-    int32_t numNodes = rS32();
+    int32_t numNodes = readCount(100000);
     struct OldNode { int32_t ni, pi; };
     std::vector<OldNode> nodes(numNodes);
     for (int i = 0; i < numNodes; i++) {
@@ -189,20 +197,20 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         // v<17: 2 S32s + 1 bool read, then 3 computed (not in stream)
     }
 
-    int32_t numObjects = rS32();
+    int32_t numObjects = readCount(100000);
     struct OldObj { int32_t ni, nm, sm, no; };
     std::vector<OldObj> objs(numObjects);
     for (int i = 0; i < numObjects; i++) {
         objs[i].ni = rS32(); objs[i].nm = rS32(); objs[i].sm = rS32(); objs[i].no = rS32();
     }
 
-    int32_t numDecals = rS32();
+    int32_t numDecals = readCount(100000);
     skip(numDecals * 4 * 4); // 4 S32s per decal (not needed)
 
-    int32_t numIFLs = rS32();
+    int32_t numIFLs = readCount(100000);
     skip(numIFLs * 2 * 4); // 2 S32s per IFL
 
-    int32_t numSubShapes = rS32();
+    int32_t numSubShapes = readCount(100000);
     std::vector<int32_t> subFirstNode(numSubShapes), subFirstObj(numSubShapes), subFirstDecal(numSubShapes);
     for (int i = 0; i < numSubShapes; i++) subFirstNode[i] = rS32();
     rS32(); // tossed (subShapeLastNode not in file)
@@ -217,7 +225,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     if (ver < 17) { int32_t sz = rS32(); skip(sz * 3 * 4); }
 
     // Default node states: rotations (S16×4 per node) + translations (F32×3 per node)
-    int32_t numNodeStates = rS32();
+    int32_t numNodeStates = readCount(100000);
     std::vector<QuatF> defRot(numNodeStates);
     std::vector<Point3F> defTrans(numNodeStates);
     for (int i = 0; i < numNodeStates; i++) {
@@ -1336,7 +1344,9 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         DTSShape::Animation anim;
         anim.name = (nameIdx >= 0 && nameIdx < (int)names.size()) ? names[nameIdx] : "seq" + std::to_string(s);
         anim.duration = dur;
-        anim.looping = (flags & 1) != 0;
+        // TSShape::Sequence flags: Blend=0x08, Cyclic=0x10.
+        anim.looping = (flags & 0x10) != 0;
+        anim.blend = (flags & 0x8) != 0;
 
         if (numKFrames > 0 && dur > 0.0f) {
             int32_t rotCount = (int32_t)rotMatters.size();
@@ -1793,7 +1803,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     {
         std::string lower = name;
         for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
-        if (lower.find("bioderm") != std::string::npos || lower.find("player") != std::string::npos || lower.find("turret") != std::string::npos || lower.find("sentry") != std::string::npos || lower.find("station_inv") != std::string::npos) {
+        if (getenv("TORCH_DTS_DIAG") &&
+            (lower.find("bioderm") != std::string::npos || lower.find("player") != std::string::npos || lower.find("turret") != std::string::npos || lower.find("sentry") != std::string::npos || lower.find("station_inv") != std::string::npos)) {
             auto& con = Console::instance();
             con.printf(LogLevel::Info, "DTS DEBUG '%s' (v%d, numNodes=%d):", name, (int)ver, numNodes);
             for (int i = 0; i < std::min(numNodes, 15); i++) {
@@ -1865,7 +1876,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     {
         std::string lower = name;
         for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
-        if (lower.find("projectile") != std::string::npos || lower.find("weapon_disc") != std::string::npos) {
+        if (getenv("TORCH_DTS_DIAG") &&
+            (lower.find("projectile") != std::string::npos || lower.find("weapon_disc") != std::string::npos)) {
             auto& con = Console::instance();
             con.printf(LogLevel::Info, "PROJECTILE DEBUG '%s':", name);
             con.printf(LogLevel::Info, "  Nodes (%zu), Objects (%zu), Meshes (%zu), Details (%zu)",

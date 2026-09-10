@@ -4,7 +4,21 @@
 #include "core/engine.h"
 #include <GL/glew.h>
 #include <algorithm>
+#include <cmath>
 #include <vector>
+
+namespace {
+struct RemapAction { const char* name; const char* label; };
+constexpr RemapAction kRemapActions[] = {
+    {"forward", "Forward"}, {"backward", "Backward"},
+    {"left", "Strafe Left"}, {"right", "Strafe Right"},
+    {"jump", "Jump"}, {"jet", "Jet"}, {"fire", "Fire"},
+    {"altfire", "Alt Fire"}, {"zoom", "Zoom"}, {"reload", "Reload"},
+    {"scoreboard", "Scoreboard"}, {"f1", "Free Camera"},
+    {"f2", "Orbit Camera"}, {"chat", "Chat"}, {"console", "Console"},
+};
+constexpr int kRemapActionCount = sizeof(kRemapActions) / sizeof(kRemapActions[0]);
+}
 
 struct HUD::Impl {
     std::vector<std::pair<std::string, double>> messages;
@@ -69,33 +83,6 @@ void HUD::render(Game* game) {
             float alpha = (float)(1.0 - age / 3.0);
             if (font) font->render(msg.first.c_str(), w * 0.5f - 100, h * 0.3f + i * 25,
                                    {1, 1, 1, alpha}, 2.0f);
-        }
-    }
-
-    // Compass / direction indicator
-    {
-        float yaw = game->player().rotation().z;
-        // Convert to degrees, 0 = north (+Z in T2)
-        float deg = yaw * 180.0f / 3.14159f;
-        const char* dirs[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
-        int dirIdx = ((int)((deg + 22.5f) / 45.0f) + 8) % 8;
-        snprintf(buf, sizeof(buf), "%s", dirs[dirIdx]);
-        if (font) font->render(buf, w * 0.5f - 10, 40.0f, {1, 1, 1, 0.7f}, 2.0f);
-    }
-
-    // Weapon info
-    int32_t cw = game->player().currentWeapon();
-    if (cw >= 0 && cw < game->player().weaponCount()) {
-        const Weapon& w = game->player().weapon(cw);
-        if (w.type >= 0 && w.type < gWeaponCount) {
-            const WeaponData& wd = gWeaponTable[w.type];
-            snprintf(buf, sizeof(buf), "%s", wd.name);
-            if (font) font->render(buf, 20.0f, h - 120.0f, {1, 1, 0, 1}, 2.0f);
-
-            if (wd.maxAmmo > 0) {
-                snprintf(buf, sizeof(buf), "Ammo: %d/%d", w.ammo, wd.maxAmmo);
-                if (font) font->render(buf, 20.0f, h - 100.0f, {1, 1, 1, 1}, 2.0f);
-            }
         }
     }
 
@@ -399,17 +386,53 @@ void HUD::renderScoreboard(Game* game) {
     float bx = (w - bw) * 0.5f, by = (h - bh) * 0.5f;
     r.drawBox(Box3F{{bx, by, 0}, {bx + bw, by + bh, 0}}, {0, 0, 0, 0.7f});
 
+    char buf[256];
+
     // Title
     if (font) font->render("SCOREBOARD", bx + 10, by + 10, {1, 1, 0, 1}, 2.0f);
+    if (game->isConnected() && game->activeConnection() &&
+        game->activeConnection()->isObserverMode()) {
+        const auto observer = game->activeConnection()->observerSnapshot();
+        snprintf(buf, sizeof(buf), "Observed players: %zu  targets: %zu  mission CRC: %08X",
+                 observer.players.size(), observer.targets.size(), observer.missionCrc);
+        if (font) font->render(buf, bx + 10, by + 30, {0.65f, 0.75f, 0.85f, 0.9f}, 1.0f);
+        const char* phase = game->liveMatchEnded() ? "DEBRIEF" :
+                            game->liveMatchStarted() ? "MATCH LIVE" : "WARMUP";
+        if (font) font->render(phase, bx + 10, by + 40,
+                              {0.55f, 0.65f, 0.75f, 0.8f}, 1.0f);
+        if (font && (!game->liveMissionDisplayName().empty() ||
+                     !game->liveMissionType().empty())) {
+            snprintf(buf, sizeof(buf), "%s  %s",
+                     game->liveMissionDisplayName().c_str(),
+                     game->liveMissionType().c_str());
+            font->render(buf, bx + 140, by + 40, {0.75f, 0.75f, 0.55f, 0.9f}, 1.0f);
+        }
+        const int clockMs = game->liveClockRemainingMs();
+        if (clockMs > 0) {
+            snprintf(buf, sizeof(buf), "Clock %d:%02d", clockMs / 60000,
+                     (clockMs / 1000) % 60);
+            if (font) font->render(buf, bx + 420, by + 40, {0.9f, 0.85f, 0.5f, 0.9f}, 1.0f);
+        }
+        if (font && !game->liveLoadInfoLines().empty()) {
+            const auto& line = game->liveLoadInfoLines().front();
+            font->render(line.c_str(), bx + 20, by + 385, {0.8f, 0.8f, 0.7f, 0.9f}, 1.0f);
+        }
+        float teamX = bx + 360;
+        for (const auto& [teamId, team] : game->getLiveTeamScores()) {
+            snprintf(buf, sizeof(buf), "%s %d %s", team.name.empty() ? "Team" : team.name.c_str(),
+                     team.score, team.flagStatus.c_str());
+            if (font) font->render(buf, teamX, by + 30, {0.8f, 0.8f, 0.45f, 0.9f}, 1.0f);
+            teamX += 90;
+        }
+    }
 
     // Column headers
     float colX[] = {bx + 20, bx + 160, bx + 300, bx + 400, bx + 470};
-    const char* headers[] = {"Player", "Team", "Skin", "Damage", "Health"};
+    const char* headers[] = {"Player", "Team", "Score", "Damage", "Health"};
     for (int i = 0; i < 5; i++) {
         if (font) font->render(headers[i], colX[i], by + 50, {1, 1, 1, 1}, 2.0f);
     }
 
-    char buf[256];
     int row = 0;
     const int maxRows = 15;
 
@@ -433,7 +456,7 @@ void HUD::renderScoreboard(Game* game) {
                 else if (p.teamId == 1) teamName = "Blue";
                 else if (p.teamId == 2) teamName = "Green";
                 if (font) font->render(teamName, colX[1], ry, teamCol, 2.0f);
-                snprintf(buf, sizeof(buf), "%s", p.skin.c_str());
+                snprintf(buf, sizeof(buf), "%d", p.score);
                 if (font) font->render(buf, colX[2], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
                 float dmgPct = (1.0f - p.damage) * 100.0f;
                 snprintf(buf, sizeof(buf), "%.0f%%", p.damage * 100.0f);
@@ -466,7 +489,7 @@ void HUD::renderScoreboard(Game* game) {
             if (font) font->render(buf, colX[0], ry, nameCol, 2.0f);
             const char* teamName = g->teamId == 1 ? "Red" : g->teamId == 2 ? "Blue" : "N/A";
             if (font) font->render(teamName, colX[1], ry, nameCol, 2.0f);
-            snprintf(buf, sizeof(buf), "%d", g->kills);
+             snprintf(buf, sizeof(buf), "%d", g->score);
             if (font) font->render(buf, colX[2], ry, {1,1,0,0.9f}, 2.0f);
             snprintf(buf, sizeof(buf), "%d", g->deaths);
             if (font) font->render(buf, colX[3], ry, {1,0.5f,0.2f,0.9f}, 2.0f);
@@ -625,7 +648,54 @@ void Menu::update(float dt) {
     } else if (currentScreen == Settings) {
         if (esc && !prevEsc) { currentScreen = Main; selectedItem = 2; }
     } else if (currentScreen == Controls) {
-        if (esc && !prevEsc) { currentScreen = Main; selectedItem = 3; }
+        if (remapActive) {
+            if (esc && !prevEsc) {
+                remapActive = false;
+                remapAction = -1;
+            } else {
+                int key = -1;
+                for (int sc = 0; sc < 512; ++sc) {
+                    if (input.keysDown[sc] && !remapPrevKeys[sc]) { key = sc; break; }
+                }
+                if (key >= 0 && key != SCANCODE_ESCAPE) {
+                    Engine::instance().setBind(kRemapActions[remapAction].name, key);
+                    remapActive = false;
+                    remapAction = -1;
+                } else {
+                    const bool mouseDown = input.mouseButtons[1] || input.mouseButtons[2] || input.mouseButtons[3];
+                    if (mouseDown && !remapPrevMouse) {
+                        int button = input.mouseButtons[1] ? -1 : input.mouseButtons[2] ? -2 : -3;
+                        Engine::instance().setBind(kRemapActions[remapAction].name, button);
+                        remapActive = false;
+                        remapAction = -1;
+                    }
+                }
+            }
+            for (int sc = 0; sc < 512; ++sc) remapPrevKeys[sc] = input.keysDown[sc];
+            remapPrevMouse = input.mouseButtons[1] || input.mouseButtons[2] || input.mouseButtons[3];
+        } else {
+            if (esc && !prevEsc) { currentScreen = Main; selectedItem = 3; }
+            if (up && !prevUp) selectedItem = (selectedItem - 1 + kRemapActionCount) % kRemapActionCount;
+            if (down && !prevDown) selectedItem = (selectedItem + 1) % kRemapActionCount;
+            const bool mouseDown = input.mouseButtons[1] != 0;
+            if (mouseDown && !remapPrevMouse) {
+                const int row = (input.mouseY - 80) / 30;
+                if (input.mouseX >= 20 && input.mouseX <= 520 &&
+                    row >= 0 && row < kRemapActionCount) {
+                    selectedItem = row;
+                    remapAction = row;
+                    remapActive = true;
+                    remapPrevMouse = true;
+                    for (int sc = 0; sc < 512; ++sc) remapPrevKeys[sc] = input.keysDown[sc];
+                }
+            }
+            if (enter && !prevEnter) {
+                remapAction = std::clamp(selectedItem, 0, kRemapActionCount - 1);
+                remapActive = true;
+                for (int sc = 0; sc < 512; ++sc) remapPrevKeys[sc] = input.keysDown[sc];
+            }
+            remapPrevMouse = mouseDown;
+        }
     }
 
     prevUp = up; prevDown = down; prevEnter = enter; prevEsc = esc;
@@ -720,30 +790,31 @@ void Menu::render() {
         case Controls: {
             if (font) font->render("Controls", 20, 20, {1, 1, 0, 1}, 2.0f);
             if (font) font->render("[ESC] Back", 20, 700, {0.7f, 0.7f, 0.7f, 0.8f}, 2.0f);
-            const char* binds[] = {
-                "WASD / Arrows", "Move",
-                "Mouse", "Look",
-                "Space", "Jump",
-                "Shift", "Jet",
-                "Left Click", "Fire",
-                "Right Click", "Alt Fire",
-                "R", "Reload / Spectate",
-                "F1", "Free Camera",
-                "F2", "Orbit Camera",
-                "P", "Pause Demo",
-                "E", "Demo Events",
-                "Tab", "Scoreboard",
-                "ESC", "Pause / Menu",
-                "~", "Console",
-                nullptr, nullptr
-            };
+            char bindText[64];
             int sy = 80;
-            for (int i = 0; binds[i]; i += 2) {
+            for (int i = 0; i < kRemapActionCount; ++i) {
+                const bool selected = i == selectedItem;
+                if (selected)
+                    r.drawRectFill({20, (float)sy - 3, 0}, {520, (float)sy + 25, 0},
+                                   {1, 1, 0, 0.16f});
                 if (font) {
-                    font->render(binds[i], 40, sy, {1, 1, 0, 1}, 2.0f);
-                    font->render(binds[i+1], 250, sy, {1, 1, 1, 1}, 2.0f);
+                    font->render(kRemapActions[i].label, 40, sy,
+                                 selected ? ColorF{1, 1, 0, 1} : ColorF{1, 1, 1, 1}, 1.5f);
+                    snprintf(bindText, sizeof(bindText), "%s",
+                             Engine::instance().scancodeName(
+                                 Engine::instance().getBind(kRemapActions[i].name)));
+                    font->render(bindText, 300, sy, {0.8f, 0.8f, 0.8f, 1}, 1.5f);
                 }
-                sy += 24;
+                sy += 30;
+            }
+            if (remapActive) {
+                r.drawRectFill({120, 260, 0}, {620, 360, 0}, {0, 0, 0, 0.92f});
+                if (font) {
+                    snprintf(bindText, sizeof(bindText), "Press a key for %s",
+                             kRemapActions[remapAction].label);
+                    font->render(bindText, 160, 290, {1, 1, 0, 1}, 1.5f);
+                    font->render("ESC cancels", 270, 325, {0.8f, 0.8f, 0.8f, 1}, 1.2f);
+                }
             }
             break;
         }

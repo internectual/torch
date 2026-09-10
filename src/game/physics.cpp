@@ -22,8 +22,8 @@ void Physics::update(Player* player, float dt, const Game::InputMove& input) {
 
     if (input.forward)  { moveDir.x += sinYaw * speed; moveDir.z += cosYaw * speed; }
     if (input.backward) { moveDir.x -= sinYaw * speed; moveDir.z -= cosYaw * speed; }
-    if (input.left)     { moveDir.x -= cosYaw * speed; moveDir.z += sinYaw * speed; }
-    if (input.right)    { moveDir.x += cosYaw * speed; moveDir.z -= sinYaw * speed; }
+    if (input.left)     { moveDir.x += cosYaw * speed; moveDir.z -= sinYaw * speed; }
+    if (input.right)    { moveDir.x -= cosYaw * speed; moveDir.z += sinYaw * speed; }
 
     // Apply movement (clamp smoothing so a long frame can't overshoot)
     float smooth = dt * 10.0f; if (smooth > 1.0f) smooth = 1.0f;

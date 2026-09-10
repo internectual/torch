@@ -30,10 +30,15 @@ struct PlayerGhostState {
     float rotationW = 1.0f;
     float health = 100.0f;
     float energy = 100.0f;
+    bool hasHealth = false;
+    bool hasEnergy = false;
     float headPitch = 0.0f;
     float headYaw = 0.0f;
+    bool hasPosition = false;
+    bool hasHeadAngles = false;
     bool hasRotation = false;
     bool moving = false;
+    bool hasMovement = false;
     ThreadState threads[4]{};
 };
 
@@ -55,10 +60,18 @@ bool readPlayerGhostPayload(V12BitStream& stream, bool initial,
                             const V12Vec3& compressionPoint,
                             PlayerGhostState* state = nullptr);
 
+bool readItemGhostPayload(V12BitStream& stream, bool initial,
+                          const V12Vec3& compressionPoint,
+                          PlayerGhostState* state = nullptr);
+
 // Reads the verified Tribes 2 build-25034 payload for the supported class.
 // Unsupported classes return false without consuming payload bits.
 bool readGhostPayload(V12BitStream& stream, uint16_t classId, bool initial,
                       const V12Vec3& compressionPoint,
                       PlayerGhostState* playerState = nullptr);
+
+// Native update payloads are sparse; fold them onto the last full player state.
+PlayerGhostState mergePlayerGhostState(const PlayerGhostState& base,
+                                       const PlayerGhostState& update);
 
 } // namespace V12

@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <memory>
 #include <set>
 #include <zlib.h>
 
@@ -771,9 +772,38 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
     }
     offset += header.initialBlockSize;
 
+    playerInfo_.clear();
+    for (const auto& target : initialBlock.targetEntries) {
+        if (target.name.empty()) continue;
+        DemoPlayerInfo player;
+        player.name = target.name;
+        player.skin = target.skin;
+        player.teamId = target.sensorGroup;
+        player.damage = target.damageLevel;
+        player.clientId = target.targetId;
+        playerInfo_.push_back(std::move(player));
+    }
+    for (const auto& score : initialBlock.scoreEntries) {
+        auto player = std::find_if(playerInfo_.begin(), playerInfo_.end(),
+            [&](const DemoPlayerInfo& entry) { return entry.clientId == (int)score.clientId; });
+        if (player != playerInfo_.end()) {
+            player->teamId = (int)score.teamId;
+            player->score = (int)score.score;
+        }
+    }
+    initialTaggedStrings_ = initialBlock.taggedStrings;
+    initialPlayerInfo_ = playerInfo_;
+
     // Decompress block stream (raw deflate)
     size_t compSize = bufSize - offset;
     if (compSize == 0) return false;
+    constexpr size_t kMaxCompressedBlock = 128u * 1024u * 1024u;
+    constexpr size_t kMaxDecompressedBlock = 512u * 1024u * 1024u;
+    if (compSize > kMaxCompressedBlock) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: compressed block exceeds safety limit");
+        return false;
+    }
 
     z_stream strm{};
     strm.next_in = (Bytef*)(buf + offset);
@@ -781,7 +811,9 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
     int ret = inflateInit2(&strm, -15);
     if (ret != Z_OK) return false;
 
+    if (compSize > kMaxDecompressedBlock / 4) return false;
     size_t outSize = std::max(compSize * 4, (size_t)262144);
+    if (outSize > kMaxDecompressedBlock) outSize = kMaxDecompressedBlock;
     decompressed = (uint8_t*)malloc(outSize);
     strm.next_out = decompressed;
     strm.avail_out = (uInt)outSize;
@@ -866,6 +898,15 @@ DemoBlock* DemoParser::nextBlock() {
 void DemoParser::reset() {
     blockStreamOffset = 0; blockCursor_ = 0; blockCount_ = -1;
     compressionPoint = {0,0,0};
+    initialBlock.taggedStrings = initialTaggedStrings_;
+    playerInfo_ = initialPlayerInfo_;
+    currentMissionCrc_ = initialBlock.missionCRC;
+    currentMission_ = missionChanges_.empty() ? "" : missionChanges_[0].second;
+    nextChangeIdx_ = 0;
+    eventLog_.clear();
+    weaponsHud_ = {};
+    backpackHud_ = {};
+    inventoryHud_ = {};
     ghostTracker.clear();
     for (int index : ibGhostTracker.getAllIndices()) {
         const GhostEntry* source = ibGhostTracker.getGhost(index);
@@ -874,6 +915,73 @@ void DemoParser::reset() {
         if (GhostEntry* target = ghostTracker.getMutableGhost(index))
             *target = *source;
     }
+}
+
+DemoParserSnapshot DemoParser::captureSnapshot() const {
+    DemoParserSnapshot snapshot;
+    snapshot.blockStreamOffset = (size_t)std::max(0, blockStreamOffset);
+    snapshot.blockCount = blockCount_;
+    snapshot.blockCursor = blockCursor_;
+    snapshot.ghostTracker = ghostTracker;
+    snapshot.compressionPoint = compressionPoint;
+    std::copy(std::begin(lastSeqRecvdAtSend), std::end(lastSeqRecvdAtSend),
+              std::begin(snapshot.lastSeqRecvdAtSend));
+    snapshot.lastSeqRecvd = lastSeqRecvd;
+    snapshot.highestAckedSeq = highestAckedSeq;
+    snapshot.lastSendSeq = lastSendSeq;
+    snapshot.recvAckMask = recvAckMask;
+    snapshot.connectSequence = connectSequence;
+    snapshot.lastRecvAckAck = lastRecvAckAck;
+    snapshot.connectionEstablished = connectionEstablished;
+    snapshot.nextRecvEventSeq = nextRecvEventSeq;
+    snapshot.packetsParsed = packetsParsed;
+    snapshot.missionChanges = missionChanges_;
+    snapshot.taggedStrings = initialBlock.taggedStrings;
+    snapshot.currentMissionCrc = currentMissionCrc_;
+    snapshot.currentMission = currentMission_;
+    snapshot.nextChangeIdx = nextChangeIdx_;
+    snapshot.eventLog = eventLog_;
+    snapshot.playerInfo = playerInfo_;
+    snapshot.skinToPlayer = skinToPlayer_;
+    snapshot.weaponsHud = weaponsHud_;
+    snapshot.backpackHud = backpackHud_;
+    snapshot.inventoryHud = inventoryHud_;
+    return snapshot;
+}
+
+bool DemoParser::restoreSnapshot(const DemoParserSnapshot& snapshot) {
+    if (!decompressed || snapshot.blockStreamOffset > decompressedSize ||
+        snapshot.blockCursor < 0 || snapshot.nextChangeIdx < 0 ||
+        snapshot.nextChangeIdx > (int)snapshot.missionChanges.size())
+        return false;
+    blockStreamOffset = (int)snapshot.blockStreamOffset;
+    blockCount_ = snapshot.blockCount;
+    blockCursor_ = snapshot.blockCursor;
+    ghostTracker = snapshot.ghostTracker;
+    compressionPoint = snapshot.compressionPoint;
+    std::copy(std::begin(snapshot.lastSeqRecvdAtSend), std::end(snapshot.lastSeqRecvdAtSend),
+              std::begin(lastSeqRecvdAtSend));
+    lastSeqRecvd = snapshot.lastSeqRecvd;
+    highestAckedSeq = snapshot.highestAckedSeq;
+    lastSendSeq = snapshot.lastSendSeq;
+    recvAckMask = snapshot.recvAckMask;
+    connectSequence = snapshot.connectSequence;
+    lastRecvAckAck = snapshot.lastRecvAckAck;
+    connectionEstablished = snapshot.connectionEstablished;
+    nextRecvEventSeq = snapshot.nextRecvEventSeq;
+    packetsParsed = snapshot.packetsParsed;
+    missionChanges_ = snapshot.missionChanges;
+    initialBlock.taggedStrings = snapshot.taggedStrings;
+    currentMissionCrc_ = snapshot.currentMissionCrc;
+    currentMission_ = snapshot.currentMission;
+    nextChangeIdx_ = snapshot.nextChangeIdx;
+    eventLog_ = snapshot.eventLog;
+    playerInfo_ = snapshot.playerInfo;
+    skinToPlayer_ = snapshot.skinToPlayer;
+    weaponsHud_ = snapshot.weaponsHud;
+    backpackHud_ = snapshot.backpackHud;
+    inventoryHud_ = snapshot.inventoryHud;
+    return true;
 }
 
 int DemoParser::processBlocks(int count) {
@@ -886,7 +994,23 @@ int DemoParser::processBlocks(int count) {
     return proc;
 }
 
+bool DemoParser::seekToBlock(int blockIndex) {
+    if (!decompressed || blockIndex < 0) return false;
+    if (blockIndex < blockCursor_) reset();
+    while (blockCursor_ < blockIndex) {
+        std::unique_ptr<DemoBlock> block(nextBlock());
+        if (!block) return false;
+        if (block->type == T2Demo::BlockTypeSendPacket) {
+            onSendPacketTrigger();
+        } else if (block->type == T2Demo::BlockTypePacket) {
+            parsePacket(block->data.data(), block->data.size(), block->index);
+        }
+    }
+    return true;
+}
+
 bool DemoParser::parseFull(std::vector<DemoBlock>& out) {
+    out.clear();
     reset();
     while (auto* b = nextBlock()) { out.push_back(*b); delete b; }
     return !out.empty();
@@ -950,6 +1074,7 @@ void DemoParser::scanMissionChanges() {
             missionChanges_.push_back({0, extracted});
     }
     currentMission_ = missionChanges_.empty() ? "" : missionChanges_[0].second;
+    currentMissionCrc_ = initialBlock.missionCRC;
 }
 void DemoParser::setCurrentBlock(int blockIndex) {
     while (nextChangeIdx_ < (int)missionChanges_.size() &&
@@ -1172,12 +1297,16 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents,
                 ev.message += arg;
             }
         } else if (ev.classId == T2Demo::NetEventClassFirst + 7) { // NetStringEvent
+            const int id = bs.readInt(10);
             if (bs.readFlag()) {
-                bs.readInt(8);
-                bs.readString();
+                const std::string value = bs.readString();
+                if (!bs.isError() && id >= 0 && id < 1024)
+                    initialBlock.taggedStrings[id] = value;
             }
         } else if (ev.classId == T2Demo::NetEventClassFirst + 4) { // GhostingMessageEvent
-            if (bs.readFlag()) { int n = bs.readInt(5); for (int i = 0; i < n; i++) { bs.readFlag(); } }
+            bs.readU32();
+            bs.readInt(3);
+            bs.readInt(11);
         } else if (ev.classId == T2Demo::NetEventClassFirst + 0) { // CRCChallengeEvent
             bs.readU32(); bs.readU32(); bs.readU32(); bs.readFlag();
         } else if (ev.classId == T2Demo::NetEventClassFirst + 1) { // CRCChallengeResponseEvent
@@ -1213,15 +1342,78 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents,
         } else if (ev.classId == T2Demo::NetEventClassFirst + 5) { // GravityEvent
             bs.readF32();
         } else if (ev.classId == T2Demo::NetEventClassFirst + 6) { // LightningStrikeEvent
-            bs.readPoint3F(); bs.readPoint3F();
+            bs.readInt(11);
+            bs.readFloat(10);
+            bs.readFloat(10);
+            if (bs.readFlag()) bs.readInt(11);
+        } else if (ev.classId == T2Demo::NetEventClassFirst + 12) { // SensorGroupColorEvent
+            bs.readInt(5);
+            const uint32_t updateMask = bs.readU32();
+            for (int i = 0; i < 32; ++i) {
+                if ((updateMask & (1u << i)) != 0) {
+                    if (bs.readFlag()) {
+                        bs.readU8(); bs.readU8(); bs.readU8(); bs.readU8();
+                    }
+                }
+            }
+        } else if (ev.classId == T2Demo::NetEventClassFirst + 14) { // SetObjectActiveImageEvent
+            bs.readRangedU32(0, 1023);
+            bs.readRangedU32(0, 8);
+        } else if (ev.classId == T2Demo::NetEventClassFirst + 15) { // SetSensorGroupEvent
+            bs.readInt(5);
+        } else if (ev.classId == T2Demo::NetEventClassFirst + 16) { // SetServerTargetEvent
+            if (bs.readFlag()) bs.readInt(9);
+            bs.readF32(); bs.readF32(); bs.readF32();
         } else if (ev.classId == T2Demo::NetEventClassFirst + 24) { // TargetInfoEvent
-            bs.readInt(4); bs.readInt(32);
+            ev.hasTargetInfo = true;
+            ev.targetId = bs.readInt(9);
+            auto readTag = [&](std::string& value) {
+                if (bs.readFlag()) {
+                    const int tag = bs.readFlag() ? bs.readInt(10) : 0x400;
+                    if (tag != 0x400) {
+                        auto it = initialBlock.taggedStrings.find(tag);
+                        if (it != initialBlock.taggedStrings.end()) value = it->second;
+                    }
+                }
+            };
+            readTag(ev.targetName);
+            readTag(ev.targetSkin);
+            readTag(ev.targetSkinPreference);
+            readTag(ev.targetVoice);
+            readTag(ev.targetType);
+            if (bs.readFlag()) ev.targetSensorGroup = bs.readInt(5);
+            if (bs.readFlag()) ev.targetDataBlockId = bs.readFlag() ? bs.readInt(11) : -2;
+            if (bs.readFlag()) ev.targetRenderFlags = bs.readInt(9);
+            if (bs.readFlag()) ev.targetVoicePitch = bs.readFloat(7) * 1.5f + 0.5f;
+            if (!ev.targetName.empty()) {
+                auto player = std::find_if(playerInfo_.begin(), playerInfo_.end(),
+                    [&](const DemoPlayerInfo& entry) {
+                        return entry.name == ev.targetName;
+                    });
+                if (player != playerInfo_.end()) {
+                    if (!ev.targetSkin.empty()) player->skin = ev.targetSkin;
+                } else {
+                    DemoPlayerInfo added;
+                    added.name = ev.targetName;
+                    added.skin = ev.targetSkin;
+                    added.teamId = ev.targetSensorGroup;
+                    added.clientId = ev.targetId;
+                    playerInfo_.push_back(std::move(added));
+                }
+            }
         } else if (ev.classId == T2Demo::NetEventClassFirst + 25) { // TargetToEvent
-            bs.readInt(4); bs.readInt(4);
+            if (bs.readFlag()) bs.readInt(9);
+            if (bs.readFlag()) {
+                bs.readF32(); bs.readF32(); bs.readF32();
+            }
+            bs.readFlag();
         } else if (ev.classId == T2Demo::NetEventClassFirst + 23) { // TargetFreeEvent
-            bs.readInt(4);
+            ev.hasTargetFree = true;
+            ev.targetId = bs.readInt(9);
         } else if (ev.classId == T2Demo::NetEventClassFirst + 13) { // SetMissionCRCEvent
-            bs.readU32();
+            ev.hasMissionCrc = true;
+            ev.missionCrc = bs.readU32();
+            currentMissionCrc_ = ev.missionCrc;
         } else if (ev.classId == T2Demo::NetEventClassFirst + 12) { // SensorGroupColorEvent
             bs.readInt(4); bs.readU32();
         } else {
