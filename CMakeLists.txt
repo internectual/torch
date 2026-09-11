@@ -227,4 +227,4 @@ target_link_libraries(torch_demo_snapshot_test PRIVATE ZLIB::ZLIB m)
 target_compile_options(torch_demo_snapshot_test PRIVATE -UNDEBUG)
 add_test(NAME torch_demo_snapshot
     COMMAND torch_demo_snapshot_test
-        ${CMAKE_CURRENT_SOURCE_DIR}/../t2-linux/treachery.rec)
+        $ENV{HOME}/.torch/base/recordings/treachery.rec)

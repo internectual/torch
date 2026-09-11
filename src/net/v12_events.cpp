@@ -143,8 +143,6 @@ bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
         } else if (header.classId == 22) {
             event.message = stream.readString();
         } else if (header.classId == 23) {
-            stream.readUnsigned(4);
-        } else if (header.classId == 23) {
             event.hasTargetFree = true;
             event.targetFreeId = (uint16_t)stream.readUnsigned(9);
         } else if (header.classId == 24) {

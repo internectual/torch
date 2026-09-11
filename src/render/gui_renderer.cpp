@@ -40,6 +40,13 @@ static void drawLaunchPopupList(Renderer& r, GuiControl* ctl, float x, float y);
 static void drawPopupDropdownList(Renderer& r, GuiControl* ctl, float x, float y);
 
 void GuiControl::addChild(GuiControl* child) {
+    if (!child || child == this) return;
+    if (child->parent == this) {
+        if (std::find(children.begin(), children.end(), child) != children.end()) return;
+    } else if (child->parent) {
+        auto& oldChildren = child->parent->children;
+        oldChildren.erase(std::remove(oldChildren.begin(), oldChildren.end(), child), oldChildren.end());
+    }
     child->parent = this;
     children.push_back(child);
 }
@@ -92,6 +99,20 @@ static std::unordered_map<std::string, GuiControl*>& createdControls() {
     return m;
 }
 
+static void callGuiChildLifecycle(GuiControl* root, const char* suffix) {
+    if (!root) return;
+    auto* ts = Engine::instance().script().ts();
+    const auto children = root->children;
+    for (auto* child : children) {
+        if (ts) {
+            const std::string callback = child->name + suffix;
+            if (ts->hasFunction(callback))
+                ts->callFunction(callback, {VMValue(child->name)});
+        }
+        callGuiChildLifecycle(child, suffix);
+    }
+}
+
 GuiRenderer::GuiRenderer() {}
 GuiRenderer::~GuiRenderer() {
     auto del = [&](auto& self, GuiControl* ctl) -> void {
@@ -121,6 +142,9 @@ static std::string normalizeGuiClassName(const std::string& cn) {
         {"ShellChatMemberList",      "GuiTextListCtrl"},
         {"ShellLoadFileDlg",         "GuiFileDialogCtrl"},
         {"ShellSaveFileDlg",         "GuiFileDialogCtrl"},
+        {"GuiCommanderMapCheckbox",  "GuiCheckBoxCtrl"},
+        {"GuiCommanderMapButton",     "GuiButtonCtrl"},
+        {"GuiCommanderNoFocusCtrl",   "GuiControl"},
     };
     auto it = sShellToGui.find(cn);
     return it != sShellToGui.end() ? it->second : cn;
@@ -177,7 +201,7 @@ void GuiRenderer::init() {
     // First pass: create/adopt GuiControl objects for all GUI-related ScriptObjects
     std::unordered_map<std::string, GuiControl*> controlMap;
     for (auto& [name, obj] : objs) {
-        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl" ||
+        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
             GuiControl*& slot = createdControls()[lowerKey(name)];
             GuiControl* ctl = slot;
@@ -262,7 +286,7 @@ void GuiRenderer::init() {
 
     // Second pass: link parent-child relationships
     for (auto& [name, obj] : objs) {
-        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl" ||
+        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
             auto ctl = controlMap.find(name);
             if (ctl == controlMap.end()) continue;
@@ -286,7 +310,7 @@ void GuiRenderer::init() {
 void GuiRenderer::refresh() {
     auto& objs = ScriptEngine::instance().objects;
     for (auto& [name, obj] : objs) {
-        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl" ||
+            if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
             if (findControl(name)) continue;
             GuiControl*& slot = createdControls()[lowerKey(name)];
@@ -334,7 +358,7 @@ void GuiRenderer::refresh() {
     // processed before its parent and skipped. Re-link any control that still
     // has no parent.
     for (auto& [name, obj] : objs) {
-        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className == "GameTSCtrl" ||
+        if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
             GuiControl* ctl = findControl(name);
             if (!ctl || ctl->parent) continue;
@@ -375,6 +399,23 @@ void GuiRenderer::render() {
         glEnable(GL_SCISSOR_TEST);
         glScissor(0, h - canvasH, canvasW, canvasH);
     }
+    auto syncPrintControl = [&](const char* name, const char* variable) {
+        GuiControl* ctl = findControl(name);
+        if (!ctl) return;
+        const std::string expiryName = std::string(variable) + "Until";
+        const double expiry = std::atof(
+            Console::instance().getStringVariable(expiryName.c_str(), "0"));
+        const bool expired = expiry > 0.0 && Engine::instance().timer().now() >= expiry;
+        const std::string text = expired ? std::string() :
+            Console::instance().getStringVariable(variable, "");
+        ctl->text = text;
+        ctl->visible = !text.empty();
+        if (expired) Console::instance().setVariable(variable, "");
+    };
+    syncPrintControl("CenterPrintText", "HUD::centerPrint");
+    syncPrintControl("BottomPrintText", "HUD::bottomPrint");
+    if (auto* zoom = findControl("ZoomHud"))
+        zoom->visible = Engine::instance().game().isZooming();
     MatrixF ortho;
     ortho.identity();
     ortho.m[0][0] = 2.0f / canvasW;
@@ -1029,6 +1070,17 @@ static void computeContentExtent(GuiControl* ctl) {
         } else if (n->className == "GuiListBoxCtrl" || n->className == "GuiTextListCtrl") {
             float listH = (float)n->listRows.size() * textListLineH;
             if (listH > h) h = listH;
+        } else if (n->className == "GuiMLTextCtrl") {
+            int lines = 1;
+            auto vectorIt = n->fields.find("messageVector");
+            if (vectorIt != n->fields.end()) {
+                if (auto* vector = ScriptEngine::instance().findObject(vectorIt->second.c_str()))
+                    lines = std::max(1, vector->internals["__lineCount"].toInt());
+            } else {
+                lines = 1 + (int)std::count(n->text.begin(), n->text.end(), '\n');
+            }
+            const float textH = lines * textListLineH;
+            if (textH > h) h = textH;
         }
     };
     for (auto* c : ctl->children) {
@@ -1449,6 +1501,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (ctl->menuOpen && !ctl->menuItems.empty())
             s_openPopups.push_back(ctl);
     } else if (cn == "GuiTextCtrl") {
+        if (ctl->name == "ammoHud" && Engine::instance().game().state() == Game::Playing) {
+            const int weapon = Engine::instance().game().player().currentWeapon();
+            if (weapon >= 0 && weapon < Engine::instance().game().player().weaponCount()) {
+                const auto& item = Engine::instance().game().player().weapon(weapon);
+                ctl->text = item.ammo < 0 ? "" : std::to_string(item.ammo);
+            }
+        }
         ColorF tc{1,1,1,1};
         auto* prof = getProfile(ctl->profileName);
         if (prof) {
@@ -1481,8 +1540,20 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 lineY += ch * scale;
             }
         }
-    } else if (cn == "GuiMLTextCtrl") {
+    } else if (cn == "GuiMLTextCtrl" || cn == "GuiMessageVectorCtrl") {
         // Rich text renderer — parses GuiMLTextCtrl markup tags
+        auto vectorIt = ctl->fields.find("messageVector");
+        if (vectorIt != ctl->fields.end()) {
+            if (auto* vector = ScriptEngine::instance().findObject(vectorIt->second.c_str())) {
+                std::string lines;
+                const int count = vector->internals["__lineCount"].toInt();
+                for (int i = 0; i < count; ++i) {
+                    if (i) lines += "\n";
+                    lines += vector->internals["__line" + std::to_string(i)].toString();
+                }
+                ctl->text = lines;
+            }
+        }
         auto* prof = getProfile(ctl->profileName);
         if (prof) font = getProfileFont(prof);
         ColorF curColor{1,1,1,1};
@@ -1819,13 +1890,80 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             const size_t tab = row.find('\t');
             const std::string command = row.substr(0, tab);
             const std::string key = tab == std::string::npos ? std::string() : row.substr(tab + 1);
-            const ColorF& rowColor = isSel ? selTc : tc;
-            if (font) {
-                font->render(command.c_str(), x + 3, rowY + 1, rowColor, 1.0f);
-                if (!key.empty())
-                    font->render(key.c_str(), x + 136, rowY + 1, rowColor, 1.0f);
+            ColorF rowColor = isSel ? selTc : tc;
+            Font* rowFont = font;
+            auto styleIt = ctl->fields.find("rowStyle" + std::to_string(i));
+            if (styleIt != ctl->fields.end()) {
+                const std::string prefix = "styleSet" + styleIt->second;
+                auto typeIt = ctl->fields.find(prefix + ".fontType");
+                auto sizeIt = ctl->fields.find(prefix + ".fontSize");
+                if (typeIt != ctl->fields.end() && sizeIt != ctl->fields.end())
+                    rowFont = r.getFont(typeIt->second.c_str(),
+                                        std::max(1, atoi(sizeIt->second.c_str())));
+                const std::string colorKey = isSel ? ".fontColorSEL" : ".fontColor";
+                auto colorIt = ctl->fields.find(prefix + colorKey);
+                if (colorIt != ctl->fields.end()) parseColor(colorIt->second, rowColor);
+            }
+            auto rowColorIt = ctl->fields.find("rowColor" + std::to_string(i));
+            if (!isSel && rowColorIt != ctl->fields.end())
+                parseColor(rowColorIt->second, rowColor);
+            auto activeIt = ctl->fields.find("rowActive" + std::to_string(i));
+            if (!isSel && activeIt != ctl->fields.end() &&
+                activeIt->second != "1" && activeIt->second != "true") {
+                rowColor.r *= 0.55f;
+                rowColor.g *= 0.55f;
+                rowColor.b *= 0.55f;
+                rowColor.a *= 0.65f;
+            }
+            if (rowFont) {
+                if (!ctl->listColumns.empty()) {
+                    std::vector<std::string> columns;
+                    size_t start = 0;
+                    for (size_t end = row.find('\t');; end = row.find('\t', start)) {
+                        columns.push_back(row.substr(start, end == std::string::npos ? end : end - start));
+                        if (end == std::string::npos) break;
+                        start = end + 1;
+                    }
+                    float columnX = x + 3;
+                    for (size_t ci = 0; ci < ctl->listColumns.size(); ++ci) {
+                        const auto& column = ctl->listColumns[ci];
+                        const std::string value = ci < columns.size() ? columns[ci] : std::string();
+                        const float width = column.width > 0 ? column.width : ctl->extentX - (columnX - x);
+                        float textX = columnX;
+                        const float textWidth = rowFont->measure(value.c_str()).x;
+                        if (column.format.find("center") != std::string::npos)
+                            textX += std::max(0.0f, (width - textWidth) * 0.5f);
+                        else if (column.format.find("right") != std::string::npos)
+                            textX += std::max(0.0f, width - textWidth - 3.0f);
+                        rowFont->render(value.c_str(), textX, rowY + 1, rowColor, 1.0f);
+                        columnX += width;
+                    }
+                } else {
+                    rowFont->render(command.c_str(), x + 3, rowY + 1, rowColor, 1.0f);
+                    if (!key.empty())
+                        rowFont->render(key.c_str(), x + 136, rowY + 1, rowColor, 1.0f);
+                }
             }
         }
+    } else if (cn == "GuiTreeView") {
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.08f, 0.09f, 0.12f, 1.0f});
+        const float rowHeight = font ? font->charHeight + 3.0f : 16.0f;
+        float rowY = y + 2.0f;
+        std::function<void(int, int)> drawBranch = [&](int parent, int depth) {
+            for (const auto& item : ctl->treeItems) {
+                if (item.parent != parent || rowY > y + ctl->extentY) continue;
+                const bool selected = item.id == ctl->selectedTreeItem;
+                if (selected)
+                    r.drawRectFill({x, rowY, 0}, {x + ctl->extentX, rowY + rowHeight, 0},
+                                   {0.2f, 0.35f, 0.55f, 0.8f});
+                if (font)
+                    font->render(item.text.c_str(), x + 4.0f + depth * 14.0f,
+                                 rowY + 1.0f, selected ? ColorF{1,1,1,1} : ColorF{0.8f,0.85f,0.9f,1}, 1.0f);
+                rowY += rowHeight;
+                if (item.expanded) drawBranch(item.id, depth + 1);
+            }
+        };
+        drawBranch(0, 0);
     } else if (cn == "GuiCheckBoxCtrl" || cn == "GuiRadioCtrl") {
         ColorF tc{1,1,1,1}, tcHL{-1,-1,-1,1};
         std::string justify;
@@ -1915,7 +2053,23 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         auto* prof = getProfile(ctl->profileName);
         if (prof) { auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), bg); }
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, bg);
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX * 0.5f, y + ctl->extentY, 0}, fg);
+        const float progress = std::clamp(ctl->hudValueSet ? ctl->hudValue : 0.0f, 0.0f, 1.0f);
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX * progress, y + ctl->extentY, 0}, fg);
+    } else if (cn == "GuiConsoleVariableCtrl") {
+        std::string expression;
+        auto ei = ctl->fields.find("expression");
+        if (ei != ctl->fields.end()) expression = ei->second;
+        std::string value = expression.empty() ? std::string() :
+            Console::instance().getStringVariable(expression.c_str(), "");
+        if (value.empty()) {
+            if (expression == "$OpenGL::triCount3") value = std::to_string(r.stats.triangles);
+            else if (expression == "$FPS::Real") value = "0";
+        }
+        if (font && !value.empty()) {
+            auto* prof = getProfile(ctl->profileName);
+            Font* vf = prof ? getProfileFont(prof) : font;
+            vf->render(value.c_str(), x + 2, y + 2, {0.8f, 0.9f, 1.0f, 1.0f}, 1.0f);
+        }
     } else if (cn == "GuiConsole") {
         // The console's own extent is unreliable (unset controls get a default
         // 100x30). Size the translucent bg and line count to the enclosing
@@ -2851,22 +3005,56 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         float fontSize = 12.0f;
         Font* hf = font;
         // HudEnergy/HudDamage/HudHeat/HudBarBaseCtrl: bar display
-        if (cn == "HudEnergy" || cn == "HudDamage" || cn == "HudHeat" || cn == "HudBarBaseCtrl") {
+        if (cn == "HudEnergy" || cn == "HudDamage" || cn == "HudHeat" ||
+            cn == "HudCapacitor" || cn == "HudBarBaseCtrl") {
             ColorF barBg{0.1f,0.1f,0.15f,0.5f};
-            ColorF barFg = cn == "HudEnergy" ? ColorF{0,0.8f,1,0.8f} : cn == "HudDamage" ? ColorF{1,0.2f,0.2f,0.8f} : cn == "HudHeat" ? ColorF{1,0.5f,0,0.8f} : ColorF{0.3f,0.6f,0.3f,0.8f};
+            ColorF barFg = cn == "HudEnergy" ? ColorF{0,0.8f,1,0.8f} :
+                           cn == "HudDamage" ? ColorF{1,0.2f,0.2f,0.8f} :
+                           cn == "HudHeat" ? ColorF{1,0.5f,0,0.8f} :
+                           cn == "HudCapacitor" ? ColorF{1,0.75f,0.2f,0.85f} :
+                           ColorF{0.3f,0.6f,0.3f,0.8f};
             float barH = ctl->extentY * 0.7f;
             float barY = y + (ctl->extentY - barH) * 0.5f;
             r.drawRectFill({x, barY, 0}, {x + ctl->extentX, barY + barH, 0}, barBg);
-            r.drawRectFill({x, barY, 0}, {x + ctl->extentX * 0.5f, barY + barH, 0}, barFg);
+            float fill = ctl->hudValueSet ? ctl->hudValue : 0.5f;
+            if (cn == "HudEnergy" && Engine::instance().game().state() == Game::Playing)
+                fill = Engine::instance().game().player().energy() / 100.0f;
+            else if (cn == "HudDamage" && Engine::instance().game().state() == Game::Playing)
+                fill = Engine::instance().game().player().health() / 100.0f;
+            else if (cn == "HudHeat" && Engine::instance().game().state() == Game::Playing)
+                fill = Engine::instance().game().player().heat() / 100.0f;
+            else if (cn == "HudCapacitor" && Engine::instance().game().state() == Game::Playing)
+                fill = Engine::instance().game().player().energy() / 100.0f;
+            if (fill > 1.0f) fill /= 100.0f;
+            fill = std::clamp(fill, 0.0f, 1.0f);
+            auto verticalIt = ctl->fields.find("verticalFill");
+            const bool vertical = verticalIt != ctl->fields.end() &&
+                (verticalIt->second == "1" || verticalIt->second == "true");
+            if (vertical) {
+                const float filledH = barH * fill;
+                r.drawRectFill({x, barY + barH - filledH, 0},
+                               {x + ctl->extentX, barY + barH, 0}, barFg);
+            } else {
+                r.drawRectFill({x, barY, 0},
+                               {x + ctl->extentX * fill, barY + barH, 0}, barFg);
+            }
         } else if (cn == "HudCompass") {
-            // Compass: circular in top-center of HUD
+            // Compass: rotate cardinal labels with the active camera heading.
             float cx = x + ctl->extentX * 0.5f, cy = y + ctl->extentY * 0.5f;
             float radius = std::min(ctl->extentX, ctl->extentY) * 0.4f;
             r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0,0,0,0.3f});
-            // Draw N/S/E/W text
             if (hf) {
-                hf->render("N", cx - 4, y + 2, {1,0.5f,0.5f,0.9f}, 1.0f);
-                hf->render("S", cx - 4, y + ctl->extentY - 12, {0.5f,0.5f,0.5f,0.9f}, 1.0f);
+                const float heading = std::atan2(r.cameraTarget.x - r.cameraPos.x,
+                                                 -(r.cameraTarget.z - r.cameraPos.z));
+                const char* labels[] = {"N", "E", "S", "W"};
+                for (int i = 0; i < 4; ++i) {
+                    const float bearing = i * 3.14159265359f * 0.5f - heading;
+                    const float px = cx + std::sin(bearing) * radius;
+                    const float py = cy - std::cos(bearing) * radius;
+                    const ColorF color = i == 0 ? ColorF{1,0.5f,0.5f,0.9f}
+                                                : ColorF{0.6f,0.8f,0.8f,0.9f};
+                    hf->render(labels[i], px - 4, py - 6, color, 1.0f);
+                }
             }
         } else if (cn == "HudClock") {
             // Clock: top-center of HUD
@@ -2877,15 +3065,297 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     auto ti = sobj->fields.find("text");
                     if (ti != sobj->fields.end()) timeStr = ti->second.toString();
                 }
+                const int liveMs = Engine::instance().game().liveClockRemainingMs();
+                if (liveMs > 0 && Engine::instance().game().isConnected()) {
+                    const int totalSeconds = liveMs / 1000;
+                    char liveTime[32];
+                    snprintf(liveTime, sizeof(liveTime), "%02d:%02d",
+                             totalSeconds / 60, totalSeconds % 60);
+                    timeStr = liveTime;
+                }
                 float tw = hf->measure(timeStr.c_str()).x;
                 hf->render(timeStr.c_str(), x + (ctl->extentX - tw) * 0.5f, y + 2, {0.5f,1,0.5f,0.9f}, 1.5f);
             }
-        } else if (cn == "HudPulsingBitmap" || cn == "HudBitmapCtrl") {
-            // Bitmap HUD: semi-transparent background, no fill to let 3D show through
-            if (ctl->text.empty() && ctl->bitmap.empty()) {
+        } else if (cn == "HudZoom") {
+            const int width = Engine::instance().platform().width();
+            const int height = Engine::instance().platform().height();
+            const float bar = height * 0.12f;
+            r.drawRectFill({0, 0, 0}, {(float)width, bar, 0}, {0, 0, 0, 0.78f});
+            r.drawRectFill({0, (float)height - bar, 0}, {(float)width, (float)height, 0},
+                           {0, 0, 0, 0.78f});
+        } else if (cn == "HudPulsingBitmap" || cn == "HudBitmapCtrl" ||
+                   cn == "HudCrosshair") {
+            Texture* tex = nullptr;
+            if (!ctl->bitmap.empty()) {
+                tex = r.loadTexture(ctl->bitmap.c_str());
+                if (!tex || !tex->loaded)
+                    tex = r.loadTexture(("textures/gui/" + ctl->bitmap).c_str());
+            }
+            ColorF tint{1, 1, 1, 1};
+            auto colorIt = ctl->fields.find("color");
+            if (colorIt != ctl->fields.end()) parseColor(colorIt->second, tint);
+            if (cn == "HudPulsingBitmap") {
+                auto pulseIt = ctl->fields.find("pulse");
+                const bool pulse = pulseIt != ctl->fields.end() &&
+                    (pulseIt->second == "1" || pulseIt->second == "true");
+                if (pulse) {
+                    float rate = 1000.0f;
+                    auto rateIt = ctl->fields.find("pulseRate");
+                    if (rateIt != ctl->fields.end()) rate = std::max(1.0f, (float)std::atof(rateIt->second.c_str()));
+                    const float phase = (float)std::fmod(Engine::instance().timer().now() * 1000.0 / rate, 1.0);
+                    tint.a *= 0.35f + 0.65f * (0.5f + 0.5f * std::sin(phase * 6.2831853f));
+                }
+            }
+            if (tex && tex->loaded)
+                r.drawTexturedRectUV({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, tex->id,
+                                     0, 0, 1, 1, &tint);
+            else if (ctl->text.empty() && ctl->bitmap.empty()) {
+                // Bitmap HUD: semi-transparent background, no fill to let 3D show through
                 // Draw a subtle outline so the control area is visible
                 r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + 1, 0}, {0.5f,0.5f,0.6f,0.2f});
                 r.drawRectFill({x, y + ctl->extentY - 1, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.5f,0.5f,0.6f,0.2f});
+            }
+        } else if (cn == "HudNetDisplay") {
+            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0},
+                           {0.02f, 0.04f, 0.05f, 0.65f});
+            if (hf) {
+                int ping = 0;
+                uint64_t received = 0, sent = 0;
+                if (auto* conn = Engine::instance().game().activeConnection())
+                    ping = (int)conn->ping(), received = conn->receivedPacketCount(), sent = conn->sentPacketCount();
+                char netText[96];
+                snprintf(netText, sizeof(netText), "%dms  RX:%llu TX:%llu", ping,
+                         (unsigned long long)received, (unsigned long long)sent);
+                hf->render(netText, x + 5, y + 4, {0.4f, 1.0f, 0.4f, 0.9f}, 0.75f);
+                hf->render("NET", x + 5, y + ctl->extentY - 15,
+                           {0.7f, 0.8f, 0.8f, 0.8f}, 0.8f);
+            }
+            auto graphIt = ctl->fields.find("renderGraph");
+            if (graphIt != ctl->fields.end() && (graphIt->second == "1" || graphIt->second == "true")) {
+                const double now = Engine::instance().timer().now();
+                auto* conn = Engine::instance().game().activeConnection();
+                if (conn && (ctl->netLastSample <= 0.0 || now - ctl->netLastSample >= 0.05)) {
+                    const uint64_t currentReceived = conn->receivedPacketCount();
+                    const uint64_t currentSent = conn->sentPacketCount();
+                    const uint64_t packets = (currentReceived >= ctl->netLastReceived
+                                                  ? currentReceived - ctl->netLastReceived : 0) +
+                                             (currentSent >= ctl->netLastSent
+                                                  ? currentSent - ctl->netLastSent : 0);
+                    ctl->netHistory.push_back((float)std::min<uint64_t>(packets, 64));
+                    ctl->netLastReceived = currentReceived;
+                    ctl->netLastSent = currentSent;
+                    ctl->netLastSample = now;
+                    const size_t limit = 100;
+                    if (ctl->netHistory.size() > limit)
+                        ctl->netHistory.erase(ctl->netHistory.begin(),
+                                              ctl->netHistory.begin() + (ctl->netHistory.size() - limit));
+                }
+                if (ctl->netHistory.size() > 1) {
+                    const float maxValue = 64.0f;
+                    for (size_t i = 1; i < ctl->netHistory.size(); ++i) {
+                        const float x0 = x + ctl->extentX * (float)(i - 1) /
+                                         (float)(ctl->netHistory.size() - 1);
+                        const float x1 = x + ctl->extentX * (float)i /
+                                         (float)(ctl->netHistory.size() - 1);
+                        const float y0 = y + ctl->extentY -
+                            ctl->extentY * ctl->netHistory[i - 1] / maxValue;
+                        const float y1 = y + ctl->extentY -
+                            ctl->extentY * ctl->netHistory[i] / maxValue;
+                        r.drawLine({x0, y0, 0}, {x1, y1, 0}, {0.1f, 0.9f, 0.6f, 0.8f});
+                    }
+                }
+            }
+        } else if (cn == "HudWeapons" || cn == "HudVehicleWeapon" || cn == "HudInventory") {
+            const bool inventory = cn == "HudInventory";
+            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0},
+                           {0.02f, 0.03f, 0.04f, 0.45f});
+            auto loadHudBitmap = [&](const char* field) -> Texture* {
+                auto it = ctl->fields.find(field);
+                if (it == ctl->fields.end() || it->second.empty()) return nullptr;
+                Texture* texture = r.loadTexture(it->second.c_str());
+                if (!texture || !texture->loaded)
+                    texture = r.loadTexture(("textures/gui/" + it->second).c_str());
+                return texture && texture->loaded ? texture : nullptr;
+            };
+            if (Texture* background = loadHudBitmap("backgroundBitmap"))
+                r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, background->id);
+            Texture* highlight = loadHudBitmap("highlightBitmap");
+            Texture* infiniteAmmo = loadHudBitmap("infiniteAmmoBitmap");
+            if (!ctl->hudSlots.empty()) {
+                for (size_t i = 0; i < ctl->hudSlots.size(); ++i) {
+                    const auto& slot = ctl->hudSlots[i];
+                    if (!slot.visible) continue;
+                    const float sx = x + (inventory ? (float)i * 30.0f : 2.0f);
+                    const float sy = y + (inventory ? 2.0f : (float)i * 30.0f);
+                    const float sw = inventory ? 28.0f : ctl->extentX - 4.0f;
+                    const float sh = inventory ? ctl->extentY - 4.0f : 28.0f;
+                    if (slot.active && highlight)
+                        r.drawTexturedRect({sx, sy, 0}, {sx + sw, sy + sh, 0}, highlight->id);
+                    else if (slot.active)
+                        r.drawRectFill({sx, sy, 0}, {sx + sw, sy + sh, 0},
+                                       {0.3f, 0.7f, 0.8f, 0.45f});
+                    Texture* tex = slot.bitmap.empty() ? nullptr : r.loadTexture(slot.bitmap.c_str());
+                    if (!tex || !tex->loaded)
+                        tex = slot.bitmap.empty() ? nullptr : r.loadTexture(("textures/gui/" + slot.bitmap).c_str());
+                    if (tex && tex->loaded)
+                        r.drawTexturedRect({sx + 2, sy + 2, 0}, {sx + sw - 2, sy + sh - 2, 0}, tex->id);
+                    if (slot.amount < 0 && infiniteAmmo)
+                        r.drawTexturedRect({sx + 2, sy + 2, 0}, {sx + sw - 2, sy + sh - 2, 0}, infiniteAmmo->id);
+                    if (hf && slot.amount >= 0)
+                        hf->render(std::to_string(slot.amount).c_str(), sx + 3, sy + sh - 13,
+                                   {1.0f, 1.0f, 0.6f, 0.95f}, 0.8f);
+                }
+            }
+            const int weapon = Engine::instance().game().player().currentWeapon();
+            if (ctl->hudSlots.empty() && hf && weapon >= 0 && weapon < Engine::instance().game().player().weaponCount()) {
+                const auto& item = Engine::instance().game().player().weapon(weapon);
+                const char* name = (item.type >= 0 && item.type < gWeaponCount)
+                    ? gWeaponTable[item.type].name : "Weapon";
+                hf->render(name, x + 3, y + 2, {0.7f, 1.0f, 0.8f, 0.9f}, 0.8f);
+                hf->render(std::to_string(item.ammo).c_str(), x + 3, y + ctl->extentY - 14,
+                           {1.0f, 1.0f, 0.6f, 0.9f}, 0.9f);
+            }
+        } else if (cn == "HudScoreCtrl") {
+            auto separatorIt = ctl->fields.find("separators");
+            if (separatorIt != ctl->fields.end()) {
+                std::string value;
+                for (char c : separatorIt->second + " ") {
+                    if (c == ' ' || c == '\t') {
+                        if (!value.empty()) {
+                            const float separator = (float)std::atof(value.c_str());
+                            r.drawRectFill({x + separator, y + 1, 0},
+                                           {x + separator + 1, y + ctl->extentY - 1, 0},
+                                           {0.3f, 0.8f, 0.7f, 0.45f});
+                            value.clear();
+                        }
+                    } else value += c;
+                }
+            }
+            auto horizontalIt = ctl->fields.find("horzSeparator");
+            if (horizontalIt != ctl->fields.end() && horizontalIt->second == "1") {
+                const float lineY = y + ctl->extentY * 0.5f;
+                r.drawRectFill({x + 1, lineY, 0},
+                               {x + ctl->extentX - 1, lineY + 1, 0},
+                               {0.3f, 0.8f, 0.7f, 0.45f});
+            }
+            bool hasScriptRows = false;
+            for (auto* child : ctl->children)
+                if (child && !child->text.empty()) { hasScriptRows = true; break; }
+            if (!hasScriptRows && hf) {
+                float rowY = y + 2;
+                for (const auto& [teamId, team] : Engine::instance().game().getLiveTeamScores()) {
+                    if (rowY > y + ctl->extentY - 14) break;
+                    const ColorF color = teamId == 1 ? ColorF{1.0f, 0.85f, 0.35f, 0.95f}
+                                                    : ColorF{0.75f, 0.85f, 1.0f, 0.95f};
+                    char line[192];
+                    snprintf(line, sizeof(line), "%s  %d  %s", team.name.c_str(),
+                             team.score, team.flagStatus.c_str());
+                    hf->render(line, x + 4, rowY, color, 0.9f);
+                    rowY += (float)hf->charHeight + 2.0f;
+                }
+            }
+        } else if (cn == "HudNavDisplay") {
+            // Project live/demo player ghosts into the HUD's 2D viewport. The
+            // stock script owns marker visibility and labels; this renderer
+            // supplies the world-space friend/foe indicator and health bar.
+            const auto& cameraPos = r.cameraPos;
+            Point3F forward{r.cameraTarget.x - cameraPos.x,
+                            r.cameraTarget.y - cameraPos.y,
+                            r.cameraTarget.z - cameraPos.z};
+            const float forwardLen = std::sqrt(forward.x * forward.x +
+                                               forward.y * forward.y +
+                                               forward.z * forward.z);
+            if (forwardLen > 0.001f) {
+                forward.x /= forwardLen; forward.y /= forwardLen; forward.z /= forwardLen;
+                Point3F up{0, 1, 0};
+                Point3F right{forward.z, 0, -forward.x};
+                const float rightLen = std::sqrt(right.x * right.x + right.z * right.z);
+                if (rightLen > 0.001f) {
+                    right.x /= rightLen; right.z /= rightLen;
+                    up = {right.z * forward.y, right.x * 0.0f - right.x * forward.z,
+                          -right.x * forward.y};
+                    const float upLen = std::sqrt(up.x * up.x + up.y * up.y + up.z * up.z);
+                    if (upLen > 0.001f) {
+                        up.x /= upLen; up.y /= upLen; up.z /= upLen;
+                    }
+                }
+                const float tanHalfFov = std::tan(1.2f * 0.5f);
+                const float aspect = std::max(0.1f, ctl->extentX / std::max(1.0f, ctl->extentY));
+                const int localTeam = Engine::instance().game().player().team();
+                auto isMarkerClass = [](const std::string& className) {
+                    return className.find("Player") != std::string::npos ||
+                           className.find("Vehicle") != std::string::npos ||
+                           className.find("Beacon") != std::string::npos ||
+                           className.find("Flag") != std::string::npos ||
+                           className.find("Objective") != std::string::npos ||
+                           className.find("MissionMarker") != std::string::npos;
+                };
+                auto drawMarker = [&](const GhostEntry* ghost) {
+                    if (!ghost) return;
+                    const Vec3& markerPos = (Engine::instance().game().isDemoPlaying() &&
+                                             ghost->hasRendered) ? ghost->renderPos : ghost->position;
+                    const Point3F world{markerPos.x, markerPos.y + 1.0f, markerPos.z};
+                    const Point3F rel{world.x - cameraPos.x,
+                                      world.y - cameraPos.y,
+                                      world.z - cameraPos.z};
+                    const float depth = rel.x * forward.x + rel.y * forward.y + rel.z * forward.z;
+                    if (depth <= 0.1f) return;
+                    const float sx = (rel.x * right.x + rel.y * right.y + rel.z * right.z) /
+                                     (depth * tanHalfFov * aspect);
+                    const float sy = (rel.x * up.x + rel.y * up.y + rel.z * up.z) /
+                                     (depth * tanHalfFov);
+                    const float mx = x + ctl->extentX * (0.5f + sx * 0.5f);
+                    const float my = y + ctl->extentY * (0.5f - sy * 0.5f);
+                    const bool edgeMarker = mx < x || mx > x + ctl->extentX ||
+                                            my < y || my > y + ctl->extentY;
+                    auto edgeIt = ctl->fields.find("renderEdgeMarkers");
+                    const bool renderEdges = edgeIt == ctl->fields.end() ||
+                        (edgeIt->second != "0" && edgeIt->second != "false");
+                    if (edgeMarker && !renderEdges) return;
+                    const float markerX = std::clamp(mx, x + 5.0f, x + ctl->extentX - 5.0f);
+                    const float markerY = std::clamp(my, y + 5.0f, y + ctl->extentY - 5.0f);
+                    const bool friendUnit = ghost->teamId >= 0 && ghost->teamId == localTeam;
+                    ColorF color = friendUnit ? ColorF{0.2f, 1.0f, 0.3f, 0.95f}
+                                               : ColorF{1.0f, 0.2f, 0.2f, 0.95f};
+                    const bool vehicle = ghost->className.find("Vehicle") != std::string::npos;
+                    auto colorIt = ctl->fields.find(vehicle ? "vehicleBeaconColor" :
+                                                    (friendUnit ? "friendBeaconColor" : "enemyBeaconColor"));
+                    if (colorIt != ctl->fields.end()) parseColor(colorIt->second, color);
+                    if (edgeMarker && renderEdges)
+                        r.drawLine({x + ctl->extentX * 0.5f, y + ctl->extentY * 0.5f, 0},
+                                   {markerX, markerY, 0}, {color.r, color.g, color.b, 0.35f});
+                    r.drawRectFill({markerX - 3, markerY - 3, 0},
+                                   {markerX + 3, markerY + 3, 0}, color);
+                    const float health = std::clamp(ghost->health /
+                        std::max(1.0f, ghost->maxHealth), 0.0f, 1.0f);
+                    r.drawRectFill({markerX - 16, markerY - 11, 0},
+                                   {markerX + 16, markerY - 8, 0},
+                                   {0.05f, 0.05f, 0.05f, 0.8f});
+                    r.drawRectFill({markerX - 16, markerY - 11, 0},
+                                   {markerX - 16 + 32 * health, markerY - 8, 0}, color);
+                    auto textIt = ctl->fields.find("renderMarkerText");
+                    const bool renderText = textIt == ctl->fields.end() ||
+                        (textIt->second != "0" && textIt->second != "false");
+                    const std::string label = !ghost->playerName.empty() ? ghost->playerName :
+                        (!ghost->shapeName.empty() ? ghost->shapeName : ghost->className);
+                    if (renderText && hf && !label.empty())
+                        hf->render(label.c_str(), markerX + 7, markerY - 6, color, 0.8f);
+                };
+                if (Engine::instance().game().isDemoPlaying()) {
+                    if (auto* parser = Engine::instance().game().getDemoParser()) {
+                        for (int index : parser->getGhostTracker().getAllIndices()) {
+                            const auto* ghost = parser->getGhostTracker().getGhost(index);
+                            if (ghost && isMarkerClass(ghost->className))
+                                drawMarker(ghost);
+                        }
+                    }
+                } else {
+                    for (int index : Engine::instance().game().getLiveGhostIndices()) {
+                        const auto* ghost = Engine::instance().game().getLiveGhost(index);
+                        if (ghost && isMarkerClass(ghost->className))
+                            drawMarker(ghost);
+                    }
+                }
             }
         } else {
             // Generic HUD: transparent background, render text
@@ -2905,6 +3375,134 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 hf->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
             }
         }
+    } else if (cn == "GuiCommanderTree") {
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0},
+                       {0.03f, 0.05f, 0.07f, 0.94f});
+        ctl->commanderTreeEntries.clear();
+        const auto isCommanderEntry = [](const GhostEntry* ghost) {
+            if (!ghost) return false;
+            std::string className = ghost->className;
+            std::string shapeName = ghost->shapeName;
+            for (char& c : className) c = (char)std::tolower((unsigned char)c);
+            for (char& c : shapeName) c = (char)std::tolower((unsigned char)c);
+            const auto matches = [](const std::string& value) {
+                return value.find("player") != std::string::npos ||
+                       value.find("vehicle") != std::string::npos ||
+                       value.find("flag") != std::string::npos ||
+                       value.find("beacon") != std::string::npos ||
+                       value.find("objective") != std::string::npos ||
+                       value.find("missionmarker") != std::string::npos;
+            };
+            return matches(className) || matches(shapeName);
+        };
+        if (font) {
+            float rowY = y + 5.0f;
+            int selectedTarget = -1;
+            if (auto* map = gr->findControl("CommanderMap"))
+                selectedTarget = atoi(map->fields["selectedTarget"].c_str());
+            auto drawGhost = [&](int index, const GhostEntry* ghost) {
+                if (!ghost || rowY > y + ctl->extentY - 16) return;
+                ctl->commanderTreeEntries.push_back(index);
+                if (index == selectedTarget)
+                    r.drawRectFill({x, rowY - 2, 0}, {x + ctl->extentX, rowY + font->charHeight + 2, 0},
+                                   {0.2f, 0.35f, 0.55f, 0.8f});
+                const bool friendUnit = ghost->teamId >= 0 &&
+                    ghost->teamId == Engine::instance().game().player().team();
+                const ColorF color = friendUnit ? ColorF{0.35f, 1.0f, 0.45f, 1.0f}
+                                                 : ColorF{1.0f, 0.35f, 0.35f, 1.0f};
+                const std::string label = !ghost->playerName.empty() ? ghost->playerName :
+                    (!ghost->shapeName.empty() ? ghost->shapeName : ghost->className);
+                font->render(label.c_str(), x + 8.0f, rowY, color, 0.9f);
+                rowY += (float)font->charHeight + 3.0f;
+            };
+            if (Engine::instance().game().isDemoPlaying()) {
+                if (auto* parser = Engine::instance().game().getDemoParser())
+                    for (int index : parser->getGhostTracker().getAllIndices()) {
+                        const auto* ghost = parser->getGhostTracker().getGhost(index);
+                        if (isCommanderEntry(ghost)) drawGhost(index, ghost);
+                    }
+            } else {
+                for (int index : Engine::instance().game().getLiveGhostIndices()) {
+                    const auto* ghost = Engine::instance().game().getLiveGhost(index);
+                        if (isCommanderEntry(ghost)) drawGhost(index, ghost);
+                }
+            }
+        }
+    } else if (cn == "GuiCommanderMap") {
+        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0},
+                       {0.02f, 0.05f, 0.06f, 0.96f});
+        auto* terrain = Engine::instance().game().world().terrain();
+        if (terrain && terrain->loaded && terrain->size > 1) {
+            const float worldW = terrain->size * terrain->squareSize;
+            const float fullMinX = terrain->worldOffset.x;
+            const float fullMaxZ = terrain->worldOffset.z;
+            auto mapValue = [&](const char* name, float fallback) {
+                auto it = ctl->fields.find(name);
+                if (it == ctl->fields.end() || it->second.empty()) return fallback;
+                return (float)std::atof(it->second.c_str());
+            };
+            const float zoom = std::max(0.25f, mapValue("mapZoom", 1.0f));
+            const float viewW = worldW / zoom;
+            const float minX = mapValue("mapCenterX", fullMinX + worldW * 0.5f) - viewW * 0.5f;
+            const float maxZ = mapValue("mapCenterZ", fullMaxZ - worldW * 0.5f) + viewW * 0.5f;
+            const int cells = 32;
+            const float cellW = ctl->extentX / cells;
+            const float cellH = ctl->extentY / cells;
+            for (int row = 0; row < cells; ++row) {
+                for (int col = 0; col < cells; ++col) {
+                    const float wx = minX + (col + 0.5f) * viewW / cells;
+                    const float wz = maxZ - (row + 0.5f) * viewW / cells;
+                    const float h = std::clamp(terrain->sampleHeight(wx, wz) / 256.0f, 0.0f, 1.0f);
+                    r.drawRectFill({x + col * cellW, y + row * cellH, 0},
+                                   {x + (col + 1) * cellW, y + (row + 1) * cellH, 0},
+                                   {0.04f + h * 0.12f, 0.16f + h * 0.32f,
+                                    0.18f + h * 0.25f, 1.0f});
+                }
+            }
+            const int selectedTarget = atoi(ctl->fields["selectedTarget"].c_str());
+            auto drawMapMarker = [&](const Point3F& pos, const ColorF& color, float size, int index = -1) {
+                const float nx = (pos.x - minX) / viewW;
+                const float nz = (maxZ - pos.z) / viewW;
+                if (nx < 0 || nx > 1 || nz < 0 || nz > 1) return;
+                const float px = x + nx * ctl->extentX;
+                const float py = y + nz * ctl->extentY;
+                if (index >= 0 && index == selectedTarget)
+                    r.drawRectFill({px - size - 2, py - size - 2, 0},
+                                   {px + size + 2, py + size + 2, 0},
+                                   {1.0f, 1.0f, 0.2f, 0.9f});
+                r.drawRectFill({px - size, py - size, 0}, {px + size, py + size, 0}, color);
+            };
+            drawMapMarker(Engine::instance().game().player().position(),
+                          {0.2f, 1.0f, 0.3f, 1.0f}, 4.0f);
+            if (Engine::instance().game().isDemoPlaying()) {
+                if (auto* parser = Engine::instance().game().getDemoParser()) {
+                    for (int index : parser->getGhostTracker().getAllIndices()) {
+                        const auto* ghost = parser->getGhostTracker().getGhost(index);
+                        if (!ghost) continue;
+                        const auto isCommanderMarker = [](const std::string& value) {
+                            std::string lower = value;
+                            for (char& c : lower)
+                                c = (char)std::tolower((unsigned char)c);
+                            return lower.find("player") != std::string::npos ||
+                                   lower.find("vehicle") != std::string::npos ||
+                                   lower.find("flag") != std::string::npos ||
+                                   lower.find("beacon") != std::string::npos ||
+                                   lower.find("objective") != std::string::npos ||
+                                   lower.find("missionmarker") != std::string::npos;
+                        };
+                        if (!isCommanderMarker(ghost->className) &&
+                            !isCommanderMarker(ghost->shapeName)) continue;
+                        const Vec3& p = ghost->hasRendered ? ghost->renderPos : ghost->position;
+                        const bool friendUnit = ghost->teamId >= 0 &&
+                            ghost->teamId == Engine::instance().game().player().team();
+                        drawMapMarker({p.x, p.y, p.z},
+                                      friendUnit ? ColorF{0.2f,1,0.3f,1} : ColorF{1,0.2f,0.2f,1},
+                                      3.0f, index);
+                    }
+                }
+            }
+        }
+        if (font) font->render("COMMAND MAP", x + 8, y + 8, {0.7f, 1.0f, 0.9f, 0.9f}, 0.9f);
     } else if (cn == "GuiPlayerView") {
         // Dark background
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.08f, 0.08f, 0.12f, 1});
@@ -3103,8 +3701,32 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
 
 void GuiRenderer::update(float dt) {
     updateFades(dt);
+    if (auto* map = findControl("CommanderMap")) {
+        auto value = [&](const char* name, float fallback) {
+            auto it = map->fields.find(name);
+            if (it == map->fields.end() || it->second.empty()) return fallback;
+            return (float)std::atof(it->second.c_str());
+        };
+        const auto* terrain = Engine::instance().game().world().terrain();
+        const float worldW = terrain && terrain->loaded && terrain->size > 1
+            ? terrain->size * terrain->squareSize : 0.0f;
+        float centerX = value("mapCenterX", terrain ? terrain->worldOffset.x + worldW * 0.5f : 0.0f);
+        float centerZ = value("mapCenterZ", terrain ? terrain->worldOffset.z - worldW * 0.5f : 0.0f);
+        float zoom = std::max(0.25f, value("mapZoom", 1.0f));
+        const float speed = 300.0f / zoom;
+        if (value("cameraMove::left", 0)) centerX -= speed * dt;
+        if (value("cameraMove::right", 0)) centerX += speed * dt;
+        if (value("cameraMove::up", 0)) centerZ += speed * dt;
+        if (value("cameraMove::down", 0)) centerZ -= speed * dt;
+        if (value("cameraMove::in", 0)) zoom = std::min(8.0f, zoom * std::pow(1.0f + dt, 2.0f));
+        if (value("cameraMove::out", 0)) zoom = std::max(0.25f, zoom / std::pow(1.0f + dt, 2.0f));
+        map->fields["mapCenterX"] = std::to_string(centerX);
+        map->fields["mapCenterZ"] = std::to_string(centerZ);
+        map->fields["mapZoom"] = std::to_string(zoom);
+    }
     // Clear hover states each frame
     std::function<void(GuiControl*)> clearHover = [&](GuiControl* ctl) {
+        ctl->previousHovered = ctl->hovered;
         ctl->hovered = false;
         ctl->hoveredTab = -1;
         ctl->hoveredItem = -1;
@@ -3123,6 +3745,13 @@ void GuiRenderer::update(float dt) {
         for (auto* p = ctl->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
         if (mx >= ax && my >= ay && mx < ax + ctl->extentX && my < ay + ctl->extentY) {
             ctl->hovered = true;
+            if (auto* ts = Engine::instance().script().ts()) {
+                const std::string callback = ctl->name +
+                    (ctl->previousHovered ? "::onMouseMove" : "::onMouseEnter");
+                if (ts->hasFunction(callback))
+                    ts->callFunction(callback,
+                        {VMValue(ctl->name), VMValue(mx), VMValue(my)});
+            }
             if (ctl->className == "ShellTabGroupCtrl" || ctl->className == "GuiTabBookCtrl") {
                 float tabX = ax + 2;
                 const float tabH = 29;
@@ -3173,6 +3802,19 @@ void GuiRenderer::update(float dt) {
         for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it)
             applyHover(*it);
     }
+    std::function<void(GuiControl*)> dispatchMouseLeave = [&](GuiControl* ctl) {
+        if (!ctl) return;
+        if (ctl->previousHovered && !ctl->hovered) {
+            if (auto* ts = Engine::instance().script().ts()) {
+                const std::string callback = ctl->name + "::onMouseLeave";
+                if (ts->hasFunction(callback))
+                    ts->callFunction(callback, {VMValue(ctl->name), VMValue(mx), VMValue(my)});
+            }
+        }
+        for (auto* child : ctl->children) dispatchMouseLeave(child);
+    };
+    for (auto* dialog : dialogStack) dispatchMouseLeave(dialog);
+    if (canvas) dispatchMouseLeave(canvas);
     double now = Engine::instance().timer().now();
     // Collect expired events first, then execute after erasing
     // (execution may add new events, invalidating iterators)
@@ -3468,6 +4110,15 @@ bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
         break;
     }
     if (!hit) return false;
+    if (hit->className == "GuiCommanderMap") {
+        auto zoomIt = hit->fields.find("mapZoom");
+        float zoom = zoomIt == hit->fields.end() || zoomIt->second.empty()
+            ? 1.0f : (float)std::atof(zoomIt->second.c_str());
+        if (zoom <= 0) zoom = 1.0f;
+        zoom *= wheelDelta > 0 ? 1.15f : 0.87f;
+        hit->fields["mapZoom"] = std::to_string(std::clamp(zoom, 0.25f, 8.0f));
+        return true;
+    }
     GuiControl* scrollCtrl = hit;
     while (scrollCtrl) {
         if (scrollCtrl->className == "GuiScrollCtrl") {
@@ -3572,10 +4223,83 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         if (canvas) closePopups(canvas);
     }
     if (!hit) return false;
+    pressedCtrl = hit;
+    if (auto* ts = Engine::instance().script().ts()) {
+        const std::string mouseDown = hit->name + "::onMouseDown";
+        if (ts->hasFunction(mouseDown))
+            ts->callFunction(mouseDown, {VMValue(hit->name), VMValue(x), VMValue(y)});
+    }
     // GuiPlayerView: press begins drag-to-rotate (handled in handleDrag)
     if (hit->className == "GuiPlayerView") {
         hit->modelRotating = true;
         hit->lastDragX = x;
+        return true;
+    }
+    if (hit->className == "GuiCommanderMap") {
+        const auto mode = hit->fields.find("mouseMode");
+        if (mode == hit->fields.end() || mode->second == "select") {
+            auto* terrain = Engine::instance().game().world().terrain();
+            int selected = -1;
+            std::string selectedName, selectedType;
+            float bestDistance = 14.0f * 14.0f;
+            if (terrain && terrain->loaded && terrain->size > 1) {
+                const float worldW = terrain->size * terrain->squareSize;
+                const float minX = terrain->worldOffset.x;
+                const float maxZ = terrain->worldOffset.z;
+                auto fieldValue = [&](const char* name, float fallback) {
+                    auto it = hit->fields.find(name);
+                    return it == hit->fields.end() || it->second.empty()
+                        ? fallback : (float)std::atof(it->second.c_str());
+                };
+                const float zoom = std::max(0.25f, fieldValue("mapZoom", 1.0f));
+                const float viewW = worldW / zoom;
+                const float centerX = fieldValue("mapCenterX", minX + worldW * 0.5f);
+                const float centerZ = fieldValue("mapCenterZ", maxZ - worldW * 0.5f);
+                const float viewMinX = centerX - viewW * 0.5f;
+                const float viewMaxZ = centerZ + viewW * 0.5f;
+                float mapX = hit->posX, mapY = hit->posY;
+                for (auto* parent = hit->parent; parent && parent != canvas; parent = parent->parent) {
+                    mapX += parent->posX;
+                    mapY += parent->posY;
+                }
+                auto consider = [&](int index, const GhostEntry* ghost) {
+                    if (!ghost) return;
+                    const Vec3& p = (Engine::instance().game().isDemoPlaying() && ghost->hasRendered)
+                        ? ghost->renderPos : ghost->position;
+                    const float px = mapX + (p.x - viewMinX) / viewW * hit->extentX;
+                    const float py = mapY + (viewMaxZ - p.z) / viewW * hit->extentY;
+                    const float dx = px - x, dy = py - y;
+                    const float distance = dx * dx + dy * dy;
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        selected = index;
+                        selectedName = ghost->playerName.empty() ? ghost->className : ghost->playerName;
+                        selectedType = ghost->className;
+                    }
+                };
+                if (Engine::instance().game().isDemoPlaying()) {
+                    if (auto* parser = Engine::instance().game().getDemoParser())
+                        for (int index : parser->getGhostTracker().getAllIndices())
+                            consider(index, parser->getGhostTracker().getGhost(index));
+                } else {
+                    for (int index : Engine::instance().game().getLiveGhostIndices())
+                        consider(index, Engine::instance().game().getLiveGhost(index));
+                }
+            }
+            if (auto* map = findControl("CommanderMap"))
+                map->fields["selectedTarget"] = std::to_string(selected);
+            if (auto* ts = Engine::instance().script().ts()) {
+                const std::string callback = "GuiCommanderMap::onSelect";
+                if (ts->hasFunction(callback))
+                    ts->callFunction(callback, {VMValue("CommanderMap"), VMValue(selected),
+                                                VMValue(selectedName), VMValue(selectedType),
+                                                VMValue(selected >= 0 ? 1 : 0)});
+            }
+            return true;
+        }
+        hit->commanderMapDragging = true;
+        hit->commanderMapLastX = x;
+        hit->commanderMapLastY = y;
         return true;
     }
     // GuiServerBrowser: row selection + column header sort
@@ -3606,6 +4330,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     }
     // ShellTextList / GuiListBoxCtrl: row selection
     if (hit->className == "GuiListBoxCtrl" || hit->className == "GuiTextListCtrl") {
+        selectedList = hit;
         float ax = hit->posX, ay = hit->posY;
         for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
         // Get scroll offset
@@ -3633,6 +4358,61 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                 ts->callFunction(selName, {VMValue(hit->name), VMValue(id), VMValue(hit->listRows[row])});
             if (hit->name == "OP_RemapList" && ts && ts->hasFunction(hit->name + "::doRemap"))
                 ts->callFunction(hit->name + "::doRemap", {VMValue(hit->name)});
+        }
+        return true;
+    }
+    if (hit->className == "GuiCommanderTree") {
+        float ax = hit->posX, ay = hit->posY;
+        for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+        const float rowHeight = Engine::instance().renderer().getFont()
+            ? Engine::instance().renderer().getFont()->charHeight + 3.0f : 16.0f;
+        const int row = (int)((y - ay - 5.0f) / rowHeight);
+        if (row >= 0 && row < (int)hit->commanderTreeEntries.size()) {
+            const int index = hit->commanderTreeEntries[row];
+            const GhostEntry* ghost = nullptr;
+            if (Engine::instance().game().isDemoPlaying()) {
+                if (auto* parser = Engine::instance().game().getDemoParser())
+                    ghost = parser->getGhostTracker().getGhost(index);
+            } else {
+                ghost = Engine::instance().game().getLiveGhost(index);
+            }
+            if (ghost) {
+                const std::string name = ghost->playerName.empty() ? ghost->className : ghost->playerName;
+                if (auto* map = findControl("CommanderMap"))
+                    map->fields["selectedTarget"] = std::to_string(index);
+                if (auto* ts = Engine::instance().script().ts()) {
+                    const std::string callback = "GuiCommanderMap::onSelect";
+                    if (ts->hasFunction(callback))
+                        ts->callFunction(callback, {VMValue("CommanderMap"), VMValue(index),
+                                                    VMValue(name), VMValue(ghost->className), VMValue(1)});
+                }
+            }
+        }
+        return true;
+    }
+    if (hit->className == "GuiTreeView") {
+        float ax = hit->posX, ay = hit->posY;
+        for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+        const float rowHeight = Engine::instance().renderer().getFont()
+            ? Engine::instance().renderer().getFont()->charHeight + 3.0f : 16.0f;
+        const int wanted = (int)((y - ay - 2.0f) / rowHeight);
+        int current = 0, selected = 0;
+        std::function<void(int)> findRow = [&](int parent) {
+            for (const auto& item : hit->treeItems) {
+                if (item.parent != parent) continue;
+                if (current == wanted) selected = item.id;
+                ++current;
+                if (item.expanded) findRow(item.id);
+            }
+        };
+        findRow(0);
+        if (selected) {
+            hit->selectedTreeItem = selected;
+            if (auto* ts = Engine::instance().script().ts()) {
+                const std::string callback = hit->name + "::onSelect";
+                if (ts->hasFunction(callback))
+                    ts->callFunction(callback, {VMValue(hit->name), VMValue(selected)});
+            }
         }
         return true;
     }
@@ -3735,9 +4515,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     }
     // Text edit: set focusedCtrl for keyboard input
     if (hit->className == "GuiTextEditCtrl") {
-        if (!focusedCtrl) Engine::instance().platform().startTextInput();
-        focusedCtrl = hit;
-        focusedCtrl->cursorPos = (int)focusedCtrl->text.size();
+        makeFirstResponder(hit->name, true);
         return true;
     }
 
@@ -3745,7 +4523,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     if (focusedCtrl && focusedCtrl->className == "GuiTextEditCtrl" && !focusedCtrl->command.empty()) {
         Console::instance().execute(focusedCtrl->command.c_str());
     }
-    if (focusedCtrl) { focusedCtrl = nullptr; Engine::instance().platform().stopTextInput(); }
+    if (focusedCtrl) makeFirstResponder(focusedCtrl->name, false);
 
     // ShellSliderCtrl: start drag on click
     if (hit->className == "GuiSliderCtrl") {
@@ -3760,6 +4538,11 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             hit->sliderValue -= step;
             if (hit->sliderValue < hit->sliderMin) hit->sliderValue = hit->sliderMin;
             if (!hit->command.empty()) Console::instance().execute(hit->command.c_str());
+            if (auto* ts = Engine::instance().script().ts()) {
+                const std::string callback = hit->name + "::onAction";
+                if (ts->hasFunction(callback))
+                    ts->callFunction(callback, {VMValue(hit->name), VMValue(hit->sliderValue)});
+            }
             return true;
         }
         if (hit->usePlusMinus && x > ax + hit->extentX - 16) {
@@ -3768,6 +4551,11 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             hit->sliderValue += step;
             if (hit->sliderValue > hit->sliderMax) hit->sliderValue = hit->sliderMax;
             if (!hit->command.empty()) Console::instance().execute(hit->command.c_str());
+            if (auto* ts = Engine::instance().script().ts()) {
+                const std::string callback = hit->name + "::onAction";
+                if (ts->hasFunction(callback))
+                    ts->callFunction(callback, {VMValue(hit->name), VMValue(hit->sliderValue)});
+            }
             return true;
         }
         float norm = (float)(x - barX) / barW;
@@ -3780,6 +4568,11 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         }
         hit->sliderDragging = true;
         if (!hit->command.empty()) Console::instance().execute(hit->command.c_str());
+        if (auto* ts = Engine::instance().script().ts()) {
+            const std::string callback = hit->name + "::onAction";
+            if (ts->hasFunction(callback))
+                ts->callFunction(callback, {VMValue(hit->name), VMValue(hit->sliderValue)});
+        }
         return true;
     }
     // ShellWindowCtrl: start drag on title bar
@@ -3820,6 +4613,11 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         if (!hit->variable.empty())
             Console::instance().setVariable(hit->variable.c_str(), hit->checked ? "1" : "0");
     }
+    if (auto* ts = Engine::instance().script().ts()) {
+        const std::string action = hit->name + "::onAction";
+        if (ts->hasFunction(action))
+            ts->callFunction(action, {VMValue(hit->name), VMValue(hit->checked ? 1 : 0)});
+    }
     if (hit->onClick) {
         hit->onClick();
         return true;
@@ -3827,6 +4625,20 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     if (!hit->altCommand.empty()) {
         Console::instance().execute(hit->altCommand.c_str());
         return true;
+    }
+    return false;
+}
+
+bool GuiRenderer::handleSecondaryInput(int x, int y) {
+    GuiControl* hit = hitTestTop(x, y);
+    if (!hit) return false;
+    if (auto* ts = Engine::instance().script().ts()) {
+        const std::string callback = hit->name + "::onRightMouseDown";
+        if (ts->hasFunction(callback)) {
+            ts->callFunction(callback, {VMValue(hit->name), VMValue(0),
+                                        VMValue(std::to_string(x) + " " + std::to_string(y))});
+            return true;
+        }
     }
     return false;
 }
@@ -3847,6 +4659,41 @@ bool GuiRenderer::handleDrag(int x, int y) {
         };
         for (auto* d : dialogStack) if (rotate(d)) return true;
         if (rotate(canvas)) return true;
+    }
+    {
+        std::function<bool(GuiControl*)> pan = [&](GuiControl* c) -> bool {
+            if (!c) return false;
+            if (c->commanderMapDragging && c->commanderMapLastX >= 0) {
+                const float dx = (float)(x - c->commanderMapLastX);
+                const float dy = (float)(y - c->commanderMapLastY);
+                auto fieldValue = [&](const char* name, float fallback) {
+                    auto it = c->fields.find(name);
+                    return it == c->fields.end() ? fallback : (float)std::atof(it->second.c_str());
+                };
+                float centerX = 0.0f;
+                float centerZ = 0.0f;
+                if (auto* terrain = Engine::instance().game().world().terrain();
+                    terrain && terrain->loaded && terrain->size > 1) {
+                    const float worldW = terrain->size * terrain->squareSize;
+                    centerX = terrain->worldOffset.x + worldW * 0.5f;
+                    centerZ = terrain->worldOffset.z - worldW * 0.5f;
+                }
+                const float zoom = std::max(0.25f, fieldValue("mapZoom", 1.0f));
+                centerX = fieldValue("mapCenterX", centerX);
+                centerZ = fieldValue("mapCenterZ", centerZ);
+                centerX -= dx * 8.0f / zoom;
+                centerZ += dy * 8.0f / zoom;
+                c->fields["mapCenterX"] = std::to_string(centerX);
+                c->fields["mapCenterZ"] = std::to_string(centerZ);
+                c->commanderMapLastX = x;
+                c->commanderMapLastY = y;
+                return true;
+            }
+            for (auto* child : c->children) if (pan(child)) return true;
+            return false;
+        };
+        for (auto* d : dialogStack) if (pan(d)) return true;
+        if (pan(canvas)) return true;
     }
     // Find any control that is being dragged
     std::function<bool(GuiControl*)> findDrag = [&](GuiControl* ctl) -> bool {
@@ -3870,6 +4717,13 @@ bool GuiRenderer::handleDrag(int x, int y) {
             // Fire command if value changed
             if (ctl->sliderValue != oldVal && !ctl->command.empty())
                 Console::instance().execute(ctl->command.c_str());
+            if (ctl->sliderValue != oldVal) {
+                if (auto* ts = Engine::instance().script().ts()) {
+                    const std::string callback = ctl->name + "::onAction";
+                    if (ts->hasFunction(callback))
+                        ts->callFunction(callback, {VMValue(ctl->name), VMValue(ctl->sliderValue)});
+                }
+            }
             return true;
         }
         if (ctl->windowDragging) {
@@ -3955,11 +4809,22 @@ bool GuiRenderer::handleDrag(int x, int y) {
 
 void GuiRenderer::handleDragRelease() {
     if (!canvas) return;
+    if (pressedCtrl) {
+        if (auto* ts = Engine::instance().script().ts()) {
+            const std::string mouseUp = pressedCtrl->name + "::onMouseUp";
+            if (ts->hasFunction(mouseUp))
+                ts->callFunction(mouseUp, {VMValue(pressedCtrl->name)});
+        }
+        pressedCtrl = nullptr;
+    }
     std::function<void(GuiControl*)> clearDrag = [&](GuiControl* ctl) {
         if (!ctl) return;
         ctl->sliderDragging = false;
         ctl->windowDragging = false;
         ctl->modelRotating = false;
+        ctl->commanderMapDragging = false;
+        ctl->commanderMapLastX = -1;
+        ctl->commanderMapLastY = -1;
         ctl->vThumbDragging = false;
         ctl->hThumbDragging = false;
         ctl->lastDragX = -1;
@@ -3972,6 +4837,8 @@ void GuiRenderer::handleDragRelease() {
 void GuiRenderer::handleKeyboard() {
     auto& input = Engine::instance().platform().input();
     static bool prevBS = false, prevEnter = false, prevEsc = false;
+    static bool prevLeft = false, prevRight = false, prevHome = false, prevEnd = false, prevDelete = false;
+    static bool prevListUp = false, prevListDown = false;
     // Per-key previous-state tracking for the GuiInputCtrl capture below.
     // Mirroring the engine's ESC/~ edge handling (keysDown + prevX) works even
     // when the nested script event pump clears keyPressQueue in between frames
@@ -4041,7 +4908,7 @@ void GuiRenderer::handleKeyboard() {
             if (found) break;
         }
         if (!found) found = owns(canvas);
-        if (!found) { focusedCtrl = nullptr; }
+        if (!found && focusedCtrl) makeFirstResponder(focusedCtrl->name, false);
     }
 
     if (focusedCtrl) {
@@ -4064,10 +4931,34 @@ void GuiRenderer::handleKeyboard() {
                 textChanged = true;
             }
         }
+        if (input.keysDown[SCANCODE_LEFT] && !prevLeft && focusedCtrl->cursorPos > 0)
+            --focusedCtrl->cursorPos;
+        if (input.keysDown[SCANCODE_RIGHT] && !prevRight &&
+            focusedCtrl->cursorPos < (int)focusedCtrl->text.size())
+            ++focusedCtrl->cursorPos;
+        if (input.keysDown[SCANCODE_HOME] && !prevHome) focusedCtrl->cursorPos = 0;
+        if (input.keysDown[SCANCODE_END] && !prevEnd)
+            focusedCtrl->cursorPos = (int)focusedCtrl->text.size();
+        if (input.keysDown[SCANCODE_DELETE] && !prevDelete &&
+            focusedCtrl->cursorPos < (int)focusedCtrl->text.size()) {
+            focusedCtrl->text.erase(focusedCtrl->cursorPos, 1);
+            textChanged = true;
+        }
 
         // Fire command on text change (T2 convention: command fires on every edit)
-        if (textChanged && !focusedCtrl->command.empty()) {
-            Console::instance().execute(focusedCtrl->command.c_str());
+        if (textChanged) {
+            if (!focusedCtrl->variable.empty()) {
+                Console::instance().setVariable(focusedCtrl->variable.c_str(), focusedCtrl->text.c_str());
+                if (auto* ts = Engine::instance().script().ts())
+                    ts->setGlobal(focusedCtrl->variable, VMValue(focusedCtrl->text));
+            }
+            if (auto* ts = Engine::instance().script().ts()) {
+                const std::string callback = focusedCtrl->name + "::onTextChanged";
+                if (ts->hasFunction(callback))
+                    ts->callFunction(callback, {VMValue(focusedCtrl->name), VMValue(focusedCtrl->text)});
+            }
+            if (!focusedCtrl->command.empty())
+                Console::instance().execute(focusedCtrl->command.c_str());
         }
 
         if (input.keysDown[SCANCODE_RETURN] && !prevEnter) {
@@ -4083,9 +4974,32 @@ void GuiRenderer::handleKeyboard() {
         }
 
         if (input.keysDown[SCANCODE_ESCAPE] && !prevEsc) {
-            focusedCtrl = nullptr;
+            makeFirstResponder(focusedCtrl->name, false);
         }
     } else {
+        if (selectedList && selectedList->visible &&
+            (selectedList->className == "GuiListBoxCtrl" ||
+             selectedList->className == "GuiTextListCtrl")) {
+            const bool up = input.keysDown[SCANCODE_UP] && !prevListUp;
+            const bool down = input.keysDown[SCANCODE_DOWN] && !prevListDown;
+            if ((up || down) && !selectedList->listRows.empty()) {
+                int row = selectedList->selectedRow;
+                if (row < 0) row = down ? 0 : (int)selectedList->listRows.size() - 1;
+                else row += down ? 1 : -1;
+                row = std::clamp(row, 0, (int)selectedList->listRows.size() - 1);
+                selectedList->selectedRow = row;
+                const int id = row < (int)selectedList->listRowIds.size()
+                    ? selectedList->listRowIds[row] : row;
+                if (auto* ts = Engine::instance().script().ts()) {
+                    const std::string callback = selectedList->name + "::onSelect";
+                    if (ts->hasFunction(callback))
+                        ts->callFunction(callback, {VMValue(selectedList->name),
+                                                    VMValue(id),
+                                                    VMValue(selectedList->listRows[row])});
+                }
+                input.consumedSc[down ? SCANCODE_DOWN : SCANCODE_UP] = true;
+            }
+        }
         // No text control focused: T2 fires only explicit ACCELERATORS on
         // Enter (e.g. MessageBox YES="enter") — never a random default
         // button, which leaked keystrokes into unrelated responders.
@@ -4127,13 +5041,20 @@ void GuiRenderer::handleKeyboard() {
     prevBS = input.keysDown[SCANCODE_BACKSPACE];
     prevEnter = input.keysDown[SCANCODE_RETURN];
     prevEsc = input.keysDown[SCANCODE_ESCAPE];
+    prevLeft = input.keysDown[SCANCODE_LEFT];
+    prevRight = input.keysDown[SCANCODE_RIGHT];
+    prevHome = input.keysDown[SCANCODE_HOME];
+    prevEnd = input.keysDown[SCANCODE_END];
+    prevDelete = input.keysDown[SCANCODE_DELETE];
+    prevListUp = input.keysDown[SCANCODE_UP];
+    prevListDown = input.keysDown[SCANCODE_DOWN];
 }
 
 // Create a GuiControl from a ScriptObject (and recursively create children)
 GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     auto& objs = ScriptEngine::instance().objects;
     auto it = objs.find(name);
-    if (it == objs.end() || !(it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className == "GameTSCtrl"))
+    if (it == objs.end() || !(it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className.find("Hud") == 0 || it->second->className == "GameTSCtrl"))
         return nullptr;
     // Canonical identity: reuse the registered instance if one exists.
     {
@@ -4180,6 +5101,8 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     fi = it->second->fields.find("sel"); if (fi != it->second->fields.end()) ctl->checked = fi->second.toBool();
     fi = it->second->fields.find("active"); if (fi != it->second->fields.end()) ctl->active = fi->second.toBool();
     fi = it->second->fields.find("variable"); if (fi != it->second->fields.end()) ctl->variable = fi->second.toString();
+    for (const auto& [field, value] : it->second->fields)
+        ctl->fields[field] = value.toString();
     fi = it->second->fields.find("range"); if (fi != it->second->fields.end()) {
         float lo = 0, hi = 1;
         sscanf(fi->second.toString().c_str(), "%f %f", &lo, &hi);
@@ -4190,7 +5113,13 @@ GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
     fi = it->second->fields.find("noTitleBar"); if (fi != it->second->fields.end()) ctl->usePlusMinus = !fi->second.toBool(); // repurpose: no titlebar
     fi = it->second->fields.find("value"); if (fi != it->second->fields.end()) {
         float v = (float)fi->second.toDouble();
+        ctl->hudValue = v;
+        ctl->hudValueSet = true;
         if (ctl->className.find("Slider") != std::string::npos) ctl->sliderValue = v;
+        if (ctl->className == "GuiProgressCtrl" || ctl->className.find("Hud") == 0) {
+            ctl->hudValue = v;
+            ctl->hudValueSet = true;
+        }
     }
     if (ctl->className == "GuiCanvas") canvas = ctl;
     bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl";
@@ -4224,7 +5153,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
         // Try creating the GuiControl from the ScriptObject on-the-fly
         auto& objs = ScriptEngine::instance().objects;
         auto it = objs.find(name);
-        if (it != objs.end() && (it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className == "GameTSCtrl")) {
+        if (it != objs.end() && (it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className.find("Hud") == 0 || it->second->className == "GameTSCtrl")) {
             ctl = soToGui(name, nullptr);
         }
     }
@@ -4252,6 +5181,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
                     ts->callFunction(name + "::onWake", {VMValue(name)});
                 }
             }
+            callGuiChildLifecycle(ctl, "::onWake");
             Console::instance().printf(LogLevel::Debug, "GUI: pushDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
             // Persistent chrome: keep LaunchToolbarDlg on TOP of the stack so
             // the bar stays visible and clickable over OptionsDlg,
@@ -4287,12 +5217,14 @@ void GuiRenderer::popDialog(const std::string& name) {
             if (!slept) {
                 slept = true;
                 if (auto* ts = Engine::instance().script().ts()) {
-                    if (ts->hasFunction(name + "::onSleep")) {
+                    const std::string sleepingName = (*it)->name;
+                    if (ts->hasFunction(sleepingName + "::onSleep")) {
                         Console::instance().printf(LogLevel::Debug,
-                            "GUI: popDialog calling onSleep '%s'", name.c_str());
-                        ts->callFunction(name + "::onSleep", {VMValue(name)});
+                            "GUI: popDialog calling onSleep '%s'", sleepingName.c_str());
+                        ts->callFunction(sleepingName + "::onSleep", {VMValue(sleepingName)});
                     }
                 }
+                callGuiChildLifecycle(*it, "::onSleep");
             }
             // Drop keyboard focus if it lived inside the removed subtree —
             // a stale focusedCtrl would keep firing its command on Enter.
@@ -4302,8 +5234,12 @@ void GuiRenderer::popDialog(const std::string& name) {
                 return false;
             };
             if (focusedCtrl && ownsFocused(*it)) {
-                focusedCtrl = nullptr;
-                Engine::instance().platform().stopTextInput();
+                makeFirstResponder(focusedCtrl->name, false);
+            }
+            if (selectedList) {
+                GuiControl* p = selectedList;
+                while (p && p != *it) p = p->parent;
+                if (p == *it) selectedList = nullptr;
             }
             it = dialogStack.erase(it);
         } else {
@@ -4315,11 +5251,53 @@ void GuiRenderer::popDialog(const std::string& name) {
 }
 
 void GuiRenderer::clearDialogs() {
+    const auto dialogs = dialogStack;
+    if (auto* ts = Engine::instance().script().ts()) {
+        for (auto it = dialogs.rbegin(); it != dialogs.rend(); ++it) {
+            if (!*it) continue;
+            const std::string callback = (*it)->name + "::onSleep";
+            if (ts->hasFunction(callback))
+                ts->callFunction(callback, {VMValue((*it)->name)});
+        }
+    }
+    if (focusedCtrl) makeFirstResponder(focusedCtrl->name, false);
     focusedCtrl = nullptr;
+    pressedCtrl = nullptr;
+    selectedList = nullptr;
     Engine::instance().platform().stopTextInput();
     dialogStack.clear();
     lastPushed.clear();
     s_openPopups.clear();
+}
+
+bool GuiRenderer::makeFirstResponder(const std::string& name, bool focus) {
+    GuiControl* ctl = findControl(name);
+    if (!ctl) return false;
+    if (!focus) {
+        if (focusedCtrl == ctl) {
+            if (auto* ts = Engine::instance().script().ts()) {
+                const std::string callback = ctl->name + "::onLoseFirstResponder";
+                if (ts->hasFunction(callback)) ts->callFunction(callback, {VMValue(ctl->name)});
+            }
+            focusedCtrl = nullptr;
+            Engine::instance().platform().stopTextInput();
+        }
+        return true;
+    }
+    if (focusedCtrl && focusedCtrl != ctl) {
+        if (auto* ts = Engine::instance().script().ts()) {
+            const std::string callback = focusedCtrl->name + "::onLoseFirstResponder";
+            if (ts->hasFunction(callback)) ts->callFunction(callback, {VMValue(focusedCtrl->name)});
+        }
+    }
+    if (focusedCtrl != ctl) Engine::instance().platform().startTextInput();
+    focusedCtrl = ctl;
+    focusedCtrl->cursorPos = (int)focusedCtrl->text.size();
+    if (auto* ts = Engine::instance().script().ts()) {
+        const std::string callback = ctl->name + "::onGainFirstResponder";
+        if (ts->hasFunction(callback)) ts->callFunction(callback, {VMValue(ctl->name)});
+    }
+    return true;
 }
 
 void GuiRenderer::callOnAddOnce(GuiControl* ctl) {
@@ -4365,6 +5343,7 @@ void GuiRenderer::setContent(const std::string& name) {
     if (auto* ts = Engine::instance().script().ts()) {
         if (ts->hasFunction(name + "::onWake")) ts->callFunction(name + "::onWake", {VMValue(name)});
     }
+    callGuiChildLifecycle(ctl, "::onWake");
     inBaseDialogPush = false;
 }
 
@@ -4412,4 +5391,39 @@ GuiControl* GuiRenderer::findControl(const std::string& name) {
         return lit->second;
     if (!canvas) return nullptr;
     return canvas->findChild(name);
+}
+
+bool GuiRenderer::removeControl(const std::string& name) {
+    GuiControl* ctl = findControl(name);
+    if (!ctl || ctl == canvas) return false;
+    std::function<void(GuiControl*)> destroy = [&](GuiControl* current) {
+        if (!current) return;
+        const auto children = current->children;
+        for (auto* child : children) destroy(child);
+        createdControls().erase(lowerKey(current->name));
+        lastPushed.erase(current->name);
+        onAddCalled.erase(current->name);
+        delete current;
+    };
+    if (ctl->parent) {
+        auto& siblings = ctl->parent->children;
+        siblings.erase(std::remove(siblings.begin(), siblings.end(), ctl), siblings.end());
+    }
+    dialogStack.erase(std::remove(dialogStack.begin(), dialogStack.end(), ctl), dialogStack.end());
+    auto owns = [&](GuiControl* root, GuiControl* node) {
+        for (auto* current = node; current; current = current->parent)
+            if (current == root) return true;
+        return false;
+    };
+    if (focusedCtrl && owns(ctl, focusedCtrl))
+        makeFirstResponder(focusedCtrl->name, false);
+    if (pressedCtrl && owns(ctl, pressedCtrl)) {
+        if (auto* ts = Engine::instance().script().ts()) {
+            const std::string callback = pressedCtrl->name + "::onMouseUp";
+            if (ts->hasFunction(callback)) ts->callFunction(callback, {VMValue(pressedCtrl->name)});
+        }
+        pressedCtrl = nullptr;
+    }
+    destroy(ctl);
+    return true;
 }

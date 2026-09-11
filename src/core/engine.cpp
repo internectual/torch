@@ -1149,7 +1149,7 @@ bool Engine::init(int argc, char* argv[]) {
             }
             Console::instance().printf(LogLevel::Debug, "TS: bind(%s, %d, '%s') = '%s'",
                 objName.empty() ? "?" : objName.c_str(), device, keyName.c_str(), command.c_str());
-            return VMValue(1);
+            return VMValue(0);
         });
         scr->ts()->registerNative("bindcmd", [](const auto& args) -> VMValue {
             auto& s_actionBinds = actionBindingStore();
@@ -1202,7 +1202,19 @@ bool Engine::init(int argc, char* argv[]) {
             return VMValue(1);
         });
         scr->ts()->registerNative("copybind", [](const auto& args) -> VMValue {
-            return VMValue(1);
+            auto& binds = actionBindingStore();
+            if (args.size() < 3) return VMValue(0);
+            const std::string dest = args[0].toString();
+            const std::string source = args[1].toString();
+            const std::string command = args[2].toString();
+            for (const auto& [key, binding] : binds) {
+                const auto& [map, device, keyName] = key;
+                if (map == source && binding.cmdOn == command) {
+                    binds[{dest, device, keyName}] = binding;
+                    return VMValue(1);
+                }
+            }
+            return VMValue(0);
         });
     }
 
@@ -1901,6 +1913,8 @@ void Engine::run() {
             }
             bool pressed = plat->input().mouseButtons[1] != 0;
             static bool prevPressed = false;
+            bool secondaryPressed = plat->input().mouseButtons[3] != 0;
+            static bool prevSecondaryPressed = false;
             if (pressed && !prevPressed) {
                 if (gui->handleInput(mx, my, true))
                     plat->input().consumedMouse[1] = true;
@@ -1909,7 +1923,12 @@ void Engine::run() {
             } else if (!pressed && prevPressed) {
                 gui->handleDragRelease();
             }
+            if (secondaryPressed && !prevSecondaryPressed) {
+                if (gui->handleSecondaryInput(mx, my))
+                    plat->input().consumedMouse[3] = true;
+            }
             prevPressed = pressed;
+            prevSecondaryPressed = secondaryPressed;
         }
 
         // GUI keyboard input (text fields) — skip when console is active
@@ -1958,8 +1977,12 @@ void Engine::run() {
                 if (tsInput && !g->isMapperMode()) {
                     for (const auto& [binding, action] : actionBindingStore()) {
                         const auto& [mapName, device, keyName] = binding;
-                        if (action.cmdOn.empty() ||
-                            (mapName != "moveMap" && mapName != "observerMap")) continue;
+                        bool mapActive = mapName == "moveMap" || mapName == "observerMap";
+                        if (!mapActive) {
+                            if (auto* map = ScriptEngine::instance().findObject(mapName.c_str()))
+                                mapActive = map->internals["__pushed"].toBool();
+                        }
+                        if (action.cmdOn.empty() || !mapActive) continue;
                         if (device == 1 && (keyName == "xaxis" || keyName == "yaxis")) {
                             const float value = keyName == "xaxis"
                                 ? (float)plat->input().mouseDeltaX * 0.002f
@@ -3024,6 +3047,9 @@ void Engine::run() {
         frameCount++;
         fpsTimer += dt;
         if (fpsTimer >= 1.0f) {
+            Console::instance().setVariable("$FPS::Real", std::to_string(frameCount).c_str());
+            Console::instance().setVariable("$OpenGL::triCount3",
+                                             std::to_string(ren->stats.triangles).c_str());
             char title[128];
             if (mapperMode)
                 snprintf(title, sizeof(title), "Torch Mapper Mode - %s - %d FPS", mapperMap.c_str(), frameCount);

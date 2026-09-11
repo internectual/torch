@@ -105,6 +105,10 @@ public:
     void setState(State s) { connState = s; }
     NetAddress address() const { return remoteAddr; }
     uint32_t ping() const { return currentPing; }
+    uint64_t sentPacketCount() const;
+    uint64_t receivedPacketCount() const;
+    uint64_t sentByteCount() const;
+    uint64_t receivedByteCount() const;
     uint64_t protocolEpoch() const { return epoch; }
 
     void sendPacket(PacketType type, const uint8_t* data, size_t size);
@@ -117,6 +121,8 @@ public:
 
     using CommandCallback = std::function<void(const std::string&)>;
     void setCommandCallback(CommandCallback cb) { commandCb = cb; }
+    using ClientCommandCallback = std::function<void(const std::vector<std::string>&)>;
+    void setClientCommandCallback(ClientCommandCallback cb) { clientCommandCb = std::move(cb); }
 
     using TargetCallback = std::function<void(const V12::ServerEvent::TargetInfo*,
                                               uint16_t)>;
@@ -189,6 +195,7 @@ private:
     uint32_t currentPing = 0;
     PacketCallback packetCb;
     CommandCallback commandCb;
+    ClientCommandCallback clientCommandCb;
     TargetCallback targetCb;
     MissionCallback missionCb;
     ServerMessageCallback serverMessageCb;

@@ -67,6 +67,10 @@ public:
     const std::string& dbgFile() const;
     int dbgLine() const;
     VMValue callFunction(const std::string& name, const std::vector<VMValue>& args);
+    void registerMessageCallback(const std::string& messageType,
+                                 const std::string& functionName);
+    void dispatchMessageCallback(const std::string& messageType,
+                                 const std::vector<VMValue>& args);
 
     void setGlobal(const std::string& name, const VMValue& val);
     VMValue getGlobal(const std::string& name);

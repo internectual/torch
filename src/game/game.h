@@ -8,6 +8,7 @@
 #include "game/demo.h"
 #include "game/hud.h"
 #include <vector>
+#include <algorithm>
 #include <string>
 #include <deque>
 #include <unordered_map>
@@ -53,9 +54,11 @@ public:
 
     float health() const { return hp; }
     float energy() const { return eng; }
+    float heat() const { return heatLevel; }
     float armor() const { return arm; }
     int team() const { return teamId; }
     void setTeam(int team) { teamId = team; }
+    void setHeat(float value) { heatLevel = std::clamp(value, 0.0f, 100.0f); }
     bool isDead() const { return hp <= 0; }
     bool isOnGround() const { return onGround; }
     AnimState animState() const { return anim; }
@@ -93,6 +96,7 @@ private:
     Point3F vel{0, 0, 0};
     float hp = 100.0f;
     float eng = 100.0f;
+    float heatLevel = 0.0f;
     float arm = 0.0f;
     int teamId = 1;
     bool onGround = true;
@@ -367,8 +371,10 @@ public:
     uint32_t moveSeq = 0;
     std::deque<StoredMove> pendingMoves;
     void reconcile(const Point3F& serverPos, const Point3F& serverVel, uint32_t lastProcessedSeq);
+    void dispatchHudClientCommand(const std::vector<std::string>& args);
 
     bool scoreboardShown() const { return showScoreboard; }
+    bool isZooming() const { return currentInput.zoom; }
     bool isDemoPlaying() const { return demoPlaying; }
     bool isDemoPaused() const { return demoPaused; }
     bool isDemoFastForward() const { return demoFastForward || demoJetHeld; }

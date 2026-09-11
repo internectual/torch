@@ -2179,8 +2179,14 @@ bool ScriptEngine::init() {
     // Mark a GUI control as persistent so setContent preserves it across panel swaps
 
     // Console functions used by ConsoleDlg.gui (ToggleConsole / ConsoleEntry::eval)
-    tsInstance->registerNative("activateKeyboard", [](const auto&) -> VMValue { return VMValue(1); });
-    tsInstance->registerNative("deactivateKeyboard", [](const auto&) -> VMValue { return VMValue(1); });
+    tsInstance->registerNative("activateKeyboard", [](const auto&) -> VMValue {
+        Engine::instance().platform().startTextInput();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("deactivateKeyboard", [](const auto&) -> VMValue {
+        Engine::instance().platform().stopTextInput();
+        return VMValue(1);
+    });
     tsInstance->registerNative("eval", [](const auto& args) -> VMValue {
         if (!args.empty()) {
             std::string code = args[0].toString();
@@ -2191,9 +2197,11 @@ bool ScriptEngine::init() {
     });
     // Console history
     tsInstance->registerNative("showCursor", [](const auto&) -> VMValue {
+        Engine::instance().platform().showMouse(true);
         return VMValue(1);
     });
     tsInstance->registerNative("hideCursor", [](const auto&) -> VMValue {
+        Engine::instance().platform().showMouse(false);
         return VMValue(1);
     });
     tsInstance->registerNative("setContent", [](const auto& args) -> VMValue {
@@ -2218,21 +2226,40 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("playGui", [](const auto& args) -> VMValue {
-        if (!args.empty())
-            Console::instance().printf(LogLevel::Info, "playGui: %s", args[0].toString().c_str());
+        if (!args.empty()) {
+            const std::string name = args.back().toString();
+            if (!name.empty()) Engine::instance().guiRenderer().setContent(name);
+        }
         return VMValue(1);
     });
     tsInstance->registerNative("Show", [](const auto& args) -> VMValue {
+        if (!args.empty())
+            if (auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString())) {
+                ctl->visible = true;
+                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                    obj->fields["visible"] = VMValue("1");
+            }
         return VMValue(1);
     });
     tsInstance->registerNative("Hide", [](const auto& args) -> VMValue {
+        if (!args.empty())
+            if (auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString())) {
+                ctl->visible = false;
+                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                    obj->fields["visible"] = VMValue("0");
+            }
         return VMValue(1);
     });
-    tsInstance->registerNative("isActive", [](const auto&) -> VMValue {
-        return VMValue(1);
+    tsInstance->registerNative("isActive", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString());
+        return VMValue(ctl && ctl->active && ctl->visible ? 1 : 0);
     });
-    tsInstance->registerNative("makeFirstResponder", [](const auto&) -> VMValue {
-        return VMValue(1);
+    tsInstance->registerNative("makeFirstResponder", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const std::string name = args[0].toString();
+        const bool focus = args.size() < 2 || args[1].toBool();
+        return VMValue(Engine::instance().guiRenderer().makeFirstResponder(name, focus) ? 1 : 0);
     });
 
     // File operations needed by startup scripts
@@ -2418,6 +2445,8 @@ bool ScriptEngine::init() {
         if (args.size() >= 2) {
             std::string msgType = args[0].toString();
             std::string callback = args[1].toString();
+            if (auto* ts = Engine::instance().script().ts())
+                ts->registerMessageCallback(msgType, callback);
             Console::instance().printf(LogLevel::Debug, "addMessageCallback: type='%s' callback='%s'", msgType.c_str(), callback.c_str());
         }
         return VMValue(1);
@@ -2542,9 +2571,13 @@ bool ScriptEngine::init() {
 
     // Missing startup function stubs
     tsInstance->registerNative("activateDirectInput", [](const auto&) -> VMValue {
+        Engine::instance().platform().setRelativeMouse(true);
+        Engine::instance().platform().showMouse(false);
         return VMValue(1);
     });
     tsInstance->registerNative("deactivateDirectInput", [](const auto&) -> VMValue {
+        Engine::instance().platform().setRelativeMouse(false);
+        Engine::instance().platform().showMouse(true);
         return VMValue(1);
     });
     tsInstance->registerNative("setNetPort", [](const auto& args) -> VMValue {
@@ -2579,10 +2612,36 @@ bool ScriptEngine::init() {
             ctl->listRowIds.clear();
             ctl->selectedRow = -1;
             ctl->menuItems.clear();
+            if (ctl->className == "GuiTreeView") {
+                ctl->treeItems.clear();
+                ctl->selectedTreeItem = 0;
+                ctl->nextTreeItemId = 1;
+            }
+        } else if (auto* obj = ScriptEngine::instance().findObject(cname.c_str());
+                   obj && obj->className == "MessageVector") {
+            obj->internals.clear();
+            obj->internals["__lineCount"] = VMValue(0);
         }
         return VMValue(1);
     });
     tsInstance->registerNative("add", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            auto* group = ScriptEngine::instance().findObject(args[0].toString().c_str());
+            auto* childObject = ScriptEngine::instance().findObject(args[1].toString().c_str());
+            if (group && childObject && group->className.find("Sim") == 0) {
+                const int count = group->internals["__childCount"].toInt();
+                group->internals["__child" + std::to_string(count)] = VMValue(childObject->name);
+                group->internals["__childCount"] = VMValue(count + 1);
+                childObject->internals["__parent"] = VMValue(group->name);
+                return VMValue(1);
+            }
+        }
+        if (args.size() >= 2) {
+            auto* parent = getListCtrl(args[0].toString());
+            auto* child = getListCtrl(args[1].toString());
+            if (parent && child && child != parent) parent->addChild(child);
+            if (args.size() == 2) return VMValue(1);
+        }
         if (args.size() < 3) return VMValue(1);
         auto* ctl = getListCtrl(args[0].toString());
         if (!ctl) return VMValue(1);
@@ -2601,6 +2660,33 @@ bool ScriptEngine::init() {
             id = (int)args[2].toDouble();
         }
         ctl->menuItems.push_back({id, txt, false});
+        return VMValue(1);
+    });
+    tsInstance->registerNative("remove", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(1);
+        auto* group = ScriptEngine::instance().findObject(args[0].toString().c_str());
+        if (group && group->className.find("Sim") == 0) {
+            const std::string childName = args[1].toString();
+            const int count = group->internals["__childCount"].toInt();
+            for (int i = 0; i < count; ++i) {
+                if (group->internals["__child" + std::to_string(i)].toString() != childName) continue;
+                for (int j = i + 1; j < count; ++j)
+                    group->internals["__child" + std::to_string(j - 1)] =
+                        group->internals["__child" + std::to_string(j)];
+                group->internals.erase("__child" + std::to_string(count - 1));
+                group->internals["__childCount"] = VMValue(count - 1);
+                return VMValue(1);
+            }
+            return VMValue(0);
+        }
+        auto* parent = getListCtrl(args[0].toString());
+        auto* child = getListCtrl(args[1].toString());
+        if (!parent || !child) return VMValue(1);
+        auto it = std::find(parent->children.begin(), parent->children.end(), child);
+        if (it != parent->children.end()) {
+            parent->children.erase(it);
+            child->parent = nullptr;
+        }
         return VMValue(1);
     });
     tsInstance->registerNative("addSeparator", [getListCtrl](const auto& args) -> VMValue {
@@ -3105,6 +3191,10 @@ bool ScriptEngine::init() {
         if (!ctl->menuItems.empty()) return VMValue((int32_t)ctl->menuItems.size());
         return VMValue((int32_t)ctl->listRows.size());
     });
+    tsInstance->registerNative("getRowCount", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        return ctl ? VMValue((int32_t)ctl->listRows.size()) : VMValue(0);
+    });
     // getText() — return the currently selected/displayed text
     tsInstance->registerNative("getText", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
@@ -3159,6 +3249,8 @@ bool ScriptEngine::init() {
             auto* ctl = getListCtrl(args[0].toString());
             if (ctl) {
                 ctl->visible = args[1].toInt() != 0;
+                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                    obj->fields["visible"] = VMValue(ctl->visible ? "1" : "0");
             }
         }
         return VMValue(1);
@@ -3175,10 +3267,176 @@ bool ScriptEngine::init() {
         if (obj) return VMValue(name);
         return VMValue(0);
     });
+    tsInstance->registerNative("getName", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const std::string objectName = args[0].toString();
+        if (auto* object = ScriptEngine::instance().findObject(objectName.c_str()))
+            return VMValue(object->name);
+        return VMValue(objectName);
+    });
+    tsInstance->registerNative("getClassName", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const std::string objectName = args[0].toString();
+        if (auto* object = ScriptEngine::instance().findObject(objectName.c_str()))
+            return VMValue(object->className);
+        return VMValue("");
+    });
+    auto inventoryObject = [](const std::vector<VMValue>& args) -> ScriptObject* {
+        return args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str());
+    };
+    tsInstance->registerNative("getInventory", [inventoryObject](const auto& args) -> VMValue {
+        auto* object = inventoryObject(args);
+        if (!object || args.size() < 2) return VMValue(0);
+        return object->fields["inventory::" + args[1].toString()];
+    });
+    tsInstance->registerNative("setInventory", [inventoryObject](const auto& args) -> VMValue {
+        auto* object = inventoryObject(args);
+        if (!object || args.size() < 3) return VMValue(0);
+        object->fields["inventory::" + args[1].toString()] = args[2];
+        return VMValue(1);
+    });
+    tsInstance->registerNative("incInventory", [inventoryObject](const auto& args) -> VMValue {
+        auto* object = inventoryObject(args);
+        if (!object || args.size() < 3) return VMValue(0);
+        const std::string key = "inventory::" + args[1].toString();
+        const int amount = object->fields[key].toInt() + args[2].toInt();
+        object->fields[key] = VMValue(amount);
+        return VMValue(amount);
+    });
+    tsInstance->registerNative("decInventory", [inventoryObject](const auto& args) -> VMValue {
+        auto* object = inventoryObject(args);
+        if (!object || args.size() < 3) return VMValue(0);
+        const std::string key = "inventory::" + args[1].toString();
+        const int amount = std::max(0, object->fields[key].toInt() - args[2].toInt());
+        object->fields[key] = VMValue(amount);
+        return VMValue(amount);
+    });
+    tsInstance->registerNative("maxInventory", [inventoryObject](const auto& args) -> VMValue {
+        auto* object = inventoryObject(args);
+        if (!object || args.size() < 2) return VMValue(0);
+        return object->fields["maxInventory::" + args[1].toString()];
+    });
+    tsInstance->registerNative("getDataBlock", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["dataBlock"];
+        return VMValue("");
+    });
+    tsInstance->registerNative("getTarget", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(-1);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["target"].toInt();
+        return VMValue(-1);
+    });
+    tsInstance->registerNative("setTarget", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
+            object->fields["target"] = args[1];
+            return VMValue(1);
+        }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("setTargetObject", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
+            object->fields["targetObject"] = args[1];
+            return VMValue(1);
+        }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("getMountedImage", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["mountedImage::" + std::to_string(args[1].toInt())];
+        return VMValue(0);
+    });
+    tsInstance->registerNative("setMountedImage", [](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
+            object->fields["mountedImage::" + std::to_string(args[1].toInt())] = args[2];
+            return VMValue(1);
+        }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("getMountNodeObject", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["mountNode::" + args[1].toString()];
+        return VMValue(0);
+    });
+    tsInstance->registerNative("getTransform", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["transform"];
+        return VMValue("");
+    });
+    tsInstance->registerNative("setTransform", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
+            object->fields["transform"] = args[1];
+            return VMValue(1);
+        }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("getWorldBoxCenter", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
+            auto it = object->fields.find("worldBoxCenter");
+            if (it != object->fields.end()) return it->second;
+            return object->fields["position"];
+        }
+        return VMValue("");
+    });
+    tsInstance->registerNative("getDamageState", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["damageState"];
+        return VMValue("");
+    });
+    tsInstance->registerNative("isMounted", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["mounted"].toBool() ? VMValue(1) : VMValue(0);
+        return VMValue(0);
+    });
+    tsInstance->registerNative("getType", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["type"];
+        return VMValue(0);
+    });
+    tsInstance->registerNative("getVelocity", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["velocity"];
+        return VMValue("");
+    });
+    tsInstance->registerNative("getEnergyPercent", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0f);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["energyPercent"];
+        return VMValue(0.0f);
+    });
+    tsInstance->registerNative("getDamagePercent", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0f);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["damagePercent"];
+        return VMValue(0.0f);
+    });
+    tsInstance->registerNative("isAIControlled", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return VMValue(object->fields["aiControlled"].toBool() ? 1 : 0);
+        return VMValue(0);
+    });
     tsInstance->registerNative("setActive", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() >= 2) {
             auto* ctl = getListCtrl(args[0].toString());
-            if (ctl) ctl->active = args[1].toInt() != 0;
+            if (ctl) {
+                ctl->active = args[1].toInt() != 0;
+                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                    obj->fields["active"] = VMValue(ctl->active ? "1" : "0");
+            }
         }
         return VMValue(1);
     });
@@ -3186,14 +3444,48 @@ bool ScriptEngine::init() {
         if (!args.empty()) {
             std::string objName = args[0].toString();
             auto* obj = ScriptEngine::instance().findObject(objName.c_str());
-            if (obj) {
-                // Don't delete GUI objects — they're managed by C++ renderer
+                if (obj) {
                 if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 ||
-                    obj->className.find("Sim") == 0 || objName.find("Profile") != std::string::npos) {
-                    Console::instance().printf(LogLevel::Debug, "delete: skipped GUI object '%s' (class=%s)", objName.c_str(), obj->className.c_str());
-                    return VMValue(1);
+                    obj->className.find("Hud") == 0) {
+                    Engine::instance().guiRenderer().removeControl(objName);
                 }
+                if (obj->className.find("Profile") != std::string::npos) return VMValue(1);
                 Console::instance().printf(LogLevel::Debug, "delete: removing ScriptObject '%s'", objName.c_str());
+                std::set<std::string> doomed{objName};
+                bool expanded = true;
+                while (expanded) {
+                    expanded = false;
+                    for (const auto& [candidateName, candidate] : ScriptEngine::instance().objects) {
+                        auto parent = candidate->internals.find("parent");
+                        if (parent != candidate->internals.end() &&
+                            doomed.count(parent->second.toString()) &&
+                            doomed.insert(candidateName).second)
+                            expanded = true;
+                    }
+                }
+                for (const auto& doomedName : doomed) {
+                    if (doomedName == objName) continue;
+                    auto childIt = ScriptEngine::instance().objects.find(doomedName);
+                    if (childIt != ScriptEngine::instance().objects.end()) {
+                        delete childIt->second;
+                        ScriptEngine::instance().objects.erase(childIt);
+                    }
+                }
+                const std::string parentName = obj->internals["__parent"].toString();
+                if (!parentName.empty()) {
+                    if (auto* parent = ScriptEngine::instance().findObject(parentName.c_str())) {
+                        const int count = parent->internals["__childCount"].toInt();
+                        for (int i = 0; i < count; ++i) {
+                            if (parent->internals["__child" + std::to_string(i)].toString() != objName) continue;
+                            for (int j = i + 1; j < count; ++j)
+                                parent->internals["__child" + std::to_string(j - 1)] =
+                                    parent->internals["__child" + std::to_string(j)];
+                            parent->internals.erase("__child" + std::to_string(count - 1));
+                            parent->internals["__childCount"] = VMValue(count - 1);
+                            break;
+                        }
+                    }
+                }
                 ScriptEngine::instance().objects.erase(objName);
                 delete obj;
             }
@@ -3210,6 +3502,11 @@ bool ScriptEngine::init() {
                     ctl->selected = args[1].toBool();  // T2 tabs: setValue(1/0) = select/deselect
                 else if (ctl->className.find("Slider") != std::string::npos)
                     ctl->sliderValue = (float)args[1].toInt() / 1000.0f;  // T2 convention: value * 1000
+                else if (ctl->className == "GuiProgressCtrl" || ctl->className.find("Hud") == 0) {
+                    ctl->hudValue = (float)args[1].toDouble();
+                    ctl->hudValueSet = true;
+                    ctl->fields["value"] = args[1].toString();
+                }
                 else if (ctl->className.find("Window") != std::string::npos && args.size() >= 4) {
                     ctl->posX = (float)args[1].toInt();
                     ctl->posY = (float)args[2].toInt();
@@ -3217,6 +3514,8 @@ bool ScriptEngine::init() {
                 }
                 else
                     ctl->text = args[1].toString();
+                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                    obj->fields["value"] = VMValue(args[1].toString());
             }
         }
         return VMValue(1);
@@ -3227,6 +3526,8 @@ bool ScriptEngine::init() {
         if (!ctl) return VMValue(0);
         if (ctl->className.find("Slider") != std::string::npos)
             return VMValue((int)(ctl->sliderValue * 1000.0f));  // T2 convention
+        if (ctl->className == "GuiProgressCtrl" || ctl->className.find("Hud") == 0)
+            return VMValue(ctl->hudValueSet ? ctl->hudValue : 0.0f);
         if (ctl->className.find("CheckBox") != std::string::npos || ctl->className.find("Radio") != std::string::npos || ctl->className.find("Toggle") != std::string::npos)
             return VMValue(ctl->checked ? 1 : 0);
         return VMValue(ctl->text);
@@ -3243,6 +3544,269 @@ bool ScriptEngine::init() {
         if (!ctl) return VMValue("0 0");
         return VMValue(std::to_string((int)ctl->posX) + " " + std::to_string((int)ctl->posY));
     });
+    tsInstance->registerNative("getGroup", [getListCtrl](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        auto* ctl = getListCtrl(args[0].toString());
+        if (ctl && ctl->parent) return VMValue(ctl->parent->name);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->internals["__parent"];
+        return VMValue("");
+    });
+    tsInstance->registerNative("getChild", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        auto* ctl = getListCtrl(args[0].toString());
+        const int index = args[1].toInt();
+        if (ctl && ctl->className == "GuiTreeView") {
+            for (const auto& item : ctl->treeItems)
+                if (item.parent == index) return VMValue(item.id);
+            return VMValue(0);
+        }
+        if (!ctl || index < 0 || index >= (int)ctl->children.size()) return VMValue("");
+        return VMValue(ctl->children[index]->name);
+    });
+    tsInstance->registerNative("getObject", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        auto* ctl = getListCtrl(args[0].toString());
+        const int index = args[1].toInt();
+        if (ctl) {
+            if (ctl->className == "GuiTreeView") {
+                for (const auto& item : ctl->treeItems)
+                    if (item.parent == index) return VMValue(item.id);
+                return VMValue(0);
+            }
+            if (index < 0 || index >= (int)ctl->children.size()) return VMValue("");
+            return VMValue(ctl->children[index]->name);
+        }
+        if (auto* group = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return group->internals["__child" + std::to_string(index)];
+        return VMValue("");
+    });
+    tsInstance->registerNative("getCount", [getListCtrl](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl) {
+            if (auto* group = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+                return VMValue(group->internals["__childCount"].toInt());
+            return VMValue(0);
+        }
+        if (ctl->className == "GuiTreeView") return VMValue((int32_t)ctl->treeItems.size());
+        if (!ctl->children.empty()) return VMValue((int32_t)ctl->children.size());
+        if (!ctl->menuItems.empty()) return VMValue((int32_t)ctl->menuItems.size());
+        return VMValue((int32_t)ctl->listRows.size());
+    });
+    tsInstance->registerNative("getFirstRootItem", [getListCtrl](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || ctl->className != "GuiTreeView") return VMValue(0);
+        for (const auto& item : ctl->treeItems)
+            if (item.parent == 0) return VMValue(item.id);
+        return VMValue(0);
+    });
+    tsInstance->registerNative("insertItem", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 4) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || ctl->className != "GuiTreeView") return VMValue(0);
+        const int id = ctl->nextTreeItemId++;
+        ctl->treeItems.push_back({id, args[1].toInt(), args[2].toString(), args[3].toString(), false});
+        return VMValue(id);
+    });
+    tsInstance->registerNative("getNextSibling", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || ctl->className != "GuiTreeView") return VMValue(0);
+        int parent = 0; bool found = false;
+        for (const auto& item : ctl->treeItems) {
+            if (item.id == args[1].toInt()) { parent = item.parent; found = true; break; }
+        }
+        if (!found) return VMValue(0);
+        bool after = false;
+        for (const auto& item : ctl->treeItems) {
+            if (item.parent != parent) continue;
+            if (after) return VMValue(item.id);
+            if (item.id == args[1].toInt()) after = true;
+        }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("getPrevSibling", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || ctl->className != "GuiTreeView") return VMValue(0);
+        int parent = -1; int previous = 0;
+        for (const auto& item : ctl->treeItems)
+            if (item.id == args[1].toInt()) { parent = item.parent; break; }
+        if (parent < 0) return VMValue(0);
+        for (const auto& item : ctl->treeItems) {
+            if (item.parent != parent) continue;
+            if (item.id == args[1].toInt()) return VMValue(previous);
+            previous = item.id;
+        }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("getItemText", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || ctl->className != "GuiTreeView") return VMValue("");
+        for (const auto& item : ctl->treeItems)
+            if (item.id == args[1].toInt()) return VMValue(item.text);
+        return VMValue("");
+    });
+    tsInstance->registerNative("getItemValue", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || ctl->className != "GuiTreeView") return VMValue("");
+        for (const auto& item : ctl->treeItems)
+            if (item.id == args[1].toInt()) return VMValue(item.data);
+        return VMValue("");
+    });
+    tsInstance->registerNative("editItem", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || ctl->className != "GuiTreeView") return VMValue(0);
+        for (auto& item : ctl->treeItems) {
+            if (item.id == args[1].toInt()) {
+                item.text = args[2].toString();
+                if (args.size() > 3) item.data = args[3].toString();
+                return VMValue(1);
+            }
+        }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("selectItem", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || ctl->className != "GuiTreeView") return VMValue(0);
+        ctl->selectedTreeItem = args[1].toInt();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("getSelectedItem", [getListCtrl](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        return ctl && ctl->className == "GuiTreeView" ? VMValue(ctl->selectedTreeItem) : VMValue(0);
+    });
+    tsInstance->registerNative("expandItem", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || ctl->className != "GuiTreeView") return VMValue(0);
+        for (auto& item : ctl->treeItems)
+            if (item.id == args[1].toInt()) { item.expanded = true; return VMValue(1); }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("collapseItem", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || ctl->className != "GuiTreeView") return VMValue(0);
+        for (auto& item : ctl->treeItems)
+            if (item.id == args[1].toInt()) { item.expanded = false; return VMValue(1); }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("removeItem", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || ctl->className != "GuiTreeView") return VMValue(0);
+        const int id = args[1].toInt();
+        std::set<int> doomed{id};
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (const auto& item : ctl->treeItems)
+                if (doomed.count(item.parent) && doomed.insert(item.id).second) changed = true;
+        }
+        ctl->treeItems.erase(std::remove_if(ctl->treeItems.begin(), ctl->treeItems.end(),
+            [&](const GuiControl::TreeItem& item) { return doomed.count(item.id) != 0; }),
+            ctl->treeItems.end());
+        if (doomed.count(ctl->selectedTreeItem)) ctl->selectedTreeItem = 0;
+        return VMValue(1);
+    });
+    tsInstance->registerNative("moveItemUp", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || ctl->className != "GuiTreeView") return VMValue(0);
+        const int id = args[1].toInt();
+        int itemIndex = -1, parent = 0;
+        for (int i = 0; i < (int)ctl->treeItems.size(); ++i)
+            if (ctl->treeItems[i].id == id) { itemIndex = i; parent = ctl->treeItems[i].parent; break; }
+        if (itemIndex < 0) return VMValue(0);
+        auto subtreeEnd = [&](int start) {
+            int end = start + 1;
+            while (end < (int)ctl->treeItems.size()) {
+                int ancestor = ctl->treeItems[end].parent;
+                bool descendant = false;
+                while (ancestor != 0) {
+                    if (ancestor == ctl->treeItems[start].id) { descendant = true; break; }
+                    auto it = std::find_if(ctl->treeItems.begin(), ctl->treeItems.end(),
+                        [&](const GuiControl::TreeItem& item) { return item.id == ancestor; });
+                    if (it == ctl->treeItems.end()) break;
+                    ancestor = it->parent;
+                }
+                if (!descendant) break;
+                ++end;
+            }
+            return end;
+        };
+        int previous = -1;
+        for (int i = 0; i < itemIndex; ++i)
+            if (ctl->treeItems[i].parent == parent) previous = i;
+        if (previous >= 0) {
+            const int previousEnd = subtreeEnd(previous);
+            const int itemEnd = subtreeEnd(itemIndex);
+            const auto previousBlockEnd = ctl->treeItems.begin() + previousEnd;
+            const auto itemBlockBegin = ctl->treeItems.begin() + itemIndex;
+            const auto itemBlockEnd = ctl->treeItems.begin() + itemEnd;
+            std::vector<GuiControl::TreeItem> previousBlock(ctl->treeItems.begin() + previous,
+                                                            previousBlockEnd);
+            std::vector<GuiControl::TreeItem> itemBlock(itemBlockBegin, itemBlockEnd);
+            ctl->treeItems.erase(ctl->treeItems.begin() + previous, itemBlockEnd);
+            ctl->treeItems.insert(ctl->treeItems.begin() + previous, itemBlock.begin(), itemBlock.end());
+            ctl->treeItems.insert(ctl->treeItems.begin() + previous + itemBlock.size(),
+                                  previousBlock.begin(), previousBlock.end());
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("moveItemDown", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || ctl->className != "GuiTreeView") return VMValue(0);
+        const int id = args[1].toInt();
+        int itemIndex = -1, parent = 0;
+        for (int i = 0; i < (int)ctl->treeItems.size(); ++i)
+            if (ctl->treeItems[i].id == id) { itemIndex = i; parent = ctl->treeItems[i].parent; break; }
+        if (itemIndex < 0) return VMValue(0);
+        auto subtreeEnd = [&](int start) {
+            int end = start + 1;
+            while (end < (int)ctl->treeItems.size()) {
+                int ancestor = ctl->treeItems[end].parent;
+                bool descendant = false;
+                while (ancestor != 0) {
+                    if (ancestor == ctl->treeItems[start].id) { descendant = true; break; }
+                    auto it = std::find_if(ctl->treeItems.begin(), ctl->treeItems.end(),
+                        [&](const GuiControl::TreeItem& item) { return item.id == ancestor; });
+                    if (it == ctl->treeItems.end()) break;
+                    ancestor = it->parent;
+                }
+                if (!descendant) break;
+                ++end;
+            }
+            return end;
+        };
+        const int itemEnd = subtreeEnd(itemIndex);
+        int next = -1;
+        for (int i = itemEnd; i < (int)ctl->treeItems.size(); ++i)
+            if (ctl->treeItems[i].parent == parent) { next = i; break; }
+        if (next >= 0) {
+            const int nextEnd = subtreeEnd(next);
+            std::vector<GuiControl::TreeItem> itemBlock(ctl->treeItems.begin() + itemIndex,
+                                                        ctl->treeItems.begin() + itemEnd);
+            std::vector<GuiControl::TreeItem> nextBlock(ctl->treeItems.begin() + next,
+                                                        ctl->treeItems.begin() + nextEnd);
+            ctl->treeItems.erase(ctl->treeItems.begin() + itemIndex,
+                                 ctl->treeItems.begin() + nextEnd);
+            ctl->treeItems.insert(ctl->treeItems.begin() + itemIndex, nextBlock.begin(), nextBlock.end());
+            ctl->treeItems.insert(ctl->treeItems.begin() + itemIndex + nextBlock.size(),
+                                  itemBlock.begin(), itemBlock.end());
+            return VMValue(1);
+        }
+        return VMValue(0);
+    });
     tsInstance->registerNative("scrollToTop", [getListCtrl](const auto& args) -> VMValue {
         if (!args.empty()) {
             auto* ctl = getListCtrl(args[0].toString());
@@ -3250,11 +3814,265 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
+    tsInstance->registerNative("scrollToBottom", [getListCtrl](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) {
+                float contentHeight = ctl->contentH;
+                std::function<void(GuiControl*)> measure = [&](GuiControl* child) {
+                    if (!child) return;
+                    auto vectorIt = child->fields.find("messageVector");
+                    if (vectorIt != child->fields.end()) {
+                        if (auto* vector = ScriptEngine::instance().findObject(vectorIt->second.c_str()))
+                            contentHeight = std::max(contentHeight,
+                                vector->internals["__lineCount"].toInt() * 14.0f);
+                    }
+                    for (auto* nested : child->children) measure(nested);
+                };
+                measure(ctl);
+                ctl->contentH = contentHeight;
+                ctl->scrollY = std::max(0.0f, contentHeight - ctl->extentY);
+            }
+        }
+        return VMValue(1);
+    });
     tsInstance->registerNative("setBitmap", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() >= 2) {
             auto* ctl = getListCtrl(args[0].toString());
-            if (ctl) ctl->bitmap = args[1].toString();
+            if (ctl) {
+                ctl->bitmap = args[1].toString();
+                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                    obj->fields["bitmap"] = VMValue(ctl->bitmap);
+            }
         }
+        return VMValue(1);
+    });
+    auto hudSlot = [getListCtrl](const auto& args, int minArgs) -> std::pair<GuiControl*, int> {
+        if ((int)args.size() < minArgs) return {nullptr, -1};
+        auto* ctl = getListCtrl(args[0].toString());
+        const int slot = args[1].toInt();
+        if (!ctl || slot < 0 || slot >= 64) return {nullptr, -1};
+        if ((int)ctl->hudSlots.size() <= slot) ctl->hudSlots.resize(slot + 1);
+        return {ctl, slot};
+    };
+    tsInstance->registerNative("setWeaponBitmap", [hudSlot](const auto& args) -> VMValue {
+        auto [ctl, slot] = hudSlot(args, 3);
+        if (ctl) { ctl->hudSlots[slot].bitmap = args[2].toString(); ctl->hudSlots[slot].visible = true; }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setInventoryBitmap", [hudSlot](const auto& args) -> VMValue {
+        auto [ctl, slot] = hudSlot(args, 3);
+        if (ctl) { ctl->hudSlots[slot].bitmap = args[2].toString(); ctl->hudSlots[slot].visible = true; }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("addWeapon", [hudSlot](const auto& args) -> VMValue {
+        auto [ctl, slot] = hudSlot(args, 3);
+        if (ctl) { ctl->hudSlots[slot].amount = args[2].toInt(); ctl->hudSlots[slot].visible = true; }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("addInventory", [hudSlot](const auto& args) -> VMValue {
+        auto [ctl, slot] = hudSlot(args, 3);
+        if (ctl) { ctl->hudSlots[slot].amount = args[2].toInt(); ctl->hudSlots[slot].visible = true; }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("removeWeapon", [hudSlot](const auto& args) -> VMValue {
+        auto [ctl, slot] = hudSlot(args, 2);
+        if (ctl) ctl->hudSlots[slot].visible = false;
+        return VMValue(1);
+    });
+    tsInstance->registerNative("removeInventory", [hudSlot](const auto& args) -> VMValue {
+        auto [ctl, slot] = hudSlot(args, 2);
+        if (ctl) ctl->hudSlots[slot].visible = false;
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setAmmo", [hudSlot](const auto& args) -> VMValue {
+        auto [ctl, slot] = hudSlot(args, 3);
+        if (ctl) ctl->hudSlots[slot].amount = args[2].toInt();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setAmount", [hudSlot](const auto& args) -> VMValue {
+        auto [ctl, slot] = hudSlot(args, 3);
+        if (ctl) ctl->hudSlots[slot].amount = args[2].toInt();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setActiveWeapon", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        if (auto* ctl = getListCtrl(args[0].toString())) {
+            ctl->activeHudSlot = args[1].toInt();
+            for (size_t i = 0; i < ctl->hudSlots.size(); ++i)
+                ctl->hudSlots[i].active = (int)i == ctl->activeHudSlot;
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setBackGroundBitmap", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) if (auto* ctl = getListCtrl(args[0].toString())) ctl->fields["backgroundBitmap"] = args[1].toString();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setHighLightBitmap", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) if (auto* ctl = getListCtrl(args[0].toString())) ctl->fields["highlightBitmap"] = args[1].toString();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setInfiniteAmmoBitmap", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) if (auto* ctl = getListCtrl(args[0].toString())) ctl->fields["infiniteAmmoBitmap"] = args[1].toString();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("clearAll", [getListCtrl](const auto& args) -> VMValue {
+        if (!args.empty()) if (auto* ctl = getListCtrl(args[0].toString())) {
+            ctl->hudSlots.clear(); ctl->activeHudSlot = -1;
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setProfile", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) {
+                ctl->profileName = args[1].toString();
+                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                    obj->fields["profile"] = VMValue(ctl->profileName);
+            }
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setTime", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) {
+                const int totalSeconds = std::max(0, args[1].toInt());
+                char timeText[32];
+                snprintf(timeText, sizeof(timeText), "%02d:%02d",
+                         totalSeconds / 60, totalSeconds % 60);
+                ctl->text = timeText;
+            }
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setSeparators", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) {
+            auto* ctl = getListCtrl(args[0].toString());
+            if (ctl) ctl->fields["separators"] = args[1].toString();
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("enableHorzSeparator", [getListCtrl](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            if (auto* ctl = getListCtrl(args[0].toString()))
+                ctl->fields["horzSeparator"] = "1";
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("disableHorzSeparator", [getListCtrl](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            if (auto* ctl = getListCtrl(args[0].toString()))
+                ctl->fields["horzSeparator"] = "0";
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("cameraMove", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        if (auto* ctl = getListCtrl(args[0].toString())) {
+            ctl->fields["cameraMove::" + args[1].toString()] = args[2].toBool() ? "1" : "0";
+            return VMValue(1);
+        }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("resetCamera", [getListCtrl](const auto& args) -> VMValue {
+        if (!args.empty()) if (auto* ctl = getListCtrl(args[0].toString())) {
+            ctl->fields["cameraMove::left"] = "0";
+            ctl->fields["cameraMove::right"] = "0";
+            ctl->fields["cameraMove::up"] = "0";
+            ctl->fields["cameraMove::down"] = "0";
+            ctl->fields["cameraMove::in"] = "0";
+            ctl->fields["cameraMove::out"] = "0";
+            ctl->fields["mouseMode"] = "0";
+            ctl->fields.erase("mapCenterX");
+            ctl->fields.erase("mapCenterZ");
+            ctl->fields["mapZoom"] = "1";
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setMouseMode", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) if (auto* ctl = getListCtrl(args[0].toString()))
+            ctl->fields["mouseMode"] = args[1].toString();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("getMouseMode", [getListCtrl](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        if (auto* ctl = getListCtrl(args[0].toString()))
+            return VMValue(atoi(ctl->fields["mouseMode"].c_str()));
+        return VMValue(0);
+    });
+    for (const char* name : {"openAllCategories", "selectControlObject", "followLastSelected"})
+        tsInstance->registerNative(name, [](const auto&) -> VMValue { return VMValue(1); });
+    auto messageVectorCount = [](ScriptObject* vector) {
+        return vector ? vector->internals["__lineCount"].toInt() : 0;
+    };
+    tsInstance->registerNative("MessageVector::getNumLines",
+        [messageVectorCount](const auto& args) -> VMValue {
+            if (args.empty()) return VMValue(0);
+            return VMValue(messageVectorCount(
+                ScriptEngine::instance().findObject(args[0].toString().c_str())));
+        });
+    tsInstance->registerNative("MessageVector::getLineText",
+        [](const auto& args) -> VMValue {
+            if (args.size() < 2) return VMValue("");
+            auto* vector = ScriptEngine::instance().findObject(args[0].toString().c_str());
+            const int index = args[1].toInt();
+            if (!vector || index < 0 || index >= vector->internals["__lineCount"].toInt())
+                return VMValue("");
+            return vector->internals["__line" + std::to_string(index)];
+        });
+    tsInstance->registerNative("MessageVector::getLineTag",
+        [](const auto& args) -> VMValue {
+            if (args.size() < 2) return VMValue(0);
+            auto* vector = ScriptEngine::instance().findObject(args[0].toString().c_str());
+            const int index = args[1].toInt();
+            if (!vector || index < 0 || index >= vector->internals["__lineCount"].toInt())
+                return VMValue(0);
+            return vector->internals["__lineTag" + std::to_string(index)];
+        });
+    tsInstance->registerNative("MessageVector::pushBackLine",
+        [](const auto& args) -> VMValue {
+            if (args.size() < 2) return VMValue(0);
+            auto* vector = ScriptEngine::instance().findObject(args[0].toString().c_str());
+            if (!vector) return VMValue(0);
+            const int count = vector->internals["__lineCount"].toInt();
+            vector->internals["__line" + std::to_string(count)] = args[1];
+            vector->internals["__lineTag" + std::to_string(count)] =
+                args.size() > 2 ? args[2] : VMValue(0);
+            vector->internals["__lineCount"] = VMValue(count + 1);
+            return VMValue(1);
+        });
+    tsInstance->registerNative("MessageVector::popFrontLine",
+        [](const auto& args) -> VMValue {
+            if (args.empty()) return VMValue(0);
+            auto* vector = ScriptEngine::instance().findObject(args[0].toString().c_str());
+            if (!vector) return VMValue(0);
+            const int count = vector->internals["__lineCount"].toInt();
+            if (count <= 0) return VMValue(1);
+            for (int i = 1; i < count; ++i) {
+                vector->internals["__line" + std::to_string(i - 1)] =
+                    vector->internals["__line" + std::to_string(i)];
+                vector->internals["__lineTag" + std::to_string(i - 1)] =
+                    vector->internals["__lineTag" + std::to_string(i)];
+            }
+            vector->internals.erase("__line" + std::to_string(count - 1));
+            vector->internals.erase("__lineTag" + std::to_string(count - 1));
+            vector->internals["__lineCount"] = VMValue(count - 1);
+            return VMValue(1);
+        });
+    tsInstance->registerNative("MessageVector::clear",
+        [](const auto& args) -> VMValue {
+            if (args.empty()) return VMValue(0);
+            auto* vector = ScriptEngine::instance().findObject(args[0].toString().c_str());
+            if (!vector) return VMValue(0);
+            vector->internals.clear();
+            vector->internals["__lineCount"] = VMValue(0);
+            return VMValue(1);
+        });
+    tsInstance->registerNative("attach", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        if (auto* ctl = getListCtrl(args[0].toString()))
+            ctl->fields["messageVector"] = args[1].toString();
         return VMValue(1);
     });
     tsInstance->registerNative("repaint", [](const auto&) -> VMValue {
@@ -3275,7 +4093,7 @@ bool ScriptEngine::init() {
             if (ctl) {
                 int row = args[1].toInt();
                 std::string color = args[2].toString();
-                Console::instance().printf(LogLevel::Debug, "setRowColor: ctl='%s' row=%d color='%s'", args[0].toString().c_str(), row, color.c_str());
+                ctl->fields["rowColor" + std::to_string(row)] = color;
             }
         }
         return VMValue(1);
@@ -3286,20 +4104,86 @@ bool ScriptEngine::init() {
             if (ctl) {
                 int row = args[1].toInt();
                 std::string style = args[2].toString();
-                Console::instance().printf(LogLevel::Debug, "setRowStyle: ctl='%s' row=%d style='%s'", args[0].toString().c_str(), row, style.c_str());
+                ctl->fields["rowStyle" + std::to_string(row)] = style;
             }
         }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("addStyleSet", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 4) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        const std::string prefix = "styleSet" + std::to_string(args[1].toInt());
+        ctl->fields[prefix + ".fontType"] = args[2].toString();
+        ctl->fields[prefix + ".fontSize"] = args[3].toString();
+        if (args.size() > 4) ctl->fields[prefix + ".fontColor"] = args[4].toString();
+        if (args.size() > 5) ctl->fields[prefix + ".fontColorHL"] = args[5].toString();
+        if (args.size() > 6) ctl->fields[prefix + ".fontColorSEL"] = args[6].toString();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setRowStyleById", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        const int id = args[1].toInt();
+        for (size_t i = 0; i < ctl->listRowIds.size(); ++i) {
+            if (ctl->listRowIds[i] == id) {
+                ctl->fields["rowStyle" + std::to_string(i)] = args[2].toString();
+                return VMValue(1);
+            }
+        }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("setRowColorById", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        const int id = args[1].toInt();
+        for (size_t i = 0; i < ctl->listRowIds.size(); ++i) {
+            if (ctl->listRowIds[i] == id) {
+                ctl->fields["rowColor" + std::to_string(i)] = args[2].toString();
+                return VMValue(1);
+            }
+        }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("removeRow", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        const int row = args[1].toInt();
+        if (row < 0 || row >= (int)ctl->listRows.size()) return VMValue(0);
+        const int oldCount = (int)ctl->listRows.size();
+        ctl->listRows.erase(ctl->listRows.begin() + row);
+        if (row < (int)ctl->listRowIds.size()) ctl->listRowIds.erase(ctl->listRowIds.begin() + row);
+        for (int i = row; i < oldCount - 1; ++i) {
+            for (const char* prefix : {"rowColor", "rowStyle"}) {
+                const std::string from = std::string(prefix) + std::to_string(i + 1);
+                const std::string to = std::string(prefix) + std::to_string(i);
+                auto value = ctl->fields.find(from);
+                if (value == ctl->fields.end()) ctl->fields.erase(to);
+                else ctl->fields[to] = value->second;
+            }
+        }
+        ctl->fields.erase("rowColor" + std::to_string(oldCount - 1));
+        ctl->fields.erase("rowStyle" + std::to_string(oldCount - 1));
+        if (ctl->selectedRow == row) ctl->selectedRow = -1;
+        else if (ctl->selectedRow > row) --ctl->selectedRow;
         return VMValue(1);
     });
     tsInstance->registerNative("setText", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() >= 2) {
             auto* ctl = getListCtrl(args[0].toString());
-            if (ctl) ctl->text = args[1].toString();
+            if (ctl) {
+                ctl->text = args[1].toString();
+                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                    obj->fields["text"] = VMValue(ctl->text);
+            }
         }
         return VMValue(1);
     });
     tsInstance->registerNative("cancelServerQuery", [](const auto&) -> VMValue {
-        Console::instance().printf(LogLevel::Debug, "cancelServerQuery");
+        Engine::instance().network().stopServerQuery();
         return VMValue(1);
     });
     tsInstance->registerNative("localConnect", [](const auto& args) -> VMValue {
@@ -3312,8 +4196,13 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("addColumn", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
         if (ctl && args.size() >= 3) {
-            std::string colName = args[1].toString();
-            float colWidth = (float)args[2].toDouble();
+            const int id = args[1].toInt();
+            const std::string colName = args[2].toString();
+            const float colWidth = args.size() > 3 ? (float)args[3].toDouble() : 0.0f;
+            const float minWidth = args.size() > 4 ? (float)args[4].toDouble() : colWidth;
+            const float maxWidth = args.size() > 5 ? (float)args[5].toDouble() : colWidth;
+            const std::string format = args.size() > 6 ? args[6].toString() : "";
+            ctl->listColumns.push_back({id, colName, colWidth, minWidth, maxWidth, format});
             ctl->sbColumns.push_back({colName, colWidth, true});
         }
         return VMValue(1);
@@ -3525,19 +4414,31 @@ bool ScriptEngine::init() {
 
     // Display notifications — store messages in console variables for HUD to render
     tsInstance->registerNative("bottomPrint", [](const auto& args) -> VMValue {
-        if (!args.empty()) Console::instance().setVariable("HUD::bottomPrint", args[0].toString().c_str());
+        if (!args.empty()) {
+            Console::instance().setVariable("HUD::bottomPrint", args[0].toString().c_str());
+            const double duration = args.size() > 1 ? args[1].toDouble() : 0.0;
+            Console::instance().setVariable("HUD::bottomPrintUntil",
+                duration > 0.0 ? std::to_string(Engine::instance().timer().now() + duration).c_str() : "0");
+        }
         return VMValue(1);
     });
     tsInstance->registerNative("centerPrint", [](const auto& args) -> VMValue {
-        if (!args.empty()) Console::instance().setVariable("HUD::centerPrint", args[0].toString().c_str());
+        if (!args.empty()) {
+            Console::instance().setVariable("HUD::centerPrint", args[0].toString().c_str());
+            const double duration = args.size() > 1 ? args[1].toDouble() : 0.0;
+            Console::instance().setVariable("HUD::centerPrintUntil",
+                duration > 0.0 ? std::to_string(Engine::instance().timer().now() + duration).c_str() : "0");
+        }
         return VMValue(1);
     });
     tsInstance->registerNative("clearBottomPrint", [](const auto&) -> VMValue {
         Console::instance().setVariable("HUD::bottomPrint", "");
+        Console::instance().setVariable("HUD::bottomPrintUntil", "0");
         return VMValue(1);
     });
     tsInstance->registerNative("clearCenterPrint", [](const auto&) -> VMValue {
         Console::instance().setVariable("HUD::centerPrint", "");
+        Console::instance().setVariable("HUD::centerPrintUntil", "0");
         return VMValue(1);
     });
     tsInstance->registerNative("bottomPrintAll", [](const auto& args) -> VMValue {
@@ -3719,8 +4620,23 @@ bool ScriptEngine::init() {
             int id = args[1].toInt();
             if (id < 0 || id > 65535) return VMValue(1); // reject absurd indices (alloc/overflow guard)
             std::string txt = args[2].toString();
-            ctl->listRows.push_back(txt);
-            ctl->listRowIds.push_back(id);
+            size_t insertAt = ctl->listRows.size();
+            if (args.size() >= 4)
+                insertAt = std::min<size_t>(std::max(0, args[3].toInt()), ctl->listRows.size());
+            for (int row = (int)ctl->listRows.size(); row > (int)insertAt; --row) {
+                for (const char* prefix : {"rowColor", "rowStyle", "rowActive"}) {
+                    const std::string from = std::string(prefix) + std::to_string(row - 1);
+                    const std::string to = std::string(prefix) + std::to_string(row);
+                    auto value = ctl->fields.find(from);
+                    if (value == ctl->fields.end()) ctl->fields.erase(to);
+                    else ctl->fields[to] = value->second;
+                }
+            }
+            for (const char* prefix : {"rowColor", "rowStyle", "rowActive"})
+                ctl->fields.erase(std::string(prefix) + std::to_string(insertAt));
+            ctl->listRows.insert(ctl->listRows.begin() + insertAt, txt);
+            ctl->listRowIds.insert(ctl->listRowIds.begin() +
+                                   std::min(insertAt, ctl->listRowIds.size()), id);
             auto* font = Engine::instance().renderer().getFont();
             float lineH = font ? font->charHeight + 2 : 14;
             ctl->extentY = std::max(ctl->extentY, (float)ctl->listRows.size() * lineH);
@@ -3733,7 +4649,12 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("clearList", [getListCtrl](const auto& args) -> VMValue {
         std::string cname = args.empty() ? "" : args[0].toString();
         auto* ctl = getListCtrl(cname);
-        if (ctl) { ctl->listRows.clear(); ctl->selectedRow = -1; Console::instance().printf(LogLevel::Debug, "clearList: ctl='%s' ok", cname.c_str()); }
+        if (ctl) {
+            ctl->listRows.clear();
+            ctl->listRowIds.clear();
+            ctl->selectedRow = -1;
+            Console::instance().printf(LogLevel::Debug, "clearList: ctl='%s' ok", cname.c_str());
+        }
         else Console::instance().printf(LogLevel::Debug, "clearList: FAIL ctl=NULL cname='%s'", cname.c_str());
         return VMValue(1);
     });
@@ -3782,12 +4703,26 @@ bool ScriptEngine::init() {
                 });
             std::vector<std::string> sortedRows(ctl->listRows.size());
             std::vector<int> sortedIds(ctl->listRowIds.size());
+            std::map<std::string, std::string> sortedStyles;
             for (size_t i = 0; i < idx.size(); i++) {
                 sortedRows[i] = ctl->listRows[idx[i]];
                 if (i < sortedIds.size()) sortedIds[i] = ctl->listRowIds[idx[i]];
+                for (const char* prefix : {"rowColor", "rowStyle"}) {
+                    const auto oldField = ctl->fields.find(
+                        std::string(prefix) + std::to_string(idx[i]));
+                    if (oldField != ctl->fields.end())
+                        sortedStyles[std::string(prefix) + std::to_string(i)] = oldField->second;
+                }
             }
             ctl->listRows.swap(sortedRows);
             ctl->listRowIds.swap(sortedIds);
+            for (auto it = ctl->fields.begin(); it != ctl->fields.end();) {
+                if (it->first.rfind("rowColor", 0) == 0 || it->first.rfind("rowStyle", 0) == 0)
+                    it = ctl->fields.erase(it);
+                else
+                    ++it;
+            }
+            ctl->fields.insert(sortedStyles.begin(), sortedStyles.end());
         }
         return VMValue(1);
     });
@@ -3975,6 +4910,26 @@ bool ScriptEngine::init() {
         const std::string& info = Engine::instance().renderer().gpuDriverInfo();
         if (!info.empty()) return VMValue(info);
         return VMValue("Unknown\tUnknown\tUnknown\t");
+    });
+    tsInstance->registerNative("getControlObjectSpeed", [](const auto&) -> VMValue {
+        const auto velocity = Engine::instance().game().player().velocity();
+        return VMValue(std::sqrt(velocity.x * velocity.x + velocity.y * velocity.y +
+                                 velocity.z * velocity.z));
+    });
+    tsInstance->registerNative("getControlObjectAltitude", [](const auto&) -> VMValue {
+        const auto position = Engine::instance().game().player().position();
+        const float ground = Engine::instance().game().world().getHeight(position.x, position.z);
+        return VMValue(position.y - ground);
+    });
+    tsInstance->registerNative("getDamageLevel", [](const auto&) -> VMValue {
+        const float health = std::clamp(Engine::instance().game().player().health(), 0.0f, 100.0f);
+        return VMValue(1.0f - health / 100.0f);
+    });
+    tsInstance->registerNative("lockMouse", [](const auto& args) -> VMValue {
+        const bool locked = !args.empty() && args[0].toBool();
+        Engine::instance().platform().setRelativeMouse(locked);
+        Engine::instance().platform().showMouse(!locked);
+        return VMValue(1);
     });
     // Save/validate dialogs ask whether a file name could be written. The
     // scripts pass either "prefs/xxx" or "base/prefs/xxx", so strip any data-
@@ -4169,9 +5124,31 @@ bool ScriptEngine::init() {
     });
 
     tsInstance->registerNative("copybind", [&s_actionBinds](const auto& args) -> VMValue {
-        // copyBind(sourceMap, command) — copy a binding from sourceMap to this map
-        // For now, just stub it
+        if (args.size() < 3) return VMValue(0);
+        const std::string dest = args[0].toString();
+        const std::string source = args[1].toString();
+        const std::string command = args[2].toString();
+        for (const auto& [key, binding] : s_actionBinds) {
+            const auto& [map, device, keyName] = key;
+            if (map == source && binding.cmdOn == command) {
+                s_actionBinds[{dest, device, keyName}] = binding;
+                return VMValue(1);
+            }
+        }
+        return VMValue(0);
+    });
+    auto setActionMapPushed = [](const auto& args, bool pushed) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str());
+        if (!object || object->className != "ActionMap") return VMValue(0);
+        object->internals["__pushed"] = VMValue(pushed ? 1 : 0);
         return VMValue(1);
+    };
+    tsInstance->registerNative("push", [setActionMapPushed](const auto& args) {
+        return setActionMapPushed(args, true);
+    });
+    tsInstance->registerNative("pop", [setActionMapPushed](const auto& args) {
+        return setActionMapPushed(args, false);
     });
 
     // ActionMap::save(fileName, isAppend) — serialize this map's binds into a
@@ -4542,22 +5519,29 @@ bool ScriptEngine::init() {
         return VMValue(result);
     });
 
-    // getColumnName(objName, colIdx) — return column name
+    // getColumnName(objName, colIdx) — return live column name
     tsInstance->registerNative("getColumnName", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue("");
-        // Stub: return column index as string
-        return VMValue("Col" + std::to_string(args[1].toInt()));
+        auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString());
+        const int index = args[1].toInt();
+        if (!ctl || index < 0 || index >= (int)ctl->sbColumns.size()) return VMValue("");
+        return VMValue(ctl->sbColumns[index].name);
     });
 
-    // getColumnKey(objName, colIdx) — return column key
+    // getColumnKey(objName, colIdx) — return the live column key
     tsInstance->registerNative("getColumnKey", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue("");
-        return VMValue("col" + std::to_string(args[1].toInt()));
+        auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString());
+        const int index = args[1].toInt();
+        if (!ctl || index < 0 || index >= (int)ctl->sbColumns.size()) return VMValue("");
+        return VMValue(ctl->sbColumns[index].name);
     });
 
-    // getNumColumns(objName) — return 0
-    tsInstance->registerNative("getNumColumns", [](const auto&) -> VMValue {
-        return VMValue(0);
+    // getNumColumns(objName) — return the live column count
+    tsInstance->registerNative("getNumColumns", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString());
+        return VMValue(ctl ? (int32_t)ctl->sbColumns.size() : 0);
     });
 
     // getRowId(objName, rowIdx) — return logical row id
@@ -4575,13 +5559,69 @@ bool ScriptEngine::init() {
         return VMValue(row);
     });
 
-    // isRowActive(objName, rowIdx) — return true
-    tsInstance->registerNative("isRowActive", [](const auto&) -> VMValue {
+    tsInstance->registerNative("getRowStyle", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        return VMValue(atoi(ctl->fields["rowStyle" + std::to_string(args[1].toInt())].c_str()));
+    });
+    tsInstance->registerNative("getRowStyleById", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        const int id = args[1].toInt();
+        for (size_t i = 0; i < ctl->listRowIds.size(); ++i)
+            if (ctl->listRowIds[i] == id)
+                return VMValue(atoi(ctl->fields["rowStyle" + std::to_string(i)].c_str()));
+        return VMValue(0);
+    });
+    tsInstance->registerNative("removeRowById", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        const int id = args[1].toInt();
+        for (size_t i = 0; i < ctl->listRowIds.size(); ++i) {
+            if (ctl->listRowIds[i] != id) continue;
+            const int oldCount = (int)ctl->listRows.size();
+            ctl->listRows.erase(ctl->listRows.begin() + i);
+            ctl->listRowIds.erase(ctl->listRowIds.begin() + i);
+            for (int row = (int)i; row < oldCount - 1; ++row) {
+                for (const char* prefix : {"rowColor", "rowStyle"}) {
+                    const std::string from = std::string(prefix) + std::to_string(row + 1);
+                    const std::string to = std::string(prefix) + std::to_string(row);
+                    auto value = ctl->fields.find(from);
+                    if (value == ctl->fields.end()) ctl->fields.erase(to);
+                    else ctl->fields[to] = value->second;
+                }
+            }
+            ctl->fields.erase("rowColor" + std::to_string(oldCount - 1));
+            ctl->fields.erase("rowStyle" + std::to_string(oldCount - 1));
+            ctl->selectedRow = -1;
+            return VMValue(1);
+        }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("clearSelection", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        if (auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString()))
+            ctl->selectedRow = -1;
         return VMValue(1);
     });
 
-    // setRowActive(objName, rowIdx, active) — no-op
-    tsInstance->registerNative("setRowActive", [](const auto&) -> VMValue {
+    tsInstance->registerNative("isRowActive", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        auto it = ctl->fields.find("rowActive" + std::to_string(args[1].toInt()));
+        return VMValue(it == ctl->fields.end() || it->second == "1" || it->second == "true");
+    });
+
+    tsInstance->registerNative("setRowActive", [](const auto& args) -> VMValue {
+        if (args.size() >= 3) {
+            if (auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString()))
+                ctl->fields["rowActive" + std::to_string(args[1].toInt())] =
+                    args[2].toBool() ? "1" : "0";
+        }
         return VMValue(1);
     });
 
@@ -4633,6 +5673,11 @@ bool ScriptEngine::init() {
             ctl->posY = (float)args[2].toInt();
             ctl->extentX = (float)args[3].toInt();
             ctl->extentY = (float)args[4].toInt();
+            if (auto* ts = Engine::instance().script().ts()) {
+                const std::string callback = ctl->name + "::onResize";
+                if (ts->hasFunction(callback))
+                    ts->callFunction(callback, {VMValue(ctl->name), VMValue(ctl->extentX), VMValue(ctl->extentY)});
+            }
             return VMValue(1);
         }
         // Also set on the script object
@@ -4644,6 +5689,48 @@ bool ScriptEngine::init() {
             snprintf(buf, sizeof(buf), "%d %d", args[3].toInt(), args[4].toInt());
             obj->fields["extent"] = VMValue(std::string(buf));
         }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setPosition", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const std::string name = args[0].toString();
+        auto* ctl = Engine::instance().guiRenderer().findControl(name);
+        const std::string value = args.size() >= 3
+            ? args[1].toString() + " " + args[2].toString() : args[1].toString();
+        float x = 0, y = 0;
+        if (args.size() >= 3) { x = args[1].toFloat(); y = args[2].toFloat(); }
+        else sscanf(value.c_str(), "%f %f", &x, &y);
+        if (ctl) { ctl->posX = x; ctl->posY = y; }
+        if (ctl) {
+            if (auto* ts = Engine::instance().script().ts()) {
+                const std::string callback = ctl->name + "::onResize";
+                if (ts->hasFunction(callback))
+                    ts->callFunction(callback, {VMValue(ctl->name), VMValue(ctl->extentX), VMValue(ctl->extentY)});
+            }
+        }
+        if (auto* obj = ScriptEngine::instance().findObject(name.c_str()))
+            obj->fields["position"] = VMValue(value);
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setExtent", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const std::string name = args[0].toString();
+        auto* ctl = Engine::instance().guiRenderer().findControl(name);
+        const std::string value = args.size() >= 3
+            ? args[1].toString() + " " + args[2].toString() : args[1].toString();
+        float w = 0, h = 0;
+        if (args.size() >= 3) { w = args[1].toFloat(); h = args[2].toFloat(); }
+        else sscanf(value.c_str(), "%f %f", &w, &h);
+        if (ctl) { ctl->extentX = w; ctl->extentY = h; }
+        if (ctl) {
+            if (auto* ts = Engine::instance().script().ts()) {
+                const std::string callback = ctl->name + "::onResize";
+                if (ts->hasFunction(callback))
+                    ts->callFunction(callback, {VMValue(ctl->name), VMValue(ctl->extentX), VMValue(ctl->extentY)});
+            }
+        }
+        if (auto* obj = ScriptEngine::instance().findObject(name.c_str()))
+            obj->fields["extent"] = VMValue(value);
         return VMValue(1);
     });
 
@@ -4783,7 +5870,16 @@ void ScriptEngine::registerFunction(const char* name, NativeFunc fn) {
 
 ScriptObject* ScriptEngine::findObject(const char* name) {
     auto it = objects.find(name);
-    return it != objects.end() ? it->second : nullptr;
+    if (it != objects.end()) return it->second;
+    if (!name) return nullptr;
+    std::string wanted(name);
+    for (char& c : wanted) c = (char)std::tolower((unsigned char)c);
+    for (auto& [objectName, object] : objects) {
+        std::string candidate = objectName;
+        for (char& c : candidate) c = (char)std::tolower((unsigned char)c);
+        if (candidate == wanted) return object;
+    }
+    return nullptr;
 }
 
 void ScriptEngine::executeString(const char* script) {

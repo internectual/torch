@@ -18,6 +18,21 @@ struct GuiControl {
     float minExtentX = 8, minExtentY = 8;
     std::string text;
     std::string bitmap;
+    float hudValue = 0.0f;
+    bool hudValueSet = false;
+    struct HudSlot {
+        std::string bitmap;
+        std::string name;
+        int amount = -1;
+        bool visible = false;
+        bool active = false;
+    };
+    std::vector<HudSlot> hudSlots;
+    int activeHudSlot = -1;
+    std::vector<float> netHistory;
+    uint64_t netLastReceived = 0;
+    uint64_t netLastSent = 0;
+    double netLastSample = 0.0;
     std::string command;  // TS command to execute when activated
     std::string altCommand; // alternate command (Enter in text fields)
     std::string profileName; // GuiControlProfile name
@@ -26,6 +41,7 @@ struct GuiControl {
     bool selected = false;
     bool checked = false;
     bool hovered = false;
+    bool previousHovered = false;
     int hoveredTab = -1; // index of tab under mouse within a ShellTabGroupCtrl
     int hoveredItem = -1; // index of item under mouse within an open ShellLaunchMenu popup
     int groupNum = 0;
@@ -53,6 +69,26 @@ struct GuiControl {
     std::vector<std::string> listRows;
     std::vector<int> listRowIds; // parallel ids: global mission id / row id per displayed row
     int selectedRow = -1;
+    struct ListColumn {
+        int id = 0;
+        std::string name;
+        float width = 0;
+        float minWidth = 0;
+        float maxWidth = 0;
+        std::string format;
+    };
+    std::vector<ListColumn> listColumns;
+
+    struct TreeItem {
+        int id = 0;
+        int parent = 0;
+        std::string text;
+        std::string data;
+        bool expanded = false;
+    };
+    std::vector<TreeItem> treeItems;
+    int selectedTreeItem = 0;
+    int nextTreeItemId = 1;
 
     // ShellLaunchMenu popup fields
     struct MenuItem { int id; std::string text; bool isSeparator; };
@@ -82,6 +118,9 @@ struct GuiControl {
     // ShellWindowCtrl fields
     bool windowDragging = false;
     float dragOffsetX = 0, dragOffsetY = 0;
+    bool commanderMapDragging = false;
+    int commanderMapLastX = -1, commanderMapLastY = -1;
+    std::vector<int> commanderTreeEntries;
 
     // Scrollbar thumb drag state
     bool vThumbDragging = false;
@@ -131,6 +170,7 @@ public:
     void refresh();
     void render();
     bool handleInput(int x, int y, bool pressed);
+    bool handleSecondaryInput(int x, int y);
     bool handleDrag(int x, int y); // continuous mouse-move while button held
     void handleDragRelease(); // stop all dragging on mouse-up
     bool handleScroll(int x, int y, int wheelDelta);
@@ -150,6 +190,7 @@ public:
 
     GuiControl* getCanvas() { return canvas; }
     GuiControl* findControl(const std::string& name);
+    bool removeControl(const std::string& name);
     // T2 ActionMap key-name <-> SDL3 scancode mapping (see gui_renderer.cpp).
     static const char* scancodeToKeyName(int sc);
     static int keyNameToScancode(const std::string& name);
@@ -159,6 +200,7 @@ public:
 
     void popDialog(const std::string& name);
     void clearDialogs();
+    bool makeFirstResponder(const std::string& name, bool focus);
     std::vector<GuiControl*>& dialogStackForDebug() { return dialogStack; }
 
     // Last instance pushed under each dialog name. A popped dialog leaves
@@ -186,6 +228,8 @@ public:
 private:
     GuiControl* canvas{};
     GuiControl* focusedCtrl = nullptr;
+    GuiControl* pressedCtrl = nullptr;
+    GuiControl* selectedList = nullptr;
     std::vector<GuiControl*> dialogStack;
 
     // Scheduler

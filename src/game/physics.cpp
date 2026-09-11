@@ -41,14 +41,18 @@ void Physics::update(Player* player, float dt, const Game::InputMove& input) {
 
     // Jet
     float energy = player->energy();
+    float heat = player->heat();
     if (input.jet && energy > 0) {
         vel.y += 12.0f * dt;
         energy -= 25.0f * dt;
         if (energy < 0) energy = 0;
+        heat += 45.0f * dt;
     } else {
         energy += 15.0f * dt;
         if (energy > 100) energy = 100;
+        heat -= 25.0f * dt;
     }
+    heat = Math::clamp(heat, 0.0f, 100.0f);
 
     // Gravity
     if (!onGround) {
@@ -88,6 +92,7 @@ void Physics::update(Player* player, float dt, const Game::InputMove& input) {
     player->setRotation(rot);
     player->setVelocity(vel);
     player->setEnergy(energy);
+    player->setHeat(heat);
     player->setOnGround(onGround);
 }
 

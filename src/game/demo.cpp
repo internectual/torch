@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
 #include <algorithm>
 #include <memory>
 #include <set>
@@ -907,6 +908,8 @@ void DemoParser::reset() {
     weaponsHud_ = {};
     backpackHud_ = {};
     inventoryHud_ = {};
+    vehicleHud_ = {};
+    ammoHud_ = {};
     ghostTracker.clear();
     for (int index : ibGhostTracker.getAllIndices()) {
         const GhostEntry* source = ibGhostTracker.getGhost(index);
@@ -914,6 +917,87 @@ void DemoParser::reset() {
         ghostTracker.createGhost(index, source->classId, source->className);
         if (GhostEntry* target = ghostTracker.getMutableGhost(index))
             *target = *source;
+    }
+}
+
+void DemoParser::handleHudRemoteCommand(const std::string& funcName,
+                                        const std::vector<std::string>& args) {
+    std::string name = funcName;
+    for (char& c : name) c = (char)std::tolower((unsigned char)c);
+    if (name.rfind("clientcmd", 0) == 0) name.erase(0, 8);
+    auto arg = [&](size_t index) -> std::string {
+        return index < args.size() ? args[index] : std::string();
+    };
+    if (name == "setweaponshuditem" && args.size() >= 4) {
+        const int slot = atoi(arg(1).c_str());
+        if (atoi(arg(3).c_str()) != 0) weaponsHud_.slots[slot] = atoi(arg(2).c_str());
+        else {
+            weaponsHud_.slots.erase(slot);
+            weaponsHud_.bitmaps.erase(slot);
+        }
+    } else if (name == "setweaponshudammo" && args.size() >= 3) {
+        const int slot = atoi(arg(1).c_str());
+        if (weaponsHud_.slots.find(slot) != weaponsHud_.slots.end())
+            weaponsHud_.slots[slot] = atoi(arg(2).c_str());
+    } else if (name == "setweaponshudbitmap" && args.size() >= 4) {
+        weaponsHud_.bitmaps[atoi(arg(1).c_str())] = arg(3);
+    } else if (name == "setweaponshudbackgroundbmp" && args.size() >= 2) {
+        weaponsHud_.backgroundBitmap = arg(1);
+    } else if (name == "setweaponshudhighlightbmp" && args.size() >= 2) {
+        weaponsHud_.highlightBitmap = arg(1);
+    } else if (name == "setweaponshudinfiniteammobmp" && args.size() >= 2) {
+        weaponsHud_.infiniteAmmoBitmap = arg(1);
+    } else if (name == "setweaponshudactive" && args.size() >= 2) {
+        weaponsHud_.activeIndex = atoi(arg(1).c_str());
+    } else if (name == "setammohudcount" && args.size() >= 2) {
+        ammoHud_.count = atoi(arg(1).c_str());
+    } else if (name == "setweaponshudclearall") {
+        weaponsHud_ = {};
+    } else if (name == "setinventoryhuditem" && args.size() >= 4) {
+        const int slot = atoi(arg(1).c_str());
+        if (atoi(arg(3).c_str()) != 0) inventoryHud_.slots[slot] = atoi(arg(2).c_str());
+        else {
+            inventoryHud_.slots.erase(slot);
+            inventoryHud_.bitmaps.erase(slot);
+        }
+    } else if (name == "setinventoryhudamount" && args.size() >= 3) {
+        const int slot = atoi(arg(1).c_str());
+        if (inventoryHud_.slots.find(slot) != inventoryHud_.slots.end())
+            inventoryHud_.slots[slot] = atoi(arg(2).c_str());
+    } else if (name == "setinventoryhudbitmap" && args.size() >= 4) {
+        inventoryHud_.bitmaps[atoi(arg(1).c_str())] = arg(3);
+    } else if (name == "setinventoryhudbackgroundbmp" && args.size() >= 2) {
+        inventoryHud_.backgroundBitmap = arg(1);
+    } else if (name == "setinventoryhudclearall") {
+        inventoryHud_ = {};
+        backpackHud_ = {};
+    } else if (name == "setbackpackhuditem" && args.size() >= 3) {
+        backpackHud_.packIndex = atoi(arg(1).c_str());
+        backpackHud_.active = atoi(arg(2).c_str()) != 0;
+        backpackHud_.bitmap.clear();
+        if (!backpackHud_.active) {
+            backpackHud_.text.clear();
+        }
+    } else if (name == "setbackpackhudbitmap" && args.size() >= 2) {
+        backpackHud_.bitmap = arg(1);
+    } else if (name == "updatepacktext" && args.size() >= 2) {
+        backpackHud_.text = arg(1);
+    } else if (name == "setsatchelarmed" ||
+               name == "setcloakiconon" || name == "setcloakiconoff" ||
+               name == "setrepairpackiconon" || name == "setrepairpackiconoff" ||
+               name == "setshieldiconon" || name == "setshieldiconoff" ||
+               name == "setsenjamiconon" || name == "setsenjamiconoff") {
+        // These stock commands replace backpackIcon directly in TorqueScript.
+        backpackHud_.bitmap.clear();
+    } else if (name == "setvweaponshudactive" && args.size() >= 2) {
+        vehicleHud_.activeWeapon = atoi(arg(1).c_str());
+        if (args.size() >= 3) vehicleHud_.vehicleType = arg(2);
+    } else if (name == "setvweaponshudclearall") {
+        vehicleHud_.activeWeapon = -1;
+    } else if (name == "showvehiclegauges" && args.size() >= 3) {
+        vehicleHud_.vehicleType = arg(1);
+        vehicleHud_.node = atoi(arg(2).c_str());
+        vehicleHud_.dashboardVisible = true;
     }
 }
 
@@ -946,6 +1030,8 @@ DemoParserSnapshot DemoParser::captureSnapshot() const {
     snapshot.weaponsHud = weaponsHud_;
     snapshot.backpackHud = backpackHud_;
     snapshot.inventoryHud = inventoryHud_;
+    snapshot.vehicleHud = vehicleHud_;
+    snapshot.ammoHud = ammoHud_;
     return snapshot;
 }
 
@@ -981,6 +1067,8 @@ bool DemoParser::restoreSnapshot(const DemoParserSnapshot& snapshot) {
     weaponsHud_ = snapshot.weaponsHud;
     backpackHud_ = snapshot.backpackHud;
     inventoryHud_ = snapshot.inventoryHud;
+    vehicleHud_ = snapshot.vehicleHud;
+    ammoHud_ = snapshot.ammoHud;
     return true;
 }
 
@@ -1293,6 +1381,7 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents,
                     auto it = initialBlock.taggedStrings.find(tag);
                     if (it != initialBlock.taggedStrings.end()) arg = it->second;
                 }
+                ev.arguments.push_back(arg);
                 if (!ev.message.empty()) ev.message += ' ';
                 ev.message += arg;
             }

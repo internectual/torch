@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <cmath>
 #include <cstring>
+#include <algorithm>
 #include <sstream>
 #include <fstream>
 #include <set>
@@ -35,6 +36,7 @@ struct TorqueScript::Impl {
     std::unordered_map<std::string, std::function<VMValue(const std::vector<VMValue>&)>> natives;
     std::unordered_map<std::string, TSFunc> functions;
     std::unordered_map<std::string, VMValue> globals;
+    std::unordered_map<std::string, std::vector<std::string>> messageCallbacks;
     TSLocals locals;
     bool initializing = false;
 
@@ -1432,6 +1434,31 @@ static void syncGuiField(const std::string& objName, const std::string& field, c
     else if (field == "text") ctl->text = val.toString();
     else if (field == "visible") ctl->visible = val.toBool();
     else if (field == "active") ctl->active = val.toBool();
+    else if (field == "bitmap") ctl->bitmap = val.toString();
+    else if (field == "profile") ctl->profileName = val.toString();
+    else if (field == "position") {
+        float x = ctl->posX, y = ctl->posY;
+        sscanf(val.toString().c_str(), "%f %f", &x, &y);
+        ctl->posX = x;
+        ctl->posY = y;
+    }
+    else if (field == "extent") {
+        float w = ctl->extentX, h = ctl->extentY;
+        sscanf(val.toString().c_str(), "%f %f", &w, &h);
+        ctl->extentX = w;
+        ctl->extentY = h;
+        if (auto* ts = Engine::instance().script().ts()) {
+            const std::string callback = ctl->name + "::onResize";
+            if (ts->hasFunction(callback))
+                ts->callFunction(callback, {VMValue(ctl->name), VMValue(w), VMValue(h)});
+        }
+    }
+    else if (field == "value") {
+        ctl->hudValue = (float)val.toDouble();
+        ctl->hudValueSet = true;
+        ctl->fields["value"] = val.toString();
+    }
+    ctl->fields[field] = val.toString();
 }
 
 VMValue TorqueScript::Impl::parsePostfix() {
@@ -2438,4 +2465,34 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
 
     impl->locals.pop();
     return result;
+}
+
+void TorqueScript::registerMessageCallback(const std::string& messageType,
+                                           const std::string& functionName) {
+    if (messageType.empty() || functionName.empty()) return;
+    auto& callbacks = impl->messageCallbacks[messageType];
+    if (std::find(callbacks.begin(), callbacks.end(), functionName) == callbacks.end())
+        callbacks.push_back(functionName);
+}
+
+void TorqueScript::dispatchMessageCallback(const std::string& messageType,
+                                           const std::vector<VMValue>& args) {
+    // Stock message.cs owns callback ordering and wildcard handling. Use it
+    // when loaded; the native registry below keeps minimal/headless script
+    // sets functional when that compatibility layer is absent.
+    if (hasFunction("clientCmdServerMessage")) {
+        callFunction("clientCmdServerMessage", args);
+        return;
+    }
+    std::vector<std::string> callbacks;
+    auto append = [&](const std::string& key) {
+        auto it = impl->messageCallbacks.find(key);
+        if (it != impl->messageCallbacks.end())
+            callbacks.insert(callbacks.end(), it->second.begin(), it->second.end());
+    };
+    append("");
+    if (!messageType.empty()) append(messageType);
+    for (const auto& functionName : callbacks) {
+        if (hasFunction(functionName)) callFunction(functionName, args);
+    }
 }

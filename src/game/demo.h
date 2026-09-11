@@ -310,6 +310,7 @@ struct NetEventInfo {
     int sequenceNumber{};
     int dataBitsStart{}, dataBitsEnd{};
     std::string message;    // parsed text for chat/server messages
+    std::vector<std::string> arguments; // decoded remote-command arguments
     std::string eventName;  // class name for display
     int audioProfileId = -1; // for audio events
     bool directAudioProfile = false;
@@ -378,6 +379,10 @@ struct InitialBlockData {
 // ─── HUD State (ported from t2-mapper StreamEngine) ───────────────
 struct WeaponsHudState {
     std::map<int, int> slots; // slot index -> ammo (-1 = none/infinite)
+    std::map<int, std::string> bitmaps;
+    std::string backgroundBitmap;
+    std::string highlightBitmap;
+    std::string infiniteAmmoBitmap;
     int activeIndex = -1;
 };
 
@@ -385,10 +390,24 @@ struct BackpackHudState {
     int packIndex = -1;
     bool active = false;
     std::string text;
+    std::string bitmap;
 };
 
 struct InventoryHudState {
     std::map<int, int> slots; // slot index -> amount
+    std::map<int, std::string> bitmaps;
+    std::string backgroundBitmap;
+};
+
+struct VehicleHudState {
+    bool dashboardVisible = false;
+    int activeWeapon = -1;
+    std::string vehicleType;
+    int node = -1;
+};
+
+struct AmmoHudState {
+    int count = -1;
 };
 
 struct PathManagerRecord {
@@ -518,6 +537,8 @@ struct DemoParserSnapshot {
     WeaponsHudState weaponsHud;
     BackpackHudState backpackHud;
     InventoryHudState inventoryHud;
+    VehicleHudState vehicleHud;
+    AmmoHudState ammoHud;
 };
 
 // ─── DemoParser ─────────────────────────────────────────────────
@@ -566,6 +587,8 @@ public:
     const WeaponsHudState& getWeaponsHud() const { return weaponsHud_; }
     const BackpackHudState& getBackpackHud() const { return backpackHud_; }
     const InventoryHudState& getInventoryHud() const { return inventoryHud_; }
+    const VehicleHudState& getVehicleHud() const { return vehicleHud_; }
+    const AmmoHudState& getAmmoHud() const { return ammoHud_; }
     void handleHudRemoteCommand(const std::string& funcName, const std::vector<std::string>& args);
     void extractMissionInfo();
 
@@ -606,6 +629,8 @@ private:
     WeaponsHudState weaponsHud_;
     BackpackHudState backpackHud_;
     InventoryHudState inventoryHud_;
+    VehicleHudState vehicleHud_;
+    AmmoHudState ammoHud_;
 
     // Packet parser state
     Vec3 compressionPoint;

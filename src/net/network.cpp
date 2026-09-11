@@ -94,6 +94,10 @@ struct Connection::Impl {
     std::vector<V12::ClientEvent> pendingNativeEvents;
     double lastNativeDataSend = 0;
     std::vector<uint8_t> disconnectPacket;
+    uint64_t sentPacketCount = 0;
+    uint64_t receivedPacketCount = 0;
+    uint64_t sentByteCount = 0;
+    uint64_t receivedByteCount = 0;
     int disconnectAttempts = 0;
     double nextDisconnectSend = 0;
     static constexpr uint32_t NativeSendWindow = 30;
@@ -128,6 +132,8 @@ struct Connection::Impl {
         if (sock < 0 || packet.empty()) return;
         sendto(sock, packet.data(), packet.size(), 0,
                (sockaddr*)&addr, sizeof(addr));
+        ++sentPacketCount;
+        sentByteCount += packet.size();
     }
 
     void sendFramedAt(PacketType ptype, uint32_t sequence,
@@ -157,6 +163,8 @@ struct Connection::Impl {
         packet[14] = (uint8_t)(csum >> 8);
 
         sendto(sock, packet.data(), packet.size(), 0, (sockaddr*)&addr, sizeof(addr));
+        ++sentPacketCount;
+        sentByteCount += packet.size();
     }
 
     // Send a pre-built payload (without wire header) with proper framing.
@@ -187,6 +195,11 @@ Connection::~Connection() {
     delete impl;
 }
 
+uint64_t Connection::sentPacketCount() const { return impl->sentPacketCount; }
+uint64_t Connection::receivedPacketCount() const { return impl->receivedPacketCount; }
+uint64_t Connection::sentByteCount() const { return impl->sentByteCount; }
+uint64_t Connection::receivedByteCount() const { return impl->receivedByteCount; }
+
 void Connection::resetProtocolEpoch() {
     impl->nativeProtocol.reset(impl->nativeProtocol.connectionSequence());
     impl->nativeStrings.clear();
@@ -213,6 +226,10 @@ void Connection::resetProtocolEpoch() {
     impl->connectRequest.clear();
     impl->disconnectPacket.clear();
     impl->disconnectAttempts = 0;
+    impl->sentPacketCount = 0;
+    impl->receivedPacketCount = 0;
+    impl->sentByteCount = 0;
+    impl->receivedByteCount = 0;
     impl->nextNativeEventSequence = 0;
     impl->nativeRateAdvertised = false;
     impl->pendingNativeMove = false;
@@ -494,6 +511,8 @@ void Connection::update() {
             from.sin_port != impl->addr.sin_port)
         )
             continue;
+        ++impl->receivedPacketCount;
+        impl->receivedByteCount += (size_t)n;
 
         // Native V12 OOB packets are byte-discriminated from dnet packets by
         // the low bit: all OOB packet types are even, while data starts with
@@ -595,6 +614,8 @@ void Connection::update() {
                                 impl->nativePlayerSensorGroup = event.sensorGroup;
                             if (event.classId == 9 && commandCb)
                                 commandCb(event.message);
+                            if (event.classId == 9 && clientCommandCb)
+                                clientCommandCb(event.arguments);
                             if (event.classId == 9 && event.arguments.size() >= 2 &&
                                 event.arguments[0] == "ServerMessage") {
                                 const auto& args = event.arguments;

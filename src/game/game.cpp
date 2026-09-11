@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstring>
 #include <cctype>
+#include <sstream>
 #include <fstream>
 #include <cstdlib>
 
@@ -600,6 +601,7 @@ void Player::applyDamage(float amount) {
 void Player::respawn() {
     hp = 100.0f;
     eng = 100.0f;
+    heatLevel = 0.0f;
     arm = 0.0f;
     vel = {0,0,0};
     pos = {0, 10, 0};
@@ -2805,6 +2807,21 @@ void Game::update(float dt) {
                             continue;
                         }
                         if (ev.message.empty()) continue;
+                        if (ev.classId == T2Demo::NetEventClassFirst + 9 &&
+                            !ev.arguments.empty() && ev.arguments[0] == "ServerMessage") {
+                            std::vector<VMValue> callbackArgs;
+                            if (ev.arguments.size() >= 2) {
+                                callbackArgs.emplace_back(ev.arguments[1]);
+                                callbackArgs.emplace_back(std::string());
+                                for (size_t i = 2; i < ev.arguments.size(); ++i)
+                                    callbackArgs.emplace_back(ev.arguments[i]);
+                                if (auto* ts = Engine::instance().script().ts())
+                                    ts->dispatchMessageCallback(ev.arguments[1], callbackArgs);
+                            }
+                        } else if (ev.classId == T2Demo::NetEventClassFirst + 9) {
+                            demoParser->handleHudRemoteCommand(ev.arguments[0], ev.arguments);
+                            dispatchHudClientCommand(ev.arguments);
+                        }
                         DemoTimedEvent te;
                         te.time = demoTime;
                         te.text = ev.message;
@@ -2868,9 +2885,9 @@ void Game::update(float dt) {
                             w->sunColorUsed = true;
                             Console::instance().printf(LogLevel::Info, "Applied sun from demo stream: az=%.0f el=%.0f color=(%d %d %d)",
                                 sd.azimuth * 180.0f / 3.14159f, sd.elevation * 180.0f / 3.14159f, sd.r, sd.g, sd.b);
+                                }
+                            }
                         }
-                    }
-                }
                 delete block;
                 if (demoPlaying && demoParser && (demoBlocksDone % 500) == 0)
                     demoSnapshots[demoBlocksDone] = demoParser->captureSnapshot();
@@ -2891,6 +2908,67 @@ void Game::update(float dt) {
                     }
                 }
                 DemoParser::s_pendingTerrainFile.clear(); // only try once
+            }
+
+            if (demoPlaying && demoParser) {
+                auto applySlots = [](GuiControl* control, const auto& state, int active,
+                                     const auto& bitmaps, const std::string& background,
+                                     const std::string& highlight, const std::string& infinite) {
+                    if (!control) return;
+                    if (control->hudSlots.size() < 32) control->hudSlots.resize(32);
+                    for (auto& slot : control->hudSlots) {
+                        slot.visible = false;
+                        slot.active = false;
+                        slot.bitmap.clear();
+                    }
+                    for (const auto& [index, amount] : state) {
+                        if (index < 0 || index >= (int)control->hudSlots.size()) continue;
+                        control->hudSlots[index].amount = amount;
+                        auto bitmap = bitmaps.find(index);
+                        if (bitmap != bitmaps.end()) control->hudSlots[index].bitmap = bitmap->second;
+                        control->hudSlots[index].visible = true;
+                        control->hudSlots[index].active = index == active;
+                    }
+                    control->activeHudSlot = active;
+                    control->fields["backgroundBitmap"] = background;
+                    control->fields["highlightBitmap"] = highlight;
+                    control->fields["infiniteAmmoBitmap"] = infinite;
+                };
+                auto& gui = Engine::instance().guiRenderer();
+                applySlots(gui.findControl("weaponsHud"), demoParser->getWeaponsHud().slots,
+                            demoParser->getWeaponsHud().activeIndex, demoParser->getWeaponsHud().bitmaps,
+                            demoParser->getWeaponsHud().backgroundBitmap,
+                            demoParser->getWeaponsHud().highlightBitmap,
+                            demoParser->getWeaponsHud().infiniteAmmoBitmap);
+                applySlots(gui.findControl("inventoryHud"), demoParser->getInventoryHud().slots, -1,
+                            demoParser->getInventoryHud().bitmaps,
+                            demoParser->getInventoryHud().backgroundBitmap, "", "");
+                if (auto* frame = gui.findControl("backpackFrame"))
+                    frame->visible = demoParser->getBackpackHud().active;
+                if (auto* text = gui.findControl("backpackText"))
+                {
+                    text->text = demoParser->getBackpackHud().text;
+                    text->visible = demoParser->getBackpackHud().active &&
+                                    atoi(demoParser->getBackpackHud().text.c_str()) != 0;
+                }
+                if (auto* icon = gui.findControl("backpackIcon")) {
+                    icon->visible = demoParser->getBackpackHud().active;
+                    // The stock client derives the bitmap from the pack index.
+                    // Preserve that script-side result when the replay command
+                    // does not carry an explicit bitmap.
+                    if (!demoParser->getBackpackHud().active ||
+                        !demoParser->getBackpackHud().bitmap.empty())
+                        icon->bitmap = demoParser->getBackpackHud().bitmap;
+                }
+                if (auto* dashboard = gui.findControl("dashboardHud"))
+                    dashboard->visible = demoParser->getVehicleHud().dashboardVisible;
+                if (auto* vehicleWeapon = gui.findControl("vWeaponsBox")) {
+                    vehicleWeapon->visible = demoParser->getVehicleHud().dashboardVisible;
+                    vehicleWeapon->activeHudSlot = demoParser->getVehicleHud().activeWeapon;
+                }
+                if (auto* ammo = gui.findControl("ammoHud"))
+                    ammo->text = demoParser->getAmmoHud().count < 0
+                        ? std::string() : std::to_string(demoParser->getAmmoHud().count);
             }
 
             // Debug: ghost stats every ~500 blocks
@@ -3467,6 +3545,8 @@ void Game::render(float dt) {
     float savedFov = r.config().fov;
     if (demoPlaying && demoCameraFov > 0 && demoCameraFov < 180) {
         r.config().fov = demoCameraFov;
+    } else if (!mapperMode && currentInput.zoom) {
+        r.config().fov = std::max(20.0f, savedFov * 0.5f);
     }
     r.setCamera(finalCam, camTarget, {0, 1, 0});
     r.config().fov = savedFov; // restore for HUD rendering
@@ -4460,6 +4540,72 @@ void Game::startLocalGame(const char* map) {
     }
 }
 
+void Game::dispatchHudClientCommand(const std::vector<std::string>& args) {
+    if (args.empty()) return;
+    std::string command = args[0];
+    std::string lower = command;
+    for (char& c : lower) c = (char)std::tolower((unsigned char)c);
+    static const std::set<std::string> allowed = {
+        "setweaponshudactive", "setweaponshuditem", "setweaponshudammo",
+        "setweaponshudbitmap", "setweaponshudbackgroundbmp",
+        "setweaponshudhighlightbmp", "setweaponshudinfiniteammobmp",
+        "setweaponshudclearall", "setammohudcount", "setbackpackhuditem",
+        "setbackpackhudbitmap",
+        "setinventoryhudbitmap", "setinventoryhuditem", "setinventoryhudamount",
+        "setinventoryhudbackgroundbmp", "setinventoryhudclearall",
+        "setvweaponshudactive", "setvweaponshudclearall", "setrepairreticle",
+        "setcloakiconon", "setcloakiconoff", "setrepairpackiconon",
+        "setrepairpackiconoff", "setshieldiconon", "setshieldiconoff",
+        "setsenjamiconon", "setsenjamiconoff", "updatepacktext",
+        "checkpassengers", "showpassenger", "sethalftimeclock",
+        "setsatchelarmed", "setbeaconnames", "removereticle",
+        "startbombersight", "endbombersight", "starteffect", "stopeffect",
+         "setpoweraudioprofiles", "setvoiceinfo", "togglehudmode",
+         "sethudmode", "displayhuds", "resethud", "toggledashhud",
+         "setpowersoundprofiles", "setcontrolobjectreticle",
+         "centerprint", "bottomprint", "clearcenterprint", "clearbottomprint",
+         "toggleplayhuds",
+         "setstationkeys", "setdefaultvehiclekeys", "setweaponryvehiclekeys",
+         "setpilotvehiclekeys", "setpassengervehiclekeys",
+         "setplaycontent", "pickteammenu", "processpickteam", "pickteam",
+         "setfirstperson", "getfirstperson", "vehiclemount", "vehicledismount",
+         "missionstartphase1", "missionstartphase2", "missionstartphase3",
+         "missionend",
+         "playmusic", "stopmusic", "playcdtrack", "stopcd",
+         "playerstarttalking", "playerstoppedtalking",
+         "chatmessage", "cannedchatmessage", "teamrepairmessage",
+         "showvehiclegauges", "stationvehicleshowhud", "stationvehiclehidehud",
+         "stationvehiclehidejusthud", "clearpassengers", "protectingstaticobjects",
+         "resetcommandmap", "scopecommandermap", "cameraattachresponse",
+         "controlobjectresponse", "controlobjectreset",
+         "resettasklist", "taskinfo", "potentialteamtask", "potentialtask",
+        "taskdeclined", "taskaccepted", "taskcompleted", "acceptedtask"
+    };
+    if (!allowed.count(lower)) return;
+    if (!command.empty()) command[0] = (char)std::toupper((unsigned char)command[0]);
+    std::vector<VMValue> callbackArgs;
+    for (size_t i = 1; i < args.size(); ++i) callbackArgs.emplace_back(args[i]);
+    if (auto* ts = Engine::instance().script().ts()) {
+        const std::string prefixed = "clientCmd" + command;
+        if (ts->hasFunction(prefixed)) ts->callFunction(prefixed, callbackArgs);
+        else if (ts->hasFunction("clientCmd" + args[0]))
+            ts->callFunction("clientCmd" + args[0], callbackArgs);
+        else if (ts->hasFunction("clientcmd" + command))
+            ts->callFunction("clientcmd" + command, callbackArgs);
+        else if (ts->hasFunction(command)) ts->callFunction(command, callbackArgs);
+    }
+    // The retail task callback has a misspelled parameter but writes the
+    // correctly spelled field, losing the AI objective in the process.
+    if (lower == "taskinfo" && args.size() >= 5) {
+        if (auto* taskList = Engine::instance().script().findObject("TaskList")) {
+            taskList->fields["currentTaskClient"] = VMValue(args[1]);
+            taskList->fields["currentAIObjective"] = VMValue(args[2]);
+            taskList->fields["currentTaskIsTeam"] = VMValue(args[3]);
+            taskList->fields["currentTaskDescription"] = VMValue(args[4]);
+        }
+    }
+}
+
 void Game::connectToServer(const char* host, uint16_t port, bool observer, const char* password) {
     cfg.serverHost = host;
     cfg.serverPort = port;
@@ -4517,6 +4663,11 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                         std::string cmd((const char*)data + 3, cmdLen);
                         Console::instance().printf(LogLevel::Warn,
                             "Ignored untrusted legacy server command: %s", cmd.c_str());
+                        std::istringstream tokens(cmd);
+                        std::vector<std::string> args;
+                        std::string token;
+                        while (tokens >> token && args.size() < 20) args.push_back(token);
+                        if (!args.empty()) dispatchHudClientCommand(args);
                     }
                     return;
                 }
@@ -4545,6 +4696,11 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                     if (T2Protocol::decodeChat(data, size, chat)) {
                         Console::instance().printf(LogLevel::Info, "[CHAT] %s: %s", chat.sender, chat.text);
                         playChatBeep();
+                        if (auto* ts = Engine::instance().script().ts()) {
+                            if (ts->hasFunction("addMessageHudLine"))
+                                ts->callFunction("addMessageHudLine", {
+                                    VMValue(std::string(chat.sender) + ": " + chat.text)});
+                        }
                     }
                     return;
                 }
@@ -4715,6 +4871,9 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                     "Ignored untrusted server command: %s", command.c_str());
             }
         });
+        activeConn->setClientCommandCallback([this](const std::vector<std::string>& args) {
+            dispatchHudClientCommand(args);
+        });
         activeConn->setStateCallback([this](const V12::ServerGameState& state) {
             if (state.controlPresent && !state.controlDirty) {
                 serverPlayerGhostIndex = state.controlGhost;
@@ -4769,6 +4928,15 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
         });
         activeConn->setServerMessageCallback([this](const std::vector<std::string>& argv) {
             if (argv.size() < 1 || argv[0] != "ServerMessage") return;
+            if (argv.size() >= 2) {
+                std::vector<VMValue> callbackArgs;
+                callbackArgs.emplace_back(argv[1]);
+                callbackArgs.emplace_back(std::string());
+                for (size_t i = 2; i < argv.size(); ++i)
+                    callbackArgs.emplace_back(argv[i]);
+                if (auto* ts = Engine::instance().script().ts())
+                    ts->dispatchMessageCallback(argv[1], callbackArgs);
+            }
             if (argv.size() >= 2 && argv[1] == "MsgMissionStart") {
                 liveMatchStarted_ = true;
                 liveMatchEnded_ = false;
