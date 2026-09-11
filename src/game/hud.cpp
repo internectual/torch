@@ -427,9 +427,9 @@ void HUD::renderScoreboard(Game* game) {
     }
 
     // Column headers
-    float colX[] = {bx + 20, bx + 160, bx + 300, bx + 400, bx + 470};
-    const char* headers[] = {"Player", "Team", "Score", "Damage", "Health"};
-    for (int i = 0; i < 5; i++) {
+    float colX[] = {bx + 20, bx + 140, bx + 250, bx + 325, bx + 395, bx + 455, bx + 505};
+    const char* headers[] = {"Player", "Team", "Score", "Damage", "Health", "Ping", "Loss"};
+    for (int i = 0; i < 7; i++) {
         if (font) font->render(headers[i], colX[i], by + 50, {1, 1, 1, 1}, 2.0f);
     }
 
@@ -462,9 +462,13 @@ void HUD::renderScoreboard(Game* game) {
                 snprintf(buf, sizeof(buf), "%.0f%%", p.damage * 100.0f);
                 if (font) font->render(buf, colX[3], ry, {1, 0.5f, 0.2f, 0.9f}, 2.0f);
                 ColorF hc = dmgPct > 66 ? ColorF{0,1,0,0.9f} : dmgPct > 33 ? ColorF{1,1,0,0.9f} : ColorF{1,0,0,0.9f};
-                snprintf(buf, sizeof(buf), "%.0f%%", dmgPct);
-                if (font) font->render(buf, colX[4], ry, hc, 2.0f);
-                row++;
+                 snprintf(buf, sizeof(buf), "%.0f%%", dmgPct);
+                 if (font) font->render(buf, colX[4], ry, hc, 2.0f);
+                 snprintf(buf, sizeof(buf), "%d", p.ping);
+                 if (font) font->render(buf, colX[5], ry, {0.7f, 0.85f, 1.0f, 0.9f}, 2.0f);
+                 snprintf(buf, sizeof(buf), "%d%%", p.packetLoss);
+                 if (font) font->render(buf, colX[6], ry, {1.0f, 0.7f, 0.4f, 0.9f}, 2.0f);
+                 row++;
             }
             if (row == 0 && font) {
                 font->render("No player data available", colX[0], by + 80, {0.5f,0.5f,0.5f,1}, 2.0f);
@@ -475,6 +479,44 @@ void HUD::renderScoreboard(Game* game) {
 
     // Live game: show all ghosts with kills/deaths from server
     if (game->isConnected()) {
+        if (auto* connection = game->activeConnection()) {
+            const auto observer = connection->observerSnapshot();
+            if (!observer.clientNames.empty()) {
+                for (const auto& [clientId, name] : observer.clientNames) {
+                    if (row >= maxRows) break;
+                    const auto team = observer.clientTeams.find(clientId);
+                    const auto score = observer.playerScores.find(clientId);
+                    const auto ping = observer.playerPings.find(clientId);
+                    const auto loss = observer.playerPacketLoss.find(clientId);
+                    const auto target = observer.clientTargets.find(clientId);
+                    const GhostEntry* ghost = target == observer.clientTargets.end()
+                        ? nullptr : game->getLiveGhost(target->second);
+                    float ry = by + 80 + row * 22;
+                    ColorF nameCol = {0.8f, 0.8f, 1.0f, 0.9f};
+                    if (team != observer.clientTeams.end() && team->second == 1)
+                        nameCol = {1.0f, 0.3f, 0.3f, 0.9f};
+                    else if (team != observer.clientTeams.end() && team->second == 2)
+                        nameCol = {0.3f, 0.4f, 1.0f, 0.9f};
+                    if (font) font->render(name.c_str(), colX[0], ry, nameCol, 2.0f);
+                    const char* teamName = team == observer.clientTeams.end() ? "N/A" :
+                        (team->second == 1 ? "Red" : team->second == 2 ? "Blue" : "N/A");
+                    if (font) font->render(teamName, colX[1], ry, nameCol, 2.0f);
+                    snprintf(buf, sizeof(buf), "%d", score == observer.playerScores.end() ? 0 : score->second);
+                    if (font) font->render(buf, colX[2], ry, {1, 1, 0, 0.9f}, 2.0f);
+                    snprintf(buf, sizeof(buf), "-");
+                    if (font) font->render(buf, colX[3], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
+                    if (ghost) snprintf(buf, sizeof(buf), "%.0f%%", ghost->health);
+                    else snprintf(buf, sizeof(buf), "-");
+                    if (font) font->render(buf, colX[4], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
+                    snprintf(buf, sizeof(buf), "%d", ping == observer.playerPings.end() ? 0 : ping->second);
+                    if (font) font->render(buf, colX[5], ry, {0.7f, 0.85f, 1.0f, 0.9f}, 2.0f);
+                    snprintf(buf, sizeof(buf), "%d%%", loss == observer.playerPacketLoss.end() ? 0 : loss->second);
+                    if (font) font->render(buf, colX[6], ry, {1.0f, 0.7f, 0.4f, 0.9f}, 2.0f);
+                    row++;
+                }
+                return;
+            }
+        }
         auto indices = game->getLiveGhostIndices();
         row = 0;
         for (auto idx : indices) {
