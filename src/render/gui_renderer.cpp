@@ -3415,9 +3415,54 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             }
             if (opaque)
                 r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.1f,0.1f,0.15f,0.6f});
-            if (hf && !ctl->text.empty()) {
+            std::string displayText = ctl->text;
+            bool underDashboard = false;
+            for (auto* parent = ctl->parent; parent; parent = parent->parent) {
+                if (parent->name == "dashboardHud") {
+                    underDashboard = true;
+                    break;
+                }
+            }
+            if (underDashboard && (ctl->name == "vSpeedText" || ctl->name == "vAltitudeText")) {
+                const GhostEntry* ghost = nullptr;
+                if (Engine::instance().game().isDemoPlaying()) {
+                    if (auto* parser = Engine::instance().game().getDemoParser())
+                        ghost = parser->getGhostTracker().getGhost(
+                            Engine::instance().game().getControlGhostIndex());
+                } else {
+                    ghost = Engine::instance().game().getLiveGhost(
+                        Engine::instance().game().getControlGhostIndex());
+                }
+                if (ghost && ctl->name == "vAltitudeText") {
+                    displayText = std::to_string((int)std::lround(ghost->position.z));
+                } else if (ghost && ghost->hasVelocity) {
+                    Vec3 velocity = ghost->velocity;
+                    if (ghost->hasLinearMomentum && Engine::instance().game().isDemoPlaying()) {
+                        if (auto* parser = Engine::instance().game().getDemoParser()) {
+                            float mass = 200.0f;
+                            const auto dataBlock = parser->getInitialBlock().dataBlocks.find(
+                                (uint32_t)ghost->datablockId);
+                            if (dataBlock != parser->getInitialBlock().dataBlocks.end()) {
+                                const auto massField = dataBlock->second.data.find("mass");
+                                if (massField != dataBlock->second.data.end()) {
+                                    const float parsedMass = (float)std::atof(massField->second.c_str());
+                                    if (parsedMass > 0.0f) mass = parsedMass;
+                                }
+                            }
+                            velocity = {ghost->linearMomentum.x / mass,
+                                        ghost->linearMomentum.y / mass,
+                                        ghost->linearMomentum.z / mass};
+                        }
+                    }
+                    const float speed = std::sqrt(velocity.x * velocity.x +
+                                                  velocity.y * velocity.y +
+                                                  velocity.z * velocity.z);
+                    displayText = std::to_string((int)std::lround(speed * 3.6f));
+                }
+            }
+            if (hf && !displayText.empty()) {
                 float tx = x + 4, ty = y + 2;
-                hf->render(ctl->text.c_str(), tx, ty, tc, 1.0f);
+                hf->render(displayText.c_str(), tx, ty, tc, 1.0f);
             }
         }
     } else if (cn == "GuiCommanderTree") {

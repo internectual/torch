@@ -435,10 +435,14 @@ struct GhostEntry {
     int classId{};
     std::string className;
     Vec3 position{};
+    Vec3 velocity{};
+    Vec3 linearMomentum{};
     Vec3 renderPos{};
     Vec4 rotation{};
     Vec4 renderRotation{};
     bool hasRotation{};
+    bool hasVelocity{};
+    bool hasLinearMomentum{};
     int datablockId = -1;
     bool hasDatablock = false;
     std::string skinName;

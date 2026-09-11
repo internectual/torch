@@ -1695,7 +1695,19 @@ static void readVehicleData(BitStream& bs, bool isInitial, const Vec3& cp, Ghost
         } else bs.readCompressedPoint(cp);
         float qx = bs.readF32(), qy = bs.readF32(), qz = bs.readF32(), qw = bs.readF32();
         if (entry) { entry->rotation = {qx, qy, qz, qw}; entry->hasRotation = true; }
-        bs.readPoint3F(); // linMomentum
+        if (entry) {
+            const Vec3 momentum = bs.readPoint3F(); // linMomentum
+            // Vehicle datablock mass is not part of this ghost update. Use
+            // the same native fallback as the reference parser until the
+            // datablock mass can be resolved at render time.
+            entry->velocity = {momentum.x / 200.0f, momentum.y / 200.0f,
+                               momentum.z / 200.0f};
+            entry->linearMomentum = momentum;
+            entry->hasVelocity = true;
+            entry->hasLinearMomentum = true;
+        } else {
+            bs.readPoint3F(); // linMomentum
+        }
         bs.readPoint3F(); // angMomentum
     }
     if (bs.readFlag()) bs.readFloat(8); // EnergyMask
