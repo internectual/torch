@@ -512,6 +512,8 @@ struct DemoPlayerInfo {
     float damage{0};
     int clientId{-1};
     int score{0};
+    int ping{0};
+    int packetLoss{0};
 };
 
 struct DemoParserSnapshot {
@@ -556,6 +558,9 @@ public:
 
     int getBlockCount();
     int getMoveBlockCount() const;
+    uint32_t getPacketsParsed() const { return packetsParsed; }
+    float getRoundTripTime() const { return initialBlock.roundTripTime; }
+    float getPacketLoss() const { return initialBlock.packetLoss; }
     int getBlockCursor() const { return blockCursor_; }
 
     DemoBlock* nextBlock();

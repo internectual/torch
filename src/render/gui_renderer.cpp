@@ -3025,6 +3025,30 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 fill = Engine::instance().game().player().heat() / 100.0f;
             else if (cn == "HudCapacitor" && Engine::instance().game().state() == Game::Playing)
                 fill = Engine::instance().game().player().energy() / 100.0f;
+            bool underDashboard = false;
+            for (auto* parent = ctl->parent; parent; parent = parent->parent) {
+                if (parent->name == "dashboardHud") {
+                    underDashboard = true;
+                    break;
+                }
+            }
+            if (underDashboard) {
+                const GhostEntry* ghost = nullptr;
+                if (Engine::instance().game().isDemoPlaying()) {
+                    if (auto* parser = Engine::instance().game().getDemoParser())
+                        ghost = parser->getGhostTracker().getGhost(
+                            Engine::instance().game().getControlGhostIndex());
+                } else {
+                    ghost = Engine::instance().game().getLiveGhost(
+                        Engine::instance().game().getControlGhostIndex());
+                }
+                if (ghost) {
+                    if (cn == "HudDamage")
+                        fill = ghost->health / std::max(1.0f, ghost->maxHealth);
+                    else if (cn == "HudEnergy")
+                        fill = ghost->energy / 100.0f;
+                }
+            }
             if (fill > 1.0f) fill /= 100.0f;
             fill = std::clamp(fill, 0.0f, 1.0f);
             auto verticalIt = ctl->fields.find("verticalFill");
@@ -3121,11 +3145,28 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             if (hf) {
                 int ping = 0;
                 uint64_t received = 0, sent = 0;
+                float packetLoss = -1.0f;
                 if (auto* conn = Engine::instance().game().activeConnection())
                     ping = (int)conn->ping(), received = conn->receivedPacketCount(), sent = conn->sentPacketCount();
+                else if (Engine::instance().game().isDemoPlaying()) {
+                    if (auto* parser = Engine::instance().game().getDemoParser()) {
+                        ping = std::max(0, (int)std::lround(parser->getRoundTripTime() * 1000.0f));
+                        received = parser->getPacketsParsed();
+                        const auto& players = parser->getPlayerInfo();
+                        if (!players.empty()) {
+                            int lossTotal = 0;
+                            for (const auto& player : players) lossTotal += player.packetLoss;
+                            packetLoss = (float)lossTotal / (float)players.size();
+                        }
+                    }
+                }
                 char netText[96];
-                snprintf(netText, sizeof(netText), "%dms  RX:%llu TX:%llu", ping,
-                         (unsigned long long)received, (unsigned long long)sent);
+                if (packetLoss >= 0.0f)
+                    snprintf(netText, sizeof(netText), "%dms L:%.0f%% RX:%llu TX:%llu", ping,
+                             packetLoss, (unsigned long long)received, (unsigned long long)sent);
+                else
+                    snprintf(netText, sizeof(netText), "%dms  RX:%llu TX:%llu", ping,
+                             (unsigned long long)received, (unsigned long long)sent);
                 hf->render(netText, x + 5, y + 4, {0.4f, 1.0f, 0.4f, 0.9f}, 0.75f);
                 hf->render("NET", x + 5, y + ctl->extentY - 15,
                            {0.7f, 0.8f, 0.8f, 0.8f}, 0.8f);
@@ -3134,9 +3175,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             if (graphIt != ctl->fields.end() && (graphIt->second == "1" || graphIt->second == "true")) {
                 const double now = Engine::instance().timer().now();
                 auto* conn = Engine::instance().game().activeConnection();
-                if (conn && (ctl->netLastSample <= 0.0 || now - ctl->netLastSample >= 0.05)) {
-                    const uint64_t currentReceived = conn->receivedPacketCount();
-                    const uint64_t currentSent = conn->sentPacketCount();
+                const bool demo = Engine::instance().game().isDemoPlaying();
+                if ((conn || demo) && (ctl->netLastSample <= 0.0 || now - ctl->netLastSample >= 0.05)) {
+                    const uint64_t currentReceived = conn
+                        ? conn->receivedPacketCount()
+                        : (Engine::instance().game().getDemoParser()
+                            ? Engine::instance().game().getDemoParser()->getPacketsParsed() : 0);
+                    const uint64_t currentSent = conn ? conn->sentPacketCount() : 0;
                     const uint64_t packets = (currentReceived >= ctl->netLastReceived
                                                   ? currentReceived - ctl->netLastReceived : 0) +
                                              (currentSent >= ctl->netLastSent

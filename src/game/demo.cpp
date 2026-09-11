@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <zlib.h>
 
 // Pending explosion events from projectile ghost parsers
@@ -790,6 +791,26 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
         if (player != playerInfo_.end()) {
             player->teamId = (int)score.teamId;
             player->score = (int)score.score;
+        }
+    }
+    // The recordings.cs PLAYERLIST demo value uses the same roster field
+    // order as MapGenius: name, ..., client id, ..., ping, packet loss.
+    if (initialBlock.demoValues.size() >= 2) {
+        size_t valueIndex = 1; // MISC precedes PLAYERLIST.
+        const int playerCount = std::max(0, atoi(initialBlock.demoValues[valueIndex++].c_str()));
+        for (int i = 0; i < playerCount && valueIndex < initialBlock.demoValues.size(); ++i) {
+            std::string field;
+            std::vector<std::string> fields;
+            std::stringstream row(initialBlock.demoValues[valueIndex++]);
+            while (std::getline(row, field, '\t')) fields.push_back(field);
+            if (fields.size() < 8) continue;
+            const int clientId = atoi(fields[2].c_str());
+            auto player = std::find_if(playerInfo_.begin(), playerInfo_.end(),
+                [&](const DemoPlayerInfo& entry) { return entry.clientId == clientId; });
+            if (player != playerInfo_.end()) {
+                player->ping = atoi(fields[6].c_str());
+                player->packetLoss = atoi(fields[7].c_str());
+            }
         }
     }
     initialTaggedStrings_ = initialBlock.taggedStrings;
