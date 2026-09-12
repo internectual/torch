@@ -31,7 +31,7 @@ GuiControl* GuiControl::findChild(const std::string& name) {
 
 // GuiPlayerView shape cache (control name -> loaded shape)
 static std::unordered_map<std::string, DTSShape> s_playerViewShapes;
-static DTSShape s_playerViewSpinfusor;
+static std::unordered_map<std::string, DTSShape> s_playerViewWeapons;
 
 // Open popup dropdowns collected during the dialog pass; drawn last so they
 // render on top of sibling/overlay controls (T2 popups are topmost layers).
@@ -1300,8 +1300,18 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
     auto& fs = Engine::instance().fs();
     auto* font = r.getFont();
 
-    float x = ctl->posX + scrollOfsX;
-    float y = ctl->posY + scrollOfsY;
+    float localX = ctl->posX;
+    float localY = ctl->posY;
+    if (ctl->parent && ctl->parent != canvas) {
+        const auto horiz = ctl->fields.find("horizSizing");
+        const auto vert = ctl->fields.find("vertSizing");
+        if (horiz != ctl->fields.end() && horiz->second == "right")
+            localX = ctl->parent->extentX - ctl->extentX - ctl->posX;
+        if (vert != ctl->fields.end() && vert->second == "bottom")
+            localY = ctl->parent->extentY - ctl->extentY - ctl->posY;
+    }
+    float x = localX + scrollOfsX;
+    float y = localY + scrollOfsY;
 
     // Add parent offset (walk up to canvas, excluding scroll ancestor's offset which is in scrollOfs)
     GuiControl* p = ctl->parent;
@@ -3695,12 +3705,14 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 float dx = mx.x-mn.x, dy = mx.y-mn.y, dz = mx.z-mn.z;
                 float radius = 0.5f * std::sqrt(dx*dx+dy*dy+dz*dz);
                 float fitScale = (radius > 1e-3f) ? (1.0f / radius) : 1.0f;
+                fitScale *= ctl->modelZoom;
 
                 // Orbit transform
                 MatrixF ry; ry.setRotationY(ctl->modelYaw);
+                MatrixF rx; rx.setRotationX(ctl->modelPitch);
                 MatrixF sc2; sc2.setScale({fitScale, fitScale, fitScale});
                 MatrixF tr; tr.setTranslation({-center.x, -center.y, -center.z});
-                MatrixF model = ry * sc2 * tr;
+                MatrixF model = ry * rx * sc2 * tr;
                 r.setModel(model);
 
                 // Render the shape
@@ -3710,27 +3722,40 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 // GL_CULL_FACE from earlier code discard the model's faces.
                 GLboolean modelCullWasOn = glIsEnabled(GL_CULL_FACE);
                 glDisable(GL_CULL_FACE);
-                shape.render(0);
-                if (!s_playerViewSpinfusor.loaded) {
-                    s_playerViewSpinfusor.name = "weapon_disc.dts";
-                    auto data = Engine::instance().fs().read("shapes/weapon_disc.dts");
-                    if (!data.empty())
-                        s_playerViewSpinfusor.load(data.data(), data.size());
+                if (ctl->modelSequence >= 0 && ctl->modelSequence < (int)shape.animations.size())
+                    shape.renderAnimation(shape.animations[ctl->modelSequence].name.c_str(), ctl->modelAnimTime);
+                else
+                    shape.render(0);
+                std::string weaponName = "weapon_disc.dts";
+                std::string modelLower = ctl->modelShape;
+                for (char& c : modelLower) c = (char)std::tolower((unsigned char)c);
+                if (modelLower.find("heavy") != std::string::npos)
+                    weaponName = "weapon_mortar.dts";
+                else if (modelLower.find("medium") != std::string::npos)
+                    weaponName = "weapon_plasma.dts";
+                auto weaponIt = s_playerViewWeapons.find(weaponName);
+                if (weaponIt == s_playerViewWeapons.end()) {
+                    DTSShape weapon;
+                    weapon.name = weaponName;
+                    auto data = Engine::instance().fs().read(("shapes/" + weaponName).c_str());
+                    if (!data.empty()) weapon.load(data.data(), data.size());
+                    weaponIt = s_playerViewWeapons.emplace(weaponName, std::move(weapon)).first;
                 }
-                if (s_playerViewSpinfusor.loaded) {
+                auto& playerViewWeapon = weaponIt->second;
+                if (playerViewWeapon.loaded) {
                     int playerMount = shape.findNode("mount0");
                     if (playerMount < 0) playerMount = shape.findNode("mount1");
-                    int weaponMount = s_playerViewSpinfusor.findNode("Mountpoint");
-                    if (weaponMount < 0) weaponMount = s_playerViewSpinfusor.findNode("mount0");
+                    int weaponMount = playerViewWeapon.findNode("Mountpoint");
+                    if (weaponMount < 0) weaponMount = playerViewWeapon.findNode("mount0");
                     MatrixF weaponModel = model;
                     if (playerMount >= 0 && weaponMount >= 0 &&
                         playerMount < (int)shape.defaultTransforms.size() &&
-                        weaponMount < (int)s_playerViewSpinfusor.defaultTransforms.size()) {
+                        weaponMount < (int)playerViewWeapon.defaultTransforms.size()) {
                         weaponModel = model * shape.defaultTransforms[playerMount] *
-                            s_playerViewSpinfusor.defaultTransforms[weaponMount].inverse();
+                            playerViewWeapon.defaultTransforms[weaponMount].inverse();
                     }
                     r.setModel(weaponModel);
-                    s_playerViewSpinfusor.render(0);
+                    playerViewWeapon.render(0);
                 }
                 if (modelCullWasOn) glEnable(GL_CULL_FACE);
 
@@ -3790,6 +3815,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
 
 void GuiRenderer::update(float dt) {
     updateFades(dt);
+    std::function<void(GuiControl*)> advanceModelAnimations = [&](GuiControl* control) {
+        if (!control) return;
+        if (control->modelSequence >= 0) control->modelAnimTime += dt;
+        for (auto* child : control->children) advanceModelAnimations(child);
+    };
+    for (auto* dialog : dialogStack) advanceModelAnimations(dialog);
+    if (canvas) advanceModelAnimations(canvas);
     if (auto* map = findControl("CommanderMap")) {
         auto value = [&](const char* name, float fallback) {
             auto it = map->fields.find(name);
@@ -4002,9 +4034,23 @@ void GuiRenderer::updateFades(float dt) {
 
 GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
     if (!ctl || !ctl->visible || !ctl->active) return nullptr;
+    auto localPosition = [](GuiControl* control) {
+        float x = control->posX;
+        float y = control->posY;
+        if (control->parent) {
+            const auto horiz = control->fields.find("horizSizing");
+            const auto vert = control->fields.find("vertSizing");
+            if (horiz != control->fields.end() && horiz->second == "right")
+                x = control->parent->extentX - control->extentX - control->posX;
+            if (vert != control->fields.end() && vert->second == "bottom")
+                y = control->parent->extentY - control->extentY - control->posY;
+        }
+        return std::pair<float, float>{x, y};
+    };
     // Tab pages and tab frames are not click targets, but their children are.
     if (ctl->className == "GuiTabPageCtrl" || ctl->className == "ShellTabFrame") {
-        float x = ctl->posX, y = ctl->posY;
+        auto [localX, localY] = localPosition(ctl);
+        float x = localX, y = localY;
         GuiControl* p = ctl->parent;
         while (p && p != canvas) { x += p->posX; y += p->posY; p = p->parent; }
         if (mx >= x && mx < x + ctl->extentX && my >= y && my < y + ctl->extentY) {
@@ -4015,8 +4061,9 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
         }
         return nullptr;
     }
-    float x = ctl->posX;
-    float y = ctl->posY;
+    auto [localX, localY] = localPosition(ctl);
+    float x = localX;
+    float y = localY;
     GuiControl* p = ctl->parent;
     while (p && p != canvas) {
         x += p->posX;
@@ -4322,6 +4369,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     if (hit->className == "GuiPlayerView") {
         hit->modelRotating = true;
         hit->lastDragX = x;
+        hit->lastDragY = y;
         return true;
     }
     if (hit->className == "GuiCommanderMap") {
@@ -4721,6 +4769,11 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
 bool GuiRenderer::handleSecondaryInput(int x, int y) {
     GuiControl* hit = hitTestTop(x, y);
     if (!hit) return false;
+    if (hit->className == "GuiPlayerView") {
+        hit->modelZooming = true;
+        hit->lastDragY = y;
+        return true;
+    }
     if (auto* ts = Engine::instance().script().ts()) {
         const std::string callback = hit->name + "::onRightMouseDown";
         if (ts->hasFunction(callback)) {
@@ -4734,13 +4787,16 @@ bool GuiRenderer::handleSecondaryInput(int x, int y) {
 
 bool GuiRenderer::handleDrag(int x, int y) {
     if (!canvas) return false;
-    // GuiPlayerView: dragging horizontally rotates the model
+    // GuiPlayerView: drag to orbit the model in yaw and pitch.
     {
         std::function<bool(GuiControl*)> rotate = [&](GuiControl* c) -> bool {
             if (!c) return false;
             if (c->modelRotating && c->lastDragX >= 0) {
                 c->modelYaw += (float)(x - c->lastDragX) * 0.01f;
+                c->modelPitch = std::clamp(c->modelPitch + (float)(y - c->lastDragY) * 0.01f,
+                                           -1.2f, 1.2f);
                 c->lastDragX = x;
+                c->lastDragY = y;
                 return true;
             }
             for (auto* ch : c->children) if (rotate(ch)) return true;
@@ -4748,6 +4804,21 @@ bool GuiRenderer::handleDrag(int x, int y) {
         };
         for (auto* d : dialogStack) if (rotate(d)) return true;
         if (rotate(canvas)) return true;
+    }
+    {
+        std::function<bool(GuiControl*)> zoom = [&](GuiControl* c) -> bool {
+            if (!c) return false;
+            if (c->modelZooming && c->lastDragY >= 0) {
+                c->modelZoom = std::clamp(c->modelZoom - (float)(y - c->lastDragY) * 0.01f,
+                                          0.5f, 2.0f);
+                c->lastDragY = y;
+                return true;
+            }
+            for (auto* ch : c->children) if (zoom(ch)) return true;
+            return false;
+        };
+        for (auto* d : dialogStack) if (zoom(d)) return true;
+        if (zoom(canvas)) return true;
     }
     {
         std::function<bool(GuiControl*)> pan = [&](GuiControl* c) -> bool {
@@ -4911,12 +4982,14 @@ void GuiRenderer::handleDragRelease() {
         ctl->sliderDragging = false;
         ctl->windowDragging = false;
         ctl->modelRotating = false;
+        ctl->modelZooming = false;
         ctl->commanderMapDragging = false;
         ctl->commanderMapLastX = -1;
         ctl->commanderMapLastY = -1;
         ctl->vThumbDragging = false;
         ctl->hThumbDragging = false;
         ctl->lastDragX = -1;
+        ctl->lastDragY = -1;
         for (auto* c : ctl->children) clearDrag(c);
     };
     clearDrag(canvas);

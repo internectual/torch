@@ -2022,6 +2022,15 @@ bool ScriptEngine::init() {
         }
         return VMValue(0);
     });
+    vmInstance->registerNativeFunction("setseq", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        if (auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString())) {
+            ctl->modelSequence = std::clamp(args[1].toInt(), -1, 6);
+            ctl->modelAnimTime = 0.0f;
+            return VMValue(1);
+        }
+        return VMValue(0);
+    });
 
     // GuiPlayerView::update() — just a no-op trigger; setModel does the work
     // The T2 script defines GMW_PlayerModel::update() which calls setModel internally
@@ -2172,6 +2181,15 @@ bool ScriptEngine::init() {
             ctl->modelYaw = 0.5f;
             ctl->modelPitch = 0.15f;
             Console::instance().printf(LogLevel::Info, "GuiPlayerView: setModel('%s', '%s') on '%s'", shape.c_str(), skin.c_str(), objName.c_str());
+            return VMValue(1);
+        }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("setseq", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        if (auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString())) {
+            ctl->modelSequence = std::clamp(args[1].toInt(), -1, 6);
+            ctl->modelAnimTime = 0.0f;
             return VMValue(1);
         }
         return VMValue(0);
@@ -4857,24 +4875,97 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // Container/spatial query stubs (basic implementations)
-    static struct { int nextIdx; bool active; } s_containerSearch = {0, false};
-    tsInstance->registerNative("InitContainerRadiusSearch", [](const auto&) -> VMValue {
-        s_containerSearch = {0, true};
+    // Container/spatial queries backed by the native world collision/object data.
+    struct ContainerHit { std::string id; float distance; };
+    static std::vector<ContainerHit> s_containerHits;
+    static size_t s_containerIndex = 0;
+    static float s_containerCurrentDistance = 0.0f;
+    auto parsePoint = [](const std::string& value) {
+        Point3F point{};
+        std::istringstream stream(value);
+        stream >> point.x >> point.y >> point.z;
+        return point;
+    };
+    tsInstance->registerNative("InitContainerRadiusSearch", [parsePoint](const auto& args) -> VMValue {
+        s_containerHits.clear();
+        s_containerIndex = 0;
+        s_containerCurrentDistance = 0.0f;
+        if (args.size() < 2) return VMValue(0);
+        const Point3F center = parsePoint(args[0].toString());
+        const float radius = std::max(0.0f, args[1].toFloat());
+        const auto& player = Engine::instance().game().player();
+        const Point3F playerPos = player.position();
+        const float playerDistance = std::sqrt(
+            (playerPos.x - center.x) * (playerPos.x - center.x) +
+            (playerPos.y - center.y) * (playerPos.y - center.y) +
+            (playerPos.z - center.z) * (playerPos.z - center.z));
+        if (playerDistance <= radius)
+            s_containerHits.push_back({"Player", playerDistance});
+        for (const auto& object : Engine::instance().game().world().objects()) {
+            const float dx = object.pos.x - center.x;
+            const float dy = object.pos.y - center.y;
+            const float dz = object.pos.z - center.z;
+            const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (distance <= radius)
+                s_containerHits.push_back({object.label.empty() ? object.shapeName : object.label, distance});
+        }
         return VMValue(1);
     });
     tsInstance->registerNative("containerSearchNext", [](const auto&) -> VMValue {
-        if (!s_containerSearch.active) return VMValue(0);
-        if (s_containerSearch.nextIdx == 0) { s_containerSearch.nextIdx++; return VMValue("Player"); }
-        s_containerSearch.active = false;
-        return VMValue(0);
+        if (s_containerIndex >= s_containerHits.size()) return VMValue(0);
+        s_containerCurrentDistance = s_containerHits[s_containerIndex].distance;
+        return VMValue(s_containerHits[s_containerIndex++].id);
     });
-    tsInstance->registerNative("containerRayCast", [](const auto&) -> VMValue {
-        return VMValue("");
+    tsInstance->registerNative("containerRayCast", [parsePoint](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        const Point3F origin = parsePoint(args[0].toString());
+        const Point3F end = parsePoint(args[1].toString());
+        Point3F direction{end.x - origin.x, end.y - origin.y, end.z - origin.z};
+        const float length = std::sqrt(direction.x * direction.x + direction.y * direction.y + direction.z * direction.z);
+        if (length <= 0.0001f) return VMValue("");
+        direction.x /= length; direction.y /= length; direction.z /= length;
+        float distance = 0.0f;
+        Point3F hit{}, normal{};
+        if (!Engine::instance().game().world().collision().raycast(origin, direction, length,
+                                                                    distance, hit, normal))
+            return VMValue("");
+        char result[160];
+        snprintf(result, sizeof(result), "Terrain\t%.3f %.3f %.3f\t%.3f %.3f %.3f",
+                 hit.x, hit.y, hit.z, normal.x, normal.y, normal.z);
+        return VMValue(result);
     });
-    tsInstance->registerNative("containerSearchCurrDist", [](const auto&) -> VMValue { return VMValue(0.0); });
-    tsInstance->registerNative("containerSearchCurrRadDamageDist", [](const auto&) -> VMValue { return VMValue(0.0); });
-    tsInstance->registerNative("calcExplosionCoverage", [](const auto&) -> VMValue { return VMValue(1.0); });
+    tsInstance->registerNative("containerSearchCurrDist", [](const auto&) -> VMValue {
+        return VMValue((double)s_containerCurrentDistance);
+    });
+    tsInstance->registerNative("containerSearchCurrRadDamageDist", [](const auto&) -> VMValue {
+        return VMValue((double)s_containerCurrentDistance);
+    });
+    tsInstance->registerNative("calcExplosionCoverage", [parsePoint](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(1.0);
+        const Point3F origin = parsePoint(args[0].toString());
+        const std::string targetId = args[1].toString();
+        Point3F target = Engine::instance().game().player().position();
+        if (targetId != "Player") {
+            bool found = false;
+            for (const auto& object : Engine::instance().game().world().objects()) {
+                const std::string id = object.label.empty() ? object.shapeName : object.label;
+                if (id == targetId) {
+                    target = object.pos;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return VMValue(1.0);
+        }
+        Point3F direction{target.x - origin.x, target.y - origin.y, target.z - origin.z};
+        const float length = std::sqrt(direction.x * direction.x + direction.y * direction.y + direction.z * direction.z);
+        if (length <= 0.0001f) return VMValue(1.0);
+        direction.x /= length; direction.y /= length; direction.z /= length;
+        float hitDistance = 0.0f;
+        Point3F hit{}, normal{};
+        return VMValue(Engine::instance().game().world().collision().raycast(
+            origin, direction, std::max(0.0f, length - 0.05f), hitDistance, hit, normal) ? 0.0 : 1.0);
+    });
 
     // Misc startup stubs
     tsInstance->registerNative("setModPaths", [](const auto& args) -> VMValue {
@@ -5850,6 +5941,10 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("disconnect", [](const auto&) -> VMValue {
         if (auto* connection = Engine::instance().game().activeConnection())
             connection->disconnect();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("stopDemoPlayback", [](const auto&) -> VMValue {
+        Engine::instance().game().stopDemoPlayback();
         return VMValue(1);
     });
 

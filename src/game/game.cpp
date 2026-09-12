@@ -555,6 +555,17 @@ void Player::selectWeapon(int32_t idx) {
         weapons[curWeapon].reloading = false;
         weapons[curWeapon].reloadTimer = 0;
         loadWeaponModel();
+        if (auto* hud = Engine::instance().guiRenderer().findControl("weaponsHud")) {
+            std::string nativeName = gWeaponTable[weapons[curWeapon].type].name;
+            if (nativeName == "Spinfusor") nativeName = "Disc";
+            else if (nativeName == "PlasmaGun") nativeName = "Plasma";
+            else if (nativeName == "ELF") nativeName = "ELFGun";
+            hud->activeHudSlot = -1;
+            for (size_t slot = 0; slot < hud->hudSlots.size(); ++slot) {
+                hud->hudSlots[slot].active = hud->hudSlots[slot].name == nativeName;
+                if (hud->hudSlots[slot].active) hud->activeHudSlot = (int)slot;
+            }
+        }
     }
 }
 
@@ -611,6 +622,14 @@ void Player::fireWeapon(bool alt) {
     if (wd.maxAmmo > 0) {
         w.ammo--;
         if (w.ammo <= 0) w.ammo = 0;
+    }
+    if (auto* hud = Engine::instance().guiRenderer().findControl("weaponsHud")) {
+        std::string nativeName = gWeaponTable[w.type].name;
+        if (nativeName == "Spinfusor") nativeName = "Disc";
+        else if (nativeName == "PlasmaGun") nativeName = "Plasma";
+        else if (nativeName == "ELF") nativeName = "ELFGun";
+        for (auto& slot : hud->hudSlots)
+            if (slot.name == nativeName) slot.amount = w.ammo;
     }
 }
 
@@ -1858,7 +1877,22 @@ void World::render(const Point3F& cameraPos) {
         defShader->setUniform("uEnvMap", (int32_t)2);
     }
 
-    for (auto& obj : worldObjects) {
+    std::vector<WorldObject*> renderQueue;
+    renderQueue.reserve(worldObjects.size());
+    for (auto& obj : worldObjects) renderQueue.push_back(&obj);
+    std::stable_sort(renderQueue.begin(), renderQueue.end(),
+        [&](const WorldObject* left, const WorldObject* right) {
+            const float ldx = left->pos.x - cameraPos.x;
+            const float ldy = left->pos.y - cameraPos.y;
+            const float ldz = left->pos.z - cameraPos.z;
+            const float rdx = right->pos.x - cameraPos.x;
+            const float rdy = right->pos.y - cameraPos.y;
+            const float rdz = right->pos.z - cameraPos.z;
+            return ldx * ldx + ldy * ldy + ldz * ldz >
+                   rdx * rdx + rdy * rdy + rdz * rdz;
+        });
+    for (auto* object : renderQueue) {
+        auto& obj = *object;
         if (obj.shape && obj.shape->loaded) {
             const bool mapperMarker = Engine::instance().game().isMapperMode() &&
                                       !obj.label.empty();
@@ -2809,8 +2843,8 @@ void Game::update(float dt) {
                             demoPrevCameraTarget = demoCameraTarget;
                             demoCameraTarget = {
                                 demoCameraPos.x + std::sin(demoViewYaw) * std::cos(demoViewPitch),
-                                demoCameraPos.y + std::sin(demoViewPitch),
-                                demoCameraPos.z + std::cos(demoViewYaw) * std::cos(demoViewPitch)
+                                demoCameraPos.y + std::cos(demoViewYaw) * std::cos(demoViewPitch),
+                                demoCameraPos.z + std::sin(demoViewPitch)
                             };
                             demoMoveBlend = 0.0f;
                         }
@@ -2892,9 +2926,9 @@ void Game::update(float dt) {
                         demoCameraTarget = {
                             demoCameraPos.x + std::sin(pd.gameState.cameraYaw) *
                                 std::cos(pd.gameState.cameraPitch),
-                            demoCameraPos.y + std::sin(pd.gameState.cameraPitch),
-                            demoCameraPos.z + std::cos(pd.gameState.cameraYaw) *
-                                std::cos(pd.gameState.cameraPitch)
+                            demoCameraPos.y + std::cos(pd.gameState.cameraYaw) *
+                                std::cos(pd.gameState.cameraPitch),
+                            demoCameraPos.z + std::sin(pd.gameState.cameraPitch)
                         };
                         demoMoveBlend = 0.0f;
                         demoHasPos = true;
@@ -2906,17 +2940,13 @@ void Game::update(float dt) {
                                pd.gameState.compressionPoint.y != 0 ||
                                pd.gameState.compressionPoint.z != 0) {
                          // Update compression point from partial control update
-                          const Vec3& cp = pd.gameState.compressionPoint;
-                          if (!demoHasPos) {
-                              Console::instance().printf(LogLevel::Info,
-                                  "Demo camera compression point=(%.2f %.2f %.2f) orientation=%d yaw=%.3f pitch=%.3f",
-                                  cp.x, cp.y, cp.z, demoHasOrientation ? 1 : 0,
-                                  demoViewYaw, demoViewPitch);
-                              demoCameraPos = {cp.x, cp.y, cp.z};
+                           const Vec3& cp = pd.gameState.compressionPoint;
+                           if (!demoHasPos) {
+                               demoCameraPos = {cp.x, cp.y, cp.z};
                               demoCameraTarget = demoHasOrientation
                                   ? Point3F{cp.x + std::sin(demoViewYaw) * std::cos(demoViewPitch),
-                                            cp.y + std::sin(demoViewPitch),
-                                            cp.z + std::cos(demoViewYaw) * std::cos(demoViewPitch)}
+                                         cp.y + std::cos(demoViewYaw) * std::cos(demoViewPitch),
+                                         cp.z + std::sin(demoViewPitch)}
                                   : Point3F{cp.x, cp.y + 2.0f, cp.z};
                              demoHasPos = true;
                          }
@@ -3506,19 +3536,13 @@ void Game::render(float dt) {
     } else if (demoPlaying && (demoHasPos || demoFirstPersonCam)) {
         // Orbit camera for spectator mode
         if (demoFirstPersonCam) {
-            camPos = pl ? pl->cameraPos() : Point3F{0, 6, 0};
-            camTarget = pl ? pl->cameraTarget() : Point3F{0, 6, 1};
-            if (!demoHasPos && w && !w->observerCameras().empty()) {
-                const auto& observer = w->observerCameras().front();
-                MatrixF rotation;
-                rotation.setRotationAxis(observer.axis, -observer.angleDeg * Math::DEG2RAD(1.0f));
-                camPos = Math::torquePointToYUp(observer.pos);
-                const Point3F rawForward = rotation.transformNormal({0, 0, 1});
-                const Point3F rawTarget = {observer.pos.x + rawForward.x * 10.0f,
-                                           observer.pos.y + rawForward.y * 10.0f,
-                                           observer.pos.z + rawForward.z * 10.0f};
-                camTarget = Math::torquePointToYUp(rawTarget);
-            }
+            if (demoHasPos) {
+                camPos = demoCameraPos;
+                camTarget = demoCameraTarget;
+            } else {
+                camPos = pl ? pl->cameraPos() : Point3F{0, 6, 0};
+                camTarget = pl ? pl->cameraTarget() : Point3F{0, 6, 1};
+                bool cameraGhostUsed = false;
             // First-person camera: position at spectated ghost's eye level, look in facing direction
             int fpIdx = (spectateGhostIndex >= 0) ? spectateGhostIndex : controlGhostIndex;
             if (fpIdx >= 0 && demoParser) {
@@ -3542,13 +3566,28 @@ void Game::render(float dt) {
                         camTarget = {position.x + std::sin(yaw) * std::cos(pitch) * 10.0f,
                                      position.y + std::sin(pitch) * 10.0f,
                                      position.z + std::cos(yaw) * std::cos(pitch) * 10.0f};
+                        cameraGhostUsed = true;
                     } else {
                         camPos = {position.x, position.y, position.z};
                         camPos.y += 1.8f;
                         const float yaw = atan2f(g->renderRotation.x, g->renderRotation.w) * 2.0f;
                         camTarget = {camPos.x + sinf(yaw) * 10.0f,
                                      camPos.y, camPos.z + cosf(yaw) * 10.0f};
+                        cameraGhostUsed = true;
                     }
+                }
+            }
+                if (!cameraGhostUsed && w && !w->observerCameras().empty()) {
+                const auto& observer = w->observerCameras().front();
+                MatrixF rotation;
+                rotation.setRotationAxis(observer.axis, -observer.angleDeg * Math::DEG2RAD(1.0f));
+                camPos = Math::torquePointToYUp(observer.pos);
+                const Point3F rawForward = rotation.transformNormal({0, 0, 1});
+                const Point3F rawTarget = {observer.pos.x + rawForward.x * 10.0f,
+                                           observer.pos.y + rawForward.y * 10.0f,
+                                           observer.pos.z + rawForward.z * 10.0f};
+                camTarget = Math::torquePointToYUp(rawTarget);
+                cameraCoordinatesConverted = true;
                 }
             }
         } else if (demoOrbitCam) {
@@ -3641,6 +3680,15 @@ void Game::render(float dt) {
     if (demoPlaying && !cameraOverride && !cameraCoordinatesConverted) {
         finalCam = Math::torquePointToYUp(finalCam);
         camTarget = Math::torquePointToYUp(camTarget);
+    }
+    if (demoPlaying) {
+        static bool loggedRenderCamera = false;
+        if (!loggedRenderCamera) {
+            loggedRenderCamera = true;
+            Console::instance().printf(LogLevel::Info,
+                "Demo render camera pos=(%.2f %.2f %.2f) target=(%.2f %.2f %.2f)",
+                finalCam.x, finalCam.y, finalCam.z, camTarget.x, camTarget.y, camTarget.z);
+        }
     }
     // Apply FOV from demo stream if available
     float savedFov = r.config().fov;
@@ -4636,6 +4684,7 @@ void Game::startLocalGame(const char* map) {
                     else if (nativeName == "PlasmaGun") nativeName = "Plasma";
                     if (nativeName != itemName) continue;
                     auto& hudSlot = weaponsHud->hudSlots[slot];
+                    hudSlot.name = itemName;
                     hudSlot.bitmap = hudName(slot, "bitmapName");
                     hudSlot.amount = player().weapon(weapon).ammo;
                     hudSlot.visible = true;
@@ -5494,6 +5543,11 @@ bool Game::playDemo(const char* path) {
         failDemoLoad();
         return false;
     }
+    Engine::instance().guiRenderer().popDialog("ConsoleDlg");
+    if (auto* console = Engine::instance().guiRenderer().findControl("ConsoleDlg"))
+        console->visible = false;
+    if (auto* overlay = Engine::instance().guiRenderer().findControl("FrameOverlayGui"))
+        overlay->visible = false;
 
     // Reset demo path history
     demoPath.clear();

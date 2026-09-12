@@ -775,6 +775,13 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
             "Demo: invalid native initial block");
         return false;
     }
+    Console::instance().printf(LogLevel::Info,
+        "Demo initial protocol recv=%u high=%u send=%u ack=%u connect=%u",
+        initialBlock.connectionState.lastSeqRecvd,
+        initialBlock.connectionState.highestAckedSeq,
+        initialBlock.connectionState.lastSendSeq,
+        initialBlock.connectionState.ackMask,
+        initialBlock.connectionState.connectSequence);
     ghostTracker.clear();
     for (int index : ibGhostTracker.getAllIndices()) {
         const GhostEntry* source = ibGhostTracker.getGhost(index);
@@ -870,10 +877,18 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
     inflateEnd(&strm);
 
     // Init packet parser state
-    memset(lastSeqRecvdAtSend, 0, sizeof(lastSeqRecvdAtSend));
-    lastSeqRecvd = 0; highestAckedSeq = 0; lastSendSeq = 0;
-    recvAckMask = 0; connectSequence = 0; lastRecvAckAck = 0;
-    connectionEstablished = false; nextRecvEventSeq = 0; packetsParsed = 0;
+    std::copy(std::begin(initialBlock.connectionState.lastSeqRecvdAtSend),
+              std::end(initialBlock.connectionState.lastSeqRecvdAtSend),
+              std::begin(lastSeqRecvdAtSend));
+    lastSeqRecvd = initialBlock.connectionState.lastSeqRecvd;
+    highestAckedSeq = initialBlock.connectionState.highestAckedSeq;
+    lastSendSeq = initialBlock.connectionState.lastSendSeq;
+    recvAckMask = initialBlock.connectionState.ackMask;
+    connectSequence = initialBlock.connectionState.connectSequence;
+    lastRecvAckAck = initialBlock.connectionState.lastRecvAckAck;
+    connectionEstablished = initialBlock.connectionState.connectionEstablished;
+    nextRecvEventSeq = initialBlock.nextRecvEventSeq;
+    packetsParsed = 0;
     compressionPoint = {0,0,0};
     blockStreamOffset = 0; blockCursor_ = 0; blockCount_ = -1;
 
@@ -1301,7 +1316,7 @@ GameState DemoParser::readGameState(BitStream& bs) {
                 gs.cameraPitch = bs.readF32();
                 gs.cameraYaw = bs.readF32();
                 gs.hasCameraTransform = true;
-                const int mode = bs.readInt(3);
+                const int mode = bs.readRangedU32(0, 4);
                 if (mode == 3 || mode == 4) {
                     bs.readF32();
                     bs.readF32();
@@ -2527,8 +2542,9 @@ PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIn
     BitStream bs(data, size);
     pd.dnetHeader = readDnetHeader(bs);
     bool dispatchData = false;
-    if (!applyProtocolHeader(pd.dnetHeader, dispatchData) || !dispatchData)
+    if (!applyProtocolHeader(pd.dnetHeader, dispatchData) || !dispatchData) {
         return pd;
+    }
     if (bs.readFlag()) { bs.readInt(10); bs.readInt(10); }
     if (bs.readFlag()) { bs.readInt(10); bs.readInt(10); }
     bs.setStringBufferEnabled(true);

@@ -105,7 +105,8 @@ struct GuiControl {
 
     // GuiPlayerView mouse-drag rotation
     bool modelRotating = false;
-    int lastDragX = -1;
+    int lastDragX = -1, lastDragY = -1;
+    bool modelZooming = false;
 
     // ShellSliderCtrl fields
     float sliderValue = 0.5f;  // 0..1 normalized
@@ -148,6 +149,9 @@ struct GuiControl {
     std::string modelSkin;    // skin name override
     float modelYaw = 0.5f;    // orbit rotation
     float modelPitch = 0.15f;
+    float modelZoom = 1.0f;
+    int modelSequence = -1;
+    float modelAnimTime = 0.0f;
 
     GuiControl* findChild(const std::string& name);
     void addChild(GuiControl* child);
