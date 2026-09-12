@@ -384,20 +384,18 @@ void GuiRenderer::render() {
     MatrixF savedView = r.view;
     auto& plat = Engine::instance().platform();
     int w = plat.width(), h = plat.height();
-    const bool gameCanvas = !dialogStack.empty() && dialogStack.front() &&
-                            dialogStack.front()->name == "PlayGui";
-    const int canvasW = gameCanvas && canvas->extentX > 0
-        ? std::min(w, (int)canvas->extentX) : w;
-    const int canvasH = gameCanvas && canvas->extentY > 0
-        ? std::min(h, (int)canvas->extentY) : h;
+    const bool gameCanvas = Engine::instance().game().state() == Game::Playing;
+    const int canvasW = gameCanvas ? 640 : w;
+    const int canvasH = gameCanvas ? 480 : h;
     GLint oldViewport[4];
     glGetIntegerv(GL_VIEWPORT, oldViewport);
     GLint oldScissor[4];
     glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
     const GLboolean scissorWasOn = glIsEnabled(GL_SCISSOR_TEST);
     if (gameCanvas) {
+        glViewport(0, 0, w, h);
         glEnable(GL_SCISSOR_TEST);
-        glScissor(0, h - canvasH, canvasW, canvasH);
+        glScissor(0, 0, w, h);
     }
     auto syncPrintControl = [&](const char* name, const char* variable) {
         GuiControl* ctl = findControl(name);
@@ -3339,7 +3337,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     if (!ghost) return;
                     const Vec3& markerPos = (Engine::instance().game().isDemoPlaying() &&
                                              ghost->hasRendered) ? ghost->renderPos : ghost->position;
-                    const Point3F world{markerPos.x, markerPos.y + 1.0f, markerPos.z};
+                    Point3F world = Math::torquePointToYUp({markerPos.x, markerPos.y, markerPos.z});
+                    world.y += 1.0f;
                     const Point3F rel{world.x - cameraPos.x,
                                       world.y - cameraPos.y,
                                       world.z - cameraPos.z};
@@ -5435,6 +5434,23 @@ void GuiRenderer::setContent(const std::string& name) {
     }
     callGuiChildLifecycle(ctl, "::onWake");
     inBaseDialogPush = false;
+}
+
+void GuiRenderer::setContentImmediate(const std::string& name) {
+    GuiControl* ctl = soToGui(name, nullptr);
+    if (!ctl) return;
+    dialogStack.clear();
+    focusedCtrl = nullptr;
+    pressedCtrl = nullptr;
+    selectedList = nullptr;
+    dialogStack.push_back(ctl);
+    lastPushed[ctl->name] = ctl;
+    callOnAddOnce(ctl);
+    callGuiChildLifecycle(ctl, "::onWake");
+    if (auto* ts = Engine::instance().script().ts()) {
+        if (ts->hasFunction(name + "::onWake"))
+            ts->callFunction(name + "::onWake", {VMValue(name)});
+    }
 }
 
 bool GuiRenderer::isDialogActive(const std::string& name) {

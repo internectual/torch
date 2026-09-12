@@ -209,6 +209,7 @@ public:
     // building a fresh empty one.
     std::unordered_map<std::string, GuiControl*> lastPushed;
     void setContent(const std::string& name);
+    void setContentImmediate(const std::string& name);
     void handleKeyboard(); // process keyboard input for focused text control
     bool isDialogActive(const std::string& name);
     // If the topmost dialog contains a GuiInputCtrl (e.g. RemapDlg), return it

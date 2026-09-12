@@ -9,6 +9,7 @@
 #include <fnmatch.h>
 #include <dirent.h>
 #include <strings.h>
+#include <chrono>
 
 namespace fs = std::filesystem;
 
@@ -128,6 +129,22 @@ bool FileSystem::fileExists(const char* path) const {
         if (TorchPath::staysWithinRoot(p.c_str(), (p + "/" + path).c_str()) &&
             fs::exists(p + "/" + path)) return true;
     return false;
+}
+
+int64_t FileSystem::fileModifyTime(const char* path) const {
+    if (!TorchPath::isSafeLogicalPath(path) ||
+        (originalOnly && !TorchAssets::isOriginalRuntimePath(path))) return 0;
+    for (const auto& root : impl->searchPaths) {
+        const auto file = fs::path(root) / path;
+        if (!TorchPath::staysWithinRoot(root.c_str(), file.c_str()) || !fs::is_regular_file(file)) continue;
+        std::error_code error;
+        const auto stamp = fs::last_write_time(file, error);
+        if (error) continue;
+        const auto systemStamp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            stamp - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+        return std::chrono::duration_cast<std::chrono::seconds>(systemStamp.time_since_epoch()).count();
+    }
+    return 0;
 }
 
 void FileSystem::listFiles(const char* pattern, std::vector<std::string>& out) const {

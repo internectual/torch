@@ -2287,6 +2287,10 @@ bool ScriptEngine::init() {
         if (slash != std::string::npos) return VMValue(path.substr(slash + 1));
         return VMValue(path);
     });
+    tsInstance->registerNative("getFileModifyTime", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        return VMValue((int32_t)Engine::instance().fs().fileModifyTime(args[0].toString().c_str()));
+    });
 
     // Schedule: store callback for later execution
     tsInstance->registerNative("schedule", [](const auto& args) -> VMValue {
@@ -2329,6 +2333,7 @@ bool ScriptEngine::init() {
             Console::instance().printf(LogLevel::Debug, "findFirstFile(\"%s\"): found %zu files, first=\"%s\"", pattern.c_str(), s_fileList.size(), s_fileList.empty() ? "" : s_fileList[0].c_str());
             // Sort to match T2 behavior
             std::sort(s_fileList.begin(), s_fileList.end());
+            s_fileList.erase(std::unique(s_fileList.begin(), s_fileList.end()), s_fileList.end());
             return s_fileList.empty() ? VMValue("") : VMValue(s_fileList[0]);
         });
         tsInstance->registerNative("findNextFile", [](const auto&) -> VMValue {
@@ -4436,9 +4441,20 @@ bool ScriptEngine::init() {
         Console::instance().setVariable("HUD::bottomPrintUntil", "0");
         return VMValue(1);
     });
+    tsInstance->registerNative("clientCmdclearBottomPrint", [](const auto&) -> VMValue {
+        Console::instance().setVariable("HUD::bottomPrint", "");
+        Console::instance().setVariable("HUD::bottomPrintUntil", "0");
+        return VMValue(1);
+    });
     tsInstance->registerNative("clearCenterPrint", [](const auto&) -> VMValue {
         Console::instance().setVariable("HUD::centerPrint", "");
         Console::instance().setVariable("HUD::centerPrintUntil", "0");
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxEnableForceFeedback", [](const auto&) -> VMValue {
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setGravity", [](const auto&) -> VMValue {
         return VMValue(1);
     });
     tsInstance->registerNative("bottomPrintAll", [](const auto& args) -> VMValue {
@@ -4554,6 +4570,7 @@ bool ScriptEngine::init() {
         for (size_t i = 1; i < args.size(); i++)
             cmd += " " + args[i].toString();
         Console::instance().printf(LogLevel::Debug, "commandToServer: %s", cmd.c_str());
+        if (func == "getScores") return VMValue(1);
         // Send over wire if connected (client to server)
         auto* conn = Engine::instance().game().activeConnection();
         if (conn && conn->isConnected()) {
@@ -5043,7 +5060,7 @@ bool ScriptEngine::init() {
             const auto& [existingKey, existingBind] = *it;
             const auto& [existingMap, existingDevice, existingName] = existingKey;
             if (existingMap == objName && existingDevice == device &&
-                existingBind.cmdOn == command)
+                (existingBind.cmdOn == command || existingName == keyName))
                 it = s_actionBinds.erase(it);
             else
                 ++it;

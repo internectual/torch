@@ -2380,6 +2380,17 @@ const std::string& TorqueScript::dbgFile() const { return impl->currentFile; }
 int TorqueScript::dbgLine() const { return impl->srcLine; }
 
 VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VMValue>& args) {
+    static thread_local int callDepth = 0;
+    if (callDepth >= 128) {
+        Console::instance().printf(LogLevel::Error,
+            "TS: call depth limit reached in '%s'", name.c_str());
+        return {};
+    }
+    ++callDepth;
+    struct CallDepthGuard {
+        int& depth;
+        ~CallDepthGuard() { --depth; }
+    } guard{callDepth};
     auto it = impl->functions.find(name);
     if (it == impl->functions.end()) {
         std::string nativeName = name;

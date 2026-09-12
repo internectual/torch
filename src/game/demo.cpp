@@ -359,15 +359,24 @@ DemoParser::~DemoParser() {
 
 bool DemoParser::loadFile(const char* path) {
     FILE* f = fopen(path, "rb");
-    if (!f) { Console::instance().printf(LogLevel::Error, "Demo: cannot open %s", path); return false; }
+    if (!f) return false;
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
     uint8_t* b = (uint8_t*)malloc(sz);
     if (!b) { fclose(f); return false; }
     size_t readBytes = fread(b, 1, sz, f); fclose(f);
     if ((long)readBytes != sz) { free(b); Console::instance().printf(LogLevel::Error, "Demo: short read %s", path); return false; }
-    bool ok = load(b, sz);
+    bool ok = loadData(b, (size_t)sz);
+    free(b);
+    return ok;
+}
+
+bool DemoParser::loadData(const uint8_t* data, size_t size) {
+    uint8_t* b = (uint8_t*)malloc(size);
+    if (!b) return false;
+    memcpy(b, data, size);
+    bool ok = load(b, size);
     if (ownsBuffer) free((void*)buf);
-    buf = b; bufSize = sz; ownsBuffer = true;
+    buf = b; bufSize = size; ownsBuffer = true;
     return ok;
 }
 
@@ -738,10 +747,12 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
             "Demo: unsupported recording signature '%s'", header.identString.c_str());
         return false;
     }
-    if (header.protocolVersion != T2Demo::ProtocolV25034) {
+    if (header.protocolVersion != T2Demo::ProtocolV24834 &&
+        header.protocolVersion != T2Demo::ProtocolV25034) {
         Console::instance().printf(LogLevel::Error,
-            "Demo: unsupported protocol 0x%08X (native parser supports 0x%08X)",
+            "Demo: unsupported protocol 0x%08X (native parser supports 0x%08X and 0x%08X)",
             (unsigned)header.protocolVersion,
+            (unsigned)T2Demo::ProtocolV24834,
             (unsigned)T2Demo::ProtocolV25034);
         return false;
     }
@@ -1284,10 +1295,12 @@ GameState DemoParser::readGameState(BitStream& bs) {
             gs.energy = bs.readF32();
             gs.rechargeRate = bs.readF32();
             const GhostEntry* control = ghostTracker.getGhost(gs.controlObjectGhostIndex);
-            if (control && control->classId == 4) {
-                gs.compressionPoint = {bs.readF32(), bs.readF32(), bs.readF32()};
-                bs.readF32(); // rotation X
-                bs.readF32(); // rotation Z
+            if (control && control->className == "Camera") {
+                gs.cameraPosition = {bs.readF32(), bs.readF32(), bs.readF32()};
+                gs.compressionPoint = gs.cameraPosition;
+                gs.cameraPitch = bs.readF32();
+                gs.cameraYaw = bs.readF32();
+                gs.hasCameraTransform = true;
                 const int mode = bs.readInt(3);
                 if (mode == 3 || mode == 4) {
                     bs.readF32();
@@ -1781,8 +1794,14 @@ static void readCameraData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
     readShapeBaseData(bs, isInitial, entry);
     if (bs.readFlag()) return; // control object shortcut
     if (bs.readFlag()) { // camera update mask
-        bs.readF32(); bs.readF32(); bs.readF32();
-        bs.readF32(); bs.readF32();
+        const Vec3 position{bs.readF32(), bs.readF32(), bs.readF32()};
+        const float pitch = bs.readF32();
+        const float yaw = bs.readF32();
+        if (entry) {
+            entry->position = position;
+            entry->cameraEuler = {pitch, 0.0f, yaw};
+            entry->hasCameraEuler = true;
+        }
     }
 }
 

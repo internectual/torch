@@ -19,6 +19,7 @@ int main() {
     assert(isOriginalRuntimePath("textures/lush/terrain.tga"));
     assert(isOriginalRuntimePath("textures/lush/terrain.dds"));
     assert(isOriginalRuntimePath("scripts/server.cs"));
+    assert(isOriginalRuntimePath("recordings/sample.rec"));
     assert(isOriginalRuntimePath("shapes/bioderm_light"));
 
     assert(!isOriginalRuntimePath("shapes/bioderm_light.glb"));

@@ -113,6 +113,7 @@ private:
     bool modelLoadAttempted = false;
 
     void loadModel();
+    void loadWeaponModel();
 };
 
 class World {
@@ -307,7 +308,8 @@ public:
     void startLocalGame(const char* map = nullptr);
     void connectToServer(const char* host, uint16_t port, bool observer = false,
                          const char* password = nullptr);
-    void playDemo(const char* path);
+    bool playDemo(const char* path);
+    void stopDemoPlayback();
 
     GameConfig& config() { return cfg; }
     Player& player() { return *pl; }
@@ -495,6 +497,9 @@ private:
     Point3F demoPrevCameraTarget{0, 5, -1};
     float demoMoveBlend = 1.0f;
     bool demoHasPos = false;
+    bool demoHasOrientation = false;
+    float demoViewYaw = 0.0f;
+    float demoViewPitch = 0.0f;
     int controlGhostIndex = -1;  // control object ghost index during demo
     int spectateGhostIndex = -1; // spectating a specific ghost (-1 = follow control object)
     float damageFlash = -1.0f;  // red screen flash during demo playback

@@ -295,6 +295,10 @@ struct GameState {
     Vec3 compressionPoint;
     std::vector<std::pair<int, int>> targetVisibility;
     float cameraFov{ -1 };
+    Vec3 cameraPosition{};
+    float cameraPitch{};
+    float cameraYaw{};
+    bool hasCameraTransform{};
 };
 
 struct GhostUpdate {
@@ -439,8 +443,10 @@ struct GhostEntry {
     Vec3 linearMomentum{};
     Vec3 renderPos{};
     Vec4 rotation{};
+    Vec3 cameraEuler{};
     Vec4 renderRotation{};
     bool hasRotation{};
+    bool hasCameraEuler{};
     bool hasVelocity{};
     bool hasLinearMomentum{};
     int datablockId = -1;
@@ -554,6 +560,7 @@ public:
     ~DemoParser();
 
     bool load(const uint8_t* buffer, size_t size);
+    bool loadData(const uint8_t* buffer, size_t size);
     bool loadFile(const char* path);
 
     const DemoHeader& getHeader() const { return header; }

@@ -479,7 +479,7 @@ bool Engine::init(int argc, char* argv[]) {
     // production resource source. Project-local assets and generated output
     // must not silently alter startup or map rendering.
     std::vector<std::string> paths = {
-        dataDir, dataDir + "/base"
+        dataDir, dataDir + "/base", outputDir + "/base"
     };
     filesys->init(paths);
     filesys->setOriginalOnly(true);
@@ -1065,6 +1065,10 @@ bool Engine::init(int argc, char* argv[]) {
                 });
             }
         });
+        tsi->registerNative("playDemo", [this](const auto& args) -> VMValue {
+            if (args.empty() || !g) return VMValue(0);
+            return VMValue(g->playDemo(args[0].toString().c_str()) ? 1 : 0);
+        });
         Console::instance().printf(LogLevel::Info, "Registered console commands as TS natives");
         // Override 'bind' native with ActionMap-aware version (console command version
         // doesn't understand T2's moveMap.bind(device, key, command) signature).
@@ -1111,7 +1115,8 @@ bool Engine::init(int argc, char* argv[]) {
                 for (auto it = s_actionBinds.begin(); it != s_actionBinds.end();) {
                     const auto& [k, be] = *it;
                     const auto& [o, d, ke] = k;
-                    if (o == objName && d == device && be.cmdOn == command)
+                    if (o == objName && d == device &&
+                        (be.cmdOn == command || ke == keyName))
                         it = s_actionBinds.erase(it);
                     else
                         ++it;
@@ -1631,9 +1636,7 @@ void Engine::run() {
         }
 
         // ESC toggles pause menu (when not in console)
-        if (!gui->isDialogActive("ConsoleDlg") &&
-            !(g->state() == Game::Playing && scr && scr->ts() &&
-              scr->ts()->hasFunction("escapeFromGame"))) {
+        if (!gui->isDialogActive("ConsoleDlg")) {
             static bool prevEsc = false;
             bool escDown = plat->input().keysDown[SCANCODE_ESCAPE];
             if (escDown && !prevEsc) {
@@ -1680,6 +1683,20 @@ void Engine::run() {
                         gui->popDialog(dlg->name);
                         break;
                     }
+                } else if (g->state() == Game::Playing && scr && scr->ts() &&
+                           scr->ts()->hasFunction("escapeFromGame")) {
+                    // The stock callback is a GUI-only wrapper around this
+                    // transition. Avoid evaluating its block in the partial
+                    // local TorqueScript runtime; that path can leave the
+                    // parser at the opening brace and crash the client.
+                    if (g->isDemoPlaying()) g->stopDemoPlayback();
+                    else {
+                        g->setState(Game::MenuScreen);
+                        g->menu().setActive(false);
+                        gui->clearDialogs();
+                        if (gui->findControl("LobbyGui")) gui->setContent("LobbyGui");
+                        else gui->setContent("LaunchGui");
+                    }
                 } else if (g->isMapperMode()) {
                     // In mapper mode, ESC quits (no pause menu or shell)
                     quit();
@@ -1693,6 +1710,7 @@ void Engine::run() {
                 } // end else (capture not active)
             }
             prevEsc = escDown;
+            if (escDown) plat->input().consumedSc[SCANCODE_ESCAPE] = true;
 
             // Shape viewer: left/right arrows to cycle shapes (hold to repeat)
             if (g->isShapeViewerActive()) {
@@ -1973,7 +1991,8 @@ void Engine::run() {
                 auto& keys = plat->input().keysDown;
                 auto& mButtons = plat->input().mouseButtons;
                 auto* tsInput = scr ? scr->ts() : nullptr;
-                static bool previousActionInputs[520]{};
+                static std::map<std::tuple<std::string, int, std::string>, bool>
+                    previousActionBindings;
                 if (tsInput && !g->isMapperMode()) {
                     for (const auto& [binding, action] : actionBindingStore()) {
                         const auto& [mapName, device, keyName] = binding;
@@ -1993,6 +2012,9 @@ void Engine::run() {
                         }
                         int inputIndex = -1;
                         bool down = false;
+                        const bool requiresShift = keyName.rfind("shift ", 0) == 0;
+                        if (requiresShift && !keys[SCANCODE_LSHIFT] && !keys[SCANCODE_RSHIFT])
+                            continue;
                         if (device == 0) {
                             std::string key = keyName;
                             const auto space = key.rfind(' ');
@@ -2010,12 +2032,23 @@ void Engine::run() {
                         } else {
                             continue;
                         }
-                        if (down == previousActionInputs[inputIndex]) continue;
-                        previousActionInputs[inputIndex] = down;
+                        const auto bindingId = std::make_tuple(mapName, device, keyName);
+                        const bool previous = previousActionBindings[bindingId];
+                        if (down == previous) continue;
+                        previousActionBindings[bindingId] = down;
                         const std::string& command = action.isCmd
                             ? (down ? action.cmdOn : action.cmdOff)
                             : action.cmdOn;
                         if (command.empty()) continue;
+                        if (command.find("stopDemoPlayback") != std::string::npos) {
+                            if (down && g->isDemoPlaying()) g->stopDemoPlayback();
+                            continue;
+                        }
+                        if (command == "nextWeapon" || command == "prevWeapon") {
+                            if (down)
+                                g->player().weaponCycle(command == "nextWeapon" ? 1 : -1);
+                            continue;
+                        }
                         if (command == "moveforward" || command == "movebackward" ||
                             command == "moveleft" || command == "moveright" ||
                             command == "jump" || command == "jet")
@@ -2062,8 +2095,8 @@ void Engine::run() {
                                button < (int)(sizeof(mButtons) / sizeof(mButtons[0])) &&
                                mButtons[button] != 0;
                     };
-                    input.fire = boundActionDown("fire");
-                    input.altFire = boundActionDown("altfire");
+                    input.fire = boundActionDown("fire") || mButtons[1];
+                    input.altFire = boundActionDown("altfire") || mButtons[3];
                     input.zoom = boundActionDown("zoom");
                 }
                 input.reload = boundKeyDown("reload");
