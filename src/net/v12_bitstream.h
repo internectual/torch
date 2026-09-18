@@ -51,6 +51,7 @@ public:
     size_t sizeBits() const { return bitSize; }
     size_t remainingBits() const { return bitPosition <= bitSize ? bitSize - bitPosition : 0; }
     bool failed() const { return error; }
+    void fail() { error = true; }
 
 private:
     const uint8_t* bytes;

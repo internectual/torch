@@ -38,6 +38,10 @@ public:
     void addPath(const char* path);
 
     bool readFile(const char* path, std::vector<uint8_t>& data);
+    // Torque texture references may omit the image suffix. The returned path
+    // is the actual logical asset selected by the stock probe order.
+    bool readTextureFile(const char* path, std::vector<uint8_t>& data,
+                         std::string* resolvedPath = nullptr);
     bool readTextFile(const char* path, std::string& text);
     bool fileExists(const char* path) const;
     int64_t fileModifyTime(const char* path) const;

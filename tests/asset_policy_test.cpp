@@ -8,9 +8,35 @@
 #include "net/v12_ghost_packet.h"
 
 #include <cassert>
+#include <cmath>
 
 int main() {
     using TorchAssets::isOriginalRuntimePath;
+
+    V12BitWriter linearImpactWriter;
+    linearImpactWriter.writeFlag(true);
+    linearImpactWriter.writeUnsigned(7, 11); // projectile datablock
+    linearImpactWriter.writeFlag(false);     // no source ghost
+    linearImpactWriter.writeFlag(false);     // non-full update: impact point follows
+    linearImpactWriter.writeUnsigned(3, 2);  // uncompressed point
+    linearImpactWriter.writeUnsigned(0x3f800000, 32);
+    linearImpactWriter.writeUnsigned(0x40000000, 32);
+    linearImpactWriter.writeUnsigned(0x40400000, 32);
+    linearImpactWriter.writeUnsigned(16384, 15); // phi = 0, normal points up
+    linearImpactWriter.writeUnsigned(8192, 14);  // theta = 0
+    linearImpactWriter.writeFlag(false);
+    V12BitStream linearImpactStream(linearImpactWriter.data().data(),
+                                     linearImpactWriter.data().size());
+    V12::PlayerGhostState linearState;
+    std::vector<V12::ProjectileImpact> linearImpacts;
+    assert(V12::readGhostPayload(linearImpactStream, 19, false, {}, &linearState,
+                                 &linearImpacts));
+    assert(linearImpacts.size() == 1 && linearImpacts[0].hasDatablock &&
+           linearImpacts[0].datablockId == 7);
+    assert(std::fabs(linearImpacts[0].position.x - 1.0f) < 0.001f &&
+           std::fabs(linearImpacts[0].position.y - 2.0f) < 0.001f &&
+           std::fabs(linearImpacts[0].position.z - 3.0f) < 0.001f &&
+           linearImpacts[0].normal.y > 0.99f);
 
     assert(isOriginalRuntimePath("shapes/bioderm_light.dts"));
     assert(isOriginalRuntimePath("interiors/base.dif"));
@@ -77,6 +103,23 @@ int main() {
     V12BitStream compressedTextStream(compressedTextWriter.data().data(), compressedTextWriter.data().size());
     assert(compressedTextStream.readHuffmanString() == "Tribes 2 observer");
     assert(!compressedTextWriter.writeHuffmanString(std::string(256, 'x')));
+
+    V12::ProtocolState sender(1);
+    V12::ProtocolState receiver(1);
+    const auto sent = sender.buildClientPacket({});
+    V12BitStream sentStream(sent.data(), sent.size());
+    V12::DnetHeader sentHeader;
+    assert(V12::readDnetHeader(sentStream, sentHeader));
+    assert(receiver.processReceived(sentHeader).accepted);
+    V12::ServerPacketOptions response;
+    const auto acknowledged = receiver.buildServerPacket(response);
+    V12BitStream acknowledgedStream(acknowledged.data(), acknowledged.size());
+    V12::DnetHeader acknowledgedHeader;
+    assert(V12::readDnetHeader(acknowledgedStream, acknowledgedHeader));
+    const auto ackResult = sender.processReceived(acknowledgedHeader);
+    assert(ackResult.accepted && !ackResult.acknowledgements.empty() &&
+           ackResult.acknowledgements.front().acknowledged);
+
     V12BitWriter sharedStringWriter;
     sharedStringWriter.writeFlag(false);
     sharedStringWriter.writeHuffmanString("Player");
@@ -167,7 +210,8 @@ int main() {
     projectileWriter.writeHuffmanString("");
     projectileWriter.writeUnsigned(0, 32); projectileWriter.writeUnsigned(0, 32);
     projectileWriter.writeFlag(false); projectileWriter.writeFlag(false);
-    for (int i = 0; i < 15; ++i) projectileWriter.writeFlag(false);
+    projectileWriter.writeFlag(true); projectileWriter.writeUnsigned(17, 11);
+    for (int i = 0; i < 14; ++i) projectileWriter.writeFlag(false);
     projectileWriter.writeFlag(false); projectileWriter.writeFlag(false);
     projectileWriter.writeUnsigned(0, 8); projectileWriter.writeUnsigned(0, 32);
     projectileWriter.writeUnsigned(0x12, 5);
@@ -510,6 +554,22 @@ int main() {
     assert(processedDbEvents.size() == 2 && processedDbEvents[0].hasDatablock &&
            processedDbEvents[0].datablockClassName == "GameBaseData" &&
            processedDbEvents[1].message == "setPlayerTeam 0");
+    V12BitWriter truncatedDbWriter;
+    truncatedDbWriter.writeFlag(false);
+    truncatedDbWriter.writeFlag(true);
+    V12::EventHeader truncatedDbHeader{true, false, 19, 1};
+    V12::writeEventHeader(truncatedDbWriter, true, truncatedDbHeader);
+    truncatedDbWriter.writeFlag(true); // mProcess
+    truncatedDbWriter.writeUnsigned(4, 11); // object
+    truncatedDbWriter.writeUnsigned(18, 7); // class
+    truncatedDbWriter.writeUnsigned(0, 11); // index
+    truncatedDbWriter.writeUnsigned(0, 12); // invalid total
+    V12BitStream truncatedDbStream(truncatedDbWriter.data().data(),
+                                   truncatedDbWriter.data().size());
+    V12::NetStringTable truncatedDbStrings;
+    std::vector<V12::ServerEvent> truncatedDbEvents;
+    assert(!V12::readServerEvents(truncatedDbStream, truncatedDbStrings,
+                                  truncatedDbEvents));
     V12BitWriter ghostingEventWriter;
     ghostingEventWriter.writeFlag(false);
     ghostingEventWriter.writeFlag(true);
@@ -639,6 +699,31 @@ int main() {
     assert(updates.size() == 1 &&
            updates[0].operation == V12::GhostUpdate::Operation::Delete);
     assert(packetGhosts.get(3) == nullptr);
+    // Retransmitted deletes must not be surfaced as duplicate lifecycle events.
+    ghostDeleteStream = V12BitStream(ghostDeleteWriter.data().data(),
+                                     ghostDeleteWriter.data().size());
+    updates.clear();
+    assert(V12::readGhostUpdates(ghostDeleteStream, packetGhosts, updates));
+    assert(updates.empty());
+    // A delete followed by a fresh create at the same index starts a new
+    // lifecycle and must not be treated as a stale update.
+    V12BitWriter recreateWriter;
+    recreateWriter.writeFlag(true);
+    recreateWriter.writeUnsigned(0, 3);
+    recreateWriter.writeFlag(true);
+    recreateWriter.writeUnsigned(3, 3);
+    recreateWriter.writeFlag(false);
+    recreateWriter.writeUnsigned(25, 7);
+    recreateWriter.writeFlag(false);
+    recreateWriter.writeFlag(false);
+    V12BitStream recreateStream(recreateWriter.data().data(), recreateWriter.data().size());
+    assert(V12::readGhostUpdates(recreateStream, packetGhosts, updates,
+        [](V12BitStream& stream, uint16_t, uint16_t, bool) {
+            stream.readFlag();
+            return !stream.failed();
+        }));
+    assert(updates.size() == 1 &&
+           updates[0].operation == V12::GhostUpdate::Operation::Create);
     V12BitWriter playerPayloadWriter;
     playerPayloadWriter.writeFlag(false); // GameBase mask 1
     playerPayloadWriter.writeFlag(false); // GameBase mask 2
@@ -685,6 +770,7 @@ int main() {
     turretWriter.writeFlag(false); // ShapeBase masks
     turretWriter.writeFlag(false); // StaticShape position
     turretWriter.writeFlag(false); // powered
+    turretWriter.writeFlag(false); // no capacitor energy update
     turretWriter.writeFlag(false); // not controlled by this client
     turretWriter.writeFlag(true);  // turret orientation update
     turretWriter.writeUnsigned(0x155, 10);
@@ -772,7 +858,15 @@ int main() {
     assert(shapeGhostStream.readUnsigned(5) == 0x15 && !shapeGhostStream.failed());
 
     V12BitWriter triggerWriter;
-    triggerWriter.writeUnsigned(0x12345678, 32); triggerWriter.writeUnsigned(0x15, 5);
+    triggerWriter.writeUnsigned(3, 2); // uncompressed affine position
+    for (int i = 0; i < 3; ++i) triggerWriter.writeUnsigned(0, 32);
+    for (int i = 0; i < 3; ++i) triggerWriter.writeUnsigned(0, 32); // quaternion xyz
+    triggerWriter.writeFlag(false); // quaternion sign
+    for (int i = 0; i < 3; ++i) triggerWriter.writeUnsigned(0, 32); // scale
+    triggerWriter.writeUnsigned(0, 32); // point count
+    triggerWriter.writeUnsigned(0, 32); // plane count
+    triggerWriter.writeUnsigned(0, 32); // edge count
+    triggerWriter.writeUnsigned(0x15, 5);
     V12BitStream triggerStream(triggerWriter.data().data(), triggerWriter.data().size());
     assert(V12::readGhostPayload(triggerStream, 47, false, {}));
     assert(triggerStream.readUnsigned(5) == 0x15 && !triggerStream.failed());
@@ -945,6 +1039,7 @@ int main() {
     V12BitWriter tsStaticWriter;
     for (int i = 0; i < 16; ++i) tsStaticWriter.writeUnsigned(0, 32); // MatrixF
     for (int i = 0; i < 3; ++i) tsStaticWriter.writeUnsigned(0, 32); // position
+    tsStaticWriter.writeHuffmanString("props/wall.dts"); // shape name
     tsStaticWriter.writeUnsigned(0x15, 5); // aligned sentinel
     V12BitStream tsStaticStream(tsStaticWriter.data().data(),
                                 tsStaticWriter.data().size());
@@ -1015,6 +1110,19 @@ int main() {
     assert(V12::readGhostPayload(splashStream, 38, false, {}));
     assert(splashStream.readUnsigned(5) == 0x12 && !splashStream.failed());
 
+    V12BitWriter splashDataWriter;
+    for (int i = 0; i < 3 + 4 + 1 + 1 + 9; ++i) splashDataWriter.writeUnsigned(0, 32);
+    for (int i = 0; i < 4; ++i) splashDataWriter.writeFlag(false); // explosion + emitters
+    for (int i = 0; i < 4 + 4; ++i) splashDataWriter.writeUnsigned(0, 32);
+    splashDataWriter.writeHuffmanString("");
+    splashDataWriter.writeHuffmanString("");
+    splashDataWriter.writeUnsigned(0x12, 5);
+    V12BitStream splashDataStream(splashDataWriter.data().data(), splashDataWriter.data().size());
+    V12::DecodedDataBlock splashData;
+    assert(V12::readDataBlockPayload(splashDataStream, 43, &splashData));
+    assert(splashData.hasSplash && splashData.splash.numSegments == 0);
+    assert(splashDataStream.readUnsigned(5) == 0x12 && !splashDataStream.failed());
+
     V12BitWriter missionAreaWriter;
     missionAreaWriter.writeFlag(true); // area update
     for (int i = 0; i < 4; ++i) missionAreaWriter.writeUnsigned(0, 32);
@@ -1075,6 +1183,26 @@ int main() {
     assert(V12::readGhostPayload(linearFlareUpdateStream, 18, false, {}));
     assert(linearFlareUpdateStream.readUnsigned(5) == 0x12 &&
            !linearFlareUpdateStream.failed());
+
+    V12BitWriter shockLanceBeamWriter;
+    shockLanceBeamWriter.writeFlag(false); shockLanceBeamWriter.writeFlag(false);
+    shockLanceBeamWriter.writeFlag(false); // no target
+    shockLanceBeamWriter.writeFlag(true);
+    for (uint32_t value : {0x3f800000u, 0x40000000u, 0x40400000u,
+                           0x41300000u, 0x41400000u, 0x41500000u})
+        shockLanceBeamWriter.writeUnsigned(value, 32);
+    shockLanceBeamWriter.writeFlag(true); // hit object
+    shockLanceBeamWriter.writeFlag(false); // no source
+    shockLanceBeamWriter.writeUnsigned(0x14, 5);
+    V12BitStream shockLanceBeamStream(shockLanceBeamWriter.data().data(),
+                                      shockLanceBeamWriter.data().size());
+    V12::PlayerGhostState shockLanceState;
+    std::vector<V12::ProjectileImpact> shockLanceImpacts;
+    assert(V12::readGhostPayload(shockLanceBeamStream, 32, true, {}, &shockLanceState,
+                                 &shockLanceImpacts));
+    assert(shockLanceState.hasBeam && shockLanceState.beamStart.x == 1.0f &&
+           shockLanceState.beamEnd.z == 13.0f && shockLanceImpacts.size() == 1);
+    assert(shockLanceBeamStream.readUnsigned(5) == 0x14 && !shockLanceBeamStream.failed());
 
     V12BitWriter sniperInitialWriter;
     sniperInitialWriter.writeFlag(false); // GameBase datablock
@@ -1484,6 +1612,23 @@ int main() {
                                        &fixtureGameState, &fixtureCompressionPoint));
     assert(!V12::readServerPacketEvents(
         fixturePayload, targetStrings, fixtureEvents, nullptr, nullptr));
+
+    V12::PlayerGhostState baseState;
+    baseState.threads[0].sequence = 2;
+    baseState.threads[0].valid = true;
+    baseState.mountedImages[0].datablockId = 11;
+    baseState.mountedImages[0].valid = true;
+    V12::PlayerGhostState sparseState;
+    sparseState.threads[0].forward = false;
+    sparseState.threads[0].atEnd = true;
+    sparseState.threads[0].valid = true;
+    sparseState.mountedImages[0].datablockId = 17;
+    sparseState.mountedImages[0].firing = true;
+    sparseState.mountedImages[0].valid = true;
+    const auto mergedState = V12::mergePlayerGhostState(baseState, sparseState);
+    assert(!mergedState.threads[0].forward && mergedState.threads[0].atEnd);
+    assert(mergedState.mountedImages[0].datablockId == 17 &&
+           mergedState.mountedImages[0].firing);
 
     return 0;
 }

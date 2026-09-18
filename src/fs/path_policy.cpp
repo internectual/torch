@@ -35,4 +35,15 @@ bool isSafeLogicalPath(const char* path) {
     return true;
 }
 
+bool safeOutputPath(const char* root, const char* logicalName, std::string& result) {
+    if (!root || !logicalName || !isSafeLogicalPath(logicalName)) return false;
+    std::error_code error;
+    const std::filesystem::path rootPath = std::filesystem::weakly_canonical(root, error);
+    if (error) return false;
+    const std::filesystem::path candidate = rootPath / logicalName;
+    if (!staysWithinRoot(rootPath.c_str(), candidate.c_str())) return false;
+    result = candidate.string();
+    return true;
+}
+
 }

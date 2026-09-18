@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <vector>
 #include <cstring>
+#include <functional>
+#include <string>
 
 // ─── Torch Network Protocol ──────────────────────────────────────────
 //
@@ -68,6 +70,7 @@ namespace T2Protocol {
     constexpr int CLASS_FLAG_RED = 100;
     constexpr int CLASS_FLAG_BLUE = 101;
     constexpr int CLASS_PROJECTILE = 33;
+    constexpr uint8_t UPDATE_DEAD = 1u << 0;
     constexpr int CLASS_SENSOR = 54;
 
     // Game data types
@@ -351,12 +354,20 @@ public:
     bool start(uint16_t port);
     void stop();
     void update();
+    uint16_t port() const;
+    uint16_t queryPort() const;
 
     // Set a callback for terrain height queries (x,z → height)
     // Returns true if the callback was set
     void setHeightCallback(float (*cb)(float, float, void*), void* userData) {
         heightCB = cb; heightCtx = userData;
     }
+    void setRayCallback(bool (*cb)(float, float, float, float, float, float, float, void*),
+                       void* userData) {
+        rayCB = cb; rayCtx = userData;
+    }
+    using RemoteCommandCallback = std::function<void(int, const std::vector<std::string>&)>;
+    void setRemoteCommandCallback(RemoteCommandCallback cb) { remoteCommandCB = std::move(cb); }
 
     // Load a .mis mission file and spawn ghosts for supported objects
     bool loadMission(const char* missionPath);
@@ -383,4 +394,7 @@ private:
     Impl* impl;
     float (*heightCB)(float, float, void*) = nullptr;
     void* heightCtx = nullptr;
+    bool (*rayCB)(float, float, float, float, float, float, float, void*) = nullptr;
+    void* rayCtx = nullptr;
+    RemoteCommandCallback remoteCommandCB;
 };

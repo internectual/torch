@@ -178,6 +178,8 @@ public:
     bool handleDrag(int x, int y); // continuous mouse-move while button held
     void handleDragRelease(); // stop all dragging on mouse-up
     bool handleScroll(int x, int y, int wheelDelta);
+    // Convert SDL window coordinates to the logical GUI canvas used for hit tests.
+    void mapMouse(int physicalX, int physicalY, int& logicalX, int& logicalY) const;
     GuiControl* hitTest(GuiControl* ctl, int mx, int my);
     GuiControl* hitTestTop(int mx, int my); // dialogStack (top-down) then canvas
     GuiControl* launchPopupAt(int mx, int my); // open ShellLaunchMenu popup containing (mx,my)
@@ -212,6 +214,8 @@ public:
     // its accumulated child state, e.g. LaunchTabView's tabs) rather than
     // building a fresh empty one.
     std::unordered_map<std::string, GuiControl*> lastPushed;
+    // Responder to restore when a transient dialog is removed.
+    std::unordered_map<GuiControl*, GuiControl*> focusBeforeDialog;
     void setContent(const std::string& name);
     void setContentImmediate(const std::string& name);
     void handleKeyboard(); // process keyboard input for focused text control

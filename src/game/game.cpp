@@ -1,20 +1,36 @@
 #include "game/game.h"
+#include "render/material_parity.h"
+#include "render/environment_commands.h"
+#include "game/decal_runtime.h"
 #include <GL/glew.h>
 #include "game/demo.h"
 #include "net/v12_registry.h"
 #include "game/hud.h"
+#include "game/item_parity.h"
+#include "game/link_beam.h"
 #include "game/physics.h"
+#include "game/time_scale.h"
+#include "game/projectile_audio.h"
+#include "game/wind.h"
 #include "game/mission_parser.h"
+#include "game/mission_discovery.h"
+#include "game/objective_parity.h"
+#include <SDL3/SDL.h>
 #include "render/renderer.h"
+#include "render/dts_animation.h"
+#include "render/texture_frames.h"
 #include "render/shader.h"
 #include "render/gui_renderer.h"
 #include "core/console.h"
+#include "core/console_args.h"
 #include "core/config.h"
 #include "core/engine.h"
+#include "core/input_parity.h"
 #include "script/torquescript.h"
 #include <algorithm>
 #include <numeric>
 #include "fs/file_system.h"
+#include "fs/path_policy.h"
 #include <cstdio>
 #include <cmath>
 #include <cstring>
@@ -22,8 +38,43 @@
 #include <sstream>
 #include <fstream>
 #include <cstdlib>
+#include <utility>
+
+static void appendWheelNodeOverrides(const GhostEntry& ghost, DTSShape& shape,
+                                     float dt, DTSShape::NodeOverride* overrides,
+                                     int& overrideCount, int maxOverrides,
+                                     float* wheelRotation);
+
+static std::string formatDemoRemoteText(const std::string& templ,
+                                        const std::vector<std::string>& values) {
+    std::string text = templ;
+    for (size_t i = 0; i < values.size(); ++i) {
+        const std::string key = "%" + std::to_string(i + 1);
+        size_t pos = 0;
+        while ((pos = text.find(key, pos)) != std::string::npos) {
+            text.replace(pos, key.size(), values[i]);
+            pos += values[i].size();
+        }
+    }
+    for (size_t pos = 0; (pos = text.find('%', pos)) != std::string::npos;) {
+        size_t end = pos + 1;
+        while (end < text.size() && std::isdigit((unsigned char)text[end])) ++end;
+        if (end == pos + 1) { ++pos; continue; }
+        text.erase(pos, end - pos);
+    }
+    text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char c) {
+        return c < 0x20;
+    }), text.end());
+    return text;
+}
 
 // Forward declarations
+
+static const char* liveFlagStatus(const std::string& status) {
+    if (status == "<At Base>" || status == "At Base") return "home";
+    if (status == "<In the Field>" || status == "In the Field") return "field";
+    return status.empty() ? "home" : "held";
+}
 
 // ─── Mission shape helpers ─────────────────────────────────────────
 // Read shapeFile values from datablocks created by executed TorqueScript.
@@ -96,14 +147,118 @@ static const std::string* findDatablockShape(
 static std::string normalizeShapePath(std::string path) {
     if (!path.empty() && path.back() == '"') path.pop_back();
     if (path.empty()) return {};
+    for (char& c : path) {
+        if (c == '\\') c = '/';
+        c = (char)std::tolower((unsigned char)c);
+    }
     if (path.starts_with("shapes/") || path.starts_with("interiors/")) return path;
-    std::string lower = path;
+    return path.ends_with(".dif") ? "interiors/" + path : "shapes/" + path;
+}
+
+static std::string normalizeMissionName(std::string name) {
+    for (char& c : name) {
+        if (c == '\\') c = '/';
+    }
+    std::string lower = name;
     for (char& c : lower) c = (char)std::tolower((unsigned char)c);
-    return lower.ends_with(".dif") ? "interiors/" + path : "shapes/" + path;
+    if (lower.starts_with("base/missions/")) name.erase(0, 14);
+    else if (lower.starts_with("missions/")) name.erase(0, 9);
+    if (name.size() >= 4) {
+        std::string ext = name.substr(name.size() - 4);
+        for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+        if (ext == ".mis") name.resize(name.size() - 4);
+    }
+    return name;
+}
+
+static std::vector<std::string> terrainAssetCandidates(std::string name) {
+    for (char& c : name) if (c == '\\') c = '/';
+    std::string lower = name;
+    for (char& c : lower) c = (char)std::tolower((unsigned char)c);
+    if (!lower.ends_with(".ter")) name += ".ter";
+    std::vector<std::string> result{name};
+    if (!lower.starts_with("terrains/") && !lower.starts_with("missions/"))
+        result.push_back("terrains/" + name);
+    return result;
+}
+
+static std::vector<uint32_t> parseEmptySquareRuns(const std::string& value) {
+    std::vector<uint32_t> runs;
+    const char* cursor = value.c_str();
+    while (*cursor) {
+        char* end = nullptr;
+        unsigned long long packed = std::strtoull(cursor, &end, 0);
+        if (end == cursor) { ++cursor; continue; }
+        if (packed <= 0xffffffffull) runs.push_back((uint32_t)packed);
+        cursor = end;
+    }
+    return runs;
+}
+
+static ColorF unpackShockwaveColor(uint32_t packed) {
+    return {((packed >> 0) & 0xff) / 255.0f,
+            ((packed >> 8) & 0xff) / 255.0f,
+            ((packed >> 16) & 0xff) / 255.0f,
+            ((packed >> 24) & 0xff) / 255.0f};
+}
+
+static ColorF interpolateShockwaveColor(const V12::DecodedDataBlock::ShockwaveData& data,
+                                        float normalizedAge) {
+    if (data.colors.empty()) return {1, 1, 1, 1};
+    const size_t count = std::min(data.colors.size(), data.times.size());
+    if (count == 0) return unpackShockwaveColor(data.colors.front());
+    if (normalizedAge <= data.times[0]) return unpackShockwaveColor(data.colors[0]);
+    for (size_t i = 1; i < count; ++i) {
+        if (normalizedAge <= data.times[i]) {
+            const float span = data.times[i] - data.times[i - 1];
+            const float t = span > 0.0f ? (normalizedAge - data.times[i - 1]) / span : 0.0f;
+            const ColorF a = unpackShockwaveColor(data.colors[i - 1]);
+            const ColorF b = unpackShockwaveColor(data.colors[i]);
+            return {a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
+                    a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
+        }
+    }
+    return unpackShockwaveColor(data.colors[count - 1]);
+}
+
+static const VMValue* scriptField(const ScriptObject* object, const std::string& wanted) {
+    if (!object) return nullptr;
+    for (const auto& [name, value] : object->fields) {
+        if (name.size() == wanted.size()) {
+            bool equal = true;
+            for (size_t i = 0; i < name.size(); ++i)
+                if (std::tolower((unsigned char)name[i]) !=
+                    std::tolower((unsigned char)wanted[i])) { equal = false; break; }
+            if (equal) return &value;
+        }
+    }
+    return nullptr;
+}
+
+static ScriptObject* findScriptObject(const std::string& name) {
+    for (const auto& [objectName, object] : ScriptEngine::instance().objects) {
+        if (!object || objectName.size() != name.size()) continue;
+        bool equal = true;
+        for (size_t i = 0; i < name.size(); ++i)
+            if (std::tolower((unsigned char)objectName[i]) !=
+                std::tolower((unsigned char)name[i])) { equal = false; break; }
+        if (equal) return object;
+    }
+    return nullptr;
+}
+
+static float scriptFloat(const ScriptObject* object, const char* field, float fallback = 0.0f) {
+    if (const auto* value = scriptField(object, field)) return value->toFloat();
+    return fallback;
+}
+
+static bool scriptBool(const ScriptObject* object, const char* field, bool fallback = false) {
+    if (const auto* value = scriptField(object, field)) return value->toBool();
+    return fallback;
 }
 
 static const DTSShape::Animation* findAnimation(const DTSShape& shape,
-                                                const char* wanted) {
+                                                 const char* wanted) {
     if (!wanted) return nullptr;
     std::string name = wanted;
     for (char& c : name) c = (char)std::tolower((unsigned char)c);
@@ -113,6 +268,25 @@ static const DTSShape::Animation* findAnimation(const DTSShape& shape,
         if (candidate == name) return &animation;
     }
     return nullptr;
+}
+
+static int findFirstNode(const DTSShape& shape,
+                         std::initializer_list<const char*> names) {
+    for (const char* name : names) {
+        const int node = shape.findNode(name);
+        if (node >= 0) return node;
+    }
+    return -1;
+}
+
+static Point3F mountedNodePosition(const MatrixF& model, const DTSShape& image,
+                                   const char* fallbackNode) {
+    const int node = findFirstNode(image, {"muzzlePoint", "MuzzlePoint", "muzzle", fallbackNode});
+    if (node >= 0 && node < (int)image.defaultTransforms.size())
+        return model.transform({image.defaultTransforms[node].m[0][3],
+                                image.defaultTransforms[node].m[1][3],
+                                image.defaultTransforms[node].m[2][3]});
+    return model.transform({0, 0, 0});
 }
 
 static std::string defaultMissionAnimation(const DTSShape* shape) {
@@ -230,6 +404,15 @@ static Point3F worldToScreen(const Point3F& worldPos, const MatrixF& view, const
     if (nw == 0) return {-999, -999, 0};
     float invW = 1.0f / nw;
     return {(nx*invW*0.5f+0.5f)*screenW, (-ny*invW*0.5f+0.5f)*screenH, nz*invW};
+}
+
+static bool parseLiveIndex(const std::string& text, int& value) {
+    if (text.empty()) return false;
+    char* end = nullptr;
+    const long parsed = std::strtol(text.c_str(), &end, 10);
+    if (end == text.c_str() || *end != '\0' || parsed < 0 || parsed >= 1024) return false;
+    value = (int)parsed;
+    return true;
 }
 
 // Forward declarations for demo ghost shape helpers
@@ -538,6 +721,7 @@ void Player::render() {
 }
 
 void Player::applyMove(const Point3F& move, bool jump, bool jet, float dt) {
+    if (isDead()) return;
     Game::InputMove input;
     input.left = move.x < -0.001f;
     input.right = move.x > 0.001f;
@@ -550,8 +734,9 @@ void Player::applyMove(const Point3F& move, bool jump, bool jet, float dt) {
 }
 
 void Player::selectWeapon(int32_t idx) {
-    if (idx >= 0 && idx < (int32_t)weapons.size()) {
+    if (idx >= 0 && idx < (int32_t)weapons.size() && weaponIsSelectable(weapons[idx])) {
         curWeapon = idx;
+        weapons[curWeapon].firing = false;
         weapons[curWeapon].reloading = false;
         weapons[curWeapon].reloadTimer = 0;
         loadWeaponModel();
@@ -563,13 +748,34 @@ void Player::selectWeapon(int32_t idx) {
             hud->activeHudSlot = -1;
             for (size_t slot = 0; slot < hud->hudSlots.size(); ++slot) {
                 hud->hudSlots[slot].active = hud->hudSlots[slot].name == nativeName;
-                if (hud->hudSlots[slot].active) hud->activeHudSlot = (int)slot;
+                if (hud->hudSlots[slot].active) {
+                    hud->hudSlots[slot].amount = weapons[curWeapon].ammo;
+                    hud->activeHudSlot = (int)slot;
+                }
             }
         }
     }
 }
 
+void Player::updateWeaponHud() {
+    if (curWeapon < 0 || curWeapon >= (int32_t)weapons.size()) return;
+    auto* hud = Engine::instance().guiRenderer().findControl("weaponsHud");
+    if (!hud) return;
+    std::string nativeName = gWeaponTable[weapons[curWeapon].type].name;
+    if (nativeName == "Spinfusor") nativeName = "Disc";
+    else if (nativeName == "PlasmaGun") nativeName = "Plasma";
+    else if (nativeName == "ELF") nativeName = "ELFGun";
+    for (size_t slot = 0; slot < hud->hudSlots.size(); ++slot) {
+        if (hud->hudSlots[slot].name == nativeName) {
+            hud->hudSlots[slot].amount = weapons[curWeapon].ammo;
+            hud->hudSlots[slot].active = true;
+            hud->activeHudSlot = (int)slot;
+        }
+    }
+}
+
 void Player::fireWeapon(bool alt) {
+    if (isDead()) return;
     if (curWeapon < 0 || curWeapon >= (int32_t)weapons.size()) return;
     Weapon& w = weapons[curWeapon];
     const WeaponData& wd = gWeaponTable[w.type];
@@ -577,7 +783,8 @@ void Player::fireWeapon(bool alt) {
     if (!w.canFire(eng)) return;
 
     eng -= wd.energyCost;
-    w.fireTimer = 1.0f / wd.fireRate;
+    w.fireTimer = wd.fireRate;
+    w.firing = true;
     weaponAnimTime = 0.0f;
 
     Point3F cpos = cameraPos();
@@ -589,6 +796,7 @@ void Player::fireWeapon(bool alt) {
 
     Projectile p;
     p.pos = computeProjectileSpawn(cpos, dir);
+    p.previousPos = p.pos;
     p.vel = {dir.x * wd.speed, dir.y * wd.speed, dir.z * wd.speed};
     p.type = wd.projectileType;
     p.damage = wd.damage;
@@ -623,25 +831,18 @@ void Player::fireWeapon(bool alt) {
         w.ammo--;
         if (w.ammo <= 0) w.ammo = 0;
     }
-    if (auto* hud = Engine::instance().guiRenderer().findControl("weaponsHud")) {
-        std::string nativeName = gWeaponTable[w.type].name;
-        if (nativeName == "Spinfusor") nativeName = "Disc";
-        else if (nativeName == "PlasmaGun") nativeName = "Plasma";
-        else if (nativeName == "ELF") nativeName = "ELFGun";
-        for (auto& slot : hud->hudSlots)
-            if (slot.name == nativeName) slot.amount = w.ammo;
-    }
+    updateWeaponHud();
 }
 
 void Player::weaponCycle(int32_t dir) {
     if (weapons.empty()) return;
-    int32_t next = curWeapon + dir;
-    if (next < 0) next = (int32_t)weapons.size() - 1;
-    if (next >= (int32_t)weapons.size()) next = 0;
+    int32_t next = nextSelectableWeapon(weapons, curWeapon, dir);
     selectWeapon(next);
 }
 
 void Player::applyDamage(float amount) {
+    // A dead ShapeBase cannot take a second lethal hit before respawn.
+    if (hp <= 0.0f && amount >= 0.0f) return;
     if (amount < 0) {
         // Healing
         hp -= amount; // amount is negative, so this adds
@@ -667,8 +868,21 @@ void Player::respawn() {
     heatLevel = 0.0f;
     arm = 0.0f;
     vel = {0,0,0};
-    pos = {0, 10, 0};
+    pos = Engine::instance().game().world().spawnPoint();
+    pos.y += 1.0f;
     onGround = false;
+    curWeapon = weapons.empty() ? -1 : 0;
+    for (auto& weapon : weapons) {
+        weapon.ammo = weapon.type >= 0 && weapon.type < gWeaponCount &&
+            gWeaponTable[weapon.type].maxAmmo > 0
+            ? gWeaponTable[weapon.type].maxAmmo : 9999;
+        weapon.fireTimer = 0.0f;
+        weapon.reloadTimer = 0.0f;
+        weapon.firing = false;
+        weapon.reloading = false;
+    }
+    loadWeaponModel();
+    updateWeaponHud();
 }
 
 Point3F Player::cameraPos() const {
@@ -685,32 +899,258 @@ Point3F Player::cameraTarget() const {
 World::World() {}
 World::~World() {}
 
+static int findWaterBody(const std::vector<World::WaterState>& bodies,
+                         const std::string& target) {
+    if (target.empty()) {
+        for (size_t i = 0; i < bodies.size(); ++i)
+            if (bodies[i].active) return (int)i;
+        return -1;
+    }
+    char* end = nullptr;
+    const long index = std::strtol(target.c_str(), &end, 10);
+    if (end != target.c_str() && *end == '\0' && index >= 0 &&
+        index < (long)bodies.size() && bodies[index].active)
+        return (int)index;
+    for (size_t i = 0; i < bodies.size(); ++i)
+        if (bodies[i].active && bodies[i].name == target) return (int)i;
+    return -1;
+}
+
+bool World::setWaterLevel(const std::string& target, float level) {
+    const int index = findWaterBody(waterBodies, target);
+    if (index < 0 || !applyWaterLevel(waterBodies[index].level, level)) return false;
+    if (index == 0) water = waterBodies[index];
+    return true;
+}
+
+bool World::setWaterType(const std::string& target, int type) {
+    const int index = findWaterBody(waterBodies, target);
+    if (index < 0 || type < 0 || type > 7) return false;
+    waterBodies[index].liquidType = type;
+    if (index == 0) water.liquidType = type;
+    return true;
+}
+
+bool World::setWaterOpacity(const std::string& target, float opacity) {
+    const int index = findWaterBody(waterBodies, target);
+    if (index < 0 || !applyWaterOpacity(waterBodies[index].opacity, opacity)) return false;
+    waterBodies[index].surfaceColor.a = opacity;
+    if (index == 0) water = waterBodies[index];
+    return true;
+}
+
+bool World::setWaterColor(const std::string& target, const ColorF& color) {
+    const int index = findWaterBody(waterBodies, target);
+    if (index < 0 || !applyWaterColor(waterBodies[index].surfaceColor, color.r, color.g, color.b)) return false;
+    waterBodies[index].surfaceColor.a = color.a;
+    waterBodies[index].opacity = color.a;
+    if (index == 0) water = waterBodies[index];
+    return true;
+}
+
+bool World::setSkyColor(const ColorF& color) {
+    if (!validEnvironmentColor(color)) return false;
+    skyBox.solidColor = color;
+    skyBox.useSkyTextures = false;
+    return true;
+}
+
+bool World::setSkyMaterialList(const std::string& materialList) {
+    if (materialList.empty() || materialList.find("..") != std::string::npos ||
+        materialList.find('\\') != std::string::npos || materialList.front() == '/')
+        return false;
+    skyMaterialList = materialList;
+    return true;
+}
+
+bool World::setSunDirection(const Point3F& direction) {
+    if (!validSunDirection(direction)) return false;
+    const float length = std::sqrt(direction.x * direction.x + direction.y * direction.y + direction.z * direction.z);
+    sunLightDir = {direction.x / length, direction.y / length, direction.z / length};
+    sunLightDirUsed = true;
+    return true;
+}
+
+bool World::setSunColor(const ColorF& color) {
+    if (!validEnvironmentColor(color)) return false;
+    sunColor = color;
+    sunColorUsed = true;
+    return true;
+}
+
+bool World::setSunAmbient(const ColorF& color) {
+    if (!validEnvironmentColor(color)) return false;
+    sunAmbient = color;
+    return true;
+}
+
+bool World::setFogTransition(float duration, float distance, const ColorF* color) {
+    if (!std::isfinite(duration) || duration < 0.0f ||
+        !std::isfinite(distance) || distance <= 0.0f) return false;
+    const float targetDensity = 1.0f / distance;
+    if (color && !validEnvironmentColor(*color)) return false;
+    fog.transitionStartDensity = fog.density;
+    fog.transitionTargetDensity = targetDensity;
+    fog.transitionStartColor = fog.color;
+    fog.transitionTargetColor = color ? *color : fog.color;
+    fog.transitionElapsed = 0.0f;
+    fog.transitionDuration = duration;
+    fog.transitioning = duration > 0.0f;
+    fog.enabled = true;
+    if (!fog.transitioning) {
+        fog.density = targetDensity;
+        fog.distance = distance;
+        fog.color = fog.transitionTargetColor;
+    }
+    return true;
+}
+
+void World::cleanupMission() {
+    if (auto* ts = Engine::instance().script().ts()) ts->clearScheduledEvents();
+    clearEffects();
+    terrainBlock.reset();
+    skyBox.reset();
+    if (SDL_GL_GetCurrentContext()) {
+        for (auto& shape : shapes) {
+            for (auto& mesh : shape.meshes) mesh.destroy();
+            for (auto& texture : shape.materialTextures) texture.destroy();
+            for (auto& texture : shape.lightmaps) texture.destroy();
+        }
+        for (auto& shape : debrisShapes) {
+            for (auto& mesh : shape.meshes) mesh.destroy();
+            for (auto& texture : shape.materialTextures) texture.destroy();
+            for (auto& texture : shape.lightmaps) texture.destroy();
+        }
+    }
+    worldObjects.clear();
+    missionObjectives.clear();
+    navGraph = {};
+    interiorCollision = {};
+    currentSceneState = {};
+    cameras.clear();
+    shapes.clear();
+    debrisShapes.clear();
+    projList.clear();
+    fogVolumes.clear();
+    skyMaterialList.clear();
+    fog = {};
+    visibleDistance = 1000.0f;
+    sunLightDir = {0.5f, 0.8f, 0.6f};
+    sunColor = {1, 1, 1, 1};
+    sunAmbient = {0.3f, 0.3f, 0.4f, 1.0f};
+    sunLightDirUsed = false;
+    sunColorUsed = false;
+    missionArea = {};
+    precipitation = {};
+    lightningEnabled = true;
+    setTorchWindVelocity({});
+    water = {};
+    waterBodies.clear();
+    loaded = false;
+    auto& config = Engine::instance().renderer().config();
+    config.fogDensity = -1.0f;
+    config.fogColorOverride = false;
+}
+
 bool World::load(const char* mapName) {
     Console::instance().printf(LogLevel::Info, "Loading map: %s", mapName);
 
+    if (auto* ts = Engine::instance().script().ts()) ts->clearScheduledEvents();
+    // Mission-owned effects must not survive a V12 scene replacement.
+    clearEffects();
+
+    // A mission load replaces the native scene graph. Do not let static world
+    // geometry or terrain from the previous mission survive a transition.
+    terrainBlock.reset();
+    skyBox.reset();
+    if (SDL_GL_GetCurrentContext()) {
+        for (auto& shape : shapes) {
+            for (auto& mesh : shape.meshes) mesh.destroy();
+            for (auto& texture : shape.materialTextures) texture.destroy();
+            for (auto& texture : shape.lightmaps) texture.destroy();
+        }
+        for (auto& shape : debrisShapes) {
+            for (auto& mesh : shape.meshes) mesh.destroy();
+            for (auto& texture : shape.materialTextures) texture.destroy();
+            for (auto& texture : shape.lightmaps) texture.destroy();
+        }
+    }
+    shapes.clear();
+    debrisShapes.clear();
+    worldObjects.clear();
+    missionObjectives.clear();
+    navGraph = {};
+    interiorCollision = {};
+    currentSceneState = {};
     cameras.clear();
+    fogVolumes.clear();
+    // Sky and precipitation are mission-owned state.  Reset every field before
+    // parsing the next mission; V12 creates a fresh environment object here.
+    skyMaterialList.clear();
+    skyBox.fogColor = {0.75f, 0.8f, 0.85f, 1.0f};
+    skyBox.visibleDistance = 1000.0f;
+    skyBox.solidColor = {0, 0, 0, 1};
+    skyBox.useSkyTextures = true;
+    fog = {};
+    auto& fogConfig = Engine::instance().renderer().config();
+    fogConfig.fogDensity = -1.0f;
+    fogConfig.fogColorOverride = false;
+    visibleDistance = 1000.0f;
+    sunLightDir = {0.5f, 0.8f, 0.6f};
+    sunColor = {1, 1, 1, 1};
+    sunAmbient = {0.3f, 0.3f, 0.4f, 1.0f};
+    sunLightDirUsed = false;
+    sunColorUsed = false;
+    setTorchWindVelocity({});
+    missionArea = {};
+    precipitation = {};
+    lightningEnabled = true;
+    water = {};
+    waterBodies.clear();
+    playerSpawn = {0, 5, 0};
+    loaded = false;
 
     auto& fs = Engine::instance().fs();
 
     // Try to load mission file
-    std::string misPath = std::string("missions/") + mapName + ".mis";
+    if (mapName && !TorchPath::isSafeLogicalPath(mapName)) {
+        Console::instance().printf(LogLevel::Error, "Rejected unsafe mission argument: %s", mapName);
+        return false;
+    }
+    std::string missionName = mapName ? mapName : "";
+    missionName = normalizeMissionName(missionName);
+    if (!TorchPath::isSafeLogicalPath(missionName.c_str())) {
+        Console::instance().printf(LogLevel::Error, "Rejected unsafe mission path: %s", mapName ? mapName : "");
+        return false;
+    }
+    std::string misPath = std::string("missions/") + missionName + ".mis";
     std::string misData = fs.readText(misPath.c_str());
 
     if (misData.empty()) {
-        // Try alternative case
-        misPath = std::string("Missions/") + mapName + ".mis";
+        // FileSystem resolves case-insensitively for both loose and archived
+        // assets; try the packed mission form without reintroducing raw input.
+        misPath = std::string("missions/") + missionName + ".misPK";
         misData = fs.readText(misPath.c_str());
     }
 
     // Cloud layer properties (populated from Sky object if .mis available)
     float cloudHeights[3] = {0.7f, 0.5f, 0.3f};
     float cloudSpeeds[3] = {0.3f, 0.15f, 0.08f};
+    bool missionHasTerrainBlock = false;
 
     if (!misData.empty()) {
         Console::instance().printf(LogLevel::Info, "Found mission: %s (%zu bytes, first 30: '%s')", misPath.c_str(), misData.size(),
             misData.substr(0, 30).c_str());
 
         auto objects = parseMisFile(misData);
+
+        if (const MisObject* graph = findObject(objects, "NavigationGraph"))
+            navGraph = authoredNavigationGraph(*graph);
+        for (const auto& object : objects)
+            if (object.className == "AIObjective")
+                missionObjectives.push_back(authoredMissionObjective(object));
+        Console::instance().printf(LogLevel::Info, "  navigation graph: %s, objectives: %zu",
+            navGraph.graphFile.empty() ? "none" : navGraph.graphFile.c_str(), missionObjectives.size());
 
         for (const auto& obj : objects) {
             if (obj.className != "Camera") continue;
@@ -736,22 +1176,18 @@ bool World::load(const char* mapName) {
         // Find TerrainBlock
         MisObject* terrainObj = findObject(objects, "TerrainBlock");
         if (terrainObj) {
+            missionHasTerrainBlock = true;
             std::string terrainFile = getProp(terrainObj->props, "terrainfile");
             Console::instance().printf(LogLevel::Info, "  terrain file: '%s'", terrainFile.c_str());
 
             // Try loading the .ter file from various paths
-            std::vector<std::string> terPaths = {
-                terrainFile,
-                "missions/" + terrainFile,
-                "terrains/" + terrainFile,
-                terrainFile + ".ter",
-                "missions/" + terrainFile + ".ter",
-                "terrains/" + terrainFile + ".ter"
-            };
+            const std::vector<std::string> terPaths = terrainAssetCandidates(terrainFile);
 
             // Read terrain positioning
             std::string sqStr = getProp(terrainObj->props, "squaresize");
             if (!sqStr.empty()) terrainBlock.squareSize = (float)std::atof(sqStr.c_str());
+            terrainBlock.setEmptySquareRuns(
+                parseEmptySquareRuns(getProp(terrainObj->props, "emptysquares")));
             Console::instance().printf(LogLevel::Debug, "  terrain squareSize: %.1f", terrainBlock.squareSize);
             std::string hsStr = getProp(terrainObj->props, "heightscale");
             if (!hsStr.empty()) terrainBlock.heightScale = (float)std::atof(hsStr.c_str());
@@ -823,16 +1259,9 @@ bool World::load(const char* mapName) {
                 }
             }
 
-            if (!terrainBlock.loaded) {
-                // Still try just .ter extension
-                std::string tryPath = terrainFile;
-                if (tryPath.size() < 4 || tryPath.substr(tryPath.size()-4) != ".ter")
-                    tryPath += ".ter";
-                auto terData = fs.read(tryPath.c_str());
-                if (!terData.empty()) {
-                    terrainBlock.load(terData.data(), terData.size());
-                }
-            }
+            if (!terrainBlock.loaded)
+                Console::instance().printf(LogLevel::Warn,
+                    "Terrain: required asset '%s' could not be resolved", terrainFile.c_str());
         }
 
         // Load GameGrid texture for mission area boundary rendering
@@ -860,12 +1289,46 @@ bool World::load(const char* mapName) {
                     fog.enabled = true;
                 }
             }
+            std::string visibleDist = getProp(skyObj->props, "visibledistance");
+            if (!visibleDist.empty()) visibleDistance = std::max(0.0f, (float)std::atof(visibleDist.c_str()));
+            skyBox.visibleDistance = visibleDistance;
+            skyBox.fogColor = fog.color;
+            std::string windStr = getProp(skyObj->props, "windVelocity");
+            if (!windStr.empty()) {
+                float wx, wy, wz;
+                if (sscanf(windStr.c_str(), "%f %f %f", &wx, &wy, &wz) == 3)
+                    setTorchWindVelocity(Math::torquePointToYUp({wx, wy, wz}));
+            }
             std::string fogDist = getProp(skyObj->props, "fogdistance");
             if (!fogDist.empty()) {
-                fog.distance = (float)std::atof(fogDist.c_str());
-                fog.density = 1.0f / fog.distance;
-                fog.enabled = true;
+                float distance = (float)std::atof(fogDist.c_str());
+                if (applyFogDistance(fog.distance, fog.density, distance))
+                    fog.enabled = true;
             }
+            std::string useSkyTextures = getProp(skyObj->props, "useskytextures");
+            if (!useSkyTextures.empty())
+                skyBox.useSkyTextures = std::atoi(useSkyTextures.c_str()) != 0;
+            for (int i = 1; i <= 3; ++i) {
+                const std::string volume = getProp(
+                    skyObj->props, ("fogVolume" + std::to_string(i)).c_str());
+                float distance = 0.0f, minHeight = 0.0f, maxHeight = 0.0f;
+                if (sscanf(volume.c_str(), "%f %f %f", &distance, &minHeight,
+                           &maxHeight) == 3 && distance > 0.0f &&
+                    maxHeight > minHeight) {
+                    fogVolumes.push_back({distance, minHeight, maxHeight});
+                }
+            }
+            skyBox.fogVolumes.clear();
+            for (const auto& volume : fogVolumes)
+                skyBox.fogVolumes.push_back({volume.visibleDistance, volume.minHeight,
+                                             volume.maxHeight, 1.0f});
+            std::string solidColor = getProp(skyObj->props, "skysolidcolor");
+            if (!solidColor.empty()) {
+                float sr, sg, sb;
+                if (sscanf(solidColor.c_str(), "%f %f %f", &sr, &sg, &sb) >= 3)
+                    skyBox.solidColor = {sr, sg, sb, 1.0f};
+            }
+            skyBox.fogColor = fog.color;
             // setFogDensity / setFogColor console overrides take precedence over
             // the mission's Sky fog values.
             auto& fogCfg = Engine::instance().renderer().config();
@@ -909,8 +1372,12 @@ bool World::load(const char* mapName) {
                     std::atof(azStr.c_str()), std::atof(elStr.c_str()), sunLightDir.x, sunLightDir.y, sunLightDir.z);
             }
             if (!colStr.empty()) {
-                sscanf(colStr.c_str(), "%f %f %f", &sunColor.r, &sunColor.g, &sunColor.b);
-                sunColorUsed = true;
+                float r, g, b;
+                if (sscanf(colStr.c_str(), "%f %f %f", &r, &g, &b) == 3 &&
+                    validEnvironmentColor({r, g, b, 1.0f})) {
+                    sunColor = {r, g, b, 1.0f};
+                    sunColorUsed = true;
+                }
             }
             std::string ambStr = getProp(sunObj->props, "ambient");
             if (!ambStr.empty()) {
@@ -954,18 +1421,49 @@ bool World::load(const char* mapName) {
             if (obj.className == "Precipitation") {
                 PrecipitationState ps;
                 std::string s;
-                s = getProp(obj.props, "numDrops"); if (!s.empty()) ps.numDrops = std::atoi(s.c_str());
+                // Native V12 names; retain the newer names as aliases.
+                s = getProp(obj.props, "maxNumDrops");
+                if (s.empty()) s = getProp(obj.props, "numDrops");
+                 if (!s.empty()) ps.numDrops = std::atoi(s.c_str());
+                 ps.configuredDrops = ps.numDrops;
+                 s = getProp(obj.props, "type"); if (!s.empty()) ps.type = std::atoi(s.c_str());
+                 s = getProp(obj.props, "percentage"); if (!s.empty()) ps.percentage = (float)std::atof(s.c_str());
+                s = getProp(obj.props, "maxRadius");
+                if (!s.empty()) ps.boxWidth = std::max(1.0f, (float)std::atof(s.c_str()) * 2.0f);
                 s = getProp(obj.props, "boxWidth"); if (!s.empty()) ps.boxWidth = (float)std::atof(s.c_str());
                 s = getProp(obj.props, "boxHeight"); if (!s.empty()) ps.boxHeight = (float)std::atof(s.c_str());
                 s = getProp(obj.props, "dropSize"); if (!s.empty()) ps.dropSize = (float)std::atof(s.c_str());
-                s = getProp(obj.props, "minSpeed"); if (!s.empty()) ps.minSpeed = (float)std::atof(s.c_str());
-                s = getProp(obj.props, "maxSpeed"); if (!s.empty()) ps.maxSpeed = (float)std::atof(s.c_str());
+                s = getProp(obj.props, "minVelocity");
+                if (s.empty()) s = getProp(obj.props, "minSpeed");
+                if (!s.empty()) ps.minSpeed = (float)std::atof(s.c_str());
+                s = getProp(obj.props, "maxVelocity");
+                if (s.empty()) s = getProp(obj.props, "maxSpeed");
+                if (!s.empty()) ps.maxSpeed = (float)std::atof(s.c_str());
+                s = getProp(obj.props, "position");
+                if (!s.empty()) ps.origin = Math::torquePointToYUp(parsePos(s));
+                s = getProp(obj.props, "color1");
+                if (!s.empty()) {
+                    float r, g, b, a = ps.color.a;
+                    if (sscanf(s.c_str(), "%f %f %f %f", &r, &g, &b, &a) >= 3)
+                        ps.color = {r, g, b, a};
+                }
                 s = getProp(obj.props, "followCam");
                 if (!s.empty()) ps.followCam = (std::atoi(s.c_str()) != 0);
+                s = getProp(obj.props, "useWind");
+                if (!s.empty()) ps.useWind = (std::atoi(s.c_str()) != 0);
+                s = getProp(obj.props, "textureName");
+                if (s.empty()) s = getProp(obj.props, "texture");
+                if (!s.empty()) {
+                    std::vector<float> durations;
+                    Engine::instance().renderer().loadTextureFrames(
+                        s.c_str(), ps.textures, durations);
+                    ps.textureDurations = std::move(durations);
+                }
                 if (ps.numDrops > 0 && ps.maxSpeed > 0) {
                     ps.active = true;
                     precipitation = ps;
-                    initPrecipitation(precipitation);
+                    precipitation.configuredDrops = ps.numDrops;
+                    if (!setPrecipitation(ps.type, ps.percentage)) precipitation = {};
                     Console::instance().printf(LogLevel::Info, "  Precipitation: %d drops, box=%.0fx%.0f, speed=%.1f-%.1f",
                         precipitation.numDrops, precipitation.boxWidth, precipitation.boxHeight,
                         precipitation.minSpeed, precipitation.maxSpeed);
@@ -974,44 +1472,102 @@ bool World::load(const char* mapName) {
             }
         }
 
-        // Parse WaterBlock from mission
+        // Parse every WaterBlock. WaterBlock positions are the lower-left
+        // corner of the fluid region, not the center of the rendered plane.
         for (auto& obj : objects) {
             if (obj.className == "WaterBlock") {
-                // WaterBlock position.y = water level
-                std::string posStr = getProp(obj.props, "position");
-                if (!posStr.empty()) {
-                    float px, py, pz;
-                    if (sscanf(posStr.c_str(), "%f %f %f", &px, &py, &pz) >= 3) {
-                        water.level = py;
-                        water.active = true;
-                    }
-                }
-                // Try scale for coverage size
+                 WaterState body;
+                 body.name = obj.objName;
+                float scaleZ = 0.0f;
                 std::string scaleStr = getProp(obj.props, "scale");
                 if (!scaleStr.empty()) {
                     float sx, sy, sz;
                     if (sscanf(scaleStr.c_str(), "%f %f %f", &sx, &sy, &sz) >= 3) {
-                        water.size = std::max(sx, sz);
+                        scaleZ = sz;
+                        body.sizeX = std::max(0.0f, sx);
+                        body.sizeY = std::max(0.0f, sy);
+                        body.size = std::max(body.sizeX, body.sizeY);
                     }
                 }
-                // Parse surface color if available
-                std::string colorStr = getProp(obj.props, "baseColor");
-                if (!colorStr.empty()) {
-                    float cr, cg, cb;
-                    if (sscanf(colorStr.c_str(), "%f %f %f", &cr, &cg, &cb) >= 3) {
-                        water.surfaceColor = {cr, cg, cb, water.opacity};
+                std::string posStr = getProp(obj.props, "position");
+                 if (!posStr.empty()) {
+                     float px, py, pz;
+                     if (sscanf(posStr.c_str(), "%f %f %f", &px, &py, &pz) == 3 &&
+                         std::isfinite(px) && std::isfinite(py) && std::isfinite(pz) &&
+                         body.sizeX > 0.0f && body.sizeY > 0.0f) {
+                        body.originX = px;
+                        body.originZ = -py;
+                        body.level = pz + scaleZ;
+                        body.active = true;
                     }
+                 }
+                 std::string liquidType = getProp(obj.props, "liquidType");
+                 int parsedLiquidType = body.liquidType;
+                 if (!liquidType.empty() && !parseWaterType(liquidType, parsedLiquidType)) {
+                     Console::instance().printf(LogLevel::Warn,
+                         "WaterBlock '%s': rejected liquidType '%s'", obj.objName.c_str(), liquidType.c_str());
+                     continue;
+                 }
+                 body.liquidType = parsedLiquidType;
+                 std::string liquidLower = liquidType;
+                 for (char& c : liquidLower) c = (char)std::tolower((unsigned char)c);
+                 if (liquidLower.find("lava") != std::string::npos)
+                    body.surfaceColor = {0.75f, 0.12f, 0.02f, body.opacity};
+                std::string waveMagnitude = getProp(obj.props, "waveMagnitude");
+                if (!waveMagnitude.empty())
+                    body.waveMagnitude = std::max(0.0f, (float)std::atof(waveMagnitude.c_str()));
+                // These are the native WaterBlock fields; baseColor/opacity are
+                // not the surface material controls used by the original engine.
+                std::string colorStr = getProp(obj.props, "surfaceColor");
+                 if (!colorStr.empty()) {
+                     float cr, cg, cb;
+                     ColorF parsedColor{};
+                     if (sscanf(colorStr.c_str(), "%f %f %f", &cr, &cg, &cb) == 3 &&
+                         applyWaterColor(parsedColor, cr, cg, cb)) {
+                         body.surfaceColor = {cr, cg, cb, body.opacity};
+                     } else {
+                         Console::instance().printf(LogLevel::Warn,
+                             "WaterBlock '%s': rejected surfaceColor '%s'", obj.objName.c_str(), colorStr.c_str());
+                         continue;
+                     }
+                 }
+                std::string opacityStr = getProp(obj.props, "surfaceOpacity");
+                if (opacityStr.empty()) opacityStr = getProp(obj.props, "opacity");
+                 if (!opacityStr.empty()) {
+                     const float opacity = (float)std::atof(opacityStr.c_str());
+                     if (!applyWaterOpacity(body.opacity, opacity)) {
+                         Console::instance().printf(LogLevel::Warn,
+                             "WaterBlock '%s': rejected opacity '%s'", obj.objName.c_str(), opacityStr.c_str());
+                         continue;
+                     }
+                     body.surfaceColor.a = body.opacity;
                 }
-                std::string opacityStr = getProp(obj.props, "opacity");
-                if (!opacityStr.empty()) {
-                    water.opacity = (float)std::atof(opacityStr.c_str());
-                    water.surfaceColor.a = water.opacity;
+                auto& renderer = Engine::instance().renderer();
+                const std::string surfaceTexture = getProp(obj.props, "surfaceTexture");
+                if (!surfaceTexture.empty())
+                    renderer.loadTextureFrames(surfaceTexture.c_str(), body.surfaceFrames,
+                                               body.surfaceFrameDurations);
+                const std::string shoreTexture = getProp(obj.props, "shoreTexture");
+                if (!shoreTexture.empty())
+                    renderer.loadTextureFrames(shoreTexture.c_str(), body.shoreFrames,
+                                               body.shoreFrameDurations);
+                const std::string envTexture = getProp(obj.props, "envMapTexture");
+                if (!envTexture.empty()) {
+                    renderer.loadTextureFrames(envTexture.c_str(), body.envFrames,
+                                               body.envFrameDurations);
                 }
-                if (water.active) {
+                const std::string envIntensity = getProp(obj.props, "envMapIntensity");
+                if (!envIntensity.empty()) body.envIntensity = std::max(0.0f, (float)std::atof(envIntensity.c_str()));
+                const std::string shoreDepth = getProp(obj.props, "shoreDepth");
+                if (!shoreDepth.empty()) body.shoreDepth = std::max(0.0f, (float)std::atof(shoreDepth.c_str()));
+                if (body.active) {
+                    waterBodies.push_back(body);
+                    // Keep the legacy summary fields useful to callers that
+                    // only need the first authored surface.
+                    if (!water.active) water = body;
                     Console::instance().printf(LogLevel::Info, "  WaterBlock: level=%.1f size=%.0f opacity=%.2f",
-                        water.level, water.size, water.opacity);
+                        body.level, body.size, body.opacity);
                 }
-                break;
             }
         }
 
@@ -1050,7 +1606,7 @@ bool World::load(const char* mapName) {
         // Collect shape paths for all renderable mission objects
         // (TSStatic, InteriorInstance, StaticShape, Turret, Item, Camera, etc.)
         for (auto& obj : objects) {
-            if (!isRenderableMissionShape(obj.className)) continue;
+            if (!isRenderableMissionShape(obj.className) && obj.className != "ForceFieldBare") continue;
             std::string shapePath = resolveShapePath(obj, datablockShapes);
             if (!shapePath.empty()) addShapeName(shapePath);
             if (obj.className == "Turret") {
@@ -1075,25 +1631,18 @@ bool World::load(const char* mapName) {
     if (shape.loaded) {
         Console::instance().printf(LogLevel::Debug, "  loaded world shape: %s", shapeName.c_str());
             } else {
-                Console::instance().printf(LogLevel::Debug, "  world shape not loaded: %s", shapeName.c_str());
+                    Console::instance().printf(LogLevel::Warn, "World asset not loaded: %s", shapeName.c_str());
             }
 
             shapes.push_back(std::move(shape));
         }
 
-        // Find player spawn point from SpawnSphere objects
-        for (auto& obj : objects) {
-            if (obj.className == "SpawnSphere") {
-                std::string sp = getProp(obj.props, "position");
-                if (!sp.empty()) {
-                    float sx, sy, sz;
-                    if (sscanf(sp.c_str(), "%f %f %f", &sx, &sy, &sz) >= 3) {
-                        playerSpawn = {sx, sy, sz};
-                        Console::instance().printf(LogLevel::Debug, "  spawn point: (%.1f, %.1f, %.1f)", sx, sy, sz);
-                        break;
-                    }
-                }
-            }
+        // V12 chooses a team-compatible authored sphere. Sort by authored name
+        // rather than file order so equivalent missions spawn deterministically.
+        if (const MisObject* spawn = selectAuthoredSpawn(objects, 1)) {
+            playerSpawn = authoredMissionMarker(*spawn).position;
+            Console::instance().printf(LogLevel::Debug, "  spawn point: (%.1f, %.1f, %.1f)",
+                                        playerSpawn.x, playerSpawn.y, playerSpawn.z);
         }
 
         // Build collision mesh from DIF interior shapes
@@ -1102,6 +1651,96 @@ bool World::load(const char* mapName) {
 
         // Place objects from mission, mapping to loaded shapes
         for (auto& obj : objects) {
+             if (obj.className == "AudioEmitter") {
+                WorldObject emitter;
+                emitter.pos = parsePos(getProp(obj.props, "position"));
+                emitter.audioEmitter = true;
+                emitter.audioFileName = getProp(obj.props, "filename");
+                const std::string volume = getProp(obj.props, "volume");
+                const std::string is3D = getProp(obj.props, "is3D");
+                const std::string looping = getProp(obj.props, "isLooping");
+                const std::string minDistance = getProp(obj.props, "minDistance");
+                const std::string maxDistance = getProp(obj.props, "maxDistance");
+                if (!volume.empty()) emitter.audioVolume = (float)std::atof(volume.c_str());
+                if (!is3D.empty()) emitter.audioIs3D = std::atoi(is3D.c_str()) != 0;
+                if (!looping.empty()) emitter.audioIsLooping = std::atoi(looping.c_str()) != 0;
+                if (!minDistance.empty()) emitter.audioMinDistance = (float)std::atof(minDistance.c_str());
+                if (!maxDistance.empty()) emitter.audioMaxDistance = (float)std::atof(maxDistance.c_str());
+                addObject(emitter);
+                continue;
+            }
+             if (obj.className == "Marker" || obj.className == "MissionMarker" ||
+                  obj.className == "SpawnSphere" ||
+                  obj.className == "Trigger" || obj.className == "PhysicalZone") {
+                WorldObject marker;
+                  marker.className = obj.className;
+                  const AuthoredMissionMarker authored = authoredMissionMarker(obj);
+                  marker.teamId = authored.teamId;
+                  marker.objectName = obj.objName;
+                  marker.pos = authored.position;
+                  marker.rot = authored.rotation;
+                  marker.rotAngleDeg = authored.rotationAngleDeg;
+                  marker.scale = authored.scale;
+                  marker.label = authored.label;
+                  // Markers are mapper guides, never world collision geometry.
+                   marker.collidable = false;
+                   marker.visible = authoredVisible(obj);
+                  if (obj.className == "Trigger") {
+                      std::string pointsText = getProp(obj.props, "polyhedron");
+                     if (pointsText.empty()) pointsText = getProp(obj.props, "pointList");
+                     if (pointsText.empty()) pointsText = getProp(obj.props, "points");
+                     const auto numbers = triggerNumbers(pointsText);
+                     std::vector<Point3F> localPoints;
+                     for (size_t i = 0; i + 2 < numbers.size(); i += 3)
+                         localPoints.push_back({numbers[i], numbers[i + 1], numbers[i + 2]});
+                     if (localPoints.size() >= 4)
+                         marker.trigger = triggerFromVertices(localPoints);
+                     else
+                         marker.trigger = triggerBox({marker.scale.x * 0.5f, marker.scale.y * 0.5f,
+                                                      marker.scale.z * 0.5f});
+                     marker.triggerVolume = true;
+                 }
+                marker.missionVolume = obj.className == "Trigger" ||
+                                       obj.className == "PhysicalZone";
+                 if (obj.className == "SpawnSphere") marker.volumeRadius = authored.radius;
+                if (obj.className == "PhysicalZone") {
+                    const std::string velocity = getProp(obj.props, "velocityMod");
+                    const std::string gravity = getProp(obj.props, "gravityMod");
+                    const std::string force = getProp(obj.props, "appliedForce");
+                    if (!velocity.empty()) marker.physicalVelocityMod = (float)std::atof(velocity.c_str());
+                    if (!gravity.empty()) marker.physicalGravityMod = (float)std::atof(gravity.c_str());
+                    if (sscanf(force.c_str(), "%f %f %f", &marker.physicalForce.x,
+                               &marker.physicalForce.y, &marker.physicalForce.z) != 3)
+                        marker.physicalForce = {};
+                    const std::string active = getProp(obj.props, "active");
+                    if (!active.empty()) marker.physicalActive = std::atoi(active.c_str()) != 0;
+                }
+                 addObject(marker);
+                 continue;
+             }
+             if (obj.className == "AIObjective") {
+                 const AuthoredMissionObjective authored = authoredMissionObjective(obj);
+                 WorldObject objective;
+                 objective.className = obj.className;
+                 objective.objectName = obj.objName;
+                 objective.pos = authored.marker.position;
+                 objective.rot = authored.marker.rotation;
+                 objective.rotAngleDeg = authored.marker.rotationAngleDeg;
+                 objective.scale = authored.marker.scale;
+                 objective.teamId = authored.marker.teamId;
+                 objective.label = authored.marker.label;
+                 objective.missionObjective = true;
+                 objective.objectiveMode = authored.mode;
+                 objective.objectiveTarget = authored.targetObject;
+                 objective.objectiveTargetId = authored.targetObjectId;
+                 objective.objectiveWeight = authored.weight[0];
+                 objective.objectiveOffense = authored.offense;
+                 objective.objectiveDefense = authored.defense;
+                 objective.collidable = false;
+                 objective.visible = authoredVisible(obj);
+                 addObject(objective);
+                 continue;
+             }
             // Skip infrastructure / non-renderable classes (handled elsewhere)
             if (obj.className == "SimGroup" || obj.className == "MissionArea" ||
                 obj.className == "TerrainBlock" || obj.className == "Sky" ||
@@ -1114,10 +1753,11 @@ bool World::load(const char* mapName) {
                 obj.className == "Explosion" || obj.className == "Lightning")
                 continue;
 
-            if (!isRenderableMissionShape(obj.className)) continue;
+            if (!isRenderableMissionShape(obj.className) && obj.className != "ForceFieldBare") continue;
 
             WorldObject wo;
-            wo.pos = parsePos(getProp(obj.props, "position"));
+             wo.pos = parsePos(getProp(obj.props, "position"));
+             wo.visible = authoredVisible(obj);
             {
                 std::string rotStr = getProp(obj.props, "rotation");
                 float vals[4] = {0,0,1,0};
@@ -1135,8 +1775,55 @@ bool World::load(const char* mapName) {
                         wo.scale = {sx, sy, sz};
                 }
             }
-            wo.shapeName = resolveShapePath(obj, datablockShapes);
-             wo.shapeName = normalizeShapePath(wo.shapeName);
+             wo.shapeName = resolveShapePath(obj, datablockShapes);
+              wo.shapeName = normalizeShapePath(wo.shapeName);
+             wo.animName = authoredSequence(obj);
+            if (obj.className == "WayPoint") {
+                wo.label = getProp(obj.props, "name");
+                wo.collidable = false;
+            }
+            if (obj.className == "ForceFieldBare") {
+                wo.forceField = true;
+                wo.translucent = true;
+                const ScriptObject* datablockObject = findScriptObject(getProp(obj.props, "datablock"));
+                auto datablockField = [&](const char* name) -> const VMValue* {
+                    return scriptField(datablockObject, name);
+                };
+                const std::string color = datablockField("color")
+                    ? datablockField("color")->toString() : "";
+                float cr, cg, cb;
+                if (sscanf(color.c_str(), "%f %f %f", &cr, &cg, &cb) >= 3)
+                    wo.forceFieldColor = {cr, cg, cb, 1.0f};
+                if (datablockField("baseTranslucency"))
+                    wo.forceFieldBaseTranslucency = datablockField("baseTranslucency")->toFloat();
+                if (datablockField("umapping"))
+                    wo.forceFieldUMapping = datablockField("umapping")->toFloat();
+                if (datablockField("vmapping"))
+                    wo.forceFieldVMapping = datablockField("vmapping")->toFloat();
+                if (datablockField("framesPerSec"))
+                    wo.forceFieldFramesPerSec = datablockField("framesPerSec")->toFloat();
+                if (datablockField("scrollSpeed"))
+                    wo.forceFieldScrollSpeed = datablockField("scrollSpeed")->toFloat();
+                const int frameCount = datablockField("numFrames")
+                    ? std::clamp((int)datablockField("numFrames")->toFloat(), 1, 64) : 1;
+                for (int frame = 0; frame < frameCount; ++frame) {
+                    const std::string fieldName = "texture[" + std::to_string(frame) + "]";
+                    const VMValue* texture = datablockField(fieldName.c_str());
+                    if (!texture) continue;
+                    std::vector<float> durations;
+                    std::vector<uint32_t> loadedFrames;
+                    Engine::instance().renderer().loadTextureFrames(
+                        texture->toString().c_str(), loadedFrames, durations);
+                    wo.forceFieldFrames.insert(wo.forceFieldFrames.end(), loadedFrames.begin(), loadedFrames.end());
+                    if (wo.forceFieldFrameDurations.empty())
+                        wo.forceFieldFrameDurations = std::move(durations);
+                }
+                const std::string open = getProp(obj.props, "fieldopen");
+                wo.forceFieldOpen = !open.empty() && std::atoi(open.c_str()) != 0;
+                wo.boundsRadius = std::sqrt(wo.scale.x * wo.scale.x +
+                                             wo.scale.y * wo.scale.y +
+                                             wo.scale.z * wo.scale.z) * 0.5f;
+            }
             std::string datablock = getProp(obj.props, "datablock");
             std::string datablockLower = datablock;
             for (char& c : datablockLower)
@@ -1154,7 +1841,9 @@ bool World::load(const char* mapName) {
                 if (Engine::instance().game().isMapperMode())
                     wo.animName.clear();
             }
-            wo.collidable = true;
+             wo.collidable = authoredCollidable(obj, obj.className != "Item");
+             wo.itemPickup = obj.className == "Item";
+            if (obj.className == "WayPoint") wo.collidable = false;
 
             // Find matching shape
             for (auto& s : shapes) {
@@ -1164,7 +1853,7 @@ bool World::load(const char* mapName) {
                     // assembled geometry for mission shapes such as turrets
                     // and stations. Use its native default sequence in all
                     // world modes; do not infer an animation name externally.
-                    wo.animName = defaultMissionAnimation(wo.shape);
+                    if (wo.animName.empty()) wo.animName = defaultMissionAnimation(wo.shape);
                     if (Engine::instance().game().isMapperMode() && !wo.animName.empty()) {
                         if (const auto* animation = findAnimation(*wo.shape, wo.animName.c_str()))
                             wo.animTime = animation->looping
@@ -1208,8 +1897,140 @@ bool World::load(const char* mapName) {
             }
         }
 
-        // Parse item pickups — only for items whose shapes failed to load
-        // (items with loaded shapes are rendered as WorldObjects)
+        // Mission particle dummies and lightning are runtime effects, not
+        // renderable shapes. Resolve their authored datablocks from the
+        // already executed TorqueScript object table.
+        auto loadParticle = [&](const ScriptObject* object,
+                                V12::DecodedDataBlock::ParticleData& particle) {
+            if (!object) return false;
+            particle.dragCoefficient = scriptFloat(object, "dragCoefficient");
+            particle.windCoefficient = scriptFloat(object, "windCoefficient");
+            particle.gravityCoefficient = scriptFloat(object, "gravityCoefficient");
+            particle.inheritedVelFactor = scriptFloat(object, "inheritedVelFactor");
+            particle.constantAcceleration = scriptFloat(object, "constantAcceleration");
+            particle.lifetimeMS = (uint32_t)std::max(0.0f, scriptFloat(object, "lifetimeMS"));
+            particle.lifetimeVarianceMS = (uint32_t)std::max(0.0f, scriptFloat(object, "lifetimeVarianceMS"));
+            particle.spinSpeed = scriptFloat(object, "spinSpeed");
+            particle.spinRandomMin = scriptFloat(object, "spinRandomMin");
+            particle.spinRandomMax = scriptFloat(object, "spinRandomMax");
+            particle.useInvAlpha = scriptBool(object, "useInvAlpha");
+            if (const auto* texture = scriptField(object, "textureName"))
+                particle.textures.push_back(texture->toString());
+            for (int i = 0; i < 8; ++i) {
+                const std::string suffix = "[" + std::to_string(i) + "]";
+                const auto* color = scriptField(object, "colors" + suffix);
+                const auto* size = scriptField(object, "sizes" + suffix);
+                const auto* time = scriptField(object, "times" + suffix);
+                if (!color && !size && !time) break;
+                V12::DecodedDataBlock::ParticleKey key;
+                if (color) sscanf(color->toString().c_str(), "%f %f %f %f", &key.red, &key.green, &key.blue, &key.alpha);
+                if (size) key.size = size->toFloat();
+                if (time) key.time = time->toFloat();
+                 // Mission scripts use metres; network datablocks use size/50.
+                 key.size /= 50.0f;
+                 particle.keys.push_back(key);
+            }
+            return !particle.textures.empty() || !particle.keys.empty();
+        };
+        auto loadEmitter = [&](const ScriptObject* object, EffectEmitter& emitter) {
+            if (!object) return false;
+            emitter.emitter.ejectionPeriodMS = (uint32_t)std::max(1.0f, scriptFloat(object, "ejectionPeriodMS", 1));
+            emitter.emitter.periodVariance = (uint32_t)std::max(0.0f, scriptFloat(object, "periodVarianceMS"));
+            emitter.emitter.ejectionVelocity = (uint32_t)std::lround(std::max(0.0f, scriptFloat(object, "ejectionVelocity")) * 100.0f);
+            emitter.emitter.velocityVariance = (uint32_t)std::lround(std::max(0.0f, scriptFloat(object, "velocityVariance")) * 100.0f);
+            emitter.emitter.ejectionOffset = (uint32_t)std::lround(std::max(0.0f, scriptFloat(object, "ejectionOffset")) * 100.0f);
+            emitter.emitter.thetaMin = (uint32_t)std::max(0.0f, scriptFloat(object, "thetaMin"));
+            emitter.emitter.thetaMax = (uint32_t)std::max(0.0f, scriptFloat(object, "thetaMax"));
+            emitter.emitter.phiReferenceVel = (uint32_t)std::max(0.0f, scriptFloat(object, "phiReferenceVel"));
+            emitter.emitter.phiVariance = (uint32_t)std::max(0.0f, scriptFloat(object, "phiVariance"));
+            emitter.emitter.orientParticles = scriptBool(object, "orientParticles");
+            emitter.emitter.orientOnVelocity = scriptBool(object, "orientOnVelocity");
+            emitter.emitter.useEmitterSizes = scriptBool(object, "useEmitterSizes");
+            emitter.emitter.useEmitterColors = scriptBool(object, "useEmitterColors");
+            emitter.emitter.lifetimeMS = (uint32_t)std::max(0.0f, scriptFloat(object, "lifetimeMS"));
+            emitter.emitter.lifetimeVarianceMS = (uint32_t)std::max(0.0f, scriptFloat(object, "lifetimeVarianceMS"));
+            const auto* particle = scriptField(object, "particles");
+            return particle && loadParticle(findScriptObject(particle->toString()), emitter.particle);
+        };
+        for (const auto& obj : objects) {
+            if (obj.className == "ParticleEmissionDummy" || obj.className == "ParticleEmitter") {
+                std::string name = getProp(obj.props, "emitter");
+                if (name.empty()) name = getProp(obj.props, "datablock");
+                EffectEmitter emitter;
+                if (!loadEmitter(findScriptObject(name), emitter)) continue;
+                emitter.pos = Math::torquePointToYUp(parsePos(getProp(obj.props, "position")));
+                Point3F axis{0, 0, 1}; float angle = 0.0f;
+                sscanf(getProp(obj.props, "rotation").c_str(), "%f %f %f %f", &axis.x, &axis.y, &axis.z, &angle);
+                emitter.axis = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(angle))
+                    .transformNormal(Math::torquePointToYUp({0, 0, 1}));
+                const float length = std::sqrt(emitter.axis.x * emitter.axis.x + emitter.axis.y * emitter.axis.y + emitter.axis.z * emitter.axis.z);
+                if (length > 0.0001f) { emitter.axis.x /= length; emitter.axis.y /= length; emitter.axis.z /= length; }
+                for (const auto& textureName : emitter.particle.textures) {
+                    std::vector<uint32_t> frames; std::vector<float> durations;
+                    Engine::instance().renderer().loadTextureFrames(textureName.c_str(), frames, durations);
+                    emitter.textures.insert(emitter.textures.end(), frames.begin(), frames.end());
+                    emitter.textureDurations.insert(emitter.textureDurations.end(), durations.begin(), durations.end());
+                }
+                if (!emitter.textures.empty()) emitter.texture = emitter.textures.front();
+                effectEmitters.push_back(std::move(emitter));
+            } else if (obj.className == "Lightning") {
+                EffectLightning lightning;
+                lightning.pos = Math::torquePointToYUp(parsePos(getProp(obj.props, "position")));
+                lightning.scale = parsePos(getProp(obj.props, "scale"));
+                if (getProp(obj.props, "scale").empty()) lightning.scale = {1, 1, 1};
+                Point3F axis{0, 0, 1}; float angle = 0.0f;
+                sscanf(getProp(obj.props, "rotation").c_str(), "%f %f %f %f", &axis.x, &axis.y, &axis.z, &angle);
+                lightning.rotation = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(angle));
+                auto value = [&](const char* field, float fallback) { const auto s = getProp(obj.props, field); return s.empty() ? fallback : (float)std::atof(s.c_str()); };
+                lightning.strikeWidth = value("strikeWidth", 1.0f);
+                lightning.strikesPerMinute = value("strikesPerMinute", 0.0f);
+                 lightning.strikeRadius = value("strikeRadius", 0.0f);
+                 lightning.boltStartRadius = value("boltStartRadius", 0.0f);
+                 lightning.chanceToHitTarget = value("chanceToHitTarget", 0.0f);
+                auto color = [&](const char* field, ColorF fallback) { float r, g, b, a; const auto s = getProp(obj.props, field); return sscanf(s.c_str(), "%f %f %f %f", &r, &g, &b, &a) >= 3 ? ColorF{r, g, b, a} : fallback; };
+                lightning.color = color("color", lightning.color);
+                lightning.fadeColor = color("fadeColor", lightning.fadeColor);
+                lightning.nextStrike = lightning.strikesPerMinute > 0.0f ? 60.0f / lightning.strikesPerMinute : 0.0f;
+                effectLightnings.push_back(std::move(lightning));
+            }
+        }
+        if (!effectEmitters.empty() || !effectLightnings.empty())
+            Console::instance().printf(LogLevel::Info, "  mission effects: %zu particle emitters, %zu lightning objects",
+                                       effectEmitters.size(), effectLightnings.size());
+
+        // Register static objects with the interior zone that contains them.
+        // This is the small SceneGraph equivalent of InteriorInstance::scopeObject.
+        for (size_t managerIndex = 0; managerIndex < worldObjects.size(); managerIndex++) {
+            auto& manager = worldObjects[managerIndex];
+            if (!manager.shape || !manager.shape->loaded || !manager.shape->isInterior ||
+                manager.shape->interiorBSP.empty()) continue;
+            MatrixF managerModel;
+            if (manager.rotAngleDeg != 0 && (manager.rot.x != 0 || manager.rot.y != 0 || manager.rot.z != 0)) {
+                Point3F axis = manager.rot;
+                const float length = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+                if (length > 0.0001f) {
+                    axis.x /= length; axis.y /= length; axis.z /= length;
+                    managerModel = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(manager.rotAngleDeg));
+                }
+            }
+            managerModel.setTranslation({manager.pos.x, manager.pos.z, -manager.pos.y});
+            if (manager.scale.x != 1.0f || manager.scale.y != 1.0f || manager.scale.z != 1.0f)
+                managerModel = managerModel * Math::torqueScaleToYUp(manager.scale);
+            managerModel = managerModel * manager.shape->upOrientation();
+            const MatrixF inverseManager = managerModel.inverse();
+            for (auto& object : worldObjects) {
+                if (&object == &manager || object.zoneManager >= 0 || !object.shape) continue;
+                const Point3F worldPosition{object.pos.x, object.pos.z, -object.pos.y};
+                const int zone = manager.shape->interiorZoneForPoint(inverseManager.transform(worldPosition));
+                if (zone >= 0) {
+                    object.zoneManager = (int)managerIndex;
+                    object.interiorZone = zone;
+                }
+            }
+        }
+
+        // Track pickups separately from their visual. Native Item shapes are
+        // rendered as WorldObjects, while shape-less items use the proxy below.
         for (auto& obj : objects) {
             if (obj.className != "Item") continue;
             std::string db = getProp(obj.props, "datablock");
@@ -1227,25 +2048,35 @@ bool World::load(const char* mapName) {
                     break;
                 }
             }
-            if (hasShape) continue; // rendered as WorldObject
-
-            ItemPickup::Type type;
-            std::string dbLower;
-            for (auto& c : db) dbLower += (char)std::tolower((unsigned char)c);
-            if (dbLower.find("health") != std::string::npos || dbLower.find("repair") != std::string::npos)
-                type = ItemPickup::Health;
-            else if (dbLower.find("energy") != std::string::npos)
-                type = ItemPickup::Energy;
-            else if (dbLower.find("ammo") != std::string::npos)
-                type = ItemPickup::Ammo;
-            else
-                continue;
+             const ItemKind kind = classifyItemKind(db);
+             if (kind == ItemKind::None)
+                 continue;
+             ItemPickup::Type type = kind == ItemKind::Health ? ItemPickup::Health
+                 : kind == ItemKind::Energy ? ItemPickup::Energy : ItemPickup::Ammo;
 
             ItemPickup item;
             item.pos = itemPos;
             item.type = type;
-            item.respawnTimer = 0;
-            item.active = true;
+             auto scriptIt = ScriptEngine::instance().objects.find(db);
+             if (scriptIt != ScriptEngine::instance().objects.end() && scriptIt->second) {
+                 auto* script = scriptIt->second;
+                 auto number = [&](const char* field, float fallback) {
+                     auto it = script->fields.find(field);
+                     return it == script->fields.end() ? fallback : it->second.toFloat();
+                 };
+                 item.amount = number("amount", item.amount);
+                 item.respawnDelay = number("respawnTime", number("respawn", item.respawnDelay));
+             }
+             item.renderProxy = !hasShape;
+             for (size_t i = 0; i < worldObjects.size(); ++i) {
+                 auto& wo = worldObjects[i];
+                 if (wo.itemPickup && std::abs(wo.pos.x - itemPos.x) < 0.01f &&
+                     std::abs(wo.pos.y - itemPos.y) < 0.01f &&
+                     std::abs(wo.pos.z - itemPos.z) < 0.01f) {
+                     item.worldObjectIndex = (int)i;
+                     break;
+                 }
+             }
             items.push_back(item);
             Console::instance().printf(LogLevel::Debug, "  item (box): %s at (%.1f, %.1f, %.1f)",
                 db.c_str(), item.pos.x, item.pos.y, item.pos.z);
@@ -1258,6 +2089,39 @@ bool World::load(const char* mapName) {
             uint32_t vertBase = 0;
 
             for (auto& wo : worldObjects) {
+                if (!wo.collidable) continue;
+                if (wo.forceField) {
+                    MatrixF xform;
+                    if (wo.rotAngleDeg != 0 && (wo.rot.x != 0 || wo.rot.y != 0 || wo.rot.z != 0)) {
+                        Point3F axis = wo.rot;
+                        const float length = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+                        if (length > 0.0001f) {
+                            axis.x /= length; axis.y /= length; axis.z /= length;
+                            xform = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(wo.rotAngleDeg));
+                        }
+                    }
+                    xform = xform * Math::torqueScaleToYUp(wo.scale);
+                    xform.setTranslation(Math::torquePointToYUp(wo.pos));
+                    const Point3F corners[8] = {
+                        {-0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, -0.5f},
+                        {0.5f, 0.5f, -0.5f}, {-0.5f, 0.5f, -0.5f},
+                        {-0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, 0.5f},
+                        {0.5f, 0.5f, 0.5f}, {-0.5f, 0.5f, 0.5f}
+                    };
+                    const uint32_t faces[] = {
+                        0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6,
+                        0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7,
+                        0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2
+                    };
+                    const uint32_t base = vertBase;
+                    for (const auto& corner : corners) {
+                        const Point3F v = xform.transform(corner);
+                        allVerts.insert(allVerts.end(), {v.x, v.y, v.z});
+                    }
+                    for (const auto index : faces) allIndices.push_back(base + index);
+                    vertBase += 8;
+                    continue;
+                }
                 if (!wo.shape || !wo.shape->loaded || !wo.shape->isInterior) continue;
 
                 // Build transform matrix for this object (same as render code)
@@ -1315,37 +2179,12 @@ bool World::load(const char* mapName) {
             }
         }
 
-        // Parse item pickups
-        for (auto& obj : objects) {
-            if (obj.className == "Item") {
-                std::string db = getProp(obj.props, "datablock");
-                std::string posStr = getProp(obj.props, "position");
-                ItemPickup::Type type;
-                if (db.find("Health") != std::string::npos || db.find("health") != std::string::npos)
-                    type = ItemPickup::Health;
-                else if (db.find("Energy") != std::string::npos || db.find("energy") != std::string::npos)
-                    type = ItemPickup::Energy;
-                else if (db.find("Ammo") != std::string::npos || db.find("ammo") != std::string::npos)
-                    type = ItemPickup::Ammo;
-                else
-                    continue;
-
-                ItemPickup item;
-                item.pos = parsePos(posStr);
-                item.type = type;
-                item.respawnTimer = 0;
-                item.active = true;
-                items.push_back(item);
-                Console::instance().printf(LogLevel::Debug, "  item: %s at (%.1f, %.1f, %.1f)",
-                    db.c_str(), item.pos.x, item.pos.y, item.pos.z);
-            }
-        }
     } else {
         Console::instance().printf(LogLevel::Warn, "No mission file found for '%s', skipping terrain/sky/fog setup", mapName);
     }
 
     // Generate terrain only if we have a real mission (skip for missing .mis in demo playback)
-    if (!terrainBlock.loaded && !misData.empty()) {
+    if (missionHasTerrainBlock && !terrainBlock.loaded) {
         terrainBlock.load(nullptr, 0);
     }
 
@@ -1378,15 +2217,18 @@ bool World::load(const char* mapName) {
                 while (end < dmlContent.size() && dmlContent[end] != '\n') end++;
                 std::string line = dmlContent.substr(pos, end - pos);
                 while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r')) line.pop_back();
-                if (!line.empty()) {
+                // DML comments and blank lines are not entries.  Counting them
+                // shifts the face/emap/cloud slots and makes valid sky lists
+                // resolve the wrong assets.
+                if (!line.empty() && line.front() != ';') {
                     if (lineIdx < 6)
                         faceNames.push_back(line);
                     else if (lineIdx == 6)
                         emapPath = line;
                     else if (lineIdx >= 7 && lineIdx <= 9)
                         cloudPaths.push_back(line);
+                    lineIdx++;
                 }
-                lineIdx++;
                 pos = end + 1;
             }
 
@@ -1434,7 +2276,7 @@ bool World::load(const char* mapName) {
 
     // Fallback if DML-based loading failed
     if (skyFaces.size() < 6) {
-        Console::instance().printf(LogLevel::Error, "Sky: failed to load cubemap faces from materialList '%s'. Expected 6 face textures in the DML.", skyMaterialList.c_str());
+        Console::instance().printf(LogLevel::Warn, "Sky: cubemap unavailable for materialList '%s'; using solid-color fallback", skyMaterialList.c_str());
     }
 
     if (skyFaces.size() >= 6) {
@@ -1530,7 +2372,12 @@ bool World::loadTerrain(const char* mapName) {
     // load just the heightfield. Avoids shape/material/GL loading so a dedicated
     // server can register an authoritative ground-height callback.
     auto& fs = Engine::instance().fs();
-    std::string misPath = std::string("missions/") + mapName + ".mis";
+    std::string missionName = mapName ? mapName : "";
+    for (char& c : missionName) if (c == '\\') c = '/';
+    if (missionName.starts_with("base/")) missionName.erase(0, 5);
+    if (missionName.starts_with("missions/")) missionName.erase(0, 9);
+    if (missionName.ends_with(".mis")) missionName.erase(missionName.size() - 4);
+    std::string misPath = std::string("missions/") + missionName + ".mis";
     std::string misData = fs.readText(misPath.c_str());
     if (misData.empty()) {
         misPath = std::string("Missions/") + mapName + ".mis";
@@ -1545,6 +2392,8 @@ bool World::loadTerrain(const char* mapName) {
     std::string terrainFile = getProp(terrainObj->props, "terrainfile");
     std::string sqStr = getProp(terrainObj->props, "squaresize");
     if (!sqStr.empty()) terrainBlock.squareSize = (float)std::atof(sqStr.c_str());
+    terrainBlock.setEmptySquareRuns(
+        parseEmptySquareRuns(getProp(terrainObj->props, "emptysquares")));
     std::string hsStr = getProp(terrainObj->props, "heightscale");
     if (!hsStr.empty()) terrainBlock.heightScale = (float)std::atof(hsStr.c_str());
     std::string posStr = getProp(terrainObj->props, "position");
@@ -1554,24 +2403,14 @@ bool World::loadTerrain(const char* mapName) {
             terrainBlock.worldOffset = {px, pz, -py};
     }
 
-    std::vector<std::string> terPaths = {
-        terrainFile,
-        "missions/" + terrainFile,
-        "terrains/" + terrainFile,
-        terrainFile + ".ter",
-        "missions/" + terrainFile + ".ter",
-        "terrains/" + terrainFile + ".ter"
-    };
+    const std::vector<std::string> terPaths = terrainAssetCandidates(terrainFile);
     for (auto& tp : terPaths) {
         auto terData = fs.read(tp.c_str());
         if (!terData.empty()) { terrainBlock.load(terData.data(), terData.size()); break; }
     }
-    if (!terrainBlock.loaded) {
-        std::string tryPath = terrainFile;
-        if (tryPath.size() < 4 || tryPath.substr(tryPath.size() - 4) != ".ter") tryPath += ".ter";
-        auto terData = fs.read(tryPath.c_str());
-        if (!terData.empty()) terrainBlock.load(terData.data(), terData.size());
-    }
+    if (!terrainBlock.loaded)
+        Console::instance().printf(LogLevel::Warn,
+            "Server: required terrain asset '%s' could not be resolved", terrainFile.c_str());
     if (terrainBlock.loaded)
         Console::instance().printf(LogLevel::Info, "Server terrain loaded from '%s'", mapName);
     else
@@ -1602,11 +2441,132 @@ bool World::loadTerrain(const char* mapName) {
 }
 
 void World::update(float dt) {
+    if (fog.transitioning) {
+        fog.transitionElapsed = std::min(fog.transitionElapsed + std::max(0.0f, dt),
+                                          fog.transitionDuration);
+        const float t = fog.transitionDuration > 0.0f
+            ? fog.transitionElapsed / fog.transitionDuration : 1.0f;
+        fog.density = Math::lerp(fog.transitionStartDensity,
+                                 fog.transitionTargetDensity, t);
+        fog.color = {
+            Math::lerp(fog.transitionStartColor.r, fog.transitionTargetColor.r, t),
+            Math::lerp(fog.transitionStartColor.g, fog.transitionTargetColor.g, t),
+            Math::lerp(fog.transitionStartColor.b, fog.transitionTargetColor.b, t),
+            Math::lerp(fog.transitionStartColor.a, fog.transitionTargetColor.a, t)};
+        fog.distance = fog.density > 0.0f ? 1.0f / fog.density : 0.0f;
+        if (t >= 1.0f) fog.transitioning = false;
+    }
+    auto managerModel = [](const WorldObject& manager) {
+        MatrixF model;
+        if (manager.rotAngleDeg != 0 && (manager.rot.x != 0 || manager.rot.y != 0 || manager.rot.z != 0)) {
+            Point3F axis = manager.rot;
+            const float length = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+            if (length > 0.0001f) {
+                axis.x /= length; axis.y /= length; axis.z /= length;
+                model = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(manager.rotAngleDeg));
+            }
+        }
+        model.setTranslation({manager.pos.x, manager.pos.z, -manager.pos.y});
+        if (manager.scale.x != 1.0f || manager.scale.y != 1.0f || manager.scale.z != 1.0f)
+            model = model * Math::torqueScaleToYUp(manager.scale);
+        return model * manager.shape->upOrientation();
+    };
+    for (size_t objectIndex = 0; objectIndex < worldObjects.size(); objectIndex++) {
+        auto& object = worldObjects[objectIndex];
+        if (!object.shape) continue;
+        object.interiorZone = -1;
+        if (object.zoneManager >= 0 && object.zoneManager < (int)worldObjects.size() &&
+            worldObjects[object.zoneManager].shape && worldObjects[object.zoneManager].shape->isInterior) {
+            auto& manager = worldObjects[object.zoneManager];
+            const Point3F local = managerModel(manager).inverse().transform(
+                {object.pos.x, object.pos.z, -object.pos.y});
+            object.interiorZone = manager.shape->interiorZoneForPoint(local);
+            if (object.interiorZone >= 0) continue;
+        }
+        object.zoneManager = -1;
+        for (size_t managerIndex = 0; managerIndex < worldObjects.size(); managerIndex++) {
+            if (managerIndex == objectIndex) continue;
+            auto& manager = worldObjects[managerIndex];
+            if (!manager.shape || !manager.shape->loaded || !manager.shape->isInterior ||
+                manager.shape->interiorBSP.empty()) continue;
+            const Point3F local = managerModel(manager).inverse().transform(
+                {object.pos.x, object.pos.z, -object.pos.y});
+            const int zone = manager.shape->interiorZoneForPoint(local);
+            if (zone >= 0) {
+                object.zoneManager = (int)managerIndex;
+                object.interiorZone = zone;
+                break;
+            }
+        }
+    }
+
+    // Trigger callbacks are local scene behavior.  Network ghost creation and
+    // deletion remain owned by the protocol; only already-visible player ghosts
+    // participate here, so this cannot manufacture network state.
+    if (!Engine::instance().game().isMapperMode()) {
+        auto transformTrigger = [](const WorldObject& object, const Point3F& local) {
+            Point3F axis = object.rot;
+            const float length = std::sqrt(axis.x*axis.x + axis.y*axis.y + axis.z*axis.z);
+            MatrixF rotation;
+            if (length > 0.0001f) {
+                axis.x /= length; axis.y /= length; axis.z /= length;
+                rotation = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(object.rotAngleDeg));
+            }
+            const Point3F scaled{local.x * object.scale.x, local.y * object.scale.z,
+                                 local.z * object.scale.y};
+            const Point3F converted = Math::torquePointToYUp(scaled);
+            const Point3F rotated = rotation.transform(converted);
+            return Point3F{rotated.x + Math::torquePointToYUp(object.pos).x,
+                           rotated.y + Math::torquePointToYUp(object.pos).y,
+                           rotated.z + Math::torquePointToYUp(object.pos).z};
+        };
+        auto dispatch = [](const WorldObject& trigger, const char* event,
+                           const std::string& actor) {
+            auto* ts = ScriptEngine::instance().ts();
+            if (!ts) return;
+            const std::string names[] = {trigger.objectName + "::" + event,
+                                         trigger.className + "::" + event};
+            for (const auto& name : names) {
+                if (name.size() <= std::strlen(event) + 2 || !ts->hasFunction(name)) continue;
+                ts->callFunction(name, {VMValue(trigger.objectName), VMValue(actor)});
+                break;
+            }
+        };
+        std::vector<std::pair<std::string, Point3F>> actors;
+        const Point3F player = Engine::instance().game().player().position();
+        actors.push_back({"Player", player});
+        for (int index : Engine::instance().game().getLiveGhostIndices()) {
+            const GhostEntry* ghost = Engine::instance().game().getLiveGhost(index);
+            if (!ghost || ghost->className != "Player") continue;
+            actors.push_back({std::to_string(index), {ghost->renderPos.x, ghost->renderPos.y, ghost->renderPos.z}});
+        }
+        for (auto& trigger : worldObjects) {
+            if (!trigger.triggerVolume) continue;
+            std::vector<Point3F> transformed;
+            transformed.reserve(trigger.trigger.vertices.size());
+            for (const auto& vertex : trigger.trigger.vertices)
+                transformed.push_back(transformTrigger(trigger, vertex));
+            const TriggerPolyhedron worldHull = triggerFromVertices(transformed);
+            std::unordered_set<std::string> current;
+            for (const auto& actor : actors) {
+                const bool inside = worldHull.contains(actor.second);
+                if (inside) current.insert(actor.first);
+                const bool wasInside = trigger.triggerOccupants.count(actor.first) != 0;
+                if (inside != wasInside) dispatch(trigger, inside ? "onEnter" : "onLeave", actor.first);
+            }
+            trigger.triggerOccupants = std::move(current);
+        }
+    }
+
     // Update item pickups
     for (auto& item : items) {
         if (!item.active) {
             item.respawnTimer -= dt;
-            if (item.respawnTimer <= 0) item.active = true;
+            if (item.respawnTimer <= 0) {
+                item.active = true;
+                if (item.worldObjectIndex >= 0 && item.worldObjectIndex < (int)worldObjects.size())
+                    worldObjects[item.worldObjectIndex].itemActive = true;
+            }
             continue;
         }
 
@@ -1621,19 +2581,29 @@ void World::update(float dt) {
 
         if (dist < 2.0f) {
             item.active = false;
-            item.respawnTimer = 15.0f;
+            item.respawnTimer = item.respawnDelay;
+            if (item.worldObjectIndex >= 0 && item.worldObjectIndex < (int)worldObjects.size())
+                worldObjects[item.worldObjectIndex].itemActive = false;
 
             switch (item.type) {
                 case ItemPickup::Health:
-                    game.player().applyDamage(-25.0f); // negative = heal
+                    game.player().applyDamage(-item.amount); // negative = heal
                     break;
                 case ItemPickup::Energy:
-                    game.player().setEnergy(game.player().energy() + 25.0f);
+                    game.player().setEnergy(applyItemAmount(ItemKind::Energy, game.player().energy(),
+                                                            item.amount, 100.0f));
                     break;
                 case ItemPickup::Ammo: {
                     int32_t cw = game.player().currentWeapon();
                     if (cw >= 0 && cw < (int32_t)game.player().weaponCount())
-                        game.player().weapon(cw).ammo += 15;
+                        game.player().weapon(cw).ammo = (int)applyItemAmount(
+                            ItemKind::Ammo, (float)game.player().weapon(cw).ammo, item.amount, 0.0f);
+                    if (cw >= 0 && cw < (int32_t)game.player().weaponCount()) {
+                        if (auto* hud = Engine::instance().guiRenderer().findControl("weaponsHud")) {
+                            for (auto& slot : hud->hudSlots)
+                                if (slot.active) slot.amount = game.player().weapon(cw).ammo;
+                        }
+                    }
                     break;
                 }
             }
@@ -1648,8 +2618,11 @@ void World::update(float dt) {
         e.lifetime -= dt;
         e.radius += dt * 4.0f;
         // Check explosion against bots
-        for (auto& b : bots) {
+        for (size_t botIndex = 0; botIndex < bots.size(); botIndex++) {
+            auto& b = bots[botIndex];
             if (!b.alive) continue;
+            if (std::find(e.damagedBots.begin(), e.damagedBots.end(), botIndex) != e.damagedBots.end())
+                continue;
             float dx = b.pos.x - e.pos.x;
             float dy = b.pos.y - e.pos.y;
             float dz = b.pos.z - e.pos.z;
@@ -1657,6 +2630,7 @@ void World::update(float dt) {
             if (dist < e.radius) {
                 float dmg = 30.0f * (1.0f - dist / e.radius);
                 b.health -= dmg;
+                e.damagedBots.push_back(botIndex);
                 if (b.health <= 0) { b.health = 0; b.alive = false; b.respawnTimer = 5.0f; }
                 else { b.lastHitTime = Engine::instance().game().gameTime(); }
             }
@@ -1672,9 +2646,11 @@ void World::update(float dt) {
     for (auto& p : projList) {
         if (!p.active) continue;
         updateProjectile(p, dt);
+        if (!p.active) continue;
 
         // Spawn trail particles
-        if (std::rand() % 3 == 0) {
+        // Native projectile emitters are time based, not rand() based.
+        {
             ColorF trailColor;
             switch (p.type) {
                 case ProjectileType::Disc:    trailColor = {1.0f, 0.6f, 0.1f, 0.6f}; break;
@@ -1688,7 +2664,10 @@ void World::update(float dt) {
 
         // Check for impact
             float groundH = 0;
-            if (checkProjectileCollision(p, groundH)) {
+            Point3F impactNormal{0, 1, 0};
+            if (checkProjectileCollision(p, groundH, impactNormal)) {
+                if (impactNormal.y > 0.5f)
+                    spawnTrail(p.pos, {0.45f, 0.42f, 0.35f, 0.55f}, 0.25f);
                 // Spawn explosion effect
                 ColorF expColor;
                 switch (p.type) {
@@ -1829,34 +2808,87 @@ void World::update(float dt) {
     }
 }
 
+void World::updateRendererLights(Renderer& renderer) const {
+    std::vector<DynamicPointLight> lights;
+    lights.reserve(effectLights.size());
+    for (const auto& source : effectLights) {
+        const float fade = dynamicLightFade(source.age, source.delay, source.lifetime);
+        if (fade <= 0.0f) continue;
+        lights.push_back({source.pos.x, source.pos.y, source.pos.z,
+                          source.color.r * fade, source.color.g * fade,
+                          source.color.b * fade, source.radius, source.falloff});
+    }
+    renderer.setDynamicLights(lights);
+}
+
 void World::render(const Point3F& cameraPos) {
+    static float forceFieldTime = 0.0f;
+    forceFieldTime += 1.0f / 60.0f;
     if (!loaded) return;
 
     auto& r = Engine::instance().renderer();
 
+    currentSceneState.cameraPosition = cameraPos;
+    currentSceneState.view = r.view;
+    currentSceneState.projection = r.projection;
+    currentSceneState.interiorVisibleZones.clear();
+    currentSceneState.interiorVisibilityComputed.clear();
+
     // Render sky first (behind everything, depth writes off)
     glDepthMask(GL_FALSE);
-    skyBox.render(r.view, r.projection);
+    skyBox.fogColor = fog.color;
+    skyBox.visibleDistance = visibleDistance;
+    skyBox.fogVolumes.clear();
+    for (const auto& volume : fogVolumes)
+        skyBox.fogVolumes.push_back({volume.visibleDistance, volume.minHeight,
+                                     volume.maxHeight, 1.0f});
+    skyBox.render(r.view, r.projection, cameraPos.y);
     glDepthMask(GL_TRUE);
+
+    // Sky fog volumes are height bands in the stock mission data.  The native
+    // shader already owns the distance ramp, so select the tightest authored
+    // ramp for the band containing the camera rather than ignoring these fields.
+    float effectiveFogStart = fog.distance;
+    float effectiveFogEnd = visibleDistance;
+    for (const auto& volume : fogVolumes) {
+        if (cameraPos.y < volume.minHeight || cameraPos.y > volume.maxHeight)
+            continue;
+        effectiveFogEnd = std::min(effectiveFogEnd, volume.visibleDistance);
+        effectiveFogStart = std::min(effectiveFogStart,
+                                     volume.visibleDistance * 0.5f);
+    }
 
     // Render terrain
     if (terrainBlock.loaded) {
         ShaderManager::getTerrainShader()->bind();
         Point3F terrainLight = sunLightDirUsed ? sunLightDir : Point3F{0.5f, 0.7f, 0.5f};
         bool mapperNoFog = Engine::instance().game().isMapperMode();
-        terrainBlock.render(cameraPos, fog.enabled && !mapperNoFog, fog.color, fog.density, &terrainLight);
+        terrainBlock.render(cameraPos, fog.enabled && !mapperNoFog, fog.color, fog.density, &terrainLight,
+                            sunColorUsed ? &sunColor : nullptr, &sunAmbient, effectiveFogStart, effectiveFogEnd);
     }
 
     // Render world objects with default shader
     auto* defShader = ShaderManager::getDefaultShader();
     defShader->bind();
     defShader->setUniform("uCamPos", cameraPos);
+    for (int i = 0; i < 3; ++i) {
+        ColorF packed{};
+        if (i < (int)fogVolumes.size() && fogVolumes[i].visibleDistance > 0.0f) {
+            const auto& volume = fogVolumes[i];
+            packed = {1.0f / volume.visibleDistance, volume.minHeight,
+                      volume.maxHeight, 0.0f};
+        }
+        defShader->setUniform((std::string("uFogVolume") + std::to_string(i)).c_str(), packed);
+    }
 
     // Apply fog
-    defShader->setUniform("uFogEnabled", (int32_t)(fog.enabled ? 1 : 0));
+    const bool mapperNoFog = Engine::instance().game().isMapperMode();
+    defShader->setUniform("uFogEnabled", (int32_t)(fog.enabled && !mapperNoFog ? 1 : 0));
     if (fog.enabled) {
         defShader->setUniform("uFogColor", Point3F{fog.color.r, fog.color.g, fog.color.b});
         defShader->setUniform("uFogDensity", fog.density);
+        defShader->setUniform("uFogStart", effectiveFogStart);
+        defShader->setUniform("uFogEnd", effectiveFogEnd);
     }
 
     // Apply sun lighting direction from mission data (or default for demo/procedural)
@@ -1879,23 +2911,57 @@ void World::render(const Point3F& cameraPos) {
 
     std::vector<WorldObject*> renderQueue;
     renderQueue.reserve(worldObjects.size());
-    for (auto& obj : worldObjects) renderQueue.push_back(&obj);
+    for (auto& obj : worldObjects) {
+        if (Engine::instance().game().isMapperMode() || obj.boundsRadius <= 0.0f) {
+            renderQueue.push_back(&obj);
+            continue;
+        }
+        const Point3F position{obj.pos.x, obj.pos.z, -obj.pos.y};
+        const float dx = position.x - cameraPos.x;
+        const float dy = position.y - cameraPos.y;
+        const float dz = position.z - cameraPos.z;
+        const float scale = std::max({std::fabs(obj.scale.x), std::fabs(obj.scale.y),
+                                      std::fabs(obj.scale.z), 1.0f});
+        if (dx * dx + dy * dy + dz * dz <=
+            std::pow(Engine::instance().renderer().config().farPlane + obj.boundsRadius * scale, 2.0f))
+            renderQueue.push_back(&obj);
+    }
     std::stable_sort(renderQueue.begin(), renderQueue.end(),
         [&](const WorldObject* left, const WorldObject* right) {
-            const float ldx = left->pos.x - cameraPos.x;
-            const float ldy = left->pos.y - cameraPos.y;
-            const float ldz = left->pos.z - cameraPos.z;
-            const float rdx = right->pos.x - cameraPos.x;
-            const float rdy = right->pos.y - cameraPos.y;
-            const float rdz = right->pos.z - cameraPos.z;
+            if (left->translucent != right->translucent)
+                return !left->translucent;
+            const Point3F leftPos{left->pos.x, left->pos.z, -left->pos.y};
+            const Point3F rightPos{right->pos.x, right->pos.z, -right->pos.y};
+            const float ldx = leftPos.x - cameraPos.x;
+            const float ldy = leftPos.y - cameraPos.y;
+            const float ldz = leftPos.z - cameraPos.z;
+            const float rdx = rightPos.x - cameraPos.x;
+            const float rdy = rightPos.y - cameraPos.y;
+            const float rdz = rightPos.z - cameraPos.z;
             return ldx * ldx + ldy * ldy + ldz * ldz >
                    rdx * rdx + rdy * rdy + rdz * rdz;
         });
+    bool waterRendered = false;
     for (auto* object : renderQueue) {
         auto& obj = *object;
+        // Opaque geometry must populate depth before the water surface. Keep
+        // translucent world geometry on the far side of this boundary.
+        if (!waterRendered && obj.translucent) {
+            r.flushSpriteBatch();
+            renderWater();
+            waterRendered = true;
+        }
+        if (obj.itemPickup && !obj.itemActive) continue;
+        if (!Engine::instance().game().isMapperMode() &&
+            !isPositionVisible(obj.pos, cameraPos))
+            continue;
         if (obj.shape && obj.shape->loaded) {
-            const bool mapperMarker = Engine::instance().game().isMapperMode() &&
-                                      !obj.label.empty();
+             if (!obj.visible) continue;
+             const bool mapperMarker = Engine::instance().game().isMapperMode() &&
+                 (obj.className == "Marker" || obj.className == "MissionMarker" ||
+                  obj.className == "SpawnSphere" || obj.className == "Trigger" ||
+                   obj.className == "PhysicalZone" || obj.className == "WayPoint" ||
+                   obj.className == "AIObjective");
             if (mapperMarker) {
                 glDisable(GL_DEPTH_TEST);
                 glDepthMask(GL_FALSE);
@@ -1962,10 +3028,21 @@ void World::render(const Point3F& cameraPos) {
                 obj.labelAnchorValid = mn.x < mx.x || mn.y < mx.y || mn.z < mx.z;
             }
             r.setModel(model * obj.shape->upOrientation());
+            obj.shape->activeInteriorZones.clear();
+            if (obj.shape->isInterior && !Engine::instance().game().isMapperMode() &&
+                !obj.shape->interiorBSP.empty()) {
+                const MatrixF renderModel = model * obj.shape->upOrientation();
+                const Point3F localCamera = renderModel.inverse().transform(cameraPos);
+                const int zone = obj.shape->interiorZoneForPoint(localCamera);
+                obj.shape->interiorVisibleZones(zone, localCamera,
+                                                r.projection * r.view * renderModel,
+                                                obj.shape->activeInteriorZones);
+            }
             if (!obj.animName.empty())
                 obj.shape->renderAnimation(obj.animName.c_str(), obj.animTime);
             else
                 obj.shape->render(0);
+            obj.shape->activeInteriorZones.clear();
             if (mapperMarker) {
                 glDepthMask(GL_TRUE);
                 glEnable(GL_DEPTH_TEST);
@@ -2004,6 +3081,131 @@ void World::render(const Point3F& cameraPos) {
                         "Mounted shape '%s' has no compatible native mount frames",
                         obj.mountedShape->name.c_str());
                 }
+            }
+        }
+         if (obj.forceField) {
+            MatrixF fieldModel;
+            if (obj.rotAngleDeg != 0 && (obj.rot.x != 0 || obj.rot.y != 0 || obj.rot.z != 0)) {
+                Point3F axis = obj.rot;
+                const float length = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+                if (length > 0.0001f) {
+                    axis.x /= length; axis.y /= length; axis.z /= length;
+                    fieldModel = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(obj.rotAngleDeg));
+                }
+            }
+            fieldModel = fieldModel * Math::torqueScaleToYUp(obj.scale);
+            fieldModel.setTranslation(Math::torquePointToYUp(obj.pos));
+             const Point3F corners[8] = {
+                 {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+                 {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}
+            };
+            const int edges[12][2] = {{0,1},{1,2},{2,3},{3,0},{4,5},{5,6},
+                                      {6,7},{7,4},{0,4},{1,5},{2,6},{3,7}};
+            Point3F transformed[8];
+            for (int i = 0; i < 8; ++i) transformed[i] = fieldModel.transform(corners[i]);
+            glEnable(GL_BLEND);
+            glDepthMask(GL_FALSE);
+            for (const auto& edge : edges)
+                r.drawLine(transformed[edge[0]], transformed[edge[1]], {0.25f, 0.85f, 1.0f, 0.65f});
+            if (!obj.forceFieldOpen && !obj.forceFieldFrames.empty()) {
+                const size_t frame = obj.forceFieldFramesPerSec > 0.0f
+                    ? (size_t)(forceFieldTime * obj.forceFieldFramesPerSec) % obj.forceFieldFrames.size() : 0;
+                const float u = obj.forceFieldUMapping;
+                const float v = obj.forceFieldVMapping;
+                const float scroll = forceFieldTime * obj.forceFieldScrollSpeed;
+                const ColorF tint = {obj.forceFieldColor.r, obj.forceFieldColor.g,
+                                     obj.forceFieldColor.b,
+                                     obj.forceFieldColor.a * obj.forceFieldBaseTranslucency};
+                const uint32_t texture = obj.forceFieldFrames[frame];
+                r.drawTexturedQuad(transformed[0], transformed[1], transformed[2], transformed[3], texture, tint, 0, scroll, u, v + scroll);
+                r.drawTexturedQuad(transformed[4], transformed[7], transformed[6], transformed[5], texture, tint, 0, scroll, u, v + scroll);
+                r.drawTexturedQuad(transformed[0], transformed[4], transformed[5], transformed[1], texture, tint, 0, scroll, u, v + scroll);
+                r.drawTexturedQuad(transformed[3], transformed[2], transformed[6], transformed[7], texture, tint, 0, scroll, u, v + scroll);
+            }
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
+
+        // MissionMarker is only in the runtime scene while editing in the
+        // original engine.  Mapper mode is Torch's editor equivalent, so
+        // show the authored marker and volume bounds there without changing
+        // gameplay collision semantics.
+        if (Engine::instance().game().isMapperMode() &&
+            (obj.className == "Marker" || obj.className == "MissionMarker" ||
+             obj.className == "SpawnSphere" ||
+              obj.className == "Trigger" || obj.className == "PhysicalZone" ||
+              obj.className == "AIObjective")) {
+            const Point3F center = Math::torquePointToYUp(obj.pos);
+            MatrixF markerModel;
+            Point3F axis = obj.rot;
+            const float axisLength = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+            if (axisLength > 0.0001f) {
+                axis.x /= axisLength; axis.y /= axisLength; axis.z /= axisLength;
+                markerModel = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(obj.rotAngleDeg));
+            }
+            markerModel = markerModel * Math::torqueScaleToYUp(obj.scale);
+            markerModel.setTranslation(center);
+            if (obj.className == "SpawnSphere") {
+                constexpr int segments = 24;
+                for (int i = 0; i < segments; ++i) {
+                    const float a = Math::PI * 2.0f * (float)i / segments;
+                    const float b = Math::PI * 2.0f * (float)(i + 1) / segments;
+                    const Point3F first = markerModel.transform({std::cos(a) * obj.volumeRadius,
+                                                                  0, std::sin(a) * obj.volumeRadius});
+                    const Point3F second = markerModel.transform({std::cos(b) * obj.volumeRadius,
+                                                                   0, std::sin(b) * obj.volumeRadius});
+                    r.drawLine(first, second,
+                               {0.3f, 1.0f, 0.3f, 0.8f});
+                }
+            } else if (obj.missionVolume) {
+                if (obj.className == "Trigger" && obj.trigger.vertices.size() >= 4) {
+                    Point3F axis = obj.rot;
+                    const float length = std::sqrt(axis.x*axis.x + axis.y*axis.y + axis.z*axis.z);
+                    MatrixF rotation;
+                    if (length > 0.0001f) {
+                        axis.x /= length; axis.y /= length; axis.z /= length;
+                        rotation = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(obj.rotAngleDeg));
+                    }
+                    const Point3F center = Math::torquePointToYUp(obj.pos);
+                    std::vector<Point3F> vertices;
+                    for (const auto& local : obj.trigger.vertices) {
+                        const Point3F scaled{local.x * obj.scale.x, local.y * obj.scale.z,
+                                             local.z * obj.scale.y};
+                        const Point3F rotated = rotation.transform(Math::torquePointToYUp(scaled));
+                        vertices.push_back({center.x + rotated.x, center.y + rotated.y, center.z + rotated.z});
+                    }
+                    for (size_t i = 0; i < vertices.size(); ++i)
+                        for (size_t j = i + 1; j < vertices.size(); ++j) {
+                            int shared = 0;
+                            for (const auto& plane : obj.trigger.planes) {
+                                const auto distance = [&](const Point3F& p) {
+                                    return plane.x*p.x + plane.y*p.y + plane.z*p.z + plane.w;
+                                };
+                                if (std::fabs(distance(obj.trigger.vertices[i])) < 0.001f &&
+                                    std::fabs(distance(obj.trigger.vertices[j])) < 0.001f) ++shared;
+                            }
+                            if (shared >= 2) r.drawLine(vertices[i], vertices[j], {1.0f, 0.7f, 0.2f, 0.8f});
+                        }
+                    continue;
+                }
+                 const Point3F half{0.5f, 0.5f, 0.5f};
+                 const Point3F corners[8] = {
+                     markerModel.transform({-half.x,-half.y,-half.z}), markerModel.transform({half.x,-half.y,-half.z}),
+                     markerModel.transform({half.x,half.y,-half.z}), markerModel.transform({-half.x,half.y,-half.z}),
+                     markerModel.transform({-half.x,-half.y,half.z}), markerModel.transform({half.x,-half.y,half.z}),
+                     markerModel.transform({half.x,half.y,half.z}), markerModel.transform({-half.x,half.y,half.z})};
+                constexpr int edges[12][2] = {{0,1},{1,2},{2,3},{3,0},{4,5},{5,6},
+                                              {6,7},{7,4},{0,4},{1,5},{2,6},{3,7}};
+                const ColorF color = obj.className == "Trigger"
+                    ? ColorF{1.0f, 0.7f, 0.2f, 0.8f}
+                    : ColorF{0.2f, 0.7f, 1.0f, 0.8f};
+                for (const auto& edge : edges)
+                    r.drawLine(corners[edge[0]], corners[edge[1]], color);
+            } else {
+                r.drawLine(center, markerModel.transform({0, 1, 0}),
+                           obj.className == "AIObjective"
+                               ? ColorF{1.0f, 0.3f, 0.8f, 0.9f}
+                               : ColorF{1.0f, 1.0f, 0.2f, 0.9f});
             }
         }
     }
@@ -2096,6 +3298,7 @@ skip_grid:
     // Render item pickups
     float time = Engine::instance().game().gameTime();
     for (auto& item : items) {
+        if (!item.renderProxy) continue;
         if (!item.active) continue;
         float bob = sinf(time * 2.0f + item.pos.x * 0.1f) * 0.3f;
         ColorF col;
@@ -2109,7 +3312,12 @@ skip_grid:
         r.drawBox(box, col);
     }
 
-    // Render projectiles as sprites
+    if (!waterRendered) {
+        r.flushSpriteBatch();
+        renderWater();
+    }
+
+    // Render projectiles as sprites after the water transition.
     for (auto& p : projList) {
         if (!p.active) continue;
         ColorF col;
@@ -2133,15 +3341,19 @@ skip_grid:
         // Colored fireball (expands, fades)
         r.drawSprite(e.pos, size * 0.5f, {e.color.r, e.color.g, e.color.b, t * 0.4f});
     }
+    for (const auto& light : effectLights) {
+        const float fade = dynamicLightFade(light.age, light.delay, light.lifetime);
+        if (fade <= 0.0f) continue;
+        r.drawSprite(light.pos, light.radius * (0.65f + 0.35f * fade),
+                     {1.0f, 0.72f, 0.28f, 0.28f * fade});
+    }
 
-    // Render particles
+    // All remaining effects share an explicit depth-tested, depth-read-only
+    // state. Their batches cannot leak additive blending into later passes.
+    r.beginTransparentPass();
     renderParticles();
-
-    // Render precipitation
     renderPrecipitation();
-
-    // Render water surface
-    renderWater();
+    r.endTransparentPass();
 
     // Render bots
     auto* shader = ShaderManager::getDefaultShader();
@@ -2212,7 +3424,31 @@ void World::spawnBots(int count) {
 }
 
 void World::addObject(const WorldObject& obj) {
-    worldObjects.push_back(obj);
+    WorldObject stored = obj;
+    if (stored.shape && stored.shape->loaded && stored.boundsRadius <= 0.0f) {
+        float radiusSquared = 0.0f;
+        for (const auto& mesh : stored.shape->meshes) {
+            for (const auto& vertex : mesh.vertices) {
+                const float lengthSquared = vertex.pos.x * vertex.pos.x +
+                    vertex.pos.y * vertex.pos.y + vertex.pos.z * vertex.pos.z;
+                radiusSquared = std::max(radiusSquared, lengthSquared);
+            }
+        }
+        stored.boundsRadius = std::sqrt(radiusSquared);
+    }
+    if (stored.shape) {
+        stored.translucent = std::any_of(
+            stored.shape->materialFlags.begin(), stored.shape->materialFlags.end(),
+            [](uint32_t flags) {
+                return (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0;
+            });
+    }
+    worldObjects.push_back(std::move(stored));
+}
+
+void World::resetTriggerTracking() {
+    for (auto& object : worldObjects)
+        object.triggerOccupants.clear();
 }
 
 void Game::selectMapperObserverCamera(int index) {
@@ -2245,9 +3481,54 @@ float World::getHeight(float x, float z) const {
     }
 
     // Fall back to terrain height
-    if (!terrainBlock.loaded || terrainBlock.heights.empty()) return 0;
+    if (!terrainBlock.loaded || terrainBlock.heights.empty() ||
+        terrainBlock.isEmptySquare(x, z)) return -1e9f;
 
     return terrainBlock.sampleHeight(x, z);
+}
+
+float World::getFloorHeight(float x, float y, float z) const {
+    if (interiorCollision.loaded) {
+        const float interior = interiorCollision.getFloorHeight(x, y, z);
+        if (interior > -1e9f) return interior;
+    }
+    if (!terrainBlock.loaded || terrainBlock.heights.empty() || terrainBlock.isEmptySquare(x, z))
+        return -1e9f;
+    const float terrain = terrainBlock.sampleHeight(x, z);
+    return terrain <= y + 0.001f ? terrain : -1e9f;
+}
+
+World::PhysicalZoneEffect World::physicalZoneEffect(const Point3F& position) const {
+    PhysicalZoneEffect result;
+    for (const auto& object : worldObjects) {
+        if (object.className != "PhysicalZone" || !object.physicalActive)
+            continue;
+
+        // Mission positions/scales are authored in T2's Z-up frame.  World
+        // movement uses Y-up, and the existing mapper volume visualization
+        // uses the same axis conversion.
+        const Point3F center = Math::torquePointToYUp(object.pos);
+        const Point3F half{
+            std::max(0.5f, std::fabs(object.scale.x) * 0.5f),
+            std::max(0.5f, std::fabs(object.scale.z) * 0.5f),
+            std::max(0.5f, std::fabs(object.scale.y) * 0.5f)};
+        if (std::fabs(position.x - center.x) > half.x ||
+            std::fabs(position.y - center.y) > half.y ||
+            std::fabs(position.z - center.z) > half.z)
+            continue;
+
+        result.velocityMod *= std::max(0.0f, object.physicalVelocityMod);
+        result.gravityMod *= std::max(0.0f, object.physicalGravityMod);
+        const Point3F force = Math::torquePointToYUp(object.physicalForce);
+        result.appliedForce.x += force.x;
+        result.appliedForce.y += force.y;
+        result.appliedForce.z += force.z;
+    }
+    return result;
+}
+
+void Game::setTimeScale(float value) {
+    timeScale = GameTime::clampScale(value);
 }
 
 // ─── Particle System ──────────────────────────────────────────
@@ -2301,6 +3582,404 @@ void World::spawnExplosion(const Point3F& pos, const ColorF& color, float radius
     }
 }
 
+void World::spawnExplosionEffect(const Point3F& pos,
+                                 const V12::DecodedDataBlock* projectileData,
+                                 const V12::DecodedDataBlock* explosionData,
+                                 const std::map<uint32_t, ParsedDataBlock>* dataBlocks,
+                                 const Point3F& impactNormal) {
+    static constexpr size_t maxEffectInstances = 4096;
+    if (!projectileData || !dataBlocks) {
+        spawnExplosion(pos, {1.0f, 0.7f, 0.3f, 1.0f}, 2.0f, 15);
+        return;
+    }
+    const auto find = [&](uint32_t id) -> const V12::DecodedDataBlock* {
+        auto it = dataBlocks->find(id);
+        return it == dataBlocks->end() ? nullptr : &it->second.decoded;
+    };
+    for (uint32_t ref : projectileData->projectileDecalRefs) {
+        const auto* block = find(ref);
+        if (!block || !block->hasDecal || block->decal.texture.empty()) continue;
+        const DecalBasis basis = makeDecalBasis(pos, impactNormal);
+        bool duplicate = false;
+        for (const auto& existing : effectDecals) {
+            if (existing.sourceRef == ref && decalIsDuplicate(basis,
+                    makeDecalBasis(existing.pos, existing.normal), ref)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            EffectDecal decal;
+            decal.data = block->decal;
+            decal.sourceRef = ref;
+            decal.normal = basis.normal;
+            decal.pos = basis.position;
+            decal.sizeX = std::max(0.001f, std::fabs(block->decal.sizeX));
+            decal.sizeY = std::max(0.001f, std::fabs(block->decal.sizeY));
+            decal.lifetime = std::max(0.1f, block->decal.lifetimeMS / 1000.0f);
+            decal.frameSeed = ref * 2654435761u ^ (uint32_t)std::lround(pos.x * 100.0f) ^
+                (uint32_t)std::lround(pos.y * 100.0f) ^ (uint32_t)std::lround(pos.z * 100.0f);
+            if (block->decal.randomize) decal.angle = (decal.frameSeed / 4294967296.0f) * Math::PI * 2.0f;
+            Engine::instance().renderer().loadTextureFrames(
+                block->decal.texture.c_str(), decal.textures, decal.textureDurations);
+            if (!decal.textures.empty()) decal.texture = decal.textures.front();
+            if (effectDecals.size() < maxEffectInstances)
+                effectDecals.push_back(std::move(decal));
+        }
+        break;
+    }
+    const V12::DecodedDataBlock* selectedExplosion = explosionData;
+    if (projectileData->projectileUnderwaterExplosionRef != 0) {
+        for (const auto& body : waterBodies) {
+            if (pos.x < body.originX || pos.x > body.originX + body.sizeX ||
+                pos.z < body.originZ || pos.z > body.originZ + body.sizeY) continue;
+            if (body.level - pos.y >= projectileData->projectileDepthTolerance) {
+                selectedExplosion = find(projectileData->projectileUnderwaterExplosionRef);
+            }
+            break;
+        }
+    }
+    if (!selectedExplosion || !selectedExplosion->hasExplosion) {
+        spawnExplosion(pos, {1.0f, 0.7f, 0.3f, 1.0f}, 2.0f, 15);
+        return;
+    }
+    const auto addEmitter = [&](uint32_t emitterId, bool burst, int burstCount,
+                                float effectLifetime, float effectDelay, const Point3F& origin) {
+        const auto* emitterBlock = find(emitterId);
+        if (!emitterBlock || !emitterBlock->hasEmitter || emitterBlock->emitter.particleRefs.empty()) return;
+        const auto* particleBlock = find(emitterBlock->emitter.particleRefs.front());
+        if (!particleBlock || !particleBlock->hasParticle) return;
+        EffectEmitter emitter;
+        emitter.pos = origin;
+        emitter.emitter = emitterBlock->emitter;
+        emitter.particle = particleBlock->particle;
+        for (const std::string& name : emitter.particle.textures) {
+            std::vector<uint32_t> frames;
+            std::vector<float> durations;
+            Engine::instance().renderer().loadTextureFrames(name.c_str(), frames, durations);
+            if (durations.empty() && !frames.empty()) durations.assign(frames.size(), 1.0f);
+            emitter.textures.insert(emitter.textures.end(), frames.begin(), frames.end());
+            emitter.textureDurations.insert(emitter.textureDurations.end(), durations.begin(), durations.end());
+        }
+        if (!emitter.textures.empty()) emitter.texture = emitter.textures.front();
+        emitter.burst = burst;
+        emitter.burstCount = std::max(0, burstCount);
+        emitter.delay = effectDelay;
+        emitter.age = -effectDelay;
+        if (effectLifetime > 0.0f) {
+            emitter.lifetime = effectLifetime;
+        } else {
+            const float emitterLifetimeMS = (float)emitter.emitter.lifetimeMS +
+                ((float)std::rand() / RAND_MAX * 2.0f - 1.0f) *
+                    emitter.emitter.lifetimeVarianceMS;
+            emitter.lifetime = std::max(0.0f, emitterLifetimeMS / 1000.0f);
+        }
+        emitter.nextEmission = burst ? -1.0f : 0.0f;
+        emitter.particles.reserve((size_t)std::min(burstCount, 512));
+        if (effectEmitters.size() < maxEffectInstances)
+            effectEmitters.push_back(std::move(emitter));
+    };
+    std::vector<const V12::DecodedDataBlock*> explosionStack;
+    std::function<void(const V12::DecodedDataBlock*, int, const Point3F&)> spawnGraph;
+    spawnGraph = [&](const V12::DecodedDataBlock* block, int depth, const Point3F& origin) {
+        if (!block || !block->hasExplosion || depth > 4) return;
+        if (std::find(explosionStack.begin(), explosionStack.end(), block) != explosionStack.end()) return;
+        explosionStack.push_back(block);
+        const auto& effect = block->explosion;
+        const Point3F effectOrigin{origin.x, origin.y + effect.offset, origin.z};
+        const int density = std::clamp(effect.particleDensity, 0, 512);
+        const float lifetimeMS = (float)effect.lifetimeMS +
+            ((float)std::rand() / RAND_MAX * 2.0f - 1.0f) * effect.lifetimeVarianceMS;
+        const float effectLifetime = std::max(0.0f, lifetimeMS / 1000.0f);
+        const float effectDelay = std::max(0.0f, (float)effect.delayMS / 1000.0f);
+        if (effect.hasLight && effectLights.size() < maxEffectInstances) {
+            EffectLight light;
+            light.pos = effectOrigin;
+            light.delay = effectDelay;
+            light.lifetime = effectLifetime > 0.0f ? effectLifetime : 0.1f;
+            light.radius = std::clamp(std::fabs(effect.particleRadius), 0.05f, 64.0f);
+            light.color = {1.0f, 0.72f, 0.28f, 1.0f};
+            effectLights.push_back(light);
+        }
+        if (effect.shakeCamera && effectCameraShakes.size() < maxEffectInstances) {
+            EffectCameraShake shake;
+            shake.pos = effectOrigin;
+            shake.frequency = effect.shakeFrequency;
+            shake.amplitude = effect.shakeAmplitude;
+            shake.delay = effectDelay;
+            shake.duration = std::max(0.0f, effect.shakeDuration);
+            shake.radius = std::max(0.0f, effect.shakeRadius);
+            shake.falloff = std::max(0.0f, effect.shakeFalloff);
+            effectCameraShakes.push_back(shake);
+        }
+        if (effect.debrisRef) {
+            const auto* debrisBlock = find(effect.debrisRef);
+            const int debrisCount = effect.debrisNum > 0 ? std::clamp(effect.debrisNum +
+                (int)((float)std::rand() / RAND_MAX * 2.0f - 1.0f) * effect.debrisNumVariance,
+                0, 128) : 1;
+            for (int debrisIndex = 0; debrisBlock && debrisIndex < debrisCount &&
+                 effectDebris.size() < maxEffectInstances; ++debrisIndex) {
+                const auto& data = debrisBlock->debris;
+                const float random01 = (float)std::rand() / (float)RAND_MAX;
+                const float theta = random01 * Math::PI * 2.0f;
+                Point3F normal = impactNormal;
+                const float normalLength = std::sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+                if (normalLength > 0.001f) {
+                    normal.x /= normalLength; normal.y /= normalLength; normal.z /= normalLength;
+                } else normal = {0, 1, 0};
+                EffectDebris debris;
+                debris.pos = effectOrigin;
+                const float baseSpeed = effect.debrisVelocity != 0.0f
+                    ? effect.debrisVelocity : data.velocity;
+                const float speedVariance = effect.debrisVelocity != 0.0f
+                    ? effect.debrisVelocityVariance : data.velocityVariance;
+                const float speed = std::max(0.0f, baseSpeed +
+                    (random01 * 2.0f - 1.0f) * speedVariance);
+                const float spread = std::max(0.0f, speedVariance * 0.25f);
+                Point3F tangent{normal.y, -normal.x, 0};
+                const float tangentLength = std::sqrt(tangent.x * tangent.x + tangent.y * tangent.y);
+                if (tangentLength < 0.001f) tangent = {1, 0, 0};
+                else { tangent.x /= tangentLength; tangent.y /= tangentLength; }
+                const Point3F bitangent{normal.y * tangent.z - normal.z * tangent.y,
+                                        normal.z * tangent.x - normal.x * tangent.z,
+                                        normal.x * tangent.y - normal.y * tangent.x};
+                debris.vel = {normal.x * speed + tangent.x * std::cos(theta) * spread + bitangent.x * std::sin(theta) * spread,
+                              normal.y * speed + tangent.y * std::cos(theta) * spread + bitangent.y * std::sin(theta) * spread,
+                              normal.z * speed + tangent.z * std::cos(theta) * spread + bitangent.z * std::sin(theta) * spread};
+                debris.lifetime = std::max(0.05f, (data.lifetimeMS +
+                    (random01 * 2.0f - 1.0f) * data.lifetimeVarianceMS) / 1000.0f);
+                debris.elasticity = std::clamp(data.elasticity, 0.0f, 1.0f);
+                debris.friction = std::clamp(data.friction, 0.0f, 1.0f);
+                debris.gravModifier = std::max(0.0f, data.gravModifier);
+                debris.terminalVelocity = std::max(0.0f, data.terminalVelocity);
+                debris.maxBounces = std::max(0, data.numBounces +
+                    (int)((random01 * 2.0f - 1.0f) * data.bounceVariance));
+                debris.explodeOnMaxBounce = data.explodeOnMaxBounce;
+                debris.rotation = data.minSpin + random01 * (data.maxSpin - data.minSpin);
+                std::string path = normalizeShapePath(data.shape.empty() ? debrisBlock->debrisShape : data.shape);
+                if (!path.empty()) {
+                    auto shapeData = Engine::instance().fs().read(path.c_str());
+                    if (!shapeData.empty()) {
+                        DTSShape shape;
+                        shape.name = path;
+                        if (shape.load(shapeData.data(), shapeData.size())) {
+                            debris.shapeIndex = (int)debrisShapes.size();
+                            debrisShapes.push_back(std::move(shape));
+                        }
+                    }
+                }
+                effectDebris.push_back(std::move(debris));
+            }
+        }
+        if (effect.particleEmitterRef)
+            addEmitter(effect.particleEmitterRef, true, density, effectLifetime, effectDelay, effectOrigin);
+        for (uint32_t ref : effect.emitterRefs)
+            if (ref) addEmitter(ref, false, 0, effectLifetime, effectDelay, effectOrigin);
+        if (effect.shockwaveRef) {
+            const auto* shockwaveBlock = find(effect.shockwaveRef);
+            if (shockwaveBlock && shockwaveBlock->hasShockwave) {
+                EffectShockwave shockwave;
+                shockwave.pos = effectOrigin;
+                shockwave.data = shockwaveBlock->shockwave;
+                const float delay = (float)shockwave.data.delayMS +
+                    ((float)std::rand() / RAND_MAX * 2.0f - 1.0f) * shockwave.data.delayVariance;
+                shockwave.age = -std::max(0.0f, delay / 1000.0f);
+                shockwave.velocity = shockwave.data.velocity;
+                const float lifetime = (float)shockwave.data.lifetimeMS +
+                    ((float)std::rand() / RAND_MAX * 2.0f - 1.0f) * shockwave.data.lifetimeVariance;
+                shockwave.lifetime = std::max(0.001f, lifetime / 1000.0f);
+                if (!shockwave.data.textures.empty()) {
+                    std::vector<uint32_t> frames;
+                    std::vector<float> durations;
+                    Engine::instance().renderer().loadTextureFrames(
+                        shockwave.data.textures.front().c_str(), frames, durations);
+                    if (!frames.empty()) shockwave.texture = frames.front();
+                }
+                if (shockwave.data.textures.size() > 1) {
+                    std::vector<uint32_t> frames;
+                    std::vector<float> durations;
+                    Engine::instance().renderer().loadTextureFrames(
+                        shockwave.data.textures[1].c_str(), frames, durations);
+                    if (!frames.empty()) shockwave.mapTexture = frames.front();
+                }
+                if (effectShockwaves.size() < maxEffectInstances)
+                    effectShockwaves.push_back(std::move(shockwave));
+            }
+        }
+        for (uint32_t ref : effect.subExplosionRefs) {
+            if (effectEmitters.size() >= maxEffectInstances &&
+                effectShockwaves.size() >= maxEffectInstances) break;
+            if (const auto* sub = find(ref)) spawnGraph(sub, depth + 1, effectOrigin);
+        }
+        explosionStack.pop_back();
+    };
+    spawnGraph(selectedExplosion, 0, pos);
+}
+
+void World::spawnSplashEffect(const Point3F& inputPos,
+                              const V12::DecodedDataBlock& splashBlock,
+                              const std::map<uint32_t, ParsedDataBlock>& dataBlocks) {
+    if (!splashBlock.hasSplash) return;
+    const auto find = [&](uint32_t id) -> const V12::DecodedDataBlock* {
+        auto it = dataBlocks.find(id);
+        return it == dataBlocks.end() ? nullptr : &it->second.decoded;
+    };
+    Point3F pos = inputPos;
+    bool onWater = false;
+    for (const auto& body : waterBodies) {
+        if (pos.x >= body.originX && pos.x <= body.originX + body.sizeX &&
+            pos.z >= body.originZ && pos.z <= body.originZ + body.sizeY) {
+            pos.y = body.level;
+            onWater = true;
+            break;
+        }
+    }
+    if (!onWater) {
+        const float terrain = getHeight(pos.x, pos.z);
+        if (terrain > -1e8f) pos.y = terrain;
+    }
+
+    const auto& data = splashBlock.splash;
+    EffectShockwave ring;
+    ring.pos = pos;
+    ring.data.delayMS = data.delayMS;
+    ring.data.delayVariance = data.delayVarianceMS;
+    ring.data.lifetimeMS = data.ringLifetime > 0.0f ? (int32_t)data.ringLifetime : data.lifetimeMS;
+    ring.data.lifetimeVariance = data.lifetimeVarianceMS;
+    ring.data.width = std::fabs(data.width * data.scale.x);
+    ring.data.height = data.height * data.scale.y;
+    ring.data.velocity = data.velocity * data.scale.x;
+    ring.data.acceleration = data.acceleration * data.scale.x;
+    ring.data.texWrap = data.texWrap * data.texFactor;
+    ring.data.numSegments = (int)data.numSegments;
+    ring.data.renderBottom = false;
+    ring.radius = data.startRadius * data.scale.x;
+    ring.velocity = ring.data.velocity;
+    const float delay = (float)data.delayMS +
+        ((float)std::rand() / RAND_MAX * 2.0f - 1.0f) * data.delayVarianceMS;
+    ring.age = -std::max(0.0f, delay / 1000.0f);
+    const float lifetime = data.ringLifetime > 0.0f ? data.ringLifetime : (float)data.lifetimeMS;
+    ring.lifetime = std::max(0.001f, lifetime / 1000.0f);
+    ring.data.colors = data.colors;
+    ring.data.times = data.times;
+    for (const auto& textureName : data.textures) {
+        std::vector<uint32_t> frames;
+        std::vector<float> durations;
+        Engine::instance().renderer().loadTextureFrames(textureName.c_str(), frames, durations);
+        if (!frames.empty()) {
+            if (ring.texture == UINT32_MAX) ring.texture = frames.front();
+            else if (ring.mapTexture == UINT32_MAX) ring.mapTexture = frames.front();
+        }
+    }
+    ring.drawMapTexture = ring.mapTexture != UINT32_MAX;
+    if (effectShockwaves.size() < 4096) effectShockwaves.push_back(std::move(ring));
+
+    for (uint32_t emitterId : data.emitterRefs) {
+        const auto* emitterBlock = find(emitterId);
+        if (!emitterBlock || !emitterBlock->hasEmitter || emitterBlock->emitter.particleRefs.empty()) continue;
+        const auto* particleBlock = find(emitterBlock->emitter.particleRefs.front());
+        if (!particleBlock || !particleBlock->hasParticle || effectEmitters.size() >= 4096) continue;
+        EffectEmitter emitter;
+        emitter.pos = pos;
+        emitter.emitter = emitterBlock->emitter;
+        emitter.particle = particleBlock->particle;
+        emitter.burst = false;
+        emitter.lifetime = std::max(0.001f, data.lifetimeMS / 1000.0f);
+        emitter.age = -std::max(0.0f, delay / 1000.0f);
+        for (const auto& name : emitter.particle.textures) {
+            std::vector<uint32_t> frames;
+            std::vector<float> durations;
+            Engine::instance().renderer().loadTextureFrames(name.c_str(), frames, durations);
+            emitter.textures.insert(emitter.textures.end(), frames.begin(), frames.end());
+            emitter.textureDurations.insert(emitter.textureDurations.end(), durations.begin(), durations.end());
+        }
+        if (!emitter.textures.empty()) emitter.texture = emitter.textures.front();
+        effectEmitters.push_back(std::move(emitter));
+    }
+    if (data.explosionRef) {
+        const auto* explosionData = find(data.explosionRef);
+        if (explosionData && explosionData->hasExplosion) {
+            V12::DecodedDataBlock projectileData;
+            projectileData.projectileExplosionRef = data.explosionRef;
+            spawnExplosionEffect(pos, &projectileData, explosionData, &dataBlocks);
+        }
+    }
+}
+
+void World::clearEffects() {
+    particles.clear();
+    explosions.clear();
+    effectEmitters.clear();
+    effectShockwaves.clear();
+    effectDebris.clear();
+    effectDecals.clear();
+    effectLightnings.clear();
+    effectLights.clear();
+    effectCameraShakes.clear();
+}
+
+void World::beginProjectileTrailSync() { ++trailGeneration; }
+
+void World::syncProjectileTrail(int ownerId, const Point3F& pos, const Point3F& velocity,
+                                const V12::DecodedDataBlock* projectileData,
+                                const std::map<uint32_t, ParsedDataBlock>* dataBlocks) {
+    if (!projectileData || !dataBlocks || !projectileData->projectileBaseEmitterRef) return;
+    auto find = [&](uint32_t id) -> const V12::DecodedDataBlock* {
+        auto it = dataBlocks->find(id);
+        return it == dataBlocks->end() ? nullptr : &it->second.decoded;
+    };
+    const auto* emitterBlock = find(projectileData->projectileBaseEmitterRef);
+    if (!emitterBlock || !emitterBlock->hasEmitter || emitterBlock->emitter.particleRefs.empty()) return;
+    const auto* particleBlock = find(emitterBlock->emitter.particleRefs.front());
+    if (!particleBlock || !particleBlock->hasParticle) return;
+    auto it = std::find_if(effectEmitters.begin(), effectEmitters.end(),
+        [ownerId](const EffectEmitter& e) { return e.projectileTrail && e.ownerId == ownerId; });
+    if (it == effectEmitters.end()) {
+        EffectEmitter emitter;
+        emitter.pos = pos; emitter.ownerVelocity = velocity; emitter.ownerId = ownerId;
+        emitter.projectileTrail = true; emitter.emitter = emitterBlock->emitter;
+        emitter.particle = particleBlock->particle; emitter.nextEmission = 0.0f;
+        emitter.axis = velocity;
+        const float axisLength = std::sqrt(emitter.axis.x * emitter.axis.x +
+            emitter.axis.y * emitter.axis.y + emitter.axis.z * emitter.axis.z);
+        if (axisLength > 0.0001f) {
+            emitter.axis.x /= axisLength; emitter.axis.y /= axisLength; emitter.axis.z /= axisLength;
+        } else emitter.axis = {0, 1, 0};
+        for (const std::string& name : emitter.particle.textures) {
+            std::vector<uint32_t> frames;
+            std::vector<float> durations;
+            Engine::instance().renderer().loadTextureFrames(name.c_str(), frames, durations);
+            if (durations.empty() && !frames.empty()) durations.assign(frames.size(), 1.0f);
+            emitter.textures.insert(emitter.textures.end(), frames.begin(), frames.end());
+            emitter.textureDurations.insert(emitter.textureDurations.end(), durations.begin(), durations.end());
+        }
+        if (!emitter.textures.empty()) emitter.texture = emitter.textures.front();
+        effectEmitters.push_back(std::move(emitter));
+        it = std::prev(effectEmitters.end());
+    } else {
+        it->pos = pos; it->ownerVelocity = velocity;
+        it->axis = velocity;
+        const float axisLength = std::sqrt(it->axis.x * it->axis.x +
+            it->axis.y * it->axis.y + it->axis.z * it->axis.z);
+        if (axisLength > 0.0001f) {
+            it->axis.x /= axisLength; it->axis.y /= axisLength; it->axis.z /= axisLength;
+        }
+    }
+    it->trailGeneration = trailGeneration;
+}
+
+void World::endProjectileTrailSync() {
+    effectEmitters.erase(std::remove_if(effectEmitters.begin(), effectEmitters.end(),
+        [this](const EffectEmitter& e) { return e.projectileTrail && e.trailGeneration != trailGeneration; }),
+        effectEmitters.end());
+}
+
+void World::removeProjectileTrail(int ownerId) {
+    effectEmitters.erase(std::remove_if(effectEmitters.begin(), effectEmitters.end(),
+        [ownerId](const EffectEmitter& e) { return e.projectileTrail && e.ownerId == ownerId; }),
+        effectEmitters.end());
+}
+
 void World::spawnTrail(const Point3F& pos, const ColorF& color, float size) {
     Particle p;
     p.pos = pos;
@@ -2330,47 +4009,538 @@ void World::updateParticles(float dt) {
     // Remove dead particles
     particles.erase(std::remove_if(particles.begin(), particles.end(),
         [](const Particle& p) { return !p.active; }), particles.end());
+
+    for (auto& debris : effectDebris) {
+        if (!debris.active) continue;
+        debris.age += dt;
+        if (debris.age >= debris.lifetime) { debris.active = false; continue; }
+        debris.vel.y -= 9.81f * debris.gravModifier * dt;
+        if (debris.terminalVelocity > 0.0f) {
+            const float speed = std::sqrt(debris.vel.x * debris.vel.x + debris.vel.y * debris.vel.y +
+                                          debris.vel.z * debris.vel.z);
+            if (speed > debris.terminalVelocity) {
+                const float scale = debris.terminalVelocity / speed;
+                debris.vel.x *= scale; debris.vel.y *= scale; debris.vel.z *= scale;
+            }
+        }
+        debris.pos.x += debris.vel.x * dt;
+        debris.pos.y += debris.vel.y * dt;
+        debris.pos.z += debris.vel.z * dt;
+        const float floor = getFloorHeight(debris.pos.x, debris.pos.y, debris.pos.z);
+        if (floor > -1e8f && debris.pos.y - debris.radius <= floor && debris.vel.y < 0.0f) {
+            debris.pos.y = floor + debris.radius;
+            debris.vel.y = -debris.vel.y * debris.elasticity;
+            debris.vel.x *= std::max(0.0f, 1.0f - debris.friction * dt);
+            debris.vel.z *= std::max(0.0f, 1.0f - debris.friction * dt);
+            if (++debris.bounces > debris.maxBounces ||
+                (std::fabs(debris.vel.y) < 0.15f && std::fabs(debris.vel.x) < 0.15f &&
+                 std::fabs(debris.vel.z) < 0.15f))
+                if (debris.explodeOnMaxBounce && debris.bounces > debris.maxBounces)
+                    spawnExplosion(debris.pos, {1.0f, 0.65f, 0.25f, 1.0f}, 0.7f, 6);
+            if (debris.bounces > debris.maxBounces ||
+                (std::fabs(debris.vel.y) < 0.15f && std::fabs(debris.vel.x) < 0.15f &&
+                 std::fabs(debris.vel.z) < 0.15f))
+                debris.active = false;
+        } else if (interiorCollision.loaded) {
+            Point3F push{};
+            if (interiorCollision.sphereCollide(debris.pos, debris.radius, push)) {
+                debris.pos.x += push.x; debris.pos.y += push.y; debris.pos.z += push.z;
+                debris.vel.y = -debris.vel.y * debris.elasticity;
+                debris.vel.x *= std::max(0.0f, 1.0f - debris.friction * dt);
+                debris.vel.z *= std::max(0.0f, 1.0f - debris.friction * dt);
+                if (++debris.bounces > debris.maxBounces) debris.active = false;
+            }
+        }
+        debris.rotation += dt;
+    }
+    effectDebris.erase(std::remove_if(effectDebris.begin(), effectDebris.end(),
+        [](const EffectDebris& debris) { return !debris.active; }), effectDebris.end());
+
+    auto random01 = []() { return (float)std::rand() / (float)RAND_MAX; };
+    for (auto& emitter : effectEmitters) {
+        const float previousAge = emitter.age;
+        emitter.age += dt;
+        if (emitter.age < 0.0f) continue;
+        auto emitOne = [&](float ageOffset) {
+            EffectParticle p;
+            const float theta = Math::DEG2RAD(emitter.emitter.thetaMin + random01() *
+                (emitter.emitter.thetaMax - emitter.emitter.thetaMin));
+            // phiReferenceVel is angular velocity in degrees/sec. Variance is
+            // sampled from [0, variance], as in ParticleSystem.ts.
+            const float phi = Math::DEG2RAD(emitter.age * emitter.emitter.phiReferenceVel +
+                random01() * emitter.emitter.phiVariance);
+
+            // Start along the emitter axis, then apply theta and phi. The
+            // perpendicular basis matches ParticleSystem.ts for arbitrary axes.
+            const Point3F axis = emitter.axis;
+            Point3F axisX = std::fabs(axis.z) < 0.9f
+                ? Point3F{axis.y, -axis.x, 0}
+                : Point3F{-axis.z, 0, axis.x};
+            const float axisXLength = std::sqrt(axisX.x * axisX.x + axisX.y * axisX.y + axisX.z * axisX.z);
+            if (axisXLength > 0.0001f) {
+                axisX.x /= axisXLength; axisX.y /= axisXLength; axisX.z /= axisXLength;
+            } else axisX = {1, 0, 0};
+            Point3F dir{
+                axis.x * std::cos(theta) + axisX.x * std::sin(theta),
+                axis.y * std::cos(theta) + axisX.y * std::sin(theta),
+                axis.z * std::cos(theta) + axisX.z * std::sin(theta)
+            };
+            const float cosPhi = std::cos(phi), sinPhi = std::sin(phi);
+            const Point3F cross{
+                axis.y * dir.z - axis.z * dir.y,
+                axis.z * dir.x - axis.x * dir.z,
+                axis.x * dir.y - axis.y * dir.x
+            };
+            const float dot = dir.x * axis.x + dir.y * axis.y + dir.z * axis.z;
+            dir = {
+                dir.x * cosPhi + cross.x * sinPhi + axis.x * dot * (1.0f - cosPhi),
+                dir.y * cosPhi + cross.y * sinPhi + axis.y * dot * (1.0f - cosPhi),
+                dir.z * cosPhi + cross.z * sinPhi + axis.z * dot * (1.0f - cosPhi)
+            };
+            const float speed = ((float)emitter.emitter.ejectionVelocity +
+                (random01() * 2.0f - 1.0f) * emitter.emitter.velocityVariance) / 100.0f;
+            p.pos = emitter.pos;
+            p.pos.x += dir.x * (float)emitter.emitter.ejectionOffset / 100.0f;
+            p.pos.y += dir.y * (float)emitter.emitter.ejectionOffset / 100.0f;
+            p.pos.z += dir.z * (float)emitter.emitter.ejectionOffset / 100.0f;
+            p.vel = {dir.x * speed, dir.y * speed, dir.z * speed};
+            if (emitter.projectileTrail) {
+                p.vel.x += emitter.ownerVelocity.x * emitter.particle.inheritedVelFactor;
+                p.vel.y += emitter.ownerVelocity.y * emitter.particle.inheritedVelFactor;
+                p.vel.z += emitter.ownerVelocity.z * emitter.particle.inheritedVelFactor;
+            }
+            p.orientDir = p.vel;
+            const float lifeMS = (float)emitter.particle.lifetimeMS +
+                (random01() * 2.0f - 1.0f) * emitter.particle.lifetimeVarianceMS;
+            p.lifetime = std::max(0.001f, lifeMS / 1000.0f);
+            p.size = emitter.particle.keys.empty() ? 1.0f : emitter.particle.keys.front().size * 50.0f;
+            p.texture = emitter.texture;
+            p.textureIndex = 0;
+            if (!emitter.textures.empty()) p.texture = emitter.textures.front();
+            p.additive = !emitter.particle.useInvAlpha;
+            if (!emitter.particle.keys.empty()) {
+                const auto& k = emitter.particle.keys.front();
+                p.color = {k.red, k.green, k.blue, k.alpha};
+            }
+            p.acc = {p.vel.x * emitter.particle.constantAcceleration,
+                     p.vel.y * emitter.particle.constantAcceleration,
+                     p.vel.z * emitter.particle.constantAcceleration};
+            const float spinRandom = emitter.particle.spinRandomMin +
+                ((float)std::rand() / RAND_MAX) *
+                    (emitter.particle.spinRandomMax - emitter.particle.spinRandomMin);
+            p.spinSpeed = emitter.particle.spinSpeed + spinRandom;
+            if (!emitter.emitter.overrideAdvances && ageOffset > 0.0f) {
+                // Match ParticleSystem.ts: particles emitted part-way through
+                // a frame receive the remaining frame advance immediately.
+                p.initialAdvance = std::max(0.0f, dt - ageOffset);
+                if (p.initialAdvance >= p.lifetime) p.active = false;
+            }
+            if (emitter.particles.size() < 4096)
+                emitter.particles.push_back(p);
+        };
+        if (emitter.burst && emitter.nextEmission < 0.0f) {
+            for (int i = 0; i < emitter.burstCount; ++i) emitOne(0.0f);
+            emitter.nextEmission = 0.0f;
+        } else if (!emitter.burst) {
+            // A long frame can cross more than one ejection period. Torque
+            // emits each due particle rather than dropping overdue emissions.
+            while (emitter.age >= emitter.nextEmission &&
+                   (emitter.lifetime <= 0.0f || emitter.nextEmission <= emitter.lifetime)) {
+                const float ageOffset = std::max(0.0f, emitter.age - emitter.nextEmission);
+                emitOne(ageOffset);
+                const float period = std::max(0.001f,
+                    ((float)emitter.emitter.ejectionPeriodMS +
+                     (random01() * 2.0f - 1.0f) * emitter.emitter.periodVariance) / 1000.0f);
+                emitter.nextEmission += period;
+                if (emitter.nextEmission > emitter.age && previousAge < 0.0f) break;
+                if (emitter.particles.size() >= 4096) break;
+            }
+        }
+        for (auto& p : emitter.particles) {
+            if (!p.active) continue;
+            const float particleDt = p.initialAdvance >= 0.0f
+                ? std::exchange(p.initialAdvance, -1.0f) : dt;
+            p.age += particleDt;
+            if (p.age >= p.lifetime) { p.active = false; continue; }
+            p.vel.x += p.acc.x * particleDt; p.vel.y += p.acc.y * particleDt; p.vel.z += p.acc.z * particleDt;
+            const float drag = std::max(0.0f, 1.0f - emitter.particle.dragCoefficient * particleDt);
+            p.vel.x *= drag; p.vel.y *= drag; p.vel.z *= drag;
+            const Point3F wind = windAcceleration(emitter.particle.windCoefficient);
+            p.vel.x += wind.x * particleDt;
+            p.vel.y += wind.y * particleDt;
+            p.vel.z += wind.z * particleDt;
+            p.vel.y -= emitter.particle.gravityCoefficient * 9.81f * particleDt;
+            p.pos.x += p.vel.x * particleDt; p.pos.y += p.vel.y * particleDt; p.pos.z += p.vel.z * particleDt;
+            if (emitter.emitter.orientOnVelocity) p.orientDir = p.vel;
+            p.spin += p.spinSpeed * particleDt;
+            const float t = p.age / p.lifetime;
+            if (!emitter.textures.empty()) {
+                p.textureIndex = textureFrameIndex(emitter.textureDurations,
+                                                    emitter.textures.size(), p.age);
+                p.texture = emitter.textures[p.textureIndex];
+            }
+            if (emitter.particle.keys.size() >= 2) {
+                size_t next = 1;
+                while (next < emitter.particle.keys.size() && emitter.particle.keys[next].time < t) ++next;
+                const auto& b = emitter.particle.keys[std::min(next, emitter.particle.keys.size() - 1)];
+                const auto& a = emitter.particle.keys[next < emitter.particle.keys.size() ? next - 1 : next];
+                const float span = b.time - a.time;
+                const float f = span > 0.0f ? (t - a.time) / span : 0.0f;
+                const auto& colorA = emitter.emitter.useEmitterColors &&
+                    emitter.emitter.colors.size() > (next < emitter.emitter.colors.size() ? next - 1 : next)
+                    ? emitter.emitter.colors[next < emitter.emitter.colors.size() ? next - 1 : next] : a;
+                const auto& colorB = emitter.emitter.useEmitterColors &&
+                    emitter.emitter.colors.size() > std::min(next, emitter.emitter.colors.size() - 1)
+                    ? emitter.emitter.colors[std::min(next, emitter.emitter.colors.size() - 1)] : b;
+                p.color = {colorA.red + (colorB.red - colorA.red) * f,
+                           colorA.green + (colorB.green - colorA.green) * f,
+                           colorA.blue + (colorB.blue - colorA.blue) * f,
+                           colorA.alpha + (colorB.alpha - colorA.alpha) * f};
+                const float sizeA = emitter.emitter.useEmitterSizes &&
+                    emitter.emitter.sizes.size() > (next < emitter.emitter.sizes.size() ? next - 1 : next)
+                    ? emitter.emitter.sizes[next < emitter.emitter.sizes.size() ? next - 1 : next] : a.size * 50.0f;
+                const float sizeB = emitter.emitter.useEmitterSizes &&
+                    emitter.emitter.sizes.size() > std::min(next, emitter.emitter.sizes.size() - 1)
+                    ? emitter.emitter.sizes[std::min(next, emitter.emitter.sizes.size() - 1)] : b.size * 50.0f;
+                p.size = sizeA + (sizeB - sizeA) * f;
+            }
+        }
+        emitter.particles.erase(std::remove_if(emitter.particles.begin(), emitter.particles.end(),
+            [](const EffectParticle& p) { return !p.active; }), emitter.particles.end());
+    }
+    effectEmitters.erase(std::remove_if(effectEmitters.begin(), effectEmitters.end(),
+        [](const EffectEmitter& e) {
+            return (e.burst && e.age >= 0.0f && e.particles.empty()) ||
+                   (!e.burst && e.lifetime > 0.0f && e.age > e.lifetime);
+        }),
+        effectEmitters.end());
+    for (auto& shockwave : effectShockwaves) {
+        const float previousAge = shockwave.age;
+        shockwave.age += dt;
+        if (shockwave.age < 0.0f) continue;
+        // Only the portion after the delay may advance the wave.
+        const float activeDt = previousAge < 0.0f
+            ? std::min(dt, shockwave.age) : dt;
+        shockwave.velocity += shockwave.data.acceleration * activeDt;
+        shockwave.radius += shockwave.velocity * activeDt;
+    }
+    effectShockwaves.erase(std::remove_if(effectShockwaves.begin(), effectShockwaves.end(),
+        [](const EffectShockwave& shockwave) {
+            const float lifetime = shockwave.lifetime > 0.0f ? shockwave.lifetime :
+                std::max(0.001f, shockwave.data.lifetimeMS / 1000.0f);
+            return shockwave.age >= lifetime;
+        }), effectShockwaves.end());
+    for (auto& light : effectLights) light.age += dt;
+    effectLights.erase(std::remove_if(effectLights.begin(), effectLights.end(),
+        [](const EffectLight& light) { return light.age >= light.delay + light.lifetime; }),
+        effectLights.end());
+    for (auto& shake : effectCameraShakes) shake.age += dt;
+    effectCameraShakes.erase(std::remove_if(effectCameraShakes.begin(), effectCameraShakes.end(),
+        [](const EffectCameraShake& shake) { return shake.age >= shake.delay + shake.duration; }),
+        effectCameraShakes.end());
+    for (auto& lightning : effectLightnings) {
+        if (lightning.strikesPerMinute <= 0.0f) continue;
+        lightning.age += dt;
+        if (lightning.life > 0.0f) lightning.life -= dt;
+        if (lightning.age < lightning.nextStrike) continue;
+        lightning.age = 0.0f;
+        lightning.nextStrike = 60.0f / lightning.strikesPerMinute;
+        auto random01 = [&]() {
+            lightning.randomSeed = lightning.randomSeed * 1664525u + 1013904223u;
+            return (lightning.randomSeed >> 8) * (1.0f / 16777216.0f);
+        };
+        const Point3F localStart{
+            (random01() - 0.5f) * lightning.scale.x,
+            lightning.scale.y * 0.5f,
+            (random01() - 0.5f) * lightning.scale.z};
+        const Point3F localEnd{
+            localStart.x + (random01() * 2.0f - 1.0f) * lightning.strikeRadius,
+            -lightning.scale.y * 0.5f,
+            localStart.z + (random01() * 2.0f - 1.0f) * lightning.strikeRadius};
+        const Point3F torqueStart = Math::torquePointToYUp(localStart);
+        const Point3F torqueEnd = Math::torquePointToYUp(localEnd);
+        lightning.start = {lightning.pos.x + lightning.rotation.transformNormal(torqueStart).x,
+                           lightning.pos.y + lightning.rotation.transformNormal(torqueStart).y,
+                           lightning.pos.z + lightning.rotation.transformNormal(torqueStart).z};
+        lightning.end = {lightning.pos.x + lightning.rotation.transformNormal(torqueEnd).x,
+                         lightning.pos.y + lightning.rotation.transformNormal(torqueEnd).y,
+                         lightning.pos.z + lightning.rotation.transformNormal(torqueEnd).z};
+        lightning.life = 0.12f;
+    }
+    for (auto& decal : effectDecals) decal.age += dt;
+    effectDecals.erase(std::remove_if(effectDecals.begin(), effectDecals.end(),
+        [](const EffectDecal& decal) { return decal.age >= decal.lifetime; }), effectDecals.end());
+}
+
+Point3F World::cameraShakeOffset(const Point3F& cameraPosition) const {
+    Point3F result{};
+    for (const auto& shake : effectCameraShakes) {
+        const float elapsed = shake.age - shake.delay;
+        if (elapsed < 0.0f || shake.duration <= 0.0f) continue;
+        const float dx = cameraPosition.x - shake.pos.x;
+        const float dy = cameraPosition.y - shake.pos.y;
+        const float dz = cameraPosition.z - shake.pos.z;
+        const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (shake.radius > 0.0f && distance >= shake.radius) continue;
+        const float proximity = shake.radius > 0.0f
+            ? std::pow(std::clamp(1.0f - distance / shake.radius, 0.0f, 1.0f), shake.falloff)
+            : 1.0f;
+        const float fade = std::clamp(1.0f - elapsed / shake.duration, 0.0f, 1.0f) * proximity;
+        result.x += std::sin(elapsed * shake.frequency[0] * 6.2831853f) * shake.amplitude[0] * fade;
+        result.y += std::sin(elapsed * shake.frequency[1] * 6.2831853f + 1.7f) * shake.amplitude[1] * fade;
+        result.z += std::sin(elapsed * shake.frequency[2] * 6.2831853f + 3.1f) * shake.amplitude[2] * fade;
+    }
+    return result;
+}
+
+bool World::isPositionVisible(const Point3F& torquePosition, const Point3F& cameraPosition) const {
+    const Point3F worldPosition{torquePosition.x, torquePosition.z, -torquePosition.y};
+    const auto& renderer = Engine::instance().renderer();
+    if (currentSceneState.interiorVisibleZones.size() != worldObjects.size()) {
+        currentSceneState.interiorVisibleZones.resize(worldObjects.size());
+        currentSceneState.interiorVisibilityComputed.assign(worldObjects.size(), 0);
+    }
+    for (size_t managerIndex = 0; managerIndex < worldObjects.size(); managerIndex++) {
+        const auto& manager = worldObjects[managerIndex];
+        if (!manager.shape || !manager.shape->loaded || !manager.shape->isInterior ||
+            manager.shape->interiorBSP.empty()) continue;
+        MatrixF model;
+        if (manager.rotAngleDeg != 0 && (manager.rot.x != 0 || manager.rot.y != 0 || manager.rot.z != 0)) {
+            Point3F axis = manager.rot;
+            const float length = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+            if (length > 0.0001f) {
+                axis.x /= length; axis.y /= length; axis.z /= length;
+                model = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(manager.rotAngleDeg));
+            }
+        }
+        model.setTranslation({manager.pos.x, manager.pos.z, -manager.pos.y});
+        if (manager.scale.x != 1.0f || manager.scale.y != 1.0f || manager.scale.z != 1.0f)
+            model = model * Math::torqueScaleToYUp(manager.scale);
+        model = model * manager.shape->upOrientation();
+        const MatrixF inverse = model.inverse();
+        const int objectZone = manager.shape->interiorZoneForPoint(inverse.transform(worldPosition));
+        if (objectZone < 0) continue;
+        if (!currentSceneState.interiorVisibilityComputed[managerIndex]) {
+            const Point3F localCamera = inverse.transform(cameraPosition);
+            const int cameraZone = manager.shape->interiorZoneForPoint(localCamera);
+            if (cameraZone >= 0)
+                manager.shape->interiorVisibleZones(cameraZone, localCamera,
+                    renderer.projection * renderer.view * model,
+                    currentSceneState.interiorVisibleZones[managerIndex]);
+            currentSceneState.interiorVisibilityComputed[managerIndex] = 1;
+        }
+        const auto& visible = currentSceneState.interiorVisibleZones[managerIndex];
+        return visible.empty() || (objectZone < (int)visible.size() && visible[objectZone]);
+    }
+    return true;
 }
 
 void World::renderParticles() {
     auto& r = Engine::instance().renderer();
+    auto* debrisShader = ShaderManager::getDefaultShader();
+    if (debrisShader) debrisShader->bind();
+    for (const auto& debris : effectDebris) {
+        const float alpha = std::clamp(1.0f - debris.age / debris.lifetime, 0.0f, 1.0f);
+        if (debris.shapeIndex >= 0 && debris.shapeIndex < (int)debrisShapes.size() &&
+            debrisShapes[debris.shapeIndex].loaded) {
+            MatrixF model;
+            model.setRotationAxis(debris.rotationAxis, debris.rotation);
+            model.setTranslation(debris.pos);
+            r.setModel(model * debrisShapes[debris.shapeIndex].upOrientation());
+            if (debrisShader) {
+                debrisShader->setUniform("uUseTexture", (int32_t)1);
+                debrisShader->setUniform("uUseLightmap", (int32_t)0);
+            }
+            debrisShapes[debris.shapeIndex].render(0);
+        } else {
+            r.drawSprite(debris.pos, debris.radius * 2.0f,
+                         {0.8f, 0.55f, 0.25f, alpha});
+        }
+    }
+    std::vector<size_t> decalOrder(effectDecals.size());
+    std::iota(decalOrder.begin(), decalOrder.end(), 0);
+    std::stable_sort(decalOrder.begin(), decalOrder.end(), [&](size_t a, size_t b) {
+        return effectDecals[a].data.renderPriority > effectDecals[b].data.renderPriority;
+    });
+    for (size_t index : decalOrder) {
+        const auto& decal = effectDecals[index];
+        const float alpha = decalAlpha(decal.age, decal.lifetime, decal.data.fadeTimeMS);
+        size_t frame = decalTextureFrame(decal.textureDurations, decal.textures.size(), decal.age,
+                                          decal.lifetime, decal.data.randomize, decal.frameSeed);
+        uint32_t texture = decal.textures.empty() ? 0 : decal.textures[frame];
+        const uint32_t rows = std::max(1u, decal.data.textureRows), cols = std::max(1u, decal.data.textureCols);
+        const uint32_t atlasFrame = decal.data.randomize ? decal.frameSeed % (rows * cols) :
+            std::min<uint32_t>((uint32_t)(decal.age / std::max(0.001f, decal.lifetime) * rows * cols), rows * cols - 1);
+        const float u0 = (atlasFrame % cols) / (float)cols, u1 = (atlasFrame % cols + 1) / (float)cols;
+        const float v0 = (atlasFrame / cols) / (float)rows, v1 = (atlasFrame / cols + 1) / (float)rows;
+        r.drawOrientedSpriteRect(decal.pos, decal.sizeX, decal.sizeY, {1, 1, 1, alpha}, decal.normal,
+                                 decal.angle, texture, u0, v0, u1, v1, false);
+    }
     for (auto& p : particles) {
         if (!p.active) continue;
         r.drawSprite(p.pos, p.size, p.color);
+    }
+    for (const auto& emitter : effectEmitters) {
+        for (const auto& p : emitter.particles) {
+            if (p.active) {
+                if (emitter.emitter.orientParticles)
+                    r.drawOrientedSprite(p.pos, p.size, p.color, p.orientDir, p.spin, p.texture, p.additive);
+                else
+                    r.drawSprite(p.pos, p.size, p.color, p.texture, p.additive);
+            }
+        }
+    }
+    for (const auto& shockwave : effectShockwaves) {
+        if (shockwave.age < 0.0f) continue;
+        const int segments = std::max(4, std::min(shockwave.data.numSegments, 128));
+        const float life = shockwave.lifetime > 0.0f ? shockwave.lifetime :
+            std::max(0.001f, shockwave.data.lifetimeMS / 1000.0f);
+        ColorF color = interpolateShockwaveColor(shockwave.data,
+            std::clamp(shockwave.age / life, 0.0f, 1.0f));
+        color.a *= std::clamp(1.0f - shockwave.age / life, 0.0f, 1.0f);
+        Point3F shockwaveCenter = shockwave.pos;
+        Point3F shockwaveNormal{0, 1, 0};
+        if (shockwave.data.mapToTerrain) {
+            const float terrainHeight = getHeight(shockwaveCenter.x, shockwaveCenter.z);
+            if (terrainHeight <= -1e8f) continue;
+            shockwaveCenter.y = terrainHeight;
+        }
+        if (shockwave.data.orientToNormal) {
+            const float eps = 0.5f;
+            const float hx = getHeight(shockwaveCenter.x + eps, shockwaveCenter.z) -
+                             getHeight(shockwaveCenter.x - eps, shockwaveCenter.z);
+            const float hz = getHeight(shockwaveCenter.x, shockwaveCenter.z + eps) -
+                             getHeight(shockwaveCenter.x, shockwaveCenter.z - eps);
+            shockwaveNormal = {hx * -0.5f, 1.0f, hz * -0.5f};
+        }
+        const uint32_t texture = shockwave.data.mapToTerrain && shockwave.mapTexture != UINT32_MAX
+            ? shockwave.mapTexture : shockwave.texture;
+        r.drawShockwaveRing(shockwaveCenter, shockwave.radius, shockwave.data.width,
+                            shockwave.data.height, segments, texture, color,
+                             shockwave.data.texWrap, true, shockwave.data.renderBottom,
+                             shockwaveNormal);
+        if (shockwave.drawMapTexture && shockwave.mapTexture != UINT32_MAX) {
+            ColorF foamColor = color;
+            foamColor.a *= 0.35f;
+            r.drawShockwaveRing(shockwaveCenter, shockwave.radius,
+                                shockwave.data.width * 1.02f, shockwave.data.height,
+                                segments, shockwave.mapTexture, foamColor,
+                                shockwave.data.texWrap, false,
+                                shockwave.data.renderBottom, shockwaveNormal);
+        }
+    }
+    for (const auto& lightning : effectLightnings) {
+        if (!lightningEnabled || !lightning.enabled || lightning.life <= 0.0f) continue;
+        const float fade = std::clamp(lightning.life / 0.12f, 0.0f, 1.0f);
+        const ColorF color{
+            lightning.fadeColor.r + (lightning.color.r - lightning.fadeColor.r) * fade,
+            lightning.fadeColor.g + (lightning.color.g - lightning.fadeColor.g) * fade,
+            lightning.fadeColor.b + (lightning.color.b - lightning.fadeColor.b) * fade,
+            lightning.fadeColor.a + (lightning.color.a - lightning.fadeColor.a) * fade};
+        r.drawLine(lightning.start, lightning.end, color);
     }
 }
 
 // ─── Precipitation System ─────────────────────────────────────
 
 void World::initPrecipitation(const PrecipitationState& state) {
+    precipitation.randomSeed = state.randomSeed;
+    precipitation.textureAge = 0.0f;
     precipitation.drops.resize(state.numDrops);
     float halfW = state.boxWidth * 0.5f;
     float halfD = state.boxWidth * 0.5f;
+    auto nextRandom = [&]() {
+        precipitation.randomSeed = precipitation.randomSeed * 1664525u + 1013904223u;
+        return (precipitation.randomSeed >> 8) * (1.0f / 16777216.0f);
+    };
     for (auto& d : precipitation.drops) {
-        d.pos.x = ((float)std::rand() / RAND_MAX) * state.boxWidth - halfW;
-        d.pos.y = ((float)std::rand() / RAND_MAX) * state.boxHeight;
-        d.pos.z = ((float)std::rand() / RAND_MAX) * state.boxWidth - halfD;
-        float speed = state.minSpeed + ((float)std::rand() / RAND_MAX) * (state.maxSpeed - state.minSpeed);
-        d.vel = {0, -speed, 0};
+        d.pos.x = state.origin.x + nextRandom() * state.boxWidth - halfW;
+        d.pos.y = state.origin.y + nextRandom() * state.boxHeight;
+        d.pos.z = state.origin.z + nextRandom() * state.boxWidth - halfD;
+        float speed = state.minSpeed + nextRandom() * (state.maxSpeed - state.minSpeed);
+        const Point3F wind = state.useWind ? getTorchWindVelocity() : Point3F{};
+        d.vel = {wind.x, -speed + wind.y, wind.z};
         d.active = true;
     }
 }
 
+bool World::setPrecipitation(int type, float percentage) {
+    if (type < 0 || type > 7 || !std::isfinite(percentage) || percentage < 0.0f || percentage > 1.0f)
+        return false;
+    precipitation.type = type;
+    precipitation.percentage = percentage;
+    if (percentage == 0.0f) {
+        precipitation.active = false;
+        precipitation.drops.clear();
+        return true;
+    }
+    precipitation.active = true;
+    precipitation.numDrops = std::max(1, (int)std::lround(precipitation.configuredDrops * percentage));
+    initPrecipitation(precipitation);
+    return true;
+}
+
+bool World::setPrecipitationEnabled(bool enabled) {
+    return setPrecipitation(precipitation.type, enabled ? precipitation.percentage : 0.0f);
+}
+
+bool World::setPrecipitationType(int type) {
+    return setPrecipitation(type, precipitation.percentage);
+}
+
+bool World::setPrecipitationWind(const Point3F& velocity) {
+    if (!std::isfinite(velocity.x) || !std::isfinite(velocity.y) || !std::isfinite(velocity.z)) return false;
+    setTorchWindVelocity(velocity);
+    if (precipitation.active && precipitation.useWind)
+        for (auto& drop : precipitation.drops) { drop.vel.x = velocity.x; drop.vel.z = velocity.z; }
+    return true;
+}
+
+bool World::setPrecipitationBox(float width, float height) {
+    if (!std::isfinite(width) || !std::isfinite(height) || width <= 0.0f || height <= 0.0f) return false;
+    precipitation.boxWidth = width;
+    precipitation.boxHeight = height;
+    if (precipitation.active) initPrecipitation(precipitation);
+    return true;
+}
+
+bool World::setLightningEnabled(bool enabled) {
+    lightningEnabled = enabled;
+    if (!enabled) for (auto& lightning : effectLightnings) lightning.life = 0.0f;
+    return true;
+}
+
+bool World::strikeLightning() {
+    if (!lightningEnabled || effectLightnings.empty()) return false;
+    bool struck = false;
+    for (auto& lightning : effectLightnings) {
+        if (!lightning.enabled) continue;
+        lightning.age = lightning.nextStrike;
+        lightning.nextStrike = 0.0f;
+        struck = true;
+    }
+    return struck;
+}
+
 void World::updatePrecipitation(float dt, const Point3F& camPos) {
     if (!precipitation.active || precipitation.drops.empty()) return;
+    precipitation.textureAge += std::max(0.0f, dt);
 
     float halfW = precipitation.boxWidth * 0.5f;
     float halfD = precipitation.boxWidth * 0.5f;
-    float boxY = precipitation.boxHeight;
+    float boxY = precipitation.origin.y + precipitation.boxHeight;
 
     for (auto& d : precipitation.drops) {
         if (!d.active) continue;
         d.pos.y += d.vel.y * dt;
         // Reset drop when it falls below the box
-        if (d.pos.y < -5.0f) {
-            d.pos.y = boxY + ((float)std::rand() / RAND_MAX) * 10.0f;
-            float speed = precipitation.minSpeed + ((float)std::rand() / RAND_MAX) * (precipitation.maxSpeed - precipitation.minSpeed);
-            d.vel.y = -speed;
+        if (d.pos.y < precipitation.origin.y - 5.0f) {
+            d.pos.y = boxY;
+            precipitation.randomSeed = precipitation.randomSeed * 1664525u + 1013904223u;
+            float random = (precipitation.randomSeed >> 8) * (1.0f / 16777216.0f);
+            float speed = precipitation.minSpeed + random * (precipitation.maxSpeed - precipitation.minSpeed);
+            const Point3F wind = precipitation.useWind ? getTorchWindVelocity() : Point3F{};
+            d.vel = {wind.x, -speed + wind.y, wind.z};
         }
     }
 
@@ -2391,24 +4561,26 @@ void World::updatePrecipitation(float dt, const Point3F& camPos) {
 void World::renderPrecipitation() {
     if (!precipitation.active || precipitation.drops.empty()) return;
     auto& r = Engine::instance().renderer();
-    ColorF dropColor = {0.8f, 0.85f, 0.9f, 0.4f};
+    ColorF dropColor = precipitation.color;
+    uint32_t texture = 0;
+    if (!precipitation.textures.empty()) {
+        const size_t frame = textureFrameIndex(precipitation.textureDurations,
+                                               precipitation.textures.size(),
+                                               precipitation.textureAge);
+        texture = precipitation.textures[frame];
+    }
     for (auto& d : precipitation.drops) {
         if (!d.active) continue;
-        r.drawSprite(d.pos, precipitation.dropSize, dropColor);
+        r.drawSprite(d.pos, precipitation.dropSize, dropColor, texture);
     }
 }
 
 void World::renderWater() {
-    // If no WaterBlock in mission, use default water level 0
-    float waterLevel = water.active ? water.level : 0.0f;
-    float waterSize = water.active ? water.size : 2048.0f;
+    if (waterBodies.empty()) return;
 
     auto& r = Engine::instance().renderer();
     float time = Engine::instance().game().gameTime();
     Point3F cam = r.cameraPos;
-
-    // Don't render if camera is too far above water
-    if (cam.y > waterLevel + 80.0f) return;
 
     auto* waterShdr = ShaderManager::getWaterShader();
     if (!waterShdr) return;
@@ -2416,81 +4588,160 @@ void World::renderWater() {
     waterShdr->setUniform("uProjection", r.projection);
     waterShdr->setUniform("uView", r.view);
     waterShdr->setUniform("uCamPos", cam);
+    for (int i = 0; i < 3; ++i) {
+        ColorF packed{};
+        if (i < (int)fogVolumes.size() && fogVolumes[i].visibleDistance > 0.0f) {
+            const auto& volume = fogVolumes[i];
+            packed = {1.0f / volume.visibleDistance, volume.minHeight,
+                      volume.maxHeight, 0.0f};
+        }
+        waterShdr->setUniform((std::string("uFogVolume") + std::to_string(i)).c_str(), packed);
+    }
+    waterShdr->setUniform("uUseSurfaceTexture", (int32_t)0);
+    waterShdr->setUniform("uUseShoreTexture", (int32_t)0);
+    waterShdr->setUniform("uUseEnvMap", (int32_t)0);
 
     // Sun lighting
     Point3F sunDir = sunLightDirUsed ? sunLightDir : Point3F{0.5f, 0.8f, 0.6f};
     waterShdr->setUniform("uSunDir", sunDir);
     waterShdr->setUniform("uSunColor", Point3F{sunColor.r, sunColor.g, sunColor.b});
 
-    // Water appearance
-    ColorF waterCol = water.surfaceColor;
-    waterShdr->setUniform("uWaterColor", Point3F{waterCol.r, waterCol.g, waterCol.b});
-    waterShdr->setUniform("uWaterOpacity", waterCol.a);
-
     // Fog
-    waterShdr->setUniform("uFogEnabled", (int32_t)(fog.enabled ? 1 : 0));
-    if (fog.enabled) {
+    const bool renderFog = fog.enabled && !Engine::instance().game().isMapperMode();
+    waterShdr->setUniform("uFogEnabled", (int32_t)(renderFog ? 1 : 0));
+    if (renderFog) {
         waterShdr->setUniform("uFogColor", Point3F{fog.color.r, fog.color.g, fog.color.b});
         waterShdr->setUniform("uFogDensity", fog.density);
+        waterShdr->setUniform("uFogStart", fog.distance);
+        waterShdr->setUniform("uFogEnd", Engine::instance().renderer().config().farPlane);
     }
 
-    int gridRes = 24;
-    float halfSize = waterSize * 0.5f;
-    float step = waterSize / gridRes;
-
+    GLboolean cullWasOn = glIsEnabled(GL_CULL_FACE);
+    GLboolean depthTestWasOn = glIsEnabled(GL_DEPTH_TEST);
+    GLboolean blendWasOn = glIsEnabled(GL_BLEND);
+    GLboolean depthWriteWasOn = GL_TRUE;
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWriteWasOn);
+    GLint blendSrcRGB, blendDstRGB, blendSrcAlpha, blendDstAlpha;
+    glGetIntegerv(GL_BLEND_SRC_RGB, &blendSrcRGB);
+    glGetIntegerv(GL_BLEND_DST_RGB, &blendDstRGB);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrcAlpha);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDstAlpha);
+    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
 
-    for (int z = 0; z < gridRes; z++) {
-        for (int x = 0; x < gridRes; x++) {
-            float wx = -halfSize + x * step;
-            float wz = -halfSize + z * step;
+    for (const auto& body : waterBodies) {
+        if (cam.y > body.level + 80.0f) continue;
+        waterShdr->setUniform("uUseSurfaceTexture", (int32_t)0);
+        waterShdr->setUniform("uUseShoreTexture", (int32_t)0);
+        waterShdr->setUniform("uUseEnvMap", (int32_t)0);
+        ColorF waterCol = body.surfaceColor;
+        waterShdr->setUniform("uWaterColor", Point3F{waterCol.r, waterCol.g, waterCol.b});
+        waterShdr->setUniform("uWaterOpacity", std::clamp(body.opacity, 0.0f, 1.0f) *
+                                               std::clamp(waterCol.a, 0.0f, 1.0f));
+        uint32_t surfaceTexture = 0;
+        if (!body.surfaceFrames.empty()) {
+            surfaceTexture = body.surfaceFrames.front();
+            if (body.surfaceFrames.size() > 1) {
+                float cycle = 0.0f;
+                for (float duration : body.surfaceFrameDurations) cycle += std::max(duration, 0.001f);
+                float cursor = cycle > 0.0f ? std::fmod(time, cycle) : 0.0f;
+                for (size_t frame = 0; frame < body.surfaceFrames.size(); ++frame) {
+                    const float duration = frame < body.surfaceFrameDurations.size()
+                        ? std::max(body.surfaceFrameDurations[frame], 0.001f) : 1.0f;
+                    if (cursor < duration) { surfaceTexture = body.surfaceFrames[frame]; break; }
+                    cursor -= duration;
+                }
+            }
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, surfaceTexture);
+            waterShdr->setUniform("uSurfaceTexture", (int32_t)0);
+            waterShdr->setUniform("uUseSurfaceTexture", (int32_t)1);
+        }
+        if (!body.envFrames.empty()) {
+            size_t envFrame = 0;
+            if (body.envFrames.size() > 1) {
+                float cycle = 0.0f;
+                for (float duration : body.envFrameDurations) cycle += std::max(duration, 0.001f);
+                float cursor = cycle > 0.0f ? std::fmod(time, cycle) : 0.0f;
+                for (size_t frame = 0; frame < body.envFrames.size(); ++frame) {
+                    const float duration = frame < body.envFrameDurations.size()
+                        ? std::max(body.envFrameDurations[frame], 0.001f) : 1.0f;
+                    if (cursor < duration) { envFrame = frame; break; }
+                    cursor -= duration;
+                }
+            }
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, body.envFrames[envFrame]);
+            waterShdr->setUniform("uEnvMap", (int32_t)1);
+            waterShdr->setUniform("uEnvIntensity", body.envIntensity);
+            waterShdr->setUniform("uUseEnvMap", (int32_t)1);
+        }
+        waterShdr->setUniform("uTexOffset", std::fmod(time * body.waveSpeed * 0.01f, 1.0f));
+        const int gridRes = 24;
+        const float stepX = body.sizeX / gridRes;
+        const float stepZ = body.sizeY / gridRes;
+        for (int z = 0; z < gridRes; z++) {
+            for (int x = 0; x < gridRes; x++) {
+            float wx = body.originX + x * stepX;
+            float wz = body.originZ + z * stepZ;
 
             // Skip quads far from camera
-            float dx = wx + step * 0.5f - cam.x;
-            float dz = wz + step * 0.5f - cam.z;
+            float dx = wx + stepX * 0.5f - cam.x;
+            float dz = wz + stepZ * 0.5f - cam.z;
             float dist = sqrtf(dx * dx + dz * dz);
             if (dist > 400.0f) continue;
 
             // Wave animation
-            float wy = waterLevel;
-            wy += sinf(time * water.waveSpeed + wx * 0.01f) * water.waveMagnitude;
-            wy += sinf(time * water.waveSpeed * 0.7f + wz * 0.015f) * water.waveMagnitude * 0.5f;
+            float wy = body.level;
+            wy += (sinf(wx * 0.05f + time) + sinf(wz * 0.05f + time)) *
+                  body.waveMagnitude * 0.25f;
 
             // Build model matrix for this quad
             MatrixF model;
             model.identity();
             model.setTranslation({wx, wy, wz});
             MatrixF scale;
-            scale.setScale({step, 1.0f, step});
+            scale.setScale({stepX, 1.0f, stepZ});
             model = model * scale;
+            float shoreFactor = 1.0f;
+            if (body.shoreDepth > 0.0f && terrainBlock.loaded && !body.shoreFrames.empty()) {
+                const float terrainHeight = terrainBlock.sampleHeight(wx + stepX * 0.5f, wz + stepZ * 0.5f);
+                shoreFactor = std::clamp((body.level - terrainHeight) / body.shoreDepth, 0.0f, 1.0f);
+                glActiveTexture(GL_TEXTURE2);
+                glBindTexture(GL_TEXTURE_2D, body.shoreFrames.front());
+                waterShdr->setUniform("uShoreTexture", (int32_t)2);
+                waterShdr->setUniform("uUseShoreTexture", (int32_t)1);
+            }
+            waterShdr->setUniform("uShoreFactor", shoreFactor);
             waterShdr->setUniform("uModel", model);
 
-            // Draw a simple quad (two triangles)
-            float verts[] = {
-                0, 0, 0,  step, 0, 0,  step, 0, step,
-                0, 0, 0,  step, 0, step,  0, 0, step
-            };
-            // Use drawBox for simplicity
-            Box3F quad = {{0, -0.05f, 0}, {step, 0.05f, step}};
-            MatrixF boxModel;
-            boxModel.identity();
-            boxModel.setTranslation({wx, wy, wz});
-            waterShdr->setUniform("uModel", boxModel);
-            r.drawBox(quad, {1, 1, 1, 1}); // white, shader handles color
+            r.drawFilledQuad(stepX, stepZ);
+            }
         }
     }
 
-    glDepthMask(GL_TRUE);
-    glDisable(GL_BLEND);
+    if (cullWasOn) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+    if (depthTestWasOn) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    if (blendWasOn) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+    glDepthMask(depthWriteWasOn);
+    glBlendFuncSeparate((GLenum)blendSrcRGB, (GLenum)blendDstRGB,
+                        (GLenum)blendSrcAlpha, (GLenum)blendDstAlpha);
 }
 
 Game::Game() : pl(new Player), w(new World) {
     mMenu = new Menu;
     hud = new HUD;
 }
-Game::~Game() { delete pl; delete w; delete hud; }
+Game::~Game() { clearProjectileAudio(); delete pl; delete w; delete hud; }
+
+void Game::clearProjectileAudio() {
+    auto& audio = Engine::instance().audio();
+    for (auto& [index, source] : projectileSoundSources) audio.releaseSource(source);
+    projectileSoundSources.clear();
+}
 
 bool Game::init() {
     Console::instance().printf(LogLevel::Info, "Game initialized");
@@ -2515,34 +4766,66 @@ bool Game::init() {
     }, "setFov <degrees> - script-owned camera FOV bridge");
 
     con.addCommand("connect", [this](int32_t argc, const char* const* argv) {
-        if (argc > 1) connectToServer(argv[1], argc > 2 ? (uint16_t)atoi(argv[2]) : T2Protocol::DEFAULT_PORT);
-    });
+        if (argc < 2 || !argv[1][0]) {
+            Console::instance().printf(LogLevel::Warn, "Usage: connect <host> [port]");
+            return;
+        }
+        uint16_t port = T2Protocol::DEFAULT_PORT;
+        if (argc > 2 && !parseConsolePort(argv[2], port)) {
+            Console::instance().printf(LogLevel::Warn, "Invalid port: %s", argv[2]);
+            return;
+        }
+        connectToServer(argv[1], port);
+    }, "connect <host> [port] - connect to a server");
     con.addCommand("watchServer", [this](int32_t argc, const char* const* argv) {
-        if (argc < 2) return;
-        std::string address = argv[1];
-        const auto colon = address.rfind(':');
-        if (colon == std::string::npos || colon == 0) return;
-        const int port = atoi(address.substr(colon + 1).c_str());
-        if (port < 1 || port > 65535) return;
-        const std::string host = address.substr(0, colon);
-        connectToServer(host.c_str(), (uint16_t)port, true);
+        std::string host;
+        uint16_t port = 0;
+        if (argc < 2 || !parseConsoleHostPort(argv[1], host, port)) {
+            Console::instance().printf(LogLevel::Warn, "Usage: watchServer <host:port>");
+            return;
+        }
+        connectToServer(host.c_str(), port, true);
     }, "watchServer <host:port> - connect as an anonymous observer");
 
     con.addCommand("startServer", [this](int32_t argc, const char* const* argv) {
-        uint16_t port = (argc > 1) ? (uint16_t)atoi(argv[1]) : T2Protocol::DEFAULT_PORT;
+        uint16_t port = T2Protocol::DEFAULT_PORT;
+        if (argc > 1 && !parseConsolePort(argv[1], port)) {
+            Console::instance().printf(LogLevel::Warn, "Invalid port: %s", argv[1]);
+            return;
+        }
         if (argc > 2) {
-            Console::instance().setVariable("sv_mission", argv[2]);
+            const std::string mission = missionLoadPath(argv[2]);
+            if (mission.empty()) {
+                Console::instance().printf(LogLevel::Warn, "Invalid mission: %s", argv[2]);
+                return;
+            }
+            Console::instance().setVariable("sv_mission", mission.c_str());
         }
         // Wire terrain height callback for server-side collision
         server.setHeightCallback(+[](float x, float z, void* ctx) -> float {
             return static_cast<World*>(ctx)->getHeight(x, z);
         }, &w);
+        server.setRayCallback(+[](float ox, float oy, float oz, float dx, float dy, float dz,
+                                  float distance, void* ctx) -> bool {
+            float hitDistance = 0.0f;
+            Point3F hitPoint{}, hitNormal{};
+            return static_cast<World*>(ctx)->collision().raycast(
+                {ox, oy, oz}, {dx, dy, dz}, distance, hitDistance, hitPoint, hitNormal);
+        }, &w);
         server.start(port);
     }, "startServer [port] [mission] - Start a game server on the given port");
 
     con.addCommand("loadMission", [this](int32_t argc, const char* const* argv) {
-        if (argc < 2) return;
-        startLocalGame(argv[1]);
+        if (argc < 2) {
+            Console::instance().printf(LogLevel::Warn, "Usage: loadMission <name>");
+            return;
+        }
+        const std::string mission = missionLoadPath(argv[1]);
+        if (mission.empty()) {
+            Console::instance().printf(LogLevel::Warn, "Invalid mission: %s", argv[1]);
+            return;
+        }
+        startLocalGame(mission.c_str());
     }, "loadMission <name> - Load and start a mission");
 
     con.addCommand("startMission", [this](int32_t, const char* const*) {
@@ -2575,9 +4858,32 @@ bool Game::init() {
         demoBlocksDone = target;
         demoTime = demoBlocksTotal > 0 && demoTotalTime > 0
             ? demoTotalTime * (float)target / (float)demoBlocksTotal : 0;
-        demoHasPos = false;
-        demoMoveBlend = 1.0f;
-        demoPath.clear();
+        // Parser snapshots restore authoritative demo state, but these are
+        // presentation values accumulated by the game loop after the snapshot.
+        // Drop them so a seek cannot leak camera effects or events from the
+        // discarded timeline into the new one.
+        Engine::instance().audio().stopAll();
+        clearProjectileAudio();
+        demoEventLog.clear();
+        damageFlash = -1.0f;
+        whiteOut = -1.0f;
+        shakeIntensity = 0.0f;
+        shakeOffset = {0, 0, 0};
+        if (w) w->clearEffects();
+        if (demoParser) demoParser->consumeExplosions();
+        demoTrails.clear();
+          demoHasPos = false;
+          demoAuthoredCamera = false;
+         demoHasOrientation = false;
+          demoInterpolationDt = 0.0f;
+         demoMoveBlend = 1.0f;
+          demoOrbitCam = false;
+          demoFirstPersonCam = demoParser->getInitialBlock().firstPerson;
+          controlGhostIndex = demoParser->getInitialBlock().controlObjectGhostIndex;
+            demoCameraFov = -1.0f;
+         orbitCenterInit = false;
+         spectateGhostIndex = -1;
+         demoPath.clear();
         demoPathCount = 0;
         Console::instance().printf(LogLevel::Info,
             "Demo seeked to block %d", target);
@@ -2706,10 +5012,56 @@ bool Game::init() {
     return true;
 }
 
+static void resetGameplayGui(GuiRenderer& gui) {
+    for (const char* name : {"weaponsHud", "inventoryHud"}) {
+        if (auto* control = gui.findControl(name)) {
+            for (auto& slot : control->hudSlots) {
+                slot.visible = false;
+                slot.active = false;
+                slot.bitmap.clear();
+                slot.amount = 0;
+            }
+            control->activeHudSlot = -1;
+        }
+    }
+    if (auto* control = gui.findControl("backpackFrame")) control->visible = false;
+    if (auto* control = gui.findControl("backpackText")) {
+        control->text.clear();
+        control->visible = false;
+    }
+    if (auto* control = gui.findControl("backpackIcon")) {
+        control->bitmap.clear();
+        control->visible = false;
+    }
+    if (auto* control = gui.findControl("dashboardHud")) control->visible = false;
+    if (auto* control = gui.findControl("vWeaponsBox")) {
+        control->visible = false;
+        control->activeHudSlot = -1;
+    }
+    if (auto* control = gui.findControl("ammoHud")) control->text.clear();
+    if (auto* taskList = Engine::instance().script().findObject("TaskList")) {
+        taskList->fields["currentTaskClient"] = VMValue("");
+        taskList->fields["currentAIObjective"] = VMValue("");
+        taskList->fields["currentTaskIsTeam"] = VMValue("0");
+        taskList->fields["currentTaskDescription"] = VMValue("");
+    }
+}
+
 void Game::shutdown() {
     delete mMenu;
     mMenu = nullptr;
+    clearMissionAudio();
+}
+
+void Game::clearMissionAudio() {
     auto& audio = Engine::instance().audio();
+    for (auto& [key, source] : shapeBaseSoundSources)
+        if (source) audio.releaseSource(source);
+    shapeBaseSoundSources.clear();
+    audio.setUnderwater(false);
+    audio.clearEnvironmentState();
+    for (auto* source : emitterSources) audio.releaseSource(source);
+    emitterSources.clear();
     if (ambientSource) audio.releaseSource(ambientSource);
     ambientSource = nullptr;
     ambientSound = nullptr;
@@ -2727,7 +5079,7 @@ static void scanAudioProfiles() {
     if (!s_audioProfiles.empty()) return;
     auto& fs = Engine::instance().fs();
     std::vector<std::string> scriptFiles;
-    fs.listFiles("scripts/", scriptFiles);
+    fs.listFiles("scripts/*.cs", scriptFiles);
     std::set<std::string> seen;
     for (auto& f : scriptFiles) {
         if (f.size() < 3 || f.substr(f.size() - 3) != ".cs") continue;
@@ -2757,11 +5109,12 @@ static void scanAudioProfiles() {
                 if (fnq) break;
                 fk += 8;
             }
-            if (fnq) {
+                    if (fnq) {
                 const char* fnq2 = strchr(fnq + 1, '"');
                 if (fnq2) {
                     std::string fn(fnq + 1, fnq2 - fnq - 1);
-                    if (!fn.empty()) s_audioProfiles.push_back({name, "audio/" + fn});
+                    if (!fn.empty()) s_audioProfiles.push_back({name,
+                        fn.rfind("audio/", 0) == 0 ? fn : "audio/" + fn});
                 }
             }
             p = cb + 1;
@@ -2771,27 +5124,61 @@ static void scanAudioProfiles() {
         s_audioProfiles.size(), seen.size());
 }
 
+static SoundSource* playNativeAudioProfile(AudioSystem& audio,
+    const std::map<uint32_t, ParsedDataBlock>& blocks, uint32_t profileId,
+    const Point3F& position, bool forceLoop = false) {
+    if (!profileId || !audio.config().enabled || audio.config().sfxVolume <= 0.0f)
+        return nullptr;
+    auto it = blocks.find(profileId);
+    if (it == blocks.end() || it->second.decoded.audioFilename.empty()) return nullptr;
+    const auto& profile = it->second.decoded;
+    std::string path = profile.audioFilename;
+    if (path.rfind("audio/", 0) != 0) path = "audio/" + path;
+    auto* buffer = audio.loadSound(path.c_str());
+    auto* source = buffer ? audio.createSource(false) : nullptr;
+    if (!source) return nullptr;
+    source->setVolume(profile.audioVolume * audio.config().masterVolume * audio.config().sfxVolume);
+    if (profile.audioIs3D) {
+        source->setPosition(position);
+        source->setDistance(profile.audioMinDistance, profile.audioMaxDistance);
+    }
+    source->setLooping(forceLoop || profile.audioLooping);
+    if (!forceLoop && profile.audioLooping)
+        source->setLoopSchedule(profile.audioLoopCount, profile.audioMinLoopGapMs,
+                                profile.audioMaxLoopGapMs, profileId);
+    source->play(buffer);
+    return source;
+}
+
 void Game::update(float dt) {
-    time += dt;
+    Engine::instance().audio().advance(dt);
+    const float simulationDt = GameTime::scaledDelta(dt, timeScale);
+    time += demoPlaying ? std::max(0.0f, dt) : simulationDt;
 
     if (gameState == Playing) {
         // ─── Demo playback ──────────────────────────────────────
         if (demoPlaying) {
             if (demoPaused && !demoStepRequest) {
                 demoJetHeld = false;
+                demoInterpolationDt = 0.0f;
                 return;
             }
             const bool stepDemo = demoStepRequest;
             const float playbackRate = (demoFastForward || currentInput.jet) ? 4.0f : 1.0f;
-            if (!stepDemo) demoTime += dt * playbackRate;
+            Engine::instance().audio().setPlaybackRate(playbackRate);
+            const float blockDuration = T2Demo::playbackBlockDuration(
+                demoTotalTime, demoBlocksTotal);
+            const float playbackDt = stepDemo ? blockDuration : dt * playbackRate;
+            demoInterpolationDt = playbackDt;
+            demoTime = std::min(demoTime + playbackDt, demoTotalTime);
             // Decay camera shake
             if (shakeIntensity > 0) {
                 shakeIntensity = std::max(0.0f, shakeIntensity - dt * 8.0f);
-                shakeOffset = {
-                    (float)(rand() % 1000) / 500.0f - 1.0f,
-                    (float)(rand() % 1000) / 500.0f - 1.0f,
-                    (float)(rand() % 1000) / 500.0f - 1.0f,
-                };
+                const Vec3 unit = T2Demo::cameraShakeOffset(
+                    demoTime, {1.0f, 1.0f, 1.0f}, {1.7f, 2.3f, 1.1f},
+                    {0.0f, 0.37f, 0.71f});
+                shakeOffset = {unit.x * shakeIntensity, unit.y * shakeIntensity,
+                               unit.z * shakeIntensity};
                 shakeOffset.x *= shakeIntensity;
                 shakeOffset.y *= shakeIntensity;
                 shakeOffset.z *= shakeIntensity;
@@ -2807,15 +5194,20 @@ void Game::update(float dt) {
                 demoStepRequest = false;
             } else if (demoFastForward || currentInput.jet) {
                 demoJetHeld = currentInput.jet;
-                blocksThisFrame = (int)(demoBlocksTotal * dt * playbackRate /
-                                        (demoTotalTime > 0 ? demoTotalTime : 1.0f));
+                // Use the same playhead-to-block conversion as normal
+                // playback. Integer truncation here used to stall 4x playback
+                // whenever a frame represented less than one block.
+                const int targetDone = T2Demo::playbackTargetBlock(
+                    demoTime, demoTotalTime, demoBlocksTotal);
+                blocksThisFrame = targetDone - demoBlocksDone;
             } else {
                 demoJetHeld = false;
                 // Match real-time: catch up to target position
-                int targetDone = (int)(demoTime / (demoTotalTime > 0 ? demoTotalTime : 1.0f) * demoBlocksTotal);
+                int targetDone = T2Demo::playbackTargetBlock(
+                    demoTime, demoTotalTime, demoBlocksTotal);
                 blocksThisFrame = targetDone - demoBlocksDone;
             }
-            if (blocksThisFrame < 1) blocksThisFrame = 1;
+            if (blocksThisFrame < 0) blocksThisFrame = 0;
             if (blocksThisFrame > 500) blocksThisFrame = 500;
 
             for (int i = 0; i < blocksThisFrame; i++) {
@@ -2824,13 +5216,36 @@ void Game::update(float dt) {
                     Console::instance().printf(LogLevel::Info,
                         "Demo playback complete: %d blocks in %.1f seconds",
                         demoBlocksDone, demoTime);
-                    demoPlaying = false;
-                    delete demoParser; demoParser = nullptr;
-                    setState(MenuScreen);
+                    stopDemoPlayback();
                     return;
                 }
                 demoBlocksDone++;
+                const float blockTime = demoBlocksTotal > 0
+                    ? demoTotalTime * (float)(demoBlocksDone - 1) / (float)demoBlocksTotal
+                    : 0.0f;
+                const std::string previousMission = demoParser->currentMission();
                 demoParser->setCurrentBlock(demoBlocksDone - 1);
+                if (demoParser->currentMission() != previousMission) {
+                    // A demo mission change replaces the environment ghost set;
+                    // reload the authored atmosphere before applying new ghosts.
+                    if (w && !demoParser->currentMission().empty())
+                        w->load(demoParser->currentMission().c_str());
+                    demoParser->resetMissionState();
+                    clearMissionAudio();
+                    Engine::instance().audio().stopAll();
+                    clearProjectileAudio();
+                    demoTrails.clear();
+                    if (w) w->clearEffects();
+                    targetFinderShown = false;
+                    damageFlash = -1.0f;
+                    whiteOut = -1.0f;
+                    shakeIntensity = 0.0f;
+                    auto& missionGui = Engine::instance().guiRenderer();
+                    missionGui.clearDialogs();
+                    missionGui.setContent("PlayGui");
+                    resetGameplayGui(missionGui);
+                    if (hud) hud->resetState();
+                }
 
                 // Extract position data from move blocks
                 if (block->type == T2Demo::BlockTypeMove && block->size >= 64) {
@@ -2857,10 +5272,14 @@ void Game::update(float dt) {
                 } else if (block->type == T2Demo::BlockTypePacket) {
                     PacketData pd = demoParser->parsePacket(block->data.data(), block->data.size(), demoBlocksDone - 1);
                     // Collect chat/server events for the event pane
-                    for (const auto& ev : pd.events) {
+                    for (size_t eventIndex = 0; eventIndex < pd.events.size(); ++eventIndex) {
+                        const auto& ev = pd.events[eventIndex];
                         // Handle audio events
                         if (ev.directAudioProfile && ev.audioProfileId >= 0) {
                             auto& audio = Engine::instance().audio();
+                            const uint64_t eventKey = demoAudioEventKey(
+                                demoBlocksDone - 1, static_cast<int>(eventIndex), ev);
+                            if (!demoAudioEventsPlayed.insert(eventKey).second) continue;
                             if (audio.config().enabled && audio.config().sfxVolume > 0) {
                                 scanAudioProfiles();
                                 if (ev.audioProfileId < (int)s_audioProfiles.size()) {
@@ -2869,9 +5288,9 @@ void Game::update(float dt) {
                                     if (buf) {
                                         auto* src = audio.createSource();
                                         if (src) {
-                                            src->setVolume(0.3f);
-                                            if (ev.hasAudioPosition &&
-                                                ev.classId == T2Demo::NetEventClassFirst + 18) {
+                                            src->setVolume(0.3f * audio.config().masterVolume *
+                                                audio.config().sfxVolume);
+                                            if (ev.hasAudioPosition) {
                                                 src->setPosition(Math::torquePointToYUp({
                                                     ev.audioPosition.x, ev.audioPosition.y,
                                                     ev.audioPosition.z}));
@@ -2884,6 +5303,21 @@ void Game::update(float dt) {
                             continue;
                         }
                         if (ev.message.empty()) continue;
+                        std::string displayText = ev.message;
+                        if (ev.classId == T2Demo::NetEventClassFirst + 9 &&
+                            !ev.arguments.empty()) {
+                            const std::string& command = ev.arguments[0];
+                            if ((command == "ServerMessage" || command == "ChatMessage") &&
+                                ev.arguments.size() >= (command == "ServerMessage" ? 3u : 4u)) {
+                                const size_t templateIndex = command == "ServerMessage" ? 2 : 3;
+                                std::vector<std::string> values(
+                                    ev.arguments.begin() + templateIndex + 1, ev.arguments.end());
+                                displayText = formatDemoRemoteText(ev.arguments[templateIndex], values);
+                            } else if (command != "ServerMessage" && command != "ChatMessage") {
+                                // HUD-only remote commands are state changes, not chat entries.
+                                continue;
+                            }
+                        }
                         if (ev.classId == T2Demo::NetEventClassFirst + 9 &&
                             !ev.arguments.empty() && ev.arguments[0] == "ServerMessage") {
                             std::vector<VMValue> callbackArgs;
@@ -2900,13 +5334,14 @@ void Game::update(float dt) {
                             dispatchHudClientCommand(ev.arguments);
                         }
                         DemoTimedEvent te;
-                        te.time = demoTime;
-                        te.text = ev.message;
+                        te.time = blockTime;
+                        te.text = displayText;
                         te.ghostIndex = -1;
                         if (ev.classId == T2Demo::NetEventClassFirst + 22) {
                             te.type = 0; // chat message
                         } else if (ev.classId == T2Demo::NetEventClassFirst + 9) {
-                            te.type = 1; // server command
+                            te.type = (!ev.arguments.empty() && ev.arguments[0] == "ChatMessage")
+                                ? 0 : 1; // server command or chat remote
                         } else {
                             te.type = 2; // system
                         }
@@ -2915,23 +5350,26 @@ void Game::update(float dt) {
                             te.ghostIndex = pd.ghosts[0].index;
                         }
                         demoEventLog.push_back(te);
+                        if (demoEventLog.size() > 200)
+                            demoEventLog.erase(demoEventLog.begin(), demoEventLog.begin() +
+                                               (demoEventLog.size() - 200));
                     }
                     // Update compression point from GameState
-                    if (pd.gameState.hasCameraTransform) {
+                     if (pd.gameState.hasCameraTransform) {
                         demoPrevCameraPos = demoCameraPos;
                         demoPrevCameraTarget = demoCameraTarget;
                         demoCameraPos = {pd.gameState.cameraPosition.x,
                                           pd.gameState.cameraPosition.y,
                                           pd.gameState.cameraPosition.z};
+                        const Vec3 direction = T2Demo::cameraDirectionFromYawPitch(
+                            pd.gameState.cameraYaw, pd.gameState.cameraPitch);
                         demoCameraTarget = {
-                            demoCameraPos.x + std::sin(pd.gameState.cameraYaw) *
-                                std::cos(pd.gameState.cameraPitch),
-                            demoCameraPos.y + std::cos(pd.gameState.cameraYaw) *
-                                std::cos(pd.gameState.cameraPitch),
-                            demoCameraPos.z + std::sin(pd.gameState.cameraPitch)
-                        };
-                        demoMoveBlend = 0.0f;
-                        demoHasPos = true;
+                            demoCameraPos.x + direction.x,
+                            demoCameraPos.y + direction.y,
+                            demoCameraPos.z + direction.z};
+                         demoMoveBlend = 0.0f;
+                         demoHasPos = true;
+                         demoAuthoredCamera = true;
                     }
                     if (pd.gameState.controlObjectDirty) {
                         // Full control object update with new ghost index
@@ -2939,34 +5377,55 @@ void Game::update(float dt) {
                     } else if (pd.gameState.compressionPoint.x != 0 ||
                                pd.gameState.compressionPoint.y != 0 ||
                                pd.gameState.compressionPoint.z != 0) {
-                         // Update compression point from partial control update
-                           const Vec3& cp = pd.gameState.compressionPoint;
-                           if (!demoHasPos) {
-                               demoCameraPos = {cp.x, cp.y, cp.z};
-                              demoCameraTarget = demoHasOrientation
-                                  ? Point3F{cp.x + std::sin(demoViewYaw) * std::cos(demoViewPitch),
-                                         cp.y + std::cos(demoViewYaw) * std::cos(demoViewPitch),
-                                         cp.z + std::sin(demoViewPitch)}
-                                  : Point3F{cp.x, cp.y + 2.0f, cp.z};
-                             demoHasPos = true;
-                         }
+                          // Update compression point from partial control update
+                          Vec3 cp = pd.gameState.compressionPoint;
+                          const int controlIndex = pd.gameState.controlObjectGhostIndex >= 0
+                              ? pd.gameState.controlObjectGhostIndex : controlGhostIndex;
+                          if (demoParser) {
+                              const auto* control = demoParser->getGhostTracker().getGhost(controlIndex);
+                              if (control && control->className == "Player") cp.z += 1.5f;
+                          }
+                          demoPrevCameraPos = demoCameraPos;
+                          demoPrevCameraTarget = demoCameraTarget;
+                          demoCameraPos = {cp.x, cp.y, cp.z};
+                          demoCameraTarget = demoHasOrientation
+                              ? Point3F{cp.x + std::sin(demoViewYaw) * std::cos(demoViewPitch),
+                                        cp.y + std::cos(demoViewYaw) * std::cos(demoViewPitch),
+                                        cp.z + std::sin(demoViewPitch)}
+                              : Point3F{cp.x, cp.y + 2.0f, cp.z};
+                          demoMoveBlend = 0.0f;
+                          demoHasPos = true;
                      }
-                    // Store damage flash and whiteout for screen effects
-                    damageFlash = pd.gameState.damageFlash;
-                    whiteOut = pd.gameState.whiteOut;
-                    if (pd.gameState.cameraFov > 0) demoCameraFov = pd.gameState.cameraFov;
+                    // GameState is sparse; an omitted effect must not erase the
+                    // previous effect before its normal client-side decay.
+                    if (pd.gameState.hasDamageFlash)
+                        damageFlash = pd.gameState.damageFlash;
+                    if (pd.gameState.hasWhiteOut)
+                        whiteOut = pd.gameState.whiteOut;
+                     if (pd.gameState.cameraFov > 0) demoCameraFov = pd.gameState.cameraFov;
                     // Camera shake on damage
                     if (pd.gameState.damageFlash > 0.5f)
                         shakeIntensity = std::max(shakeIntensity, pd.gameState.damageFlash * 3.0f);
                     // Store control object ghost index for highlight
-                    if (pd.gameState.controlObjectGhostIndex >= 0)
-                        controlGhostIndex = pd.gameState.controlObjectGhostIndex;
+                     if (pd.gameState.controlObjectGhostIndex >= 0)
+                         controlGhostIndex = pd.gameState.controlObjectGhostIndex;
 
                     // Consume pending explosions from projectile parsers
                     auto explosions = demoParser->consumeExplosions();
                     for (auto& exp : explosions) {
-                        Point3F expPos = {exp.position.x, exp.position.y, exp.position.z};
-                        w->spawnExplosion(expPos, {1.0f, 0.7f, 0.3f, 1.0f}, 2.0f, 15);
+                        Point3F expPos = Math::torquePointToYUp({exp.position.x, exp.position.y, exp.position.z});
+                        Point3F expNormal = Math::torquePointToYUp({exp.normal.x, exp.normal.y, exp.normal.z});
+                        const V12::DecodedDataBlock* projectileData = nullptr;
+                        const V12::DecodedDataBlock* explosionData = nullptr;
+                        const auto& dataBlocks = demoParser->getInitialBlock().dataBlocks;
+                        auto projectileIt = dataBlocks.find((uint32_t)exp.projectileDataBlockId);
+                        if (projectileIt != dataBlocks.end()) {
+                            projectileData = &projectileIt->second.decoded;
+                            auto explosionIt = dataBlocks.find(projectileData->projectileExplosionRef);
+                            if (explosionIt != dataBlocks.end())
+                                explosionData = &explosionIt->second.decoded;
+                        }
+                        w->spawnExplosionEffect(expPos, projectileData, explosionData, &dataBlocks, expNormal);
                         shakeIntensity = std::max(shakeIntensity, 1.5f);
                     }
 
@@ -3097,7 +5556,7 @@ void Game::update(float dt) {
 
             // Advance interpolation blend (smooth over ~150ms)
             if (demoMoveBlend < 1.0f) {
-                demoMoveBlend = std::min(demoMoveBlend + dt * 6.0f, 1.0f);
+                demoMoveBlend = std::min(demoMoveBlend + demoInterpolationDt * 6.0f, 1.0f);
             }
 
             // Free camera toggle during demos (F1)
@@ -3128,21 +5587,54 @@ void Game::update(float dt) {
                 if (currentInput.jump) freeCamPos.y += camSpeed;
                 if (currentInput.jet) freeCamPos.y -= camSpeed;
                 freeCamTarget = {freeCamPos.x + fwd.x, freeCamPos.y + fwd.y, freeCamPos.z + fwd.z};
-            } else if (demoOrbitCam) {
+                    } else if (demoOrbitCam) {
                 float orbitSpeed = 60.0f * dt;
                 bool orbitInput = currentInput.left || currentInput.right;
                 if (currentInput.left) orbitAngle -= orbitSpeed;
                 else if (currentInput.right) orbitAngle += orbitSpeed;
                 // Auto-rotate when no input (gentle spin to show the scene)
                 if (!orbitInput) orbitAngle += dt * 8.0f;
-                if (currentInput.forward) orbitDistance = std::max(20.0f, orbitDistance - 50.0f * dt);
+                 if (currentInput.forward) orbitDistance = std::max(20.0f, orbitDistance - 50.0f * dt);
                 if (currentInput.backward) orbitDistance = std::min(2000.0f, orbitDistance + 50.0f * dt);
                 if (currentInput.jump) orbitHeight = std::min(500.0f, orbitHeight + 30.0f * dt);
-                if (currentInput.jet) orbitHeight = std::max(20.0f, orbitHeight - 30.0f * dt);
+                 if (currentInput.jet) orbitHeight = std::max(20.0f, orbitHeight - 30.0f * dt);
+             }
+            auto& demoKeys = Engine::instance().platform().input().keysDown;
+            static bool prevDemoF2 = false, prevDemoF4 = false;
+            const bool demoF2 = demoKeys[SCANCODE_F2];
+            const bool demoF4 = demoKeys[SCANCODE_F4];
+            if (demoF2 && !prevDemoF2) {
+                demoOrbitCam = !demoOrbitCam;
+                demoFirstPersonCam = false;
+                orbitCenterInit = false;
             }
+            if (demoF4 && !prevDemoF4) {
+                demoFirstPersonCam = !demoFirstPersonCam;
+                demoOrbitCam = false;
+            }
+            prevDemoF2 = demoF2;
+            prevDemoF4 = demoF4;
 
+            auto& audio = Engine::instance().audio();
+            if (audio.config().enabled) {
+                const Point3F camPos = freeCamActive ? freeCamPos : demoCameraPos;
+                const Point3F camTarget = freeCamActive ? freeCamTarget : demoCameraTarget;
+                Point3F forward = {camTarget.x - camPos.x, camTarget.y - camPos.y,
+                                   camTarget.z - camPos.z};
+                const float length = std::sqrt(forward.x * forward.x + forward.y * forward.y +
+                                               forward.z * forward.z);
+                if (length > 0.0001f) {
+                    forward.x /= length; forward.y /= length; forward.z /= length;
+                }
+                audio.update(camPos, {0, 0, 0}, forward, {0, 1, 0},
+                             w && w->isUnderwater(camPos));
+            }
             return; // skip normal game logic during demo playback
         }
+
+        // Demo playback has its own clock; normal simulation honors the
+        // TorqueScript time scale from this point onward.
+        dt = simulationDt;
 
         // Mapper mode: free-fly camera only, no player gameplay
         if (mapperMode) {
@@ -3176,7 +5668,7 @@ void Game::update(float dt) {
             auto& audio = Engine::instance().audio();
             if (audio.config().enabled) {
                 Point3F fwd = {std::sin(freeCamRot.z) * std::cos(freeCamRot.x), std::sin(freeCamRot.x), std::cos(freeCamRot.z) * std::cos(freeCamRot.x)};
-                audio.update(freeCamPos, {0,0,0}, fwd, {0,1,0});
+                audio.update(freeCamPos, {0,0,0}, fwd, {0,1,0}, w->isUnderwater(freeCamPos));
             }
             return;
         }
@@ -3303,6 +5795,7 @@ void Game::update(float dt) {
             for (int i = 0; i < pl->weaponCount(); i++) {
                 const_cast<Weapon&>(pl->weapon(i)).updateTimers(dt);
             }
+            pl->updateWeaponHud();
 
             // Fire weapon
             if (currentInput.fire) {
@@ -3318,6 +5811,7 @@ void Game::update(float dt) {
                 static bool chatActive = false;
                 static std::string chatBuf;
                 auto& plat = Engine::instance().platform();
+                hud->setChatInput("");
                 bool enterDown = plat.input().keysDown[SCANCODE_RETURN];
                 bool escDown = plat.input().keysDown[SCANCODE_ESCAPE];
                 if (!chatActive) {
@@ -3367,10 +5861,8 @@ void Game::update(float dt) {
                     if (plat.input().keysDown[SCANCODE_BACKSPACE] && !prevBS && !chatBuf.empty())
                         chatBuf.pop_back();
                     prevBS = plat.input().keysDown[SCANCODE_BACKSPACE];
-                    // Render chat buffer as overlay text
-                    if (!chatBuf.empty()) {
-                        hud->showMessage(chatBuf.c_str(), ColorF{1,1,1,1});
-                    }
+                    // Keep the editable line separate from expiring popups.
+                    hud->setChatInput(chatBuf.c_str());
                 }
             }
 
@@ -3401,14 +5893,21 @@ void Game::update(float dt) {
             if (currentInput.reload) {
                 int32_t cw = pl->currentWeapon();
                 if (cw >= 0 && cw < pl->weaponCount()) {
-                    const_cast<Weapon&>(pl->weapon(cw)).reloading = true;
-                    const_cast<Weapon&>(pl->weapon(cw)).reloadTimer = gWeaponTable[pl->weapon(cw).type].reloadTime;
+                    auto& weapon = const_cast<Weapon&>(pl->weapon(cw));
+                    if (gWeaponTable[weapon.type].maxAmmo > 0 && !weapon.reloading) {
+                        weapon.reloading = true;
+                        weapon.reloadTimer = gWeaponTable[weapon.type].reloadTime;
+                    }
                 }
             }
         }
 
         // Death check (deaths tracked in Player::applyDamage)
         if (pl->health() <= 0 && gameState == Playing) {
+            deathTimer = 0.0f;
+            currentInput = {};
+            pendingMoves.clear();
+            w->projectiles().clear();
             setState(Dead);
         }
 
@@ -3424,7 +5923,7 @@ void Game::update(float dt) {
             float flen = std::sqrt(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
             if (flen > 0.0001f) { forward.x /= flen; forward.y /= flen; forward.z /= flen; }
             Point3F up = {0, 1, 0};
-            audio.update(camPos, pl->velocity(), forward, up);
+            audio.update(camPos, pl->velocity(), forward, up, w->isUnderwater(camPos));
         }
     } else if (gameState == Dead) {
         // Spectator mode when online
@@ -3438,40 +5937,46 @@ void Game::update(float dt) {
                        ghost->className == "WheeledVehicle" ||
                        ghost->className == "Vehicle";
             };
-            if (!liveSpectateInit) {
-                // Find first live ghost to spectate
-                auto indices = liveGhosts.getAllIndices();
-                auto first = std::find_if(indices.begin(), indices.end(), isSpectatable);
-                if (first != indices.end()) {
-                    liveSpectateInit = true;
-                    freeCamActive = false;
-                    spectateGhostIndex = *first;
-                    // If it's our own ghost, skip to next
-                    if ((uint32_t)spectateGhostIndex == serverPlayerGhostIndex && indices.size() > 1)
-                        spectateGhostIndex = indices[1];
+            auto spectatableIndices = liveGhosts.getAllIndices();
+            spectatableIndices.erase(
+                std::remove_if(spectatableIndices.begin(), spectatableIndices.end(),
+                    [&](int index) {
+                        return !isSpectatable(index) ||
+                               (uint32_t)index == serverPlayerGhostIndex;
+                    }),
+                spectatableIndices.end());
+             if (!spectatableIndices.empty() &&
+                (!liveSpectateInit ||
+                 std::find(spectatableIndices.begin(), spectatableIndices.end(),
+                           spectateGhostIndex) == spectatableIndices.end())) {
+                // Native observers already receive the server's current target;
+                // use it before falling back to stable ghost order.
+                int initial = -1;
+                if (activeConn->isObserverMode()) {
+                    const int control = (int)activeConn->observerSnapshot().controlGhost;
+                    if (std::find(spectatableIndices.begin(), spectatableIndices.end(),
+                                  control) != spectatableIndices.end())
+                        initial = control;
                 }
-            }
-            // Cycle ghosts with right mouse / R key
+                if (initial < 0) initial = spectatableIndices.front();
+                 liveSpectateInit = true;
+                 freeCamActive = false;
+                 spectateGhostIndex = initial;
+                 liveFollowGhostIndex = -1;
+                 liveFollowCenterInit = false;
+             }
+            // Cycle ghosts with the observer right mouse action / R key.
             static bool prevCycle = false;
-            bool cycleNow = currentInput.fire || currentInput.reload;
+            bool cycleNow = observerCyclePressed(currentInput.reload, currentInput.altFire);
             if (cycleNow && !prevCycle) {
-                auto indices = liveGhosts.getAllIndices();
-                if (!indices.empty()) {
-                    indices.erase(std::remove_if(indices.begin(), indices.end(),
-                                                 [&](int index) { return !isSpectatable(index); }),
-                                  indices.end());
-                }
-                if (!indices.empty()) {
+                if (!spectatableIndices.empty()) {
                     int cur = 0;
-                    for (size_t i = 0; i < indices.size(); i++)
-                        if (indices[i] == spectateGhostIndex) { cur = (int)i; break; }
-                    cur = (cur + 1) % (int)indices.size();
-                    spectateGhostIndex = indices[cur];
-                    // Skip our own ghost
-                    if ((uint32_t)spectateGhostIndex == serverPlayerGhostIndex && indices.size() > 1) {
-                        cur = (cur + 1) % (int)indices.size();
-                        spectateGhostIndex = indices[cur];
-                    }
+                    for (size_t i = 0; i < spectatableIndices.size(); i++)
+                        if (spectatableIndices[i] == spectateGhostIndex) { cur = (int)i; break; }
+                     cur = (cur + 1) % (int)spectatableIndices.size();
+                     spectateGhostIndex = spectatableIndices[cur];
+                     liveFollowGhostIndex = -1;
+                     liveFollowCenterInit = false;
                 }
             }
             prevCycle = cycleNow;
@@ -3509,12 +6014,13 @@ void Game::update(float dt) {
             }
         } else {
             // Offline: auto-respawn after delay
-            static float deathTimer = 0;
             deathTimer += dt;
-            if (deathTimer > 3.0f) {
-                deathTimer = 0;
-                liveSpectateInit = false;
-                pl->respawn();
+            if (deathTimer >= DeathRespawn::RespawnDelay) {
+                deathTimer = 0.0f;
+                 liveSpectateInit = false;
+                 liveFollowGhostIndex = -1;
+                 liveFollowCenterInit = false;
+                 pl->respawn();
                 setState(Playing);
             }
         }
@@ -3526,6 +6032,35 @@ void Game::render(float dt) {
 
     auto& eng = Engine::instance();
     auto& r = eng.renderer();
+    auto applyShapeBaseAudio = [&](GhostEntry& ghost, int ghostIndex, const Vec3& position) {
+        auto& audio = eng.audio();
+        if (!audio.isInitialized()) return;
+        for (int slot = 0; slot < 4; ++slot) {
+            const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(ghostIndex)) << 3) |
+                                 static_cast<uint64_t>(slot);
+            const auto& state = ghost.soundThreads[slot];
+            auto it = shapeBaseSoundSources.find(key);
+            if (!state.valid || !state.playing || state.profileId < 0) {
+                if (it != shapeBaseSoundSources.end()) {
+                    audio.releaseSource(it->second);
+                    shapeBaseSoundSources.erase(it);
+                }
+                continue;
+            }
+            if (it == shapeBaseSoundSources.end()) {
+                scanAudioProfiles();
+                if (state.profileId >= (int)s_audioProfiles.size()) continue;
+                auto* buffer = audio.loadSound(s_audioProfiles[state.profileId].filename.c_str());
+                auto* source = buffer ? audio.createSource(true) : nullptr;
+                if (!source) continue;
+                source->setLooping(true);
+                source->setVolume(0.3f * audio.config().masterVolume * audio.config().sfxVolume);
+                source->play(buffer);
+                it = shapeBaseSoundSources.emplace(key, source).first;
+            }
+            it->second->setPosition(Math::torquePointToYUp({position.x, position.y, position.z}));
+        }
+    };
     r.beginFrame({0.3f, 0.5f, 0.8f, 1.0f});
 
     Point3F camPos, camTarget;
@@ -3536,7 +6071,7 @@ void Game::render(float dt) {
     } else if (demoPlaying && (demoHasPos || demoFirstPersonCam)) {
         // Orbit camera for spectator mode
         if (demoFirstPersonCam) {
-            if (demoHasPos) {
+            if (demoHasPos && demoAuthoredCamera) {
                 camPos = demoCameraPos;
                 camTarget = demoCameraTarget;
             } else {
@@ -3579,14 +6114,12 @@ void Game::render(float dt) {
             }
                 if (!cameraGhostUsed && w && !w->observerCameras().empty()) {
                 const auto& observer = w->observerCameras().front();
-                MatrixF rotation;
-                rotation.setRotationAxis(observer.axis, -observer.angleDeg * Math::DEG2RAD(1.0f));
                 camPos = Math::torquePointToYUp(observer.pos);
-                const Point3F rawForward = rotation.transformNormal({0, 0, 1});
-                const Point3F rawTarget = {observer.pos.x + rawForward.x * 10.0f,
-                                           observer.pos.y + rawForward.y * 10.0f,
-                                           observer.pos.z + rawForward.z * 10.0f};
-                camTarget = Math::torquePointToYUp(rawTarget);
+                const Point3F forward = Math::torqueCameraForwardToYUp(
+                    observer.axis, Math::DEG2RAD(observer.angleDeg));
+                camTarget = {camPos.x + forward.x * 10.0f,
+                             camPos.y + forward.y * 10.0f,
+                             camPos.z + forward.z * 10.0f};
                 cameraCoordinatesConverted = true;
                 }
             }
@@ -3630,19 +6163,34 @@ void Game::render(float dt) {
                     [&](int index) { return isSpectatable(liveGhosts.getGhost(index)); });
                 spectateGhostIndex = first == idxs.end() ? -1 : *first;
             }
-            const GhostEntry* g = liveGhosts.getGhost(spectateGhostIndex);
-            if (g && (g->position.x != 0 || g->position.y != 0 || g->position.z != 0)) {
+             const GhostEntry* g = liveGhosts.getGhost(spectateGhostIndex);
+             if (g && (g->position.x != 0 || g->position.y != 0 || g->position.z != 0)) {
                 if (freeCamActive) {
                     camPos = freeCamPos;
                     camTarget = freeCamTarget;
                 } else {
-                    camPos = {g->position.x, g->position.y + 4.0f, g->position.z - 6.0f};
-                    camTarget = Point3F{g->position.x, g->position.y, g->position.z};
+                    const Point3F targetPos{g->position.x, g->position.y, g->position.z};
+                    if (liveFollowGhostIndex != spectateGhostIndex) {
+                        liveFollowGhostIndex = spectateGhostIndex;
+                        liveFollowCenter = targetPos;
+                        liveFollowCenterInit = true;
+                    }
+                    // setOrbitMode follows the target without teleporting the view;
+                    // use frame-rate-independent tracking for the native ghost path.
+                    const float followAlpha = 1.0f - std::exp(-10.0f * std::max(dt, 0.0f));
+                    liveFollowCenter.x += (targetPos.x - liveFollowCenter.x) * followAlpha;
+                    liveFollowCenter.y += (targetPos.y - liveFollowCenter.y) * followAlpha;
+                    liveFollowCenter.z += (targetPos.z - liveFollowCenter.z) * followAlpha;
+                    camPos = {liveFollowCenter.x, liveFollowCenter.y + 4.0f,
+                              liveFollowCenter.z - 6.0f};
+                    camTarget = liveFollowCenter;
                     camTarget.y += 2.0f;
                 }
             } else {
                 camPos = freeCamActive ? freeCamPos : Point3F{0, 10, 0};
                 camTarget = freeCamActive ? freeCamTarget : Point3F{0, 10, -1};
+                liveFollowGhostIndex = -1;
+                liveFollowCenterInit = false;
             }
         } else if (demoMoveBlend < 1.0f) {
             float t = demoMoveBlend;
@@ -3667,7 +6215,10 @@ void Game::render(float dt) {
         camTarget = {0, 6, 1};
     }
     // Apply camera shake
-    Point3F finalCam = {camPos.x + shakeOffset.x, camPos.y + shakeOffset.y, camPos.z + shakeOffset.z};
+    const Point3F nativeShake = w ? w->cameraShakeOffset(camPos) : Point3F{};
+    Point3F finalCam = {camPos.x + shakeOffset.x + nativeShake.x,
+                        camPos.y + shakeOffset.y + nativeShake.y,
+                        camPos.z + shakeOffset.z + nativeShake.z};
     bool cameraOverride = false;
     // Diagnostic camera override for mapper analysis (TORCH_CAM=px,py,pz,tx,ty,tz)
     if (const char* camOv = getenv("TORCH_CAM")) {
@@ -3680,15 +6231,6 @@ void Game::render(float dt) {
     if (demoPlaying && !cameraOverride && !cameraCoordinatesConverted) {
         finalCam = Math::torquePointToYUp(finalCam);
         camTarget = Math::torquePointToYUp(camTarget);
-    }
-    if (demoPlaying) {
-        static bool loggedRenderCamera = false;
-        if (!loggedRenderCamera) {
-            loggedRenderCamera = true;
-            Console::instance().printf(LogLevel::Info,
-                "Demo render camera pos=(%.2f %.2f %.2f) target=(%.2f %.2f %.2f)",
-                finalCam.x, finalCam.y, finalCam.z, camTarget.x, camTarget.y, camTarget.z);
-        }
     }
     // Apply FOV from demo stream if available
     float savedFov = r.config().fov;
@@ -3703,6 +6245,7 @@ void Game::render(float dt) {
     // Shadow pass and scene rendering — skip in shape viewer / test shape mode
     if (!shapeViewerActive && !testShapeLoaded) {
         const char* dynShadows = Console::instance().getStringVariable("enableDynamicShadows", "1");
+        r.shadowsActive = false;
         if (r.shadowEnabled() && (!dynShadows || atoi(dynShadows) != 0)) {
             // Compute scene bounds from terrain
             Point3F sceneCenter = {0, 0, 0};
@@ -3778,8 +6321,11 @@ void Game::render(float dt) {
                     model.setTranslation(b.pos);
                     MatrixF mvp = r.lightViewProj() * model * b.shape->upOrientation();
                     shadowShader->setUniform("uLightMVP", mvp);
-                    r.setModel(model * b.shape->upOrientation());
-                    b.shape->render(0);
+                    // DTSShape::render binds the lit shader and would therefore
+                    // submit bot geometry with stale main-pass uniforms. Shadow
+                    // casters must stay on the depth shader.
+                    for (auto& mesh : b.shape->meshes)
+                        mesh.render();
                 }
             }
         }
@@ -3815,6 +6361,28 @@ void Game::render(float dt) {
     glDepthFunc(GL_LESS);
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
+    w->updateRendererLights(r);
+    if (!demoPlaying && activeConn && activeConn->isConnected()) {
+        auto lights = r.dynamicLights;
+        for (int idx : liveGhosts.getAllIndices()) {
+            const GhostEntry* ghost = liveGhosts.getGhost(idx);
+            if (!ghost || ghost->className.empty() ||
+                ghost->className.find("Projectile") == std::string::npos ||
+                !ghost->hasDatablock) continue;
+            const auto dataIt = nativeDatablocks.find(ghost->datablockId);
+            if (dataIt == nativeDatablocks.end() || !dataIt->second.decoded.projectileHasLight)
+                continue;
+            const auto& data = dataIt->second.decoded;
+            const auto color = Engine::instance().audio().isUnderwater() &&
+                               data.projectileHasUnderwaterLightColor
+                ? data.projectileUnderwaterLightColor : data.projectileLightColor;
+            const Point3F projectilePos = Math::torquePointToYUp(
+                {ghost->renderPos.x, ghost->renderPos.y, ghost->renderPos.z});
+            lights.push_back({projectilePos.x, projectilePos.y, projectilePos.z,
+                              color[0], color[1], color[2], data.projectileLightRadius, 2.0f});
+        }
+        r.setDynamicLights(lights);
+    }
     w->render(finalCam);
     if (pl && !freeCamActive && !demoPlaying && !testShapeLoaded) pl->render();
     } // end if (!shapeViewerActive && !testShapeLoaded)
@@ -3824,6 +6392,9 @@ void Game::render(float dt) {
         if (font) {
             for (const auto& obj : w->objects()) {
                 if (obj.label.empty()) continue;
+                 if ((obj.className == "Marker" || obj.className == "MissionMarker" ||
+                      obj.className == "SpawnSphere" || obj.className == "AIObjective") && !mapperMode)
+                    continue;
                 Point3F anchor = obj.labelAnchorValid
                     ? obj.labelAnchor
                     : Math::torquePointToYUp(obj.pos);
@@ -3833,13 +6404,19 @@ void Game::render(float dt) {
                     screen.x < 0 || screen.x > r.config().width ||
                     screen.y < 0 || screen.y > r.config().height)
                     continue;
-                font->render(obj.label.c_str(), screen.x - 35, screen.y - 12,
-                    {1, 1, 1, 1}, 1.0f);
+                 ColorF labelColor{1, 1, 1, 1};
+                 if (obj.missionObjective)
+                     labelColor = objectiveMarkerColor(obj.teamId, pl ? pl->team() : 0, true);
+                 font->render(obj.label.c_str(), screen.x - 35, screen.y - 12,
+                     labelColor, 1.0f);
             }
         }
     }
 
-    if (hud && gameState == Playing && demoPlaying && !mapperMode) hud->render(this);
+    const bool liveObserver = activeConn && activeConn->isConnected() && activeConn->isObserverMode();
+    if (hud && !mapperMode && (gameState == Playing ||
+                               (gameState == Dead && !demoPlaying)))
+        hud->render(this);
 
     // Connection status overlay
     if (cfg.online && activeConn && activeConn->isConnected() && liveGhosts.size() == 0) {
@@ -4014,6 +6591,7 @@ void Game::render(float dt) {
 
         const GhostTracker& gt = demoParser->getGhostTracker();
         std::vector<int> indices = gt.getAllIndices();
+        w->beginProjectileTrailSync();
         for (int idx : indices) {
             const GhostEntry* g = gt.getGhost(idx);
             if (!g) continue;
@@ -4040,7 +6618,7 @@ void Game::render(float dt) {
                 mg->renderRotation = g->rotation;
                 mg->prevPosition = p;
             } else {
-                float lerpFactor = 1.0f - expf(-12.0f * dt);
+                float lerpFactor = 1.0f - expf(-12.0f * demoInterpolationDt);
                 mg->renderPos.x += (p.x - mg->renderPos.x) * lerpFactor;
                 mg->renderPos.y += (p.y - mg->renderPos.y) * lerpFactor;
                 mg->renderPos.z += (p.z - mg->renderPos.z) * lerpFactor;
@@ -4067,6 +6645,37 @@ void Game::render(float dt) {
             }
             rp = mg->renderPos;
 
+             const bool isProjectile = (g->className.find("Projectile") != std::string::npos ||
+                 g->className == "EnergyBolt" || g->className == "LinearFlare" ||
+                 g->className.find("Tracer") != std::string::npos);
+             const V12::DecodedDataBlock* visualData = nullptr;
+              bool hasBaseEmitter = false;
+             if (isProjectile && g->hasDatablock) {
+                 const auto& dataBlocks = demoParser->getInitialBlock().dataBlocks;
+                 auto projectileIt = dataBlocks.find((uint32_t)g->datablockId);
+                  if (projectileIt != dataBlocks.end()) {
+                      const auto& projectileData = projectileIt->second.decoded;
+                      visualData = &projectileData;
+                     hasBaseEmitter = projectileData.projectileBaseEmitterRef != 0;
+                     if (projectileData.hasProjectileScale) {
+                         mg->projectileScale = {
+                             std::isfinite(projectileData.projectileScale.x) && projectileData.projectileScale.x > 0.0f
+                                 ? projectileData.projectileScale.x : 1.0f,
+                             std::isfinite(projectileData.projectileScale.y) && projectileData.projectileScale.y > 0.0f
+                                 ? projectileData.projectileScale.y : 1.0f,
+                             std::isfinite(projectileData.projectileScale.z) && projectileData.projectileScale.z > 0.0f
+                                 ? projectileData.projectileScale.z : 1.0f};
+                         mg->hasProjectileScale = true;
+                     } else {
+                         mg->projectileScale = {1.0f, 1.0f, 1.0f};
+                         mg->hasProjectileScale = false;
+                     }
+                     w->syncProjectileTrail(idx, Math::torquePointToYUp({rp.x, rp.y, rp.z}),
+                        Math::torquePointToYUp({g->velocity.x, g->velocity.y, g->velocity.z}),
+                        &projectileData, &dataBlocks);
+                }
+            }
+
             // Compute velocity from interpolated position (smooth)
             float dx = rp.x - mg->prevPosition.x;
             float dz = rp.z - mg->prevPosition.z;
@@ -4075,14 +6684,126 @@ void Game::render(float dt) {
             mg->isMoving = (speed > 0.1f);
             if (mg->isMoving) {
                 mg->moveYaw = atan2f(dx, dz);
-                mg->animTime += dt;
+                mg->animTime += demoInterpolationDt;
             } else {
-                mg->animTime = fmodf(mg->animTime, 10.0f) + dt * 0.3f; // slow idle
+                mg->animTime = fmodf(mg->animTime, 10.0f) + demoInterpolationDt * 0.3f; // slow idle
             }
-            mg->prevPosition = rp;
-            mg->hasRendered = true;
+            mg->threadAnimTime += demoInterpolationDt;
+             mg->prevPosition = rp;
+             mg->hasRendered = true;
+              applyShapeBaseAudio(*mg, idx, p);
 
-            // Try to get or load the DTS shape for this ghost class
+               if (visualData && visualData->projectileMaterial != V12::DecodedDataBlock::ProjectileMaterial::None) {
+                   const auto& data = *visualData;
+                   mg->projectileVisualAge += std::max(0.0f, dt);
+                   const float fade = projectileVisualFade(data, mg->projectileVisualAge);
+                   ColorF color{data.projectileMaterialColor[0], data.projectileMaterialColor[1],
+                                data.projectileMaterialColor[2], data.projectileMaterialColor[3] *
+                                projectileMaterialAlpha(data) * fade};
+                   const bool additive = projectileMaterialAdditive(data);
+                   std::vector<uint32_t> materialTextures;
+                  for (const auto& name : data.projectileMaterialTextures) {
+                      std::vector<uint32_t> frames;
+                      std::vector<float> durations;
+                      r.loadTextureFrames(name.c_str(), frames, durations);
+                      materialTextures.push_back(frames.empty() ? UINT32_MAX : frames.front());
+                  }
+                   const auto texture = [&](size_t index) {
+                       return projectileMaterialTexture(materialTextures, index);
+                   };
+                   const Point3F materialPos = Math::torquePointToYUp({rp.x, rp.y, rp.z});
+                   const Point3F velocity = Math::torquePointToYUp(
+                       {g->velocity.x, g->velocity.y, g->velocity.z});
+                   const auto layers = projectileVisualLayers(data, mg->projectileVisualAge);
+                   for (const auto& layer : layers) {
+                       if (layer.alpha <= 0.0f) continue;
+                       ColorF layerColor = color;
+                       layerColor.a *= std::clamp(layer.alpha, 0.0f, 1.0f);
+                        const bool drawTracer = (data.projectileMaterial == V12::DecodedDataBlock::ProjectileMaterial::LinearFlare ||
+                            data.projectileMaterial == V12::DecodedDataBlock::ProjectileMaterial::Cross) &&
+                            data.projectileTracerLength > 0.0f;
+                        if (drawTracer) {
+                           Point3F direction = velocity;
+                           const float length = std::sqrt(direction.x * direction.x + direction.y * direction.y + direction.z * direction.z);
+                           if (length > 0.001f) {
+                               direction.x /= length; direction.y /= length; direction.z /= length;
+                           } else direction = {0, 0, 1};
+                           const float trailLength = data.projectileTracerLength * (1.0f + 0.35f * (float)(&layer - layers.data()));
+                           const Point3F start{materialPos.x - direction.x * trailLength,
+                                               materialPos.y - direction.y * trailLength,
+                                               materialPos.z - direction.z * trailLength};
+                           const auto quad = projectileBeamQuad(start, materialPos, r.cameraPos,
+                               std::max(0.01f, layer.height));
+                           if (quad.size() == 4)
+                               r.drawTexturedQuad(quad[0], quad[1], quad[2], quad[3],
+                                                  texture(layer.textureIndex), layerColor, 0, 0, 1, 1, additive);
+                       }
+                       const bool drawCross = data.projectileMaterial != V12::DecodedDataBlock::ProjectileMaterial::Cross ||
+                           data.projectileRenderCross || data.projectileTracerLength <= 0.0f;
+                       if (drawCross) {
+                           const float size = data.projectileMaterial == V12::DecodedDataBlock::ProjectileMaterial::Cross
+                               ? std::max(0.01f, data.projectileCrossSize > 0.0f ? data.projectileCrossSize : layer.width)
+                               : layer.width;
+                           r.drawOrientedSprite(materialPos, size, layerColor, velocity, layer.angle,
+                                                texture(layer.textureIndex), additive);
+                       }
+                   }
+                  if (data.projectileHasLight)
+                      r.drawSprite(Math::torquePointToYUp({rp.x, rp.y, rp.z}),
+                                   std::clamp(data.projectileLightRadius, 0.05f, 64.0f),
+                                   {data.projectileLightColor[0], data.projectileLightColor[1],
+                                    data.projectileLightColor[2], 0.22f}, true);
+              }
+
+               if (demoParser && (g->className == "ELFProjectile" || g->className == "RepairProjectile")) {
+                 const GhostEntry* source = demoParser->getGhostTracker().getGhost(g->linkSourceGhost);
+                 const GhostEntry* target = demoParser->getGhostTracker().getGhost(g->linkTargetGhost);
+                 if (source && target) {
+                     Point3F start = Math::torquePointToYUp(
+                         {source->renderPos.x, source->renderPos.y, source->renderPos.z});
+                     Point3F end = Math::torquePointToYUp(
+                         {target->renderPos.x, target->renderPos.y, target->renderPos.z});
+                     start.y += 1.4f;
+                     end.y += 1.0f;
+                     const auto points = linkBeamPoints(start, end, g->className == "ELFProjectile");
+                     const ColorF color = g->className == "ELFProjectile"
+                         ? ColorF{0.25f, 0.75f, 1.0f, 0.9f}
+                         : ColorF{1.0f, 0.2f, 0.2f, 0.75f};
+                     r.drawLineStrip(points, color);
+                     r.drawSprite(end, g->className == "ELFProjectile" ? 0.5f : 0.6f,
+                                  color, 0, true);
+                 }
+                  continue;
+              }
+
+               const bool stockBeam = g->className == "ShockLanceProjectile" ||
+                   g->className == "SniperProjectile" ||
+                   g->className == "TracerProjectile" ||
+                   g->className == "LinearFlareProjectile";
+              if (stockBeam && g->hasBeam) {
+                  const Point3F start = Math::torquePointToYUp(
+                      {g->beamStart.x, g->beamStart.y, g->beamStart.z});
+                  const Point3F end = Math::torquePointToYUp(
+                      {g->beamEnd.x, g->beamEnd.y, g->beamEnd.z});
+                  const ColorF color = g->className == "ShockLanceProjectile"
+                      ? ColorF{0.35f, 0.8f, 1.0f, 0.9f}
+                      : g->className == "TracerProjectile"
+                          ? ColorF{1.0f, 0.65f, 0.2f, 0.85f}
+                          : ColorF{1.0f, 0.85f, 0.25f, 0.85f};
+                  const auto quad = projectileBeamQuad(start, end,
+                      r.cameraPos, 0.08f);
+                  std::vector<Point3F> outline{quad.front()};
+                  if (quad.size() == 4) {
+                      outline.push_back(quad[1]); outline.push_back(quad[2]);
+                      outline.push_back(quad[3]); outline.push_back(quad.front());
+                  } else {
+                      outline.push_back(quad.back());
+                  }
+                  r.drawLineStrip(outline, color);
+                  continue;
+              }
+
+             // Try to get or load the DTS shape for this ghost class
             DTSShape* shape = const_cast<DTSShape*>(g->shape);
              if (!shape && !isEffectOnlyGhostClass(g->className) && g->className.empty() == false) {
                 GhostEntry* mutableG = const_cast<GhostEntry*>(g);
@@ -4122,11 +6843,14 @@ void Game::render(float dt) {
                 } else {
                     model.identity();
                 }
-                if (shape->nativeDTS) {
+                 if (shape->nativeDTS) {
                     MatrixF shapeFrame;
                     shapeFrame.setRotationY(Math::PI);
-                    model = model * shapeFrame;
-                }
+                     model = model * shapeFrame;
+                 }
+                 if (isProjectile && mg->hasProjectileScale)
+                     model.setScale({mg->projectileScale.x, mg->projectileScale.y,
+                                     mg->projectileScale.z});
                 // Hover bob for stationary vehicles
                 float hoverY = 0.0f;
                 if (isVehicle && !mg->isMoving) {
@@ -4138,6 +6862,21 @@ void Game::render(float dt) {
 
                 // Appearance comes from native material and skin data only.
                 if (defShader) defShader->setUniform("uTint", ColorF{1, 1, 1, 1});
+
+                // ShapeBase replaces the normal material map with cloakTexture.
+                Texture* cloakTexture = nullptr;
+                if (g->cloaked && g->hasDatablock && demoParser) {
+                    const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+                    auto block = blocks.find((uint32_t)g->datablockId);
+                    if (block != blocks.end() && !block->second.decoded.cloakTexture.empty()) {
+                        const std::string& path = block->second.decoded.cloakTexture;
+                        cloakTexture = r.loadTexture(path.c_str());
+                        if (!cloakTexture) cloakTexture = r.loadTexture(("textures/" + path).c_str());
+                        if (!cloakTexture) cloakTexture = r.loadTexture(("textures/" + path + ".png").c_str());
+                    }
+                    if (!cloakTexture) cloakTexture = r.loadTexture("textures/special/cloakTexture.png");
+                }
+                shape->cloakTextureOverride = cloakTexture && cloakTexture->loaded ? cloakTexture : nullptr;
 
                 // Apply cloak transparency
                 if (g->cloaked) {
@@ -4157,17 +6896,26 @@ void Game::render(float dt) {
                         thread.sequence >= (int)shape->animations.size()) continue;
                     if (thread.state == 1 || thread.state == 3) continue;
                     animation = &shape->animations[thread.sequence];
-                    animationPosition = std::clamp(thread.position, 0.0f, 1.0f);
-                    if (thread.state == 0 && !thread.atEnd && animation->duration > 0.0f)
-                        animationPosition = std::clamp(
-                            animationPosition + dt * thread.timescale / animation->duration,
-                            0.0f, 1.0f);
+                    const float threadTime = dtsThreadTime(thread.position, animation->duration,
+                        mg->threadAnimTime, thread.timescale, thread.atEnd, thread.forward);
+                    animationPosition = animation->duration > 0.0f
+                        ? threadTime / animation->duration : 0.0f;
+                    if (thread.atEnd) animationPosition = thread.forward ? 1.0f : 0.0f;
                     break;
+                }
+                if (g->damageState >= 2) {
+                    for (const char* name : {"hulk", "destroyed", "wreck", "dead"}) {
+                        if (const auto* damageAnimation = findAnimation(*shape, name)) {
+                            animation = damageAnimation;
+                            animationPosition = 1.0f;
+                            break;
+                        }
+                    }
                 }
 
                 // Node overrides for turret barrel and player head
-                DTSShape::NodeOverride overrides[2];
-                int numOverrides = 0;
+                 DTSShape::NodeOverride overrides[8];
+                 int numOverrides = 0;
                 if (isTurret && shape && (mg->barrelPitch != 0.0f || mg->barrelYaw != 0.0f)) {
                     int barrelNode = shape->findNode("barrel");
                     if (barrelNode < 0) barrelNode = shape->findNode("mount0");
@@ -4182,13 +6930,15 @@ void Game::render(float dt) {
                         yawMat.setRotationAxis({0, 1, 0}, -mg->barrelYaw);
                         overrides[numOverrides].transform = overrides[numOverrides].transform * yawMat * pitchMat;
                         numOverrides++;
-                    }
-                }
-                // Player head aim direction
+                     }
+                 }
+                 appendWheelNodeOverrides(*g, *shape, dt, overrides, numOverrides,
+                                          8, mg->wheelRotation);
+                 // Player head aim direction
                 if (isPlayer && shape && (mg->headPitch != 0.0f || mg->headYaw != 0.0f)) {
                     int headNode = shape->findNode("head");
                     if (headNode < 0) headNode = shape->findNode("mount4");
-                    if (headNode >= 0 && numOverrides < 2) {
+                     if (headNode >= 0 && numOverrides < 8) {
                         overrides[numOverrides].nodeIndex = headNode;
                         if (headNode < (int)shape->defaultTransforms.size())
                             overrides[numOverrides].transform = shape->defaultTransforms[headNode];
@@ -4202,6 +6952,9 @@ void Game::render(float dt) {
                     }
                 }
 
+                if (!w->isPositionVisible({rp.x, rp.y, rp.z}, camPos))
+                    continue;
+
                 if (animation) {
                     shape->renderAnimation(animation->name.c_str(),
                                            animationPosition * animation->duration,
@@ -4210,6 +6963,7 @@ void Game::render(float dt) {
                 } else {
                     shape->render(0, numOverrides > 0 ? overrides : nullptr, numOverrides);
                 }
+                shape->cloakTextureOverride = nullptr;
 
                 // Render mounted weapons for player ghosts
                 if (isPlayer) {
@@ -4222,10 +6976,14 @@ void Game::render(float dt) {
                         if (demoParser) {
                             const auto& ib = demoParser->getInitialBlock();
                             auto wit = ib.datablockWeaponShapes.find(dbId);
-                            if (wit != ib.datablockWeaponShapes.end()) {
-                                dynamicPath = wit->second;
-                                wPath = dynamicPath.c_str();
-                            }
+                             if (wit != ib.datablockWeaponShapes.end()) {
+                                 dynamicPath = wit->second;
+                                 wPath = dynamicPath.c_str();
+                                 const auto db = ib.dataBlocks.find((uint32_t)dbId);
+                                 if (db != ib.dataBlocks.end() && db->second.decoded.hasMountPoint)
+                                     mg->mountedImages[img].mountPoint =
+                                         (int)db->second.decoded.mountPoint;
+                             }
                         }
                         if (!wPath) continue;
 
@@ -4247,53 +7005,38 @@ void Game::render(float dt) {
                         }
                         if (!wShape || !wShape->loaded) continue;
 
-                        // Position weapon at player's hand node if available
-                        Point3F weaponPos = {rp.x + 0.3f, rp.y + 0.1f, rp.z + 0.2f};
-                        MatrixF weaponRot;
-                        bool usedNodeTransform = false;
-
-                        if (shape) {
-                            int handNode = shape->findNode("rhand");
-                            if (handNode < 0) handNode = shape->findNode("mount0");
-                            if (handNode >= 0 && handNode < (int)shape->defaultTransforms.size()) {
-                                // Extract world-space position from the hand node transform
-                                const MatrixF& nodeXform = shape->defaultTransforms[handNode];
-                                // The node transform is in model space; combine with ghost world transform
-                                MatrixF worldXform;
-                                if (mg->hasRotation) {
-                                    QuatF wq(mg->renderRotation.x, mg->renderRotation.y, mg->renderRotation.z, mg->renderRotation.w);
-                                    worldXform = wq.toMatrix();
-                                } else {
-                                    worldXform.setRotationAxis({0, 1, 0}, -mg->moveYaw);
-                                }
-                                // Transform hand node position to world space
-                                Point3F nodePos = nodeXform.transform({0, 0, 0});
-                                Point3F worldOffset = worldXform.transformNormal(nodePos);
-                                weaponPos = {rp.x + worldOffset.x, rp.y + worldOffset.y, rp.z + worldOffset.z};
-                                // Use the combined rotation for weapon orientation
-                                weaponRot = worldXform * nodeXform;
-                                weaponRot.setTranslation(weaponPos);
-                                usedNodeTransform = true;
-                            }
-                        }
-
-                        if (!usedNodeTransform) {
-                            MatrixF weaponModel;
-                            if (mg->hasRotation) {
-                                QuatF wq(mg->renderRotation.x, mg->renderRotation.y, mg->renderRotation.z, mg->renderRotation.w);
-                                weaponModel = wq.toMatrix();
-                            } else {
-                                weaponModel.setRotationAxis({0, 1, 0}, -mg->moveYaw);
-                            }
-                            weaponModel.setTranslation(weaponPos);
-                            weaponRot = weaponModel;
-                        }
-                        r.setModel(weaponRot * wShape->upOrientation());
-                        wShape->render(0);
+                        // Torque mounts the image's Mountpoint node to the
+                        // owning shape's mountN node. The image datablock's
+                        // mountPoint, rather than the image slot, selects N.
+                        MatrixF mountedModel = model * shape->upOrientation();
+                        const int mountPoint = mg->mountedImages[img].mountPoint;
+                        std::string mountName = "mount" + std::to_string(mountPoint);
+                        int mountNode = shape->findNode(mountName.c_str());
+                        if (mountNode < 0 && mountPoint == 0) mountNode = shape->findNode("rhand");
+                        if (mountNode >= 0 && mountNode < (int)shape->defaultTransforms.size())
+                            mountedModel = mountedModel * shape->defaultTransforms[mountNode];
+                        const int imageMount = wShape->findNode("Mountpoint");
+                        if (imageMount >= 0 && imageMount < (int)wShape->defaultTransforms.size())
+                            mountedModel = mountedModel * wShape->defaultTransforms[imageMount].inverse();
+                         MatrixF imageModel = mountedModel * wShape->upOrientation();
+                         r.setModel(imageModel);
+                         wShape->cloakTextureOverride = shape->cloakTextureOverride;
+                         const DTSShape::Animation* imageAnimation = nullptr;
+                         for (const char* name : {mg->mountedImages[img].isFiring ? "fire" : "idle",
+                                                  "ambient", "spin", "stand"}) {
+                             imageAnimation = findAnimation(*wShape, name);
+                             if (imageAnimation) break;
+                         }
+                         if (imageAnimation && imageAnimation->duration > 0.0f)
+                             wShape->renderAnimation(imageAnimation->name.c_str(),
+                                                     fmodf(mg->threadAnimTime, imageAnimation->duration));
+                         else
+                             wShape->render(0);
+                         wShape->cloakTextureOverride = nullptr;
 
                         // Muzzle flash and particles when firing
-                        if (mg->mountedImages[img].isFiring) {
-                            Point3F muzzlePos = weaponPos;
+                         if (mg->mountedImages[img].isFiring) {
+                             Point3F muzzlePos = mountedNodePosition(imageModel, *wShape, "Mountpoint");
                             float flashSize = 0.15f;
                             ColorF flashCol = {1.0f, 0.9f, 0.5f, 0.9f};
                             r.drawSprite(muzzlePos, flashSize, flashCol);
@@ -4371,9 +7114,6 @@ void Game::render(float dt) {
             }
 
             // Update projectile trail
-            bool isProjectile = (g->className.find("Projectile") != std::string::npos ||
-                g->className == "EnergyBolt" || g->className == "LinearFlare" ||
-                g->className.find("Tracer") != std::string::npos);
             if (isProjectile) {
                 // Color by projectile type
                 ColorF trailCol = {0.5f, 1.0f, 1.0f, 1.0f}; // default cyan
@@ -4387,11 +7127,20 @@ void Game::render(float dt) {
                     trailCol = {1.0f, 0.3f, 0.1f, 1.0f}; // red-orange
                 else if (g->className.find("Shock") != std::string::npos)
                     trailCol = {0.8f, 0.2f, 1.0f, 1.0f}; // purple
+                if (hasBaseEmitter) continue;
                 auto& trail = demoTrails[idx];
                 Point3F trailPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
                 trail.push_back({trailPosition.x, trailPosition.y, trailPosition.z, 1.0f, trailCol});
                 if (trail.size() > 30) trail.erase(trail.begin());
             }
+        }
+        w->endProjectileTrailSync();
+
+        // A deleted projectile can leave a few interpolated points behind;
+        // discard them immediately instead of waiting for their fade timer.
+        for (auto it = demoTrails.begin(); it != demoTrails.end();) {
+            if (!gt.hasGhost(it->first)) it = demoTrails.erase(it);
+            else ++it;
         }
 
         // Render projectile trails
@@ -4475,11 +7224,14 @@ void Game::render(float dt) {
         if (defShader) defShader->bind();
 
         std::vector<int> indices = liveGhosts.getAllIndices();
-        for (int idx : indices) {
-            // Skip our own player ghost (we render locally via pl->render)
-            if (serverPlayerGhostSynced && (uint32_t)idx == serverPlayerGhostIndex) continue;
-            GhostEntry* g = liveGhosts.getMutableGhost(idx);
-            if (!g) continue;
+         for (int idx : indices) {
+             // Skip our own player ghost (we render locally via pl->render)
+             if (serverPlayerGhostSynced && (uint32_t)idx == serverPlayerGhostIndex) continue;
+             GhostEntry* g = liveGhosts.getMutableGhost(idx);
+             if (!g) continue;
+             if (activeConn->isObserverMode() &&
+                 !isSensorGroupTargetVisible(activeConn->observerSnapshot().playerSensorGroup,
+                                             g->sensorGroup)) continue;
             Vec3 p = g->position;
             if (p.x == 0 && p.y == 0 && p.z == 0) continue;
             if (!isRenderableGhostClass(g->className)) continue;
@@ -4517,7 +7269,9 @@ void Game::render(float dt) {
                     g->renderRotation.z *= invLen; g->renderRotation.w *= invLen;
                 }
             }
-            rp = g->renderPos;
+             rp = g->renderPos;
+             g->threadAnimTime += dt;
+             applyShapeBaseAudio(*g, idx, p);
 
             // Try to load a shape for this ghost class
              if (!g->shape && !isEffectOnlyGhostClass(g->className)) {
@@ -4530,16 +7284,129 @@ void Game::render(float dt) {
                     QuatF q(g->renderRotation.x, g->renderRotation.y, g->renderRotation.z, g->renderRotation.w);
                     model = Math::torqueQuaternionToYUp(q);
                 }
-                if (g->shape->nativeDTS) {
+              if (g->shape->nativeDTS) {
                     MatrixF shapeFrame;
                     shapeFrame.setRotationY(Math::PI);
                     model = model * shapeFrame;
-                }
-                Point3F renderPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
-                model.setTranslation(renderPosition);
-                r.setModel(model * g->shape->upOrientation());
-                g->shape->render(0);
-            }
+              }
+              const bool isVehicle = (g->className.find("Vehicle") != std::string::npos ||
+                                      g->className == "Shrike" || g->className == "Turbograv" ||
+                                      g->className == "Shield" || g->className == "Wildcat");
+              Point3F renderPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
+             model.setTranslation(renderPosition);
+             r.setModel(model * g->shape->upOrientation());
+             Texture* cloakTexture = nullptr;
+             if (g->cloaked && g->hasDatablock) {
+                 auto block = nativeDatablocks.find((uint32_t)g->datablockId);
+                 if (block != nativeDatablocks.end() &&
+                     !block->second.decoded.cloakTexture.empty()) {
+                     const std::string& path = block->second.decoded.cloakTexture;
+                     cloakTexture = r.loadTexture(path.c_str());
+                     if (!cloakTexture) cloakTexture = r.loadTexture(("textures/" + path).c_str());
+                     if (!cloakTexture) cloakTexture = r.loadTexture(("textures/" + path + ".png").c_str());
+                 }
+                 if (!cloakTexture) cloakTexture = r.loadTexture("textures/special/cloakTexture.png");
+             }
+             g->shape->cloakTextureOverride = cloakTexture && cloakTexture->loaded ? cloakTexture : nullptr;
+             if (defShader) defShader->setUniform("uScreenDoor", g->cloaked ? 0.5f : 0.0f);
+              DTSShape::NodeOverride overrides[8]{};
+              int overrideCount = 0;
+             if ((g->className == "Turret" || g->className == "Sentry") &&
+                 g->hasTurretAim) {
+                 int barrelNode = g->shape->findNode("barrel");
+                 if (barrelNode < 0) barrelNode = g->shape->findNode("mount0");
+                 if (barrelNode >= 0) {
+                      overrides[overrideCount].nodeIndex = barrelNode;
+                      overrides[overrideCount].transform = barrelNode < (int)g->shape->defaultTransforms.size()
+                          ? g->shape->defaultTransforms[barrelNode] : MatrixF{};
+                      MatrixF pitch, yaw;
+                      pitch.setRotationAxis({1, 0, 0}, -g->barrelPitch);
+                      yaw.setRotationAxis({0, 1, 0}, -g->barrelYaw);
+                      overrides[overrideCount].transform = overrides[overrideCount].transform * yaw * pitch;
+                      overrideCount = 1;
+                  }
+              }
+              appendWheelNodeOverrides(*g, *g->shape, dt, overrides, overrideCount,
+                                       8, g->wheelRotation);
+               const DTSShape::Animation* animation = nullptr;
+               float animationPosition = 0.0f;
+               for (const auto& thread : g->threads) {
+                   if (!thread.valid || thread.sequence < 0 ||
+                       thread.sequence >= (int)g->shape->animations.size()) continue;
+                   if (thread.state == 1 || thread.state == 3) continue;
+                   animation = &g->shape->animations[thread.sequence];
+                     const float threadTime = dtsThreadTime(thread.position, animation->duration,
+                         g->threadAnimTime, thread.timescale, thread.atEnd, thread.forward);
+                    animationPosition = animation->duration > 0.0f
+                        ? threadTime / animation->duration : 0.0f;
+                   if (thread.atEnd) animationPosition = thread.forward ? 1.0f : 0.0f;
+                   break;
+               }
+               if (animation)
+                   g->shape->renderAnimation(animation->name.c_str(),
+                                             animationPosition * animation->duration,
+                                             overrideCount ? overrides : nullptr, overrideCount);
+               else
+                   g->shape->render(0, overrideCount ? overrides : nullptr, overrideCount);
+               g->shape->cloakTextureOverride = nullptr;
+
+             // ShapeBase images are mounted on every owning shape, not only players.
+             static std::unordered_map<std::string, DTSShape> liveImageCache;
+             for (int img = 0; img < 8; ++img) {
+                 const auto& mounted = g->mountedImages[img];
+                 if (mounted.shapePath.empty()) continue;
+                 auto imageIt = liveImageCache.find(mounted.shapePath);
+                 DTSShape* imageShape = imageIt == liveImageCache.end() ? nullptr : &imageIt->second;
+                 if (!imageShape) {
+                     auto data = Engine::instance().fs().read(mounted.shapePath.c_str());
+                     if (data.empty()) continue;
+                     auto& entry = liveImageCache[mounted.shapePath];
+                     entry.name = mounted.shapePath;
+                     entry.load(data.data(), data.size());
+                     imageShape = entry.loaded ? &entry : nullptr;
+                 }
+                 if (!imageShape) continue;
+                 const std::string mountName = "mount" + std::to_string(mounted.mountPoint);
+                 int mountNode = g->shape->findNode(mountName);
+                 if (mountNode < 0 && mounted.mountPoint == 0)
+                     mountNode = g->shape->findNode("rhand");
+                 const int imageMount = imageShape->findNode("Mountpoint");
+                 if (mountNode < 0 || imageMount < 0 ||
+                     mountNode >= (int)g->shape->defaultTransforms.size() ||
+                     imageMount >= (int)imageShape->defaultTransforms.size()) continue;
+                  MatrixF imageModel = model * g->shape->upOrientation() *
+                             g->shape->defaultTransforms[mountNode] *
+                             imageShape->defaultTransforms[imageMount].inverse() *
+                             imageShape->upOrientation();
+                  r.setModel(imageModel);
+                  const DTSShape::Animation* imageAnimation = nullptr;
+                  for (const char* name : {mounted.isFiring ? "fire" : "idle",
+                                           "ambient", "spin", "stand"}) {
+                      imageAnimation = findAnimation(*imageShape, name);
+                      if (imageAnimation) break;
+                  }
+                   if (imageAnimation && imageAnimation->duration > 0.0f)
+                       imageShape->renderAnimation(imageAnimation->name.c_str(),
+                                                   fmodf(g->threadAnimTime, imageAnimation->duration));
+                   else
+                       imageShape->render(0);
+                   if (mounted.isFiring) {
+                       const Point3F muzzle = mountedNodePosition(imageModel, *imageShape, "Mountpoint");
+                       r.drawSprite(muzzle, 0.15f, {1.0f, 0.9f, 0.5f, 0.9f});
+                   }
+              }
+              if (g->hasShield && g->shieldLevel > 0.01f) {
+                  const float pulse = sinf(demoTime * 6.0f) * 0.08f + 0.92f;
+                  const float alpha = g->shieldLevel * 0.25f * pulse;
+                  const float baseSize = isVehicle ? 1.8f : 1.0f;
+                  for (int layer = 0; layer < 3; ++layer) {
+                      const float size = baseSize * (1.0f - layer * 0.15f);
+                      r.drawBox({{renderPosition.x - size, renderPosition.y - size, renderPosition.z - size},
+                                 {renderPosition.x + size, renderPosition.y + size, renderPosition.z + size}},
+                                {0.3f, 0.6f, 1.0f, alpha * (1.0f - layer * 0.25f)});
+                  }
+              }
+          }
         }
 
         // Spectator HUD for live ghosts
@@ -4558,10 +7425,18 @@ void Game::render(float dt) {
                     above.y += 2.5f;
                     Point3F screen = worldToScreen(above, r.viewMatrix(), r.projectionMatrix(), screenW, screenH);
                     if (screen.x < 0 || screen.x > screenW || screen.y < 0 || screen.y > screenH) continue;
-                    ColorF col{1, 1, 1, 1};
-                    std::string label = g->className;
-                    font->render(label.c_str(), screen.x - 30, screen.y - 20, col, 1.2f);
-                    float barW = 50, barH = 6;
+                     ColorF col{1, 1, 1, 1};
+                     std::string label = g->isFlag ? "Flag" : g->className;
+                     if (g->isFlag) {
+                         const auto team = liveTeamScores.find(g->flagTeamId);
+                         if (team != liveTeamScores.end() && !team->second.name.empty())
+                             label = team->second.name + " Flag";
+                     }
+                     if (g->isFlag && g->flagTeamId == 1) col = {1, 0.25f, 0.25f, 1};
+                     else if (g->isFlag && g->flagTeamId == 2) col = {0.3f, 0.45f, 1, 1};
+                     font->render(label.c_str(), screen.x - 30, screen.y - 20, col, 1.2f);
+                     if (g->isFlag) continue;
+                     float barW = 50, barH = 6;
                     float bx = screen.x - barW/2;
                     float by = screen.y + 2;
                     r.drawBox({{bx-1, by-1, 0}, {bx+barW+1, by+barH+1, 0}}, {0, 0, 0, 0.6f});
@@ -4599,8 +7474,22 @@ void Game::render(float dt) {
 
 void Game::startLocalGame(const char* map) {
     Console::instance().printf(LogLevel::Info, "Starting local game");
+    if (demoPlaying) stopDemoPlayback();
     setState(Loading);
+    Engine::instance().audio().stopAll();
+    clearProjectileAudio();
+    clearMissionAudio();
 
+    auto failLocalGame = [&]() {
+        setState(MenuScreen);
+        if (hud) hud->resetState();
+        auto& gui = Engine::instance().guiRenderer();
+        gui.clearDialogs();
+        resetGameplayGui(gui);
+        gui.setContentImmediate(gui.findControl("LobbyGui") ? "LobbyGui" : "LaunchGui");
+        Engine::instance().platform().setRelativeMouse(false);
+        Engine::instance().platform().showMouse(true);
+    };
     std::string missionPath;
 
     if (map && map[0]) {
@@ -4610,32 +7499,40 @@ void Game::startLocalGame(const char* map) {
         // Dynamically discover available missions
         auto& fs = Engine::instance().fs();
         std::vector<std::string> allEntries;
-        fs.listFiles("missions/", allEntries);
+        fs.listFiles(nullptr, allEntries);
         std::vector<std::string> foundMissions;
         for (auto& e : allEntries) {
-            size_t dot = e.rfind('.');
-            std::string ext = (dot != std::string::npos) ? e.substr(dot) : "";
-            if (ext == ".mis" || ext == ".misPK") {
-                size_t slash = e.rfind('/');
-                std::string base = (slash != std::string::npos) ? e.substr(slash + 1) : e;
-                size_t edot = base.rfind('.');
-                if (edot != std::string::npos) base = base.substr(0, edot);
-                if (!base.empty()) foundMissions.push_back(base);
-            }
+            if (missionLower(e).starts_with("missions/") && isMissionFile(e))
+                if (const std::string mission = missionLoadPath(e); !mission.empty())
+                    foundMissions.push_back(mission);
         }
 
         if (!foundMissions.empty()) {
-            std::sort(foundMissions.begin(), foundMissions.end());
+            std::sort(foundMissions.begin(), foundMissions.end(), [](const std::string& a, const std::string& b) {
+                const std::string al = missionLower(a), bl = missionLower(b);
+                return al == bl ? a < b : al < bl;
+            });
+            foundMissions.erase(std::unique(foundMissions.begin(), foundMissions.end(),
+                [](const std::string& a, const std::string& b) {
+                    return missionLower(a) == missionLower(b);
+                }), foundMissions.end());
             missionPath = foundMissions[0];
             Console::instance().printf(LogLevel::Info, "Found %zu missions, loading: %s", foundMissions.size(), missionPath.c_str());
         } else {
-            Console::instance().printf(LogLevel::Error, "No missions found in filesystem. Expected .mis files in missions/ directory.");
+            Console::instance().printf(LogLevel::Error, "No missions found in filesystem. Expected missions/*.mis in mounted stock resources.");
         }
 
         if (missionPath.empty()) {
             Console::instance().printf(LogLevel::Error, "Cannot start local game: no mission available. Place .mis/.ter files in missions/ directory.");
+            failLocalGame();
             return;
         }
+    }
+    missionPath = missionLoadPath(missionPath);
+    if (missionPath.empty()) {
+        Console::instance().printf(LogLevel::Error, "Cannot start local game: unsafe mission name");
+        failLocalGame();
+        return;
     }
 
     // Classify weather by mission name for ambient audio selection
@@ -4661,9 +7558,13 @@ void Game::startLocalGame(const char* map) {
 
         // Clear TS GUI dialogs and switch to in-game view
         auto& gui = Engine::instance().guiRenderer();
-        gui.clearDialogs();
-        gui.setContent("PlayGui");
-        if (auto* weaponsHud = gui.findControl("weaponsHud")) {
+         gui.clearDialogs();
+         gui.setContent("PlayGui");
+         if (hud) {
+             const auto initialObjective = stockTrainingInitialObjective(missionPath);
+             hud->setObjectiveTask(initialObjective.first.c_str(), initialObjective.second.c_str());
+         }
+         if (auto* weaponsHud = gui.findControl("weaponsHud")) {
             weaponsHud->visible = true;
             weaponsHud->fields["backgroundBitmap"] = "gui/hud_new_panel";
             weaponsHud->fields["highlightBitmap"] = "gui/hud_new_weaponselect";
@@ -4695,8 +7596,50 @@ void Game::startLocalGame(const char* map) {
             }
         }
 
-        // Start ambient audio
+        // AudioEmitter is a supported V12 mission object, distinct from the
+        // weather loop below.  Use the mission fields directly so authored
+        // map ambience survives local playback.
         auto& audio = Engine::instance().audio();
+        clearMissionAudio();
+        if (audio.config().enabled) {
+            for (const auto& object : w->objects()) {
+                 if (!object.audioEmitter) continue;
+                 std::string fileName = object.audioFileName;
+                 // A stock Training2 emitter contains one typo in the quoted
+                 // path ("sandpatter1. wav"). Torque ignores that whitespace
+                 // while resolving resource names; preserve the supplied
+                 // asset and normalize only authored audio paths here.
+                 fileName.erase(std::remove_if(fileName.begin(), fileName.end(),
+                     [](unsigned char c) { return std::isspace(c); }), fileName.end());
+                 if (fileName.empty()) continue;
+                SoundBuffer* sound = audio.loadSound(fileName.c_str());
+                if (!sound && fileName.rfind("audio/", 0) != 0)
+                    sound = audio.loadSound(("audio/" + fileName).c_str());
+                if (!sound) continue;
+                 auto* source = audio.createSource();
+                 if (!source) break;
+                const Point3F position = Math::torquePointToYUp(object.pos);
+                const bool is3D = object.audioIs3D;
+                const bool looping = object.audioIsLooping;
+                const float volume = std::max(0.0f, object.audioVolume);
+                const float minDistance = std::max(0.001f, object.audioMinDistance);
+                const float maxDistance = std::max(minDistance, object.audioMaxDistance);
+                 source->setVolume(volume * audio.config().masterVolume *
+                     audio.config().sfxVolume);
+                source->setLooping(looping);
+                if (is3D) {
+                    source->setPosition(position);
+                    source->setDistance(minDistance, maxDistance);
+                }
+                source->play(sound);
+                 // Keep one-shot emitters owned by the mission too. OpenAL
+                 // may retire them between frames, but cleanup must still be
+                 // able to release every source deterministically.
+                 emitterSources.push_back(source);
+            }
+        }
+
+        // Start ambient audio
         if (audio.config().enabled) {
             const char* ambPath;
             if (weatherType == 1)      ambPath = "audio/fx/environment/coldwind1.wav";
@@ -4708,15 +7651,18 @@ void Game::startLocalGame(const char* map) {
             ambientSound = audio.loadSound(ambPath);
             if (ambientSound) {
                 ambientSource = audio.createSource();
-                ambientSource->setLooping(true);
-                ambientSource->setVolume(0.3f);
-                ambientSource->play(ambientSound);
-                Console::instance().printf(LogLevel::Info, "Ambient: %s", ambPath);
+                if (ambientSource) {
+                    ambientSource->setLooping(true);
+                     ambientSource->setVolume(0.3f * audio.config().masterVolume *
+                         audio.config().sfxVolume);
+                    ambientSource->play(ambientSound);
+                    Console::instance().printf(LogLevel::Info, "Ambient: %s", ambPath);
+                }
             }
         }
     } else {
         Console::instance().printf(LogLevel::Error, "Failed to load map '%s'", missionPath.c_str());
-        setState(MenuScreen);
+        failLocalGame();
     }
 }
 
@@ -4763,16 +7709,12 @@ void Game::dispatchHudClientCommand(const std::vector<std::string>& args) {
     };
     if (!allowed.count(lower)) return;
     if (!command.empty()) command[0] = (char)std::toupper((unsigned char)command[0]);
-    std::vector<VMValue> callbackArgs;
-    for (size_t i = 1; i < args.size(); ++i) callbackArgs.emplace_back(args[i]);
     if (auto* ts = Engine::instance().script().ts()) {
-        const std::string prefixed = "clientCmd" + command;
-        if (ts->hasFunction(prefixed)) ts->callFunction(prefixed, callbackArgs);
-        else if (ts->hasFunction("clientCmd" + args[0]))
-            ts->callFunction("clientCmd" + args[0], callbackArgs);
-        else if (ts->hasFunction("clientcmd" + command))
-            ts->callFunction("clientcmd" + command, callbackArgs);
-        else if (ts->hasFunction(command)) ts->callFunction(command, callbackArgs);
+        // Keep the wire words intact, including empty positional arguments.
+        // The script dispatcher performs the case-insensitive clientCmd lookup.
+        if (!ts->dispatchClientCommand(args))
+            Console::instance().printf(LogLevel::Warn,
+                "Client: ignored unknown clientCmd '%s'", args[0].c_str());
     }
     // The retail task callback has a misspelled parameter but writes the
     // correctly spelled field, losing the AI objective in the process.
@@ -4783,10 +7725,26 @@ void Game::dispatchHudClientCommand(const std::vector<std::string>& args) {
             taskList->fields["currentTaskIsTeam"] = VMValue(args[3]);
             taskList->fields["currentTaskDescription"] = VMValue(args[4]);
         }
+        if (hud) hud->setObjectiveTask(args[4].c_str());
+    } else if (lower == "resettasklist") {
+        if (hud) hud->clearObjectiveTask();
+    } else if (lower == "taskcompleted" || lower == "acceptedtask") {
+        if (hud && args.size() >= 2) hud->setObjectiveTask(args[1].c_str());
     }
 }
 
 void Game::connectToServer(const char* host, uint16_t port, bool observer, const char* password) {
+    if (!host || !host[0] || port == 0) {
+        Console::instance().printf(LogLevel::Warn, "Invalid server address");
+        return;
+    }
+    if (demoPlaying) stopDemoPlayback();
+    if (activeConn) {
+        activeConn->disconnect();
+        Engine::instance().network().destroyConnection(activeConn);
+        activeConn = nullptr;
+    }
+    resetLiveMissionState();
     cfg.serverHost = host;
     cfg.serverPort = port;
     cfg.online = true;
@@ -4801,7 +7759,7 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
     activeConn->setPlayerName(cfg.playerName.c_str());
     activeConn->setJoinPassword(password ? password : "");
     activeConn->setObserverMode(observer);
-    if (activeConn->connect(host, port)) {
+    {
         activeConn->setConnectCallback([this](bool success) {
             if (success) {
                 Console::instance().printf(LogLevel::Info, "Connected!");
@@ -4812,14 +7770,18 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                 }
             } else {
                 Console::instance().printf(LogLevel::Info, "Connection failed");
-                liveSpectateInit = false;
-                spectateGhostIndex = -1;
-                liveGhosts.clear();
-                nativeDatablockShapes.clear();
+                // Transport failures must restore the same world, audio, HUD,
+                // dialog, and pointer state as an explicit disconnect.
+                resetLiveMissionState();
+                cfg.online = false;
+                Engine::instance().platform().setRelativeMouse(false);
+                Engine::instance().platform().showMouse(true);
                 setState(MenuScreen);
             }
         });
 
+        // Install every callback before opening the socket. This keeps a fast
+        // local response from racing the launch transition setup.
         // Handle incoming packets
         activeConn->setPacketCallback([this](PacketType type, const uint8_t* data, size_t size) {
             if (type == PacketType::ConnectOK) {
@@ -4828,6 +7790,8 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                 if (activeConn->isObserverMode()) {
                     liveSpectateInit = false;
                     spectateGhostIndex = -1;
+                    liveFollowGhostIndex = -1;
+                    liveFollowCenterInit = false;
                     setState(Dead);
                     auto& gui = Engine::instance().guiRenderer();
                     gui.clearDialogs();
@@ -4876,6 +7840,10 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                     if (T2Protocol::decodeChat(data, size, chat)) {
                         Console::instance().printf(LogLevel::Info, "[CHAT] %s: %s", chat.sender, chat.text);
                         playChatBeep();
+                        if (hud) {
+                            std::string line = std::string(chat.sender) + ": " + chat.text;
+                            hud->addChatLine(line.c_str());
+                        }
                         if (auto* ts = Engine::instance().script().ts()) {
                             if (ts->hasFunction("addMessageHudLine"))
                                 ts->callFunction("addMessageHudLine", {
@@ -5038,10 +8006,22 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                     // Reconcile: set to server state then replay pending moves
                     Point3F serverPos = {update.posX, update.posY, update.posZ};
                     Point3F serverVel = {update.velX, update.velY, update.velZ};
-                    if (pl) {
-                        reconcile(serverPos, serverVel, update.lastMoveSeq);
-                        pl->setRotation({update.rotX, 0, update.rotZ});
-                    }
+                     if (pl) {
+                         reconcile(serverPos, serverVel, update.lastMoveSeq);
+                         pl->setRotation({update.rotX, 0, update.rotZ});
+                         pl->setHealth(update.health);
+                         if ((update.flags & T2Protocol::UPDATE_DEAD) != 0 && gameState == Playing) {
+                             deathTimer = 0.0f;
+                             currentInput = {};
+                             pendingMoves.clear();
+                             w->projectiles().clear();
+                             setState(Dead);
+                         } else if ((update.flags & T2Protocol::UPDATE_DEAD) == 0 &&
+                                    update.health > 0.0f && gameState == Dead) {
+                             deathTimer = 0.0f;
+                             setState(Playing);
+                         }
+                     }
                 }
             }
         });
@@ -5054,13 +8034,15 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
         activeConn->setClientCommandCallback([this](const std::vector<std::string>& args) {
             dispatchHudClientCommand(args);
         });
-        activeConn->setStateCallback([this](const V12::ServerGameState& state) {
+         activeConn->setStateCallback([this](const V12::ServerGameState& state) {
+             if (!state.sensorGroupListenMasks.empty())
+                 liveSensorGroupListenMasks = state.sensorGroupListenMasks;
             if (state.controlPresent && !state.controlDirty) {
                 serverPlayerGhostIndex = state.controlGhost;
                 serverPlayerGhostSynced = true;
             }
-            if (state.damageFlash > 0) damageFlash = state.damageFlash;
-            if (state.whiteOut > 0) whiteOut = state.whiteOut;
+            if (state.hasDamageFlash) damageFlash = state.damageFlash;
+            if (state.hasWhiteOut) whiteOut = state.whiteOut;
         });
         activeConn->setEpochCallback([this](uint64_t epoch) {
             Console::instance().printf(LogLevel::Info,
@@ -5068,6 +8050,7 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                 (unsigned long long)epoch);
             liveGhosts.clear();
             nativeDatablockShapes.clear();
+            nativeDatablocks.clear();
             liveTargets.clear();
             liveMissionCrc = 0;
             liveTeamScores.clear();
@@ -5086,28 +8069,107 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
             spectateGhostIndex = -1;
         });
         activeConn->setDatablockCallback(
-            [this](uint16_t objectId, uint8_t, uint16_t, uint16_t,
-                   const std::string&, const V12::DecodedDataBlock& data) {
+             [this](uint16_t objectId, uint8_t classId, uint16_t, uint16_t,
+                    const std::string& className, const V12::DecodedDataBlock& data) {
                  if (!data.shapeFile.empty())
                      nativeDatablockShapes[objectId] = data.shapeFile;
+                 ParsedDataBlock block;
+                 block.objectId = objectId;
+                 block.classId = classId;
+                  block.className = className;
+                  block.decoded = data;
+                  if (className == "AudioProfile" && data.audioDescriptionRef != 0) {
+                      auto description = nativeDatablocks.find(data.audioDescriptionRef);
+                      if (description != nativeDatablocks.end()) {
+                          block.decoded.audioVolume = description->second.decoded.audioVolume;
+                           block.decoded.audioLooping = description->second.decoded.audioLooping;
+                           block.decoded.audioLoopCount = description->second.decoded.audioLoopCount;
+                           block.decoded.audioMinLoopGapMs = description->second.decoded.audioMinLoopGapMs;
+                           block.decoded.audioMaxLoopGapMs = description->second.decoded.audioMaxLoopGapMs;
+                          block.decoded.audioIs3D = description->second.decoded.audioIs3D;
+                          block.decoded.audioMinDistance = description->second.decoded.audioMinDistance;
+                          block.decoded.audioMaxDistance = description->second.decoded.audioMaxDistance;
+                      }
+                  }
+                  nativeDatablocks[objectId] = std::move(block);
+                  if (className == "AudioDescription") {
+                      for (auto& [id, profile] : nativeDatablocks) {
+                          if (profile.className != "AudioProfile" ||
+                              profile.decoded.audioDescriptionRef != objectId) continue;
+                          profile.decoded.audioVolume = data.audioVolume;
+                           profile.decoded.audioLooping = data.audioLooping;
+                           profile.decoded.audioLoopCount = data.audioLoopCount;
+                           profile.decoded.audioMinLoopGapMs = data.audioMinLoopGapMs;
+                           profile.decoded.audioMaxLoopGapMs = data.audioMaxLoopGapMs;
+                          profile.decoded.audioIs3D = data.audioIs3D;
+                          profile.decoded.audioMinDistance = data.audioMinDistance;
+                          profile.decoded.audioMaxDistance = data.audioMaxDistance;
+                      }
+                  }
              });
-        activeConn->setTargetCallback(
+         activeConn->setTargetCallback(
             [this](const V12::ServerEvent::TargetInfo* info, uint16_t targetId) {
-                if (!info) {
-                    liveTargets.erase(targetId);
-                    return;
-                }
-                liveTargets[targetId] = *info;
-                if (GhostEntry* ghost = liveGhosts.getMutableGhost((int)targetId)) {
+                 if (!info) {
+                  liveTargets.erase(targetId);
+                      if (GhostEntry* ghost = liveGhosts.getMutableGhost((int)targetId)) {
+                          ghost->playerName.clear();
+                          ghost->skinName.clear();
+                          ghost->targetType.clear();
+                          ghost->targetRenderFlags = 0;
+                          ghost->isFlag = false;
+                          ghost->flagTeamId = 0;
+                      }
+                     if (spectateGhostIndex == (int)targetId) {
+                         spectateGhostIndex = -1;
+                         liveFollowGhostIndex = -1;
+                         liveFollowCenterInit = false;
+                     }
+                     return;
+                 }
+                 auto& target = liveTargets[targetId];
+                 target.targetId = targetId;
+                 if (info->hasName) { target.hasName = true; target.name = info->name; }
+                 if (info->hasSkin) { target.hasSkin = true; target.skin = info->skin; }
+                 if (info->hasSkinPreference) { target.hasSkinPreference = true; target.skinPreference = info->skinPreference; }
+                 if (info->hasVoice) { target.hasVoice = true; target.voice = info->voice; }
+                  if (info->hasType) { target.hasType = true; target.type = info->type; }
+                  if (info->hasSensorGroup) { target.hasSensorGroup = true; target.sensorGroup = info->sensorGroup; }
+                 if (info->hasDataBlockId) { target.hasDataBlockId = true; target.dataBlockId = info->dataBlockId; }
+                 if (info->hasRenderFlags) { target.hasRenderFlags = true; target.renderFlags = info->renderFlags; }
+                 if (info->hasVoicePitch) { target.hasVoicePitch = true; target.voicePitch = info->voicePitch; }
+                  if (GhostEntry* ghost = liveGhosts.getMutableGhost((int)targetId)) {
                     if (info->hasName && !info->name.empty()) ghost->playerName = info->name;
-                    if (info->hasSkin && !info->skin.empty()) ghost->skinName = info->skin;
-                }
+                      if (info->hasSkin && !info->skin.empty()) ghost->skinName = info->skin;
+                       if (info->hasSensorGroup) ghost->sensorGroup = info->sensorGroup;
+                       if (info->hasType) ghost->targetType = info->type;
+                       if (info->hasRenderFlags) ghost->targetRenderFlags = info->renderFlags;
+                     const bool isClientTarget = std::any_of(
+                         liveClientTargetIds.begin(), liveClientTargetIds.end(),
+                         [targetId](const auto& entry) { return entry.second == (int)targetId; });
+                      ghost->isFlag = (target.renderFlags & 0x2) != 0 && !isClientTarget;
+                     ghost->flagTeamId = ghost->isFlag ? target.sensorGroup : 0;
+                     if (ghost->isFlag) ghost->teamId = target.sensorGroup;
+                 }
             });
         activeConn->setMissionCallback([this](uint32_t crc) {
+            if (liveMissionCrc != 0 && liveMissionCrc != crc)
+                resetLiveMissionState();
             liveMissionCrc = crc;
         });
         activeConn->setServerMessageCallback([this](const std::vector<std::string>& argv) {
-            if (argv.size() < 1 || argv[0] != "ServerMessage") return;
+            if (argv.empty()) return;
+            if (argv[0] == "ChatMessage") {
+                if (argv.size() >= 2) {
+                     Console::instance().printf(LogLevel::Info, "[CHAT] %s", argv[1].c_str());
+                     playChatBeep();
+                     if (hud) hud->addChatLine(argv[1].c_str());
+                    if (auto* ts = Engine::instance().script().ts();
+                        ts && ts->hasFunction("addMessageHudLine"))
+                        ts->callFunction("addMessageHudLine", {VMValue(argv[1])});
+                }
+                return;
+            }
+            if (argv[0] != "ServerMessage") return;
             if (argv.size() >= 2) {
                 std::vector<VMValue> callbackArgs;
                 callbackArgs.emplace_back(argv[1]);
@@ -5133,6 +8195,9 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                 return;
             }
             if (argv.size() >= 5 && argv[1] == "MsgMissionDropInfo") {
+                if ((!liveMissionDisplayName_.empty() || !liveMissionType_.empty()) &&
+                    (liveMissionDisplayName_ != argv[2] || liveMissionType_ != argv[3]))
+                    resetLiveMissionState();
                 liveMissionDisplayName_ = argv[2];
                 liveMissionType_ = argv[3];
                 return;
@@ -5164,28 +8229,27 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                 }
                 return;
             }
-            if (argv.size() >= 6 && argv[1] == "MsgCTFAddTeam") {
-                const int teamId = atoi(argv[2].c_str());
-                if (teamId <= 0 || teamId >= 64) return;
+             if (argv.size() >= 6 && argv[1] == "MsgCTFAddTeam") {
+                 int teamId = 0;
+                 if (!parseLiveIndex(argv[2], teamId) || teamId <= 0 || teamId >= 64) return;
                 auto& team = liveTeamScores[teamId];
                 team.teamId = teamId;
                 team.name = argv[3];
-                team.flagStatus = argv[4].find("At Base") == 0 ? "home" :
-                                   argv[4].find("In the Field") == 0 ? "field" : "held";
-                team.flagCarrier = team.flagStatus == "held" ? argv[4] : "";
+                  team.flagStatus = liveFlagStatus(argv[4]);
+                 team.flagCarrier = team.flagStatus == "held" && !argv[4].empty() ? argv[4] : "";
                 team.score = atoi(argv[5].c_str());
                 return;
             }
             if (argv.size() >= 5 &&
                 (argv[1] == "MsgCTFFlagTaken" || argv[1] == "MsgCTFFlagDropped" ||
                  argv[1] == "MsgCTFFlagReturned" || argv[1] == "MsgCTFFlagCapped")) {
-                const int teamId = atoi(argv[4].c_str());
-                if (teamId <= 0 || teamId >= 64) return;
+                 int teamId = 0;
+                 if (!parseLiveIndex(argv[4], teamId) || teamId <= 0 || teamId >= 64) return;
                 auto& team = liveTeamScores[teamId];
                 team.teamId = teamId;
                 team.flagStatus = argv[1] == "MsgCTFFlagTaken" ? "held" :
                                    argv[1] == "MsgCTFFlagDropped" ? "field" : "home";
-                team.flagCarrier = team.flagStatus == "held" ? argv[2] : "";
+                 team.flagCarrier = team.flagStatus == "held" && argv[2] != "0" ? argv[2] : "";
                 return;
             }
             if (argv.size() >= 4 && argv[1] == "MsgPlayerScore") {
@@ -5238,25 +8302,35 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                         break;
                     }
                 }
-            } else if (argv.size() >= 5 && argv[1] == "MsgClientJoin") {
-                const int clientId = atoi(argv[3].c_str());
-                const int targetId = atoi(argv[4].c_str());
-                if (clientId >= 0 && clientId < 1024 && targetId >= 0 && targetId < 1024) {
+             } else if (argv.size() >= 5 && argv[1] == "MsgClientJoin") {
+                 int clientId = 0, targetId = 0;
+                 if (parseLiveIndex(argv[3], clientId) && parseLiveIndex(argv[4], targetId)) {
                     liveClientTargetIds[clientId] = targetId;
-                    liveClientNames[clientId] = argv[2];
-                    if (GhostEntry* ghost = liveGhosts.getMutableGhost(targetId))
-                        ghost->playerName = argv[2];
+                     liveClientNames[clientId] = argv[2];
+                     if (GhostEntry* ghost = liveGhosts.getMutableGhost(targetId)) {
+                         ghost->playerName = argv[2];
+                         ghost->isFlag = false;
+                         ghost->flagTeamId = 0;
+                     }
                     auto score = livePlayerScores.find(clientId);
                     if (score != livePlayerScores.end()) {
                         if (GhostEntry* ghost = liveGhosts.getMutableGhost(targetId))
                             ghost->score = score->second;
                     }
                 }
-            } else if (argv.size() >= 4 && argv[1] == "MsgClientDrop") {
-                const int clientId = atoi(argv[3].c_str());
+             } else if (argv.size() >= 4 && argv[1] == "MsgClientDrop") {
+                 int clientId = 0;
+                 if (!parseLiveIndex(argv[3], clientId)) return;
+                 const auto target = liveClientTargetIds.find(clientId);
+                 if (target != liveClientTargetIds.end() && spectateGhostIndex == target->second) {
+                     spectateGhostIndex = -1;
+                     liveFollowGhostIndex = -1;
+                     liveFollowCenterInit = false;
+                 }
                 liveClientTargetIds.erase(clientId);
-                liveClientNames.erase(clientId);
-                liveClientTeams.erase(clientId);
+                 liveClientNames.erase(clientId);
+                  liveClientTeams.erase(clientId);
+                  livePlayerScores.erase(clientId);
             } else if (argv.size() >= 5 && argv[1] == "MsgClientNameChanged") {
                 const int clientId = atoi(argv[4].c_str());
                 if (clientId >= 0 && clientId < 1024) {
@@ -5280,10 +8354,30 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                 }
             }
         });
-        activeConn->setGhostCallback([this](const V12::GhostUpdate& update,
-                                             const V12::PlayerGhostState* state) {
-            if (update.operation == V12::GhostUpdate::Operation::Delete) {
-                liveGhosts.deleteGhost((int)update.index);
+         activeConn->setGhostCallback([this](const V12::GhostUpdate& update,
+                                              const V12::PlayerGhostState* state) {
+              if (update.operation == V12::GhostUpdate::Operation::Delete) {
+                   auto& audio = Engine::instance().audio();
+                   auto projectileSound = projectileSoundSources.find(update.index);
+                   if (projectileSound != projectileSoundSources.end()) {
+                       audio.releaseSource(projectileSound->second);
+                       projectileSoundSources.erase(projectileSound);
+                   }
+                  for (int slot = 0; slot < 4; ++slot) {
+                      const uint64_t key = (static_cast<uint64_t>(update.index) << 3) |
+                                           static_cast<uint64_t>(slot);
+                      auto sound = shapeBaseSoundSources.find(key);
+                      if (sound != shapeBaseSoundSources.end()) {
+                          audio.releaseSource(sound->second);
+                          shapeBaseSoundSources.erase(sound);
+                      }
+                  }
+                  if (spectateGhostIndex == (int)update.index) {
+                     spectateGhostIndex = -1;
+                     liveFollowGhostIndex = -1;
+                     liveFollowCenterInit = false;
+                 }
+                 liveGhosts.deleteGhost((int)update.index);
                 return;
             }
             if (!liveGhosts.hasGhost((int)update.index)) {
@@ -5291,9 +8385,58 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                 liveGhosts.createGhost((int)update.index, update.classId,
                                        name ? name : "Player");
             }
-            if (!state) return;
+             if (!state) return;
+             const bool isProjectile = update.classId == 3 || update.classId == 6 ||
+                 update.classId == 7 || update.classId == 9 || update.classId == 13 ||
+                 update.classId == 18 || update.classId == 19 || update.classId == 27 ||
+                 update.classId == 30 || update.classId == 32 || update.classId == 36 ||
+                 update.classId == 44 || update.classId == 46;
+             if (isProjectile && state->hasPosition && state->hasDatablock) {
+                 auto dataIt = nativeDatablocks.find(state->datablockId);
+                 if (dataIt != nativeDatablocks.end()) {
+                     auto& audio = Engine::instance().audio();
+                     const Point3F projectilePosition = Math::torquePointToYUp(
+                         {state->position.x, state->position.y, state->position.z});
+                     auto soundIt = projectileSoundSources.find(update.index);
+                     if (soundIt == projectileSoundSources.end()) {
+                         const auto& data = dataIt->second.decoded;
+                         const uint32_t fire = ProjectileAudio::fireProfile(
+                             audio.isUnderwater(), data.projectileFireSoundRef,
+                             data.projectileWetFireSoundRef);
+                         if (fire) playNativeAudioProfile(audio, nativeDatablocks, fire,
+                                                          projectilePosition);
+                         SoundSource* source = playNativeAudioProfile(audio,
+                             nativeDatablocks, data.projectileSoundRef,
+                             projectilePosition, true);
+                         if (source) projectileSoundSources.emplace(update.index, source);
+                     } else if (audio.isSourceAlive(soundIt->second)) {
+                         soundIt->second->setPosition(projectilePosition);
+                     }
+                 }
+             }
+              if (update.operation == V12::GhostUpdate::Operation::Create &&
+                  update.classId == 38 && state->hasPosition && state->hasDatablock) {
+                  auto splashIt = nativeDatablocks.find(state->datablockId);
+                  if (splashIt != nativeDatablocks.end() && splashIt->second.decoded.hasSplash) {
+                      const Point3F position = Math::torquePointToYUp(
+                          {state->position.x, state->position.y, state->position.z});
+                      w->spawnSplashEffect(position, splashIt->second.decoded, nativeDatablocks);
+                  }
+              }
              GhostEntry* ghost = liveGhosts.getMutableGhost((int)update.index);
              if (!ghost) return;
+             if (state->hasDamageState && state->damageState >= 2) {
+                 auto& audio = Engine::instance().audio();
+                 for (int slot = 0; slot < 4; ++slot) {
+                     const uint64_t key = (static_cast<uint64_t>(update.index) << 3) |
+                                          static_cast<uint64_t>(slot);
+                     auto sound = shapeBaseSoundSources.find(key);
+                     if (sound != shapeBaseSoundSources.end()) {
+                         audio.releaseSource(sound->second);
+                         shapeBaseSoundSources.erase(sound);
+                     }
+                 }
+             }
              for (const auto& [clientId, targetId] : liveClientTargetIds) {
                  if (targetId == (int)update.index) {
                      auto name = liveClientNames.find(clientId);
@@ -5307,36 +8450,201 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
              }
              auto target = liveTargets.find((uint16_t)update.index);
              if (target != liveTargets.end()) {
-                 if (target->second.hasName && !target->second.name.empty())
+                  if (target->second.hasSensorGroup)
+                      ghost->sensorGroup = target->second.sensorGroup;
+                  if (target->second.hasName && !target->second.name.empty())
                      ghost->playerName = target->second.name;
-                 if (target->second.hasSkin && !target->second.skin.empty())
-                     ghost->skinName = target->second.skin;
-             }
+                   if (target->second.hasSkin && !target->second.skin.empty())
+                       ghost->skinName = target->second.skin;
+                   if (target->second.hasType) ghost->targetType = target->second.type;
+                   if (target->second.hasRenderFlags)
+                       ghost->targetRenderFlags = target->second.renderFlags;
+                  const bool isClientTarget = std::any_of(
+                      liveClientTargetIds.begin(), liveClientTargetIds.end(),
+                      [index = update.index](const auto& entry) { return entry.second == (int)index; });
+                      ghost->isFlag = (target->second.renderFlags & 0x2) != 0 && !isClientTarget;
+                  ghost->flagTeamId = ghost->isFlag ? target->second.sensorGroup : 0;
+                  if (ghost->isFlag) ghost->teamId = target->second.sensorGroup;
+              }
              ghost->position = {state->position.x, state->position.y, state->position.z};
             ghost->rotation = {state->rotation.x, state->rotation.y,
                                state->rotation.z, state->rotationW};
             ghost->hasRotation = state->hasRotation;
             ghost->health = state->health;
+             if (state->hasDamageState)
+                 ghost->damageState = state->damageState;
             ghost->energy = state->energy;
              ghost->headPitch = state->headPitch;
              ghost->headYaw = state->headYaw;
-             ghost->isMoving = state->moving;
-             for (int i = 0; i < 4; ++i) {
-                 ghost->threads[i].sequence = state->threads[i].sequence;
-                 ghost->threads[i].state = state->threads[i].state;
-                 ghost->threads[i].timescale = state->threads[i].timescale;
-                 ghost->threads[i].position = state->threads[i].position;
-                 ghost->threads[i].forward = state->threads[i].timescale >= 0.0f;
-                 ghost->threads[i].atEnd = state->threads[i].atEnd;
-                 ghost->threads[i].valid = state->threads[i].valid;
-             }
-             if (state->hasDatablock) {
-                 auto shapeIt = nativeDatablockShapes.find(state->datablockId);
-                 if (shapeIt != nativeDatablockShapes.end())
-                     ghost->shapeName = shapeIt->second;
-             }
-        });
-    }
+             ghost->barrelPitch = state->barrelPitch;
+             ghost->barrelYaw = state->barrelYaw;
+              ghost->hasTurretAim = state->hasTurretAim;
+              ghost->isMoving = state->moving;
+              for (int i = 0; i < 4; ++i) {
+                  const auto& incoming = state->threads[i];
+                  const bool changed = incoming.valid &&
+                      (!ghost->threads[i].valid || ghost->threads[i].sequence != incoming.sequence ||
+                       ghost->threads[i].state != incoming.state ||
+                       ghost->threads[i].timescale != incoming.timescale ||
+                       ghost->threads[i].position != incoming.position ||
+                       ghost->threads[i].atEnd != incoming.atEnd);
+                  ghost->threads[i].sequence = incoming.sequence;
+                  ghost->threads[i].state = incoming.state;
+                  ghost->threads[i].timescale = incoming.timescale;
+                  ghost->threads[i].position = incoming.position;
+                  ghost->threads[i].forward = incoming.forward;
+                  ghost->threads[i].atEnd = incoming.atEnd;
+                  ghost->threads[i].valid = incoming.valid;
+                  if (changed) ghost->threadAnimTime = 0.0f;
+              }
+              for (int i = 0; i < 4; ++i)
+                  ghost->soundThreads[i] = {state->soundThreads[i].profileId,
+                                             state->soundThreads[i].playing,
+                                             state->soundThreads[i].valid};
+               if (state->hasCloak) {
+                  ghost->cloaked = state->cloaked;
+                  ghost->hasCloak = true;
+              }
+              if (state->hasShield) {
+                  ghost->shieldLevel = state->shieldLevel;
+                  ghost->hasShield = true;
+              }
+                for (int i = 0; i < 8; ++i) {
+                   if (!state->mountedImages[i].valid) continue;
+                   const bool wasFiring = ghost->mountedImages[i].isFiring;
+                   ghost->mountedImages[i] = {};
+                  ghost->mountedImages[i].datablockId =
+                      (int16_t)state->mountedImages[i].datablockId;
+                  ghost->mountedImages[i].loaded = state->mountedImages[i].loaded;
+                   ghost->mountedImages[i].isFiring = state->mountedImages[i].firing;
+                   if (wasFiring != ghost->mountedImages[i].isFiring)
+                       ghost->threadAnimTime = 0.0f;
+                  if (state->mountedImages[i].datablockId >= 0) {
+                      const auto image = nativeDatablocks.find(
+                          (uint32_t)state->mountedImages[i].datablockId);
+                      if (image != nativeDatablocks.end()) {
+                          ghost->mountedImages[i].mountPoint =
+                              image->second.decoded.hasMountPoint
+                                  ? (int)image->second.decoded.mountPoint : 0;
+                          ghost->mountedImages[i].shapePath =
+                              image->second.decoded.shapeFile;
+                      }
+                  }
+               }
+               for (int i = 0; i < 6; ++i) {
+                   ghost->wheels[i].angularVelocity = state->wheels[i].angularVelocity;
+                   ghost->wheels[i].suspension = state->wheels[i].suspension;
+                   ghost->wheels[i].lateral = state->wheels[i].lateral;
+                   ghost->wheels[i].valid = state->wheels[i].valid;
+               }
+              if (state->hasDatablock) {
+                  auto shapeIt = nativeDatablockShapes.find(state->datablockId);
+                  if (shapeIt != nativeDatablockShapes.end())
+                      ghost->shapeName = shapeIt->second;
+                  auto dataIt = nativeDatablocks.find(state->datablockId);
+                  if (dataIt != nativeDatablocks.end() &&
+                      dataIt->second.decoded.hasProjectileScale) {
+                      const auto& scale = dataIt->second.decoded.projectileScale;
+                      ghost->projectileScale = {
+                          std::isfinite(scale.x) && scale.x > 0.0f ? scale.x : 1.0f,
+                          std::isfinite(scale.y) && scale.y > 0.0f ? scale.y : 1.0f,
+                          std::isfinite(scale.z) && scale.z > 0.0f ? scale.z : 1.0f};
+                      ghost->hasProjectileScale = true;
+                  }
+              }
+         });
+         activeConn->setProjectileImpactCallback(
+             [this](uint16_t ghostIndex, uint16_t classId,
+                    const V12::ProjectileImpact& impact) {
+                 if (!w) return;
+                 V12::DecodedDataBlock fallbackData;
+                 const V12::DecodedDataBlock* projectileData = &fallbackData;
+                 if (impact.hasDatablock) {
+                     auto projectileIt = nativeDatablocks.find(impact.datablockId);
+                     if (projectileIt != nativeDatablocks.end())
+                         projectileData = &projectileIt->second.decoded;
+                 }
+                 const V12::DecodedDataBlock* explosionData = nullptr;
+                 if (projectileData->projectileExplosionRef != 0) {
+                     auto explosionIt = nativeDatablocks.find(
+                         (uint16_t)projectileData->projectileExplosionRef);
+                     if (explosionIt != nativeDatablocks.end())
+                     explosionData = &explosionIt->second.decoded;
+                 }
+                 const Point3F position = Math::torquePointToYUp(
+                     {impact.position.x, impact.position.y, impact.position.z});
+                 Point3F normal = Math::torquePointToYUp(
+                     {impact.normal.x, impact.normal.y, impact.normal.z});
+                 const float normalLength = std::sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+                 if (!std::isfinite(normalLength) || normalLength < 0.001f)
+                     normal = {0.0f, 1.0f, 0.0f};
+                 else {
+                     normal.x /= normalLength;
+                     normal.y /= normalLength;
+                     normal.z /= normalLength;
+                 }
+                  w->spawnExplosionEffect(position, projectileData, explosionData,
+                                            &nativeDatablocks, normal);
+                  const V12::DecodedDataBlock* soundExplosion = explosionData;
+                  if (projectileData->projectileUnderwaterExplosionRef != 0 &&
+                      Engine::instance().audio().isUnderwater()) {
+                      auto underwater = nativeDatablocks.find(
+                          projectileData->projectileUnderwaterExplosionRef);
+                      if (underwater != nativeDatablocks.end())
+                          soundExplosion = &underwater->second.decoded;
+                  }
+                  if (soundExplosion && soundExplosion->explosion.soundProfileRef != 0)
+                      playNativeAudioProfile(Engine::instance().audio(), nativeDatablocks,
+                                             soundExplosion->explosion.soundProfileRef, position);
+                  auto projectileSound = projectileSoundSources.find(ghostIndex);
+                  if (projectileSound != projectileSoundSources.end()) {
+                      Engine::instance().audio().releaseSource(projectileSound->second);
+                      projectileSoundSources.erase(projectileSound);
+                  }
+                  w->removeProjectileTrail((int)ghostIndex);
+             });
+          activeConn->setAudioCallback([this](const V12::ServerEvent& event) {
+             auto& audio = Engine::instance().audio();
+             if (!audio.config().enabled || audio.config().sfxVolume <= 0)
+                 return;
+              // Audio profiles are indexed by the server's profile table. The
+              // decoded datablock table is authoritative for live packets.
+              // Script scanning remains a fallback for older demos that do
+              // not contain their datablock definitions.
+              auto nativeProfile = nativeDatablocks.find(
+                  static_cast<uint32_t>(event.audioProfileId));
+              if (nativeProfile != nativeDatablocks.end() &&
+                  nativeProfile->second.className == "AudioProfile") {
+                  const Point3F position = event.audioHasPosition
+                      ? Math::torquePointToYUp({event.audioPosition.x,
+                                                event.audioPosition.y,
+                                                event.audioPosition.z})
+                      : Point3F{};
+                  playNativeAudioProfile(audio, nativeDatablocks,
+                                         static_cast<uint32_t>(event.audioProfileId),
+                                         position);
+                  return;
+              }
+              scanAudioProfiles();
+             if (event.audioProfileId < 0 ||
+                 event.audioProfileId >= (int)s_audioProfiles.size()) return;
+             const auto& profile = s_audioProfiles[event.audioProfileId];
+             auto* buffer = audio.loadSound(profile.filename.c_str());
+             if (!buffer) return;
+             auto* source = audio.createSource();
+             if (!source) return;
+             source->setVolume(0.3f * audio.config().masterVolume * audio.config().sfxVolume);
+             if (event.audioHasPosition)
+                 source->setPosition(Math::torquePointToYUp({event.audioPosition.x,
+                                                              event.audioPosition.y,
+                                                              event.audioPosition.z}));
+              source->play(buffer);
+          });
+        if (!activeConn->connect(host, port)) {
+            Console::instance().printf(LogLevel::Error, "Unable to connect to %s:%d", host, port);
+            disconnectedCleanup();
+        }
+      }
 }
 
 int Game::liveClockRemainingMs() const {
@@ -5395,8 +8703,42 @@ static bool isEffectOnlyGhostClass(const std::string& className) {
            className == "Splash";
 }
 
+static void appendWheelNodeOverrides(const GhostEntry& ghost, DTSShape& shape,
+                                     float dt, DTSShape::NodeOverride* overrides,
+                                     int& overrideCount, int maxOverrides,
+                                     float* wheelRotation) {
+    if (ghost.className != "WheeledVehicle" || !shape.nativeDTS || !overrides ||
+        !wheelRotation)
+        return;
+    for (int i = 0; i < 6 && overrideCount < maxOverrides; ++i) {
+        if (!ghost.wheels[i].valid) continue;
+        // Torque's WheeledVehicle uses hub nodes as the wheel anchors. Keep
+        // wheelN as a compatibility alias for authored shapes that expose it.
+        int wheelNode = shape.findNode("hub" + std::to_string(i));
+        if (wheelNode < 0)
+            wheelNode = shape.findNode("wheel" + std::to_string(i));
+        if (wheelNode < 0) continue;
+        if (wheelNode >= (int)shape.defaultTransforms.size()) continue;
+
+        wheelRotation[i] += ghost.wheels[i].angularVelocity * std::max(dt, 0.0f);
+        MatrixF lateralAndSuspension;
+        lateralAndSuspension.setTranslation({ghost.wheels[i].lateral, 0.0f,
+                                              ghost.wheels[i].suspension});
+        MatrixF spin;
+        spin.setRotationAxis({1, 0, 0}, wheelRotation[i]);
+        overrides[overrideCount].nodeIndex = wheelNode;
+        overrides[overrideCount].transform = shape.defaultTransforms[wheelNode] *
+                                              lateralAndSuspension * spin;
+        ++overrideCount;
+    }
+}
+
 DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::string& skinName,
                                    const std::string& datablockInstance) {
+    if (className == "Camera" || className == "AIObjective" ||
+        className == "StationFXPersonal")
+        return nullptr;
+
     // Datablock and skin references determine identity. Do not infer an asset
     // variant from a name fragment; scripts and streamed datablocks own that
     // relationship.
@@ -5452,7 +8794,16 @@ DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::stri
 }
 
 bool Game::playDemo(const char* path) {
+    if (!path || !path[0]) {
+        Console::instance().printf(LogLevel::Warn, "Usage: playdemo <path>");
+        return false;
+    }
     Console::instance().printf(LogLevel::Info, "Loading demo: %s", path);
+    demoPlaying = false;
+    demoPaused = false;
+    clearMissionAudio();
+    Engine::instance().audio().stopAll();
+    clearProjectileAudio();
     auto failDemoLoad = [&]() {
         demoPlaying = false;
         demoFastForward = false;
@@ -5460,11 +8811,16 @@ bool Game::playDemo(const char* path) {
             delete demoParser;
             demoParser = nullptr;
         }
+        if (hud) hud->resetState();
         setState(MenuScreen);
         menu().setActive(false);
         auto& gui = Engine::instance().guiRenderer();
+        gui.clearDialogs();
+        resetGameplayGui(gui);
         if (gui.findControl("LobbyGui")) gui.setContentImmediate("LobbyGui");
         else gui.setContentImmediate("LaunchGui");
+        Engine::instance().platform().setRelativeMouse(false);
+        Engine::instance().platform().showMouse(true);
     };
 
     // Clean up previous parser
@@ -5557,16 +8913,23 @@ bool Game::playDemo(const char* path) {
     // Reset stats
     demoPacketsParsed = 0;
     demoTime = 0;
+    demoInterpolationDt = 0;
+    demoPaused = false;
     demoEventLog.clear();
+    demoAudioEventsPlayed.clear();
     int totalBlocks = demoParser->getBlockCount();
     const int moveBlocks = demoParser->getMoveBlockCount();
-    demoTotalTime = moveBlocks > 0 ? moveBlocks * 0.032f : 1.0f;
+    demoTotalTime = hdr.demoLengthMs > 0 ? hdr.demoLengthMs / 1000.0f :
+        (moveBlocks > 0 ? moveBlocks * 0.032f : 1.0f);
     demoBlocksTotal = totalBlocks;
     demoBlocksDone = 0;
     demoSnapshots.clear();
     demoSnapshots[0] = demoParser->captureSnapshot();
     demoFastForward = false; // real-time when invoked from console
-    demoFirstPersonCam = true;
+    demoFirstPersonCam = demoParser->getInitialBlock().firstPerson;
+    controlGhostIndex = demoParser->getInitialBlock().controlObjectGhostIndex;
+    demoAuthoredCamera = false;
+    demoCameraFov = -1.0f;
     demoOrbitCam = false;
     demoHasOrientation = false;
     demoViewYaw = 0.0f;
@@ -5584,8 +8947,16 @@ bool Game::playDemo(const char* path) {
 void Game::stopDemoPlayback() {
     demoPlaying = false;
     demoFastForward = false;
+    Engine::instance().audio().setPlaybackRate(1.0f);
+    Engine::instance().audio().stopAll();
+    clearMissionAudio();
+    demoAudioEventsPlayed.clear();
     demoPath.clear();
     demoTrails.clear();
+    if (w) w->clearEffects();
+    targetFinderShown = false;
+    if (hud) hud->resetState();
+    resetGameplayGui(Engine::instance().guiRenderer());
     if (demoParser) {
         delete demoParser;
         demoParser = nullptr;
@@ -5597,41 +8968,164 @@ void Game::stopDemoPlayback() {
     else gui.setContentImmediate("LaunchGui");
 }
 
-void Game::applyInput(const InputMove& input) {
-    // Edge detection for demo controls (track previous key state)
-    static bool prevPauseKey = false;
-    static bool prevStepKey = false;
-    static bool prevEventKey = false;
+void Game::toggleDemoPause() {
+    demoPaused = !demoPaused;
+    if (demoPaused)
+        Engine::instance().audio().pauseAll();
+    else {
+        Engine::instance().audio().setPlaybackRate(
+            (demoFastForward || currentInput.jet) ? 4.0f : 1.0f);
+        Engine::instance().audio().resumeAll();
+    }
+}
 
+void Game::disconnectedCleanup() {
+    if (auto* ts = Engine::instance().script().ts(); ts && ts->hasFunction("DisconnectedCleanup"))
+        ts->callFunction("DisconnectedCleanup", {});
+    if (auto* ts = Engine::instance().script().ts()) ts->clearScheduledEvents();
+    if (activeConn) activeConn->disconnect();
+    auto& audio = Engine::instance().audio();
+    audio.stopAll();
+    clearProjectileAudio();
+    clearMissionAudio();
+    liveGhosts.clear();
+    nativeDatablockShapes.clear();
+    nativeDatablocks.clear();
+    liveTargets.clear();
+    liveSensorGroupListenMasks.clear();
+    liveMissionCrc = 0;
+    liveTeamScores.clear();
+    livePlayerScores.clear();
+    liveClientTargetIds.clear();
+    liveClientNames.clear();
+    liveClientTeams.clear();
+    liveMatchStarted_ = false;
+    liveMatchEnded_ = false;
+    liveMissionDisplayName_.clear();
+    liveMissionType_.clear();
+    liveClockDurationMs_ = 0;
+    liveClockReceivedAt_ = 0.0;
+    liveLoadInfoLines_.clear();
+    liveSpectateInit = false;
+    spectateGhostIndex = -1;
+    liveFollowGhostIndex = -1;
+    liveFollowCenterInit = false;
+    targetFinderShown = false;
+    demoTrails.clear();
+    if (w) w->clearEffects();
+    if (w) w->resetTriggerTracking();
+    if (hud) hud->resetState();
+    auto& gui = Engine::instance().guiRenderer();
+    gui.clearDialogs();
+    resetGameplayGui(gui);
+    Engine::instance().platform().setRelativeMouse(false);
+    Engine::instance().platform().showMouse(true);
+    setState(MenuScreen);
+    menu().setActive(false);
+}
+
+void Game::resetLiveMissionState() {
+    auto& audio = Engine::instance().audio();
+    audio.stopAll();
+    clearProjectileAudio();
+    clearMissionAudio();
+    liveGhosts.clear();
+    nativeDatablockShapes.clear();
+    nativeDatablocks.clear();
+    liveTargets.clear();
+    liveSensorGroupListenMasks.clear();
+    liveTeamScores.clear();
+    livePlayerScores.clear();
+    liveClientTargetIds.clear();
+    liveClientNames.clear();
+    liveClientTeams.clear();
+    liveMatchStarted_ = false;
+    liveMatchEnded_ = false;
+    liveMissionDisplayName_.clear();
+    liveMissionType_.clear();
+    liveClockDurationMs_ = 0;
+    liveClockReceivedAt_ = 0.0;
+    liveLoadInfoLines_.clear();
+    liveSpectateInit = false;
+    liveSpectateRespawned = false;
+    liveFollowGhostIndex = -1;
+    liveFollowCenterInit = false;
+    spectateGhostIndex = -1;
+    freeCamActive = false;
+    freeCamPos = {0, 10, 0};
+    freeCamTarget = {0, 10, -1};
+    freeCamRot = {0, 0, 0};
+    showScoreboard = false;
+    targetFinderShown = false;
+    serverPlayerGhostIndex = 0;
+    serverPlayerGhostSynced = false;
+    damageFlash = -1.0f;
+    whiteOut = -1.0f;
+    shakeIntensity = 0.0f;
+    shakeOffset = {0, 0, 0};
+    demoTrails.clear();
+    if (w) w->clearEffects();
+    if (w) w->resetTriggerTracking();
+    if (hud) hud->resetState();
+    auto& gui = Engine::instance().guiRenderer();
+    gui.clearDialogs();
+    gui.setContent("PlayGui");
+    resetGameplayGui(gui);
+}
+
+void Game::toggleTargetFinder() {
+    const bool available = demoPlaying || (activeConn && activeConn->isConnected() &&
+                                           activeConn->isObserverMode());
+    if (available) targetFinderShown = !targetFinderShown;
+}
+
+void Game::selectSpectateTarget(int ghostIndex) {
+    if (ghostIndex < 0) return;
+    if (demoPlaying) {
+        if (demoParser && demoParser->getGhostTracker().getGhost(ghostIndex)) {
+            spectateGhostIndex = ghostIndex;
+            demoAuthoredCamera = false;
+            demoFirstPersonCam = true;
+            demoOrbitCam = false;
+        }
+    } else if (activeConn && activeConn->isObserverMode() && liveGhosts.getGhost(ghostIndex)) {
+        spectateGhostIndex = ghostIndex;
+        liveFollowGhostIndex = -1;
+        liveFollowCenterInit = false;
+    }
+}
+
+void Game::applyInput(const InputMove& input) {
     currentInput = input;
     showScoreboard = input.showScoreboard;
 
     // Demo pause toggle on rising edge of P key
-    if (demoPlaying && input.demoPause && !prevPauseKey)
+    if (demoPlaying && input.demoPause && !previousDemoPause)
         toggleDemoPause();
-    prevPauseKey = input.demoPause;
+    previousDemoPause = input.demoPause;
 
     // Demo step frame on rising edge of . key
-    if (demoPlaying && input.demoStepFrame && !prevStepKey)
+    if (demoPlaying && input.demoStepFrame && !previousDemoStep)
         requestDemoStep();
-    prevStepKey = input.demoStepFrame;
+    previousDemoStep = input.demoStepFrame;
 
     // Demo event log toggle on rising edge of E key
-    if (demoPlaying && input.demoShowEvents && !prevEventKey)
+    if (demoPlaying && input.demoShowEvents && !previousDemoEvent)
         toggleDemoEvents();
-    prevEventKey = input.demoShowEvents;
+    previousDemoEvent = input.demoShowEvents;
 
-    // Spectate cycle on reload key (R) during demo playback
-    static bool prevReload = false;
-    if (demoPlaying && input.reload && !prevReload) {
+    // Spectate cycle on the observer right-mouse action or R during playback.
+    const bool observerCycle = observerCyclePressed(input.reload, input.altFire);
+    if (demoPlaying && observerCycle && !previousObserverCycle) {
         if (demoParser) {
             auto indices = demoParser->getGhostTracker().getAllIndices();
             // Find all Player/MPB class ghosts
             std::vector<int> players;
-            for (int i : indices) {
-                const GhostEntry* g = demoParser->getGhostTracker().getGhost(i);
-                if (g && (g->className == "Player" || g->className == "MPB"))
-                    players.push_back(i);
+             for (int i : indices) {
+                 const GhostEntry* g = demoParser->getGhostTracker().getGhost(i);
+                  if (g && (g->className == "Player" || g->className == "MPB") &&
+                      g->damageState == 0)
+                      players.push_back(i);
             }
             if (!players.empty()) {
                 // Find current spectate index (or control index) in player list
@@ -5644,8 +9138,32 @@ void Game::applyInput(const InputMove& input) {
                 Console::instance().printf(LogLevel::Info, "Spectating ghost %d", spectateGhostIndex);
             }
         }
+    } else if (observerCycle && !previousObserverCycle && activeConn && activeConn->isObserverMode()) {
+        const auto observer = activeConn->observerSnapshot();
+        const auto indices = liveGhosts.getAllIndices();
+        std::vector<int> players;
+        for (int index : indices) {
+            const GhostEntry* g = liveGhosts.getGhost(index);
+            if (!g || (g->className != "Player" && g->className != "MPB") ||
+                !isSensorGroupTargetVisible(observer.playerSensorGroup, g->sensorGroup)) continue;
+            players.push_back(index);
+        }
+        if (!players.empty()) {
+            auto it = std::find(players.begin(), players.end(), spectateGhostIndex);
+            spectateGhostIndex = it != players.end() && ++it != players.end() ? *it : players.front();
+            liveFollowGhostIndex = -1;
+            liveFollowCenterInit = false;
+        }
     }
-    prevReload = input.reload;
+    previousObserverCycle = observerCycle;
+}
+
+void Game::resetInputState() {
+    currentInput = {};
+    previousDemoPause = false;
+    previousDemoStep = false;
+    previousDemoEvent = false;
+    previousObserverCycle = false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

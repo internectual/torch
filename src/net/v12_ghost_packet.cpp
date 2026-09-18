@@ -19,8 +19,9 @@ bool readGhostUpdates(V12BitStream& stream, GhostTracker& tracker,
         if (deleted) {
             update.operation = GhostUpdate::Operation::Delete;
             update.dataBegin = update.dataEnd = stream.position();
-            if (!tracker.erase(update.index)) update.failed = true;
-            updates.push_back(update);
+            // A retransmitted delete is already applied and is harmless.
+            if (tracker.erase(update.index))
+                updates.push_back(update);
         } else {
             const bool initial = tracker.get(update.index) == nullptr;
             update.operation = initial ? GhostUpdate::Operation::Create

@@ -1,5 +1,6 @@
 #include "core/platform.h"
 #include <SDL3/SDL.h>
+#include <algorithm>
 #include <cstdio>
 
 struct Platform::Impl {
@@ -11,7 +12,7 @@ struct Platform::Impl {
 };
 
 Platform::Platform() : impl(new Impl) {}
-Platform::~Platform() { delete impl; }
+Platform::~Platform() { shutdown(); delete impl; }
 
 bool Platform::init(const PlatformConfig& config) {
     // Force X11 backend for GLX compatibility with GLEW
@@ -40,6 +41,7 @@ bool Platform::init(const PlatformConfig& config) {
     impl->window = SDL_CreateWindow(config.title.c_str(), config.width, config.height, flags);
     if (!impl->window) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+        SDL_Quit();
         return false;
     }
     SDL_RaiseWindow(impl->window);
@@ -47,6 +49,9 @@ bool Platform::init(const PlatformConfig& config) {
     impl->glContext = SDL_GL_CreateContext(impl->window);
     if (!impl->glContext) {
         fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+        SDL_DestroyWindow(impl->window);
+        impl->window = nullptr;
+        SDL_Quit();
         return false;
     }
 
@@ -58,9 +63,13 @@ bool Platform::init(const PlatformConfig& config) {
 }
 
 void Platform::shutdown() {
+    if (!impl) return;
     if (impl->glContext) SDL_GL_DestroyContext(impl->glContext);
+    impl->glContext = nullptr;
     if (impl->window) SDL_DestroyWindow(impl->window);
+    impl->window = nullptr;
     SDL_Quit();
+    impl->running = false;
     running = false;
 }
 
@@ -70,6 +79,7 @@ bool Platform::processEvents() {
     inputState.mouseWheel = 0;
     inputState.textInput.clear();
     inputState.keyPressQueue.clear();
+    inputState.focusLost = false;
 
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -82,22 +92,27 @@ bool Platform::processEvents() {
                 inputState.textInput += e.text.text;
                 break;
             case SDL_EVENT_KEY_DOWN:
-                if (e.key.scancode < 512) {
+                if (e.key.scancode >= 0 && e.key.scancode < 512) {
+                    const bool wasDown = inputState.keysDown[e.key.scancode];
                     inputState.keysDown[e.key.scancode] = true;
-                    inputState.keyPressQueue.push_back(e.key.scancode);
+                    if (!wasDown) inputState.keyPressQueue.push_back(e.key.scancode);
                 }
                 break;
             case SDL_EVENT_KEY_UP:
-                if (e.key.scancode < 512) {
+                if (e.key.scancode >= 0 && e.key.scancode < 512) {
                     inputState.keysDown[e.key.scancode] = false;
                     inputState.consumedSc[e.key.scancode] = false;
                 }
                 break;
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                if (e.button.button < 8) inputState.mouseButtons[e.button.button] = true;
+                inputState.mouseX = e.button.x;
+                inputState.mouseY = e.button.y;
+                if (e.button.button > 0 && e.button.button < 8) inputState.mouseButtons[e.button.button] = true;
                 break;
             case SDL_EVENT_MOUSE_BUTTON_UP:
-                if (e.button.button < 8) {
+                inputState.mouseX = e.button.x;
+                inputState.mouseY = e.button.y;
+                if (e.button.button > 0 && e.button.button < 8) {
                     inputState.mouseButtons[e.button.button] = false;
                     inputState.consumedMouse[e.button.button] = false;
                 }
@@ -109,10 +124,26 @@ bool Platform::processEvents() {
                 inputState.mouseY = e.motion.y;
                 break;
             case SDL_EVENT_MOUSE_WHEEL:
-                inputState.mouseWheel = e.wheel.y;
+                inputState.mouseX = e.wheel.mouse_x;
+                inputState.mouseY = e.wheel.mouse_y;
+                inputState.mouseWheel += (int32_t)e.wheel.y;
+                break;
+            case SDL_EVENT_WINDOW_FOCUS_LOST:
+                // SDL does not guarantee key-up events while the window is
+                // unfocused. Never carry movement, fire, or modifier state
+                // into the next focus period.
+                for (bool& down : inputState.keysDown) down = false;
+                for (bool& consumed : inputState.consumedSc) consumed = false;
+                for (bool& down : inputState.mouseButtons) down = false;
+                for (bool& consumed : inputState.consumedMouse) consumed = false;
+                inputState.focusLost = true;
                 break;
             case SDL_EVENT_WINDOW_RESIZED:
-                if (impl->resizeCb) impl->resizeCb(e.window.data1, e.window.data2);
+                if (impl->resizeCb) {
+                    int w = 0, h = 0;
+                    SDL_GetWindowSizeInPixels(impl->window, &w, &h);
+                    impl->resizeCb(w, h);
+                }
                 break;
         }
     }
@@ -131,11 +162,32 @@ int32_t Platform::height() const {
     int h; SDL_GetWindowSize(impl->window, nullptr, &h); return h;
 }
 
+int32_t Platform::drawableWidth() const {
+    int w = 1;
+    if (impl->window) SDL_GetWindowSizeInPixels(impl->window, &w, nullptr);
+    return std::max(1, w);
+}
+
+int32_t Platform::drawableHeight() const {
+    int h = 1;
+    if (impl->window) SDL_GetWindowSizeInPixels(impl->window, nullptr, &h);
+    return std::max(1, h);
+}
+
 float Platform::aspect() const { return (float)width() / (float)height(); }
 double Platform::time() const { return SDL_GetTicks() / 1000.0; }
 uint64_t Platform::frameCount() const { return impl->frameCount; }
 
 void Platform::setTitle(const char* title) { SDL_SetWindowTitle(impl->window, title); }
+bool Platform::setVideoMode(int32_t width, int32_t height, bool fullscreen, bool vsync) {
+    if (!impl->window || width <= 0 || height <= 0) return false;
+    if (!SDL_SetWindowSize(impl->window, width, height)) return false;
+    if (!SDL_SetWindowFullscreen(impl->window, fullscreen)) return false;
+    if (SDL_GL_SetSwapInterval(vsync ? 1 : 0) != 0) return false;
+    if (impl->resizeCb)
+        impl->resizeCb(drawableWidth(), drawableHeight());
+    return true;
+}
 void Platform::showMouse(bool show) { if (show) SDL_ShowCursor(); else SDL_HideCursor(); }
 void Platform::setMousePos(int32_t x, int32_t y) { SDL_WarpMouseInWindow(impl->window, x, y); }
 void Platform::setRelativeMouse(bool relative) { SDL_SetWindowRelativeMouseMode(impl->window, relative); }

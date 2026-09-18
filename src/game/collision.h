@@ -26,6 +26,10 @@ struct CollisionMesh {
     void addMesh(const float* verts, int vertCount, const uint32_t* indices, int indexCount);
     void build();
     float getHeight(float x, float z) const;
+    // Select the highest walkable surface below the actor, rather than a
+    // ceiling above it.  The unbounded overload is retained for terrain-style
+    // callers that do not have an actor height.
+    float getFloorHeight(float x, float y, float z) const;
     bool raycast(const Point3F& origin, const Point3F& dir, float maxDist, float& outT, Point3F& outPos, Point3F& outNormal) const;
     bool sphereCollide(const Point3F& center, float radius, Point3F& pushOut) const;
     bool lineOfSight(const Point3F& a, const Point3F& b) const;

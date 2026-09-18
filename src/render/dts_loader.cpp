@@ -3,6 +3,7 @@
 #include "core/engine.h"
 #include "core/math.h"
 #include "fs/file_system.h"
+#include "render/material_parity.h"
 #include <cstring>
 #include <cmath>
 #include <algorithm>
@@ -405,6 +406,9 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
             v.color = {1,1,1,1};
             md.vertices.push_back(v);
         }
+        md.tvertIndices.resize(md.vertices.size());
+        for (size_t vi = 0; vi < md.tvertIndices.size(); ++vi)
+            md.tvertIndices[vi] = (int32_t)vi;
         for (int pi = 0; pi < numPrims; pi++) {
             if (primNumElems[pi] < 3) continue;
             int32_t type = primMatIdx[pi] & (3 << 30);
@@ -1111,6 +1115,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             v.color = {1,1,1,1};
             md.vertices.push_back(v);
         }
+        md.numFrames = numFrames;
+        md.frameVertices = meshVerts[m];
         for (auto& p : prims) {
             if (p.numElements < 3 || p.numElements > 10000) continue;
             if (p.start < 0 || p.start >= (int)indices.size()) continue;
@@ -1169,6 +1175,9 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         }
         md.nodeIndex = -1;
         md.numTVertsPerFrame = numTVerts;
+        md.tvertIndices.resize(md.vertices.size());
+        for (size_t vi = 0; vi < md.tvertIndices.size(); ++vi)
+            md.tvertIndices[vi] = (int32_t)vi;
         // Assign nodeIndex from owning object
         for (int oi = 0; oi < numObjects; oi++) {
             if (m >= dtsObjects[oi].sm && m < dtsObjects[oi].sm + dtsObjects[oi].nm) {
@@ -1455,30 +1464,10 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                 auto it = std::find(objectMatters.begin(), objectMatters.end(), object);
                 return it == objectMatters.end() ? -1 : (int32_t)(it - objectMatters.begin());
             };
-            for (int j = 0; j < (int)visMatters.size(); j++) {
-                int32_t objIdx = visMatters[j];
-                int32_t stateObject = objectStateNumber(objIdx);
-                if (stateObject < 0) continue;
-                for (int k = 0; k < numKFrames; k++) {
-                    int32_t stateIdx = baseObjState + stateObject * numKFrames + k;
-                    if (stateIdx < 0 || stateIdx >= (int)objStates.size()) continue;
-                    DTSShape::ObjectKeyframe okf;
-                    okf.objectIndex = objIdx;
-                    okf.time = (numKFrames > 1) ? (float)k / (float)(numKFrames - 1) * dur : 0.0f;
-                    okf.vis = objStates[stateIdx].vis;
-                    okf.frameIndex = objStates[stateIdx].frameIndex;
-                    okf.matFrameIndex = objStates[stateIdx].matFrameIndex;
-                    anim.objectKeyframes.push_back(okf);
-                }
-            }
-            // Also add frameMatters objects that aren't already in visMatters
-            for (int j = 0; j < (int)frameMatters.size(); j++) {
-                int32_t objIdx = frameMatters[j];
-                bool alreadyAdded = false;
-                for (int v = 0; v < (int)visMatters.size(); v++) {
-                    if (visMatters[v] == objIdx) { alreadyAdded = true; break; }
-                }
-                if (alreadyAdded) continue;
+            // Object state rows are indexed by the sorted union of every
+            // membership set. This also preserves material-only animations.
+            for (int j = 0; j < (int)objectMatters.size(); j++) {
+                int32_t objIdx = objectMatters[j];
                 int32_t stateObject = objectStateNumber(objIdx);
                 if (stateObject < 0) continue;
                 for (int k = 0; k < numKFrames; k++) {
@@ -1517,7 +1506,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         for (int i = 0; i < numMats; i++) capCount(prS32()); // ALL bump
         for (int i = 0; i < numMats; i++) capCount(prS32()); // ALL detail
         if (ver > 11) for (int i = 0; i < numMats; i++) capCount(prS32()); // ALL detailScale
-        if (ver > 20) for (int i = 0; i < numMats; i++) capCount(prS32()); // ALL reflectionAmount
+        std::vector<int32_t> rawReflectionAmounts(numMats, 0);
+        if (ver > 20) for (int i = 0; i < numMats; i++) rawReflectionAmounts[i] = prS32(); // ALL reflectionAmount
         for (int i = 0; i < numMats; i++) {
             uint32_t rawFlags = rawFlagsVec[i];
             // Remap T2 bit layout to our internal flags:
@@ -1532,6 +1522,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             if (rawFlags & (1 << 5)) flags |= 4;  // SelfIlluminating
             if (rawFlags & (1 << 6)) flags |= 8;  // NeverEnvMap
             result.materialFlags.push_back(flags);
+            result.materialReflectionAmount.push_back(materialReflectionFactor(rawReflectionAmounts[i]));
         }
     }
 
@@ -1546,7 +1537,9 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
 
     // materialFlags was populated from DTS material stream — save per-DTS-material
     std::vector<uint32_t> dtsMatFlags = result.materialFlags;
+    std::vector<float> dtsMatReflection = result.materialReflectionAmount;
     result.materialFlags.clear();
+    result.materialReflectionAmount.clear();
 
     try {
     for (size_t i = 0; i < result.materialNames.size(); i++) {
@@ -1594,6 +1587,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                             matSlots[i].texIdx = (int)result.textures.size();
                             uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
                             result.materialFlags.push_back(flags);
+                            result.materialReflectionAmount.push_back(i < dtsMatReflection.size() ? dtsMatReflection[i] : 0.0f);
                             result.textures.push_back(std::move(t));
                             loaded = true;
                             break;
@@ -1609,6 +1603,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                                 matSlots[i].texIdx = (int)result.textures.size();
                                 uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
                                 result.materialFlags.push_back(flags);
+                                result.materialReflectionAmount.push_back(i < dtsMatReflection.size() ? dtsMatReflection[i] : 0.0f);
                                 result.textures.push_back(std::move(t));
                                 loaded = true;
                                 break;
@@ -1651,6 +1646,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                                 matSlots[i].texIdx = (int)result.textures.size();
                                 uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
                                 result.materialFlags.push_back(flags);
+                                result.materialReflectionAmount.push_back(i < dtsMatReflection.size() ? dtsMatReflection[i] : 0.0f);
                                 result.textures.push_back(std::move(t));
                                 loaded = true;
                                 break;
@@ -1666,6 +1662,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                                     matSlots[i].texIdx = (int)result.textures.size();
                                     uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
                                     result.materialFlags.push_back(flags);
+                                    result.materialReflectionAmount.push_back(i < dtsMatReflection.size() ? dtsMatReflection[i] : 0.0f);
                                     result.textures.push_back(std::move(t));
                                     loaded = true;
                                     break;
@@ -1694,6 +1691,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                             matSlots[i].texIdx = (int)result.textures.size();
                             uint32_t flags = (i < dtsMatFlags.size()) ? dtsMatFlags[i] : 0;
                             result.materialFlags.push_back(flags);
+                            result.materialReflectionAmount.push_back(i < dtsMatReflection.size() ? dtsMatReflection[i] : 0.0f);
                             result.textures.push_back(std::move(t));
                             loaded = true;
                             break;

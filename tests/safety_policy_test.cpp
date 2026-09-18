@@ -24,6 +24,10 @@ int main() {
     CHECK(!TorchPath::isSafeLogicalPath("missions/../outside.mis"));
     CHECK(!TorchPath::isSafeLogicalPath("missions\\outside.mis"));
     CHECK(!TorchPath::isSafeLogicalPath("./mission.mis"));
+    std::string safeOutput;
+    CHECK(TorchPath::safeOutputPath("/tmp", "preview_RiverDance.png", safeOutput));
+    CHECK(safeOutput == "/tmp/preview_RiverDance.png");
+    CHECK(!TorchPath::safeOutputPath("/tmp", "../outside.png", safeOutput));
     const std::filesystem::path tempRoot = std::filesystem::temp_directory_path() / "torch-safety-test";
     const std::filesystem::path tempOutside = std::filesystem::temp_directory_path() / "torch-safety-outside";
     std::filesystem::remove_all(tempRoot);

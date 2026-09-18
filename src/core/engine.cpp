@@ -1,4 +1,5 @@
 #include "core/engine.h"
+#include "core/input_parity.h"
 #include "core/config.h"
 #include <GL/glew.h>
 #include "fs/vol_archive.h"
@@ -8,6 +9,9 @@
 #include "render/renderer.h"
 #include "render/dif_loader.h"
 #include "game/hud.h"
+#include "game/mission_discovery.h"
+#include "render/environment_commands.h"
+#include "fs/path_policy.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -22,7 +26,7 @@
 // ─── Key Bindings ─────────────────────────────────────────────────
 static std::map<std::string, int> s_bindings = {
     {"forward", 26}, {"backward", 22}, {"left", 4}, {"right", 7},
-    {"jump", 44}, {"jet", 44}, {"fire", -1}, {"altfire", -3},
+    {"jump", 44}, {"jet", 225}, {"fire", -1}, {"altfire", -3},
     {"zoom", -2}, {"reload", 21}, {"scoreboard", 43},
     {"f1", 58}, {"f2", 59}, {"f3", 60}, {"f4", 61},
     {"chat", 40}, {"console", 53},
@@ -32,6 +36,7 @@ static std::map<int, const char*> s_scancodeNames = {
     {4, "A"}, {7, "D"}, {22, "S"}, {26, "W"},
     {20, "Q"}, {8, "E"}, {21, "R"}, {23, "T"},
     {44, "SPACE"}, {40, "ENTER"}, {53, "GRAVE"},
+    {225, "LSHIFT"}, {229, "RSHIFT"},
     {43, "TAB"}, {58, "F1"}, {59, "F2"}, {60, "F3"}, {61, "F4"},
     {224, "LCTRL"}, {225, "LSHIFT"}, {226, "LALT"}, {227, "LGUI"},
     {228, "RCTRL"}, {229, "RSHIFT"}, {230, "RALT"}, {231, "RGUI"},
@@ -98,7 +103,6 @@ void Engine::syncBindsFromActionMap() {
     };
     auto& actionBinds = actionBindingStore();
     for (const auto& [action, command] : actions) {
-        bool found = false;
         for (const auto& [key, binding] : actionBinds) {
             const auto& [obj, device, keyName] = key;
             if (obj != "moveMap" || binding.cmdOn != command) continue;
@@ -111,11 +115,11 @@ void Engine::syncBindsFromActionMap() {
             }
             if (sc >= 0 || (device == 1 && sc < 0)) {
                 setBind(action, sc);
-                found = true;
                 break;
             }
         }
-        if (!found) setBind(action, -1);
+        // A script may not define every native action (notably fire and
+        // reload). Keep the native default/remap instead of erasing it.
     }
 }
 #include <sys/stat.h>
@@ -184,7 +188,8 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  F1                 Free camera toggle\n");
              fprintf(stdout, "  F2                 Orbit camera (demo)\n");
              fprintf(stdout, "  1-3                Select authored camera (mapper)\n");
-             fprintf(stdout, "  R                  Cycle spectate target (demo)\n");
+             fprintf(stdout, "  R / Right Click    Cycle spectate target (demo/observer)\n");
+             fprintf(stdout, "  F3                 Open observer target finder\n");
             fprintf(stdout, "  P                  Pause demo\n");
             fprintf(stdout, "  .                  Step demo frame\n");
             fprintf(stdout, "  Tab                Scoreboard\n");
@@ -216,7 +221,7 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().printf(LogLevel::Error, "Another instance is already running");
         return false;
     }
-    auto releaseLock = [this]() {
+    [[maybe_unused]] auto releaseLock = [this]() {
         if (lockFd >= 0) { close(lockFd); unlink(s_lockPath); lockFd = -1; }
     };
 
@@ -334,6 +339,7 @@ bool Engine::init(int argc, char* argv[]) {
     // Parse args
     bool noLogin = false;
     bool explicitPreviewCamera = false;
+    bool explicitModPath = false;
     int mapperCamera = 0;
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-data") == 0) && i + 1 < argc) dataDir = argv[i + 1];
@@ -342,7 +348,10 @@ bool Engine::init(int argc, char* argv[]) {
         if (strcmp(argv[i], "-height") == 0 && i + 1 < argc)
             Console::instance().setVariable("videoHeight", argv[i + 1]);
         if (strcmp(argv[i], "-output") == 0 && i + 1 < argc) outputDir = argv[i + 1];
-        if (strcmp(argv[i], "-mod") == 0 && i + 1 < argc) modPath = argv[i + 1];
+        if (strcmp(argv[i], "-mod") == 0 && i + 1 < argc) {
+            modPath = argv[i + 1];
+            explicitModPath = true;
+        }
         if (strcmp(argv[i], "-online") == 0) Console::instance().setVariable("online", "1");
         if (strcmp(argv[i], "-nologin") == 0) noLogin = true;
         if (strcmp(argv[i], "-debug") == 0) Console::instance().setLogLevel(LogLevel::Debug);
@@ -415,6 +424,23 @@ bool Engine::init(int argc, char* argv[]) {
         }
     }
 
+    // Command-line output overrides are parsed after config initialization.
+    // Rebind the runtime paths so previews and scripts use the same root.
+    expandHome(outputDir);
+    if (!explicitModPath && std::filesystem::is_directory(dataDir + "/classic"))
+        modPath = "classic";
+    Console::instance().setVariable("dataDir", dataDir.c_str());
+    Console::instance().setVariable("modPath", modPath.c_str());
+    std::error_code outputError;
+    std::filesystem::create_directories(outputDir, outputError);
+    if (outputError) {
+        Console::instance().printf(LogLevel::Error, "Cannot create output directory: %s", outputDir.c_str());
+    } else {
+        Console::instance().setVariable("outputDir", outputDir.c_str());
+        Console::instance().setLogFile((outputDir + "/console.log").c_str());
+        Console::instance().setVariable("$ConsoleLogPath", (outputDir + "/console.log").c_str());
+    }
+
     // Store command-line args for passthrough to init scripts (exclude engine-only flags)
     {
         // Engine flags that take no value args (or are already consumed)
@@ -478,9 +504,7 @@ bool Engine::init(int argc, char* argv[]) {
     // File System - only the configured stock Tribes 2 installation is a
     // production resource source. Project-local assets and generated output
     // must not silently alter startup or map rendering.
-    std::vector<std::string> paths = {
-        dataDir, dataDir + "/base", outputDir + "/base"
-    };
+    std::vector<std::string> paths = {dataDir, dataDir + "/base"};
     filesys->init(paths);
     filesys->setOriginalOnly(true);
 
@@ -506,36 +530,6 @@ bool Engine::init(int argc, char* argv[]) {
         }
         return found;
     };
-
-    // -testdif: directly from disk, before slow VL2 mounting
-    if (!testDifPath.empty()) {
-        std::string fullPath = testDifPath;
-        { struct stat st; if (stat(fullPath.c_str(), &st) != 0) fullPath = dataDir + "/" + testDifPath; }
-        std::ifstream difFile(fullPath, std::ios::binary);
-        if (!difFile) {
-            Console::instance().printf(LogLevel::Error, "testdif: cannot open '%s'", fullPath.c_str());
-        } else {
-            std::vector<uint8_t> d((std::istreambuf_iterator<char>(difFile)), {});
-            DIFLoadResult r = loadDIF(d.data(), d.size(), fullPath.c_str(), true);
-            if (r.loaded) {
-                size_t totalVerts = 0, totalTris = 0;
-                for (auto& m : r.meshes) { totalVerts += m.vertices.size(); totalTris += m.indices.size() / 3; }
-                Console::instance().printf(LogLevel::Info, "--- DIF test: '%s' ---", fullPath.c_str());
-                Console::instance().printf(LogLevel::Info, "  Meshes:    %zu", r.meshes.size());
-                Console::instance().printf(LogLevel::Info, "  Vertices:  %zu", totalVerts);
-                Console::instance().printf(LogLevel::Info, "  Triangles: %zu", totalTris);
-                Console::instance().printf(LogLevel::Info, "  Textures:  %zu", r.textures.size());
-                Console::instance().printf(LogLevel::Info, "  Lightmaps: %zu", r.lightmaps.size());
-                Console::instance().printf(LogLevel::Info, "  Materials: %zu", r.materialNames.size());
-                int lLoaded = 0;
-                for (auto& lm : r.lightmaps) if (lm.loaded) lLoaded++;
-                Console::instance().printf(LogLevel::Info, "  Lightmaps loaded: %d/%zu", lLoaded, r.lightmaps.size());
-            } else {
-                Console::instance().printf(LogLevel::Error, "testdif: failed to load '%s'", fullPath.c_str());
-            }
-        }
-        exit(0);
-    }
 
     // Scan data dir and its subdirs for archives
     archives = scanArchives(dataDir);
@@ -563,6 +557,46 @@ bool Engine::init(int argc, char* argv[]) {
         }
     }
 
+    if (!testDifPath.empty()) {
+        std::string sourceName = testDifPath;
+        std::vector<uint8_t> data = fs.read(testDifPath.c_str());
+        if (data.empty()) {
+            std::string fullPath = testDifPath;
+            struct stat st;
+            if (stat(fullPath.c_str(), &st) != 0) fullPath = dataDir + "/" + testDifPath;
+            std::ifstream difFile(fullPath, std::ios::binary);
+            if (difFile) {
+                data.assign(std::istreambuf_iterator<char>(difFile), {});
+                sourceName = fullPath;
+            }
+        }
+        if (data.empty()) {
+            Console::instance().printf(LogLevel::Error, "testdif: cannot resolve '%s'", testDifPath.c_str());
+        } else {
+            DIFLoadResult r = loadDIF(data.data(), data.size(), sourceName.c_str(), true);
+            if (r.loaded) {
+                size_t totalVerts = 0, totalTris = 0;
+                for (auto& m : r.meshes) { totalVerts += m.vertices.size(); totalTris += m.indices.size() / 3; }
+                Console::instance().printf(LogLevel::Info, "--- DIF test: '%s' ---", sourceName.c_str());
+                Console::instance().printf(LogLevel::Info, "  Meshes:    %zu", r.meshes.size());
+                Console::instance().printf(LogLevel::Info, "  Vertices:  %zu", totalVerts);
+                Console::instance().printf(LogLevel::Info, "  Triangles: %zu", totalTris);
+                Console::instance().printf(LogLevel::Info, "  Textures:  %zu", r.textures.size());
+                Console::instance().printf(LogLevel::Info, "  Lightmaps: %zu", r.lightmaps.size());
+                Console::instance().printf(LogLevel::Info, "  Materials: %zu", r.materialNames.size());
+                Console::instance().printf(LogLevel::Info, "  BSP nodes: %zu", r.interiorBSP.size());
+                Console::instance().printf(LogLevel::Info, "  Zones:     %zu", r.interiorZoneNeighbors.size());
+                Console::instance().printf(LogLevel::Info, "  Portals:   %zu", r.interiorPortals.size());
+                int lLoaded = 0;
+                for (auto& lm : r.lightmaps) if (lm.loaded) lLoaded++;
+                Console::instance().printf(LogLevel::Info, "  Lightmaps loaded: %d/%zu", lLoaded, r.lightmaps.size());
+            } else {
+                Console::instance().printf(LogLevel::Error, "testdif: failed to load '%s'", sourceName.c_str());
+            }
+        }
+        exit(0);
+    }
+
 #ifdef TORCH_DEDICATED
     // The dedicated server does not need the client script/GUI/render/audio
     // stack. Returning here also prevents startup GUI code from touching an
@@ -574,8 +608,8 @@ bool Engine::init(int argc, char* argv[]) {
     // Renderer
 #ifndef TORCH_DEDICATED
     if (!ren->init(plat->nativeWindow())) { releaseLock(); return false; }
-    ren->config().width = plat->width();
-    ren->config().height = plat->height();
+    ren->config().width = plat->drawableWidth();
+    ren->config().height = plat->drawableHeight();
     plat->setResizeCallback([this](int w, int h) { ren->onResize(w, h); });
 
     // Load GFT fonts from data directory
@@ -685,17 +719,43 @@ bool Engine::init(int argc, char* argv[]) {
     con->addCommand("setFogDensity", [](int32_t argc, const char* const* argv) {
         if (argc > 1) {
             float d = atof(argv[1]);
-            Engine::instance().renderer().config().fogDensity = d;
-            Console::instance().printf(LogLevel::Info, "fogDensity set to %f", d);
+            auto& engine = Engine::instance();
+            auto& fog = engine.game().world().fog;
+            if (applyFogDensity(fog.distance, fog.density, d)) {
+                fog.enabled = true;
+                engine.renderer().config().fogDensity = d;
+                Console::instance().printf(LogLevel::Info, "fogDensity set to %f", d);
+            } else {
+                Console::instance().printf(LogLevel::Warn, "fogDensity rejected: %f", d);
+            }
         }
     }, "setFogDensity <float> - override mission fog density");
+
+    con->addCommand("setFogDistance", [](int32_t argc, const char* const* argv) {
+        if (argc > 1) {
+            float d = atof(argv[1]);
+            auto& fog = Engine::instance().game().world().fog;
+            if (applyFogDistance(fog.distance, fog.density, d)) {
+                fog.enabled = true;
+                Console::instance().printf(LogLevel::Info, "fogDistance set to %f", d);
+            } else {
+                Console::instance().printf(LogLevel::Warn, "fogDistance rejected: %f", d);
+            }
+        }
+    }, "setFogDistance <float> - set live mission fog distance");
 
     con->addCommand("setFogColor", [](int32_t argc, const char* const* argv) {
         if (argc >= 5) {
             ColorF c{(float)atof(argv[1]), (float)atof(argv[2]), (float)atof(argv[3]), (float)atof(argv[4])};
-            Engine::instance().renderer().config().fogColor = c;
-            Engine::instance().renderer().config().fogColorOverride = true;
-            Console::instance().printf(LogLevel::Info, "fogColor set to %.2f %.2f %.2f %.2f", c.r, c.g, c.b, c.a);
+            auto& engine = Engine::instance();
+            if (applyFogColor(engine.game().world().fog.color, c.r, c.g, c.b, c.a)) {
+                engine.game().world().fog.enabled = true;
+                engine.renderer().config().fogColor = c;
+                engine.renderer().config().fogColorOverride = true;
+                Console::instance().printf(LogLevel::Info, "fogColor set to %.2f %.2f %.2f %.2f", c.r, c.g, c.b, c.a);
+            } else {
+                Console::instance().printf(LogLevel::Warn, "fogColor rejected");
+            }
         }
     }, "setFogColor <r> <g> <b> <a> - override mission fog color");
 
@@ -738,11 +798,18 @@ bool Engine::init(int argc, char* argv[]) {
     });
 
     con->addCommand("screenshot", [this](int32_t argc, const char* const* argv) {
-        const char* path = argc > 1 ? argv[1] : "screenshot.png";
-        if (ren->screenshot(path))
-            Console::instance().printf(LogLevel::Info, "Screenshot saved: %s", path);
+        const char* requested = argc > 1 ? argv[1] : "screenshot.png";
+        const std::string outputDir = Console::instance().getStringVariable("outputDir", "");
+        std::string path;
+        if (!TorchPath::safeOutputPath(outputDir.c_str(), requested, path)) {
+            Console::instance().printf(LogLevel::Error, "Unsafe screenshot path: %s", requested);
+            return;
+        }
+        std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+        if (ren->screenshot(path.c_str()))
+            Console::instance().printf(LogLevel::Info, "Screenshot saved: %s", path.c_str());
         else
-            Console::instance().printf(LogLevel::Error, "Screenshot failed: %s", path);
+            Console::instance().printf(LogLevel::Error, "Screenshot failed: %s", path.c_str());
     }, "screenshot [path] - save a screenshot to path (default: screenshot.png)");
 
     // DEBUG: inject a GUI mouse click through the real input path; cycles
@@ -918,8 +985,9 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().printf(LogLevel::Info, "PasswordProcess called (stub)");
     });
 
-    con->addCommand("Disconnect", [](int32_t, const char* const*) {
+    con->addCommand("Disconnect", [this](int32_t, const char* const*) {
         Console::instance().printf(LogLevel::Info, "Disconnect called");
+        game().disconnectedCleanup();
     });
 
     // Init script path management (value comes from torch.cfg, not hardcoded)
@@ -933,9 +1001,12 @@ bool Engine::init(int argc, char* argv[]) {
             std::string path = std::string("audio/fx/weapons/") + argv[1] + ".wav";
             auto* buf = aud->loadSound(path.c_str());
             if (buf) {
-                auto* src = aud->createSource();
-                src->play(buf);
-                Console::instance().printf(LogLevel::Info, "Playing: %s", path.c_str());
+                if (auto* src = aud->createSource()) {
+                    src->play(buf);
+                    Console::instance().printf(LogLevel::Info, "Playing: %s", path.c_str());
+                } else {
+                    Console::instance().printf(LogLevel::Warn, "Audio source limit reached");
+                }
             } else {
                 Console::instance().printf(LogLevel::Warn, "Weapon sound not found: %s", path.c_str());
             }
@@ -946,9 +1017,12 @@ bool Engine::init(int argc, char* argv[]) {
         if (argc > 1 && aud) {
             auto* buf = aud->loadSound(argv[1]);
             if (buf) {
-                auto* src = aud->createSource();
-                src->play(buf);
-                Console::instance().printf(LogLevel::Info, "Playing: %s", argv[1]);
+                if (auto* src = aud->createSource()) {
+                    src->play(buf);
+                    Console::instance().printf(LogLevel::Info, "Playing: %s", argv[1]);
+                } else {
+                    Console::instance().printf(LogLevel::Warn, "Audio source limit reached");
+                }
             } else {
                 Console::instance().printf(LogLevel::Warn, "Sound not found: %s", argv[1]);
             }
@@ -1250,11 +1324,11 @@ bool Engine::init(int argc, char* argv[]) {
         }
         std::string initPath = Console::instance().getStringVariable("initScript", "");
         auto initData = fs.read(initPath.c_str());
-        if (!initData.empty()) {
+        if (!mapperMode && !initData.empty()) {
             std::string src((const char*)initData.data(), initData.size());
             scr->ts()->executeNested(src, initPath);
             Console::instance().printf(LogLevel::Info, "Init script: %s (%zu bytes)", initPath.c_str(), initData.size());
-        } else {
+        } else if (!mapperMode) {
             Console::instance().printf(LogLevel::Warn, "Init script not found: %s", initPath.c_str());
         }
         if (mapperMode) {
@@ -1275,6 +1349,44 @@ bool Engine::init(int argc, char* argv[]) {
             }
             Console::instance().printf(LogLevel::Info,
                 "Mapper: executed %d discovered asset scripts", executed);
+        }
+
+        // console_start creates the canvas but the stock client bootstrap that
+        // normally loads these resources lives in console_end.cs, which is not
+        // part of the supplied installation.  Load only the stock resources
+        // needed by the native client; do not synthesize replacements when a
+        // supplied resource is absent.
+        if (!mapperMode) {
+            const char* clientScripts[] = {
+                "scripts/player.cs", "scripts/gameCanvas.cs", "scripts/hud.cs",
+                "scripts/inventoryHud.cs", "scripts/GameGui.cs"
+            };
+            for (const char* path : clientScripts) {
+                auto data = fs.read(path);
+                if (data.empty()) {
+                    Console::instance().printf(LogLevel::Warn,
+                        "Bootstrap: stock script not found: %s", path);
+                    continue;
+                }
+                scr->ts()->executeNested(
+                    std::string((const char*)data.data(), data.size()), path);
+                Console::instance().printf(LogLevel::Debug,
+                    "Bootstrap: loaded stock script: %s", path);
+            }
+
+            const char* clientGuis[] = {"gui/PlayGui.gui", "gui/GameGui.gui"};
+            for (const char* path : clientGuis) {
+                auto data = fs.read(path);
+                if (data.empty()) {
+                    Console::instance().printf(LogLevel::Warn,
+                        "Bootstrap: stock GUI not found: %s", path);
+                    continue;
+                }
+                scr->ts()->executeNested(
+                    std::string((const char*)data.data(), data.size()), path);
+                Console::instance().printf(LogLevel::Debug,
+                    "Bootstrap: loaded stock GUI: %s", path);
+            }
         }
     }
     // Boot scripts (incl. autoexec default-seeders) may export() before real
@@ -1353,7 +1465,8 @@ bool Engine::init(int argc, char* argv[]) {
 
     // Initialize GUI renderer from script-created objects
 #ifndef TORCH_DEDICATED
-    gui->init();
+    if (!mapperMode)
+        gui->init();
 #endif
 
     // -exec: execute a file at startup (after gui init so Canvas calls work)
@@ -1375,14 +1488,25 @@ bool Engine::init(int argc, char* argv[]) {
         g->startLocalGame(previewMap.c_str());
         // Auto-compute preview camera over the terrain center if not explicitly set
         if (!usePreviewCam && g->state() == Game::Playing) {
-            auto& tb = *g->world().terrain();
-            float half = tb.size * tb.squareSize * 0.5f;
-            float cx = tb.worldOffset.x + half;
-            float cz = tb.worldOffset.z - half;
-            float h = g->world().getHeight(cx, cz);
-            if (h < 0) h = 0;
-            previewCamTarget = {cx, h, cz};
-            previewCamPos = {cx, h + half * 0.5f, cz - half * 0.8f};
+            if (!g->world().observerCameras().empty()) {
+                const auto& camera = g->world().observerCameras().front();
+                previewCamPos = Math::torquePointToYUp(camera.pos);
+                const Point3F forward = Math::torqueCameraForwardToYUp(
+                    camera.axis, Math::DEG2RAD(camera.angleDeg));
+                previewCamTarget = {previewCamPos.x + forward.x * 100.0f,
+                                    previewCamPos.y + forward.y * 100.0f,
+                                    previewCamPos.z + forward.z * 100.0f};
+                Console::instance().printf(LogLevel::Info, "Preview: using authored observer camera 1");
+            } else {
+                auto& tb = *g->world().terrain();
+                float half = tb.size * tb.squareSize * 0.5f;
+                float cx = tb.worldOffset.x + half;
+                float cz = tb.worldOffset.z - half;
+                float h = g->world().getHeight(cx, cz);
+                if (h < 0) h = 0;
+                previewCamTarget = {cx, h, cz};
+                previewCamPos = {cx, h + half * 0.5f, cz - half * 0.8f};
+            }
             usePreviewCam = true;
         }
     } else if (noLogin) {
@@ -1438,7 +1562,7 @@ bool Engine::init(int argc, char* argv[]) {
                                     return out;
                                 };
                                 bool changed = false;
-                                if (fld(1).empty() || fld(1) == "Human Male" && fld(0).empty()) { /* keep */ }
+                                if (fld(1).empty() || (fld(1) == "Human Male" && fld(0).empty())) { /* keep */ }
                                 if (fld(2).empty()) { rec = setFld(2, "beagle"); changed = true; }
                                 if (fld(3).empty()) { rec = setFld(3, "Male1"); changed = true; }
                                 if ((int)rec.size() > 0 && fld(0).empty()) { /* name empty: leave */ }
@@ -1510,9 +1634,8 @@ bool Engine::init(int argc, char* argv[]) {
                 mapperCamera <= (int)g->world().observerCameras().size()) {
                 const auto& camera = g->world().observerCameras()[mapperCamera - 1];
                 previewCamPos = Math::torquePointToYUp(camera.pos);
-                MatrixF rotation = Math::torqueRotationToYUp(
-                    camera.axis, -Math::DEG2RAD(camera.angleDeg));
-                Point3F forward = rotation.transform({0, 0, -1});
+                Point3F forward = Math::torqueCameraForwardToYUp(
+                    camera.axis, Math::DEG2RAD(camera.angleDeg));
                 previewCamTarget = {
                     previewCamPos.x + forward.x * 100.0f,
                     previewCamPos.y + forward.y * 100.0f,
@@ -1618,6 +1741,12 @@ void Engine::run() {
 
         // Process events
         if (!plat->processEvents()) break;
+        if (plat->input().focusLost) {
+            g->resetInputState();
+            // SDL may omit button-up events when focus changes. Release GUI
+            // capture so a later click cannot move an old slider/window.
+            if (gui) gui->handleDragRelease();
+        }
 
         // Pause key toggles TORCH overlay
         {
@@ -1639,7 +1768,7 @@ void Engine::run() {
         if (!gui->isDialogActive("ConsoleDlg")) {
             static bool prevEsc = false;
             bool escDown = plat->input().keysDown[SCANCODE_ESCAPE];
-            if (escDown && !prevEsc) {
+            if (escDown && !prevEsc && !g->targetFinderOpen()) {
                 // When a GuiInputCtrl key-capture (e.g. RemapDlg) is active the
                 // key belongs to the capture control: it will be forwarded to
                 // onInputEvent (which cancels on Escape). Don't also pop here or
@@ -1880,14 +2009,15 @@ void Engine::run() {
         if (g && g->activeConnection()) g->activeConnection()->update();
         g->gameServer().update();
         scr->vm()->setVariable("time", (float)now);
+        if (scr->ts()) scr->ts()->processScheduledEvents(now);
 
         // Process GUI events
         if (gui) gui->update(dt);
 
         // GUI mouse input
         if (gui && gui->getCanvas()) {
-            int mx = plat->input().mouseX;
-            int my = plat->input().mouseY;
+            int mx = 0, my = 0;
+            gui->mapMouse(plat->input().mouseX, plat->input().mouseY, mx, my);
             // Hover detection: set hovered state on control under mouse
             GuiControl* hover = gui->hitTestTop(mx, my);
             if (hover) {
@@ -1962,13 +2092,15 @@ void Engine::run() {
             if (wheel != 0) {
                 bool scrolled = false;
                 if (gui) {
-                    int mx = plat->input().mouseX;
-                    int my = plat->input().mouseY;
+                    const int physicalX = plat->input().mouseX;
+                    const int physicalY = plat->input().mouseY;
+                    int mx = 0, my = 0;
+                    gui->mapMouse(plat->input().mouseX, plat->input().mouseY, mx, my);
                     scrolled = gui->handleScroll(mx, my, wheel);
                     if (scrolled) {
                         // Consume the wheel so the dev panel console does not also scroll
                         plat->input().mouseWheel = 0;
-                    } else if (my >= 482 || (mx >= 650 && my < 480)) {
+                    } else if (physicalY >= 482 || (physicalX >= 650 && physicalY < 480)) {
                         // Cursor is over the dev panel (bottom tab panel or the
                         // object tree) — leave the wheel for the dev panel's own
                         // scroll handling instead of cycling the weapon.
@@ -1986,6 +2118,19 @@ void Engine::run() {
         bool isPlaying = (g->state() != Game::MenuScreen || g->isTestShapeLoaded() || g->isShapeViewerActive());
         if (isPlaying) {
             if (!gui->isDialogActive("ConsoleDlg") && !g->isGamePaused()) {
+                static bool previousTargetFinderKey = false;
+                const bool targetFinderKey = plat->input().keysDown[SCANCODE_F3];
+                if (targetFinderKey && !previousTargetFinderKey) {
+                    g->toggleTargetFinder();
+                    if (g->targetFinderOpen()) {
+                        plat->setRelativeMouse(false);
+                        plat->showMouse(true);
+                    } else if (g->state() == Game::Playing) {
+                        plat->setRelativeMouse(true);
+                        plat->showMouse(false);
+                    }
+                }
+                previousTargetFinderKey = targetFinderKey;
                 // Read input
                 Game::InputMove input;
                 auto& keys = plat->input().keysDown;
@@ -2116,10 +2261,11 @@ void Engine::run() {
                         -(float)plat->input().mouseDeltaX * 0.002f, 0};
                 }
                 static int lastNumKey = 0;
-                for (int nk = 0; nk < 9; nk++) {
-                    if (keys[30 + nk]) {
+                for (int nk = 0; nk < 10; nk++) {
+                    const int scancode = nk == 9 ? 39 : 30 + nk; // 1..9,0
+                    if (keys[scancode]) {
                         if (lastNumKey != nk + 1) {
-                            if (g->isMapperMode() && nk < 3)
+                            if (g->isMapperMode())
                                 g->selectMapperObserverCamera(nk + 1);
                             else if (!scriptInput && !g->isMapperMode())
                                 g->player().selectWeapon(nk);
@@ -2127,12 +2273,16 @@ void Engine::run() {
                         }
                         break;
                     }
-                    if (lastNumKey && !keys[29 + lastNumKey]) lastNumKey = 0;
+                    if (lastNumKey) {
+                        const int previousScancode = lastNumKey == 10 ? 39 : 29 + lastNumKey;
+                        if (!keys[previousScancode]) lastNumKey = 0;
+                    }
                 }
                 static bool wasInMenu = true;
                 if (g->state() == Game::Playing && wasInMenu) { plat->setRelativeMouse(true); plat->showMouse(false); wasInMenu = false; }
                 if (g->state() != Game::Playing) wasInMenu = true;
-                g->applyInput(input);
+                if (!g->targetFinderOpen()) g->applyInput(input);
+                else g->applyInput(Game::InputMove{});
             }
             {
                 static double lastTiming = 0;
@@ -2140,18 +2290,26 @@ void Engine::run() {
                 g->update(dt);
                 double t1 = Timer::now();
                 g->render(dt);  // 3D render with own beginFrame/endFrame
+                if (!g->targetFinderOpen() && g->state() == Game::Playing) {
+                    plat->setRelativeMouse(true);
+                    plat->showMouse(false);
+                }
                 // Shape preview: capture the test shape to a PNG (once)
                 {
                     static bool shapePreviewSaved = false;
                     if (g->isTestShapeLoaded() && !shapePreviewSaved) {
-                        char path[256];
-                        snprintf(path, sizeof(path), "shape_preview.png");
-                        if (ren->screenshot(path)) Console::instance().printf(LogLevel::Info, "Shape preview saved: %s", path);
+                        const std::string outputDir = Console::instance().getStringVariable("outputDir", "");
+                        std::string path;
+                        if (TorchPath::safeOutputPath(outputDir.c_str(), "shape_preview.png", path) &&
+                            ren->screenshot(path.c_str()))
+                            Console::instance().printf(LogLevel::Info, "Shape preview saved: %s", path.c_str());
                         else Console::instance().printf(LogLevel::Error, "Shape preview failed");
                         shapePreviewSaved = true;
                     }
                 }
                 double t2 = Timer::now();
+                (void)t0;
+                (void)t2;
                 if (t1 - lastTiming >= 5.0) {
                     lastTiming = t1;
                     //Console::instance().printf(LogLevel::Debug, "TIMING: update=%.1fms render=%.1fms total=%.1fms", (t1-t0)*1000, (t2-t1)*1000, (t2-t0)*1000);
@@ -2159,10 +2317,22 @@ void Engine::run() {
             }
             // Preview mode
             if (!previewMap.empty() && !previewDone) {
-                char path[256];
-                snprintf(path, sizeof(path), "preview_%s.png", previewMap.c_str());
-                if (ren->screenshot(path)) Console::instance().printf(LogLevel::Info, "Preview saved: %s", path);
-                else Console::instance().printf(LogLevel::Error, "Preview screenshot failed");
+                static int previewWarmupFrames = 0;
+                if (++previewWarmupFrames < 4) continue;
+                std::string safeName = previewMap;
+                for (char& c : safeName) {
+                    if (!std::isalnum((unsigned char)c) && c != '_' && c != '-') c = '_';
+                }
+                const std::string outputDir = Console::instance().getStringVariable("outputDir", "");
+                std::string path;
+                const std::string fileName = "preview_" + safeName + ".png";
+                if (!TorchPath::safeOutputPath(outputDir.c_str(), fileName.c_str(), path)) {
+                    Console::instance().printf(LogLevel::Error, "Unsafe preview path: %s", fileName.c_str());
+                } else if (ren->screenshot(path.c_str())) {
+                    Console::instance().printf(LogLevel::Info, "Preview saved: %s", path.c_str());
+                } else {
+                    Console::instance().printf(LogLevel::Error, "Preview screenshot failed");
+                }
                 previewDone = true; quit();
             }
         }
@@ -2171,9 +2341,14 @@ void Engine::run() {
         if (g->isTestShapeLoaded() || g->isShapeViewerActive() || mapperMode) {
             // Auto-screenshot on first frame in mapper mode
             static bool mapperScreenshotTaken = false;
-            if (mapperMode && !mapperScreenshotTaken) {
-                char path[256];
-                snprintf(path, sizeof(path), "/tmp/torch_mapper.png");
+             if (mapperMode && !mapperScreenshotTaken) {
+                 const std::string outputDir = Console::instance().getStringVariable("outputDir", "");
+                 std::string path;
+                 if (!TorchPath::safeOutputPath(outputDir.c_str(), "torch_mapper.png", path)) {
+                     Console::instance().printf(LogLevel::Error, "Unsafe mapper screenshot path");
+                     mapperScreenshotTaken = true;
+                     continue;
+                 }
                 // Build metadata string for reproducibility
                 char meta[1024];
                 auto& cam = ren->cameraPos;
@@ -2195,7 +2370,7 @@ void Engine::run() {
                         (float)camTarget.x, (float)camTarget.y, (float)camTarget.z,
                         missionName);
                 }
-                if (ren->screenshot(path, meta)) Console::instance().printf(LogLevel::Info, "Mapper screenshot saved: %s", path);
+                 if (ren->screenshot(path.c_str(), meta)) Console::instance().printf(LogLevel::Info, "Mapper screenshot saved: %s", path.c_str());
                 mapperScreenshotTaken = true;
             }
             // F12: manual snapshot of current camera position
@@ -2203,8 +2378,9 @@ void Engine::run() {
                 static bool prevF12 = false;
                 bool f12Down = plat->input().keysDown[SCANCODE_F12];
                 if (f12Down && !prevF12) {
-                    char snapPath[256];
-                    snprintf(snapPath, sizeof(snapPath), "snapshot.png");
+                    const std::string outputDir = Console::instance().getStringVariable("outputDir", "");
+                    std::string snapPath;
+                    const bool safePath = TorchPath::safeOutputPath(outputDir.c_str(), "snapshot.png", snapPath);
                     char meta[1024];
                     auto& cam = ren->cameraPos;
                     auto& camTarget = ren->cameraTarget;
@@ -2225,8 +2401,8 @@ void Engine::run() {
                             (float)camTarget.x, (float)camTarget.y, (float)camTarget.z,
                             missionName);
                     }
-                    if (ren->screenshot(snapPath, meta))
-                        Console::instance().printf(LogLevel::Info, "Snapshot saved: %s", snapPath);
+                    if (safePath && ren->screenshot(snapPath.c_str(), meta))
+                        Console::instance().printf(LogLevel::Info, "Snapshot saved: %s", snapPath.c_str());
                     else
                         Console::instance().printf(LogLevel::Error, "Snapshot failed: %s", snapPath);
                 }
@@ -3104,6 +3280,13 @@ void Engine::shutdown() {
     if (scr && scr->ts() && clientPrefsExportAllowed())
         scr->ts()->execute("export(\"$pref::*\", \"prefs/ClientPrefs.cs\", false);", "shutdown-export");
 
+    // GUI callbacks need the script VM and platform while they sleep. Tear the
+    // stack down before either subsystem is destroyed, then release the GUI.
+    if (gui) {
+        gui->clearDialogs();
+        delete gui;
+        gui = nullptr;
+    }
     g->shutdown();
     net->shutdown();
     scr->shutdown();

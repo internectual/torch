@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
+#include <cctype>
+#include <fnmatch.h>
 
 struct VolEntry {
     uint32_t crc;
@@ -16,8 +18,17 @@ struct VolEntry {
 struct VolArchive::Impl {
     std::ifstream file;
     std::unordered_map<std::string, VolEntry> entries;
+    std::unordered_map<std::string, std::string> names;
     std::string path;
     std::streamoff fileSize = 0;
+    static std::string foldPath(const char* path) {
+        std::string value = path ? path : "";
+        for (char& c : value) {
+            if (c == '\\') c = '/';
+            c = (char)std::tolower((unsigned char)c);
+        }
+        return value;
+    }
 };
 
 VolArchive::VolArchive() : impl(new Impl) {}
@@ -31,6 +42,8 @@ bool VolArchive::open(const char* path) {
     }
 
     impl->path = path;
+    impl->entries.clear();
+    impl->names.clear();
     char sig[4];
     impl->file.read(sig, 4);
     if (memcmp(sig, "VOL\0", 4) != 0) {
@@ -72,7 +85,9 @@ bool VolArchive::open(const char* path) {
         for (char* p = ent.name; *p; p++)
             if (*p == '\\') *p = '/';
 
-        impl->entries[ent.name] = ent;
+        const std::string key = Impl::foldPath(ent.name);
+        impl->entries[key] = ent;
+        impl->names[key] = ent.name;
     }
 
     Console::instance().printf(LogLevel::Info, "VOL: %s - %zu entries", path, impl->entries.size());
@@ -80,7 +95,8 @@ bool VolArchive::open(const char* path) {
 }
 
 bool VolArchive::readFile(const char* path, std::vector<uint8_t>& data) {
-    auto it = impl->entries.find(path);
+    data.clear();
+    auto it = impl->entries.find(Impl::foldPath(path));
     if (it == impl->entries.end()) return false;
 
     impl->file.seekg(it->second.offset);
@@ -90,12 +106,13 @@ bool VolArchive::readFile(const char* path, std::vector<uint8_t>& data) {
 }
 
 bool VolArchive::fileExists(const char* path) const {
-    return impl->entries.find(path) != impl->entries.end();
+    return impl->entries.find(Impl::foldPath(path)) != impl->entries.end();
 }
 
 void VolArchive::listFiles(const char* pattern, std::vector<std::string>& out) const {
+    const std::string foldedPattern = Impl::foldPath(pattern);
     for (auto& [name, ent] : impl->entries) {
-        if (!pattern || name.find(pattern) != std::string::npos)
-            out.push_back(name);
+        if (!pattern || fnmatch(foldedPattern.c_str(), name.c_str(), FNM_PATHNAME) == 0)
+            out.push_back(impl->names.at(name));
     }
 }

@@ -601,7 +601,7 @@ static bool interiorToMeshes(DIFInterior& interior,
                               std::vector<MeshData>& outMeshes,
                               std::vector<Texture>& outTextures,
                               std::vector<uint32_t>& outMatFlags,
-                              std::vector<int8_t>& outMatLMIndex,
+                               std::vector<int16_t>& outMatLMIndex,
                               std::vector<Texture>& outLightmaps,
                               std::vector<std::string>& outMatNames,
                               bool skipGpu = false,
@@ -622,8 +622,11 @@ static bool interiorToMeshes(DIFInterior& interior,
             Texture tex = resolveDIFTexture(interior.matNames[i]);
             if (tex.loaded) {
                 matSlots[i].texIdx = (int)outTextures.size();
+                const bool hasAlpha = tex.hasAlpha;
                 outTextures.push_back(std::move(tex));
-                outMatFlags.push_back(0);
+                 // DIF has no MaterialList flag payload. Preserve alpha-test
+                 // behavior from the decoded texture instead.
+                 outMatFlags.push_back(hasAlpha ? MatFlag_Translucent : MatFlag_None);
                 outMatNames.push_back(interior.matNames[i]);
             } else if (!isDIFMarkerMaterial(interior.matNames[i])) {
                 Console::instance().printf(LogLevel::Error,
@@ -651,9 +654,20 @@ static bool interiorToMeshes(DIFInterior& interior,
     }
 
     // Group surfaces by (texture slot, lightmap) pair.
+    std::vector<int> surfaceZones(interior.surfaces.size(), -1);
+    for (size_t zone = 0; zone < interior.zones.size(); zone++) {
+        const auto& z = interior.zones[zone];
+        for (uint32_t i = 0; i < z.surfaceCount && z.surfaceStart + i < interior.zoneSurfaces.size(); i++) {
+            uint16_t surface = interior.zoneSurfaces[z.surfaceStart + i];
+            if (surface < surfaceZones.size()) surfaceZones[surface] = (int)zone;
+        }
+    }
+
     struct GroupKey {
         int texIdx;   // texture slot -> materialIndex (texture binding)
         int lmIdx;    // lightmap index -> lightmap binding
+        int zone;
+        bool outsideVisible;
         int group;    // sequential id -> materialIdx (lightmap binding lookup)
     };
     std::vector<GroupKey> groupKeys;
@@ -667,11 +681,14 @@ static bool interiorToMeshes(DIFInterior& interior,
         int lmIdx = si < interior.normalLMapIndices.size()
             ? interior.normalLMapIndices[si] : -1;
         if (lmIdx < 0 || lmIdx >= (int)outLightmaps.size()) lmIdx = -1;
-        int hash = texIdx * 256 + (lmIdx + 1);
+        int zone = surfaceZones[si];
+        bool outsideVisible = (surf.surfaceFlags & (1u << 4)) != 0;
+        int hash = ((texIdx * 256 + (lmIdx + 1)) * 4096 + (zone + 1)) * 2 +
+            (outsideVisible ? 1 : 0);
         auto it = keyToGroup.find(hash);
         if (it == keyToGroup.end()) {
             int g = (int)groupKeys.size();
-            groupKeys.push_back({texIdx, lmIdx, g});
+            groupKeys.push_back({texIdx, lmIdx, zone, outsideVisible, g});
             keyToGroup[hash] = g;
         }
     }
@@ -698,7 +715,10 @@ static bool interiorToMeshes(DIFInterior& interior,
         int lmIdx = si < interior.normalLMapIndices.size()
             ? interior.normalLMapIndices[si] : -1;
         if (lmIdx < 0 || lmIdx >= (int)outLightmaps.size()) lmIdx = -1;
-        int hash = texIdx * 256 + (lmIdx + 1);
+        int zone = surfaceZones[si];
+        bool outsideVisible = (surf.surfaceFlags & (1u << 4)) != 0;
+        int hash = ((texIdx * 256 + (lmIdx + 1)) * 4096 + (zone + 1)) * 2 +
+            (outsideVisible ? 1 : 0);
         surfGroups[hash].push_back((int)si);
     }
     Console::instance().printf(LogLevel::Debug,
@@ -782,16 +802,23 @@ static bool interiorToMeshes(DIFInterior& interior,
 
     // Build meshes
     for (auto& [keyHash, surfIdxs] : surfGroups) {
-        int texIdx = keyHash / 256;
-        int lmIdx = (keyHash % 256) - 1;
+        bool outsideVisible = (keyHash & 1) != 0;
+        int groupedHash = keyHash / 2;
+        int zone = (groupedHash % 4096) - 1;
+        int materialHash = groupedHash / 4096;
+        int texIdx = materialHash / 256;
+        int lmIdx = (materialHash % 256) - 1;
         int group = -1;
         for (auto& gk : groupKeys)
-            if (gk.texIdx == texIdx && gk.lmIdx == lmIdx) { group = gk.group; break; }
+            if (gk.texIdx == texIdx && gk.lmIdx == lmIdx && gk.zone == zone &&
+                gk.outsideVisible == outsideVisible) { group = gk.group; break; }
         if (group < 0) group = 0;
 
         MeshData mesh;
         mesh.materialIndex = texIdx;   // texture binding
         mesh.materialIdx = group;      // lightmap binding (looks up materialLightmapIndex)
+        mesh.interiorZone = zone;
+        mesh.interiorOutsideVisible = outsideVisible;
 
         struct VertKey {
             float x, y, z;
@@ -1027,6 +1054,61 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
     {
         Console::instance().printf(LogLevel::Warn, "DIF: no meshes generated from '%s'", name);
         return result;
+    }
+
+    for (size_t i = 0; i < interiors[0].planeNormalIndices.size(); i++) {
+        uint16_t normalIndex = interiors[0].planeNormalIndices[i];
+        Point3F normal{0, 1, 0};
+        if (normalIndex < interiors[0].uniqueNormals.size() / 3)
+            normal = {interiors[0].uniqueNormals[normalIndex * 3],
+                      interiors[0].uniqueNormals[normalIndex * 3 + 1],
+                      interiors[0].uniqueNormals[normalIndex * 3 + 2]};
+        result.interiorPlanes.push_back({normal, interiors[0].planeD[i]});
+    }
+    for (const auto& node : interiors[0].bspNodes)
+        result.interiorBSP.push_back({node.planeIndex, node.frontIndex, node.backIndex});
+    result.interiorZoneNeighbors.resize(interiors[0].zones.size());
+    for (size_t zone = 0; zone < interiors[0].zones.size(); zone++) {
+        const auto& z = interiors[0].zones[zone];
+        for (uint32_t i = 0; i < z.portalCount && z.portalStart + i < interiors[0].zonePortalList.size(); i++) {
+            const uint16_t portalIndex = interiors[0].zonePortalList[z.portalStart + i];
+            if (portalIndex >= interiors[0].portals.size()) continue;
+            const auto& portal = interiors[0].portals[portalIndex];
+            if (portal.zoneFront >= result.interiorZoneNeighbors.size() ||
+                portal.zoneBack >= result.interiorZoneNeighbors.size() ||
+                portal.zoneFront == portal.zoneBack) continue;
+            auto& front = result.interiorZoneNeighbors[portal.zoneFront];
+            auto& back = result.interiorZoneNeighbors[portal.zoneBack];
+            if (std::find(front.begin(), front.end(), portal.zoneBack) == front.end())
+                front.push_back(portal.zoneBack);
+            if (std::find(back.begin(), back.end(), portal.zoneFront) == back.end())
+                back.push_back(portal.zoneFront);
+        }
+    }
+    for (const auto& portal : interiors[0].portals) {
+        if (portal.zoneFront >= result.interiorZoneNeighbors.size() ||
+            portal.zoneBack >= result.interiorZoneNeighbors.size()) continue;
+
+        DIFLoadResult::InteriorPortal retained;
+         retained.planeIndex = portal.planeIndex;
+         retained.zoneFront = portal.zoneFront;
+        retained.zoneBack = portal.zoneBack;
+        for (uint32_t fan = 0; fan < portal.triFanCount; fan++) {
+            uint32_t fanIndex = portal.triFanStart + fan;
+            if (fanIndex >= interiors[0].windingIndices.size()) continue;
+            const auto& triFan = interiors[0].windingIndices[fanIndex];
+            for (uint32_t i = 0; i < triFan.windingCount; i++) {
+                uint32_t windingIndex = triFan.windingStart + i;
+                if (windingIndex >= interiors[0].windings.size()) continue;
+                uint32_t point = interiors[0].windings[windingIndex];
+                if (point * 3 + 2 >= interiors[0].points.size()) continue;
+                retained.vertices.push_back({interiors[0].points[point * 3],
+                                              interiors[0].points[point * 3 + 1],
+                                              interiors[0].points[point * 3 + 2]});
+            }
+        }
+        if (retained.vertices.size() >= 3)
+            result.interiorPortals.push_back(std::move(retained));
     }
 
     DTSShape::DetailLevel dl;

@@ -19,6 +19,59 @@ std::vector<DemoParser::PendingExplosion> DemoParser::s_pendingExplosions;
 DemoParser::SunData DemoParser::s_sunData;
 std::string DemoParser::s_pendingTerrainFile;
 
+static std::string stripDemoColorCodes(const std::string& value) {
+    std::string result;
+    result.reserve(value.size());
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (value[i] == '\\' && i + 1 < value.size() && value[i + 1] == 'c') {
+            i += (i + 2 < value.size()) ? 2 : 1;
+            continue;
+        }
+        result.push_back(value[i]);
+    }
+    return result;
+}
+
+void DemoParser::extractMissionInfo() {
+    initialBlock.missionDisplayName.clear();
+    initialBlock.missionTypeDisplayName.clear();
+    initialBlock.gameClassName.clear();
+    initialBlock.serverDisplayName.clear();
+    initialBlock.modName.clear();
+    initialBlock.recorderName.clear();
+    initialBlock.recorderClientId = -1;
+    initialBlock.recordingDate.clear();
+
+    for (size_t i = 0; i < initialBlock.demoValues.size(); ++i) {
+        std::vector<std::string> fields;
+        std::stringstream row(initialBlock.demoValues[i]);
+        std::string field;
+        while (std::getline(row, field, '\t')) fields.push_back(field);
+        if (fields.size() >= 3 && fields[1].size() >= 4 &&
+            fields[1].compare(fields[1].size() - 4, 4, "Game") == 0)
+            initialBlock.gameClassName = fields[1];
+
+        if (initialBlock.demoValues[i] != "readplayerinfo" || i + 1 >= initialBlock.demoValues.size())
+            continue;
+        const std::string& value = initialBlock.demoValues[++i];
+        fields.clear();
+        std::stringstream info(value);
+        while (std::getline(info, field, '\t')) fields.push_back(field);
+        if (fields.empty()) continue;
+        if (fields[0] == "1") {
+            if (fields.size() > 1) initialBlock.recorderClientId = std::atoi(fields[1].c_str());
+            if (fields.size() > 2) initialBlock.recorderName = stripDemoColorCodes(fields[2]);
+        } else if (fields[0] == "2") {
+            if (fields.size() > 1) initialBlock.serverDisplayName = fields[1];
+            if (fields.size() > 3) initialBlock.recordingDate = fields[3];
+            if (fields.size() > 4) initialBlock.missionDisplayName = fields[4];
+        } else if (fields[0] == "3") {
+            if (fields.size() > 1) initialBlock.modName = fields[1];
+            if (fields.size() > 2) initialBlock.missionTypeDisplayName = fields[2];
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Huffman processor
 // ═══════════════════════════════════════════════════════════════
@@ -331,14 +384,15 @@ GhostEntry* GhostTracker::getMutableGhost(int index) {
 void GhostTracker::createGhost(int index, int classId, const std::string& cn) {
     const char* registeredName = (index >= 0 && classId >= 0)
         ? V12::ghostClassName((size_t)classId) : nullptr;
-    if (index >= T2Demo::MaxGhostCount || !registeredName) {
+    if (index >= T2Demo::MaxGhostCount || index < 0 || classId < 0 || classId >= 128) {
         Console::instance().printf(LogLevel::Error,
             "Demo: rejecting invalid ghost index/class (%d/%d)", index, classId);
         return;
     }
     GhostEntry e;
     e.classId = classId;
-    e.className = registeredName;
+    e.className = registeredName ? registeredName :
+        (cn.empty() ? "Class" + std::to_string(classId) : cn);
     ghosts[index] = e;
 }
 void GhostTracker::deleteGhost(int index) { ghosts.erase(index); }
@@ -647,6 +701,7 @@ bool DemoParser::readDataBlocks(BitStream& bs) {
         initialBlock.dataBlockHeaders.push_back(header);
         ParsedDataBlock parsed;
         parsed.classId = header.classId;
+        parsed.decoded = decoded;
         if (const char* name = V12::dataBlockClassName(header.classId - T2Demo::DataBlockClassFirst))
             parsed.className = name;
         parsed.objectId = header.objectId;
@@ -674,7 +729,7 @@ const std::string& DemoParser::getPlayerNameForSkin(const std::string& skin) con
     return it != skinToPlayer_.end() ? it->second : empty;
 }
 
-bool DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
+bool DemoParser::readInitialBlock(const uint8_t* data, size_t size, uint32_t protocolVersion) {
     BitStream bs(data, size);
     auto fail = [&](const char* stage) {
         Console::instance().printf(LogLevel::Error,
@@ -710,6 +765,7 @@ bool DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
     for (uint32_t i = 0; i < scoreCount; ++i)
         initialBlock.scoreEntries.push_back(readScoreEntry(bs));
     initialBlock.demoValues = readDemoValues(bs);
+    extractMissionInfo();
     readComplexTargetManager(bs);
     if (bs.isError()) return fail("target manager");
 
@@ -738,6 +794,25 @@ bool DemoParser::readInitialBlock(const uint8_t* data, size_t size) {
 
 // ─── Block stream ────────────────────────────────────────────
 bool DemoParser::load(const uint8_t* buffer, size_t size) {
+    if (decompressed) {
+        free(decompressed);
+        decompressed = nullptr;
+    }
+    header = {};
+    initialBlock = {};
+    ibGhostTracker.clear();
+    ghostTracker.clear();
+    playerInfo_.clear();
+    initialTaggedStrings_.clear();
+    initialPlayerInfo_.clear();
+    skinToPlayer_.clear();
+    missionChanges_.clear();
+    eventLog_.clear();
+    decompressedSize = 0;
+    packetsParsed = 0;
+    s_pendingExplosions.clear();
+    s_pendingTerrainFile.clear();
+    s_sunData = {};
     buf = buffer; bufSize = size; offset = 0; ownsBuffer = false;
     decompressed = nullptr; decompressedSize = 0;
 
@@ -747,12 +822,10 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
             "Demo: unsupported recording signature '%s'", header.identString.c_str());
         return false;
     }
-    if (header.protocolVersion != T2Demo::ProtocolV24834 &&
-        header.protocolVersion != T2Demo::ProtocolV25034) {
+    if (header.protocolVersion != T2Demo::ProtocolV25034) {
         Console::instance().printf(LogLevel::Error,
-            "Demo: unsupported protocol 0x%08X (native parser supports 0x%08X and 0x%08X)",
+            "Demo: unsupported protocol 0x%08X (native parser supports 0x%08X)",
             (unsigned)header.protocolVersion,
-            (unsigned)T2Demo::ProtocolV24834,
             (unsigned)T2Demo::ProtocolV25034);
         return false;
     }
@@ -770,18 +843,11 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
             "Demo: initial block exceeds file size");
         return false;
     }
-    if (!readInitialBlock(buf + offset, header.initialBlockSize)) {
+    if (!readInitialBlock(buf + offset, header.initialBlockSize, header.protocolVersion)) {
         Console::instance().printf(LogLevel::Error,
             "Demo: invalid native initial block");
         return false;
     }
-    Console::instance().printf(LogLevel::Info,
-        "Demo initial protocol recv=%u high=%u send=%u ack=%u connect=%u",
-        initialBlock.connectionState.lastSeqRecvd,
-        initialBlock.connectionState.highestAckedSeq,
-        initialBlock.connectionState.lastSendSeq,
-        initialBlock.connectionState.ackMask,
-        initialBlock.connectionState.connectSequence);
     ghostTracker.clear();
     for (int index : ibGhostTracker.getAllIndices()) {
         const GhostEntry* source = ibGhostTracker.getGhost(index);
@@ -952,11 +1018,10 @@ void DemoParser::reset() {
     currentMission_ = missionChanges_.empty() ? "" : missionChanges_[0].second;
     nextChangeIdx_ = 0;
     eventLog_.clear();
-    weaponsHud_ = {};
-    backpackHud_ = {};
-    inventoryHud_ = {};
-    vehicleHud_ = {};
-    ammoHud_ = {};
+    resetHudState();
+    s_pendingExplosions.clear();
+    s_pendingTerrainFile.clear();
+    s_sunData = {};
     ghostTracker.clear();
     for (int index : ibGhostTracker.getAllIndices()) {
         const GhostEntry* source = ibGhostTracker.getGhost(index);
@@ -965,6 +1030,33 @@ void DemoParser::reset() {
         if (GhostEntry* target = ghostTracker.getMutableGhost(index))
             *target = *source;
     }
+    std::copy(std::begin(initialBlock.connectionState.lastSeqRecvdAtSend),
+              std::end(initialBlock.connectionState.lastSeqRecvdAtSend),
+              std::begin(lastSeqRecvdAtSend));
+    lastSeqRecvd = initialBlock.connectionState.lastSeqRecvd;
+    highestAckedSeq = initialBlock.connectionState.highestAckedSeq;
+    lastSendSeq = initialBlock.connectionState.lastSendSeq;
+    recvAckMask = initialBlock.connectionState.ackMask;
+    connectSequence = initialBlock.connectionState.connectSequence;
+    lastRecvAckAck = initialBlock.connectionState.lastRecvAckAck;
+    connectionEstablished = initialBlock.connectionState.connectionEstablished;
+    nextRecvEventSeq = initialBlock.nextRecvEventSeq;
+    packetsParsed = 0;
+}
+
+void DemoParser::resetMissionState() {
+    ghostTracker.clear();
+    for (int index : ibGhostTracker.getAllIndices()) {
+        const GhostEntry* source = ibGhostTracker.getGhost(index);
+        if (!source) continue;
+        ghostTracker.createGhost(index, source->classId, source->className);
+        if (GhostEntry* target = ghostTracker.getMutableGhost(index)) *target = *source;
+    }
+    playerInfo_ = initialPlayerInfo_;
+    resetHudState();
+    s_pendingExplosions.clear();
+    s_pendingTerrainFile.clear();
+    s_sunData = {};
 }
 
 void DemoParser::handleHudRemoteCommand(const std::string& funcName,
@@ -972,80 +1064,96 @@ void DemoParser::handleHudRemoteCommand(const std::string& funcName,
     std::string name = funcName;
     for (char& c : name) c = (char)std::tolower((unsigned char)c);
     if (name.rfind("clientcmd", 0) == 0) name.erase(0, 8);
+    const bool includesFunction = !args.empty() && args[0] == funcName;
     auto arg = [&](size_t index) -> std::string {
-        return index < args.size() ? args[index] : std::string();
+        const size_t actual = index + (includesFunction ? 1 : 0);
+        return actual < args.size() ? args[actual] : std::string();
     };
-    if (name == "setweaponshuditem" && args.size() >= 4) {
-        const int slot = atoi(arg(1).c_str());
-        if (atoi(arg(3).c_str()) != 0) weaponsHud_.slots[slot] = atoi(arg(2).c_str());
+    const size_t count = args.size() - (includesFunction ? 1 : 0);
+    auto has = [&](size_t required) { return count >= required; };
+    auto number = [&](size_t index) { return atoi(arg(index).c_str()); };
+    if (name == "setweaponshuditem" && has(3)) {
+        const int slot = number(0);
+        if (number(2) != 0) weaponsHud_.slots[slot] = number(1);
         else {
             weaponsHud_.slots.erase(slot);
             weaponsHud_.bitmaps.erase(slot);
         }
-    } else if (name == "setweaponshudammo" && args.size() >= 3) {
-        const int slot = atoi(arg(1).c_str());
+    } else if (name == "setweaponshudammo" && has(2)) {
+        const int slot = number(0);
         if (weaponsHud_.slots.find(slot) != weaponsHud_.slots.end())
-            weaponsHud_.slots[slot] = atoi(arg(2).c_str());
-    } else if (name == "setweaponshudbitmap" && args.size() >= 4) {
-        weaponsHud_.bitmaps[atoi(arg(1).c_str())] = arg(3);
-    } else if (name == "setweaponshudbackgroundbmp" && args.size() >= 2) {
-        weaponsHud_.backgroundBitmap = arg(1);
-    } else if (name == "setweaponshudhighlightbmp" && args.size() >= 2) {
-        weaponsHud_.highlightBitmap = arg(1);
-    } else if (name == "setweaponshudinfiniteammobmp" && args.size() >= 2) {
-        weaponsHud_.infiniteAmmoBitmap = arg(1);
-    } else if (name == "setweaponshudactive" && args.size() >= 2) {
-        weaponsHud_.activeIndex = atoi(arg(1).c_str());
-    } else if (name == "setammohudcount" && args.size() >= 2) {
-        ammoHud_.count = atoi(arg(1).c_str());
+            weaponsHud_.slots[slot] = number(1);
+    } else if (name == "setweaponshudbitmap" && has(3)) {
+        weaponsHud_.bitmaps[number(0)] = arg(2);
+    } else if (name == "setweaponshudbackgroundbmp" && has(1)) {
+        weaponsHud_.backgroundBitmap = arg(0);
+    } else if (name == "setweaponshudhighlightbmp" && has(1)) {
+        weaponsHud_.highlightBitmap = arg(0);
+    } else if (name == "setweaponshudinfiniteammobmp" && has(1)) {
+        weaponsHud_.infiniteAmmoBitmap = arg(0);
+    } else if (name == "setweaponshudactive" && has(1)) {
+        weaponsHud_.activeIndex = number(0);
+    } else if (name == "setammohudcount" && has(1)) {
+        ammoHud_.count = number(0);
     } else if (name == "setweaponshudclearall") {
         weaponsHud_ = {};
-    } else if (name == "setinventoryhuditem" && args.size() >= 4) {
-        const int slot = atoi(arg(1).c_str());
-        if (atoi(arg(3).c_str()) != 0) inventoryHud_.slots[slot] = atoi(arg(2).c_str());
+    } else if (name == "setinventoryhuditem" && has(3)) {
+        const int slot = number(0);
+        if (number(2) != 0) inventoryHud_.slots[slot] = number(1);
         else {
             inventoryHud_.slots.erase(slot);
             inventoryHud_.bitmaps.erase(slot);
         }
-    } else if (name == "setinventoryhudamount" && args.size() >= 3) {
-        const int slot = atoi(arg(1).c_str());
+    } else if (name == "setinventoryhudamount" && has(2)) {
+        const int slot = number(0);
         if (inventoryHud_.slots.find(slot) != inventoryHud_.slots.end())
-            inventoryHud_.slots[slot] = atoi(arg(2).c_str());
-    } else if (name == "setinventoryhudbitmap" && args.size() >= 4) {
-        inventoryHud_.bitmaps[atoi(arg(1).c_str())] = arg(3);
-    } else if (name == "setinventoryhudbackgroundbmp" && args.size() >= 2) {
-        inventoryHud_.backgroundBitmap = arg(1);
+            inventoryHud_.slots[slot] = number(1);
+    } else if (name == "setinventoryhudbitmap" && has(3)) {
+        inventoryHud_.bitmaps[number(0)] = arg(2);
+    } else if (name == "setinventoryhudbackgroundbmp" && has(1)) {
+        inventoryHud_.backgroundBitmap = arg(0);
     } else if (name == "setinventoryhudclearall") {
         inventoryHud_ = {};
         backpackHud_ = {};
-    } else if (name == "setbackpackhuditem" && args.size() >= 3) {
-        backpackHud_.packIndex = atoi(arg(1).c_str());
-        backpackHud_.active = atoi(arg(2).c_str()) != 0;
+    } else if (name == "setbackpackhuditem" && has(2)) {
+        backpackHud_.packIndex = number(0);
+        backpackHud_.active = number(1) != 0;
         backpackHud_.bitmap.clear();
         if (!backpackHud_.active) {
             backpackHud_.text.clear();
         }
-    } else if (name == "setbackpackhudbitmap" && args.size() >= 2) {
-        backpackHud_.bitmap = arg(1);
-    } else if (name == "updatepacktext" && args.size() >= 2) {
-        backpackHud_.text = arg(1);
+    } else if (name == "setbackpackhudbitmap" && has(1)) {
+        backpackHud_.bitmap = arg(0);
+    } else if (name == "updatepacktext" && has(1)) {
+        backpackHud_.text = arg(0);
     } else if (name == "setsatchelarmed" ||
                name == "setcloakiconon" || name == "setcloakiconoff" ||
                name == "setrepairpackiconon" || name == "setrepairpackiconoff" ||
                name == "setshieldiconon" || name == "setshieldiconoff" ||
                name == "setsenjamiconon" || name == "setsenjamiconoff") {
-        // These stock commands replace backpackIcon directly in TorqueScript.
+        // These stock commands toggle the backpack icon directly in TorqueScript.
+        backpackHud_.active = name == "setsatchelarmed" ||
+            (name.size() >= 2 && name.substr(name.size() - 2) == "on");
         backpackHud_.bitmap.clear();
-    } else if (name == "setvweaponshudactive" && args.size() >= 2) {
-        vehicleHud_.activeWeapon = atoi(arg(1).c_str());
-        if (args.size() >= 3) vehicleHud_.vehicleType = arg(2);
+        if (!backpackHud_.active) backpackHud_.text.clear();
+    } else if (name == "setvweaponshudactive" && has(1)) {
+        vehicleHud_.activeWeapon = number(0);
+        if (has(2)) vehicleHud_.vehicleType = arg(1);
     } else if (name == "setvweaponshudclearall") {
         vehicleHud_.activeWeapon = -1;
-    } else if (name == "showvehiclegauges" && args.size() >= 3) {
-        vehicleHud_.vehicleType = arg(1);
-        vehicleHud_.node = atoi(arg(2).c_str());
+    } else if (name == "showvehiclegauges" && has(2)) {
+        vehicleHud_.vehicleType = arg(0);
+        vehicleHud_.node = number(1);
         vehicleHud_.dashboardVisible = true;
     }
+}
+
+void DemoParser::resetHudState() {
+    weaponsHud_ = {};
+    backpackHud_ = {};
+    inventoryHud_ = {};
+    vehicleHud_ = {};
+    ammoHud_ = {};
 }
 
 DemoParserSnapshot DemoParser::captureSnapshot() const {
@@ -1079,13 +1187,23 @@ DemoParserSnapshot DemoParser::captureSnapshot() const {
     snapshot.inventoryHud = inventoryHud_;
     snapshot.vehicleHud = vehicleHud_;
     snapshot.ammoHud = ammoHud_;
+    snapshot.pendingExplosions = s_pendingExplosions;
+    snapshot.pendingTerrainFile = s_pendingTerrainFile;
+    snapshot.sunDirection = s_sunData.direction;
+    snapshot.sunAzimuth = s_sunData.azimuth;
+    snapshot.sunElevation = s_sunData.elevation;
+    snapshot.sunR = s_sunData.r;
+    snapshot.sunG = s_sunData.g;
+    snapshot.sunB = s_sunData.b;
+    snapshot.sunValid = s_sunData.valid;
     return snapshot;
 }
 
 bool DemoParser::restoreSnapshot(const DemoParserSnapshot& snapshot) {
     if (!decompressed || snapshot.blockStreamOffset > decompressedSize ||
         snapshot.blockCursor < 0 || snapshot.nextChangeIdx < 0 ||
-        snapshot.nextChangeIdx > (int)snapshot.missionChanges.size())
+        snapshot.nextChangeIdx > (int)snapshot.missionChanges.size() ||
+        (snapshot.blockCount >= 0 && snapshot.blockCursor > snapshot.blockCount))
         return false;
     blockStreamOffset = (int)snapshot.blockStreamOffset;
     blockCount_ = snapshot.blockCount;
@@ -1116,6 +1234,15 @@ bool DemoParser::restoreSnapshot(const DemoParserSnapshot& snapshot) {
     inventoryHud_ = snapshot.inventoryHud;
     vehicleHud_ = snapshot.vehicleHud;
     ammoHud_ = snapshot.ammoHud;
+    s_pendingExplosions = snapshot.pendingExplosions;
+    s_pendingTerrainFile = snapshot.pendingTerrainFile;
+    s_sunData.direction = snapshot.sunDirection;
+    s_sunData.azimuth = snapshot.sunAzimuth;
+    s_sunData.elevation = snapshot.sunElevation;
+    s_sunData.r = snapshot.sunR;
+    s_sunData.g = snapshot.sunG;
+    s_sunData.b = snapshot.sunB;
+    s_sunData.valid = snapshot.sunValid;
     return true;
 }
 
@@ -1141,6 +1268,7 @@ bool DemoParser::seekToBlock(int blockIndex) {
             parsePacket(block->data.data(), block->data.size(), block->index);
         }
     }
+    setCurrentBlock(blockIndex);
     return true;
 }
 
@@ -1157,6 +1285,7 @@ bool DemoParser::parseFull(std::vector<DemoBlock>& out) {
 // Extract base map name from a mission path (e.g. "Missions/Katabatic.mis" -> "Katabatic")
 static std::string extractMapName(const std::string& missionPath) {
     std::string name = missionPath;
+    for (char& c : name) if (c == '\\') c = '/';
     auto slash = name.rfind('/');
     if (slash != std::string::npos) name = name.substr(slash + 1);
     auto dot = name.rfind('.');
@@ -1166,9 +1295,30 @@ static std::string extractMapName(const std::string& missionPath) {
     return name;
 }
 
+static bool isMissionPath(const std::string& value) {
+    std::string path = value;
+    for (char& c : path) {
+        if (c == '\\') c = '/';
+        c = (char)std::tolower((unsigned char)c);
+    }
+    if (path.rfind("missions/", 0) != 0 &&
+        path.rfind("base/missions/", 0) != 0)
+        return false;
+    if (!path.ends_with(".mis")) return false;
+    for (char c : value) {
+        if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e)
+            return false;
+    }
+    return true;
+}
+
 void DemoParser::scanMissionChanges() {
     missionChanges_.clear();
     if (!decompressed) return;
+    if (!initialBlock.missionName.empty()) {
+        const std::string initial = extractMapName(initialBlock.missionName);
+        if (!initial.empty()) missionChanges_.push_back({0, initial});
+    }
     // Save state and reset to scan from start
     int savedOffset = blockStreamOffset;
     int savedCursor = blockCursor_;
@@ -1181,18 +1331,18 @@ void DemoParser::scanMissionChanges() {
         if (blockStreamOffset + 2 + size > (int)decompressedSize) break;
         int bi = blockCursor_++;
         const uint8_t* d = decompressed + blockStreamOffset + 2;
-        for (int j = 0; j + 4 < size; j++) {
-            if (d[j] == '.' && d[j+1] == 'm' && d[j+2] == 'i' && d[j+3] == 's') {
+        for (int j = 0; j + 4 <= size; j++) {
+            if (d[j] == '.' && (d[j+1] == 'm' || d[j+1] == 'M') &&
+                (d[j+2] == 'i' || d[j+2] == 'I') &&
+                (d[j+3] == 's' || d[j+3] == 'S')) {
                 int start = (int)j;
                 while (start > 0 && d[start-1] != 0 &&
                        d[start-1] >= 0x20) start--;
                 std::string name((const char*)d + start, j + 4 - start);
-                bool valid = false;
-                for (char c : name) if (c == '/') { valid = true; break; }
-                if (valid) {
-                    // Only add if different from the last recorded mission
-                    if (missionChanges_.empty() || name != missionChanges_.back().second)
-                        missionChanges_.push_back({bi, name});
+                if (isMissionPath(name)) {
+                    const std::string mapName = extractMapName(name);
+                    if (missionChanges_.empty() || mapName != missionChanges_.back().second)
+                        missionChanges_.push_back({bi, mapName});
                 }
             }
         }
@@ -1202,16 +1352,15 @@ void DemoParser::scanMissionChanges() {
     blockStreamOffset = savedOffset;
     blockCursor_ = savedCursor;
     nextChangeIdx_ = 0;
-    // Fallback: use the initial block's mission name if the decompressed scan found nothing
-    if (missionChanges_.empty() && !initialBlock.missionName.empty()) {
-        std::string extracted = extractMapName(initialBlock.missionName);
-        if (!extracted.empty())
-            missionChanges_.push_back({0, extracted});
-    }
     currentMission_ = missionChanges_.empty() ? "" : missionChanges_[0].second;
     currentMissionCrc_ = initialBlock.missionCRC;
 }
 void DemoParser::setCurrentBlock(int blockIndex) {
+    if (blockIndex < 0) return;
+    // Recompute from the timeline so direct backward seeks cannot retain the
+    // mission selected by a later block.
+    nextChangeIdx_ = 0;
+    currentMission_.clear();
     while (nextChangeIdx_ < (int)missionChanges_.size() &&
            blockIndex >= missionChanges_[nextChangeIdx_].first) {
         currentMission_ = missionChanges_[nextChangeIdx_].second;
@@ -1263,10 +1412,14 @@ GameState DemoParser::readGameState(BitStream& bs) {
 
     // damageFlash and whiteOut (optional 7-bit floats)
     if (bs.readFlag()) {
-        if (bs.readFlag())
+        if (bs.readFlag()) {
             gs.damageFlash = bs.readFloat(7);
-        if (bs.readFlag())
+            gs.hasDamageFlash = true;
+        }
+        if (bs.readFlag()) {
             gs.whiteOut = bs.readFloat(7) * 1.5f;
+            gs.hasWhiteOut = true;
+        }
     }
 
     // selfLocked / selfHomed (gated by flag)
@@ -1317,18 +1470,17 @@ GameState DemoParser::readGameState(BitStream& bs) {
                 gs.cameraYaw = bs.readF32();
                 gs.hasCameraTransform = true;
                 const int mode = bs.readRangedU32(0, 4);
+                gs.cameraMode = mode;
                 if (mode == 3 || mode == 4) {
-                    bs.readF32();
-                    bs.readF32();
-                    bs.readF32();
+                    gs.orbitMinDistance = bs.readF32();
+                    gs.orbitMaxDistance = bs.readF32();
+                    gs.orbitDistance = bs.readF32();
                     if (mode == 3) {
                         bs.readFlag();
-                        bs.readInt(T2Demo::GhostIdBitSize);
+                        gs.orbitObjectGhostIndex = bs.readInt(T2Demo::GhostIdBitSize);
                     } else {
                         bs.readCompressedPoint(gs.compressionPoint);
                     }
-                } else if (mode == 5) {
-                 bs.readInt(T2Demo::GhostIdBitSize);
                 }
             } else if (control && control->classId == 25) {
                 // Player::readPacketData: ShapeBase state, movement, view,
@@ -1360,6 +1512,25 @@ GameState DemoParser::readGameState(BitStream& bs) {
                             } else {
                                 bs.readCompressedPoint(gs.compressionPoint);
                             }
+                        }
+                    } else if (piloted && (piloted->classId == 10 ||
+                                             piloted->classId == 14 ||
+                                             piloted->classId == 52)) {
+                        // Player::readPacketData delegates to the piloted
+                        // vehicle's readPacketData. Missing this nested
+                        // payload shifts the remainder of the packet.
+                        bs.readF32(); bs.readF32(); // vehicle energy/recharge
+                        bs.readF32(); bs.readF32(); // steering
+                        const Vec3 vehiclePosition{bs.readF32(), bs.readF32(), bs.readF32()};
+                        gs.compressionPoint = vehiclePosition;
+                        bs.readF32(); bs.readF32(); bs.readF32(); bs.readF32(); // orientation
+                        bs.readPoint3F(); // linear momentum
+                        bs.readPoint3F(); // angular momentum
+                        bs.readFlag(); // disable move
+                        bs.readFlag(); // frozen
+                        if (piloted->classId == 52) {
+                            bs.readFlag(); // braking
+                            for (int i = 0; i < 18; ++i) bs.readF32();
                         }
                     }
                 }
@@ -1485,12 +1656,12 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents,
             bs.readFloat(10);
             if (bs.readFlag()) bs.readInt(11);
         } else if (ev.classId == T2Demo::NetEventClassFirst + 12) { // SensorGroupColorEvent
-            bs.readInt(5);
+            const int sensorGroup = bs.readInt(5);
             const uint32_t updateMask = bs.readU32();
             for (int i = 0; i < 32; ++i) {
                 if ((updateMask & (1u << i)) != 0) {
                     if (bs.readFlag()) {
-                        bs.readU8(); bs.readU8(); bs.readU8(); bs.readU8();
+                        sensorGroupColors_[{sensorGroup, uint32_t(1) << i}] = bs.readU32();
                     }
                 }
             }
@@ -1539,6 +1710,16 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents,
                     playerInfo_.push_back(std::move(added));
                 }
             }
+            if (GhostEntry* ghost = ghostTracker.getMutableGhost(ev.targetId)) {
+                if (!ev.targetName.empty()) ghost->playerName = ev.targetName;
+                if (!ev.targetSkin.empty()) ghost->skinName = ev.targetSkin;
+                if (!ev.targetType.empty()) ghost->targetType = ev.targetType;
+                if (ev.targetSensorGroup >= 0) ghost->sensorGroup = ev.targetSensorGroup;
+                ghost->targetRenderFlags = ev.targetRenderFlags;
+                ghost->isFlag = (ev.targetRenderFlags & 0x2) != 0;
+                ghost->flagTeamId = ghost->isFlag ? ev.targetSensorGroup : 0;
+                if (ghost->isFlag) ghost->teamId = ev.targetSensorGroup;
+            }
         } else if (ev.classId == T2Demo::NetEventClassFirst + 25) { // TargetToEvent
             if (bs.readFlag()) bs.readInt(9);
             if (bs.readFlag()) {
@@ -1548,6 +1729,10 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents,
         } else if (ev.classId == T2Demo::NetEventClassFirst + 23) { // TargetFreeEvent
             ev.hasTargetFree = true;
             ev.targetId = bs.readInt(9);
+            ghostTracker.deleteGhost(ev.targetId);
+            playerInfo_.erase(std::remove_if(playerInfo_.begin(), playerInfo_.end(),
+                [&](const DemoPlayerInfo& player) { return player.clientId == ev.targetId; }),
+                playerInfo_.end());
         } else if (ev.classId == T2Demo::NetEventClassFirst + 13) { // SetMissionCRCEvent
             ev.hasMissionCrc = true;
             ev.missionCrc = bs.readU32();
@@ -1588,13 +1773,21 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
     // DamageMask
     if (bs.readFlag()) {
         float dmg = bs.readFloat(6);
-        if (entry) entry->health = (1.0f - dmg) * 100.0f;
-        bs.readInt(2); bs.readFlag(); bs.readNormalVector(8);
+        int damageState = bs.readInt(2);
+        if (entry) {
+            entry->health = (1.0f - dmg) * 100.0f;
+            entry->damageState = damageState;
+        }
+        bs.readFlag(); bs.readNormalVector(8);
     }
-    // SoundMask (4 slots: flag → playing flag → optional 11-bit profileId)
+    // SoundMask (4 slots: flag -> playing flag -> optional profileId)
     if (bs.readFlag()) {
         for (int i = 0; i < 4; i++)
-            if (bs.readFlag()) { bool playing = bs.readFlag(); if (playing) bs.readInt(11); }
+            if (bs.readFlag()) {
+                bool playing = bs.readFlag();
+                int profile = playing ? bs.readInt(11) : -1;
+                if (entry) entry->soundThreads[i] = {profile, playing, true};
+            }
     }
     // ThreadMask: sequence/state plus compact direction/end flags.
     if (bs.readFlag()) {
@@ -1605,11 +1798,20 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
                 bool forward = bs.readFlag();
                 bool atEnd = bs.readFlag();
                 if (entry) {
+                    const bool changed = !entry->threads[i].valid ||
+                        entry->threads[i].sequence != sequence ||
+                        entry->threads[i].state != state ||
+                        entry->threads[i].forward != forward ||
+                        entry->threads[i].atEnd != atEnd;
                     entry->threads[i].sequence = sequence;
                     entry->threads[i].state = state;
+                    entry->threads[i].timescale = forward ? 1.0f : -1.0f;
+                    entry->threads[i].position = atEnd ? (forward ? 1.0f : 0.0f) :
+                        (changed ? 0.0f : entry->threads[i].position);
                     entry->threads[i].forward = forward;
                     entry->threads[i].atEnd = atEnd;
                     entry->threads[i].valid = true;
+                    if (changed) entry->threadAnimTime = 0.0f;
                 }
             }
     }
@@ -1617,26 +1819,30 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
     if (bs.readFlag()) {
         for (int i = 0; i < 8; i++) {
             if (bs.readFlag()) {
+                const bool wasFiring = entry && entry->mountedImages[i].isFiring;
+                if (entry) entry->mountedImages[i] = {};
                 if (bs.readFlag()) {
                     int dbId = bs.readInt(11);
                     if (entry && i < 8) entry->mountedImages[i].datablockId = dbId;
                 }
                 if (bs.readFlag()) {
-                    if (bs.readFlag()) bs.readInt(10); else {
-                        std::string s = bs.readString();
-                        if (entry && entry->skinName.empty() && !s.empty())
-                            entry->skinName = s;
+                    if (bs.readFlag()) bs.readInt(10);
+                    else {
+                        std::string value = bs.readString();
+                        if (entry && entry->skinName.empty() && !value.empty())
+                            entry->skinName = value;
                     }
                 }
-                bool triggerDown = bs.readFlag();
+                bs.readFlag(); // trigger down
                 bool loaded = bs.readFlag();
                 bs.readFlag(); // ammo
                 bs.readFlag(); // wet
                 bs.readFlag(); // target
-                int fireCount = bs.readInt(3);
+                bool firing = bs.readInt(3) != 0;
                 if (entry && i < 8) {
                     entry->mountedImages[i].loaded = loaded;
-                    entry->mountedImages[i].isFiring = (fireCount > 0);
+                    entry->mountedImages[i].isFiring = firing;
+                    if (wasFiring != firing) entry->threadAnimTime = 0.0f;
                 }
                 if (isInitial) bs.readFlag();
             }
@@ -1647,7 +1853,10 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
         if (bs.readFlag()) {
             bool cloaked = bs.readFlag();
             bs.readFlag(); // controlled
-            if (entry) entry->cloaked = cloaked;
+            if (entry) {
+                entry->cloaked = cloaked;
+                entry->hasCloak = true;
+            }
             if (bs.readFlag()) { bs.readFlag(); bs.readF32(); }
             else bs.readFlag();
         }
@@ -1656,7 +1865,11 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
                 bs.readFlag(); // state-B mode
             } else {
                 bs.readNormalVector(8);
-                bs.readFloat(5);
+                const float shield = bs.readFloat(5);
+                if (entry) {
+                    entry->shieldLevel = shield;
+                    entry->hasShield = true;
+                }
             }
         }
         if (bs.readFlag()) {
@@ -1758,9 +1971,11 @@ static void readWheeledVehicleData(BitStream& bs, bool isInitial, const Vec3& cp
     bs.readFlag(); // braking
     if (bs.readFlag()) {
         for (int i = 0; i < 6; ++i) {
-            bs.readF32(); // wheel angular velocity
-            bs.readF32(); // wheel suspension displacement
-            bs.readF32(); // wheel lateral displacement
+            const float angularVelocity = bs.readF32();
+            const float suspension = bs.readF32();
+            const float lateral = bs.readF32();
+            if (entry)
+                entry->wheels[i] = {angularVelocity, suspension, lateral, true};
         }
     }
 }
@@ -1875,17 +2090,45 @@ static void readProjectileData(BitStream& bs, bool isInitial, const Vec3& cp, Gh
     if (!bs.readFlag()) return; // non-full state
     if (entry) entry->position = bs.readCompressedPoint(cp);
     else bs.readCompressedPoint(cp);
-    bs.readCompressedPoint(cp); // velocity
+    Vec3 velocity = bs.readCompressedPoint(cp); // velocity
+    if (entry) {
+        entry->velocity = velocity;
+        entry->hasVelocity = true;
+        const float length = sqrtf(velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z);
+        if (length > 0.001f) {
+            const float half = atan2f(velocity.x, velocity.y) * 0.5f;
+            entry->rotation = {0, sinf(half), 0, cosf(half)};
+            entry->hasRotation = true;
+        }
+    }
     if (bs.readFlag()) bs.readInt(10); // source
     if (bs.readFlag()) bs.readInt(10); // vehicleObject
 }
 
-static void readRepairProjectileData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry*) {
+static void readELFProjectileData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
     readGameBaseData(bs, isInitial);
     if (bs.readFlag() && bs.readFlag()) {
-        bs.readInt(11); // source object
-        bs.readInt(3); // source slot
-        bs.readInt(11); // repairing object
+        const int source = bs.readInt(11);
+        bs.readInt(3); // source image slot
+        const int target = bs.readInt(11);
+        if (entry) {
+            entry->linkSourceGhost = source;
+            entry->linkTargetGhost = target;
+        }
+    }
+}
+
+static void readRepairProjectileData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
+    readGameBaseData(bs, isInitial);
+    if (bs.readFlag() && bs.readFlag()) {
+        const int source = bs.readInt(11); // source object
+        const int slot = bs.readInt(3); // source slot
+        const int target = bs.readInt(11); // repairing object
+        if (entry) {
+            entry->linkSourceGhost = source;
+            entry->linkSourceSlot = slot;
+            entry->linkTargetGhost = target;
+        }
     }
 }
 
@@ -1895,7 +2138,11 @@ static void readDebrisData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
         if (entry) entry->position = bs.readCompressedPoint(cp);
         else bs.readCompressedPoint(cp);
     }
-    for (int i = 0; i < 3; i++) bs.readF32(); // velocity
+    Vec3 velocity{bs.readF32(), bs.readF32(), bs.readF32()}; // velocity
+    if (entry) {
+        entry->velocity = velocity;
+        entry->hasVelocity = true;
+    }
     for (int i = 0; i < 4; i++) bs.readBool();
     for (int i = 0; i < 6; i++) bs.readF32();
     for (int i = 0; i < 2; i++) bs.readBool();
@@ -1911,6 +2158,7 @@ static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEnt
         if (entry) entry->position = bs.readPoint3F();
         else bs.readPoint3F();
         Vec3 vel = bs.readPoint3F(); // velocity
+        if (entry) { entry->velocity = vel; entry->hasVelocity = true; }
         if (entry && (vel.x != 0 || vel.y != 0 || vel.z != 0)) {
             // Orient projectile along velocity vector
             float len = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z);
@@ -1928,7 +2176,9 @@ static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEnt
         if (bs.readFlag()) {
             Vec3 expPos = bs.readPoint3F();
             bs.readPoint3F(); // normal
-            DemoParser::s_pendingExplosions.push_back({expPos, 0.0f});
+            Vec3 normal = bs.readPoint3F();
+            DemoParser::s_pendingExplosions.push_back({expPos, normal, 0.0f,
+                entry ? entry->datablockId : -1});
         }
         if (bs.readFlag()) { bs.readRangedU32(0, 1024); bs.readRangedU32(0, 7); } // source
         if (bs.readFlag()) bs.readRangedU32(0, 1024); // vehicleObject
@@ -1940,8 +2190,9 @@ static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEnt
         }
         if (bs.readFlag()) {
             Vec3 expPos = bs.readPoint3F();
-            bs.readPoint3F(); // normal
-            DemoParser::s_pendingExplosions.push_back({expPos, 0.0f});
+            Vec3 normal = bs.readPoint3F();
+            DemoParser::s_pendingExplosions.push_back({expPos, normal, 0.0f,
+                entry ? entry->datablockId : -1});
         }
     }
 }
@@ -1952,7 +2203,12 @@ static void readSniperProjectileData(BitStream& bs, bool isInitial, GhostEntry* 
         bs.readFloat(7); // energyPercentage
         Vec3 startPos = bs.readPoint3F();
         Vec3 endPos = bs.readPoint3F(); // endPos
-        if (entry) entry->position = startPos;
+        if (entry) {
+            entry->position = startPos;
+            entry->beamStart = startPos;
+            entry->beamEnd = endPos;
+            entry->hasBeam = true;
+        }
         bs.readFlag(); bs.readFlag(); // truncated, hitWater
         if (bs.readFlag()) { bs.readRangedU32(0, 1024); bs.readRangedU32(0, 7); bs.readFlag(); }
     } else { // swing update
@@ -1972,7 +2228,12 @@ static void readShockLanceProjectileData(BitStream& bs, bool isInitial, GhostEnt
     if (bs.readFlag()) { // initial update
         Vec3 start = bs.readPoint3F();
         Vec3 end = bs.readPoint3F(); // end
-        if (entry) entry->position = start;
+        if (entry) {
+            entry->position = start;
+            entry->beamStart = start;
+            entry->beamEnd = end;
+            entry->hasBeam = true;
+        }
         bs.readFlag(); // hitObject
         if (bs.readFlag()) { bs.readRangedU32(0, 1024); bs.readRangedU32(0, 7); }
     }
@@ -2027,13 +2288,21 @@ static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& 
     if (bs.readFlag()) { // InitialUpdateMask
         if (bs.readFlag()) { // hidden/already exploded
             Vec3 expPos = bs.readCompressedPoint(cp);
-            bs.readNormalVector(14);
+            Vec3 normal = bs.readNormalVector(14);
             bool hitWater = bs.readFlag();
-            DemoParser::s_pendingExplosions.push_back({expPos, 0.0f});
+            DemoParser::s_pendingExplosions.push_back({expPos, normal, 0.0f,
+                entry ? entry->datablockId : -1});
         } else { // live projectile
             if (entry) entry->position = bs.readCompressedPoint(cp);
             else bs.readCompressedPoint(cp);
-            Vec3 dir = bs.readNormalVector(14); // direction
+             Vec3 dir = bs.readNormalVector(14); // direction
+             if (entry) {
+                 entry->beamStart = entry->position;
+                 entry->beamEnd = {entry->position.x + dir.x * 10.0f,
+                                   entry->position.y + dir.y * 10.0f,
+                                   entry->position.z + dir.z * 10.0f};
+                 entry->hasBeam = true;
+             }
             if (entry && (dir.x != 0 || dir.y != 0 || dir.z != 0)) {
                 float yaw = atan2f(dir.x, dir.y);
                 float half = yaw * 0.5f;
@@ -2049,9 +2318,10 @@ static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& 
         }
     } else { // non-initial: explosion
         Vec3 expPos = bs.readCompressedPoint(cp);
-        bs.readNormalVector(14);
+        Vec3 normal = bs.readNormalVector(14);
         bs.readFlag();
-        DemoParser::s_pendingExplosions.push_back({expPos, 0.0f});
+        DemoParser::s_pendingExplosions.push_back({expPos, normal, 0.0f,
+            entry ? entry->datablockId : -1});
     }
 }
 
@@ -2314,7 +2584,8 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
             "AIObjective", "SniperProjectile", "ShockLanceProjectile"
         };
         int idx = classId - T2Demo::NetObjectClassFirst;
-        if (idx >= 0 && idx < (int)(sizeof(defaultNames)/sizeof(defaultNames[0])))
+        if ((cn.empty() || cn.rfind("Class", 0) == 0) &&
+            idx >= 0 && idx < (int)(sizeof(defaultNames)/sizeof(defaultNames[0])))
             cn = defaultNames[idx];
     }
 
@@ -2336,8 +2607,8 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
         if (bs.readFlag()) bs.readFloat(8); // CapacitorEnergy
         if (bs.readFlag()) return true; // control shortcut
         if (bs.readFlag()) {
-            float barrelPitch = bs.readFloat(10);
-            float barrelYaw = bs.readFloat(10);
+            float barrelPitch = bs.readFloat(10) * 3.14159265358979323846f;
+            float barrelYaw = bs.readFloat(10) * 6.28318530717958647692f;
             bs.readFloat(8);
             if (entry) {
                 entry->barrelPitch = barrelPitch;
@@ -2351,12 +2622,37 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
     else if (cn == "Marker") readMarkerData(bs, false, cp, entry);
     else if (cn == "MissionMarker") readMissionMarkerData(bs, isInitial, cp, entry);
     else if (cn == "MissionArea") readMissionAreaData(bs);
+    else if (cn == "Splash") {
+        readGameBaseData(bs, isInitial, entry);
+        if (bs.readFlag()) {
+            if (entry) entry->position = bs.readPoint3F();
+            else bs.readPoint3F();
+        }
+    }
+    else if (cn == "Shockwave") {
+        readGameBaseData(bs, isInitial, entry);
+        if (bs.readFlag()) {
+            if (entry) entry->position = bs.readPoint3F();
+            else bs.readPoint3F();
+            bs.readPoint3F();
+        }
+    }
+    else if (cn == "ParticleEmissionDummy") {
+        readGameBaseData(bs, isInitial, entry);
+        bs.readMatrixF();
+        bs.readPoint3F();
+        if (bs.readFlag()) bs.readInt(11);
+    }
+    else if (cn == "Trigger") {
+        bs.readU32();
+    }
     else if (cn == "PhysicalZone") readPhysicalZoneData(bs, isInitial, cp, entry);
     else if (cn == "WayPoint") readWayPointData(bs, isInitial, cp, entry);
     else if (cn == "SpawnSphere") readSpawnSphereData(bs, isInitial, cp, entry);
     else if (cn == "Debris") readDebrisData(bs, isInitial, cp, entry);
     else if (cn == "Projectile")
         readProjectileData(bs, isInitial, cp, entry);
+    else if (cn == "ELFProjectile") readELFProjectileData(bs, isInitial, cp, entry);
     else if (cn == "EnergyProjectile" || cn == "FlareProjectile")
         readGrenadeData(bs, isInitial, cp, entry);
     else if (cn == "RepairProjectile") readRepairProjectileData(bs, isInitial, cp, entry);
@@ -2470,7 +2766,6 @@ void DemoParser::readGhosts(BitStream& bs, std::vector<GhostUpdate>& outGhosts, 
         GhostEntry* entry = ghostTracker.getMutableGhost(gu.index);
         bool known = readGhostClassData(bs, gu.classId, isNew, cp, entry);
         if (!known) {
-            readGameBaseData(bs, isNew);
             if (bs.readFlag()) {
                 if (bs.readFlag()) { bs.readFloat(6); bs.readInt(2); bs.readFlag(); bs.readNormalVector(8); }
                 if (bs.readFlag()) for (int i = 0; i < 4; i++) if (bs.readFlag()) { bool p = bs.readFlag(); if (p) bs.readInt(11); }
@@ -2552,6 +2847,24 @@ PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIn
     readEvents(bs, pd.events, pd.gameState.compressionPoint);
     readGhosts(bs, pd.ghosts, pd.dnetHeader.seqNumber, &pd.gameState.compressionPoint);
     bs.setStringBufferEnabled(false);
+    if (blockIndex >= 0) {
+        const double duration = header.demoLengthMs / 1000.0;
+        const double blockTime = getBlockCount() > 0
+            ? duration * (double)blockIndex / (double)getBlockCount() : 0.0;
+        for (const auto& event : pd.events) {
+            if (event.message.empty()) continue;
+            DemoTimedEvent timeline;
+            timeline.time = blockTime;
+            timeline.text = event.message;
+            timeline.type = event.classId == T2Demo::NetEventClassFirst + 22 ? 0 :
+                event.classId == T2Demo::NetEventClassFirst + 9 ?
+                    (!event.arguments.empty() && event.arguments[0] == "ChatMessage" ? 0 : 1) : 2;
+            eventLog_.push_back(std::move(timeline));
+        }
+        if (eventLog_.size() > 200)
+            eventLog_.erase(eventLog_.begin(), eventLog_.begin() +
+                            (eventLog_.size() - 200));
+    }
     return pd;
 }
 

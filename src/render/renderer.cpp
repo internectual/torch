@@ -13,6 +13,10 @@ extern "C" unsigned char* stbi_write_png_to_mem(const unsigned char* pixels, int
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
+#include "render/texture_frames.h"
+#include "render/render_order.h"
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 
 struct Renderer::Impl {
@@ -228,13 +232,69 @@ void Renderer::setCamera(const Point3F& pos, const Point3F& target, const Point3
 
     auto& cfg = config();
     MatrixF p;
-    p.perspective(Math::DEG2RAD(cfg.fov), cfg.width / (float)cfg.height, cfg.nearPlane, cfg.farPlane);
+    const float aspect = std::max(1, cfg.width) / (float)std::max(1, cfg.height);
+    p.perspective(Math::DEG2RAD(Math::horizontalFovToVertical(cfg.fov, aspect)),
+                  aspect, cfg.nearPlane, cfg.farPlane);
     setProjection(p);
+}
+
+void Renderer::setDynamicLights(const std::vector<DynamicPointLight>& lights) {
+    dynamicLights.clear();
+    dynamicLights.reserve(MAX_DYNAMIC_LIGHTS);
+    for (const auto& input : lights) {
+        if ((int)dynamicLights.size() >= std::min(MAX_DYNAMIC_LIGHTS, std::max(0, cfg.maxLights))) break;
+        DynamicPointLight light = input;
+        if (!std::isfinite(light.x) || !std::isfinite(light.y) || !std::isfinite(light.z) ||
+            !std::isfinite(light.r) || !std::isfinite(light.g) || !std::isfinite(light.b) ||
+            !std::isfinite(light.radius) || !std::isfinite(light.falloff) || light.radius <= 0.0f)
+            continue;
+        light.r = std::clamp(light.r, 0.0f, 16.0f);
+        light.g = std::clamp(light.g, 0.0f, 16.0f);
+        light.b = std::clamp(light.b, 0.0f, 16.0f);
+        light.radius = std::clamp(light.radius, 0.05f, 256.0f);
+        light.falloff = std::clamp(light.falloff, 0.1f, 8.0f);
+        dynamicLights.push_back(light);
+    }
+    auto apply = [&](Shader* shader) {
+        if (!shader) return;
+        shader->bind();
+        shader->setUniform("uPointLightCount", (int32_t)dynamicLights.size());
+        for (int i = 0; i < MAX_DYNAMIC_LIGHTS; ++i) {
+            const auto* light = i < (int)dynamicLights.size() ? &dynamicLights[i] : nullptr;
+            shader->setUniform(("uPointLightPos[" + std::to_string(i) + "]").c_str(),
+                light ? Point3F{light->x, light->y, light->z} : Point3F{});
+            shader->setUniform(("uPointLightColor[" + std::to_string(i) + "]").c_str(),
+                light ? Point3F{light->r, light->g, light->b} : Point3F{});
+            shader->setUniform(("uPointLightParams[" + std::to_string(i) + "]").c_str(),
+                light ? Point3F{light->radius, light->falloff, 0.0f} : Point3F{});
+        }
+    };
+    apply(ShaderManager::getDefaultShader());
+    apply(ShaderManager::getTerrainShader());
+}
+
+void Renderer::clearDynamicLights() { setDynamicLights({}); }
+
+void Renderer::beginTransparentPass() {
+    spriteBatchFlush();
+    constexpr auto state = transparentPassState();
+    if (state.depthTest) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    glDepthMask(state.depthWrite ? GL_TRUE : GL_FALSE);
+    if (state.blending) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, state.additive ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
+}
+
+void Renderer::endTransparentPass() {
+    spriteBatchFlush();
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    glDepthFunc(GL_LESS);
 }
 
 void Renderer::drawMesh(MeshData& mesh, const MatrixF& transform) {
     if (!mesh.uploaded) return;
 
+    spriteBatchFlush();
     setModel(transform);
     mesh.render();
     stats.drawCalls++;
@@ -242,12 +302,13 @@ void Renderer::drawMesh(MeshData& mesh, const MatrixF& transform) {
 }
 
 void Renderer::drawLine(const Point3F& a, const Point3F& b, const ColorF& color) {
+    spriteBatchFlush();
     auto* ls = ShaderManager::getLineShader();
     if (!ls) return;
     ls->bind();
     ls->setUniform("uProjection", projection);
     ls->setUniform("uView", view);
-    ls->setUniform("uColor", Point3F{color.r, color.g, color.b});
+    ls->setUniform("uColor", color);
 
     if (!lineVAO) {
         glGenVertexArrays(1, &lineVAO);
@@ -269,6 +330,7 @@ void Renderer::drawLine(const Point3F& a, const Point3F& b, const ColorF& color)
 
 void Renderer::drawLineStrip(const std::vector<Point3F>& points, const ColorF& color) {
     if (points.size() < 2) return;
+    spriteBatchFlush();
     auto* ls = ShaderManager::getLineShader();
     if (!ls) return;
     ls->bind();
@@ -310,6 +372,29 @@ void Renderer::drawBox(const Box3F& box, const ColorF& color) {
         drawLine(verts[e[0]], verts[e[1]], color);
 }
 
+void Renderer::drawFilledQuad(float width, float depth) {
+    spriteBatchFlush();
+    static uint32_t vao = 0, vbo = 0;
+    if (!vao) {
+        float verts[] = {
+            0, 0, 0,  0, 0,  width, 0, 0, 1, 0,  width, 0, depth, 1, 1,
+            0, 0, 0,  0, 0,  width, 0, depth, 1, 1,  0, 0, depth, 0, 1
+        };
+        glGenVertexArrays(1, &vao);
+        glGenBuffers(1, &vbo);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+    }
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    stats.drawCalls++;
+}
+
 void Renderer::initSpriteVAO() {
     if (spriteVAO) return;
     glGenVertexArrays(1, &spriteVAO);
@@ -325,11 +410,24 @@ void Renderer::initSpriteVAO() {
     glEnableVertexAttribArray(2);
 }
 
-void Renderer::spriteBatchAdd(float* verts, uint32_t texId) {
-    if (texId != spriteBatchTex && spriteBatchCount > 0) {
+void Renderer::spriteBatchAdd(float* verts, uint32_t texId, bool additive) {
+    const bool depthTest = glIsEnabled(GL_DEPTH_TEST) == GL_TRUE;
+    const bool depthWrite = [&]() {
+        GLboolean value = GL_TRUE;
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &value);
+        return value == GL_TRUE;
+    }();
+    const bool blend = glIsEnabled(GL_BLEND) == GL_TRUE;
+    if ((texId != spriteBatchTex || additive != spriteBatchAdditive ||
+         depthTest != spriteBatchDepthTest || depthWrite != spriteBatchDepthWrite ||
+         blend != spriteBatchBlend) && spriteBatchCount > 0) {
         spriteBatchFlush();
     }
     spriteBatchTex = texId;
+    spriteBatchAdditive = additive;
+    spriteBatchDepthTest = depthTest;
+    spriteBatchDepthWrite = depthWrite;
+    spriteBatchBlend = blend;
     spriteBatchBuf.insert(spriteBatchBuf.end(), verts, verts + 54);
     spriteBatchCount++;
     if (spriteBatchCount >= SPRITE_BATCH_MAX) {
@@ -342,11 +440,16 @@ void Renderer::spriteBatchFlush() {
     initSpriteVAO();
 
     auto* ss = ShaderManager::getSpriteShader();
-    if (ss) {
-        ss->bind();
-        ss->setUniform("uProjection", projection);
-        ss->setUniform("uView", view);
+    if (!ss) {
+        spriteBatchBuf.clear();
+        spriteBatchCount = 0;
+        spriteBatchTex = UINT32_MAX;
+        spriteBatchAdditive = false;
+        return;
     }
+    ss->bind();
+    ss->setUniform("uProjection", projection);
+    ss->setUniform("uView", view);
     if (spriteBatchTex == UINT32_MAX) {
         ss->setUniform("uUseTexture", false);
     } else {
@@ -360,20 +463,40 @@ void Renderer::spriteBatchFlush() {
     glBindBuffer(GL_ARRAY_BUFFER, spriteVBO);
     glBufferData(GL_ARRAY_BUFFER, spriteBatchBuf.size() * sizeof(float), spriteBatchBuf.data(), GL_DYNAMIC_DRAW);
 
-    // 2D quads are wound for front-facing with culling OFF; if any earlier
-    // code left GL_CULL_FACE enabled, every quad here would be discarded.
+    // Quads are wound for front-facing with culling OFF. Preserve every state
+    // changed here: effects and GUI use the same accumulator but different GL
+    // depth/blend state.
     GLboolean cullWasOn = glIsEnabled(GL_CULL_FACE);
     GLboolean depthWasOn = glIsEnabled(GL_DEPTH_TEST);
+    GLboolean blendWasOn = glIsEnabled(GL_BLEND);
+    GLboolean depthWriteWasOn = GL_TRUE;
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWriteWasOn);
+    GLint blendSrcRGB = GL_SRC_ALPHA, blendDstRGB = GL_ONE_MINUS_SRC_ALPHA;
+    GLint blendSrcAlpha = GL_SRC_ALPHA, blendDstAlpha = GL_ONE_MINUS_SRC_ALPHA;
+    glGetIntegerv(GL_BLEND_SRC_RGB, &blendSrcRGB);
+    glGetIntegerv(GL_BLEND_DST_RGB, &blendDstRGB);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrcAlpha);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDstAlpha);
     glDisable(GL_CULL_FACE);
-    glDisable(GL_DEPTH_TEST);
+    if (spriteBatchDepthTest) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    if (spriteBatchBlend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+    glDepthMask(spriteBatchDepthWrite ? GL_TRUE : GL_FALSE);
+    glBlendFunc(GL_SRC_ALPHA, spriteBatchAdditive ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(spriteBatchBuf.size() / 9));
     if (cullWasOn) glEnable(GL_CULL_FACE);
-    if (depthWasOn) glEnable(GL_DEPTH_TEST);
+    else glDisable(GL_CULL_FACE);
+    if (depthWasOn) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    if (blendWasOn) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+    glDepthMask(depthWriteWasOn);
+    glBlendFuncSeparate((GLenum)blendSrcRGB, (GLenum)blendDstRGB,
+                        (GLenum)blendSrcAlpha, (GLenum)blendDstAlpha);
 
     stats.drawCalls++;
+    stats.triangles += (int32_t)(spriteBatchBuf.size() / 27);
     spriteBatchBuf.clear();
     spriteBatchCount = 0;
     spriteBatchTex = UINT32_MAX;
+    spriteBatchAdditive = false;
 }
 
 void Renderer::flushSpriteBatch() {
@@ -416,12 +539,23 @@ void Renderer::drawTexturedRectUV(const Point3F& a, const Point3F& b, uint32_t t
     spriteBatchAdd(verts, texId);
 }
 
-void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color, uint32_t texture) {
-    spriteBatchFlush();
-    initSpriteVAO();
+void Renderer::drawTexturedQuad(const Point3F& a, const Point3F& b, const Point3F& c,
+                                const Point3F& d, uint32_t texture, const ColorF& tint,
+                                float u0, float v0, float u1, float v1, bool additive) {
+    float verts[] = {
+        a.x,a.y,a.z,u0,v0,tint.r,tint.g,tint.b,tint.a,
+        b.x,b.y,b.z,u1,v0,tint.r,tint.g,tint.b,tint.a,
+        d.x,d.y,d.z,u0,v1,tint.r,tint.g,tint.b,tint.a,
+        b.x,b.y,b.z,u1,v0,tint.r,tint.g,tint.b,tint.a,
+        c.x,c.y,c.z,u1,v1,tint.r,tint.g,tint.b,tint.a,
+        d.x,d.y,d.z,u0,v1,tint.r,tint.g,tint.b,tint.a,
+    };
+    spriteBatchAdd(const_cast<float*>(verts), texture, additive);
+}
 
-    auto* shader = ShaderManager::getSpriteShader();
-    if (!shader) return;
+void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color,
+                           uint32_t texture, bool additive) {
+    initSpriteVAO();
 
     // Billboarding: extract right/up from view matrix
     const float* v = view.data();
@@ -437,54 +571,225 @@ void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color, u
         pos.x + (-right.x - up.x) * s, pos.y + (-right.y - up.y) * s, pos.z + (-right.z - up.z) * s,  0,1, color.r,color.g,color.b,color.a,
         pos.x + (-right.x + up.x) * s, pos.y + (-right.y + up.y) * s, pos.z + (-right.z + up.z) * s,  0,0, color.r,color.g,color.b,color.a,
     };
-    shader->bind();
-    shader->setUniform("uProjection", projection);
-    shader->setUniform("uUseTexture", (int32_t)(texture ? 1 : 0));
-    if (texture) {
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, texture);
-        shader->setUniform("uTexture", (int32_t)0);
-    }
-
-    glBindVertexArray(spriteVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, spriteVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(f), f, GL_DYNAMIC_DRAW);
-
+    GLboolean depthWrite = GL_TRUE;
+    const GLboolean blendWasOn = glIsEnabled(GL_BLEND);
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWrite);
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
+    spriteBatchAdd(f, texture, additive);
+    glDepthMask(depthWrite);
+    if (!blendWasOn) glDisable(GL_BLEND);
+}
 
-    // Disable culling for this quad and RESTORE the previous state — an
-    // unconditional glEnable here leaked culling into the rest of the frame,
-    // silently discarding every subsequently batched 2D quad and 3D model.
-    GLboolean cullWasOn = glIsEnabled(GL_CULL_FACE);
-    glDisable(GL_CULL_FACE);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    if (cullWasOn) glEnable(GL_CULL_FACE);
+void Renderer::drawOrientedSprite(const Point3F& pos, float size, const ColorF& color,
+                                  const Point3F& direction, float angle,
+                                  uint32_t texture, bool additive) {
+    drawOrientedSpriteRect(pos, size, size, color, direction, angle, texture, 0, 0, 1, 1, additive);
+}
 
-    glDepthMask(GL_TRUE);
+void Renderer::drawOrientedSpriteRect(const Point3F& pos, float width, float height, const ColorF& color,
+                                      const Point3F& direction, float angle, uint32_t texture,
+                                      float u0, float v0, float u1, float v1, bool additive) {
+    initSpriteVAO();
+    Point3F normal = direction;
+    float length = std::sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+    if (length < 0.0001f) { drawSprite(pos, std::max(width, height), color, texture, additive); return; }
+    normal.x /= length; normal.y /= length; normal.z /= length;
+    Point3F toCamera{cameraPos.x - pos.x, cameraPos.y - pos.y, cameraPos.z - pos.z};
+    float projection = toCamera.x * normal.x + toCamera.y * normal.y + toCamera.z * normal.z;
+    Point3F up{toCamera.x - normal.x * projection, toCamera.y - normal.y * projection,
+               toCamera.z - normal.z * projection};
+    length = std::sqrt(up.x * up.x + up.y * up.y + up.z * up.z);
+    if (length < 0.0001f) { up = {0, 1, 0}; length = 1.0f; }
+    up.x /= length; up.y /= length; up.z /= length;
+    Point3F right{normal.y * up.z - normal.z * up.y,
+                  normal.z * up.x - normal.x * up.z,
+                  normal.x * up.y - normal.y * up.x};
+    const float c = std::cos(angle), s = std::sin(angle);
+    Point3F rr{right.x * c + up.x * s, right.y * c + up.y * s, right.z * c + up.z * s};
+    Point3F uu{up.x * c - right.x * s, up.y * c - right.y * s, up.z * c - right.z * s};
+    const float halfWidth = width * 0.5f, halfHeight = height * 0.5f;
+    auto corner = [&](float x, float y) { return Point3F{
+        pos.x + rr.x * x * halfWidth + uu.x * y * halfHeight,
+        pos.y + rr.y * x * halfWidth + uu.y * y * halfHeight,
+        pos.z + rr.z * x * halfWidth + uu.z * y * halfHeight}; };
+    const Point3F a = corner(-1, 1), b = corner(1, 1), c0 = corner(1, -1), d = corner(-1, -1);
+    float f[] = {a.x,a.y,a.z,u0,v0,color.r,color.g,color.b,color.a, b.x,b.y,b.z,u1,v0,color.r,color.g,color.b,color.a,
+                 c0.x,c0.y,c0.z,u1,v1,color.r,color.g,color.b,color.a, c0.x,c0.y,c0.z,u1,v1,color.r,color.g,color.b,color.a,
+                 d.x,d.y,d.z,u0,v1,color.r,color.g,color.b,color.a, a.x,a.y,a.z,u0,v0,color.r,color.g,color.b,color.a};
+    GLboolean depthWrite = GL_TRUE;
+    const GLboolean blendWasOn = glIsEnabled(GL_BLEND);
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWrite);
+    glEnable(GL_BLEND);
+    glDepthMask(GL_FALSE);
+    spriteBatchAdd(f, texture, additive);
+    glDepthMask(depthWrite);
+    if (!blendWasOn) glDisable(GL_BLEND);
+}
 
-    stats.drawCalls++;
-    stats.triangles += 2;
+void Renderer::drawShockwaveRing(const Point3F& center, float radius, float width,
+                                 float height, int segments, uint32_t texture,
+                                 const ColorF& color, float texWrap, bool additive,
+                                 bool renderBottom, const Point3F& normal) {
+    if (segments < 4) segments = 4;
+    segments = std::min(segments, 256);
+    const float inner = std::max(0.0f, radius - width * 0.5f);
+    const float outer = radius + width * 0.5f;
+    Point3F n = normal;
+    const float nLen = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+    if (nLen > 0.0001f) { n.x /= nLen; n.y /= nLen; n.z /= nLen; }
+    const Point3F reference = std::fabs(n.y) < 0.9f ? Point3F{0, 1, 0} : Point3F{1, 0, 0};
+    Point3F tangent{n.y * reference.z - n.z * reference.y,
+                    n.z * reference.x - n.x * reference.z,
+                    n.x * reference.y - n.y * reference.x};
+    const float tangentLen = std::sqrt(tangent.x * tangent.x + tangent.y * tangent.y + tangent.z * tangent.z);
+    if (tangentLen > 0.0001f) { tangent.x /= tangentLen; tangent.y /= tangentLen; tangent.z /= tangentLen; }
+    Point3F bitangent{n.y * tangent.z - n.z * tangent.y,
+                      n.z * tangent.x - n.x * tangent.z,
+                      n.x * tangent.y - n.y * tangent.x};
+    const auto ringPoint = [&](float angle, float distance, float normalOffset) {
+        const float c = std::cos(angle), s = std::sin(angle);
+        return Point3F{
+            center.x + (tangent.x * c + bitangent.x * s) * distance + n.x * normalOffset,
+            center.y + (tangent.y * c + bitangent.y * s) * distance + n.y * normalOffset,
+            center.z + (tangent.z * c + bitangent.z * s) * distance + n.z * normalOffset};
+    };
+    const auto drawSurface = [&](float yOffset, float surfaceHeight) {
+      for (int i = 0; i < segments; ++i) {
+        const float a0 = (float)i / segments * 2.0f * Math::PI;
+        const float a1 = (float)(i + 1) / segments * 2.0f * Math::PI;
+        const float u0 = (float)i / segments * texWrap;
+        const float u1 = (float)(i + 1) / segments * texWrap;
+        const Point3F outerA = ringPoint(a0, outer, yOffset + surfaceHeight);
+        const Point3F innerA = ringPoint(a0, inner, yOffset);
+        const Point3F outerB = ringPoint(a1, outer, yOffset + surfaceHeight);
+        const Point3F innerB = ringPoint(a1, inner, yOffset);
+        float verts[] = {
+            outerA.x, outerA.y, outerA.z, u0, 0.05f, color.r,color.g,color.b,color.a,
+            innerA.x, innerA.y, innerA.z, u0, 0.95f, color.r,color.g,color.b,color.a,
+            outerB.x, outerB.y, outerB.z, u1, 0.05f, color.r,color.g,color.b,color.a,
+            innerA.x, innerA.y, innerA.z, u0, 0.95f, color.r,color.g,color.b,color.a,
+            innerB.x, innerB.y, innerB.z, u1, 0.95f, color.r,color.g,color.b,color.a,
+            outerB.x, outerB.y, outerB.z, u1, 0.05f, color.r,color.g,color.b,color.a,
+        };
+        spriteBatchAdd(verts, texture, additive);
+      }
+    };
+    drawSurface(0.0f, height);
+    if (renderBottom) drawSurface(height, -height);
 }
 
 Texture* Renderer::loadTexture(const char* path) {
+    if (!path || !*path) return nullptr;
     auto it = impl->textures.find(path);
-    if (it != impl->textures.end()) return it->second;
+    if (it != impl->textures.end()) {
+        // Do not retain failed/no-context loads as permanent asset handles.
+        if (it->second && it->second->loaded) return it->second;
+        if (!it->second) impl->textures.erase(it);
+        else {
+            delete it->second;
+            impl->textures.erase(it);
+        }
+    }
 
-    auto data = Engine::instance().fs().read(path);
+    std::vector<uint8_t> data;
+    std::string resolvedPath;
+    if (!Engine::instance().fs().readTextureFile(path, data, &resolvedPath))
+        return nullptr;
     if (data.empty()) {
-        // Cache nullptr so we don't re-read every frame
-        impl->textures[path] = nullptr;
         return nullptr;
     }
 
     auto* tex = new Texture;
-    tex->load(data.data(), data.size());
+    std::string extension = resolvedPath;
+    for (char& c : extension) c = (char)std::tolower((unsigned char)c);
+    if (extension.ends_with(".bm8")) tex->loadBM8(data.data(), data.size());
+    else tex->load(data.data(), data.size());
+    if (!tex->loaded) {
+        delete tex;
+        return nullptr;
+    }
     impl->textures[path] = tex;
     stats.textures++;
     Console::instance().printf(LogLevel::Debug, "Texture loaded: %s (%dx%d)", path, tex->width, tex->height);
     return tex;
+}
+
+bool Renderer::loadTextureFrames(const char* path, std::vector<uint32_t>& frames,
+                                 std::vector<float>& durations) {
+    frames.clear();
+    durations.clear();
+    if (!path || !*path) return false;
+
+    const std::string requested(path);
+    std::vector<std::string> direct = {requested};
+    if (requested.rfind("textures/", 0) != 0)
+        direct.push_back("textures/" + requested);
+    static constexpr const char* imageExtensions[] = {".png", ".bm8", ".jpg", ".gif", ".bmp", ".tga", ".dds"};
+    // A companion IFL is the authored animation, so it takes precedence over
+    // a same-named still image. If it has no usable frames, fall back below.
+    std::vector<std::string> iflCandidates;
+    const auto lower = [&]() {
+        std::string value = requested;
+        for (char& c : value) c = (char)std::tolower((unsigned char)c);
+        return value;
+    }();
+    if (lower.ends_with(".ifl")) {
+        iflCandidates = direct;
+    } else {
+        for (const auto& candidate : direct) iflCandidates.push_back(candidate + ".ifl");
+        const size_t dot = lower.find_last_of('.');
+        const size_t slash = lower.find_last_of('/');
+        if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
+            for (const auto& candidate : direct)
+                iflCandidates.push_back(candidate.substr(0, candidate.find_last_of('.')) + ".ifl");
+        }
+    }
+    auto readIfl = [&](const std::string& iflPath) {
+        const std::string content = Engine::instance().fs().readText(iflPath.c_str());
+        if (content.empty()) return false;
+        const size_t slash = iflPath.find_last_of('/');
+        const std::string directory = slash == std::string::npos
+            ? std::string{} : iflPath.substr(0, slash + 1);
+        for (const auto& source : parseTextureFrameSources(content)) {
+            const std::string& frameName = source.name;
+            const float duration = source.duration;
+            std::vector<std::string> frameCandidates;
+            if (frameName.find('/') == std::string::npos) frameCandidates.push_back(directory + frameName);
+            frameCandidates.push_back(frameName);
+            if (frameName.rfind("textures/", 0) != 0) frameCandidates.push_back("textures/" + frameName);
+            for (const auto& framePath : frameCandidates) {
+                Texture* texture = loadTexture(framePath.c_str());
+                if (texture && texture->loaded) {
+                    frames.push_back(texture->id);
+                    durations.push_back(duration);
+                    break;
+                }
+            }
+        }
+        return !frames.empty();
+    };
+    for (const auto& iflPath : iflCandidates) {
+        if (readIfl(iflPath)) return true;
+        frames.clear();
+        durations.clear();
+    }
+    for (const auto& candidate : direct) {
+        std::vector<std::string> candidates{candidate};
+        const size_t dot = candidate.find_last_of('.');
+        const size_t slash = candidate.find_last_of('/');
+        if (dot == std::string::npos || (slash != std::string::npos && dot < slash))
+            for (const char* extension : imageExtensions)
+                candidates.push_back(candidate + extension);
+        for (const auto& image : candidates) {
+            if (Texture* texture = loadTexture(image.c_str()); texture && texture->loaded) {
+                frames.push_back(texture->id);
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 Shader* Renderer::loadShader(const char* vertPath, const char* fragPath) {
@@ -513,18 +818,21 @@ void Renderer::renderText(const char* text, float x, float y, const ColorF& colo
 }
 
 void Renderer::onResize(int32_t w, int32_t h) {
-    cfg.width = w;
-    cfg.height = h;
-    glViewport(0, 0, w, h);
+    cfg.width = std::max(1, w);
+    cfg.height = std::max(1, h);
+    glViewport(0, 0, cfg.width, cfg.height);
 
     MatrixF p;
-    p.perspective(Math::DEG2RAD(cfg.fov), w / (float)h, cfg.nearPlane, cfg.farPlane);
+    const float aspect = cfg.width / (float)cfg.height;
+    p.perspective(Math::DEG2RAD(Math::horizontalFovToVertical(cfg.fov, aspect)),
+                  aspect, cfg.nearPlane, cfg.farPlane);
     setProjection(p);
 }
 
 // Mesh
 void MeshData::upload() {
     if (uploaded) return;
+    if (!SDL_GL_GetCurrentContext()) return;
     glGenVertexArrays(1, &vao);
     glGenBuffers(1, &vbo);
     glGenBuffers(1, &ebo);
@@ -574,12 +882,28 @@ void MeshData::destroy() {
 
 void MeshData::remapUVs(int32_t matFrame, const std::vector<Point2F>& tverts) {
     if (numTVertsPerFrame <= 0 || vertices.empty()) return;
+    if (matFrame < 0) matFrame = 0;
+    const int32_t frameCount = (int32_t)tverts.size() / numTVertsPerFrame;
+    if (frameCount <= 0) return;
+    matFrame = std::min(matFrame, frameCount - 1);
     int32_t offset = matFrame * numTVertsPerFrame;
     for (size_t i = 0; i < vertices.size(); i++) {
-        int32_t ti = (int32_t)i + offset;
+        int32_t baseIndex = tvertIndices.size() == vertices.size()
+            ? tvertIndices[i] : (int32_t)i;
+        int32_t ti = baseIndex + offset;
         if (ti >= 0 && ti < (int32_t)tverts.size())
             vertices[i].uv = tverts[ti];
     }
+    if (uploaded) updateGPU();
+}
+
+void MeshData::setFrame(int32_t frame) {
+    if (frameVertices.empty() || vertices.empty() || numFrames < 1) return;
+    frame = std::clamp(frame, 0, numFrames - 1);
+    const size_t count = vertices.size();
+    const size_t offset = (size_t)frame * count;
+    if (offset + count > frameVertices.size()) return;
+    for (size_t i = 0; i < count; ++i) vertices[i].pos = frameVertices[offset + i];
     if (uploaded) updateGPU();
 }
 
@@ -709,6 +1033,12 @@ bool Texture::loadBM8(const uint8_t* data, size_t size) {
 }
 
 void Texture::loadRaw(const uint8_t* pixels, int32_t w, int32_t h, int32_t channels) {
+    if (!SDL_GL_GetCurrentContext()) {
+        width = w;
+        height = h;
+        loaded = false;
+        return;
+    }
     if (!id) glGenTextures(1, &id);
     glBindTexture(GL_TEXTURE_2D, id);
     GLenum fmt = (channels == 4) ? GL_RGBA : GL_RGB;
@@ -850,6 +1180,9 @@ bool Renderer::screenshot(const char* path) {
 
 bool Renderer::screenshot(const char* path, const char* metaData) {
     int w = cfg.width, h = cfg.height;
+    if (impl->window) SDL_GetWindowSizeInPixels(impl->window, &w, &h);
+    w = std::max(1, w);
+    h = std::max(1, h);
     std::vector<uint8_t> pixels(w * h * 3);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());

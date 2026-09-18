@@ -115,6 +115,8 @@ public:
     void sendGamePacket(const uint8_t* data, size_t size, bool reliable = false);
     void sendNativeMove(uint32_t moveStart, const V12::ClientMove& move);
     void sendCommandPacket(const char* command);
+    void sendRemoteCommand(const std::string& command,
+                           const std::vector<std::string>& args);
 
     using PacketCallback = std::function<void(PacketType type, const uint8_t* data, size_t size)>;
     void setPacketCallback(PacketCallback cb) { packetCb = cb; }
@@ -125,8 +127,11 @@ public:
     void setClientCommandCallback(ClientCommandCallback cb) { clientCommandCb = std::move(cb); }
 
     using TargetCallback = std::function<void(const V12::ServerEvent::TargetInfo*,
-                                              uint16_t)>;
+                                               uint16_t)>;
     void setTargetCallback(TargetCallback cb) { targetCb = std::move(cb); }
+
+    using AudioCallback = std::function<void(const V12::ServerEvent&)>;
+    void setAudioCallback(AudioCallback cb) { audioCb = std::move(cb); }
 
     using MissionCallback = std::function<void(uint32_t)>;
     void setMissionCallback(MissionCallback cb) { missionCb = std::move(cb); }
@@ -150,6 +155,7 @@ public:
         uint8_t playerSensorGroup = 0;
         bool matchStarted = false;
         bool matchEnded = false;
+        bool ghosting = false;
         uint32_t clockRemainingMs = 0;
         std::vector<std::string> loadInfoLines;
         V12::ProtocolStateSnapshot protocol;
@@ -160,18 +166,28 @@ public:
         std::vector<V12::ServerEvent::TargetInfo> targets;
         std::vector<TeamState> teams;
         std::map<int, int> playerScores;
+        std::map<int, int> playerKills;
+        std::map<int, int> playerDeaths;
         std::map<int, int> playerPings;
         std::map<int, int> playerPacketLoss;
         std::map<int, int> clientTargets;
         std::map<int, int> clientTeams;
-        std::map<int, std::string> clientNames;
-    };
+         std::map<int, std::string> clientNames;
+        std::map<std::pair<int, uint32_t>, uint32_t> sensorGroupColors;
+        std::map<int, uint32_t> sensorGroupListenMasks;
+     };
     ObserverSnapshot observerSnapshot() const;
     bool seedObserverSnapshot(const ObserverSnapshot& snapshot);
 
     using GhostCallback = std::function<void(
         const V12::GhostUpdate&, const V12::PlayerGhostState*)>;
     void setGhostCallback(GhostCallback cb) { ghostCb = cb; }
+
+    using ProjectileImpactCallback = std::function<void(
+        uint16_t ghostIndex, uint16_t classId, const V12::ProjectileImpact&)>;
+    void setProjectileImpactCallback(ProjectileImpactCallback cb) {
+        projectileImpactCb = std::move(cb);
+    }
 
     using DatablockCallback = std::function<void(
         uint16_t objectId, uint8_t classId, uint16_t index, uint16_t total,
@@ -197,9 +213,11 @@ private:
     CommandCallback commandCb;
     ClientCommandCallback clientCommandCb;
     TargetCallback targetCb;
+    AudioCallback audioCb;
     MissionCallback missionCb;
     ServerMessageCallback serverMessageCb;
     GhostCallback ghostCb;
+    ProjectileImpactCallback projectileImpactCb;
     DatablockCallback datablockCb;
     StateCallback stateCb;
     std::function<void(uint64_t)> epochCb;

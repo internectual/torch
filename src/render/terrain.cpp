@@ -1,10 +1,13 @@
 #include "render/renderer.h"
 #include "render/shader.h"
 #include "render/dts_loader.h"
+#include "render/dts_animation.h"
 #include "render/dif_loader.h"
+#include "render/material_parity.h"
 #include "core/engine.h"
 #include "stb_image.h"
 #include <GL/glew.h>
+#include <SDL3/SDL.h>
 #include <cstring>
 #include <cctype>
 #include <vector>
@@ -13,23 +16,67 @@
 #include <algorithm>
 
 float TerrainBlock::sampleHeight(float wx, float wz) const {
+    if (heights.empty() || size < 2 || squareSize <= 0.0f) return 0.0f;
     float fx = (wx - worldOffset.x) / squareSize;
     float fz = (worldOffset.z - wz) / squareSize;
-    int ix = (int)std::floor(fx);
-    int iz = (int)std::floor(fz);
-    float tx = fx - ix;
-    float tz = fz - iz;
-    ix = Math::clamp(ix, 0, size - 2);
-    iz = Math::clamp(iz, 0, size - 2);
+    const int rawIx = (int)std::floor(fx);
+    const int rawIz = (int)std::floor(fz);
+    int ix = rawIx % size;
+    int iz = rawIz % size;
+    if (ix < 0) ix += size;
+    if (iz < 0) iz += size;
+    float tx = fx - rawIx;
+    float tz = fz - rawIz;
     tx = Math::clamp(tx, 0.0f, 1.0f);
     tz = Math::clamp(tz, 0.0f, 1.0f);
+    const int ix1 = (ix + 1) % size;
+    const int iz1 = (iz + 1) % size;
     float h00 = heights[iz * size + ix];
-    float h10 = heights[iz * size + ix + 1];
-    float h01 = heights[(iz + 1) * size + ix];
-    float h11 = heights[(iz + 1) * size + ix + 1];
-    float h0 = h00 + (h10 - h00) * tx;
-    float h1 = h01 + (h11 - h01) * tx;
-    return (h0 + (h1 - h0) * tz) * heightScale;
+    float h10 = heights[iz * size + ix1];
+    float h01 = heights[iz1 * size + ix];
+    float h11 = heights[iz1 * size + ix1];
+    // Torque does not bilinearly smooth a square. Its split rule selects one
+    // of the two planes represented by the terrain mesh, which is also what
+    // the local mapper uses for terrain collision and ray hits.
+    float height;
+    if (((ix ^ iz) & 1) == 0) {
+        height = tx >= tz
+            ? h00 + (h10 - h00) * tx + (h11 - h10) * tz
+            : h00 + (h01 - h00) * tz + (h11 - h01) * tx;
+    } else {
+        height = tx + tz <= 1.0f
+            ? h00 + (h10 - h00) * tx + (h01 - h00) * tz
+            : h11 + (h10 - h11) * (1.0f - tz) +
+                  (h01 - h11) * (1.0f - tx);
+    }
+    return height * heightScale;
+}
+
+void TerrainBlock::reset() {
+    const bool hasGLContext = SDL_GL_GetCurrentContext() != nullptr;
+    if (hasGLContext)
+        for (auto& mesh : meshes) mesh.destroy();
+    meshes.clear();
+    if (hasGLContext) {
+        for (auto& texture : detailTextures) texture.destroy();
+        for (auto& texture : normalTextures) texture.destroy();
+        splatMap.destroy();
+        splatMap2.destroy();
+        gameGrid.destroy();
+        lightmap.destroy();
+    }
+    detailTextures.clear();
+    normalTextures.clear();
+    textureNames.clear();
+    heights.clear();
+    emptySquares.clear();
+    size = 256;
+    heightScale = 1.0f;
+    squareSize = 8.0f;
+    worldOffset = {-1024, 0, 1024};
+    std::fill(std::begin(detailTilings), std::end(detailTilings), 0.0f);
+    lightDir = {0.5f, 0.8f, 0.6f};
+    loaded = false;
 }
 
 void TerrainBlock::generateMesh() {
@@ -37,9 +84,9 @@ void TerrainBlock::generateMesh() {
 
     // Preserve the native terrain sample grid. Downsampling the 256x256 TER
     // into a 128x128 mesh changes silhouettes and makes map comparisons fail.
-    int32_t gridRes = size;
+    int32_t gridRes = size + 1;
     float totalWorldSize = (float)size * squareSize;
-    float step = totalWorldSize / (float)gridRes;
+    float step = totalWorldSize / (float)size;
 
     std::vector<Vertex> verts;
     std::vector<uint32_t> idxs;
@@ -50,7 +97,10 @@ void TerrainBlock::generateMesh() {
             float wz = worldOffset.z - (float)z * step;
             float h = sampleHeight(wx, wz);
 
-            float eps = 0.5f;
+            // Match MapGenius' smooth vertex normals: central differences of
+            // the wrapped bilinear heightfield, rather than the selected
+            // triangle plane (which creates diagonal banding).
+            float eps = squareSize * 0.5f;
             float hxr = sampleHeight(wx + eps, wz);
             float hxl = sampleHeight(wx - eps, wz);
             float hzf = sampleHeight(wx, wz + eps);
@@ -59,20 +109,25 @@ void TerrainBlock::generateMesh() {
             float nlen = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
             if (nlen > 0) { n.x /= nlen; n.y /= nlen; n.z /= nlen; }
 
-            verts.push_back({{wx, h, wz}, n, {(float)x / gridRes, (float)z / gridRes}, {0,0}, {1,1,1,1}});
+            const Point2F terrainUv{(float)x / size, (float)z / size};
+            // The splat and lightmap textures are indexed by terrain square;
+            // use the same 0..1/256 coordinates as MapGenius, including the
+            // duplicated seam vertex at coordinate 1.
+            verts.push_back({{wx, h, wz}, n, terrainUv, terrainUv, {1,1,1,1}});
             // Terrain coloration comes from the native material layers and
             // lightmap, not from an elevation-based replacement tint.
         }
     }
 
-    for (int32_t z = 0; z < gridRes - 1; z++) {
-        for (int32_t x = 0; x < gridRes - 1; x++) {
+    for (int32_t z = 0; z < size; z++) {
+        for (int32_t x = 0; x < size; x++) {
             // Torque-style alternating diagonals to avoid diagonal-cracks.
             // Quad corners (row z, col x): a=idx, b=idx+1, c=idx+gridRes, d=idx+gridRes+1
             int a = z * gridRes + x;
             int b = a + 1;
             int c = a + gridRes;
             int d = c + 1;
+            if (!emptySquares.empty() && emptySquares[(size_t)z * size + x]) continue;
             if (((x ^ z) & 1) == 0) {
                 // Split45: diagonal a->d, triangles (a,c,d) and (a,d,b)
                 idxs.push_back(a); idxs.push_back(c); idxs.push_back(d);
@@ -120,7 +175,7 @@ void TerrainBlock::bakeLightmap() {
         float h11 = heights[r1 * size + c1];
         float h0 = h00 + (h10 - h00) * fx;
         float h1 = h01 + (h11 - h01) * fx;
-        return h0 + (h1 - h0) * fy;
+        return (h0 + (h1 - h0) * fy) * heightScale;
     };
     // Sun direction (world, Y-up, pointing FROM scene toward sun => direction light travels).
     Point3F L = lightDir;
@@ -198,7 +253,7 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
                 // Tribes2.exe multiplies stored shorts by exactly 0.03125 (= 1/32),
                 // NOT by 1/65535 normalization. Using the wrong scale produced
                 // terrain with ~200x exaggeration and inverted elevations.
-                float h = (float)raw / 32.0f * heightScale;
+                float h = (float)raw / 32.0f;
                 heights[z * TERRAIN_SIZE + x] = h;
                 if (std::abs(h) > maxH) maxH = std::abs(h);
             }
@@ -215,7 +270,8 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
         pos += TERRAIN_SIZE * TERRAIN_SIZE;
     }
 
-    // Read texture names (8 entries)
+    // Read texture names (8 entries). The alpha maps below are packed for
+    // non-empty slots, matching t2-mapper's TerrainFile parser.
     textureNames.clear();
     int nonEmptyCount = 0;
     for (int i = 0; i < 8 && pos < size; i++) {
@@ -225,8 +281,10 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
             texName = std::string((const char*)data + pos, nameLen);
             pos += nameLen;
         }
-        textureNames.push_back(texName);
-        if (!texName.empty() && i < 6) nonEmptyCount++;
+        if (i < 6 && !texName.empty()) {
+            textureNames.push_back(std::move(texName));
+            nonEmptyCount++;
+        }
     }
 
     // Read alpha maps (nonEmptyCount × 256 × 256 bytes)
@@ -269,11 +327,11 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
 
     // Load detail textures from filesystem
     auto& fs = Engine::instance().fs();
-    static const char* exts[] = {".png", ".bm8", ".jpg", ".gif", ".bmp"};
+    static const char* exts[] = {".png", ".bm8", ".jpg", ".jpeg", ".gif", ".bmp", ".tga", ".dds"};
     int loadLayers = nonEmptyCount;
     if (loadLayers > 6) loadLayers = 6;
     if (detailCap > 0 && detailCap < loadLayers) loadLayers = detailCap;
-    for (int i = 0; i < loadLayers; i++) {
+    if (SDL_GL_GetCurrentContext()) for (int i = 0; i < loadLayers; i++) {
         Texture tex;
         // Convert terrain.X.Y.Z → textures/terrain/X.Y.Z
         // Also try textures/terrain/ prefix for names like "LushWorld.RockLight"
@@ -317,10 +375,14 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
             if (tex.loaded) break;
         }
         detailTextures.push_back(std::move(tex));
+        if (!detailTextures.back().loaded)
+            Console::instance().printf(LogLevel::Warn,
+                "Terrain: required detail texture '%s' could not be loaded",
+                textureNames[i].c_str());
     }
 
     // Load optional normal maps for each layer (independent of detail textures)
-    for (int i = 0; i < loadLayers; i++) {
+    if (SDL_GL_GetCurrentContext()) for (int i = 0; i < loadLayers; i++) {
         Texture tex;
         std::string baseName = textureNames[i];
         // Convert terrain.X.Y.Z → textures/terrain/X.Y.Z
@@ -378,15 +440,29 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
     return true;
 }
 
-void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const ColorF& fogColor, float fogDensity, const Point3F* lightDir) {
+void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const ColorF& fogColor, float fogDensity, const Point3F* lightDir,
+                           const ColorF* sunColor, const ColorF* ambient, float fogStart, float fogEnd) {
     auto* shader = ShaderManager::getTerrainShader();
     if (!shader) return;
     shader->bind();
+
+    const auto& authoredVolumes = Engine::instance().game().world().fogVolumes;
+    for (int i = 0; i < 3; ++i) {
+        ColorF packed{};
+        if (i < (int)authoredVolumes.size() && authoredVolumes[i].visibleDistance > 0.0f) {
+            const auto& volume = authoredVolumes[i];
+            packed = {volume.visibleDistance > 0.0f ? 1.0f / volume.visibleDistance : 0.0f,
+                      volume.minHeight, volume.maxHeight, 0.0f};
+        }
+        shader->setUniform((std::string("uFogVolume") + std::to_string(i)).c_str(), packed);
+    }
 
     // Apply dynamic light direction if provided
     if (lightDir) {
         shader->setUniform("uLightDir", *lightDir);
     }
+    if (sunColor) shader->setUniform("uSunColor", Point3F{sunColor->r, sunColor->g, sunColor->b});
+    if (ambient) shader->setUniform("uAmbient", Point3F{ambient->r, ambient->g, ambient->b});
 
     if (splatMap.loaded) splatMap.bind(0);
     if (splatMap2.loaded) splatMap2.bind(7);
@@ -398,6 +474,7 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
     if (detailTextures.size() >= 6 && detailTextures[5].loaded) detailTextures[5].bind(9);
     shader->setUniform("uSplatMap", (int32_t)0);
     shader->setUniform("uSplatMap2", (int32_t)7);
+    shader->setUniform("uUseSplatMap2", (int32_t)(splatMap2.loaded ? 1 : 0));
     shader->setUniform("uDetail0", (int32_t)1);
     shader->setUniform("uDetail1", (int32_t)2);
     shader->setUniform("uDetail2", (int32_t)3);
@@ -447,10 +524,15 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
     shader->setUniform("uView", renderer.view);
     shader->setUniform("uModel", model);
     shader->setUniform("uCamPos", cameraPos);
+    // The terrain is rendered before the next shadow pass is configured. Keep
+    // the sampler disabled when the current frame has no valid shadow map.
+    shader->setUniform("uShadowStrength", renderer.shadowsActive ? 0.6f : 0.0f);
     shader->setUniform("uFogEnabled", (int32_t)(fogEnabled ? 1 : 0));
     if (fogEnabled) {
         shader->setUniform("uFogColor", Point3F{fogColor.r, fogColor.g, fogColor.b});
         shader->setUniform("uFogDensity", fogDensity);
+        shader->setUniform("uFogStart", fogStart >= 0.0f ? fogStart : (fogDensity > 0.0f ? 1.0f / fogDensity : -1.0f));
+        shader->setUniform("uFogEnd", fogEnd > 0.0f ? fogEnd : renderer.config().farPlane);
     }
 
     for (auto& mesh : meshes)
@@ -646,22 +728,26 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
     shader->bind();
 
     auto& eng = Engine::instance();
-    auto w = (float)eng.platform().width();
-    auto h = (float)eng.platform().height();
-
-    MatrixF ortho;
-    ortho.identity();
-    ortho.m[0][0] = 2.0f / w;
-    ortho.m[1][1] = -2.0f / h;
-    ortho.m[0][3] = -1.0f;
-    ortho.m[1][3] = 1.0f;
+    GLboolean depthWasOn = glIsEnabled(GL_DEPTH_TEST);
+    GLboolean blendWasOn = glIsEnabled(GL_BLEND);
+    GLboolean cullWasOn = glIsEnabled(GL_CULL_FACE);
+    GLboolean depthWriteWasOn = GL_TRUE;
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWriteWasOn);
+    GLint blendSrcRGB, blendDstRGB, blendSrcAlpha, blendDstAlpha;
+    glGetIntegerv(GL_BLEND_SRC_RGB, &blendSrcRGB);
+    glGetIntegerv(GL_BLEND_DST_RGB, &blendDstRGB);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrcAlpha);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDstAlpha);
 
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    shader->setUniform("uProjection", ortho);
-    shader->setUniform("uView", MatrixF{});
+    // Use the active 2D projection. GUI dialogs intentionally render in a
+    // logical 640x480 canvas even when the window is larger; rebuilding this
+    // matrix from the physical window size misaligns every glyph.
+    shader->setUniform("uProjection", eng.renderer().projection);
+    shader->setUniform("uView", eng.renderer().view);
     shader->setUniform("uUseTexture", int32_t(1));
     shader->setUniform("uTexture", 0);
 
@@ -711,7 +797,15 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
         penX += adv;
     }
 
-    if (verts.empty()) return;
+    if (verts.empty()) {
+        if (depthWasOn) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+        if (blendWasOn) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+        if (cullWasOn) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+        glDepthMask(depthWriteWasOn);
+        glBlendFuncSeparate((GLenum)blendSrcRGB, (GLenum)blendDstRGB,
+                            (GLenum)blendSrcAlpha, (GLenum)blendDstAlpha);
+        return;
+    }
 
     if (!fontVAO) {
         glGenVertexArrays(1, &fontVAO);
@@ -732,24 +826,55 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
 
     glDisable(GL_CULL_FACE);
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)verts.size());
-    glEnable(GL_CULL_FACE);
+    if (depthWasOn) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    if (blendWasOn) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+    if (cullWasOn) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+    glDepthMask(depthWriteWasOn);
+    glBlendFuncSeparate((GLenum)blendSrcRGB, (GLenum)blendDstRGB,
+                        (GLenum)blendSrcAlpha, (GLenum)blendDstAlpha);
 }
 
 Point2F Font::measure(const char* text, float scale) {
     Point2F result;
-    result.y = charHeight * scale;
-    if (!proportional) {
-        result.x = (float)strlen(text) * charWidth * scale;
-    } else {
-        float w = 0;
-        for (const char* p = text; *p; p++)
-            w += (float)glyphs[(unsigned char)*p].xAdvance * scale;
-        result.x = w;
+    if (!text) return result;
+    scale *= defaultScale;
+    float lineWidth = 0.0f;
+    int lines = 1;
+    for (const char* p = text; *p; ++p) {
+        if (*p == '\n') {
+            result.x = std::max(result.x, lineWidth);
+            lineWidth = 0.0f;
+            ++lines;
+            continue;
+        }
+        const float advance = proportional
+            ? (float)glyphs[(unsigned char)*p].xAdvance
+            : (float)charWidth;
+        lineWidth += advance * scale;
     }
+    result.x = std::max(result.x, lineWidth);
+    result.y = charHeight * scale * lines;
     return result;
 }
 
 // Sky
+void Sky::reset() {
+    if (SDL_GL_GetCurrentContext()) {
+        if (cubemap) glDeleteTextures(1, &cubemap);
+        if (vao) glDeleteVertexArrays(1, &vao);
+        if (vbo) glDeleteBuffers(1, &vbo);
+        if (cloudVAO) glDeleteVertexArrays(1, &cloudVAO);
+        if (cloudVBO) glDeleteBuffers(1, &cloudVBO);
+        emap.destroy();
+        for (auto& layer : cloudLayers) layer.texture.destroy();
+    }
+    cubemap = vao = vbo = cloudVAO = cloudVBO = 0;
+    emap = {};
+    cloudLayers.clear();
+    fogVolumes.clear();
+    loaded = false;
+}
+
 void Sky::load(const std::vector<std::string>& faces) {
     glGenTextures(1, &cubemap);
     glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap);
@@ -864,22 +989,90 @@ void Sky::load(const std::vector<std::string>& faces) {
     loaded = true;
 }
 
-void Sky::render(const MatrixF& view, const MatrixF& proj) {
+void Sky::render(const MatrixF& view, const MatrixF& proj, float cameraHeight) {
     auto* shader = ShaderManager::getSkyShader();
     if (!shader) return;
     shader->bind();
 
+    GLint depthFunc;
+    glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
+    GLboolean blendWasOn = glIsEnabled(GL_BLEND);
+    GLint blendSrcRGB, blendDstRGB, blendSrcAlpha, blendDstAlpha;
+    glGetIntegerv(GL_BLEND_SRC_RGB, &blendSrcRGB);
+    glGetIntegerv(GL_BLEND_DST_RGB, &blendDstRGB);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrcAlpha);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDstAlpha);
     glDepthFunc(GL_LEQUAL);
     // Invert the full view-projection so the fullscreen skybox pass can recover
     // a per-pixel world-space ray that is independent of FOV and aspect ratio.
     MatrixF invVP = (proj * view).inverse();
     shader->setUniform("uInvViewProj", invVP);
 
-    if (!loaded || !cubemap) return;
-    shader->setUniform("uUseGradient", (int32_t)0);
-    shader->setUniform("uSkybox", 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap);
+    // The native renderer still draws the solid sky when a requested DML face
+    // is unavailable; do not leave the frame clear-color exposed.
+    const bool drawCubemap = useSkyTextures && loaded && cubemap;
+    shader->setUniform("uUseGradient", (int32_t)(drawCubemap ? 0 : 1));
+    shader->setUniform("uGradTop", Point3F{solidColor.r, solidColor.g, solidColor.b});
+    shader->setUniform("uGradBot", Point3F{solidColor.r, solidColor.g, solidColor.b});
+    shader->setUniform("uFogColor", Point3F{fogColor.r, fogColor.g, fogColor.b});
+    float fogTop = 0.0f;
+    float fogVisibility = 0.0f;
+    float fogPercentage = 1.0f;
+    int lastVolume = -1;
+    int firstVolume = -1;
+    for (size_t i = 0; i < fogVolumes.size(); ++i) {
+        const auto& volume = fogVolumes[i];
+        if (volume.visibleDistance > 0.0f) {
+            if (firstVolume < 0) firstVolume = (int)i;
+            lastVolume = (int)i;
+            fogTop = std::max(fogTop, volume.maxHeight);
+        }
+    }
+    if (lastVolume >= 0) {
+        fogVisibility = fogVolumes[lastVolume].visibleDistance;
+        fogPercentage = fogVolumes[firstVolume].percentage;
+        // V12 attenuates the final volume's visibility through denser slabs
+        // below it instead of selecting only the camera's current slab.
+        for (int i = 0; i < lastVolume; ++i) {
+            const auto& volume = fogVolumes[i];
+            if (volume.visibleDistance <= 0.0f ||
+                volume.visibleDistance >= fogVisibility) continue;
+            const float depthInVolume = cameraHeight < volume.minHeight
+                ? volume.maxHeight - volume.minHeight
+                : volume.maxHeight - cameraHeight;
+            if (depthInVolume > 0.0f)
+                fogVisibility -= fogVisibility * depthInVolume / volume.visibleDistance;
+        }
+    }
+    const float radius = 0.95f * visibleDistance / std::sqrt(3.0f);
+    float h0 = 0.0f, h1 = 60.0f, a0 = 0.0f, a1 = 0.0f;
+    const float depth = fogTop - cameraHeight;
+    if (fogVisibility > 0.0f && depth > 0.0f) {
+        const float cap = radius / std::sqrt(2.0f);
+        if (fogVisibility <= depth) h0 = h1 = cap, a0 = a1 = 1.0f;
+        else {
+            const float side = std::sqrt(fogVisibility * fogVisibility - depth * depth);
+            h0 = std::min(cap, radius * depth / side);
+            h1 = std::min(cap, radius * depth / (fogVisibility * 0.2f));
+            if (h1 < 60.0f) h1 = 60.0f;
+            a0 = h0 / cap;
+            // When both rings reach the sphere cap, V12 keeps the strip opaque
+            // and derives the fan alpha from the saturation ray.
+            if (h0 == cap && h1 == cap) {
+                a0 = 1.0f;
+                const float temp = ((radius * depth / side) - cap) * side / depth;
+                a1 = temp <= radius ? temp / radius : 1.0f;
+            }
+        }
+        h0 *= fogPercentage; h1 = std::max(60.0f, h1 * fogPercentage);
+    }
+    shader->setUniform("uFogBands", ColorF{h0, h1, a0, a1});
+    shader->setUniform("uSkyRadius", radius);
+    if (drawCubemap) {
+        shader->setUniform("uSkybox", 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap);
+    }
 
     // Ensure VAO exists (create on first render if needed)
     if (!vao) {
@@ -968,11 +1161,13 @@ void Sky::render(const MatrixF& view, const MatrixF& proj) {
                 glDrawArrays(GL_TRIANGLES, 0, 6);
             }
 
-            glDisable(GL_BLEND);
+            if (blendWasOn) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+            glBlendFuncSeparate((GLenum)blendSrcRGB, (GLenum)blendDstRGB,
+                                (GLenum)blendSrcAlpha, (GLenum)blendDstAlpha);
         }
     }
 
-    glDepthFunc(GL_LESS);
+    glDepthFunc((GLenum)depthFunc);
 }
 
 #if 0 // GLB is a diagnostic/interchange format, never a production asset path.
@@ -1105,6 +1300,16 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
             collisionVerts = std::move(difResult.hullCollisionVerts);
             collisionIndices = std::move(difResult.hullCollisionIndices);
             details = difResult.details;
+            interiorPlanes.clear();
+            for (const auto& plane : difResult.interiorPlanes)
+                interiorPlanes.push_back({plane.normal, plane.d});
+            interiorBSP.clear();
+            for (const auto& node : difResult.interiorBSP)
+                interiorBSP.push_back({node.planeIndex, node.frontIndex, node.backIndex});
+            interiorPortals.clear();
+            for (const auto& portal : difResult.interiorPortals)
+                interiorPortals.push_back({portal.planeIndex, portal.zoneFront, portal.zoneBack, portal.vertices});
+            interiorZoneNeighbors = std::move(difResult.interiorZoneNeighbors);
             isInterior = true;
             loaded = true;
             return true;
@@ -1122,6 +1327,7 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
         defaultLocalTransforms = std::move(dtsResult.defaultLocalTransforms);
         materialTextures = std::move(dtsResult.textures);
         materialFlags = std::move(dtsResult.materialFlags);
+        materialReflectionAmount = std::move(dtsResult.materialReflectionAmount);
         lightmaps = std::move(dtsResult.lightmaps);
         materialLightmapIndex = std::move(dtsResult.materialLightmapIndex);
         materialNames = std::move(dtsResult.materialNames);
@@ -1155,6 +1361,153 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
     } catch (...) {
         Console::instance().printf(LogLevel::Warn, "DTS: unknown exception loading '%s' - skipping", name.c_str());
         return false;
+    }
+}
+
+int DTSShape::interiorZoneForPoint(const Point3F& point) const {
+    if (interiorBSP.empty() || interiorPlanes.empty()) return -1;
+    uint16_t node = 0;
+    for (size_t steps = 0; steps <= interiorBSP.size(); steps++) {
+        if (node >= interiorBSP.size()) return -1;
+        const auto& bsp = interiorBSP[node];
+        if (bsp.planeIndex >= interiorPlanes.size()) return -1;
+        const auto& plane = interiorPlanes[bsp.planeIndex & 0x7FFF];
+        float distance = plane.normal.x * point.x + plane.normal.y * point.y +
+                         plane.normal.z * point.z + plane.d;
+        if (bsp.planeIndex & 0x8000) distance = -distance;
+        uint16_t child = distance >= 0.0f ? bsp.frontIndex : bsp.backIndex;
+        if ((child & 0x8000) == 0) { node = child; continue; }
+        if (child & 0x4000) return -1;
+        return child & ~0xC000;
+    }
+    return -1;
+}
+
+void DTSShape::interiorVisibleZones(int zone, const Point3F& camera,
+                                    const MatrixF& clipTransform,
+                                    std::vector<bool>& visible) const {
+    visible.assign(interiorZoneNeighbors.size(), false);
+    if (zone < 0) {
+        std::fill(visible.begin(), visible.end(), true);
+        return;
+    }
+    if (zone >= (int)interiorZoneNeighbors.size()) return;
+    struct ScreenRect { float left, bottom, right, top; };
+    struct ClipPlane { Point3F normal; float d; };
+    const ScreenRect fullScreen{-1.0f, -1.0f, 1.0f, 1.0f};
+    struct PendingZone { uint16_t zone; ScreenRect rect; std::vector<ClipPlane> planes; };
+    std::vector<PendingZone> pending{{(uint16_t)zone, fullScreen, {}}};
+    std::vector<ScreenRect> zoneRects(interiorZoneNeighbors.size(), {1.0f, 1.0f, -1.0f, -1.0f});
+    zoneRects[zone] = fullScreen;
+    visible[zone] = true;
+
+    auto portalRect = [&](const InteriorPortal& portal, ScreenRect& rect) {
+        rect = {1.0f, 1.0f, -1.0f, -1.0f};
+        for (const auto& point : portal.vertices) {
+            const float x = clipTransform.m[0][0] * point.x + clipTransform.m[0][1] * point.y +
+                             clipTransform.m[0][2] * point.z + clipTransform.m[0][3];
+            const float y = clipTransform.m[1][0] * point.x + clipTransform.m[1][1] * point.y +
+                             clipTransform.m[1][2] * point.z + clipTransform.m[1][3];
+            const float w = clipTransform.m[3][0] * point.x + clipTransform.m[3][1] * point.y +
+                            clipTransform.m[3][2] * point.z + clipTransform.m[3][3];
+            if (w <= 0.0f) {
+                rect = fullScreen;
+                return true;
+            }
+            const float ndcX = x / w, ndcY = y / w;
+            rect.left = std::min(rect.left, ndcX);
+            rect.bottom = std::min(rect.bottom, ndcY);
+            rect.right = std::max(rect.right, ndcX);
+            rect.top = std::max(rect.top, ndcY);
+        }
+        return rect.left <= 1.0f && rect.right >= -1.0f &&
+               rect.bottom <= 1.0f && rect.top >= -1.0f;
+    };
+
+    for (size_t i = 0; i < pending.size(); i++) {
+        uint16_t current = pending[i].zone;
+        const ScreenRect parentRect = pending[i].rect;
+        const auto parentPlanes = pending[i].planes;
+        for (uint16_t neighbor : interiorZoneNeighbors[current]) {
+            bool portalInView = false;
+            ScreenRect childRect{};
+            std::vector<ClipPlane> childPlanes;
+            for (const auto& portal : interiorPortals) {
+                const bool matches = (portal.zoneFront == current && portal.zoneBack == neighbor) ||
+                                     (portal.zoneBack == current && portal.zoneFront == neighbor);
+                if (!matches) continue;
+                if ((portal.planeIndex & 0x7FFF) < interiorPlanes.size() &&
+                    !interiorPortalAllowsTraversal(
+                        portal.planeIndex, portal.zoneFront, portal.zoneBack,
+                        current, camera, interiorPlanes[portal.planeIndex & 0x7FFF]))
+                    continue;
+                bool outsideParentPlane = false;
+                for (const auto& plane : parentPlanes) {
+                    bool anyInside = false;
+                    for (const auto& point : portal.vertices) {
+                        if (plane.normal.x * point.x + plane.normal.y * point.y +
+                            plane.normal.z * point.z + plane.d >= 0.0f) {
+                            anyInside = true;
+                            break;
+                        }
+                    }
+                    if (!anyInside) {
+                        outsideParentPlane = true;
+                        break;
+                    }
+                }
+                if (outsideParentPlane) break;
+                portalInView = portalRect(portal, childRect);
+                childRect.left = std::max(childRect.left, parentRect.left);
+                childRect.bottom = std::max(childRect.bottom, parentRect.bottom);
+                childRect.right = std::min(childRect.right, parentRect.right);
+                childRect.top = std::min(childRect.top, parentRect.top);
+                portalInView = portalInView && childRect.left <= childRect.right &&
+                               childRect.bottom <= childRect.top;
+                if (portalInView && portal.vertices.size() >= 3) {
+                    childPlanes = parentPlanes;
+                    Point3F center{0, 0, 0};
+                    for (const auto& point : portal.vertices) {
+                        center.x += point.x; center.y += point.y; center.z += point.z;
+                    }
+                    const float count = (float)portal.vertices.size();
+                    center.x /= count; center.y /= count; center.z /= count;
+                    for (size_t edge = 0; edge < portal.vertices.size(); edge++) {
+                        const Point3F& a = portal.vertices[edge];
+                        const Point3F& b = portal.vertices[(edge + 1) % portal.vertices.size()];
+                        const Point3F va{a.x - camera.x, a.y - camera.y, a.z - camera.z};
+                        const Point3F vb{b.x - camera.x, b.y - camera.y, b.z - camera.z};
+                        Point3F normal{
+                            va.y * vb.z - va.z * vb.y,
+                            va.z * vb.x - va.x * vb.z,
+                            va.x * vb.y - va.y * vb.x};
+                        float d = -(normal.x * camera.x + normal.y * camera.y + normal.z * camera.z);
+                        if (normal.x * center.x + normal.y * center.y + normal.z * center.z + d < 0.0f) {
+                            normal.x = -normal.x; normal.y = -normal.y; normal.z = -normal.z; d = -d;
+                        }
+                        childPlanes.push_back({normal, d});
+                    }
+                }
+                break;
+            }
+            if (!portalInView) continue;
+            if (neighbor < visible.size()) {
+                const ScreenRect previous = zoneRects[neighbor];
+                const ScreenRect merged{
+                    std::min(previous.left, childRect.left),
+                    std::min(previous.bottom, childRect.bottom),
+                    std::max(previous.right, childRect.right),
+                    std::max(previous.top, childRect.top)};
+                const bool expanded = !visible[neighbor] ||
+                    merged.left < previous.left || merged.bottom < previous.bottom ||
+                    merged.right > previous.right || merged.top > previous.top;
+                if (expanded) {
+                    visible[neighbor] = true;
+                    zoneRects[neighbor] = merged;
+                    pending.push_back({neighbor, merged, std::move(childPlanes)});
+                }
+            }
+        }
     }
 }
 
@@ -1238,15 +1591,23 @@ bool DTSShape::applySkin(const std::string& skinName) {
 
 void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int numOverrides) {
     try {
+    // renderAnimation mutates mesh frame/UV buffers; static draws must restore
+    // the bind pose so an animated instance cannot contaminate the next draw.
+    for (size_t mi = 0; mi < meshes.size(); ++mi) {
+        meshes[mi].setFrame(0);
+        if (mi < meshTVerts.size()) meshes[mi].remapUVs(0, meshTVerts[mi]);
+    }
     auto* shader = ShaderManager::getDefaultShader();
     if (shader) shader->bind();
     auto& r = Engine::instance().renderer();
+    if (!shader) return;
     shader->setUniform("uProjection", r.projection);
     shader->setUniform("uView", r.view);
     shader->setUniform("uCamPos", r.cameraPos);
-
     if (shader) shader->setUniform("uShadowStrength", r.shadowsActive ? 0.6f : 0.0f);
     shader->setUniform("uDebugInterior", (int32_t)(getenv("TORCH_DIF_RED") ? 1 : 0));
+    shader->setUniform("uInterior", (int32_t)(isInterior ? 1 : 0));
+    shader->setUniform("uInteriorOutsideVisible", (int32_t)0);
     shader->setUniform("uDebugLightmap", (int32_t)(getenv("TORCH_DIF_LMUV") ? 1 : 0));
     // Also check lightmap-only mode for debugging
     shader->setUniform("uDebugTex", (int32_t)(getenv("TORCH_DIF_TEXUV") ? 1 : 0));
@@ -1324,6 +1685,8 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     // textures with alphaZeroRatio>0 render translucent (depth writes OFF, blending ON).
     auto renderMesh = [&](size_t mi, bool doBlend) {
         MeshData& mesh = meshes[mi];
+        if (shader) shader->setUniform("uInteriorOutsideVisible",
+            (int32_t)(isInterior && mesh.interiorOutsideVisible ? 1 : 0));
         if (mi < skins.size() && skins[mi].hasSkin) {
             updateSkinnedMesh(mesh, skins[mi], nodeWorld, defaultTransforms);
             r.setModel(baseModel);
@@ -1335,7 +1698,8 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
         }
         uint32_t flags = 0;
         if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialTextures.size()) {
-            auto& tex = materialTextures[mesh.materialIndex];
+            Texture* texOverride = cloakTextureOverride;
+            auto& tex = texOverride ? *texOverride : materialTextures[mesh.materialIndex];
             if (tex.loaded) {
                 tex.bind(0);
                 if (shader) shader->setUniform("uTexture", (int32_t)0);
@@ -1366,6 +1730,7 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
         bool alphaTest = (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0;
         if (getenv("TORCH_NO_ALPHATEST")) alphaTest = false; // diagnostic escape hatch
         if (shader) shader->setUniform("uAlphaTest", (int32_t)alphaTest);
+        if (shader) shader->setUniform("uAlphaTestThreshold", materialAlphaTestThreshold(flags));
 
         int lmIdx = (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
             ? materialLightmapIndex[mesh.materialIdx] : -1;
@@ -1395,16 +1760,26 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
         if (shader) shader->setUniform("uSelfIlluminated", (int32_t)((flags & MatFlag_SelfIlluminating) ? 1 : 0));
 
         float metallic = 0.0f, roughness = 0.5f;
+        if (isInterior) roughness = 1.0f;
         if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialMetallic.size()) {
             metallic = materialMetallic[mesh.materialIndex];
             roughness = materialRoughness[mesh.materialIndex];
         }
         if (shader) shader->setUniform("uMetallic", metallic);
         if (shader) shader->setUniform("uRoughness", roughness);
+        float reflectionAmount = 0.0f;
+        if (materialReflectionAmount.empty())
+            reflectionAmount = 1.0f;
+        else if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialReflectionAmount.size())
+            reflectionAmount = materialReflectionAmount[mesh.materialIndex];
+        if (shader) shader->setUniform("uReflectionAmount", reflectionAmount);
 
         bool useEnvMap = false;
         auto& ren = Engine::instance().renderer();
-        if (ren.sky && ren.sky->emap.loaded && !(flags & MatFlag_NeverEnvMap))
+        // Native DTS materials use the sky sphere map independently of the
+        // PBR metallic placeholder; the asset-side opt-out is NeverEnvMap.
+        if (!isInterior && ren.sky && ren.sky->emap.loaded && reflectionAmount > 0.0f &&
+            !(flags & MatFlag_NeverEnvMap))
             useEnvMap = true;
         if (shader) shader->setUniform("uUseEnvMap", (int32_t)(useEnvMap ? 1 : 0));
 
@@ -1418,6 +1793,12 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
         if (matIdx >= 0 && matIdx < (int)materialFlags.size())
             return (materialFlags[matIdx] & (MatFlag_Translucent | MatFlag_Additive)) != 0;
         return false;
+    };
+    auto needsAdditive = [&](size_t mi) -> bool {
+        if (mi >= meshes.size()) return false;
+        const int32_t matIdx = meshes[mi].materialIndex;
+        return matIdx >= 0 && matIdx < (int)materialFlags.size() &&
+            (materialFlags[matIdx] & MatFlag_Additive) != 0;
     };
 
     // Determine which meshes to render for the selected detail level
@@ -1439,15 +1820,37 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     glDisable(GL_BLEND);
     if (isInterior) glDepthFunc(GL_LEQUAL);
     for (size_t mi : renderList) {
+        if (isInterior && !activeInteriorZones.empty() &&
+            meshes[mi].interiorZone >= 0 &&
+            (meshes[mi].interiorZone >= (int)activeInteriorZones.size() ||
+             !activeInteriorZones[meshes[mi].interiorZone]))
+            continue;
         if (!needsTranslucent(mi))
             renderMesh(mi, false);
     }
 
-    // Pass 2: Translucent meshes
+    // Pass 2: alpha-blended meshes. Additive materials are deferred so glow
+    // cannot be written underneath ordinary translucent surfaces.
     glDepthMask(GL_FALSE);
     glDepthFunc(GL_LEQUAL);
     for (size_t mi : renderList) {
-        if (needsTranslucent(mi))
+        if (isInterior && !activeInteriorZones.empty() &&
+            meshes[mi].interiorZone >= 0 &&
+            (meshes[mi].interiorZone >= (int)activeInteriorZones.size() ||
+             !activeInteriorZones[meshes[mi].interiorZone]))
+            continue;
+        if (needsTranslucent(mi) && !needsAdditive(mi))
+            renderMesh(mi, true);
+    }
+
+    // Pass 3: additive glow after alpha transparency.
+    for (size_t mi : renderList) {
+        if (isInterior && !activeInteriorZones.empty() &&
+            meshes[mi].interiorZone >= 0 &&
+            (meshes[mi].interiorZone >= (int)activeInteriorZones.size() ||
+             !activeInteriorZones[meshes[mi].interiorZone]))
+            continue;
+        if (needsAdditive(mi))
             renderMesh(mi, true);
     }
 
@@ -1480,6 +1883,14 @@ int DTSShape::findNode(const std::string& name) const {
 void DTSShape::renderAnimation(const char* animName, float time,
                                const NodeOverride* overrides, int numOverrides) {
     if (!loaded) return;
+
+    // An object can be hidden in one sample and visible in the next. Reset all
+    // mutable mesh state before sampling so skipped meshes cannot retain a
+    // prior frame or material-frame UV set.
+    for (size_t mi = 0; mi < meshes.size(); ++mi) {
+        meshes[mi].setFrame(0);
+        if (mi < meshTVerts.size()) meshes[mi].remapUVs(0, meshTVerts[mi]);
+    }
 
     // Find the animation
     const Animation* anim = nullptr;
@@ -1686,6 +2097,7 @@ void DTSShape::renderAnimation(const char* animName, float time,
 
     // ── Step 4: Handle object-level vis/frame/matFrame animation ──
     std::vector<bool> objectVisible(objectStartMesh.size() > 0 ? objectStartMesh.size() : defaultTransforms.size(), true);
+    std::vector<int32_t> objectFrame(objectVisible.size(), 0);
     std::vector<int32_t> objectMatFrame(objectVisible.size(), 0);
     if (!objectAnim->objectKeyframes.empty()) {
         const float objectTime = std::min(t, objectAnim->duration);
@@ -1694,16 +2106,20 @@ void DTSShape::renderAnimation(const char* animName, float time,
             int32_t objIdx = okf.objectIndex;
             if (objIdx < 0 || objIdx >= (int32_t)objectVisible.size()) { okfIdx++; continue; }
             float lastVis = 1.0f;
+            int32_t lastFrame = 0;
             int32_t lastMatFrame = 0;
             while (okfIdx < objectAnim->objectKeyframes.size() &&
                    objectAnim->objectKeyframes[okfIdx].objectIndex == objIdx) {
                 if (objectAnim->objectKeyframes[okfIdx].time <= objectTime) {
-                    lastVis = objectAnim->objectKeyframes[okfIdx].vis;
-                    lastMatFrame = objectAnim->objectKeyframes[okfIdx].matFrameIndex;
+                    const auto sample = sampleDTSObject(objectAnim->objectKeyframes, objIdx, objectTime);
+                    lastVis = sample.vis;
+                    lastFrame = sample.frameIndex;
+                    lastMatFrame = sample.matFrameIndex;
                 }
                 okfIdx++;
             }
             objectVisible[objIdx] = (lastVis > 0.5f);
+            objectFrame[objIdx] = lastFrame;
             objectMatFrame[objIdx] = lastMatFrame;
         }
     }
@@ -1712,9 +2128,11 @@ void DTSShape::renderAnimation(const char* animName, float time,
     auto* shader = ShaderManager::getDefaultShader();
     if (shader) shader->bind();
     auto& r = Engine::instance().renderer();
+    if (!shader) return;
     shader->setUniform("uProjection", r.projection);
     shader->setUniform("uView", r.view);
     shader->setUniform("uCamPos", r.cameraPos);
+    shader->setUniform("uInterior", (int32_t)(isInterior ? 1 : 0));
     if (shader) shader->setUniform("uShadowStrength", r.shadowsActive ? 0.6f : 0.0f);
 
     const MatrixF baseModel = r.modelMatrix();
@@ -1729,11 +2147,27 @@ void DTSShape::renderAnimation(const char* animName, float time,
             return (materialFlags[matIdx] & (MatFlag_Translucent | MatFlag_Additive)) != 0;
         return false;
     };
+    auto needsAdditive = [&](size_t mi) -> bool {
+        if (mi >= meshes.size()) return false;
+        const int32_t matIdx = meshes[mi].materialIndex;
+        return matIdx >= 0 && matIdx < (int)materialFlags.size() &&
+            (materialFlags[matIdx] & MatFlag_Additive) != 0;
+    };
 
     // Pre-setup: determine mesh visibility, apply matFrame UVs, apply skinning
     // Two-pass render: opaque first (depth writes ON), then translucent (blending ON)
     auto renderAnimMesh = [&](size_t mi, bool doBlend) {
         MeshData& mesh = meshes[mi];
+        int32_t frame = 0;
+        for (size_t oi = 0; oi < objectStartMesh.size(); ++oi)
+            if (mi >= (size_t)objectStartMesh[oi] &&
+                mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi])) {
+                if (oi < objectFrame.size()) frame = objectFrame[oi];
+                break;
+            }
+        mesh.setFrame(frame);
+        if (shader) shader->setUniform("uInteriorOutsideVisible",
+            (int32_t)(isInterior && mesh.interiorOutsideVisible ? 1 : 0));
         // Apply skinned mesh deformation if needed
         if (mi < skins.size() && skins[mi].hasSkin) {
             updateSkinnedMesh(mesh, skins[mi], nodeWorld, defaultTransforms);
@@ -1748,7 +2182,8 @@ void DTSShape::renderAnimation(const char* animName, float time,
         // Bind texture and set material properties
         uint32_t flags = 0;
         if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialTextures.size()) {
-            auto& tex = materialTextures[mesh.materialIndex];
+            Texture* texOverride = cloakTextureOverride;
+            auto& tex = texOverride ? *texOverride : materialTextures[mesh.materialIndex];
             if (tex.loaded) {
                 tex.bind(0);
                 if (shader) shader->setUniform("uTexture", (int32_t)0);
@@ -1778,6 +2213,7 @@ void DTSShape::renderAnimation(const char* animName, float time,
         // Alpha test only for materials with Translucent or Additive flags
         bool alphaTest = (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0;
         if (shader) shader->setUniform("uAlphaTest", (int32_t)alphaTest);
+        if (shader) shader->setUniform("uAlphaTestThreshold", materialAlphaTestThreshold(flags));
 
         // Lightmap
         int lmIdx = (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
@@ -1814,10 +2250,16 @@ void DTSShape::renderAnimation(const char* animName, float time,
         }
         if (shader) shader->setUniform("uMetallic", metallic);
         if (shader) shader->setUniform("uRoughness", roughness);
+        float reflectionAmount = 0.0f;
+        if (materialReflectionAmount.empty())
+            reflectionAmount = 1.0f;
+        else if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialReflectionAmount.size())
+            reflectionAmount = materialReflectionAmount[mesh.materialIndex];
+        if (shader) shader->setUniform("uReflectionAmount", reflectionAmount);
 
         bool useEnvMap = false;
         auto& ren = Engine::instance().renderer();
-        if (ren.sky && ren.sky->emap.loaded && !(flags & MatFlag_NeverEnvMap))
+        if (ren.sky && ren.sky->emap.loaded && reflectionAmount > 0.0f && !(flags & MatFlag_NeverEnvMap))
             useEnvMap = true;
         if (shader) shader->setUniform("uUseEnvMap", (int32_t)(useEnvMap ? 1 : 0));
 
@@ -1907,8 +2349,21 @@ void DTSShape::renderAnimation(const char* animName, float time,
                 meshes[mi].remapUVs(mf, meshTVerts[mi]);
         }
 
-        if (needsTranslucent(mi))
+        if (needsTranslucent(mi) && !needsAdditive(mi))
             renderAnimMesh(mi, true);
+    }
+    // Additive effects are the final transparent sub-pass.
+    for (size_t mi : renderList) {
+        bool meshVisible = true;
+        for (size_t oi = 0; oi < objectStartMesh.size(); oi++) {
+            if (mi >= (size_t)objectStartMesh[oi] &&
+                mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi])) {
+                if (oi < objectVisible.size()) meshVisible = objectVisible[oi];
+                break;
+            }
+        }
+        if (!meshVisible || !needsAdditive(mi)) continue;
+        renderAnimMesh(mi, true);
     }
 
     glDepthMask(GL_TRUE);

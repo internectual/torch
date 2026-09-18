@@ -53,6 +53,13 @@ cmake --build build -j$(nproc)
 ./build/torch_server -p 28000 -m test
 ```
 
+Dynamic projectile and explosion lights use the forward renderer's bounded
+eight-light point collection and are applied to terrain and shape/interior
+materials alongside existing sun, shadow, fog, normal-map, and lightmap terms.
+They currently do not cast point-light shadows or perform interior portal/BSP
+occlusion; the safe fallback is finite-radius attenuation with no dynamic
+light contribution when the collection is unavailable or full.
+
 Options:
 - `-p <port>`  – Server port (default: 28000)
 - `-m <name>`  – Mission to load (e.g. `test`, `deathmatch`)
@@ -70,6 +77,19 @@ Options:
 | `sv_scorelimit <n>` | Score limit (default: 25) |
 | `kick <id>` | Kick a player |
 | `ban <id>` | Ban a player by IP |
+
+Environment TorqueScript natives:
+
+| Native | Behavior |
+|--------|----------|
+| `setWaterLevel([nameOrIndex,] level)` | Move the first or selected authored water surface |
+| `setWaterType([nameOrIndex,] type)` / `setLiquidType` | Set water, ocean/river/stagnant water, lava variants, or quicksand (`0`-`7` or name) |
+| `setWaterOpacity([nameOrIndex,] opacity)` | Set opacity in the inclusive range `0`-`1` |
+| `setWaterColor([nameOrIndex,] "r g b [a]")` | Set surface color and optional alpha, each in `0`-`1` |
+
+The same setters are available as `WaterBlock::set...` methods. They return
+`1` only when a matching authored water body exists and validation succeeds;
+otherwise they return `0`. Water state is cleared when a mission is replaced.
 | `unbanall` | Clear ban list |
 | `sv_map <mission>` | Change map during game |
 | `record <path>` | Start recording |
@@ -92,6 +112,7 @@ Options:
 | Space | Jump |
 | Shift | Jet |
 | Left Mouse | Fire |
+| Right Mouse / R (observer) | Next follow target |
 | R | Reload / Use |
 | F1 | Free camera |
 | F3 | Editor mode |
@@ -116,3 +137,4 @@ not require a relay or WebSocket dependency.
 ## License
 
 MIT
+Observer target finder: while watching a demo or live observer session, press `F3` to open the native player/flag list. Type to search, use `Up`/`Down`, press `Enter` to follow a player, and `Esc` or `F3` to close.

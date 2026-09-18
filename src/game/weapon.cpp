@@ -35,7 +35,10 @@ bool Weapon::canFire(float energy) const {
 
 void Weapon::updateTimers(float dt) {
     if (fireTimer > 0) fireTimer -= dt;
-    if (fireTimer < 0) fireTimer = 0;
+    if (fireTimer <= 0) {
+        fireTimer = 0;
+        firing = false;
+    }
     if (reloading) {
         reloadTimer -= dt;
         if (reloadTimer <= 0) {
@@ -59,7 +62,8 @@ Point3F computeProjectileSpawn(const Point3F& cameraPos, const Point3F& targetDi
         float rlen = sqrtf(right.x * right.x + right.z * right.z);
         if (rlen > 1e-6f) { right.x /= rlen; right.z /= rlen; }
         Point3F up = {0, 1, 0};
-        Point3F spreadOffset = {right.x * r1 + up.x * r2, right.y * r1 + up.y * r2, 0};
+        Point3F spreadOffset = {right.x * r1 + up.x * r2, right.y * r1 + up.y * r2,
+                                right.z * r1 + up.z * r2};
         spawn.x += spreadOffset.x;
         spawn.y += spreadOffset.y;
     }
@@ -68,8 +72,10 @@ Point3F computeProjectileSpawn(const Point3F& cameraPos, const Point3F& targetDi
 }
 
 void updateProjectile(Projectile& p, float dt) {
+    if (!p.active) return;
+    p.previousPos = p.pos;
     p.lifetime -= dt;
-    if (p.lifetime <= 0 || !p.active) {
+    if (p.lifetime <= 0) {
         p.active = false;
         return;
     }
@@ -97,13 +103,16 @@ void loadWeaponSounds(Weapon& w) {
     }
 }
 
-bool checkProjectileCollision(Projectile& p, float& groundHeight) {
+bool checkProjectileCollision(Projectile& p, float& groundHeight, Point3F& impactNormal) {
     auto& world = Engine::instance().game().world();
+    groundHeight = world.getFloorHeight(p.pos.x, p.pos.y, p.pos.z);
+    impactNormal = {0, 1, 0};
 
     // Check terrain height
-    float th = world.getHeight(p.pos.x, p.pos.z);
+    float th = groundHeight;
     if (p.pos.y <= th && p.vel.y < 0) {
         p.pos.y = th;
+        impactNormal = {0, 1, 0};
         if (p.type == ProjectileType::Grenade && p.bounceCount < 3) {
             p.vel.y = -p.vel.y * 0.5f;
             p.vel.x *= 0.7f;
@@ -120,18 +129,17 @@ bool checkProjectileCollision(Projectile& p, float& groundHeight) {
     if (collision.loaded) {
         float t;
         Point3F hitPos, hitNorm;
-        Point3F dir = p.vel;
+        Point3F dir = {p.pos.x - p.previousPos.x,
+                       p.pos.y - p.previousPos.y,
+                       p.pos.z - p.previousPos.z};
         float speed = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
         if (speed > 0.1f) {
             dir.x /= speed; dir.y /= speed; dir.z /= speed;
-            float maxDist = speed * 0.1f; // Check next frame's travel
-            Point3F origin = {
-                p.pos.x - dir.x * 0.05f,
-                p.pos.y - dir.y * 0.05f,
-                p.pos.z - dir.z * 0.05f
-            };
-            if (collision.raycast(origin, dir, maxDist + 0.2f, t, hitPos, hitNorm)) {
+            const float maxDist = speed;
+            const Point3F origin = p.previousPos;
+            if (collision.raycast(origin, dir, maxDist, t, hitPos, hitNorm)) {
                 p.pos = hitPos;
+                impactNormal = hitNorm;
                 p.hasImpacted = true;
 
                 if (p.type == ProjectileType::Grenade && p.bounceCount < 3) {

@@ -2,6 +2,7 @@
 #include "core/engine.h"
 #include "script/script_engine.h"
 #include "script/torquescript.h"
+#include "core/console_args.h"
 #include <cstdio>
 #include <cstdarg>
 #include <vector>
@@ -157,20 +158,16 @@ void Console::execute(const char* script) {
         // Parse parenthesized args
         if (*s == '(') {
             s++;
-            std::string cur;
+            const char* body = s;
             int depth = 1;
+            bool quoted = false;
             while (*s && depth > 0) {
-                if (*s == ',' && depth == 1) {
-                    args.push_back(cur);
-                    cur.clear();
-                } else if (*s == '(') depth++;
-                else if (*s == ')') depth--;
-                // Delimiters must not leak into the next argument
-                // (",462" broke atoi() for every multi-arg command).
-                if (*s != ',' && *s != '(' && *s != ')' && depth > 0) cur += *s;
-                s++;
+                if (*s == '"') quoted = !quoted;
+                else if (!quoted && *s == '(') depth++;
+                else if (!quoted && *s == ')') depth--;
+                if (depth > 0) ++s;
             }
-            if (!cur.empty()) args.push_back(cur);
+            args = splitConsoleArguments(std::string_view(body, (size_t)(s - body)));
         }
         argv.push_back(cmd.c_str());
         for (auto& a : args) argv.push_back(a.c_str());

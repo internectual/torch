@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include "render/dynamic_lighting.h"
 
 // Native Torque material flags are shared by DTS, DIF, and renderer code.
 // They must not live in the diagnostic GLB loader.
@@ -33,7 +34,7 @@ struct RenderConfig {
     int32_t height = 768;
     bool fullscreen = false;
     bool vsync = true;
-    float fov = 90.0f;
+    float fov = 90.0f; // horizontal degrees, matching Torque's camera FOV
     float nearPlane = 0.1f;
     float farPlane = 1000.0f;
     int32_t maxLights = 8;
@@ -56,6 +57,8 @@ struct Vertex {
 
 struct MeshData {
     std::vector<Vertex> vertices;
+    std::vector<Point3F> frameVertices; // all mesh frames, frame-major
+    int32_t numFrames = 1;
     std::vector<uint32_t> indices;
     std::vector<int32_t> tvertIndices; // per-vertex: original tvert index (for matFrame remapping)
     int32_t numTVertsPerFrame = 0;     // number of tverts per material frame
@@ -63,12 +66,15 @@ struct MeshData {
     int32_t materialIndex = -1; // index into DTSShape::materialTextures
     int32_t materialIdx = -1;   // raw material index from GLB file
     int32_t nodeIndex = -1;     // DTS node index (-1 = no node)
+    int32_t interiorZone = -1;  // DIF zone owning this mesh; -1 for non-interior meshes
+    bool interiorOutsideVisible = false;
     bool uploaded = false;
     void upload();
     void updateGPU();
     void render();
     void destroy();
     void remapUVs(int32_t matFrame, const std::vector<Point2F>& tverts); // remap UVs based on material frame index
+    void setFrame(int32_t frame);
 };
 
 struct Texture {
@@ -191,12 +197,27 @@ struct DTSShape {
     std::vector<MatrixF> defaultLocalTransforms; // per-node bind pose local transforms
     std::vector<std::string> materialNames; // original material names (for skin overrides)
     std::vector<Texture> materialTextures;
+    // Non-owning runtime override used by ShapeBase cloak state.
+    Texture* cloakTextureOverride = nullptr;
     std::vector<uint32_t> materialFlags; // parallel to materialTextures
+    std::vector<float> materialReflectionAmount; // parallel to materialTextures
     std::vector<float> materialMetallic; // parallel to materialTextures
     std::vector<float> materialRoughness; // parallel to materialTextures
     std::vector<std::vector<Point2F>> meshTVerts; // per-mesh: all tvert data (numTVerts * numMatFrames)
     std::vector<Texture> lightmaps;
-    std::vector<int8_t> materialLightmapIndex; // per-material: -1 no lightmap, >=0 index into lightmaps[]
+    std::vector<int16_t> materialLightmapIndex; // per-material: -1 no lightmap, >=0 index into lightmaps[]
+    struct InteriorPlane { Point3F normal; float d = 0.0f; };
+    struct InteriorBSPNode { uint16_t planeIndex = 0, frontIndex = 0, backIndex = 0; };
+    struct InteriorPortal {
+        uint16_t planeIndex = 0;
+        uint16_t zoneFront = 0, zoneBack = 0;
+        std::vector<Point3F> vertices;
+    };
+    std::vector<InteriorPlane> interiorPlanes;
+    std::vector<InteriorBSPNode> interiorBSP;
+    std::vector<std::vector<uint16_t>> interiorZoneNeighbors;
+    std::vector<InteriorPortal> interiorPortals;
+    std::vector<bool> activeInteriorZones;
     bool isInterior = false;
     bool nativeDTS = false;
     bool loaded = false;
@@ -211,6 +232,9 @@ struct DTSShape {
     std::vector<float> collisionVerts;
     std::vector<uint32_t> collisionIndices;
     bool load(const uint8_t* data, size_t size);
+    int interiorZoneForPoint(const Point3F& point) const;
+    void interiorVisibleZones(int zone, const Point3F& camera, const MatrixF& clipTransform,
+                              std::vector<bool>& visible) const;
     // Node overrides: per-instance transform modifications (e.g., turret barrel aiming)
     struct NodeOverride {
         int nodeIndex;
@@ -226,12 +250,27 @@ struct DTSShape {
     int findNode(const std::string& name) const;
 };
 
+inline bool interiorPortalAllowsTraversal(uint16_t planeIndex, uint16_t zoneFront,
+                                          uint16_t zoneBack, int currentZone,
+                                          const Point3F& camera,
+                                          const DTSShape::InteriorPlane& plane) {
+    if (zoneFront == zoneBack) return false;
+    float side = plane.normal.x * camera.x + plane.normal.y * camera.y +
+                 plane.normal.z * camera.z + plane.d;
+    if (planeIndex & 0x8000) side = -side;
+    if (side == 0.0f) return true;
+    const float zoneSide = zoneFront == currentZone ? 1.0f : -1.0f;
+    return (side > 0.0f ? 1.0f : -1.0f) == zoneSide;
+}
+
 struct TerrainBlock {
     int32_t size{256};
     float heightScale{1.0f};
     float squareSize{8.0f};
     Point3F worldOffset{-1024, 0, 1024};
     std::vector<float> heights;
+    // Per-square terrain holes decoded from TerrainBlock.emptySquares.
+    std::vector<uint8_t> emptySquares;
     std::vector<MeshData> meshes;
     std::vector<Texture> detailTextures;
     std::vector<Texture> normalTextures; // optional normal maps per layer
@@ -244,10 +283,14 @@ struct TerrainBlock {
     bool loaded = false;
 
     float sampleHeight(float wx, float wz) const;
+    void setEmptySquareRuns(const std::vector<uint32_t>& runs);
+    bool isEmptySquare(float wx, float wz) const;
     bool load(const uint8_t* data, size_t size);
+    void reset();
     void generateMesh();
     void bakeLightmap();
-    void render(const Point3F& cameraPos, bool fogEnabled = false, const ColorF& fogColor = {0.5f, 0.6f, 0.7f, 1.0f}, float fogDensity = 0.005f, const Point3F* lightDir = nullptr);
+    void render(const Point3F& cameraPos, bool fogEnabled = false, const ColorF& fogColor = {0.5f, 0.6f, 0.7f, 1.0f}, float fogDensity = 0.005f, const Point3F* lightDir = nullptr,
+                const ColorF* sunColor = nullptr, const ColorF* ambient = nullptr, float fogStart = -1.0f, float fogEnd = -1.0f);
 
     Point3F lightDir{0.5f, 0.8f, 0.6f}; // normalized: points FROM scene toward sun; used for lightmap+bakeLightmap
 };
@@ -257,8 +300,15 @@ struct Sky {
     uint32_t vao{}, vbo{};
     Texture emap;
     bool loaded = false;
+    bool useSkyTextures = true;
+    ColorF solidColor{0, 0, 0, 1};
+    ColorF fogColor{0.5f, 0.5f, 0.5f, 1};
+    float visibleDistance = 250.0f;
+    struct FogVolume { float visibleDistance, minHeight, maxHeight, percentage; };
+    std::vector<FogVolume> fogVolumes;
+    void reset();
     void load(const std::vector<std::string>& faces);
-    void render(const MatrixF& view, const MatrixF& proj);
+    void render(const MatrixF& view, const MatrixF& proj, float cameraHeight = 0.0f);
 
     // Cloud layers (from DML lines 7-9)
     struct CloudLayer {
@@ -290,18 +340,45 @@ public:
     const MatrixF& viewMatrix() const { return view; }
     const MatrixF& projectionMatrix() const { return projection; }
     void setCamera(const Point3F& pos, const Point3F& target, const Point3F& up);
+    void setDynamicLights(const std::vector<DynamicPointLight>& lights);
+    void clearDynamicLights();
+    // Establish the state shared by transparent world effects. This is an
+    // explicit pass boundary rather than relying on the previous draw call.
+    void beginTransparentPass();
+    void endTransparentPass();
 
     void drawMesh(MeshData& mesh, const MatrixF& transform);
     void drawLine(const Point3F& a, const Point3F& b, const ColorF& color);
     void drawLineStrip(const std::vector<Point3F>& points, const ColorF& color);
     void drawBox(const Box3F& box, const ColorF& color);
+    void drawFilledQuad(float width, float depth);
     void drawRectFill(const Point3F& a, const Point3F& b, const ColorF& color);
-    void drawSprite(const Point3F& pos, float size, const ColorF& color, uint32_t texture = 0);
+    void drawSprite(const Point3F& pos, float size, const ColorF& color,
+                    uint32_t texture = 0, bool additive = false);
+    void drawOrientedSprite(const Point3F& pos, float size, const ColorF& color,
+                            const Point3F& direction, float angle = 0.0f,
+                            uint32_t texture = 0, bool additive = false);
+    void drawOrientedSpriteRect(const Point3F& pos, float width, float height, const ColorF& color,
+                                const Point3F& direction, float angle, uint32_t texture,
+                                float u0, float v0, float u1, float v1, bool additive = false);
+    void drawTexturedQuad(const Point3F& a, const Point3F& b, const Point3F& c,
+                          const Point3F& d, uint32_t texture,
+                          const ColorF& tint, float u0 = 0.0f, float v0 = 0.0f,
+                          float u1 = 1.0f, float v1 = 1.0f, bool additive = true);
+    void drawShockwaveRing(const Point3F& center, float radius, float width,
+                           float height, int segments, uint32_t texture,
+                           const ColorF& color, float texWrap = 1.0f,
+                           bool additive = true, bool renderBottom = false,
+                           const Point3F& normal = {0, 1, 0});
     void drawTexturedRect(const Point3F& a, const Point3F& b, uint32_t texture);
     void drawTexturedRectUV(const Point3F& a, const Point3F& b, uint32_t texture, float u0, float v0, float u1, float v1, const ColorF* tint = nullptr);
     void flushSpriteBatch();
 
     Texture* loadTexture(const char* path);
+    // Resolve a direct texture or an existing IFL into renderable frames.
+    // Durations are in seconds and are empty when the asset has no timing.
+    bool loadTextureFrames(const char* path, std::vector<uint32_t>& frames,
+                           std::vector<float>& durations);
     Shader* loadShader(const char* vertPath, const char* fragPath);
     void addShader(Shader* shader);
     void addTexture(Texture* tex);
@@ -346,6 +423,7 @@ public:
     Point3F cameraTarget;
     Point3F sunDir{0.5f, 0.8f, 0.6f};
     std::string gpuInfo;
+    std::vector<DynamicPointLight> dynamicLights;
 
     // Stats
     struct Stats {
@@ -371,14 +449,19 @@ private:
     std::unordered_map<std::string, Font*> fontCache;
 
     void initSpriteVAO();
-    void spriteBatchAdd(float* verts, uint32_t texId);
+    void spriteBatchAdd(float* verts, uint32_t texId, bool additive = false);
     void spriteBatchFlush();
 
     // Sprite batch accumulator
     std::vector<float> spriteBatchBuf;
     uint32_t spriteBatchTex = UINT32_MAX;
+    bool spriteBatchAdditive = false;
+    bool spriteBatchDepthTest = true;
+    bool spriteBatchDepthWrite = true;
+    bool spriteBatchBlend = true;
     int spriteBatchCount = 0;
     static constexpr int SPRITE_BATCH_MAX = 512; // max rects per batch
+    static constexpr int MAX_DYNAMIC_LIGHTS = 8;
 
     // Persistent 2D sprite/line rendering (created once to avoid per-frame glGen/glDelete)
     uint32_t spriteVAO = 0, spriteVBO = 0, spriteEBO = 0;

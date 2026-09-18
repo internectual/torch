@@ -4,10 +4,12 @@
 #include "net/v12_datablocks.h"
 
 #include <cstdint>
+#include <array>
 #include <utility>
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <map>
 
 namespace V12 {
 
@@ -57,25 +59,46 @@ struct ServerEvent {
         std::string skinPreference;
         std::string voice;
         std::string type;
+        bool hasSensorGroup = false;
         int sensorGroup = 0;
+        bool hasDataBlockId = false;
         int dataBlockId = -2;
+        bool hasRenderFlags = false;
         int renderFlags = 0;
+        bool hasVoicePitch = false;
         float voicePitch = 1.0f;
     } targetInfo;
     bool hasTargetInfo = false;
     bool hasTargetFree = false;
     uint16_t targetFreeId = 0;
+    bool hasTargetTo = false;
+    bool targetToHasTarget = false;
+    uint16_t targetToId = 0;
+    bool targetToHasPosition = false;
+    V12Vec3 targetToPosition{};
+    bool targetToAssign = false;
+    bool hasAudio = false;
+    bool audioHasPosition = false;
+    int audioProfileId = -1;
+    uint16_t audioTargetId = 0;
+    V12Vec3 audioPosition{};
     bool hasMissionCrc = false;
     uint32_t missionCrc = 0;
     std::vector<std::string> arguments;
     bool hasSensorGroup = false;
     uint8_t sensorGroup = 0;
+    bool hasSensorGroupColor = false;
+    uint8_t sensorColorGroup = 0;
+    uint32_t sensorColorUpdateMask = 0;
+    std::array<uint32_t, 32> sensorColors{};
 };
 
 struct ServerGameState {
     uint32_t lastMoveAck = 0;
     float damageFlash = 0;
     float whiteOut = 0;
+    bool hasDamageFlash = false;
+    bool hasWhiteOut = false;
     bool controlPresent = false;
     bool controlDirty = false;
     uint16_t controlGhost = 0;
@@ -83,6 +106,7 @@ struct ServerGameState {
     bool hasCompressionPoint = false;
     bool hasCameraFov = false;
     uint8_t cameraFov = 0;
+    std::map<int, uint32_t> sensorGroupListenMasks;
 };
 
 // Event packets contain two lists: unguaranteed events first, then guaranteed
@@ -105,7 +129,8 @@ private:
 };
 
 bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
-                      std::vector<ServerEvent>& events);
+                      std::vector<ServerEvent>& events,
+                      const V12Vec3& compressionPoint = {});
 bool readServerPacketEvents(V12BitStream& stream, NetStringTable& strings,
                             std::vector<ServerEvent>& events,
                             ServerGameState* state = nullptr,

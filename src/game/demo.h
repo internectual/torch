@@ -6,6 +6,10 @@
 #include <vector>
 #include <map>
 #include <functional>
+#include <algorithm>
+
+#include "core/math.h"
+#include "net/v12_datablocks.h"
 
 // ─── Vec3 / Quat helpers ───────────────────────────────────────
 struct Vec3 { float x{}, y{}, z{}; };
@@ -133,6 +137,42 @@ namespace T2Demo {
     constexpr int BlockTypeMove = 2;
     constexpr int BlockTypeInfo = 3;
 
+    // Demo blocks are scheduled against the recording clock, not render frames.
+    inline float playbackBlockDuration(float totalTime, int totalBlocks) {
+        return totalBlocks > 0 && totalTime > 0.0f ? totalTime / totalBlocks : 0.032f;
+    }
+    inline int playbackTargetBlock(float time, float totalTime, int totalBlocks) {
+        if (totalBlocks <= 0 || totalTime <= 0.0f) return 0;
+        return std::clamp((int)std::floor(time / totalTime * totalBlocks), 0, totalBlocks);
+    }
+    inline float playbackBlockTime(int blockIndex, float totalTime, int totalBlocks) {
+        if (totalBlocks <= 0 || totalTime <= 0.0f) return 0.0f;
+        return std::clamp(totalTime * (float)blockIndex / (float)totalBlocks,
+                          0.0f, totalTime);
+    }
+
+    // V12 stores horizontal FOV; the renderer projection takes vertical FOV.
+    inline float horizontalFovToVertical(float horizontalDeg, float aspect) {
+        return Math::horizontalFovToVertical(horizontalDeg, aspect);
+    }
+
+    // Camera::setPosition builds zRot(yaw) * xRot(pitch); its view direction
+    // is the transform's local +Y column.
+    inline Vec3 cameraDirectionFromYawPitch(float yaw, float pitch) {
+        const float cp = std::cos(pitch);
+        return {-std::sin(yaw) * cp, std::cos(yaw) * cp, std::sin(pitch)};
+    }
+
+    // Stable replacement for the V12 CameraShake sine channels. The seed is
+    // part of the effect state, so replay and seek produce identical frames.
+    inline Vec3 cameraShakeOffset(float elapsed, const Vec3& amplitude,
+                                  const Vec3& frequency, const Vec3& phase) {
+        constexpr float twoPi = 6.28318530717958647692f;
+        return {amplitude.x * std::sin(twoPi * (phase.x + elapsed) * frequency.x),
+                amplitude.y * std::sin(twoPi * (phase.y + elapsed) * frequency.y),
+                amplitude.z * std::sin(twoPi * (phase.z + elapsed) * frequency.z)};
+    }
+
     // Protocol versions
     constexpr uint32_t ProtocolV24834 = 0x00300004;
     constexpr uint32_t ProtocolV25034 = 0x00330004;
@@ -246,6 +286,7 @@ struct ParsedDataBlock {
     std::string className;
     uint32_t objectId;
     std::map<std::string, std::string> data; // simple key-value for debug
+    V12::DecodedDataBlock decoded;
 };
 
 struct ScoreEntry {
@@ -283,6 +324,8 @@ struct GameState {
     uint32_t lastMoveAck{};
     float damageFlash{ -1 };
     float whiteOut{ -1 };
+    bool hasDamageFlash{};
+    bool hasWhiteOut{};
     bool selfLocked{}, selfHomed{};
     bool seekerTracking{};
     int seekerMode{}, seekerObjectGhostIndex{ -1 };
@@ -299,6 +342,9 @@ struct GameState {
     float cameraPitch{};
     float cameraYaw{};
     bool hasCameraTransform{};
+    int cameraMode{ -1 };
+    int orbitObjectGhostIndex{ -1 };
+    float orbitMinDistance{}, orbitMaxDistance{}, orbitDistance{};
 };
 
 struct GhostUpdate {
@@ -333,12 +379,32 @@ struct NetEventInfo {
     uint32_t missionCrc = 0;
 };
 
+// Stable identity for one audio event occurrence. Block and ordinal distinguish
+// legitimate repeated sounds while the payload fields suppress parser repeats.
+inline uint64_t demoAudioEventKey(int blockIndex, int eventIndex,
+                                  const NetEventInfo& event) {
+    uint64_t key = static_cast<uint32_t>(blockIndex);
+    key = (key << 16) ^ static_cast<uint16_t>(eventIndex);
+    key = (key << 16) ^ static_cast<uint16_t>(event.classId);
+    key = (key << 11) ^ static_cast<uint16_t>(event.audioProfileId + 1);
+    if (event.hasAudioPosition) {
+        key ^= static_cast<uint32_t>(event.audioPosition.x * 16.0f);
+        key = (key << 7) ^ static_cast<uint32_t>(event.audioPosition.y * 16.0f);
+        key = (key << 7) ^ static_cast<uint32_t>(event.audioPosition.z * 16.0f);
+    }
+    return key;
+}
+
 struct DemoTimedEvent {
     double time{};       // seconds into demo
     std::string text;    // display text
     int type{};          // 0=chat, 1=server, 2=system
     int ghostIndex{-1};  // source ghost (player), -1 if server
 };
+
+inline bool demoEventVisibleAt(const DemoTimedEvent& event, float playbackTime) {
+    return event.time <= (double)playbackTime;
+}
 
 struct PacketData {
     DnetHeader dnetHeader;
@@ -436,6 +502,11 @@ struct GhostEntry {
         bool atEnd = false;
         bool valid = false;
     };
+    struct SoundThreadState {
+        int profileId = -1;
+        bool playing = false;
+        bool valid = false;
+    };
     int classId{};
     std::string className;
     Vec3 position{};
@@ -448,46 +519,76 @@ struct GhostEntry {
     bool hasRotation{};
     bool hasCameraEuler{};
     bool hasVelocity{};
+    Vec3 beamStart{};
+    Vec3 beamEnd{};
+    bool hasBeam{};
     bool hasLinearMomentum{};
     int datablockId = -1;
     bool hasDatablock = false;
+    Vec3 projectileScale{1.0f, 1.0f, 1.0f};
+    bool hasProjectileScale = false;
     std::string skinName;
     std::string shapePath;
     DTSShape* shape{};
     Vec3 prevPosition{};
     float animTime{};
+    float threadAnimTime{};
+    float projectileVisualAge{};
     bool isMoving{};
     float moveYaw{};
     bool hasRendered{};
     bool skinApplied{};
     float health{100.0f};
     float maxHealth{100.0f};
+    int damageState = 0; // 0 enabled, 1 disabled, 2 destroyed
     float energy{100.0f};
     int32_t kills{};
     int32_t deaths{};
     int32_t score{};
     std::string playerName;
     int teamId{-1};
+    int sensorGroup{-1};
+    std::string targetType;
+    int targetRenderFlags = 0;
+    bool isFlag = false;
+    int flagTeamId = 0;
     std::string shapeName; // from datablock
+    int linkSourceGhost = -1;
+    int linkTargetGhost = -1;
+    int linkSourceSlot = -1;
     ThreadState threads[4]{};
+    SoundThreadState soundThreads[4]{};
 
     // Mounted image (weapon) slots
     struct MountedImage {
         int16_t datablockId = -1;
+        int mountPoint = 0;
+        std::string shapePath;
         bool loaded = false;
         bool isFiring = false;
     };
+    struct WheelState {
+        float angularVelocity = 0.0f;
+        float suspension = 0.0f;
+        float lateral = 0.0f;
+        bool valid = false;
+    };
     MountedImage mountedImages[8]{};
+    WheelState wheels[6]{};
+    float wheelRotation[6]{};
 
     // Turret barrel aiming
     float barrelPitch = 0.0f;
     float barrelYaw = 0.0f;
+    bool hasTurretAim = false;
 
     // Cloak state
     bool cloaked = false;
+    bool hasCloak = false;
 
     // Shield state
     float shieldLevel = 0.0f;  // 0-1 normalized shield strength
+    bool hasShield = false;
 
     // Head rotation (aim direction)
     float headPitch = 0.0f;
@@ -526,6 +627,13 @@ struct DemoPlayerInfo {
     int packetLoss{0};
 };
 
+struct DemoPendingExplosion {
+    Vec3 position;
+    Vec3 normal{0, 1, 0};
+    float time{};
+    int projectileDataBlockId = -1;
+};
+
 struct DemoParserSnapshot {
     size_t blockStreamOffset{};
     int blockCount{-1};
@@ -551,6 +659,12 @@ struct DemoParserSnapshot {
     InventoryHudState inventoryHud;
     VehicleHudState vehicleHud;
     AmmoHudState ammoHud;
+    std::vector<DemoPendingExplosion> pendingExplosions;
+    std::string pendingTerrainFile;
+    Vec3 sunDirection{};
+    float sunAzimuth{}, sunElevation{};
+    int sunR{}, sunG{}, sunB{};
+    bool sunValid{};
 };
 
 // ─── DemoParser ─────────────────────────────────────────────────
@@ -576,6 +690,7 @@ public:
 
     DemoBlock* nextBlock();
     void reset();
+    void resetMissionState();
     int processBlocks(int count);
     bool seekToBlock(int blockIndex);
 
@@ -605,7 +720,11 @@ public:
     const InventoryHudState& getInventoryHud() const { return inventoryHud_; }
     const VehicleHudState& getVehicleHud() const { return vehicleHud_; }
     const AmmoHudState& getAmmoHud() const { return ammoHud_; }
+    const std::map<std::pair<int, uint32_t>, uint32_t>& getSensorGroupColors() const {
+        return sensorGroupColors_;
+    }
     void handleHudRemoteCommand(const std::string& funcName, const std::vector<std::string>& args);
+    void resetHudState();
     void extractMissionInfo();
 
 private:
@@ -647,6 +766,7 @@ private:
     InventoryHudState inventoryHud_;
     VehicleHudState vehicleHud_;
     AmmoHudState ammoHud_;
+    std::map<std::pair<int, uint32_t>, uint32_t> sensorGroupColors_;
 
     // Packet parser state
     Vec3 compressionPoint;
@@ -659,7 +779,7 @@ private:
 
     // ─── Internal parsing methods ───
     void readHeader();
-    bool readInitialBlock(const uint8_t* data, size_t size);
+    bool readInitialBlock(const uint8_t* data, size_t size, uint32_t protocolVersion);
     void readTaggedStrings(BitStream& bs);
     bool readDataBlocks(BitStream& bs);
     ScoreEntry readScoreEntry(BitStream& bs);
@@ -692,10 +812,7 @@ public:
     void onSendPacketTrigger();
 
     // Pending explosion events from projectile parsers
-    struct PendingExplosion {
-        Vec3 position;
-        float time;
-    };
+    using PendingExplosion = DemoPendingExplosion;
     static std::vector<PendingExplosion> s_pendingExplosions;
     std::vector<PendingExplosion> consumeExplosions() { auto r = std::move(s_pendingExplosions); s_pendingExplosions.clear(); return r; }
 

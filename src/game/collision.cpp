@@ -8,13 +8,59 @@ static inline float triArea2D(const Point3F& a, const Point3F& b, const Point3F&
     return (b.x - a.x) * (c.z - a.z) - (c.x - a.x) * (b.z - a.z);
 }
 
-static inline bool pointInTri2D(const Point3F& p, const CollisionTri& tri) {
-    float d0 = triArea2D(p, tri.v0, tri.v1);
-    float d1 = triArea2D(p, tri.v1, tri.v2);
-    float d2 = triArea2D(p, tri.v2, tri.v0);
-    bool neg = (d0 < 0) || (d1 < 0) || (d2 < 0);
-    bool pos = (d0 > 0) || (d1 > 0) || (d2 > 0);
-    return !(neg && pos);
+static inline bool pointInTri3D(const Point3F& p, const CollisionTri& tri) {
+    const Point3F v0{tri.v1.x - tri.v0.x, tri.v1.y - tri.v0.y, tri.v1.z - tri.v0.z};
+    const Point3F v1{tri.v2.x - tri.v0.x, tri.v2.y - tri.v0.y, tri.v2.z - tri.v0.z};
+    const Point3F v2{p.x - tri.v0.x, p.y - tri.v0.y, p.z - tri.v0.z};
+    const float d00 = v0.x * v0.x + v0.y * v0.y + v0.z * v0.z;
+    const float d01 = v0.x * v1.x + v0.y * v1.y + v0.z * v1.z;
+    const float d11 = v1.x * v1.x + v1.y * v1.y + v1.z * v1.z;
+    const float d20 = v2.x * v0.x + v2.y * v0.y + v2.z * v0.z;
+    const float d21 = v2.x * v1.x + v2.y * v1.y + v2.z * v1.z;
+    const float denominator = d00 * d11 - d01 * d01;
+    if (std::fabs(denominator) < 1e-10f) return false;
+    const float baryV = (d11 * d20 - d01 * d21) / denominator;
+    const float baryW = (d00 * d21 - d01 * d20) / denominator;
+    return baryV >= -1e-4f && baryW >= -1e-4f && baryV + baryW <= 1.0001f;
+}
+
+static Point3F closestPointOnTriangle(const Point3F& p, const CollisionTri& tri) {
+    const Point3F ab{tri.v1.x - tri.v0.x, tri.v1.y - tri.v0.y, tri.v1.z - tri.v0.z};
+    const Point3F ac{tri.v2.x - tri.v0.x, tri.v2.y - tri.v0.y, tri.v2.z - tri.v0.z};
+    const Point3F ap{p.x - tri.v0.x, p.y - tri.v0.y, p.z - tri.v0.z};
+    const float d1 = ab.x * ap.x + ab.y * ap.y + ab.z * ap.z;
+    const float d2 = ac.x * ap.x + ac.y * ap.y + ac.z * ap.z;
+    if (d1 <= 0.0f && d2 <= 0.0f) return tri.v0;
+    const Point3F bp{p.x - tri.v1.x, p.y - tri.v1.y, p.z - tri.v1.z};
+    const float d3 = ab.x * bp.x + ab.y * bp.y + ab.z * bp.z;
+    const float d4 = ac.x * bp.x + ac.y * bp.y + ac.z * bp.z;
+    if (d3 >= 0.0f && d4 <= d3) return tri.v1;
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        const float v = d1 / (d1 - d3);
+        return {tri.v0.x + v * ab.x, tri.v0.y + v * ab.y, tri.v0.z + v * ab.z};
+    }
+    const Point3F cp{p.x - tri.v2.x, p.y - tri.v2.y, p.z - tri.v2.z};
+    const float d5 = ab.x * cp.x + ab.y * cp.y + ab.z * cp.z;
+    const float d6 = ac.x * cp.x + ac.y * cp.y + ac.z * cp.z;
+    if (d6 >= 0.0f && d5 <= d6) return tri.v2;
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        const float w = d2 / (d2 - d6);
+        return {tri.v0.x + w * ac.x, tri.v0.y + w * ac.y, tri.v0.z + w * ac.z};
+    }
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return {tri.v1.x + w * (tri.v2.x - tri.v1.x),
+                tri.v1.y + w * (tri.v2.y - tri.v1.y),
+                tri.v1.z + w * (tri.v2.z - tri.v1.z)};
+    }
+    const float denom = 1.0f / (va + vb + vc);
+    const float v = vb * denom, w = vc * denom;
+    return {tri.v0.x + ab.x * v + ac.x * w,
+            tri.v0.y + ab.y * v + ac.y * w,
+            tri.v0.z + ab.z * v + ac.z * w};
 }
 
 static inline bool rayTriIntersect(const Point3F& orig, const Point3F& dir,
@@ -124,43 +170,67 @@ bool CollisionGrid::raycast(const std::vector<CollisionTri>& tris, const Point3F
         return false;
     }
 
+    float gridMinX = minX, gridMaxX = minX + resX * cellW;
+    float gridMinZ = minZ, gridMaxZ = minZ + resZ * cellH;
+    float entry = 0.0f, exit = maxDist;
+    auto clipAxis = [&](float originValue, float direction, float minValue, float maxValue) {
+        if (std::fabs(direction) < 1e-10f)
+            return originValue >= minValue && originValue <= maxValue;
+        float nearT = (minValue - originValue) / direction;
+        float farT = (maxValue - originValue) / direction;
+        if (nearT > farT) std::swap(nearT, farT);
+        entry = std::max(entry, nearT);
+        exit = std::min(exit, farT);
+        return entry <= exit;
+    };
+    if (!clipAxis(origin.x, dir.x, gridMinX, gridMaxX) ||
+        !clipAxis(origin.z, dir.z, gridMinZ, gridMaxZ) || exit < 0.0f || entry > maxDist)
+        return false;
+    entry = std::max(0.0f, entry);
     float bestT = maxDist;
     bool hit = false;
     Point3F bestNorm;
     int bestIdx = -1;
 
     // Traverse grid cells along ray
-    float t = 0;
+    const Point3F entryPoint{origin.x + dir.x * entry, origin.y + dir.y * entry,
+                             origin.z + dir.z * entry};
+    float t = entry;
     float stepX = (dir.x != 0) ? (cellW / fabs(dir.x)) : 1e10f;
     float stepZ = (dir.z != 0) ? (cellH / fabs(dir.z)) : 1e10f;
     int stepIx = (dir.x >= 0) ? 1 : -1;
     int stepIz = (dir.z >= 0) ? 1 : -1;
 
     int cx, cz;
-    if (fabs(dir.x) > 1e-10f) {
-        cx = (int)((origin.x - minX + (dir.x > 0 ? 0 : 0)) / cellW);
-    } else { cx = 0; }
-    if (fabs(dir.z) > 1e-10f) {
-        cz = (int)((origin.z - minZ + (dir.z > 0 ? 0 : 0)) / cellH);
-    } else { cz = 0; }
+    cx = (int)((entryPoint.x - minX) / cellW);
+    cz = (int)((entryPoint.z - minZ) / cellH);
     if (cx < 0) { cx = 0; } if (cx >= resX) { cx = resX - 1; }
     if (cz < 0) { cz = 0; } if (cz >= resZ) { cz = resZ - 1; }
 
-    float tMaxX = (dir.x > 0)
-        ? ((cx + 1) * cellW + minX - origin.x) / dir.x
-        : (cx * cellW + minX - origin.x) / dir.x;
-    float tMaxZ = (dir.z > 0)
-        ? ((cz + 1) * cellH + minZ - origin.z) / dir.z
-        : (cz * cellH + minZ - origin.z) / dir.z;
+    float tMaxX = 1e30f;
+    if (std::fabs(dir.x) > 1e-10f) {
+        tMaxX = (dir.x > 0)
+            ? ((cx + 1) * cellW + minX - origin.x) / dir.x
+            : (cx * cellW + minX - origin.x) / dir.x;
+    }
+    float tMaxZ = 1e30f;
+    if (std::fabs(dir.z) > 1e-10f) {
+        tMaxZ = (dir.z > 0)
+            ? ((cz + 1) * cellH + minZ - origin.z) / dir.z
+            : (cz * cellH + minZ - origin.z) / dir.z;
+    }
 
-    while (t < maxDist) {
+    while (t <= exit && t <= maxDist) {
+        const float nextCellT = std::min(tMaxX, tMaxZ);
         // Test triangles in current cell
         auto& cellTris = cells[cz * resX + cx];
         for (int ti : cellTris) {
             const auto& tri = tris[ti];
             float tt, u, vv;
             if (rayTriIntersect(origin, dir, tri.v0, tri.v1, tri.v2, tt, u, vv)) {
-                if (tt >= 0 && tt < bestT) {
+                // A triangle is indexed in every AABB cell it touches. Do
+                // not accept an intersection that belongs to a later cell.
+                if (tt >= t - 1e-5f && tt <= nextCellT + 1e-5f && tt < bestT) {
                     bestT = tt;
                     bestNorm = tri.normal;
                     bestIdx = ti;
@@ -169,7 +239,7 @@ bool CollisionGrid::raycast(const std::vector<CollisionTri>& tris, const Point3F
             }
         }
 
-        if (hit) break;
+        if (hit && bestT <= nextCellT + 1e-5f) break;
 
         // Advance to next cell
         if (tMaxX < tMaxZ) {
@@ -212,25 +282,23 @@ bool CollisionGrid::sphereCollide(const std::vector<CollisionTri>& tris, const P
             if (gx < 0 || gx >= resX || gz < 0 || gz >= resZ) continue;
             for (int ti : cells[gz * resX + gx]) {
                 const auto& tri = tris[ti];
-                Point3F toCenter = {center.x - tri.v0.x, center.y - tri.v0.y, center.z - tri.v0.z};
-
-                // Project onto normal
-                float nd = toCenter.x * tri.normal.x + toCenter.y * tri.normal.y + toCenter.z * tri.normal.z;
-                float absDistance = std::fabs(nd);
-                if (absDistance > radius) continue;
-
-                // Check if point projects inside triangle
-                Point3F proj = {center.x - tri.normal.x * nd, center.y - tri.normal.y * nd, center.z - tri.normal.z * nd};
-                if (pointInTri2D(proj, tri)) {
-                    float pen = radius - absDistance;
-                    if (pen > bestPenetration) {
-                        float direction = nd >= 0.0f ? 1.0f : -1.0f;
-                        pushOut.x = tri.normal.x * pen * direction;
-                        pushOut.y = tri.normal.y * pen * direction;
-                        pushOut.z = tri.normal.z * pen * direction;
-                        bestPenetration = pen;
-                        collided = true;
-                    }
+                const Point3F closest = closestPointOnTriangle(center, tri);
+                Point3F delta{center.x - closest.x, center.y - closest.y, center.z - closest.z};
+                const float distanceSquared = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
+                if (distanceSquared > radius * radius) continue;
+                float distance = std::sqrt(distanceSquared);
+                if (distance < 1e-6f) {
+                    delta = tri.normal;
+                    distance = 1.0f;
+                }
+                const float pen = radius - distance;
+                if (pen > bestPenetration) {
+                    const float invDistance = 1.0f / distance;
+                    pushOut = {delta.x * invDistance * pen,
+                               delta.y * invDistance * pen,
+                               delta.z * invDistance * pen};
+                    bestPenetration = pen;
+                    collided = true;
                 }
             }
         }
@@ -267,13 +335,30 @@ void CollisionMesh::build() {
 float CollisionMesh::getHeight(float x, float z) const {
     if (!loaded) return -1e10f;
 
-    Point3F origin = {x, 10000.0f, z};
-    Point3F dir = {0, -1, 0};
-    float t;
-    Point3F pos, norm;
-    if (raycast(origin, dir, 20000.0f, t, pos, norm)) {
-        return pos.y;
+    const int ix = (int)((x - grid.minX) / grid.cellW);
+    const int iz = (int)((z - grid.minZ) / grid.cellH);
+    if (ix < 0 || iz < 0 || ix >= grid.resX || iz >= grid.resZ) return -1e10f;
+
+    float bestHeight = -1e10f;
+    for (int triIndex : grid.cells[iz * grid.resX + ix]) {
+        const auto& tri = triangles[triIndex];
+        // Downward-facing surfaces are ceilings or underside geometry.
+        if (tri.normal.y <= 0.001f || !pointInTriXZ(x, z, tri)) continue;
+        const float height = tri.v0.y -
+            (tri.normal.x * (x - tri.v0.x) + tri.normal.z * (z - tri.v0.z)) /
+            tri.normal.y;
+        bestHeight = std::max(bestHeight, height);
     }
+    return bestHeight;
+}
+
+float CollisionMesh::getFloorHeight(float x, float y, float z) const {
+    if (!loaded) return -1e10f;
+    float t = 0.0f;
+    Point3F position{}, normal{};
+    const float maxDist = 20000.0f;
+    if (raycast({x, y + 0.001f, z}, {0, -1, 0}, maxDist, t, position, normal))
+        return position.y;
     return -1e10f;
 }
 

@@ -29,4 +29,15 @@ int main() {
     // Conjugation must preserve the identity rotation for every axis.
     const MatrixF identity = Math::torqueRotationToYUp({1, 2, 3}, 0.0f);
     assertPoint(identity.transform({4, 5, 6}), {4, 5, 6});
+
+    // ParticleEmissionDummy emits along Torque +Z, which is engine +Y.
+    const MatrixF dummyRotation = Math::torqueRotationToYUp({0, 0, 1}, 0.0f);
+    assertPoint(dummyRotation.transformNormal(Math::torquePointToYUp({0, 0, 1})),
+                {0, 1, 0});
+
+    // The native Camera uses local +Y as forward.
+    assertPoint(Math::torqueCameraForwardToYUp({0, 0, 1}, 0.0f),
+                {0, 0, -1});
+    assertPoint(Math::torqueCameraForwardToYUp({0, 0, 1}, Math::PI * 0.5f),
+                {-1, 0, 0});
 }

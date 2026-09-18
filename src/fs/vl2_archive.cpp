@@ -19,20 +19,26 @@ struct Vl2Archive::Impl {
     std::ifstream file;
     std::string filePath;
     std::unordered_map<std::string, Entry> entries;
+    std::unordered_map<std::string, std::string> names;
 
-    static bool iequals(const std::string& a, const std::string& b) {
-        if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); i++)
-            if (std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)b[i]))
-                return false;
-        return true;
+    static std::string foldPath(const char* path) {
+        std::string folded = path ? path : "";
+        for (char& c : folded) {
+            if (c == '\\') c = '/';
+            c = (char)std::tolower((unsigned char)c);
+        }
+        return folded;
     }
+
 };
 
 Vl2Archive::Vl2Archive() : impl(new Impl) {}
 Vl2Archive::~Vl2Archive() { if (impl->file.is_open()) impl->file.close(); delete impl; }
 
 bool Vl2Archive::open(const char* path) {
+    if (impl->file.is_open()) impl->file.close();
+    impl->entries.clear();
+    impl->names.clear();
     impl->file.open(path, std::ios::binary);
     if (!impl->file) {
         Console::instance().printf(LogLevel::Warn, "Cannot open VL2: %s", path);
@@ -71,7 +77,9 @@ bool Vl2Archive::open(const char* path) {
         entry.compressedSize = compressedSize;
         entry.uncompressedSize = uncompressedSize;
         entry.compression = compression;
-        impl->entries[name] = entry;
+        const std::string key = Impl::foldPath(name.c_str());
+        impl->entries[key] = entry;
+        impl->names[key] = name;
 
         // Skip data — read on demand
         if (compression == 0)
@@ -85,12 +93,9 @@ bool Vl2Archive::open(const char* path) {
 }
 
 bool Vl2Archive::readFile(const char* path, std::vector<uint8_t>& data) {
-    auto it = impl->entries.find(path);
-    if (it == impl->entries.end()) {
-        for (auto& [name, e] : impl->entries)
-            if (Impl::iequals(name, path)) { it = impl->entries.find(name); break; }
-        if (it == impl->entries.end()) return false;
-    }
+    data.clear();
+    auto it = impl->entries.find(Impl::foldPath(path));
+    if (it == impl->entries.end()) return false;
     const auto& e = it->second;
     // Determine total file size to validate entry bounds.
     impl->file.clear();
@@ -114,7 +119,7 @@ bool Vl2Archive::readFile(const char* path, std::vector<uint8_t>& data) {
         if (!impl->file) return false;
         data.resize(e.uncompressedSize);
         z_stream strm{};
-        inflateInit2(&strm, -MAX_WBITS);
+        if (inflateInit2(&strm, -MAX_WBITS) != Z_OK) return false;
         strm.next_in = compressed.data();
         strm.avail_in = e.compressedSize;
         strm.next_out = data.data();
@@ -129,14 +134,13 @@ bool Vl2Archive::readFile(const char* path, std::vector<uint8_t>& data) {
 }
 
 bool Vl2Archive::fileExists(const char* path) const {
-    if (impl->entries.find(path) != impl->entries.end()) return true;
-    for (auto& [name, _] : impl->entries)
-        if (Impl::iequals(name, path)) return true;
-    return false;
+    return impl->entries.find(Impl::foldPath(path)) != impl->entries.end();
 }
 
 void Vl2Archive::listFiles(const char* pattern, std::vector<std::string>& out) const {
-    for (auto& [name, _] : impl->entries)
-        if (!pattern || fnmatch(pattern, name.c_str(), FNM_PATHNAME) == 0)
-            out.push_back(name);
+    std::string foldedPattern = Impl::foldPath(pattern);
+    for (char& c : foldedPattern) c = (char)std::tolower((unsigned char)c);
+    for (auto& [key, _] : impl->entries)
+        if (!pattern || fnmatch(foldedPattern.c_str(), key.c_str(), FNM_PATHNAME) == 0)
+            out.push_back(impl->names.at(key));
 }

@@ -68,6 +68,7 @@ struct InputState {
     int32_t mouseWheel{};
     std::string textInput; // consumed text this frame (SDL_TEXT_INPUT)
     std::vector<int> keyPressQueue; // edge-triggered keydowns this frame (scancodes)
+    bool focusLost = false;
 };
 
 class Platform {
@@ -85,11 +86,14 @@ public:
 
     int32_t width() const;
     int32_t height() const;
+    int32_t drawableWidth() const;
+    int32_t drawableHeight() const;
     float aspect() const;
     double time() const;
     uint64_t frameCount() const;
 
     void setTitle(const char* title);
+    bool setVideoMode(int32_t width, int32_t height, bool fullscreen, bool vsync);
     void showMouse(bool show);
     void setMousePos(int32_t x, int32_t y);
     void setRelativeMouse(bool relative);

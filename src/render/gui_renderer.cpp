@@ -2,6 +2,8 @@
 #include "render/shader.h"
 #include "core/console.h"
 #include "core/engine.h"
+#include "core/gui_input.h"
+#include "core/gui_geometry.h"
 #include "script/script_engine.h"
 #include "script/torquescript.h"
 #include <GL/glew.h>
@@ -103,13 +105,24 @@ static void callGuiChildLifecycle(GuiControl* root, const char* suffix) {
     if (!root) return;
     auto* ts = Engine::instance().script().ts();
     const auto children = root->children;
-    for (auto* child : children) {
+    const bool sleeping = std::string(suffix) == "::onSleep";
+    auto call = [&](GuiControl* child) {
         if (ts) {
             const std::string callback = child->name + suffix;
             if (ts->hasFunction(callback))
                 ts->callFunction(callback, {VMValue(child->name)});
         }
-        callGuiChildLifecycle(child, suffix);
+    };
+    if (sleeping) {
+        for (auto it = children.rbegin(); it != children.rend(); ++it) {
+            callGuiChildLifecycle(*it, suffix);
+            call(*it);
+        }
+    } else {
+        for (auto* child : children) {
+            call(child);
+            callGuiChildLifecycle(child, suffix);
+        }
     }
 }
 
@@ -383,19 +396,19 @@ void GuiRenderer::render() {
     MatrixF savedProj = r.projectionMatrix();
     MatrixF savedView = r.view;
     auto& plat = Engine::instance().platform();
-    int w = plat.width(), h = plat.height();
+    const int w = plat.drawableWidth(), h = plat.drawableHeight();
     const bool gameCanvas = Engine::instance().game().state() == Game::Playing;
-    const int canvasW = gameCanvas ? 640 : w;
-    const int canvasH = gameCanvas ? 480 : h;
+    const GuiViewport viewport = guiViewport(w, h, gameCanvas ? 640.0f : (float)plat.width(),
+                                             gameCanvas ? 480.0f : (float)plat.height());
     GLint oldViewport[4];
     glGetIntegerv(GL_VIEWPORT, oldViewport);
     GLint oldScissor[4];
     glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
     const GLboolean scissorWasOn = glIsEnabled(GL_SCISSOR_TEST);
+    glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
     if (gameCanvas) {
-        glViewport(0, 0, w, h);
         glEnable(GL_SCISSOR_TEST);
-        glScissor(0, 0, w, h);
+        glScissor(viewport.x, viewport.y, viewport.width, viewport.height);
     }
     auto syncPrintControl = [&](const char* name, const char* variable) {
         GuiControl* ctl = findControl(name);
@@ -416,8 +429,8 @@ void GuiRenderer::render() {
         zoom->visible = Engine::instance().game().isZooming();
     MatrixF ortho;
     ortho.identity();
-    ortho.m[0][0] = 2.0f / canvasW;
-    ortho.m[1][1] = -2.0f / canvasH;
+    ortho.m[0][0] = 2.0f / viewport.logicalWidth;
+    ortho.m[1][1] = -2.0f / viewport.logicalHeight;
     ortho.m[0][3] = -1.0f;
     ortho.m[1][3] = 1.0f;
     r.setProjection(ortho);
@@ -458,6 +471,27 @@ void GuiRenderer::render() {
     if (!scissorWasOn) glDisable(GL_SCISSOR_TEST);
     r.setProjection(savedProj);
     r.setView(savedView);
+}
+
+void GuiRenderer::mapMouse(int physicalX, int physicalY, int& logicalX, int& logicalY) const {
+    auto& platform = Engine::instance().platform();
+    const bool gameCanvas = Engine::instance().game().state() == Game::Playing;
+    const GuiViewport viewport = guiViewport(platform.drawableWidth(), platform.drawableHeight(),
+        gameCanvas ? 640.0f : (float)platform.width(), gameCanvas ? 480.0f : (float)platform.height());
+    // SDL reports mouse positions in window coordinates. On a high-DPI
+    // display the drawable viewport is larger, so convert before undoing the
+    // letterbox/scale used by GL.
+    const float pixelX = physicalX * platform.drawableWidth() /
+        (float)std::max(1, platform.width());
+    const float pixelY = physicalY * platform.drawableHeight() /
+        (float)std::max(1, platform.height());
+    float x = 0.0f, y = 0.0f;
+    if (!guiPhysicalToLogical(viewport, pixelX, pixelY, x, y)) {
+        logicalX = logicalY = -1;
+        return;
+    }
+    logicalX = (int)std::floor(x);
+    logicalY = (int)std::floor(y);
 }
 
 struct ClipRect { float x, y, w, h; };
@@ -1841,7 +1875,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             ef->render(display.c_str(), x + textOffX, textY, tc, 1.0f);
             // Cursor when focused
             if (ctl == gr->getFocused()) {
-                float preW = ef->measure(ctl->text.substr(0, ctl->cursorPos).c_str(), sc).x;
+                float preW = ef->measure(ctl->text.substr(0, ctl->cursorPos).c_str(), 1.0f).x;
                 r.drawRectFill({x + textOffX + preW, textY, 0}, {x + textOffX + preW + 2, textY + textH, 0}, {1,1,1,1});
             }
         }
@@ -3334,7 +3368,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 }
                 const float tanHalfFov = std::tan(1.2f * 0.5f);
                 const float aspect = std::max(0.1f, ctl->extentX / std::max(1.0f, ctl->extentY));
-                const int localTeam = Engine::instance().game().player().team();
                 auto isMarkerClass = [](const std::string& className) {
                     return className.find("Player") != std::string::npos ||
                            className.find("Vehicle") != std::string::npos ||
@@ -3343,8 +3376,15 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                            className.find("Objective") != std::string::npos ||
                            className.find("MissionMarker") != std::string::npos;
                 };
-                auto drawMarker = [&](const GhostEntry* ghost) {
-                    if (!ghost) return;
+                 auto drawMarker = [&](const GhostEntry* ghost) {
+                     if (!ghost) return;
+                     if (!Engine::instance().game().isDemoPlaying() &&
+                         Engine::instance().game().activeConnection() &&
+                         Engine::instance().game().activeConnection()->isObserverMode()) {
+                         const auto observer = Engine::instance().game().activeConnection()->observerSnapshot();
+                         if (!Engine::instance().game().isSensorGroupTargetVisible(
+                                 observer.playerSensorGroup, ghost->sensorGroup)) return;
+                     }
                     const Vec3& markerPos = (Engine::instance().game().isDemoPlaying() &&
                                              ghost->hasRendered) ? ghost->renderPos : ghost->position;
                     Point3F world = Math::torquePointToYUp({markerPos.x, markerPos.y, markerPos.z});
@@ -3368,9 +3408,38 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     if (edgeMarker && !renderEdges) return;
                     const float markerX = std::clamp(mx, x + 5.0f, x + ctl->extentX - 5.0f);
                     const float markerY = std::clamp(my, y + 5.0f, y + ctl->extentY - 5.0f);
-                    const bool friendUnit = ghost->teamId >= 0 && ghost->teamId == localTeam;
+                     int listenerGroup = Engine::instance().game().player().team();
+                     if (Engine::instance().game().activeConnection() &&
+                         Engine::instance().game().activeConnection()->isObserverMode())
+                         listenerGroup = Engine::instance().game().activeConnection()->observerSnapshot().playerSensorGroup;
+                     const bool friendUnit = Engine::instance().game().isTargetFriendly(
+                         listenerGroup, ghost->sensorGroup);
                     ColorF color = friendUnit ? ColorF{0.2f, 1.0f, 0.3f, 0.95f}
                                                : ColorF{1.0f, 0.2f, 0.2f, 0.95f};
+                     const uint32_t targetMask = ghost->sensorGroup >= 0 && ghost->sensorGroup < 32
+                         ? (uint32_t(1) << ghost->sensorGroup) : 0;
+                     if (Engine::instance().game().isDemoPlaying()) {
+                         if (const auto* parser = Engine::instance().game().getDemoParser()) {
+                             const auto it = parser->getSensorGroupColors().find(
+                                 {ghost->sensorGroup, targetMask});
+                             if (it != parser->getSensorGroupColors().end()) {
+                                 const uint32_t packed = it->second;
+                                 color = {(packed & 0xff) / 255.0f,
+                                          ((packed >> 8) & 0xff) / 255.0f,
+                                          ((packed >> 16) & 0xff) / 255.0f,
+                                          ((packed >> 24) & 0xff) / 255.0f};
+                             }
+                         }
+                     } else if (const auto snapshot = Engine::instance().game().activeConnection()
+                                    ? Engine::instance().game().activeConnection()->observerSnapshot()
+                                    : Connection::ObserverSnapshot{};
+                                snapshot.sensorGroupColors.count({ghost->sensorGroup, targetMask})) {
+                         const uint32_t packed = snapshot.sensorGroupColors.at({ghost->sensorGroup, targetMask});
+                         color = {(packed & 0xff) / 255.0f,
+                                  ((packed >> 8) & 0xff) / 255.0f,
+                                  ((packed >> 16) & 0xff) / 255.0f,
+                                  ((packed >> 24) & 0xff) / 255.0f};
+                     }
                     const bool vehicle = ghost->className.find("Vehicle") != std::string::npos;
                     auto colorIt = ctl->fields.find(vehicle ? "vehicleBeaconColor" :
                                                     (friendUnit ? "friendBeaconColor" : "enemyBeaconColor"));
@@ -3390,8 +3459,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     auto textIt = ctl->fields.find("renderMarkerText");
                     const bool renderText = textIt == ctl->fields.end() ||
                         (textIt->second != "0" && textIt->second != "false");
-                    const std::string label = !ghost->playerName.empty() ? ghost->playerName :
-                        (!ghost->shapeName.empty() ? ghost->shapeName : ghost->className);
+                     const std::string label = ghost->isFlag ? "Flag" :
+                         (!ghost->playerName.empty() ? ghost->playerName :
+                          (!ghost->targetType.empty() ? ghost->targetType :
+                           (!ghost->shapeName.empty() ? ghost->shapeName : ghost->className)));
                     if (renderText && hf && !label.empty())
                         hf->render(label.c_str(), markerX + 7, markerY - 6, color, 0.8f);
                 };
@@ -3673,7 +3744,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 // (hand-rolled matrices risk row/column convention mismatches).
                 // Camera pulled back along -Z via the view matrix.
                 MatrixF persp;
-                persp.perspective(1.2f, sw / sh, 0.1f, 100.0f);
+                const float previewAspect = sw / std::max(1.0f, sh);
+                persp.perspective(Math::DEG2RAD(Math::horizontalFovToVertical(90.0f,
+                                                                               previewAspect)),
+                                  previewAspect, 0.1f, 100.0f);
                 r.setProjection(persp);
                 MatrixF viewM; viewM = MatrixF{}; viewM.setTranslation({0, 0.1f, -2.3f});
                 r.setView(viewM);
@@ -3858,8 +3932,8 @@ void GuiRenderer::update(float dt) {
     // Apply hover states from mouse position each frame.
     // Hit-test from topmost overlay down to content so the frontmost control gets hover.
     auto& plat = Engine::instance().platform();
-    int mx = plat.input().mouseX;
-    int my = plat.input().mouseY;
+    int mx = 0, my = 0;
+    mapMouse(plat.input().mouseX, plat.input().mouseY, mx, my);
     std::function<void(GuiControl*)> applyHover = [&](GuiControl* ctl) {
         if (!ctl) return;
         float ax = ctl->posX, ay = ctl->posY;
@@ -4230,21 +4304,16 @@ bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
         GuiControl* consScroll = console ? console->parent : nullptr;
         while (consScroll && consScroll->className != "GuiScrollCtrl") consScroll = consScroll->parent;
         if (consScroll) {
-            consScroll->scrollY += (wheelDelta < 0 ? 30 : -30);
+            consScroll->scrollY = guiScrollAfterWheel(consScroll->scrollY,
+                                                       consScroll->contentH,
+                                                       consScroll->extentY,
+                                                       wheelDelta);
             return true;
         }
     }
-    // Check all dialogs from top to bottom
-    GuiControl* hit = nullptr;
-    for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it) {
-        hit = hitTest(*it, x, y);
-        if (!hit) continue;
-        if (hit == *it && hit->onClick == nullptr) {
-            bool isScrollable = hit->className == "GuiScrollCtrl";
-            if (!isScrollable) { hit = nullptr; continue; }
-        }
-        break;
-    }
+    // Use the same topmost-layer routing as clicks. The old dialog-only pass
+    // made scroll controls attached to the canvas ignore the wheel entirely.
+    GuiControl* hit = hitTestTop(x, y);
     if (!hit) return false;
     if (hit->className == "GuiCommanderMap") {
         auto zoomIt = hit->fields.find("mapZoom");
@@ -4258,7 +4327,10 @@ bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
     GuiControl* scrollCtrl = hit;
     while (scrollCtrl) {
         if (scrollCtrl->className == "GuiScrollCtrl") {
-            scrollCtrl->scrollY += (wheelDelta < 0 ? 30 : -30);
+            scrollCtrl->scrollY = guiScrollAfterWheel(scrollCtrl->scrollY,
+                                                       scrollCtrl->contentH,
+                                                       scrollCtrl->extentY,
+                                                       wheelDelta);
             return true;
         }
         scrollCtrl = scrollCtrl->parent;
@@ -4695,14 +4767,9 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             }
             return true;
         }
-        float norm = (float)(x - barX) / barW;
-        if (norm < 0) norm = 0; if (norm > 1) norm = 1;
-        float range = hit->sliderMax - hit->sliderMin;
-        hit->sliderValue = hit->sliderMin + range * norm;
-        if (hit->sliderTicks > 0) {
-            float step = range / (float)hit->sliderTicks;
-            hit->sliderValue = std::round(hit->sliderValue / step) * step;
-        }
+        hit->sliderValue = guiSliderValueAt((float)x, barX, barW,
+                                             hit->sliderMin, hit->sliderMax,
+                                             hit->sliderTicks);
         hit->sliderDragging = true;
         if (!hit->command.empty()) Console::instance().execute(hit->command.c_str());
         if (auto* ts = Engine::instance().script().ts()) {
@@ -4802,7 +4869,8 @@ bool GuiRenderer::handleDrag(int x, int y) {
             for (auto* ch : c->children) if (rotate(ch)) return true;
             return false;
         };
-        for (auto* d : dialogStack) if (rotate(d)) return true;
+        for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it)
+            if (rotate(*it)) return true;
         if (rotate(canvas)) return true;
     }
     {
@@ -4817,7 +4885,8 @@ bool GuiRenderer::handleDrag(int x, int y) {
             for (auto* ch : c->children) if (zoom(ch)) return true;
             return false;
         };
-        for (auto* d : dialogStack) if (zoom(d)) return true;
+        for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it)
+            if (zoom(*it)) return true;
         if (zoom(canvas)) return true;
     }
     {
@@ -4852,7 +4921,8 @@ bool GuiRenderer::handleDrag(int x, int y) {
             for (auto* child : c->children) if (pan(child)) return true;
             return false;
         };
-        for (auto* d : dialogStack) if (pan(d)) return true;
+        for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it)
+            if (pan(*it)) return true;
         if (pan(canvas)) return true;
     }
     // Find any control that is being dragged
@@ -4963,7 +5033,8 @@ bool GuiRenderer::handleDrag(int x, int y) {
         for (auto* c : ctl->children) if (findDrag(c)) return true;
         return false;
     };
-    for (auto* d : dialogStack) if (findDrag(d)) return true;
+    for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it)
+        if (findDrag(*it)) return true;
     return findDrag(canvas);
 }
 
@@ -5000,7 +5071,7 @@ void GuiRenderer::handleKeyboard() {
     auto& input = Engine::instance().platform().input();
     static bool prevBS = false, prevEnter = false, prevEsc = false;
     static bool prevLeft = false, prevRight = false, prevHome = false, prevEnd = false, prevDelete = false;
-    static bool prevListUp = false, prevListDown = false;
+    static bool prevListUp = false, prevListDown = false, prevTab = false;
     // Per-key previous-state tracking for the GuiInputCtrl capture below.
     // Mirroring the engine's ESC/~ edge handling (keysDown + prevX) works even
     // when the nested script event pump clears keyPressQueue in between frames
@@ -5046,6 +5117,7 @@ void GuiRenderer::handleKeyboard() {
         prevGotKey = gotKey;
         // Snapshot this frame's state for edge detection next frame.
         for (int s = 0; s < 512; ++s) prevAnyKey[s] = input.keysDown[s];
+        prevTab = input.keysDown[SCANCODE_TAB];
         return;
     }
     // Not capturing: keep prevAnyKey in sync so a later capture doesn't treat
@@ -5053,6 +5125,28 @@ void GuiRenderer::handleKeyboard() {
     if (!prevGotKey)
         for (int s = 0; s < 512; ++s) prevAnyKey[s] = input.keysDown[s];
     prevGotKey = false;
+
+    // Stock shell dialogs use Tab to move through edit fields. Traverse only
+    // controls owned by the active dialog, never controls hidden behind it.
+    if (input.keysDown[SCANCODE_TAB] && !prevTab) {
+        std::vector<GuiControl*> focusables;
+        std::function<void(GuiControl*)> collect = [&](GuiControl* c) {
+            if (!c || !c->visible || !c->active) return;
+            if (c->className == "GuiTextEditCtrl") focusables.push_back(c);
+            for (auto* child : c->children) collect(child);
+        };
+        collect(dialogStack.empty() ? canvas : dialogStack.back());
+        if (!focusables.empty()) {
+            std::size_t current = focusables.size();
+            for (std::size_t i = 0; i < focusables.size(); ++i)
+                if (focusables[i] == focusedCtrl) { current = i; break; }
+            const bool backwards = input.keysDown[SCANCODE_LSHIFT] ||
+                                   input.keysDown[SCANCODE_RSHIFT];
+            makeFirstResponder(focusables[nextGuiFocus(current, focusables.size(), backwards)]->name, true);
+        }
+        input.consumedSc[SCANCODE_TAB] = true;
+        input.keyPressQueue.clear();
+    }
 
     // T2: Enter on a focused text control fires its altCommand/command/onClick
     if (focusedCtrl) {
@@ -5210,6 +5304,7 @@ void GuiRenderer::handleKeyboard() {
     prevDelete = input.keysDown[SCANCODE_DELETE];
     prevListUp = input.keysDown[SCANCODE_UP];
     prevListDown = input.keysDown[SCANCODE_DOWN];
+    prevTab = input.keysDown[SCANCODE_TAB];
 }
 
 // Create a GuiControl from a ScriptObject (and recursively create children)
@@ -5331,10 +5426,16 @@ void GuiRenderer::pushDialog(const std::string& name) {
                 else
                     ++it;
             }
+            focusBeforeDialog[ctl] = focusedCtrl;
             ctl->visible = true;
             ctl->isBaseDialog = inBaseDialogPush;
             if (!ctl->name.empty()) lastPushed[ctl->name] = ctl;
             dialogStack.push_back(ctl);
+            // A pushed GUI owns the pointer while gameplay is running.
+            if (Engine::instance().game().state() == Game::Playing) {
+                Engine::instance().platform().setRelativeMouse(false);
+                Engine::instance().platform().showMouse(true);
+            }
         callOnAddOnce(ctl);
             // Trigger onWake so script functions can populate menus, etc.
             if (auto* ts = Engine::instance().script().ts()) {
@@ -5372,21 +5473,20 @@ void GuiRenderer::popDialog(const std::string& name) {
     // Remove every stacked instance of the named dialog — duplicates can
     // exist when a .gui is parsed into multiple control objects; leaving any
     // behind keeps its background (dim layer) rendering over the screen.
-    bool slept = false;
     for (auto it = dialogStack.begin(); it != dialogStack.end();) {
         if ((*it)->name == name || name.empty()) {
-            // Fire onSleep once before removal — mirrors the native T2 dialog lifecycle.
-            if (!slept) {
-                slept = true;
-                if (auto* ts = Engine::instance().script().ts()) {
-                    const std::string sleepingName = (*it)->name;
-                    if (ts->hasFunction(sleepingName + "::onSleep")) {
-                        Console::instance().printf(LogLevel::Debug,
-                            "GUI: popDialog calling onSleep '%s'", sleepingName.c_str());
-                        ts->callFunction(sleepingName + "::onSleep", {VMValue(sleepingName)});
-                    }
+            GuiControl* removed = *it;
+            GuiControl* restore = focusBeforeDialog[removed];
+            // Children sleep before their parent, matching Torque's tree teardown.
+            callGuiChildLifecycle(removed, "::onSleep");
+            // Fire the root callback after its children have released state.
+            if (auto* ts = Engine::instance().script().ts()) {
+                const std::string sleepingName = removed->name;
+                if (ts->hasFunction(sleepingName + "::onSleep")) {
+                    Console::instance().printf(LogLevel::Debug,
+                        "GUI: popDialog calling onSleep '%s'", sleepingName.c_str());
+                    ts->callFunction(sleepingName + "::onSleep", {VMValue(sleepingName)});
                 }
-                callGuiChildLifecycle(*it, "::onSleep");
             }
             // Drop keyboard focus if it lived inside the removed subtree —
             // a stale focusedCtrl would keep firing its command on Enter.
@@ -5404,6 +5504,18 @@ void GuiRenderer::popDialog(const std::string& name) {
                 if (p == *it) selectedList = nullptr;
             }
             it = dialogStack.erase(it);
+            focusBeforeDialog.erase(removed);
+            if (restore) {
+                bool stillReachable = restore == canvas;
+                for (GuiControl* current = restore; !stillReachable && current; current = current->parent)
+                    stillReachable = std::find(dialogStack.begin(), dialogStack.end(), current) != dialogStack.end();
+                if (stillReachable) makeFirstResponder(restore->name, true);
+            }
+            if (dialogStack.size() <= 2 &&
+                Engine::instance().game().state() == Game::Playing) {
+                Engine::instance().platform().setRelativeMouse(true);
+                Engine::instance().platform().showMouse(false);
+            }
         } else {
             ++it;
         }
@@ -5414,9 +5526,10 @@ void GuiRenderer::popDialog(const std::string& name) {
 
 void GuiRenderer::clearDialogs() {
     const auto dialogs = dialogStack;
-    if (auto* ts = Engine::instance().script().ts()) {
-        for (auto it = dialogs.rbegin(); it != dialogs.rend(); ++it) {
-            if (!*it) continue;
+    for (auto it = dialogs.rbegin(); it != dialogs.rend(); ++it) {
+        if (!*it) continue;
+        callGuiChildLifecycle(*it, "::onSleep");
+        if (auto* ts = Engine::instance().script().ts()) {
             const std::string callback = (*it)->name + "::onSleep";
             if (ts->hasFunction(callback))
                 ts->callFunction(callback, {VMValue((*it)->name)});
@@ -5426,15 +5539,41 @@ void GuiRenderer::clearDialogs() {
     focusedCtrl = nullptr;
     pressedCtrl = nullptr;
     selectedList = nullptr;
+    std::function<void(GuiControl*)> clearDrag = [&](GuiControl* ctl) {
+        if (!ctl) return;
+        ctl->sliderDragging = false;
+        ctl->windowDragging = false;
+        ctl->modelRotating = false;
+        ctl->modelZooming = false;
+        ctl->commanderMapDragging = false;
+        ctl->commanderMapLastX = ctl->commanderMapLastY = -1;
+        ctl->vThumbDragging = false;
+        ctl->hThumbDragging = false;
+        ctl->lastDragX = ctl->lastDragY = -1;
+        ctl->menuOpen = false;
+        for (auto* child : ctl->children) clearDrag(child);
+    };
+    for (auto* dialog : dialogs) clearDrag(dialog);
+    clearDrag(canvas);
     Engine::instance().platform().stopTextInput();
+    // Dialog teardown is also used by disconnect and mission transitions. Do
+    // not leave relative input or a hidden pointer behind for the next menu.
+    Engine::instance().platform().setRelativeMouse(false);
+    Engine::instance().platform().showMouse(true);
     dialogStack.clear();
     lastPushed.clear();
+    focusBeforeDialog.clear();
     s_openPopups.clear();
 }
 
 bool GuiRenderer::makeFirstResponder(const std::string& name, bool focus) {
     GuiControl* ctl = findControl(name);
     if (!ctl) return false;
+    if (focus) {
+        for (GuiControl* current = ctl; current; current = current->parent) {
+            if (!current->visible || !current->active) return false;
+        }
+    }
     if (!focus) {
         if (focusedCtrl == ctl) {
             if (auto* ts = Engine::instance().script().ts()) {
@@ -5452,7 +5591,8 @@ bool GuiRenderer::makeFirstResponder(const std::string& name, bool focus) {
             if (ts->hasFunction(callback)) ts->callFunction(callback, {VMValue(focusedCtrl->name)});
         }
     }
-    if (focusedCtrl != ctl) Engine::instance().platform().startTextInput();
+    if (focusedCtrl != ctl && ctl->className == "GuiTextEditCtrl")
+        Engine::instance().platform().startTextInput();
     focusedCtrl = ctl;
     focusedCtrl->cursorPos = (int)focusedCtrl->text.size();
     if (auto* ts = Engine::instance().script().ts()) {
@@ -5483,15 +5623,28 @@ void GuiRenderer::setContent(const std::string& name) {
     // Fire onSleep on the current content before swapping panels, mirroring
     // the T2 lifecycle where each panel manages its own pushed dialogs.
     if (!dialogStack.empty() && dialogStack.front() != canvas) {
-        std::string oldName = dialogStack.front()->name;
+        GuiControl* oldContent = dialogStack.front();
+        std::string oldName = oldContent->name;
+        auto ownsFocused = [&](GuiControl* root) {
+            for (GuiControl* current = focusedCtrl; current; current = current->parent)
+                if (current == root) return true;
+            return false;
+        };
+        if (focusedCtrl && ownsFocused(oldContent))
+            makeFirstResponder(focusedCtrl->name, false);
         if (auto* ts = Engine::instance().script().ts()) {
             if (ts->hasFunction(oldName + "::onSleep")) {
+                callGuiChildLifecycle(oldContent, "::onSleep");
                 ts->callFunction(oldName + "::onSleep", {VMValue(oldName)});
-                if (!dialogStack.empty() && dialogStack.front()->name == oldName)
+                if (!dialogStack.empty() && dialogStack.front() == oldContent)
                     dialogStack.front() = ctl;
             } else {
+                callGuiChildLifecycle(oldContent, "::onSleep");
                 dialogStack.front() = ctl;
             }
+        } else {
+            callGuiChildLifecycle(oldContent, "::onSleep");
+            dialogStack.front() = ctl;
         }
     } else if (!dialogStack.empty()) {
         dialogStack.front() = ctl;
@@ -5512,18 +5665,46 @@ void GuiRenderer::setContent(const std::string& name) {
 void GuiRenderer::setContentImmediate(const std::string& name) {
     GuiControl* ctl = soToGui(name, nullptr);
     if (!ctl) return;
+    const auto oldDialogs = dialogStack;
+    if (auto* ts = Engine::instance().script().ts()) {
+        for (auto it = oldDialogs.rbegin(); it != oldDialogs.rend(); ++it) {
+            if (!*it || *it == canvas) continue;
+            const std::string callback = (*it)->name + "::onSleep";
+            callGuiChildLifecycle(*it, "::onSleep");
+            if (ts->hasFunction(callback))
+                ts->callFunction(callback, {VMValue((*it)->name)});
+        }
+    }
+    if (focusedCtrl) makeFirstResponder(focusedCtrl->name, false);
+    std::function<void(GuiControl*)> clearDrag = [&](GuiControl* current) {
+        if (!current) return;
+        current->sliderDragging = current->windowDragging = false;
+        current->modelRotating = current->modelZooming = false;
+        current->commanderMapDragging = false;
+        current->commanderMapLastX = current->commanderMapLastY = -1;
+        current->vThumbDragging = current->hThumbDragging = false;
+        current->lastDragX = current->lastDragY = -1;
+        for (auto* child : current->children) clearDrag(child);
+    };
+    for (auto* dialog : oldDialogs) clearDrag(dialog);
+    clearDrag(canvas);
+            if (ctl->className == "GuiTextEditCtrl")
+                Engine::instance().platform().stopTextInput();
+    Engine::instance().platform().setRelativeMouse(false);
+    Engine::instance().platform().showMouse(true);
     dialogStack.clear();
     focusedCtrl = nullptr;
     pressedCtrl = nullptr;
     selectedList = nullptr;
+    focusBeforeDialog.clear();
     dialogStack.push_back(ctl);
     lastPushed[ctl->name] = ctl;
     callOnAddOnce(ctl);
-    callGuiChildLifecycle(ctl, "::onWake");
     if (auto* ts = Engine::instance().script().ts()) {
         if (ts->hasFunction(name + "::onWake"))
             ts->callFunction(name + "::onWake", {VMValue(name)});
     }
+    callGuiChildLifecycle(ctl, "::onWake");
 }
 
 bool GuiRenderer::isDialogActive(const std::string& name) {

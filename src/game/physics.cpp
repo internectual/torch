@@ -1,5 +1,6 @@
 #include "game/physics.h"
 #include "game/game.h"
+#include "game/movement.h"
 #include "core/engine.h"
 #include <cmath>
 
@@ -13,75 +14,43 @@ void Physics::update(Player* player, float dt, const Game::InputMove& input) {
     Point3F rot = player->rotation();
     Point3F vel = player->velocity();
 
-    // Apply input acceleration
-    float speed = 10.0f;
     float yaw = rot.z;
-    float sinYaw = std::sin(yaw);
-    float cosYaw = std::cos(yaw);
-    Point3F moveDir{0,0,0};
-
-    if (input.forward)  { moveDir.x += sinYaw * speed; moveDir.z += cosYaw * speed; }
-    if (input.backward) { moveDir.x -= sinYaw * speed; moveDir.z -= cosYaw * speed; }
-    if (input.left)     { moveDir.x += cosYaw * speed; moveDir.z -= sinYaw * speed; }
-    if (input.right)    { moveDir.x -= cosYaw * speed; moveDir.z += sinYaw * speed; }
-
-    // Apply movement (clamp smoothing so a long frame can't overshoot)
-    float smooth = dt * 10.0f; if (smooth > 1.0f) smooth = 1.0f;
-    vel.x += (moveDir.x - vel.x) * smooth;
-    vel.z += (moveDir.z - vel.z) * smooth;
-
-    // Ground detection with interior collision
-    float groundHeight = Engine::instance().game().world().getHeight(pos.x, pos.z);
-    bool onGround = pos.y <= groundHeight + 0.1f;
-
-    if (input.jump && onGround) {
-        vel.y = 8.0f;
-        onGround = false;
-    }
-
-    // Jet
-    float energy = player->energy();
-    float heat = player->heat();
-    if (input.jet && energy > 0) {
-        vel.y += 12.0f * dt;
-        energy -= 25.0f * dt;
-        if (energy < 0) energy = 0;
-        heat += 45.0f * dt;
-    } else {
-        energy += 15.0f * dt;
-        if (energy > 100) energy = 100;
-        heat -= 25.0f * dt;
-    }
-    heat = Math::clamp(heat, 0.0f, 100.0f);
-
-    // Gravity
-    if (!onGround) {
-        vel.y += gravity * dt;
-        // Frame-rate-independent friction (normalized to 60 Hz)
-        vel.x *= std::pow(airFriction, dt * 60.0f);
-        vel.z *= std::pow(airFriction, dt * 60.0f);
-    } else {
-        vel.x *= std::pow(friction, dt * 60.0f);
-        vel.z *= std::pow(friction, dt * 60.0f);
-    }
-
-    // Update position
-    pos.x += vel.x * dt;
-    pos.y += vel.y * dt;
-    pos.z += vel.z * dt;
+    float groundHeight = Engine::instance().game().world().getFloorHeight(pos.x, pos.y, pos.z);
+    MovementState state{pos, vel, player->energy(), player->isOnGround(), player->jumpWasDown()};
+    MovementInput movement;
+    movement.forward = (input.forward ? 1.0f : 0.0f) - (input.backward ? 1.0f : 0.0f);
+    movement.strafe = (input.right ? 1.0f : 0.0f) - (input.left ? 1.0f : 0.0f);
+    movement.jump = input.jump; movement.jet = input.jet; movement.yaw = yaw;
+    const auto zone = Engine::instance().game().world().physicalZoneEffect(pos);
+    MovementEnvironment environment{groundHeight, {0, 1, 0},
+                                    Engine::instance().game().world().isUnderwater(pos),
+                                    zone.velocityMod, zone.gravityMod, zone.appliedForce,
+                                    Engine::instance().game().getGravity()};
+    Movement::step(state, movement, environment, dt);
+    player->setJumpWasDown(state.jumpWasDown);
+    pos = state.position; vel = state.velocity;
+    bool onGround = state.onGround;
+    float energy = state.energy;
+    float heat = Math::clamp(player->heat() + (input.jet ? 45.0f : -25.0f) * dt, 0.0f, 100.0f);
 
     // Resolve interior collision (push player out of walls/floors)
-    resolveCollision(player, pos, dt);
+    resolveCollision(player, pos, vel, dt);
 
-    // Re-check ground after collision resolve
-    groundHeight = Engine::instance().game().world().getHeight(pos.x, pos.z);
-
-    // Ground clamp
-    if (pos.y < groundHeight) {
-        pos.y = groundHeight;
-        vel.y = 0;
-        onGround = true;
+    // Re-check ground after collision resolve. Do not snap to a ceiling or to
+    // an unwalkable slope; the contact normal determines grounded state.
+    groundHeight = Engine::instance().game().world().getFloorHeight(pos.x, pos.y, pos.z);
+    Point3F floorNormal{0, 1, 0};
+    float floorT = 0.0f;
+    Point3F floorPoint{};
+    const auto& collision = Engine::instance().game().world().collision();
+    if (collision.loaded && collision.raycast({pos.x, pos.y + 0.2f, pos.z},
+                                               {0, -1, 0}, 0.4f, floorT,
+                                               floorPoint, floorNormal)) {
+        groundHeight = floorPoint.y;
     }
+    if (pos.y < groundHeight) { pos.y = groundHeight; if (vel.y < 0) vel.y = 0; }
+    onGround = pos.y <= groundHeight + 0.1f && floorNormal.y >= 0.55f;
+    if (onGround) Movement::projectOnPlane(vel, floorNormal);
 
     // Update rotation from look input
     rot.x -= input.lookDelta.x;
@@ -96,7 +65,7 @@ void Physics::update(Player* player, float dt, const Game::InputMove& input) {
     player->setOnGround(onGround);
 }
 
-void Physics::resolveCollision(Player* player, Point3F& pos, float dt) {
+void Physics::resolveCollision(Player* player, Point3F& pos, Point3F& vel, float dt) {
     auto& world = Engine::instance().game().world();
     auto& collision = world.collision();
     if (!collision.loaded) return;
@@ -112,21 +81,48 @@ void Physics::resolveCollision(Player* player, Point3F& pos, float dt) {
         pos.x += pushOut.x;
         pos.y += pushOut.y;
         pos.z += pushOut.z;
+        const float length = std::sqrt(pushOut.x * pushOut.x + pushOut.y * pushOut.y + pushOut.z * pushOut.z);
+        if (length > 0.0001f) {
+            const Point3F normal{pushOut.x / length, pushOut.y / length, pushOut.z / length};
+            const float intoWall = vel.x * normal.x + vel.y * normal.y + vel.z * normal.z;
+            if (intoWall < 0.0f) {
+                vel.x -= normal.x * intoWall;
+                vel.y -= normal.y * intoWall;
+                vel.z -= normal.z * intoWall;
+            }
+        }
     }
 }
 
 Physics::RayCastResult Physics::rayCast(const Point3F& origin, const Point3F& dir, float maxDist) {
     RayCastResult result;
+    const float length = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+    if (length <= 0.0001f || maxDist <= 0.0f) return result;
+    const Point3F normalized{dir.x / length, dir.y / length, dir.z / length};
+
+    const auto& collision = Engine::instance().game().world().collision();
+    if (collision.loaded) {
+        float hitDistance = 0.0f;
+        Point3F hitPoint{}, hitNormal{};
+        if (collision.raycast(origin, normalized, maxDist, hitDistance, hitPoint, hitNormal)) {
+            result.hit = true;
+            result.point = hitPoint;
+            result.normal = hitNormal;
+            result.distance = hitDistance;
+        }
+    }
 
     // Simple ground test
-    float h = Engine::instance().game().world().getHeight(origin.x, origin.z);
-    if (origin.y > h && dir.y < 0) {
-        float t = (origin.y - h) / (-dir.y);
+    float h = Engine::instance().game().world().getFloorHeight(origin.x, origin.y, origin.z);
+    if (origin.y > h && normalized.y < 0) {
+        float t = (origin.y - h) / (-normalized.y);
         if (t >= 0 && t <= maxDist) {
-            result.hit = true;
-            result.point = {origin.x + dir.x * t, h, origin.z + dir.z * t};
-            result.normal = {0, 1, 0};
-            result.distance = t;
+            if (!result.hit || t < result.distance) {
+                result.hit = true;
+                result.point = {origin.x + normalized.x * t, h, origin.z + normalized.z * t};
+                result.normal = {0, 1, 0};
+                result.distance = t;
+            }
         }
     }
 

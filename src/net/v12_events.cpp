@@ -41,7 +41,8 @@ void writeEventHeader(V12BitWriter& writer, bool guaranteedPhase,
 }
 
 bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
-                      std::vector<ServerEvent>& events) {
+                      std::vector<ServerEvent>& events,
+                      const V12Vec3& compressionPoint) {
     bool guaranteedPhase = false;
     int previousSequence = -1;
     bool more = stream.readFlag();
@@ -109,17 +110,25 @@ bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
         } else if (header.classId == 6) {
             stream.readPoint3F();
             stream.readPoint3F();
-        } else if (header.classId == 12) {
-            stream.readUnsigned(4);
-            stream.readUnsigned(32);
         } else if (header.classId == 13) {
             event.hasMissionCrc = true;
             event.missionCrc = stream.readU32();
-        } else if (header.classId == 17 || header.classId == 18) {
-            stream.readRange(0, 1024);
-        } else if (header.classId == 20) {
-            stream.readRange(0, 1024);
+        } else if (header.classId == 12) {
+            event.hasSensorGroupColor = true;
+            event.sensorColorGroup = (uint8_t)stream.readUnsigned(5);
+            event.sensorColorUpdateMask = stream.readU32();
+            for (size_t i = 0; i < event.sensorColors.size(); ++i) {
+                if ((event.sensorColorUpdateMask & (1u << i)) == 0) continue;
+                if (stream.readFlag()) event.sensorColors[i] = stream.readU32();
+            }
+        } else if (header.classId == 14) {
             stream.readRange(0, 1023);
+            stream.readRange(0, 8);
+        } else if (header.classId == 16) {
+            if (stream.readFlag()) stream.readUnsigned(9);
+            stream.readF32();
+            stream.readF32();
+            stream.readF32();
         } else if (header.classId == 19) {
             event.datablockProcess = stream.readFlag();
             if (!event.datablockProcess) {
@@ -136,6 +145,9 @@ bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
             event.datablockClass = (uint8_t)stream.readUnsigned(7);
             event.datablockIndex = (uint16_t)stream.readUnsigned(11);
             event.datablockTotal = (uint16_t)stream.readUnsigned(12);
+            if (stream.failed() || event.datablockTotal == 0 ||
+                event.datablockIndex >= event.datablockTotal)
+                return false;
             if (const char* name = dataBlockClassName(event.datablockClass))
                 event.datablockClassName = name;
             if (!V12::readDataBlockPayload(stream, event.datablockClass,
@@ -162,28 +174,60 @@ bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
             readTag(event.targetInfo.hasSkinPreference, event.targetInfo.skinPreference);
             readTag(event.targetInfo.hasVoice, event.targetInfo.voice);
             readTag(event.targetInfo.hasType, event.targetInfo.type);
-            if (stream.readFlag())
+            if (stream.readFlag()) {
+                event.targetInfo.hasSensorGroup = true;
                 event.targetInfo.sensorGroup = (int)stream.readUnsigned(5);
-            if (stream.readFlag())
+            }
+            if (stream.readFlag()) {
+                event.targetInfo.hasDataBlockId = true;
                 event.targetInfo.dataBlockId = stream.readFlag()
                     ? (int)stream.readUnsigned(11) : -2;
-            if (stream.readFlag())
+            }
+            if (stream.readFlag()) {
+                event.targetInfo.hasRenderFlags = true;
                 event.targetInfo.renderFlags = (int)stream.readUnsigned(9);
-            if (stream.readFlag())
+            }
+            if (stream.readFlag()) {
+                event.targetInfo.hasVoicePitch = true;
                 event.targetInfo.voicePitch = stream.readFloat(7) * 1.5f + 0.5f;
-        } else if (header.classId == 25) {
-            if (stream.readFlag()) {
-                stream.readUnsigned(9);
             }
-            if (stream.readFlag()) {
-                stream.readF32();
-                stream.readF32();
-                stream.readF32();
+        } else if (header.classId == 17 || header.classId == 18) {
+            event.hasAudio = true;
+            event.audioProfileId = (int)stream.readUnsigned(11);
+            if (header.classId == 18 && stream.readFlag()) {
+                stream.readFloat(8);
+                stream.readFloat(8);
+                stream.readFloat(8);
+                stream.readFlag();
             }
-            stream.readFlag();
+            if (header.classId == 18) {
+                event.audioPosition = stream.readCompressedPoint(compressionPoint, 0.5f);
+                event.audioHasPosition = true;
+            }
+        } else if (header.classId == 20) {
+            event.hasAudio = true;
+            event.audioTargetId = (uint16_t)stream.readUnsigned(9);
+            stream.readUnsigned(12); // file tag
+            event.audioProfileId = (int)stream.readRange(3, 1026);
+            if (stream.readFlag()) {
+                event.audioPosition = stream.readCompressedPoint(compressionPoint, 0.5f);
+                event.audioHasPosition = true;
+            }
+            stream.readFlag(); // update sound
         } else if (header.classId == 15) {
             event.hasSensorGroup = true;
             event.sensorGroup = (uint8_t)stream.readUnsigned(5);
+        } else if (header.classId == 25) {
+            event.hasTargetTo = true;
+            if (stream.readFlag()) {
+                event.targetToHasTarget = true;
+                event.targetToId = (uint16_t)stream.readUnsigned(9);
+            }
+            if (stream.readFlag()) {
+                event.targetToHasPosition = true;
+                event.targetToPosition = {stream.readF32(), stream.readF32(), stream.readF32()};
+            }
+            event.targetToAssign = stream.readFlag();
         } else {
             // Unknown event payload lengths are class-specific; do not guess
             // and desynchronize the following event list.
@@ -211,11 +255,11 @@ bool readServerPacketEvents(V12BitStream& stream, NetStringTable& strings,
     if (stream.readFlag()) {
         if (stream.readFlag()) {
             const float value = stream.readFloat(7);
-            if (state) state->damageFlash = value;
+            if (state) { state->damageFlash = value; state->hasDamageFlash = true; }
         }
         if (stream.readFlag()) {
             const float value = stream.readFloat(7) * 1.5f;
-            if (state) state->whiteOut = value;
+            if (state) { state->whiteOut = value; state->hasWhiteOut = true; }
         }
     }
     if (stream.readFlag()) {
@@ -258,8 +302,9 @@ bool readServerPacketEvents(V12BitStream& stream, NetStringTable& strings,
         }
     }
     while (stream.readFlag()) {
-        stream.readUnsigned(4);
-        stream.readUnsigned(32);
+        const int group = (int)stream.readUnsigned(4);
+        const uint32_t mask = stream.readU32();
+        if (state) state->sensorGroupListenMasks[group] = mask;
     }
     if (stream.readFlag()) {
         const uint8_t fov = (uint8_t)stream.readUnsigned(8);
@@ -269,7 +314,8 @@ bool readServerPacketEvents(V12BitStream& stream, NetStringTable& strings,
         }
     }
     if (stream.failed()) return false;
-    const bool result = readServerEvents(stream, strings, events);
+    const bool result = readServerEvents(stream, strings, events,
+                                         compressionPoint ? *compressionPoint : V12Vec3{});
     if (eventsEnd) *eventsEnd = stream.position();
     return result;
 }

@@ -37,6 +37,7 @@ struct TorqueScript::Impl {
     std::unordered_map<std::string, TSFunc> functions;
     std::unordered_map<std::string, VMValue> globals;
     std::unordered_map<std::string, std::vector<std::string>> messageCallbacks;
+    ScriptScheduler scheduler;
     TSLocals locals;
     bool initializing = false;
 
@@ -230,7 +231,7 @@ TorqueScript::TorqueScript() : impl(new Impl) { impl->outer = this; }
 TorqueScript::~TorqueScript() { delete impl; }
 
 void TorqueScript::init() {}
-void TorqueScript::shutdown() {}
+void TorqueScript::shutdown() { impl->scheduler.clear(); }
 
 // Stock TorqueScript flattens indexed globals: $pref::Player[2] and
 // $pref::Player2 are THE SAME variable. Old exported prefs files use the
@@ -2478,6 +2479,30 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
     return result;
 }
 
+int TorqueScript::scheduleEvent(double now, double delay, const std::string& object,
+                                const std::string& command, const std::vector<VMValue>& args) {
+    std::vector<std::string> values;
+    for (const auto& arg : args) values.push_back(arg.toString());
+    return impl->scheduler.schedule(now, delay, object, command, std::move(values));
+}
+bool TorqueScript::cancelEvent(int id) { return impl->scheduler.cancel(id); }
+size_t TorqueScript::cancelEventsForObject(const std::string& object) {
+    return impl->scheduler.cancelForObject(object);
+}
+bool TorqueScript::isEventPending(int id) const { return impl->scheduler.pending(id); }
+size_t TorqueScript::processScheduledEvents(double now) {
+    return impl->scheduler.advance(now, [this](const ScriptScheduler::Event& event) {
+        if (hasFunction(event.command)) {
+            std::vector<VMValue> args;
+            for (const auto& value : event.args) args.emplace_back(value);
+            callFunction(event.command, args);
+        } else {
+            execute(event.command, "schedule");
+        }
+    });
+}
+void TorqueScript::clearScheduledEvents() { impl->scheduler.clear(); }
+
 void TorqueScript::registerMessageCallback(const std::string& messageType,
                                            const std::string& functionName) {
     if (messageType.empty() || functionName.empty()) return;
@@ -2506,4 +2531,39 @@ void TorqueScript::dispatchMessageCallback(const std::string& messageType,
     for (const auto& functionName : callbacks) {
         if (hasFunction(functionName)) callFunction(functionName, args);
     }
+}
+
+bool TorqueScript::dispatchPrefixedFunction(const std::string& prefix,
+                                             const std::vector<std::string>& words) {
+    if (words.empty()) return false;
+    std::string wanted = prefix + words.front();
+    std::string lower = wanted;
+    for (char& c : lower) c = (char)tolower((unsigned char)c);
+    std::vector<VMValue> values;
+    values.reserve(words.size() - 1);
+    for (size_t i = 1; i < words.size(); ++i) values.emplace_back(words[i]);
+    for (const auto& [name, function] : impl->functions) {
+        std::string candidate = name;
+        for (char& c : candidate) c = (char)tolower((unsigned char)c);
+        if (candidate == lower) {
+            callFunction(name, values);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TorqueScript::dispatchClientCommand(const std::vector<std::string>& args) {
+    return dispatchPrefixedFunction("clientCmd", args);
+}
+
+bool TorqueScript::dispatchServerCommand(const std::vector<std::string>& args) {
+    return dispatchPrefixedFunction("serverCmd", args);
+}
+
+bool TorqueScript::dispatchMissionCallback(const std::string& name,
+                                           const std::vector<VMValue>& args) {
+    if (!hasFunction(name)) return false;
+    callFunction(name, args);
+    return true;
 }

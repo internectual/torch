@@ -54,6 +54,8 @@ uniform sampler2D uLightmap;
 uniform sampler2D uEnvMap;
 uniform bool uUseTexture;
 uniform bool uUseLightmap = false;
+uniform bool uInterior = false;
+uniform bool uInteriorOutsideVisible = false;
 uniform bool uUseEnvMap = false;
 uniform bool uSelfIlluminated = false;
 uniform vec3 uLightDir = vec3(0.5, 0.8, 0.6);
@@ -61,10 +63,19 @@ uniform vec3 uSunColor = vec3(1.0);
 uniform vec3 uAmbient = vec3(0.3);
 uniform vec3 uCamPos = vec3(0);
 uniform vec4 uTint = vec4(1.0);
+uniform int uPointLightCount = 0;
+uniform vec3 uPointLightPos[8];
+uniform vec3 uPointLightColor[8];
+uniform vec3 uPointLightParams[8]; // radius, falloff, unused
 
 uniform bool uFogEnabled = false;
 uniform vec3 uFogColor = vec3(0.75, 0.8, 0.85);
 uniform float uFogDensity = 0.01;
+uniform float uFogStart = -1.0;
+uniform float uFogEnd = -1.0;
+uniform vec4 uFogVolume0 = vec4(0.0);
+uniform vec4 uFogVolume1 = vec4(0.0);
+uniform vec4 uFogVolume2 = vec4(0.0);
 uniform float uScreenDoor = 0.0;
 
 uniform sampler2DShadow uShadowMap;
@@ -74,6 +85,8 @@ uniform float uShadowStrength = 0.5;
 uniform float uMetallic = 0.0;
 uniform float uRoughness = 0.5;
 uniform bool uAlphaTest = false;
+uniform float uAlphaTestThreshold = 0.0001;
+uniform float uReflectionAmount = 0.0;
 uniform bool uDebugInterior = false;
 uniform bool uDebugLightmap = false;
 uniform bool uDebugTex = false;
@@ -82,6 +95,33 @@ uniform bool uDebugTexOnly = false;
 uniform bool uDebugLightmapContent = false;
 
 out vec4 FragColor;
+
+float authoredVolumeFog(vec3 point) {
+    float result = 0.0;
+    vec4 volumes[3] = vec4[3](uFogVolume0, uFogVolume1, uFogVolume2);
+    for (int i = 0; i < 3; ++i) {
+        vec4 volume = volumes[i];
+        if (volume.x <= 0.0 || volume.z <= volume.y) continue;
+        float low = max(min(uCamPos.y, point.y), volume.y);
+        float high = min(max(uCamPos.y, point.y), volume.z);
+        float vertical = high - low;
+        float distance = length(point - uCamPos);
+        if (vertical > 0.0 && abs(point.y - uCamPos.y) > 0.0001)
+            result += distance * vertical / abs(point.y - uCamPos.y) * volume.x;
+        else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z)
+            result += distance * volume.x;
+    }
+    return min(result, 1.0);
+}
+
+vec3 applyAuthoredFog(vec3 color, float distance) {
+    float haze = 0.0;
+    if (uFogStart >= 0.0 && uFogEnd > uFogStart)
+        haze = clamp((distance - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
+    float volume = authoredVolumeFog(vWorldPos);
+    float factor = volume + min(haze, 1.0 - volume);
+    return mix(color, uFogColor, factor);
+}
 
 float shadowPCF(vec4 shadowCoord) {
     vec3 sc = shadowCoord.xyz / shadowCoord.w;
@@ -142,7 +182,7 @@ void main() {
     }
     if (uSelfIlluminated) {
         FragColor = vec4(col.rgb, col.a);
-    } else if (uUseLightmap) {
+    } else if (uInterior) {
         // Torque interior (.dif) formula — output = clamp(lighting * texture).
         // lighting = clamp(sceneLighting) + lightmap  (sceneLighting in gamma
         // space: sunColor*NdotL + ambient). Matches t2-mapper interiorMaterial.ts.
@@ -152,6 +192,15 @@ void main() {
 
         // Scene lighting, clamped to [0,1] BEFORE adding the lightmap
         vec3 sceneLighting = clamp(uSunColor * NdotL + uAmbient, 0.0, 1.0);
+        for (int i = 0; i < uPointLightCount; ++i) {
+            vec3 toLight = uPointLightPos[i] - vWorldPos;
+            float distance = length(toLight);
+            vec3 Lp = distance > 0.0001 ? toLight / distance : N;
+            float edge = clamp(1.0 - distance / uPointLightParams[i].x, 0.0, 1.0);
+            float attenuation = pow(edge, max(0.1, uPointLightParams[i].y));
+            sceneLighting += uPointLightColor[i] * max(dot(N, Lp), 0.0) * attenuation;
+        }
+        sceneLighting = clamp(sceneLighting, 0.0, 1.0);
 
         float shadowFactor = 1.0;
         if (uShadowStrength > 0.0) {
@@ -160,14 +209,14 @@ void main() {
         }
         sceneLighting *= shadowFactor;
 
-        vec3 lightmap = texture(uLightmap, vUV2).rgb;
-        vec3 lighting = clamp(sceneLighting + lightmap, 0.0, 1.0);
+        vec3 lighting = uInteriorOutsideVisible ? sceneLighting : vec3(0.0);
+        if (uUseLightmap)
+            lighting = clamp(lighting + texture(uLightmap, vUV2).rgb, 0.0, 1.0);
         vec3 lit = clamp(lighting * col.rgb, 0.0, 1.0);
 
         if (uFogEnabled) {
             float dist = length(vWorldPos - uCamPos);
-            float fogFactor = clamp(uFogDensity * dist, 0.0, 1.0);
-            lit = mix(lit, uFogColor, fogFactor);
+            lit = applyAuthoredFog(lit, dist);
         }
         FragColor = vec4(lit, col.a);
     } else {
@@ -208,23 +257,34 @@ void main() {
 
         vec3 specular = D * G * F / (4.0 * NdotV * NdotL + 0.0001);
 
-        vec3 lit = (diffuse + specular) * (1.0 + 1.0 * NdotL * shadowFactor);
+        vec3 dynamic = vec3(0.0);
+        for (int i = 0; i < uPointLightCount; ++i) {
+            vec3 toLight = uPointLightPos[i] - vWorldPos;
+            float distance = length(toLight);
+            vec3 Lp = distance > 0.0001 ? toLight / distance : N;
+            float edge = clamp(1.0 - distance / uPointLightParams[i].x, 0.0, 1.0);
+            float attenuation = pow(edge, max(0.1, uPointLightParams[i].y));
+            dynamic += uPointLightColor[i] * max(dot(N, Lp), 0.0) * attenuation;
+        }
+        vec3 lit = (diffuse + specular) * (1.0 + 1.0 * NdotL * shadowFactor) +
+                   col.rgb * dynamic * (1.0 - metallic);
         if (uUseEnvMap) {
             vec3 V = normalize(uCamPos - vWorldPos);
             vec3 R = reflect(-V, N);
             float m = 2.0 * sqrt(R.x*R.x + R.y*R.y + (R.z + 1.0)*(R.z + 1.0));
             vec2 envUV = vec2(R.x / m + 0.5, R.y / m + 0.5);
             vec4 env = texture(uEnvMap, envUV);
-            lit = mix(lit, env.rgb, 0.25);
+            float baseAlpha = uUseTexture ? texture(uTexture, vUV).a : 1.0;
+            float factor = clamp(baseAlpha * uReflectionAmount, 0.0, 1.0);
+            lit = mix(lit, env.rgb, factor);
         }
         if (uFogEnabled) {
             float dist = length(vWorldPos - uCamPos);
-            float fogFactor = clamp(uFogDensity * dist, 0.0, 1.0);
-            lit = mix(lit, uFogColor, fogFactor);
+            lit = applyAuthoredFog(lit, dist);
         }
         FragColor = vec4(lit, col.a);
     }
-    if (uAlphaTest && FragColor.a <= 0.0) discard;
+    if (uAlphaTest && FragColor.a < uAlphaTestThreshold) discard;
     // Screen-door transparency (dithered transparency for cloak effect)
     if (uScreenDoor > 0.01) {
         vec2 screenPos = gl_FragCoord.xy;
@@ -270,6 +330,7 @@ in vec3 vWorldPos;
 
 uniform sampler2D uSplatMap;
 uniform sampler2D uSplatMap2;
+uniform bool uUseSplatMap2 = false;
 uniform sampler2D uDetail0;
 uniform sampler2D uDetail1;
 uniform sampler2D uDetail2;
@@ -280,6 +341,8 @@ uniform sampler2D uLightmap;
 uniform bool uUseLightmap = false;
 uniform bool uUseVertexColor = false;
 uniform vec3 uLightDir = vec3(0.5, 0.8, 0.6);
+uniform vec3 uSunColor = vec3(1.0);
+uniform vec3 uAmbient = vec3(0.3);
 uniform float uDetailTiling = 32.0;
 uniform float uDetailTiling0 = 32.0;
 uniform float uDetailTiling1 = 32.0;
@@ -291,7 +354,16 @@ uniform float uDetailTiling5 = 32.0;
 uniform bool uFogEnabled = false;
 uniform vec3 uFogColor = vec3(0.75, 0.8, 0.85);
 uniform float uFogDensity = 0.01;
+uniform float uFogStart = -1.0;
+uniform float uFogEnd = -1.0;
+uniform vec4 uFogVolume0 = vec4(0.0);
+uniform vec4 uFogVolume1 = vec4(0.0);
+uniform vec4 uFogVolume2 = vec4(0.0);
 uniform vec3 uCamPos = vec3(0);
+uniform int uPointLightCount = 0;
+uniform vec3 uPointLightPos[8];
+uniform vec3 uPointLightColor[8];
+uniform vec3 uPointLightParams[8];
 
 uniform sampler2DShadow uShadowMap;
 uniform mat4 uShadowMatrix;
@@ -320,21 +392,20 @@ void main() {
     if (uUseVertexColor) {
         base = vColor;
     } else {
-        vec4 weights = texture(uSplatMap, vUV);
-        float total = weights.r + weights.g + weights.b + weights.a;
-        if (total > 0.0) weights /= total;
+        vec2 splatUv = vUV + vec2(0.5 / 256.0);
+        vec4 weights = texture(uSplatMap, splatUv);
         vec4 c0 = texture(uDetail0, vUV * uDetailTiling0);
         vec4 c1 = texture(uDetail1, vUV * uDetailTiling1);
         vec4 c2 = texture(uDetail2, vUV * uDetailTiling2);
         vec4 c3 = texture(uDetail3, vUV * uDetailTiling3);
         base = c0 * weights.r + c1 * weights.g + c2 * weights.b + c3 * weights.a;
         // Layers 4-5 via second splat map
-        vec4 weights2 = texture(uSplatMap2, vUV);
-        float total2 = weights2.r + weights2.g;
-        if (total2 > 0.0) weights2 /= total2;
         vec4 c4 = texture(uDetail4, vUV * uDetailTiling4);
         vec4 c5 = texture(uDetail5, vUV * uDetailTiling5);
-        base = base + c4 * weights2.r + c5 * weights2.g;
+        if (uUseSplatMap2) {
+            vec4 weights2 = texture(uSplatMap2, splatUv);
+            base = base + c4 * weights2.r + c5 * weights2.g;
+        }
         // Clamp the blended result back into range
         base = clamp(base, 0.0, 1.0);
     }
@@ -356,16 +427,42 @@ void main() {
     // to time-of-day and object shadows.
     vec3 lighting;
     if (uUseLightmap) {
-        vec4 lm = texture(uLightmap, vUV);
-        lighting = vec3(0.3 + 0.7 * lm.r) * vec3(0.6 + 0.4 * ndotl * shadowFactor);
+        vec4 lm = texture(uLightmap, vUV + vec2(0.5 / 512.0));
+        // The baked value already contains NdotL and self-shadowing. V12 adds
+        // its sun contribution to ambient rather than darkening ambient too.
+        lighting = uAmbient + lm.r * uSunColor * shadowFactor;
     } else {
-        lighting = vec3(0.3 + 0.7 * ndotl * shadowFactor);
+        lighting = uAmbient + uSunColor * ndotl * shadowFactor;
+    }
+    for (int i = 0; i < uPointLightCount; ++i) {
+        vec3 toLight = uPointLightPos[i] - vWorldPos;
+        float distance = length(toLight);
+        vec3 Lp = distance > 0.0001 ? toLight / distance : N;
+        float edge = clamp(1.0 - distance / uPointLightParams[i].x, 0.0, 1.0);
+        lighting += uPointLightColor[i] * max(dot(N, Lp), 0.0) *
+                    pow(edge, max(0.1, uPointLightParams[i].y));
     }
     vec3 lit = base.rgb * lighting;
     if (uFogEnabled) {
         float dist = length(vWorldPos - uCamPos);
-        float fogFactor = clamp(uFogDensity * dist, 0.0, 1.0);
-        lit = mix(lit, uFogColor, fogFactor);
+        vec4 volumes[3] = vec4[3](uFogVolume0, uFogVolume1, uFogVolume2);
+        float volumeFog = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            vec4 volume = volumes[i];
+            if (volume.x <= 0.0 || volume.z <= volume.y) continue;
+            float low = max(min(uCamPos.y, vWorldPos.y), volume.y);
+            float high = min(max(uCamPos.y, vWorldPos.y), volume.z);
+            float vertical = high - low;
+            if (vertical > 0.0 && abs(vWorldPos.y - uCamPos.y) > 0.0001)
+                volumeFog += dist * vertical / abs(vWorldPos.y - uCamPos.y) * volume.x;
+            else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z)
+                volumeFog += dist * volume.x;
+        }
+        float haze = uFogStart >= 0.0 && uFogEnd > uFogStart
+            ? clamp((dist - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0)
+            : clamp(uFogDensity * dist, 0.0, 1.0);
+        float volume = min(volumeFog, 1.0);
+        lit = mix(lit, uFogColor, volume + min(haze, 1.0 - volume));
     }
     FragColor = vec4(lit, 1.0);
 }
@@ -395,6 +492,9 @@ uniform samplerCube uSkybox;
 uniform bool uUseGradient = false;
 uniform vec3 uGradTop = vec3(0.3, 0.5, 0.8);
 uniform vec3 uGradBot = vec3(0.7, 0.8, 0.9);
+uniform vec3 uFogColor = vec3(0.5);
+uniform vec4 uFogBands = vec4(0.0, 60.0, 0.0, 0.0);
+uniform float uSkyRadius = 1.0;
 out vec4 FragColor;
 
 void main() {
@@ -405,6 +505,13 @@ void main() {
     } else {
         FragColor = texture(uSkybox, dir);
     }
+    float s = dir.y * uSkyRadius;
+    float fogAlpha = s <= uFogBands.x ? 1.0 :
+        (s <= uFogBands.y ? mix(1.0, uFogBands.z,
+            (s - uFogBands.x) / max(uFogBands.y - uFogBands.x, 0.001)) :
+         mix(uFogBands.z, uFogBands.w,
+            clamp((s - uFogBands.y) / max(uSkyRadius - uFogBands.y, 0.001), 0.0, 1.0)));
+    FragColor.rgb = mix(FragColor.rgb, uFogColor, fogAlpha);
 }
 )";
 
@@ -438,8 +545,8 @@ static const char* lineVert = R"(
 layout(location = 0) in vec3 aPos;
 uniform mat4 uProjection;
 uniform mat4 uView;
-uniform vec3 uColor;
-out vec3 vColor;
+uniform vec4 uColor;
+out vec4 vColor;
 
 void main() {
     gl_Position = uProjection * uView * vec4(aPos, 1.0);
@@ -449,11 +556,11 @@ void main() {
 
 static const char* lineFrag = R"(
 #version 330 core
-in vec3 vColor;
+in vec4 vColor;
 out vec4 FragColor;
 
 void main() {
-    FragColor = vec4(vColor, 1.0);
+    FragColor = vColor;
 }
 )";
 
@@ -487,15 +594,18 @@ void main() {
 static const char* waterVert = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUV;
 uniform mat4 uProjection;
 uniform mat4 uView;
 uniform mat4 uModel;
 out vec3 vWorldPos;
 out vec3 vNormal;
+out vec2 vUV;
 void main() {
     vec4 worldPos = uModel * vec4(aPos, 1.0);
     vWorldPos = worldPos.xyz;
     vNormal = vec3(0.0, 1.0, 0.0);
+    vUV = aUV;
     gl_Position = uProjection * uView * worldPos;
 }
 )";
@@ -504,13 +614,28 @@ static const char* waterFrag = R"(
 #version 330 core
 in vec3 vWorldPos;
 in vec3 vNormal;
+in vec2 vUV;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform vec3 uWaterColor;
 uniform float uWaterOpacity;
+uniform sampler2D uSurfaceTexture;
+uniform bool uUseSurfaceTexture;
+uniform sampler2D uShoreTexture;
+uniform bool uUseShoreTexture;
+uniform sampler2D uEnvMap;
+uniform bool uUseEnvMap;
+uniform float uEnvIntensity;
+uniform float uTexOffset;
+uniform float uShoreFactor;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
+uniform float uFogStart;
+uniform float uFogEnd;
+uniform vec4 uFogVolume0 = vec4(0.0);
+uniform vec4 uFogVolume1 = vec4(0.0);
+uniform vec4 uFogVolume2 = vec4(0.0);
 uniform bool uFogEnabled;
 out vec4 FragColor;
 void main() {
@@ -527,16 +652,43 @@ void main() {
     float spec = pow(max(dot(N, H), 0.0), 128.0);
     vec3 specular = uSunColor * spec * 1.5;
     // Combine: reflection + water base + specular
-    vec3 waterBase = uWaterColor * (1.0 - fresnel);
+    vec4 surface = uUseSurfaceTexture
+        ? texture(uSurfaceTexture, fract(vUV + vec2(uTexOffset, 0.0)))
+        : vec4(1.0);
+    if (uUseShoreTexture && uShoreFactor < 1.0)
+        surface = mix(texture(uShoreTexture, fract(vUV + vec2(uTexOffset, 0.0))), surface,
+                      clamp(uShoreFactor, 0.0, 1.0));
+    vec3 waterBase = uWaterColor * surface.rgb * (1.0 - fresnel);
     vec3 reflColor = skyReflect * fresnel;
+    if (uUseEnvMap) {
+        vec3 R = reflect(-V, N);
+        vec2 envUV = vec2(0.5 + 0.5 * R.x, 0.5 - 0.5 * R.y);
+        reflColor = mix(reflColor, texture(uEnvMap, envUV).rgb, clamp(uEnvIntensity, 0.0, 1.0));
+    }
     vec3 color = waterBase + reflColor + specular;
     // Fog
     if (uFogEnabled) {
         float dist = length(vWorldPos - uCamPos);
-        float fogFactor = clamp(uFogDensity * dist, 0.0, 1.0);
-        color = mix(color, uFogColor, fogFactor);
+        vec4 volumes[3] = vec4[3](uFogVolume0, uFogVolume1, uFogVolume2);
+        float volumeFog = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            vec4 volume = volumes[i];
+            if (volume.x <= 0.0 || volume.z <= volume.y) continue;
+            float low = max(min(uCamPos.y, vWorldPos.y), volume.y);
+            float high = min(max(uCamPos.y, vWorldPos.y), volume.z);
+            float vertical = high - low;
+            if (vertical > 0.0 && abs(vWorldPos.y - uCamPos.y) > 0.0001)
+                volumeFog += dist * vertical / abs(vWorldPos.y - uCamPos.y) * volume.x;
+            else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z)
+                volumeFog += dist * volume.x;
+        }
+        float haze = uFogStart >= 0.0 && uFogEnd > uFogStart
+            ? clamp((dist - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0)
+            : clamp(uFogDensity * dist, 0.0, 1.0);
+        float volume = min(volumeFog, 1.0);
+        color = mix(color, uFogColor, volume + min(haze, 1.0 - volume));
     }
-    FragColor = vec4(color, uWaterOpacity);
+    FragColor = vec4(color, uWaterOpacity * surface.a);
 }
 )";
 

@@ -1,11 +1,15 @@
 #include "script/script_engine.h"
 #include "script/torquescript.h"
 #include "core/console.h"
+#include "core/console_args.h"
 #include "core/config.h"
 #include "core/engine.h"
 #include "core/string_table.h"
 #include "game/mission_parser.h"
+#include "game/mission_discovery.h"
 #include "game/demo.h"
+#include "game/wind.h"
+#include "render/environment_commands.h"
 #include "net/master_query.h"
 #include <fstream>
 #include <sstream>
@@ -21,6 +25,227 @@
 #include <set>
 #include <filesystem>
 #include <fnmatch.h>
+
+namespace {
+std::map<int, std::string> s_taggedStrings;
+int s_nextTaggedStringId = 1;
+
+struct ScriptTarget {
+    std::string objectName;
+    VMValue nameTag;
+    VMValue skinTag;
+    VMValue voiceTag;
+    VMValue typeTag;
+    int sensorGroup = 0;
+    VMValue datablock;
+    double voicePitch = 1.0;
+    uint32_t renderMask = 0;
+    uint32_t alwaysVisMask = 0;
+    VMValue sensorData;
+};
+
+std::unordered_map<int, ScriptTarget> s_scriptTargets;
+int s_nextScriptTarget = 1;
+
+static bool parseFogColor(const std::vector<VMValue>& args, float& r, float& g,
+                          float& b, float& a) {
+    if (args.size() >= 4) {
+        r = args[0].toFloat(); g = args[1].toFloat();
+        b = args[2].toFloat(); a = args[3].toFloat();
+        return true;
+    }
+    if (args.size() != 1) return false;
+    return sscanf(args[0].toString().c_str(), "%f %f %f %f", &r, &g, &b, &a) == 4;
+}
+
+static VMValue setScriptFogDistance(const std::vector<VMValue>& args) {
+    if (args.empty()) return VMValue(0);
+    auto& fog = Engine::instance().game().world().fog;
+    fog.transitioning = false;
+    const bool applied = applyFogDistance(fog.distance, fog.density, args[0].toFloat());
+    if (applied) fog.enabled = true;
+    return VMValue(applied ? 1 : 0);
+}
+
+static VMValue setScriptFogDensity(const std::vector<VMValue>& args) {
+    if (args.empty()) return VMValue(0);
+    auto& fog = Engine::instance().game().world().fog;
+    fog.transitioning = false;
+    const bool applied = applyFogDensity(fog.distance, fog.density, args[0].toFloat());
+    if (applied) fog.enabled = true;
+    return VMValue(applied ? 1 : 0);
+}
+
+static VMValue setScriptFogColor(const std::vector<VMValue>& args) {
+    float r, g, b, a;
+    if (!parseFogColor(args, r, g, b, a)) return VMValue(0);
+    auto& fog = Engine::instance().game().world().fog;
+    fog.transitioning = false;
+    const bool applied = applyFogColor(fog.color, r, g, b, a);
+    if (applied) fog.enabled = true;
+    return VMValue(applied ? 1 : 0);
+}
+
+static VMValue setScriptSkyColor(const std::vector<VMValue>& args) {
+    float r, g, b, a = 1.0f;
+    if (args.size() == 1) {
+        if (sscanf(args[0].toString().c_str(), "%f %f %f %f", &r, &g, &b, &a) < 3) return VMValue(0);
+    } else if (args.size() == 3 || args.size() == 4) {
+        r = args[0].toFloat(); g = args[1].toFloat(); b = args[2].toFloat();
+        if (args.size() == 4) a = args[3].toFloat();
+    } else return VMValue(0);
+    return VMValue(Engine::instance().game().world().setSkyColor({r, g, b, a}) ? 1 : 0);
+}
+
+static VMValue setScriptSkyMaterialList(const std::vector<VMValue>& args) {
+    if (args.size() != 1) return VMValue(0);
+    return VMValue(Engine::instance().game().world().setSkyMaterialList(args[0].toString()) ? 1 : 0);
+}
+
+static bool parseVector(const VMValue& value, Point3F& result) {
+    return sscanf(value.toString().c_str(), "%f %f %f", &result.x, &result.y, &result.z) == 3;
+}
+
+static VMValue setScriptSunDirection(const std::vector<VMValue>& args) {
+    Point3F direction;
+    if (args.size() == 1 ? !parseVector(args[0], direction) : args.size() != 3) return VMValue(0);
+    if (args.size() == 3) direction = {args[0].toFloat(), args[1].toFloat(), args[2].toFloat()};
+    return VMValue(Engine::instance().game().world().setSunDirection(direction) ? 1 : 0);
+}
+
+static VMValue setScriptSunColor(const std::vector<VMValue>& args) {
+    float r, g, b, a = 1.0f;
+    if (args.size() == 1) {
+        if (sscanf(args[0].toString().c_str(), "%f %f %f %f", &r, &g, &b, &a) < 3) return VMValue(0);
+    } else if (args.size() == 3 || args.size() == 4) {
+        r = args[0].toFloat(); g = args[1].toFloat(); b = args[2].toFloat();
+        if (args.size() == 4) a = args[3].toFloat();
+    } else return VMValue(0);
+    return VMValue(Engine::instance().game().world().setSunColor({r, g, b, a}) ? 1 : 0);
+}
+
+static VMValue setScriptSunAmbient(const std::vector<VMValue>& args) {
+    float r, g, b, a = 1.0f;
+    if (args.size() == 1) {
+        if (sscanf(args[0].toString().c_str(), "%f %f %f %f", &r, &g, &b, &a) < 3) return VMValue(0);
+    } else if (args.size() == 3 || args.size() == 4) {
+        r = args[0].toFloat(); g = args[1].toFloat(); b = args[2].toFloat();
+        if (args.size() == 4) a = args[3].toFloat();
+    } else return VMValue(0);
+    return VMValue(Engine::instance().game().world().setSunAmbient({r, g, b, a}) ? 1 : 0);
+}
+
+static VMValue setScriptFogTransition(const std::vector<VMValue>& args) {
+    if (args.size() < 2) return VMValue(0);
+    ColorF color{};
+    const ColorF* colorPtr = nullptr;
+    if (args.size() >= 3) {
+        float r, g, b, a = 1.0f;
+        if (args.size() == 3 && sscanf(args[2].toString().c_str(), "%f %f %f %f", &r, &g, &b, &a) >= 3)
+            color = {r, g, b, a};
+        else if (args.size() == 5) {
+            r = args[2].toFloat(); g = args[3].toFloat(); b = args[4].toFloat();
+            color = {r, g, b, a};
+        } else return VMValue(0);
+        colorPtr = &color;
+    }
+    return VMValue(Engine::instance().game().world().setFogTransition(
+        args[0].toFloat() / 1000.0f, args[1].toFloat(), colorPtr) ? 1 : 0);
+}
+
+static VMValue setScriptWaterLevel(const std::vector<VMValue>& args) {
+    if (args.empty()) return VMValue(0);
+    const std::string target = args.size() > 1 ? args[0].toString() : "";
+    const float level = args.back().toFloat();
+    return VMValue(Engine::instance().game().world().setWaterLevel(target, level) ? 1 : 0);
+}
+
+static VMValue setScriptWaterType(const std::vector<VMValue>& args) {
+    if (args.empty()) return VMValue(0);
+    const std::string target = args.size() > 1 ? args[0].toString() : "";
+    int type = 0;
+    if (!parseWaterType(args.back().toString(), type)) return VMValue(0);
+    return VMValue(Engine::instance().game().world().setWaterType(target, type) ? 1 : 0);
+}
+
+static VMValue setScriptWaterOpacity(const std::vector<VMValue>& args) {
+    if (args.empty()) return VMValue(0);
+    const std::string target = args.size() > 1 ? args[0].toString() : "";
+    return VMValue(Engine::instance().game().world().setWaterOpacity(target, args.back().toFloat()) ? 1 : 0);
+}
+
+static VMValue setScriptWaterColor(const std::vector<VMValue>& args) {
+    if (args.empty()) return VMValue(0);
+    const bool targeted = args.size() == 2;
+    const std::string target = targeted ? args[0].toString() : "";
+    const std::string value = targeted ? args[1].toString() : args[0].toString();
+    float r = 0, g = 0, b = 0, a = 1;
+    if (targeted || args.size() == 1) {
+        if (sscanf(value.c_str(), "%f %f %f %f", &r, &g, &b, &a) < 3) return VMValue(0);
+    } else if (args.size() == 3 || args.size() == 4) {
+        r = args[0].toFloat(); g = args[1].toFloat(); b = args[2].toFloat();
+        if (args.size() == 4) a = args[3].toFloat();
+    } else return VMValue(0);
+    ColorF color{r, g, b, a};
+    if (!applyWaterColor(color, r, g, b) || !applyWaterOpacity(color.a, a)) return VMValue(0);
+    return VMValue(Engine::instance().game().world().setWaterColor(target, color) ? 1 : 0);
+}
+
+static VMValue setScriptPrecipitation(const std::vector<VMValue>& args) {
+    if (args.size() != 2) return VMValue(0);
+    return VMValue(Engine::instance().game().world().setPrecipitation(args[0].toInt(), args[1].toFloat()) ? 1 : 0);
+}
+
+static VMValue setScriptPrecipitationEnabled(const std::vector<VMValue>& args) {
+    if (args.size() != 1) return VMValue(0);
+    return VMValue(Engine::instance().game().world().setPrecipitationEnabled(args[0].toBool()) ? 1 : 0);
+}
+
+static VMValue setScriptPrecipitationType(const std::vector<VMValue>& args) {
+    if (args.size() != 1) return VMValue(0);
+    return VMValue(Engine::instance().game().world().setPrecipitationType(args[0].toInt()) ? 1 : 0);
+}
+
+static VMValue setScriptPrecipitationWind(const std::vector<VMValue>& args) {
+    Point3F velocity;
+    if (args.size() == 1 ? !parseVector(args[0], velocity) : args.size() != 3) return VMValue(0);
+    if (args.size() == 3) velocity = {args[0].toFloat(), args[1].toFloat(), args[2].toFloat()};
+    return VMValue(Engine::instance().game().world().setPrecipitationWind(velocity) ? 1 : 0);
+}
+
+static VMValue setScriptPrecipitationBox(const std::vector<VMValue>& args) {
+    if (args.size() != 2) return VMValue(0);
+    return VMValue(Engine::instance().game().world().setPrecipitationBox(args[0].toFloat(), args[1].toFloat()) ? 1 : 0);
+}
+
+static VMValue setScriptLightning(const std::vector<VMValue>& args) {
+    if (args.size() != 1) return VMValue(0);
+    return VMValue(Engine::instance().game().world().setLightningEnabled(args[0].toBool()) ? 1 : 0);
+}
+
+static VMValue strikeScriptLightning(const std::vector<VMValue>& args) {
+    if (!args.empty()) return VMValue(0);
+    return VMValue(Engine::instance().game().world().strikeLightning() ? 1 : 0);
+}
+
+// Commands assigned by scripts after a .gui has been parsed must update both
+// the live control and its click closure.  The stock message-box helpers do
+// exactly this when they install their transient button callbacks.
+static bool setGuiCommand(const std::string& name, const std::string& command) {
+    auto* ctl = Engine::instance().guiRenderer().findControl(name);
+    if (!ctl) return false;
+    ctl->command = command;
+    if (auto* obj = ScriptEngine::instance().findObject(name.c_str()))
+        obj->fields["command"] = VMValue(command);
+    ctl->onClick = nullptr;
+    if (!command.empty()) {
+        ctl->onClick = [command]() {
+            Console::instance().execute(command.c_str());
+        };
+    }
+    return true;
+}
+}
 
 // === VMValue ===
 int32_t VMValue::toInt() const {
@@ -1137,6 +1362,41 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
+    tsInstance->registerNative("setFogDistance", setScriptFogDistance);
+    tsInstance->registerNative("setFogDensity", setScriptFogDensity);
+    tsInstance->registerNative("setFogColor", setScriptFogColor);
+    tsInstance->registerNative("setFogTransition", setScriptFogTransition);
+    tsInstance->registerNative("setSkyColor", setScriptSkyColor);
+    tsInstance->registerNative("setSkyMaterial", setScriptSkyMaterialList);
+    tsInstance->registerNative("setSkyMaterialList", setScriptSkyMaterialList);
+    tsInstance->registerNative("setSunDirection", setScriptSunDirection);
+    tsInstance->registerNative("setSunColor", setScriptSunColor);
+    tsInstance->registerNative("setSunAmbient", setScriptSunAmbient);
+    tsInstance->registerNative("setPrecipitation", setScriptPrecipitation);
+    tsInstance->registerNative("setPrecipitationEnabled", setScriptPrecipitationEnabled);
+    tsInstance->registerNative("setPrecipitationType", setScriptPrecipitationType);
+    tsInstance->registerNative("setPrecipitationWind", setScriptPrecipitationWind);
+    tsInstance->registerNative("setPrecipitationBox", setScriptPrecipitationBox);
+    tsInstance->registerNative("setLightning", setScriptLightning);
+    tsInstance->registerNative("strikeLightning", strikeScriptLightning);
+    tsInstance->registerNative("Lightning::strike", strikeScriptLightning);
+    tsInstance->registerNative("MissionCleanup", [](const auto&) -> VMValue {
+        Engine::instance().game().world().cleanupMission();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setWaterLevel", setScriptWaterLevel);
+    tsInstance->registerNative("setWaterType", setScriptWaterType);
+    tsInstance->registerNative("setLiquidType", setScriptWaterType);
+    tsInstance->registerNative("setWaterOpacity", setScriptWaterOpacity);
+    tsInstance->registerNative("setWaterColor", setScriptWaterColor);
+    tsInstance->registerNative("WaterBlock::setWaterLevel", setScriptWaterLevel);
+    tsInstance->registerNative("WaterBlock::setWaterType", setScriptWaterType);
+    tsInstance->registerNative("WaterBlock::setLiquidType", setScriptWaterType);
+    tsInstance->registerNative("WaterBlock::setWaterOpacity", setScriptWaterOpacity);
+    tsInstance->registerNative("WaterBlock::setOpacity", setScriptWaterOpacity);
+    tsInstance->registerNative("WaterBlock::setWaterColor", setScriptWaterColor);
+    tsInstance->registerNative("WaterBlock::setColor", setScriptWaterColor);
+
     tsInstance->registerNative("expandFilename", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
         std::string path = args[0].toString();
@@ -1426,6 +1686,13 @@ bool ScriptEngine::init() {
         return VMValue(s);
     });
 
+    tsInstance->registerNative("rtrim", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string s = args[0].toString();
+        while (!s.empty() && std::isspace((unsigned char)s.back())) s.pop_back();
+        return VMValue(s);
+    });
+
     tsInstance->registerNative("strupr", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
         std::string s = args[0].toString();
@@ -1517,6 +1784,17 @@ bool ScriptEngine::init() {
         Console::instance().setVariable(buf, name.c_str());
         Console::instance().setVariable("$TotalNumberOfPackages", std::to_string(count + 1).c_str());
         return VMValue(1);
+    });
+    tsInstance->registerNative("isActivePackage", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const std::string wanted = args[0].toString();
+        const int count = Console::instance().getIntVariable("$TotalNumberOfPackages", 0);
+        for (int i = 0; i < count; ++i) {
+            const std::string key = "$Package[" + std::to_string(i) + "]";
+            if (Console::instance().getStringVariable(key.c_str(), "") == wanted)
+                return VMValue(1);
+        }
+        return VMValue(0);
     });
 
     // WON init (defunct, return success)
@@ -1718,13 +1996,12 @@ bool ScriptEngine::init() {
         return VMValue(result);
     });
 
-    {
-        static int nextTagId = 1;
-        tsInstance->registerNative("addTaggedString", [](const auto& args) -> VMValue {
-            if (args.empty()) return VMValue(0);
-            return VMValue(nextTagId++);
-        });
-    }
+    tsInstance->registerNative("addTaggedString", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const int id = s_nextTaggedStringId++;
+        s_taggedStrings[id] = args[0].toString();
+        return VMValue(id);
+    });
 
     // Math functions
     tsInstance->registerNative("mSin", [](const auto& args) -> VMValue {
@@ -1829,6 +2106,16 @@ bool ScriptEngine::init() {
         snprintf(buf, sizeof(buf), "%g %g %g", x, y, z);
         return buf;
     };
+    tsInstance->registerNative("setWindVelocity", [parseVec](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const auto v = parseVec(args[0].toString());
+        setTorchWindVelocity(Math::torquePointToYUp({(float)v[0], (float)v[1], (float)v[2]}));
+        return VMValue(1);
+    });
+    tsInstance->registerNative("getWindVelocity", [fmtVec](const auto&) -> VMValue {
+        const Point3F wind = torchWindVelocityToTorque();
+        return VMValue(fmtVec(wind.x, wind.y, wind.z));
+    });
     tsInstance->registerNative("VectorNormalize", [parseVec, fmtVec](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("0 0 0");
         auto v = parseVec(args[0].toString());
@@ -1904,6 +2191,41 @@ bool ScriptEngine::init() {
         Console::instance().printf(LogLevel::Error, "%s", msg.c_str());
         return VMValue(1);
     });
+
+    vmInstance->registerNativeFunction("setFogDistance", setScriptFogDistance);
+    vmInstance->registerNativeFunction("setFogDensity", setScriptFogDensity);
+    vmInstance->registerNativeFunction("setFogColor", setScriptFogColor);
+    vmInstance->registerNativeFunction("setFogTransition", setScriptFogTransition);
+    vmInstance->registerNativeFunction("setSkyColor", setScriptSkyColor);
+    vmInstance->registerNativeFunction("setSkyMaterial", setScriptSkyMaterialList);
+    vmInstance->registerNativeFunction("setSkyMaterialList", setScriptSkyMaterialList);
+    vmInstance->registerNativeFunction("setSunDirection", setScriptSunDirection);
+    vmInstance->registerNativeFunction("setSunColor", setScriptSunColor);
+    vmInstance->registerNativeFunction("setSunAmbient", setScriptSunAmbient);
+    vmInstance->registerNativeFunction("setPrecipitation", setScriptPrecipitation);
+    vmInstance->registerNativeFunction("setPrecipitationEnabled", setScriptPrecipitationEnabled);
+    vmInstance->registerNativeFunction("setPrecipitationType", setScriptPrecipitationType);
+    vmInstance->registerNativeFunction("setPrecipitationWind", setScriptPrecipitationWind);
+    vmInstance->registerNativeFunction("setPrecipitationBox", setScriptPrecipitationBox);
+    vmInstance->registerNativeFunction("setLightning", setScriptLightning);
+    vmInstance->registerNativeFunction("strikeLightning", strikeScriptLightning);
+    vmInstance->registerNativeFunction("Lightning::strike", strikeScriptLightning);
+    vmInstance->registerNativeFunction("MissionCleanup", [](const auto&) -> VMValue {
+        Engine::instance().game().world().cleanupMission();
+        return VMValue(1);
+    });
+    vmInstance->registerNativeFunction("setWaterLevel", setScriptWaterLevel);
+    vmInstance->registerNativeFunction("setWaterType", setScriptWaterType);
+    vmInstance->registerNativeFunction("setLiquidType", setScriptWaterType);
+    vmInstance->registerNativeFunction("setWaterOpacity", setScriptWaterOpacity);
+    vmInstance->registerNativeFunction("setWaterColor", setScriptWaterColor);
+    vmInstance->registerNativeFunction("WaterBlock::setWaterLevel", setScriptWaterLevel);
+    vmInstance->registerNativeFunction("WaterBlock::setWaterType", setScriptWaterType);
+    vmInstance->registerNativeFunction("WaterBlock::setLiquidType", setScriptWaterType);
+    vmInstance->registerNativeFunction("WaterBlock::setWaterOpacity", setScriptWaterOpacity);
+    vmInstance->registerNativeFunction("WaterBlock::setOpacity", setScriptWaterOpacity);
+    vmInstance->registerNativeFunction("WaterBlock::setWaterColor", setScriptWaterColor);
+    vmInstance->registerNativeFunction("WaterBlock::setColor", setScriptWaterColor);
 
     vmInstance->registerNativeFunction("strLen", [](const auto& args) {
         if (args.empty()) return VMValue(0);
@@ -2058,15 +2380,20 @@ bool ScriptEngine::init() {
     });
 
     // T2 compatibility stubs (functions called by startup scripts)
-    auto stubVM = [&](const char* name) {
-        vmInstance->registerNativeFunction(name, [](const auto&) { return VMValue(1); });
-    };
-    auto stubVMS = [&](const char* name) {
-        vmInstance->registerNativeFunction(name, [](const auto& args) {
-            return args.empty() ? VMValue(1) : args[0];
-        });
-    };
-    stubVM("audioSetDriver");
+    vmInstance->registerNativeFunction("audioSetDriver", [](const auto& args) -> VMValue {
+#ifdef TORCH_DEDICATED
+        return VMValue(0);
+#else
+        auto& audio = Engine::instance().audio();
+        const std::string driver = args.empty() ? "" : args[0].toString();
+        if (driver.empty() || driver == "miles" || driver == "openal") {
+            const bool ok = audio.isInitialized() || audio.init();
+            if (ok) Console::instance().setVariable("Audio::activeDriver", "openal");
+            return VMValue(ok ? 1 : 0);
+        }
+        return VMValue(0);
+#endif
+    });
     vmInstance->registerNativeFunction("audioDetect", [](const auto&) -> VMValue {
         return VMValue(Engine::instance().audio().isInitialized() ? 1 : 0);
     });
@@ -2075,8 +2402,7 @@ bool ScriptEngine::init() {
         return VMValue(0);
 #else
         auto& audio = Engine::instance().audio();
-        if (!audio.isInitialized()) audio.init();
-        return VMValue(1);
+        return VMValue(audio.isInitialized() || audio.init() ? 1 : 0);
 #endif
     });
     // Render/settings stubs that store values
@@ -2098,15 +2424,20 @@ bool ScriptEngine::init() {
     prefVM("setDefaultFov", "$pref::defaultFov");
 
     // Also register these on tsInstance so the TorqueScript interpreter can find them
-    auto stubTS = [&](const char* name) {
-        tsInstance->registerNative(name, [](const auto&) { return VMValue(1); });
-    };
-    auto stubTSS = [&](const char* name) {
-        tsInstance->registerNative(name, [](const auto& args) {
-            return args.empty() ? VMValue(1) : args[0];
-        });
-    };
-    stubTS("audioSetDriver");
+    tsInstance->registerNative("audioSetDriver", [](const auto& args) -> VMValue {
+#ifdef TORCH_DEDICATED
+        return VMValue(0);
+#else
+        auto& audio = Engine::instance().audio();
+        const std::string driver = args.empty() ? "" : args[0].toString();
+        if (driver.empty() || driver == "miles" || driver == "openal") {
+            const bool ok = audio.isInitialized() || audio.init();
+            if (ok) Console::instance().setVariable("Audio::activeDriver", "openal");
+            return VMValue(ok ? 1 : 0);
+        }
+        return VMValue(0);
+#endif
+    });
     tsInstance->registerNative("audioDetect", [](const auto&) -> VMValue {
         return VMValue(Engine::instance().audio().isInitialized() ? 1 : 0);
     });
@@ -2115,8 +2446,7 @@ bool ScriptEngine::init() {
         return VMValue(0);
 #else
         auto& audio = Engine::instance().audio();
-        if (!audio.isInitialized()) audio.init();
-        return VMValue(1);
+        return VMValue(audio.isInitialized() || audio.init() ? 1 : 0);
 #endif
     });
     auto prefTS = [&](const char* name, const char* prefKey) {
@@ -2263,6 +2593,8 @@ bool ScriptEngine::init() {
         if (!args.empty())
             if (auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString())) {
                 ctl->visible = false;
+                if (Engine::instance().guiRenderer().getFocused() == ctl)
+                    Engine::instance().guiRenderer().makeFirstResponder(ctl->name, false);
                 if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
                     obj->fields["visible"] = VMValue("0");
             }
@@ -2271,7 +2603,7 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("isActive", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString());
-        return VMValue(ctl && ctl->active && ctl->visible ? 1 : 0);
+        return VMValue(ctl && ctl->active ? 1 : 0);
     });
     tsInstance->registerNative("makeFirstResponder", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
@@ -2314,14 +2646,16 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("schedule", [](const auto& args) -> VMValue {
         if (args.size() >= 3) {
             double delay = args[0].toDouble() / 1000.0; // ms to seconds
-            std::string command = args[2].toString();
-            // Build argument string
-            for (size_t i = 3; i < args.size(); i++) {
-                command += " " + args[i].toString();
-            }
-            Engine::instance().guiRenderer().addSchedule(delay, command);
+            std::vector<VMValue> callbackArgs(args.begin() + 3, args.end());
+            return VMValue(ScriptEngine::instance().ts()->scheduleEvent(
+                Engine::instance().timer().now(), delay, args[1].toString(),
+                args[2].toString(), callbackArgs));
         }
-        return VMValue(1);
+        return VMValue(0);
+    });
+    tsInstance->registerNative("isEventPending", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        return VMValue(ScriptEngine::instance().ts()->isEventPending(args[0].toInt()) ? 1 : 0);
     });
 
     // File search for .gui discovery
@@ -2360,11 +2694,6 @@ bool ScriptEngine::init() {
         });
     }
 
-    tsInstance->registerNative("cleanupAudio", [](const auto&) -> VMValue {
-        auto& audio = Engine::instance().audio();
-        if (audio.isInitialized()) audio.shutdown();
-        return VMValue(1);
-    });
     tsInstance->registerNative("WONDisableFutureCalls", [](const auto&) -> VMValue {
         return VMValue(1);
     });
@@ -2464,6 +2793,18 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
+    tsInstance->registerNative("autoExec", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const std::string path = args[0].toString();
+        auto data = Engine::instance().fs().read(path.c_str());
+        if (data.empty()) data = Engine::instance().fs().read(("base/" + path).c_str());
+        if (data.empty()) data = Engine::instance().fs().read(("scripts/" + path).c_str());
+        if (data.empty()) return VMValue(0);
+        auto* ts = Engine::instance().script().ts();
+        if (!ts) return VMValue(0);
+        ts->executeNested(std::string((const char*)data.data(), data.size()), path);
+        return VMValue(1);
+    });
     tsInstance->registerNative("addMessageCallback", [](const auto& args) -> VMValue {
         if (args.size() >= 2) {
             std::string msgType = args[0].toString();
@@ -2477,7 +2818,8 @@ bool ScriptEngine::init() {
 
     tsInstance->registerNative("getTaggedString", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(std::string(""));
-        return args[0];
+        const auto it = s_taggedStrings.find(args[0].toInt());
+        return it == s_taggedStrings.end() ? VMValue(std::string("")) : VMValue(it->second);
     });
 
     tsInstance->registerNative("nameToId", [](const auto&) -> VMValue {
@@ -2519,39 +2861,136 @@ bool ScriptEngine::init() {
     static std::unordered_map<std::string, SoundBuffer*> s_audioBuffers;
     static int s_nextAudioHandle = 1;
 
-    tsInstance->registerNative("alxPlay", [](const auto& args) -> VMValue {
+    auto audioProfilePath = [](const std::string& profile) -> std::string {
+        auto* object = ScriptEngine::instance().findObject(profile.c_str());
+        if (!object || object->className != "AudioProfile") return {};
+        auto it = object->fields.find("filename");
+        if (it == object->fields.end()) return {};
+        std::string path = it->second.toString();
+        if (path.empty()) return {};
+        if (path.find('.') == std::string::npos) path += ".wav";
+        if (path.rfind("audio/", 0) != 0 && path.rfind("sound/", 0) != 0)
+            path = "audio/" + path;
+        return path;
+    };
+    auto audioProfileSettings = [](const std::string& profile, SoundSource& source) {
+        auto* object = ScriptEngine::instance().findObject(profile.c_str());
+        if (!object || object->className != "AudioProfile") return;
+        auto field = [object](const char* name, const char* fallback = nullptr) -> VMValue {
+            auto it = object->fields.find(name);
+            if (it != object->fields.end()) return it->second;
+            if (fallback) {
+                it = object->fields.find(fallback);
+                if (it != object->fields.end()) return it->second;
+            }
+            return VMValue();
+        };
+        std::string description = field("description", "audioDescription").toString();
+        if (auto* desc = ScriptEngine::instance().findObject(description.c_str());
+            desc && desc->className == "AudioDescription") {
+            auto value = [desc](const char* name) -> VMValue {
+                auto it = desc->fields.find(name);
+                return it == desc->fields.end() ? VMValue() : it->second;
+            };
+            auto volume = desc->fields.find("volume");
+            if (volume != desc->fields.end()) source.setVolume((float)volume->second.toDouble());
+            const bool looping = value("isLooping").toBool() || value("looping").toBool();
+            source.setLooping(looping);
+            if (looping && (desc->fields.find("loopCount") != desc->fields.end() ||
+                            desc->fields.find("minLoopGap") != desc->fields.end() ||
+                            desc->fields.find("maxLoopGap") != desc->fields.end())) {
+                source.setLoopSchedule(value("loopCount").toInt(),
+                                       value("minLoopGap").toInt(),
+                                       value("maxLoopGap").toInt());
+            }
+            if (value("is3D").toBool() || value("is3d").toBool())
+                source.setDistance((float)value("referenceDistance").toDouble(),
+                                   (float)value("maxDistance").toDouble());
+        }
+        auto value = [object](const char* name) -> VMValue {
+            auto it = object->fields.find(name);
+            return it == object->fields.end() ? VMValue() : it->second;
+        };
+        if (object->fields.find("volume") != object->fields.end())
+            source.setVolume((float)value("volume").toDouble());
+        if (value("looping").toBool()) source.setLooping(true);
+        if (value("is3D").toBool() || value("is3d").toBool()) {
+            source.setDistance((float)value("referenceDistance").toDouble(),
+                               (float)value("maxDistance").toDouble());
+            source.setPosition(source.position);
+        }
+    };
+    auto purgeAudioHandle = [](const std::string& handle) {
+        auto it = s_audioSources.find(handle);
+        if (it != s_audioSources.end() && !Engine::instance().audio().isSourceAlive(it->second)) {
+            s_audioSources.erase(it);
+            s_audioBuffers.erase(handle);
+        }
+    };
+    tsInstance->registerNative("cleanupAudio", [](const auto&) -> VMValue {
+        auto& audio = Engine::instance().audio();
+        if (audio.isInitialized()) audio.shutdown();
+        // shutdown destroys every source, so no script handle may retain one.
+        s_audioSources.clear();
+        s_audioBuffers.clear();
+        s_nextAudioHandle = 1;
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxPlay", [audioProfilePath, audioProfileSettings, purgeAudioHandle](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         std::string name = args[0].toString();
+        const std::string profileName = name;
         // Numeric handle from alxCreateSource → play that source directly
         if (!name.empty() && name.find_first_not_of("0123456789") == std::string::npos) {
             auto it = s_audioSources.find(name);
             if (it != s_audioSources.end()) {
+                purgeAudioHandle(name);
+                it = s_audioSources.find(name);
+                if (it == s_audioSources.end()) return VMValue(0);
                 auto bit = s_audioBuffers.find(name);
                 if (bit != s_audioBuffers.end()) it->second->play(bit->second);
-                return VMValue(1);
+                return VMValue(atoi(name.c_str()));
             }
         }
-        // Try creating a one-shot source from sound/Name.wav or sound/Name.ogg
+        std::string profilePath = audioProfilePath(name);
+        if (!profilePath.empty()) name = profilePath;
+        // Try creating a one-shot source from the profile path or sound/Name.
         auto& audio = Engine::instance().audio();
-        auto loadAndPlay = [&](const std::string& path) -> bool {
+        auto loadAndPlay = [&](const std::string& path) -> VMValue {
             SoundBuffer* buf = audio.loadSound(path.c_str());
-            if (!buf) return false;
+            if (!buf) return VMValue(0);
             SoundSource* src = audio.createSource();
-            if (!src) return false;
+            if (!src) return VMValue(0);
+            audioProfileSettings(profileName, *src);
             src->play(buf);
-            return true;
+            int h = s_nextAudioHandle++;
+            s_audioSources[std::to_string(h)] = src;
+            s_audioBuffers[std::to_string(h)] = buf;
+            return VMValue(h);
         };
+        if (profilePath.empty() == false) {
+            VMValue handle = loadAndPlay(name);
+            if (handle.toInt() != 0) return handle;
+        }
+        if (name.find('/') != std::string::npos) {
+            VMValue handle = loadAndPlay(name);
+            if (handle.toInt() != 0) return handle;
+        }
         // Map T2 sound names to files
         std::string path = "sound/" + name + ".wav";
-        if (loadAndPlay(path)) return VMValue(1);
+        VMValue handle = loadAndPlay(path);
+        if (handle.toInt() != 0) return handle;
         path = "sound/" + name + ".ogg";
-        if (loadAndPlay(path)) return VMValue(1);
+        handle = loadAndPlay(path);
+        if (handle.toInt() != 0) return handle;
         // Try lowercase variants
         for (auto& c : name) c = (char)tolower((unsigned char)c);
         path = "sound/" + name + ".wav";
-        if (loadAndPlay(path)) return VMValue(1);
+        handle = loadAndPlay(path);
+        if (handle.toInt() != 0) return handle;
         path = "sound/" + name + ".ogg";
-        if (loadAndPlay(path)) return VMValue(1);
+        handle = loadAndPlay(path);
+        if (handle.toInt() != 0) return handle;
         return VMValue(0);
     });
 
@@ -2613,8 +3052,9 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("queryMasterGameTypes", [](const auto&) -> VMValue {
         return VMValue(1);
     });
-    tsInstance->registerNative("cancel", [](const auto&) -> VMValue {
-        return VMValue(1);
+    tsInstance->registerNative("cancel", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        return VMValue(ScriptEngine::instance().ts()->cancelEvent(args[0].toInt()) ? 1 : 0);
     });
     tsInstance->registerNative("cls", [](const auto&) -> VMValue {
         return VMValue(1);
@@ -2754,66 +3194,44 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("TorchBuildMissionList", [toLowerStr, trimStr, splitWords](const auto&) -> VMValue {
         auto& fs = Engine::instance().fs();
 
-        // Discover .mis / .misPK files across the mounted archives.
+        // Scan the mounted namespace once so archive and loose missions at
+        // arbitrary subdirectory depth are treated identically.
         std::vector<std::string> entries;
-        for (const char* pat : {"missions/*", "missions/*/*", "missions/*/*/*", "missions/*.mis"})
-            fs.listFiles(pat, entries);
+        fs.listFiles(nullptr, entries);
 
         struct MisEntry { std::string name; std::string file; std::string types; };
         std::vector<MisEntry> all;
         std::set<std::string> seenBases;
         for (auto& e : entries) {
-            size_t dot = e.rfind('.');
-            if (dot == std::string::npos) continue;
-            std::string ext = e.substr(dot);
-            if (ext != ".mis" && ext != ".misPK") continue;
-
-            std::string base = e.substr(e.rfind('/') + 1);
-            size_t edot = base.rfind('.');
-            if (edot != std::string::npos) base = base.substr(0, edot);
-            if (seenBases.count(base)) continue;
-            seenBases.insert(base);
+            if (!missionLower(e).starts_with("missions/")) continue;
+            if (!isMissionFile(e)) continue;
+            const std::string relative = missionMapName(e);
+            if (!isSafeMissionMapName(relative)) continue;
+            const std::string key = missionLower(relative);
+            if (seenBases.count(key)) continue;
+            seenBases.insert(key);
 
             auto data = fs.read(e.c_str());
             if (data.empty()) continue;
             std::string content((const char*)data.data(), data.size());
 
-            // Stock T2 format: leading comment block with
-            //   // MissionTypes = CTF
-            //   // DisplayName  = Sanctuary
-            std::string dispName, typeLine;
-            bool gotTypes = false;
-            std::istringstream iss(content);
-            std::string line;
-            while (std::getline(iss, line)) {
-                std::string trimmed = trimStr(line);
-                if (trimmed.rfind("//", 0) == 0) {
-                    std::string comment = trimStr(trimmed.substr(2));
-                    size_t eqPos = comment.find('=');
-                    if (eqPos != std::string::npos) {
-                        std::string key = toLowerStr(trimStr(comment.substr(0, eqPos)));
-                        std::string val = trimStr(comment.substr(eqPos + 1));
-                        if (!gotTypes && (key == "missiontypes" || key == "missiontype" || key == "gametypes" || key == "gametype")) {
-                            typeLine = toLowerStr(val);
-                            gotTypes = true;
-                        } else if (dispName.empty() && (key == "displayname" || key == "missionname" || key == "name")) {
-                            dispName = val;
-                        }
-                    }
-                }
-                if (gotTypes && !dispName.empty()) break;
-            }
-            if (!gotTypes) {
+            MissionMetadata metadata = parseMissionMetadata(relative, content);
+            if (metadata.types.empty()) {
                 // Fallback: a `gameType` property somewhere in the objects.
                 std::vector<MisObject> objs = parseMisFile(content);
                 for (auto& o : objs) {
                     std::string g = getProp(o.props, "gametype");
-                    if (!g.empty()) { typeLine = toLowerStr(g); gotTypes = true; break; }
+                    if (!g.empty()) { metadata.types = g; break; }
                 }
             }
-
-            all.push_back({!dispName.empty() ? dispName : base, base, typeLine});
+            if (missionIsSinglePlayer(metadata)) continue;
+            all.push_back({metadata.displayName, metadata.file, metadata.types});
         }
+
+        std::sort(all.begin(), all.end(), [](const MisEntry& a, const MisEntry& b) {
+            const std::string af = missionLower(a.file), bf = missionLower(b.file);
+            return af == bf ? a.file < b.file : af < bf;
+        });
 
         // Build per-type tables exactly like stock buildMissionList().
         std::vector<std::string> typeOrder;
@@ -3271,12 +3689,15 @@ bool ScriptEngine::init() {
         if (args.size() >= 2) {
             auto* ctl = getListCtrl(args[0].toString());
             if (ctl) {
-                ctl->visible = args[1].toInt() != 0;
+                ctl->visible = args[1].toBool();
+                if (!ctl->visible && Engine::instance().guiRenderer().getFocused() == ctl)
+                    Engine::instance().guiRenderer().makeFirstResponder(ctl->name, false);
                 if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
                     obj->fields["visible"] = VMValue(ctl->visible ? "1" : "0");
+                return VMValue(1);
             }
         }
-        return VMValue(1);
+        return VMValue(0);
     });
     tsInstance->registerNative("isVisible", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
@@ -3351,6 +3772,140 @@ bool ScriptEngine::init() {
             return object->fields["target"].toInt();
         return VMValue(-1);
     });
+
+    // TargetManager.cs uses these engine natives for player, flag, waypoint,
+    // and sensor HUD entries. Keep their mutable state separate from script
+    // objects so targets remain valid after their owner changes fields.
+    tsInstance->registerNative("createTarget", [](const auto& args) -> VMValue {
+        if (args.size() < 6) return VMValue(-1);
+        ScriptTarget target;
+        target.objectName = args[0].toString();
+        target.nameTag = args[1];
+        target.skinTag = args[2];
+        target.voiceTag = args[3];
+        target.typeTag = args[4];
+        target.sensorGroup = args[5].toInt();
+        const int id = s_nextScriptTarget++;
+        s_scriptTargets.emplace(id, std::move(target));
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            object->fields["target"] = VMValue(id);
+        return VMValue(id);
+    });
+    tsInstance->registerNative("allocTarget", [](const auto& args) -> VMValue {
+        if (args.size() < 5) return VMValue(-1);
+        ScriptTarget target;
+        target.nameTag = args[0];
+        target.skinTag = args[1];
+        target.voiceTag = args[2];
+        target.typeTag = args[3];
+        target.sensorGroup = args[4].toInt();
+        if (args.size() > 5) target.datablock = args[5];
+        if (args.size() > 6 && args[6].toDouble() != 0.0) target.voicePitch = args[6].toDouble();
+        if (args.size() > 7) target.skinTag = args[7];
+        const int id = s_nextScriptTarget++;
+        s_scriptTargets.emplace(id, std::move(target));
+        return VMValue(id);
+    });
+    tsInstance->registerNative("allocClientTarget", [](const auto& args) -> VMValue {
+        if (args.size() < 5) return VMValue(-1);
+        ScriptTarget target;
+        target.objectName = args[0].toString();
+        target.nameTag = args[1];
+        target.skinTag = args[2];
+        target.voiceTag = args[3];
+        target.typeTag = args[4];
+        target.sensorGroup = args.size() > 5 ? args[5].toInt() : 0;
+        if (args.size() > 7) target.voicePitch = args[7].toDouble();
+        const int id = s_nextScriptTarget++;
+        s_scriptTargets.emplace(id, std::move(target));
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            object->fields["target"] = VMValue(id);
+        return VMValue(id);
+    });
+    tsInstance->registerNative("freeTarget", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const int id = args[0].toInt();
+        auto it = s_scriptTargets.find(id);
+        if (it == s_scriptTargets.end()) return VMValue(0);
+        if (auto* object = ScriptEngine::instance().findObject(it->second.objectName.c_str())) {
+            if (object->fields["target"].toInt() == id) object->fields["target"] = VMValue(-1);
+        }
+        s_scriptTargets.erase(it);
+        return VMValue(1);
+    });
+    tsInstance->registerNative("clientResetTargets", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const std::string objectName = args[0].toString();
+        for (auto it = s_scriptTargets.begin(); it != s_scriptTargets.end(); ) {
+            if (it->second.objectName == objectName) it = s_scriptTargets.erase(it);
+            else ++it;
+        }
+        if (auto* object = ScriptEngine::instance().findObject(objectName.c_str()))
+            object->fields["target"] = VMValue(-1);
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setTargetRenderMask", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto it = s_scriptTargets.find(args[0].toInt());
+        if (it == s_scriptTargets.end()) return VMValue(0);
+        it->second.renderMask = (uint32_t)args[1].toInt();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("getTargetRenderMask", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto it = s_scriptTargets.find(args[0].toInt());
+        return it == s_scriptTargets.end() ? VMValue(0) : VMValue((int32_t)it->second.renderMask);
+    });
+    tsInstance->registerNative("setTargetSkin", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto it = s_scriptTargets.find(args[0].toInt());
+        if (it == s_scriptTargets.end()) return VMValue(0);
+        it->second.skinTag = args[1];
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setTargetName", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto it = s_scriptTargets.find(args[0].toInt());
+        if (it == s_scriptTargets.end()) return VMValue(0);
+        it->second.nameTag = args[1];
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setTargetSensorData", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto it = s_scriptTargets.find(args[0].toInt());
+        if (it == s_scriptTargets.end()) return VMValue(0);
+        it->second.sensorData = args[1];
+        return VMValue(1);
+    });
+    tsInstance->registerNative("getTargetSensorData", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto it = s_scriptTargets.find(args[0].toInt());
+        return it == s_scriptTargets.end() ? VMValue(0) : it->second.sensorData;
+    });
+    tsInstance->registerNative("setTargetSensorGroup", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto it = s_scriptTargets.find(args[0].toInt());
+        if (it == s_scriptTargets.end()) return VMValue(0);
+        it->second.sensorGroup = args[1].toInt();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("getTargetSensorGroup", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto it = s_scriptTargets.find(args[0].toInt());
+        return it == s_scriptTargets.end() ? VMValue(0) : VMValue(it->second.sensorGroup);
+    });
+    tsInstance->registerNative("setTargetAlwaysVisMask", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto it = s_scriptTargets.find(args[0].toInt());
+        if (it == s_scriptTargets.end()) return VMValue(0);
+        it->second.alwaysVisMask = (uint32_t)args[1].toInt();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("resetTargetManager", [](const auto&) -> VMValue {
+        s_scriptTargets.clear();
+        s_nextScriptTarget = 1;
+        return VMValue(1);
+    });
     tsInstance->registerNative("setTarget", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
@@ -3366,6 +3921,86 @@ bool ScriptEngine::init() {
             return VMValue(1);
         }
         return VMValue(0);
+    });
+    tsInstance->registerNative("setSensorGroupColor", [](const auto& args) -> VMValue {
+        if (args.size() < 3) {
+            Console::instance().printf(LogLevel::Warn,
+                "setSensorGroupColor: expected group, target mask and color");
+            return VMValue(0);
+        }
+        const int group = args[0].toInt();
+        if (group < 0 || group >= 32) {
+            Console::instance().printf(LogLevel::Warn,
+                "setSensorGroupColor: invalid sensor group %d", group);
+            return VMValue(0);
+        }
+        const uint32_t targetMask = args[1].toInt();
+        std::istringstream values(args[2].toString());
+        ColorF color{};
+        if (!(values >> color.r >> color.g >> color.b >> color.a)) {
+            Console::instance().printf(LogLevel::Warn,
+                "setSensorGroupColor: invalid color '%s'", args[2].toString().c_str());
+            return VMValue(0);
+        }
+        color.r /= 255.0f; color.g /= 255.0f;
+        color.b /= 255.0f;
+        color.a = color.a < 0.0f ? 1.0f : color.a / 255.0f;
+        Engine::instance().game().setSensorGroupColor(group, targetMask, color);
+        return VMValue(1);
+    });
+     tsInstance->registerNative("setTargetFriendlyMask", [](const auto& args) -> VMValue {
+        if (args.size() < 2) {
+            Console::instance().printf(LogLevel::Warn,
+                "setTargetFriendlyMask: expected group and mask");
+            return VMValue(0);
+        }
+        const int group = args[0].toInt();
+        if (group < 0 || group >= 32) return VMValue(0);
+        const std::string maskText = args[1].toString();
+        char* end = nullptr;
+        const unsigned long mask = std::strtoul(maskText.c_str(), &end, 0);
+        if (!end || *end != '\0' || mask > 0xfffffffful) {
+            Console::instance().printf(LogLevel::Warn,
+                "setTargetFriendlyMask: invalid mask '%s'", maskText.c_str());
+            return VMValue(0);
+        }
+        Engine::instance().game().setTargetFriendlyMask(group, (uint32_t)mask);
+         return VMValue(1);
+     });
+    tsInstance->registerNative("setSensorGroupCount", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const int count = args[0].toInt();
+        if (count < 0 || count > 32) return VMValue(0);
+        Engine::instance().game().setSensorGroupCount(count);
+        return VMValue(1);
+    });
+    auto setSensorGroupMask = [](const char* nativeName, const std::vector<VMValue>& args,
+                                 auto setter) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const int group = args[0].toInt();
+        if (group < 0 || group >= 32) return VMValue(0);
+        const std::string maskText = args[1].toString();
+        char* end = nullptr;
+        const unsigned long mask = std::strtoul(maskText.c_str(), &end, 0);
+        if (!end || *end != '\0' || mask > 0xfffffffful) {
+            Console::instance().printf(LogLevel::Warn,
+                "%s: invalid mask '%s'", nativeName, maskText.c_str());
+            return VMValue(0);
+        }
+        setter(group, (uint32_t)mask);
+        return VMValue(1);
+    };
+    tsInstance->registerNative("setSensorGroupListenMask", [setSensorGroupMask](const auto& args) -> VMValue {
+        return setSensorGroupMask("setSensorGroupListenMask", args,
+            [](int group, uint32_t mask) {
+                Engine::instance().game().setSensorGroupListenMask(group, mask);
+            });
+    });
+    tsInstance->registerNative("setSensorGroupFriendlyMask", [setSensorGroupMask](const auto& args) -> VMValue {
+        return setSensorGroupMask("setSensorGroupFriendlyMask", args,
+            [](int group, uint32_t mask) {
+                Engine::instance().game().setSensorGroupFriendlyMask(group, mask);
+            });
     });
     tsInstance->registerNative("getMountedImage", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
@@ -3416,6 +4051,52 @@ bool ScriptEngine::init() {
             return object->fields["damageState"];
         return VMValue("");
     });
+    tsInstance->registerNative("setPoweredState", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str());
+        if (!object) return VMValue(0);
+        object->fields["powered"] = VMValue(args[1].toBool() ? "1" : "0");
+        return VMValue(1);
+    });
+    tsInstance->registerNative("isEnabled", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str());
+        if (!object) return VMValue(0);
+        auto it = object->fields.find("enabled");
+        return VMValue(it == object->fields.end() || it->second.toBool() ? 1 : 0);
+    });
+    tsInstance->registerNative("getDamageLevel", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0f);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["damageLevel"];
+        return VMValue(0.0f);
+    });
+    tsInstance->registerNative("setDamageLevel", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str());
+        if (!object) return VMValue(0);
+        object->fields["damageLevel"] = args[1];
+        return VMValue(1);
+    });
+    tsInstance->registerNative("getRepairRate", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0f);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["repairRate"];
+        return VMValue(0.0f);
+    });
+    tsInstance->registerNative("setRepairRate", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str());
+        if (!object) return VMValue(0);
+        object->fields["repairRate"] = args[1];
+        return VMValue(1);
+    });
+    tsInstance->registerNative("getControllingClient", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return object->fields["controllingClient"];
+        return VMValue(0);
+    });
     tsInstance->registerNative("isMounted", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
@@ -3456,16 +4137,20 @@ bool ScriptEngine::init() {
         if (args.size() >= 2) {
             auto* ctl = getListCtrl(args[0].toString());
             if (ctl) {
-                ctl->active = args[1].toInt() != 0;
+                ctl->active = args[1].toBool();
+                if (!ctl->active && Engine::instance().guiRenderer().getFocused() == ctl)
+                    Engine::instance().guiRenderer().makeFirstResponder(ctl->name, false);
                 if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
                     obj->fields["active"] = VMValue(ctl->active ? "1" : "0");
+                return VMValue(1);
             }
         }
-        return VMValue(1);
+        return VMValue(0);
     });
     tsInstance->registerNative("delete", [](const auto& args) -> VMValue {
         if (!args.empty()) {
-            std::string objName = args[0].toString();
+             std::string objName = args[0].toString();
+             ScriptEngine::instance().ts()->cancelEventsForObject(objName);
             auto* obj = ScriptEngine::instance().findObject(objName.c_str());
                 if (obj) {
                 if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 ||
@@ -4311,13 +4996,107 @@ bool ScriptEngine::init() {
     });
 
     tsInstance->registerNative("alxStopAll", [](const auto&) -> VMValue {
-        Engine::instance().audio().stopAll();
+        auto& audio = Engine::instance().audio();
+        audio.stopAll();
+        std::set<SoundSource*> scriptSources;
+        for (const auto& [name, source] : s_audioSources)
+            if (audio.isSourceAlive(source)) scriptSources.insert(source);
+        for (auto* source : scriptSources) audio.releaseSource(source);
         s_audioSources.clear();
+        s_audioBuffers.clear();
+        s_nextAudioHandle = 1;
         return VMValue(1);
     });
-    tsInstance->registerNative("alxListenerf", [](const auto&) -> VMValue {
-        // Listener float params — T2 sets these, we can ignore for now
+    tsInstance->registerNative("alxDestroySource", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const std::string name = args[0].toString();
+        auto it = s_audioSources.find(name);
+        if (it == s_audioSources.end()) return VMValue(0);
+        auto* source = it->second;
+        auto& audio = Engine::instance().audio();
+        for (auto alias = s_audioSources.begin(); alias != s_audioSources.end(); ) {
+            if (alias->second == source) {
+                s_audioBuffers.erase(alias->first);
+                alias = s_audioSources.erase(alias);
+            } else ++alias;
+        }
+        if (audio.isSourceAlive(source)) audio.releaseSource(source);
         return VMValue(1);
+    });
+    tsInstance->registerNative("alxPause", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto it = s_audioSources.find(args[0].toString());
+        if (it == s_audioSources.end() || !Engine::instance().audio().isSourceAlive(it->second)) return VMValue(0);
+        it->second->pause();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxResume", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto it = s_audioSources.find(args[0].toString());
+        if (it == s_audioSources.end() || !Engine::instance().audio().isSourceAlive(it->second)) return VMValue(0);
+        it->second->resume();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxListenerf", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const std::string param = args[0].toString();
+        if (param == "AL_GAIN_LINEAR" || param == "AL_GAIN")
+            Engine::instance().audio().setListenerGain((float)args[1].toDouble());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxListener3f", [](const auto& args) -> VMValue {
+        if (args.size() < 4) return VMValue(0);
+        const std::string param = args[0].toString();
+        if (param == "AL_POSITION" || param == "AL_VELOCITY") {
+            const Point3F value{args[1].toFloat(), args[2].toFloat(), args[3].toFloat()};
+            if (!std::isfinite(value.x) || !std::isfinite(value.y) || !std::isfinite(value.z))
+                return VMValue(0);
+            if (param == "AL_POSITION") Engine::instance().audio().setListenerPosition(value);
+            else Engine::instance().audio().setListenerVelocity(value);
+        }
+        return VMValue((param == "AL_POSITION" || param == "AL_VELOCITY") ? 1 : 0);
+    });
+    tsInstance->registerNative("alxListenerfv", [](const auto& args) -> VMValue {
+        if (args.size() == 2) {
+            float values[6]{};
+            if (sscanf(args[1].toString().c_str(), "%f %f %f %f %f %f",
+                       &values[0], &values[1], &values[2], &values[3], &values[4], &values[5]) != 6)
+                return VMValue(0);
+            const Point3F forward{values[0], values[1], values[2]};
+            const Point3F up{values[3], values[4], values[5]};
+            if (args[0].toString() != "AL_ORIENTATION") return VMValue(0);
+            Engine::instance().audio().setListenerOrientation(forward, up);
+            return VMValue(1);
+        }
+        if (args.size() != 7 || args[0].toString() != "AL_ORIENTATION") return VMValue(0);
+        const Point3F forward{args[1].toFloat(), args[2].toFloat(), args[3].toFloat()};
+        const Point3F up{args[4].toFloat(), args[5].toFloat(), args[6].toFloat()};
+        if (!std::isfinite(forward.x) || !std::isfinite(forward.y) || !std::isfinite(forward.z) ||
+            !std::isfinite(up.x) || !std::isfinite(up.y) || !std::isfinite(up.z)) return VMValue(0);
+        Engine::instance().audio().setListenerOrientation(forward, up);
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxEnableEnvironmental", [](const auto& args) -> VMValue {
+        Engine::instance().audio().setEnvironmental(!args.empty() && args[0].toBool());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxEnvironmenti", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        return VMValue(Engine::instance().audio().setEnvironmenti(
+            args[0].toString(), args[1].toInt()) ? 1 : 0);
+    });
+    tsInstance->registerNative("alxEnvironmentf", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        return VMValue(Engine::instance().audio().setEnvironmentf(
+            args[0].toString(), args[1].toFloat()) ? 1 : 0);
+    });
+    tsInstance->registerNative("alxGetEnvironmenti", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        return VMValue(Engine::instance().audio().environmenti(args[0].toString()));
+    });
+    tsInstance->registerNative("alxGetEnvironmentf", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0f);
+        return VMValue(Engine::instance().audio().environmentf(args[0].toString()));
     });
     // alx context queries feed the Settings→Audio page. Scripts pass bare
     // ALC_* identifiers, which the interpreter evaluates to their own name
@@ -4363,10 +5142,13 @@ bool ScriptEngine::init() {
         else if (channel == "Music") cfg.musicVolume = vol;
         return VMValue(1);
     });
-    tsInstance->registerNative("alxCreateSource", [](const auto& args) -> VMValue {
+    tsInstance->registerNative("alxCreateSource", [audioProfilePath, audioProfileSettings](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
         std::string name = args[0].toString();
         std::string soundName = args[1].toString();
+        const std::string profileName = soundName;
+        const std::string profilePath = audioProfilePath(soundName);
+        if (!profilePath.empty()) soundName = profilePath;
         auto& audio = Engine::instance().audio();
         SoundBuffer* buf = nullptr;
         auto tryLoad = [&](const std::string& path) {
@@ -4391,10 +5173,23 @@ bool ScriptEngine::init() {
             if (!tryLoad(path)) { path = "sound/" + soundName + ".ogg"; tryLoad(path); }
         }
         if (!buf) return VMValue(0);
-        SoundSource* src = audio.createSource();
+        SoundSource* src = audio.createSource(true);
         if (!src) return VMValue(0);
-        src->play(buf);
-        src->stop(); // created but not playing yet
+        // alxCreateSource allocates a stopped, reusable source.
+        audioProfileSettings(profileName, *src);
+        auto old = s_audioSources.find(name);
+        if (old != s_audioSources.end()) {
+            SoundSource* oldSource = old->second;
+            for (auto alias = s_audioSources.begin(); alias != s_audioSources.end(); ) {
+                if (alias->second == oldSource) {
+                    s_audioBuffers.erase(alias->first);
+                    alias = s_audioSources.erase(alias);
+                } else {
+                    ++alias;
+                }
+            }
+            if (audio.isSourceAlive(oldSource)) audio.releaseSource(oldSource);
+        }
         s_audioSources[name] = src;
         s_audioBuffers[name] = buf;
         // Numeric handle so script-side alxPlay(%handle) can resolve the source
@@ -4406,13 +5201,23 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("alxGetWaveLen", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         std::string name = args[0].toString();
-        // Full wave paths (voice.vl2 etc.) — return a sane fixed length so
-        // script-side schedule() re-enables buttons after playback.
-        if (name.find('/') != std::string::npos) return VMValue(2500.0);
         auto it = s_audioSources.find(name);
-        if (it == s_audioSources.end()) return VMValue(0);
-        // Return 1000 as a default reasonable length (T2 stubs often return this)
-        return VMValue(1000.0);
+        if (it != s_audioSources.end()) {
+            if (!Engine::instance().audio().isSourceAlive(it->second)) {
+                s_audioSources.erase(it);
+                s_audioBuffers.erase(name);
+                it = s_audioSources.end();
+            }
+        }
+        if (it != s_audioSources.end()) {
+            auto buffer = s_audioBuffers.find(name);
+            if (buffer != s_audioBuffers.end()) return VMValue((int)buffer->second->durationMs);
+        }
+        auto& audio = Engine::instance().audio();
+        SoundBuffer* buffer = audio.loadSound(name.c_str());
+        if (!buffer && name.rfind("audio/", 0) != 0)
+            buffer = audio.loadSound(("audio/" + name).c_str());
+        return buffer ? VMValue((int)buffer->durationMs) : VMValue(0);
     });
     tsInstance->registerNative("alxSourcef", [](const auto& args) -> VMValue {
         if (args.size() < 3) return VMValue(1);
@@ -4421,17 +5226,109 @@ bool ScriptEngine::init() {
         float val = (float)args[2].toDouble();
         auto it = s_audioSources.find(name);
         if (it == s_audioSources.end()) return VMValue(1);
+        if (!Engine::instance().audio().isSourceAlive(it->second)) {
+            s_audioSources.erase(it);
+            s_audioBuffers.erase(name);
+            return VMValue(0);
+        }
         auto* src = it->second;
-        if (param == "volume") src->setVolume(val);
-        else if (param == "pitch") src->setPitch(val);
-        else if (param == "looping") src->setLooping(val != 0);
+        if (param == "volume" || param == "AL_GAIN") src->setVolume(val);
+        else if (param == "pitch" || param == "AL_PITCH") src->setPitch(val);
+        else if (param == "looping" || param == "AL_LOOPING") src->setLooping(val != 0);
+        else if (param == "AL_REFERENCE_DISTANCE" || param == "minDistance")
+            src->setDistance(val, src->maxDistance);
+        else if (param == "AL_MAX_DISTANCE" || param == "maxDistance")
+            src->setDistance(src->referenceDistance, val);
+        else if (param == "rolloff" || param == "rolloffFactor" || param == "AL_ROLLOFF_FACTOR")
+            src->setRolloff(val);
+        else if (param == "offset" || param == "AL_SEC_OFFSET") {
+            const auto buffer = s_audioBuffers.find(name);
+            const uint32_t duration = buffer == s_audioBuffers.end()
+                ? 0 : buffer->second->durationMs;
+            src->setOffsetSeconds(SoundSource::clampOffsetSeconds(val, duration));
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxSource3f", [](const auto& args) -> VMValue {
+        if (args.size() < 5) return VMValue(0);
+        const std::string name = args[0].toString();
+        auto it = s_audioSources.find(name);
+        if (it == s_audioSources.end() || !Engine::instance().audio().isSourceAlive(it->second))
+            return VMValue(0);
+        const Point3F value{args[2].toFloat(), args[3].toFloat(), args[4].toFloat()};
+        if (!std::isfinite(value.x) || !std::isfinite(value.y) || !std::isfinite(value.z))
+            return VMValue(0);
+        if (args[1].toString() == "AL_POSITION") it->second->setPosition(value);
+        else if (args[1].toString() == "AL_VELOCITY") it->second->setVelocity(value);
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxSourcei", [](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        auto it = s_audioSources.find(args[0].toString());
+        if (it == s_audioSources.end() || !Engine::instance().audio().isSourceAlive(it->second))
+            return VMValue(0);
+        const std::string param = args[1].toString();
+        if (param == "AL_LOOPING") it->second->setLooping(args[2].toBool());
+        else if (param == "AL_SOURCE_RELATIVE") it->second->setRelative(args[2].toBool());
+        else return VMValue(0);
+        return VMValue(1);
+    });
+    tsInstance->registerNative("alxSource3i", [](const auto& args) -> VMValue {
+        if (args.size() < 5) return VMValue(0);
+        auto it = s_audioSources.find(args[0].toString());
+        if (it == s_audioSources.end() || !Engine::instance().audio().isSourceAlive(it->second)) return VMValue(0);
+        if (args[1].toString() != "AL_AUXILIARY_SEND_FILTER") return VMValue(0);
+        const int send = args[3].toInt();
+        const int filter = args[4].toInt();
+        if (send < 0 || filter < 0) return VMValue(0);
+        it->second->setAuxiliarySend((uint32_t)args[2].toInt(), send, (uint32_t)filter);
         return VMValue(1);
     });
     tsInstance->registerNative("alxStop", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(1);
         std::string name = args[0].toString();
         auto it = s_audioSources.find(name);
-        if (it != s_audioSources.end()) it->second->stop();
+        if (it != s_audioSources.end()) {
+            if (Engine::instance().audio().isSourceAlive(it->second)) it->second->stop();
+            else { s_audioSources.erase(it); s_audioBuffers.erase(name); }
+        }
+        return VMValue(1);
+    });
+    tsInstance->registerNative("playAudio", [audioProfilePath](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        const std::string object = args[0].toString();
+        const std::string channel = args[1].toString();
+        std::string path = audioProfilePath(args[2].toString());
+        if (path.empty()) return VMValue(0);
+        auto& audio = Engine::instance().audio();
+        auto* buffer = audio.loadSound(path.c_str());
+        if (!buffer) return VMValue(0);
+        const std::string key = object + ":" + channel;
+        auto old = s_audioSources.find(key);
+        if (old != s_audioSources.end() && audio.isSourceAlive(old->second)) {
+            old->second->stop();
+            audio.releaseSource(old->second);
+            s_audioSources.erase(old);
+            s_audioBuffers.erase(key);
+        }
+        auto* source = audio.createSource(true);
+        if (!source) return VMValue(0);
+        source->play(buffer);
+        s_audioSources[key] = source;
+        s_audioBuffers[key] = buffer;
+        return VMValue(1);
+    });
+    tsInstance->registerNative("stopAudio", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const std::string prefix = args[0].toString() + ":" + args[1].toString();
+        auto it = s_audioSources.find(prefix);
+        if (it == s_audioSources.end()) return VMValue(1);
+        if (Engine::instance().audio().isSourceAlive(it->second)) {
+            it->second->stop();
+            Engine::instance().audio().releaseSource(it->second);
+        }
+        s_audioSources.erase(it);
+        s_audioBuffers.erase(prefix);
         return VMValue(1);
     });
 
@@ -4472,7 +5369,57 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("alxEnableForceFeedback", [](const auto&) -> VMValue {
         return VMValue(1);
     });
-    tsInstance->registerNative("setGravity", [](const auto&) -> VMValue {
+    tsInstance->registerNative("setGravity", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        Engine::instance().game().setGravity(args[0].toFloat());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setTimeScale", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        Engine::instance().game().setTimeScale(args[0].toFloat());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setSensorGroupCount", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        Engine::instance().game().setSensorGroupCount(args[0].toInt());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setSensorGroupListenMask", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        Engine::instance().game().setSensorGroupListenMask(args[0].toInt(),
+                                                            (uint32_t)args[1].toInt());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setSensorGroupFriendlyMask", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        Engine::instance().game().setSensorGroupFriendlyMask(args[0].toInt(),
+                                                              (uint32_t)args[1].toInt());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setTargetFriendlyMask", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        Engine::instance().game().setTargetFriendlyMask(args[0].toInt(),
+                                                        (uint32_t)args[1].toInt());
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setSensorGroupColor", [](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        std::istringstream color(args[2].toString());
+        ColorF value{};
+        color >> value.r >> value.g >> value.b >> value.a;
+        if (value.a > 1.0f) {
+            value.r /= 255.0f; value.g /= 255.0f;
+            value.b /= 255.0f; value.a /= 255.0f;
+        }
+        Engine::instance().game().setSensorGroupColor(args[0].toInt(),
+                                                       (uint32_t)args[1].toInt(), value);
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setTargetSensorData", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto it = s_scriptTargets.find(args[0].toInt());
+        if (it == s_scriptTargets.end()) return VMValue(0);
+        it->second.sensorData = args[1];
         return VMValue(1);
     });
     tsInstance->registerNative("bottomPrintAll", [](const auto& args) -> VMValue {
@@ -4564,19 +5511,23 @@ bool ScriptEngine::init() {
         // commandToClient(client, funcName, arg1, arg2, ...)
         if (args.size() < 2) return VMValue(0);
         std::string func = args[1].toString();
-        std::string cmd = func;
-        for (size_t i = 2; i < args.size(); i++)
-            cmd += " " + args[i].toString();
-        Console::instance().printf(LogLevel::Debug, "commandToClient: %s", cmd.c_str());
+        std::vector<std::string> callbackArgs;
+        for (size_t i = 2; i < args.size(); i++) callbackArgs.push_back(args[i].toString());
+        Console::instance().printf(LogLevel::Debug, "commandToClient: %s (%zu args)",
+                                   func.c_str(), callbackArgs.size());
         // Send over wire if connected (server to client)
         auto* conn = Engine::instance().game().activeConnection();
         if (conn && conn->isConnected()) {
-            conn->sendCommandPacket(cmd.c_str());
+            conn->sendRemoteCommand(func, callbackArgs);
         } else {
             // Local fallback: execute directly
             auto* ts = Engine::instance().script().ts();
-            if (ts && ts->hasFunction(func))
-                ts->callFunction(func, {});
+            if (ts && ts->hasFunction(func)) {
+                std::vector<VMValue> callbackArgs;
+                for (size_t i = 2; i < args.size(); ++i)
+                    callbackArgs.push_back(args[i]);
+                ts->callFunction(func, callbackArgs);
+            }
         }
         return VMValue(1);
     });
@@ -4584,6 +5535,8 @@ bool ScriptEngine::init() {
         // commandToServer(funcName, arg1, arg2, ...)
         if (args.empty()) return VMValue(0);
         std::string func = args[0].toString();
+        std::vector<std::string> callbackArgs;
+        for (size_t i = 1; i < args.size(); i++) callbackArgs.push_back(args[i].toString());
         std::string cmd = func;
         for (size_t i = 1; i < args.size(); i++)
             cmd += " " + args[i].toString();
@@ -4592,7 +5545,7 @@ bool ScriptEngine::init() {
         // Send over wire if connected (client to server)
         auto* conn = Engine::instance().game().activeConnection();
         if (conn && conn->isConnected()) {
-            conn->sendCommandPacket(cmd.c_str());
+            conn->sendRemoteCommand(func, callbackArgs);
         } else {
             // Local commands do not need to be reparsed as TorqueScript source.
             // In particular, `cycleWeapon next` is console command syntax, not
@@ -4909,6 +5862,10 @@ bool ScriptEngine::init() {
             if (distance <= radius)
                 s_containerHits.push_back({object.label.empty() ? object.shapeName : object.label, distance});
         }
+        std::stable_sort(s_containerHits.begin(), s_containerHits.end(),
+            [](const ContainerHit& left, const ContainerHit& right) {
+                return left.distance < right.distance;
+            });
         return VMValue(1);
     });
     tsInstance->registerNative("containerSearchNext", [](const auto&) -> VMValue {
@@ -4924,14 +5881,42 @@ bool ScriptEngine::init() {
         const float length = std::sqrt(direction.x * direction.x + direction.y * direction.y + direction.z * direction.z);
         if (length <= 0.0001f) return VMValue("");
         direction.x /= length; direction.y /= length; direction.z /= length;
-        float distance = 0.0f;
+        float distance = length;
         Point3F hit{}, normal{};
-        if (!Engine::instance().game().world().collision().raycast(origin, direction, length,
-                                                                    distance, hit, normal))
+        std::string hitId;
+        if (Engine::instance().game().world().collision().raycast(origin, direction, length,
+                                                                  distance, hit, normal))
+            hitId = "Terrain";
+        auto raySphere = [&](const Point3F& center, float radius, const char* id) {
+            const Point3F offset{origin.x - center.x, origin.y - center.y, origin.z - center.z};
+            const float projection = offset.x * direction.x + offset.y * direction.y + offset.z * direction.z;
+            const float discriminant = projection * projection -
+                (offset.x * offset.x + offset.y * offset.y + offset.z * offset.z - radius * radius);
+            if (discriminant < 0.0f) return;
+            const float firstHit = -projection - std::sqrt(discriminant);
+            if (firstHit < 0.0f || firstHit > distance) return;
+            distance = firstHit;
+            hit = {origin.x + direction.x * distance,
+                   origin.y + direction.y * distance,
+                   origin.z + direction.z * distance};
+            normal = {hit.x - center.x, hit.y - center.y, hit.z - center.z};
+            const float normalLength = std::sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+            if (normalLength > 0.0001f) {
+                normal.x /= normalLength; normal.y /= normalLength; normal.z /= normalLength;
+            }
+            hitId = id;
+        };
+        raySphere(Engine::instance().game().player().position(), 0.5f, "Player");
+        for (const auto& object : Engine::instance().game().world().objects()) {
+            const float radius = std::max(0.5f, object.boundsRadius);
+            const std::string id = object.label.empty() ? object.shapeName : object.label;
+            raySphere(object.pos, radius, id.empty() ? "WorldObject" : id.c_str());
+        }
+        if (hitId.empty())
             return VMValue("");
         char result[160];
-        snprintf(result, sizeof(result), "Terrain\t%.3f %.3f %.3f\t%.3f %.3f %.3f",
-                 hit.x, hit.y, hit.z, normal.x, normal.y, normal.z);
+        snprintf(result, sizeof(result), "%s\t%.3f %.3f %.3f\t%.3f %.3f %.3f",
+                 hitId.c_str(), hit.x, hit.y, hit.z, normal.x, normal.y, normal.z);
         return VMValue(result);
     });
     tsInstance->registerNative("containerSearchCurrDist", [](const auto&) -> VMValue {
@@ -5029,7 +6014,12 @@ bool ScriptEngine::init() {
         const float ground = Engine::instance().game().world().getHeight(position.x, position.z);
         return VMValue(position.y - ground);
     });
-    tsInstance->registerNative("getDamageLevel", [](const auto&) -> VMValue {
+    tsInstance->registerNative("getDamageLevel", [](const auto& args) -> VMValue {
+        if (!args.empty()) {
+            if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+                return object->fields["damageLevel"];
+            return VMValue(0.0f);
+        }
         const float health = std::clamp(Engine::instance().game().player().health(), 0.0f, 100.0f);
         return VMValue(1.0f - health / 100.0f);
     });
@@ -5469,38 +6459,87 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // MessageBoxOK(title, message) — stub that logs and returns 1
     tsInstance->registerNative("MessageBoxOK", [](const auto& args) -> VMValue {
         std::string title = args.size() > 0 ? args[0].toString() : "Message";
         std::string msg = args.size() > 1 ? args[1].toString() : "";
-        Console::instance().printf(LogLevel::Info, "MessageBoxOK: [%s] %s", title.c_str(), msg.c_str());
+        auto& gui = Engine::instance().guiRenderer();
+        if (auto* frame = gui.findControl("MBOKFrame")) frame->text = title;
+        if (auto* text = gui.findControl("MBOKText")) text->text = "<just:center>" + msg;
+        const std::string command = (args.size() > 2 ? args[2].toString() + " " : "")
+            + "Canvas.popDialog(MessageBoxOKDlg);";
+        setGuiCommand("MBOKButton", command);
+        if (!gui.findControl("MessageBoxOKDlg")) return VMValue(0);
+        gui.pushDialog("MessageBoxOKDlg");
         return VMValue(1);
     });
 
-    // MessageBoxOkCancel(title, message) — stub that returns 1 (OK)
     tsInstance->registerNative("MessageBoxOkCancel", [](const auto& args) -> VMValue {
         std::string title = args.size() > 0 ? args[0].toString() : "Message";
         std::string msg = args.size() > 1 ? args[1].toString() : "";
-        Console::instance().printf(LogLevel::Info, "MessageBoxOkCancel: [%s] %s", title.c_str(), msg.c_str());
+        auto& gui = Engine::instance().guiRenderer();
+        if (auto* frame = gui.findControl("MBOKCancelFrame")) frame->text = title;
+        if (auto* text = gui.findControl("MBOKCancelText")) text->text = "<just:center>" + msg;
+        setGuiCommand("MBOKCancelButtonOK", (args.size() > 2 ? args[2].toString() + " " : "")
+            + "Canvas.popDialog(MessageBoxOKCancelDlg);");
+        setGuiCommand("MBOKCancelButtonCancel", (args.size() > 3 ? args[3].toString() + " " : "")
+            + "Canvas.popDialog(MessageBoxOKCancelDlg);");
+        if (!gui.findControl("MessageBoxOKCancelDlg")) return VMValue(0);
+        gui.pushDialog("MessageBoxOKCancelDlg");
         return VMValue(1);
     });
 
-    // getDesktopResolution() — return "width height" of the desktop
-    tsInstance->registerNative("getDesktopResolution", [](const auto&) -> VMValue {
-        return Engine::instance().guiRenderer().findControl("GuiCanvas")
-            ? VMValue(std::to_string((int)Engine::instance().guiRenderer().findControl("GuiCanvas")->extentX) + " " +
-                       std::to_string((int)Engine::instance().guiRenderer().findControl("GuiCanvas")->extentY))
-            : VMValue("1024 768");
+    tsInstance->registerNative("MessageBoxYesNo", [](const auto& args) -> VMValue {
+        std::string title = args.size() > 0 ? args[0].toString() : "Message";
+        std::string msg = args.size() > 1 ? args[1].toString() : "";
+        auto& gui = Engine::instance().guiRenderer();
+        if (auto* frame = gui.findControl("MBYesNoFrame")) frame->text = title;
+        if (auto* text = gui.findControl("MBYesNoText")) text->text = "<just:center>" + msg;
+        setGuiCommand("MBYesNoButtonYes", (args.size() > 2 ? args[2].toString() + " " : "")
+            + "Canvas.popDialog(MessageBoxYesNoDlg);");
+        setGuiCommand("MBYesNoButtonNo", (args.size() > 3 ? args[3].toString() + " " : "")
+            + "Canvas.popDialog(MessageBoxYesNoDlg);");
+        if (!gui.findControl("MessageBoxYesNoDlg")) return VMValue(0);
+        gui.pushDialog("MessageBoxYesNoDlg");
+        return VMValue(1);
     });
 
-    // getResolutionList() — return empty (single resolution mode)
+    tsInstance->registerNative("MessagePopup", [](const auto& args) -> VMValue {
+        auto& gui = Engine::instance().guiRenderer();
+        if (auto* frame = gui.findControl("MessagePopFrame"))
+            frame->text = args.size() > 0 ? args[0].toString() : "Message";
+        if (auto* text = gui.findControl("MessagePopText"))
+            text->text = args.size() > 1 ? "<just:center>" + args[1].toString() : "";
+        gui.pushDialog("MessagePopupDlg");
+        return VMValue(1);
+    });
+
+    tsInstance->registerNative("CloseMessagePopup", [](const auto&) -> VMValue {
+        Engine::instance().guiRenderer().popDialog("MessagePopupDlg");
+        return VMValue(1);
+    });
+
+    // getDesktopResolution() — return the native window resolution, not the
+    // stock logical GUI canvas size.
+    tsInstance->registerNative("getDesktopResolution", [](const auto&) -> VMValue {
+        return VMValue(std::to_string(Engine::instance().platform().width()) + " " +
+                       std::to_string(Engine::instance().platform().height()));
+    });
+
+    // getResolutionList() returns Torque's TAB-delimited width/height/bpp rows.
     tsInstance->registerNative("getResolutionList", [](const auto&) -> VMValue {
-        auto* c = Engine::instance().guiRenderer().findControl("GuiCanvas");
-        if (c) {
-            std::string res = std::to_string((int)c->extentX) + " " + std::to_string((int)c->extentY);
-            return VMValue(res);
+        const int width = Engine::instance().platform().width();
+        const int height = Engine::instance().platform().height();
+        const std::vector<std::pair<int, int>> modes = {
+            {640, 480}, {800, 600}, {1024, 768}, {1280, 720}, {1280, 1024}, {1920, 1080}
+        };
+        std::string result;
+        for (const auto& [modeWidth, modeHeight] : modes) {
+            if (!result.empty()) result += '\t';
+            result += std::to_string(modeWidth) + " " + std::to_string(modeHeight) + " 32";
         }
-        return VMValue("1024 768");
+        if (std::find(modes.begin(), modes.end(), std::pair<int, int>{width, height}) == modes.end())
+            result += '\t' + std::to_string(width) + " " + std::to_string(height) + " 32";
+        return VMValue(result);
     });
 
     // getDisplayDeviceList() — return "OpenGL"
@@ -5508,19 +6547,30 @@ bool ScriptEngine::init() {
         return VMValue("OpenGL");
     });
 
-    // setScreenMode(w, h, bpp, fullScreen) — stub
-    tsInstance->registerNative("setScreenMode", [](const auto&) -> VMValue {
-        return VMValue(1);
+    tsInstance->registerNative("setScreenMode", [](const auto& args) -> VMValue {
+        if (args.size() < 4) return VMValue(0);
+        auto& config = Engine::instance().renderer().config();
+        config.width = args[0].toInt();
+        config.height = args[1].toInt();
+        config.fullscreen = args[3].toBool();
+        return VMValue(Engine::instance().platform().setVideoMode(
+            config.width, config.height, config.fullscreen, config.vsync) ? 1 : 0);
     });
 
-    // setDisplayDevice(name) — stub
-    tsInstance->registerNative("setDisplayDevice", [](const auto&) -> VMValue {
-        return VMValue(1);
+    tsInstance->registerNative("setDisplayDevice", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        std::string device = args[0].toString();
+        for (char& c : device) c = (char)std::tolower((unsigned char)c);
+        return VMValue(device == "opengl" ? 1 : 0);
     });
 
-    // setVerticalSync(bool) — stub
-    tsInstance->registerNative("setVerticalSync", [](const auto&) -> VMValue {
-        return VMValue(1);
+    tsInstance->registerNative("setVerticalSync", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto& config = Engine::instance().renderer().config();
+        config.vsync = args[0].toBool();
+        return VMValue(Engine::instance().platform().setVideoMode(
+            Engine::instance().platform().width(), Engine::instance().platform().height(),
+            config.fullscreen, config.vsync) ? 1 : 0);
     });
 
     // writeLine(objName, line) — write a line to a FileObject's buffer
@@ -5605,8 +6655,8 @@ bool ScriptEngine::init() {
         }
     }
 
-    // removeTaggedString(id) — no-op (tagged strings are not stored)
-    tsInstance->registerNative("removeTaggedString", [](const auto&) -> VMValue {
+    tsInstance->registerNative("removeTaggedString", [](const auto& args) -> VMValue {
+        if (!args.empty()) s_taggedStrings.erase(args[0].toInt());
         return VMValue(1);
     });
 
@@ -5887,14 +6937,16 @@ bool ScriptEngine::init() {
         if (address.empty()) return VMValue(0);
         uint16_t port = T2Protocol::DEFAULT_PORT;
         const auto colon = address.rfind(':');
-        if (colon != std::string::npos && colon + 1 < address.size()) {
-            char* end = nullptr;
-            const long parsed = std::strtol(address.c_str() + colon + 1, &end, 10);
-            if (end && *end == '\0' && parsed > 0 && parsed <= 65535) {
-                port = (uint16_t)parsed;
-                address.resize(colon);
-            }
-        } else if (args.size() > 1 && args[1].toInt() > 0) {
+        if (colon != std::string::npos) {
+            if (colon + 1 >= address.size()) return VMValue(0);
+            uint16_t parsedPort = 0;
+            if (!parseConsolePort(address.substr(colon + 1), parsedPort) || colon == 0 ||
+                address.find(':') != colon)
+                return VMValue(0);
+            port = parsedPort;
+            address.resize(colon);
+        } else if (args.size() > 1) {
+            if (args[1].toInt() < 1 || args[1].toInt() > 65535) return VMValue(0);
             port = (uint16_t)args[1].toInt();
         }
         const std::string password = args.size() > 1 && colon != std::string::npos
@@ -5917,13 +6969,10 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("watchServer", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
-        const std::string address = args[0].toString();
-        const auto colon = address.rfind(':');
-        if (colon == std::string::npos || colon == 0) return VMValue(0);
-        const int port = atoi(address.substr(colon + 1).c_str());
-        if (port < 1 || port > 65535) return VMValue(0);
-        const std::string host = address.substr(0, colon);
-        Engine::instance().game().connectToServer(host.c_str(), (uint16_t)port, true);
+        std::string host;
+        uint16_t port = 0;
+        if (!parseConsoleHostPort(args[0].toString(), host, port)) return VMValue(0);
+        Engine::instance().game().connectToServer(host.c_str(), port, true);
         return VMValue(1);
     });
     tsInstance->registerNative("watchSelectedServer", [](const auto&) -> VMValue {
@@ -5948,14 +6997,19 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // disconnectedCleanup() — stub
     tsInstance->registerNative("disconnectedCleanup", [](const auto&) -> VMValue {
+        Engine::instance().game().disconnectedCleanup();
         return VMValue(1);
     });
 
-    // createServer(port, maxPlayers) — stub
-    tsInstance->registerNative("createServer", [](const auto&) -> VMValue {
-        return VMValue(0);
+    tsInstance->registerNative("createServer", [](const auto& args) -> VMValue {
+        const uint16_t port = args.empty() ? T2Protocol::DEFAULT_PORT
+                                           : (uint16_t)std::clamp(args[0].toInt(), 1, 65535);
+        auto& game = Engine::instance().game();
+        game.gameServer().setHeightCallback(+[](float x, float z, void* context) -> float {
+            return static_cast<World*>(context)->getHeight(x, z);
+        }, &game.world());
+        return VMValue(game.gameServer().start(port) ? 1 : 0);
     });
 
     // Copy all TS-registered natives to DSO VM so DSO functions can find them
@@ -5970,6 +7024,7 @@ void ScriptEngine::shutdown() {
     // Clean up objects
     for (auto& [name, obj] : objects) delete obj;
     objects.clear();
+    s_scriptTargets.clear();
     delete tsInstance;
     tsInstance = nullptr;
     delete vmInstance;

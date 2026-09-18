@@ -15,6 +15,37 @@ static void readGameBasePayload(V12BitStream& stream, PlayerGhostState* state = 
     if (stream.readFlag() && stream.readFlag()) stream.readUnsigned(9);
 }
 
+static void addProjectileImpact(std::vector<ProjectileImpact>* impacts,
+                                const V12Vec3& position, const V12Vec3& normal,
+                                const PlayerGhostState* state) {
+    if (!impacts) return;
+    ProjectileImpact impact;
+    impact.position = position;
+    impact.normal = normal;
+    if (state && state->hasDatablock) {
+        impact.datablockId = state->datablockId;
+        impact.hasDatablock = true;
+    }
+    impacts->push_back(impact);
+}
+
+static void setProjectileMotion(PlayerGhostState* state, const V12Vec3& position,
+                                 const V12Vec3& direction) {
+    if (!state) return;
+    state->position = position;
+    state->hasPosition = true;
+    const float length = std::sqrt(direction.x * direction.x + direction.y * direction.y +
+                                   direction.z * direction.z);
+    if (length <= 0.0001f) return;
+    state->velocity = {direction.x, direction.y, direction.z};
+    state->hasVelocity = true;
+    const float yaw = std::atan2(direction.x, direction.y);
+    const float half = yaw * 0.5f;
+    state->rotation = {0.0f, std::sin(half), 0.0f};
+    state->rotationW = std::cos(half);
+    state->hasRotation = true;
+}
+
 static bool readMissionAreaPayload(V12BitStream& stream) {
     if (stream.readFlag()) {
         for (int i = 0; i < 4; ++i) stream.readUnsigned(32);
@@ -84,6 +115,34 @@ static bool readSunPayload(V12BitStream& stream) {
 static bool readTSStaticPayload(V12BitStream& stream) {
     for (int i = 0; i < 16; ++i) stream.readF32();
     stream.readPoint3F();
+    // TSStatic::packUpdate writes the authored shape name after transform and
+    // scale.  It is part of the V12 payload, not a datablock extension.
+    stream.readString();
+    return !stream.failed();
+}
+
+static bool readTriggerPayload(V12BitStream& stream) {
+    // Trigger::packUpdate writes the complete edit-time polyhedron.  Keep the
+    // same unbounded scalar representation as the original V12 source, but
+    // reject counts that cannot fit in the remaining packet.
+    stream.readAffineTransform();
+    stream.readPoint3F();
+    const auto readCount = [&stream](size_t bitsPerEntry) -> uint32_t {
+        const uint32_t count = stream.readU32();
+        if (count > 4096 || count > stream.remainingBits() / bitsPerEntry) return 0xffffffffu;
+        return count;
+    };
+    const uint32_t pointCount = readCount(96);
+    if (pointCount == 0xffffffffu) return false;
+    for (uint32_t i = 0; i < pointCount; ++i) stream.readPoint3F();
+    const uint32_t planeCount = readCount(128);
+    if (planeCount == 0xffffffffu) return false;
+    for (uint32_t i = 0; i < planeCount; ++i)
+        for (int j = 0; j < 4; ++j) stream.readF32();
+    const uint32_t edgeCount = readCount(128);
+    if (edgeCount == 0xffffffffu) return false;
+    for (uint32_t i = 0; i < edgeCount; ++i)
+        for (int j = 0; j < 4; ++j) stream.readU32();
     return !stream.failed();
 }
 
@@ -122,23 +181,25 @@ static bool readFireballAtmospherePayload(V12BitStream& stream, bool initial) {
     return !stream.failed();
 }
 
-static bool readSplashPayload(V12BitStream& stream) {
-    readGameBasePayload(stream);
-    if (stream.readFlag()) stream.readPoint3F();
+static bool readSplashPayload(V12BitStream& stream, PlayerGhostState* state) {
+    readGameBasePayload(stream, state);
+    if (stream.readFlag()) {
+        const V12Vec3 position = stream.readPoint3F();
+        if (state) { state->position = position; state->hasPosition = true; }
+    }
     return !stream.failed();
 }
 
 static bool readShockwavePayload(V12BitStream& stream) {
     readGameBasePayload(stream);
-    if (stream.readFlag()) {
-        stream.readPoint3F();
-        stream.readPoint3F();
-    }
+    if (stream.readFlag()) { stream.readPoint3F(); stream.readPoint3F(); }
     return !stream.failed();
 }
 
 static bool readShapeBasePayload(V12BitStream& stream, bool initial,
                                   PlayerGhostState* state) {
+    if (state) *state = {};
+    if (state) state->hasMaxHealth = true; // Native ShapeBase uses the supported 100-point profile.
     readGameBasePayload(stream, state);
     if (!stream.readFlag()) return !stream.failed();
     if (stream.readFlag()) {
@@ -146,18 +207,13 @@ static bool readShapeBasePayload(V12BitStream& stream, bool initial,
         if (state) {
             state->health = (1.0f - damage) * 100.0f;
             state->hasHealth = true;
+            state->damageState = (int)stream.readUnsigned(2);
+            state->hasDamageState = true;
+        } else {
+            stream.readUnsigned(2);
         }
-        stream.readUnsigned(2);
         stream.readFlag();
         stream.readNormalVector(8);
-    }
-    if (stream.readFlag()) {
-        for (int i = 0; i < 4; ++i) {
-            if (stream.readFlag()) {
-                const bool playing = stream.readFlag();
-                if (playing) stream.readUnsigned(11);
-            }
-        }
     }
     if (stream.readFlag()) {
         for (int i = 0; i < 4; ++i) {
@@ -172,6 +228,7 @@ static bool readShapeBasePayload(V12BitStream& stream, bool initial,
                     state->threads[i].state = threadState;
                     state->threads[i].timescale = timescale;
                     state->threads[i].position = position;
+                    state->threads[i].forward = timescale >= 0.0f;
                     state->threads[i].atEnd = atEnd;
                     state->threads[i].valid = true;
                 }
@@ -179,23 +236,62 @@ static bool readShapeBasePayload(V12BitStream& stream, bool initial,
         }
     }
     if (stream.readFlag()) {
+        for (int i = 0; i < 4; ++i) {
+            if (stream.readFlag()) {
+                const bool playing = stream.readFlag();
+                int profile = -1;
+                if (playing) profile = (int)stream.readUnsigned(11);
+                if (state) state->soundThreads[i] = {profile, playing, true};
+            }
+        }
+    }
+    if (stream.readFlag()) {
         for (int i = 0; i < 8; ++i) {
             if (stream.readFlag()) {
-                if (stream.readFlag()) stream.readUnsigned(11);
+                // An ImageMask entry replaces the slot; no datablock means unmounted.
+                if (state) state->mountedImages[i] = {};
                 if (stream.readFlag()) {
-                    if (stream.readFlag()) stream.readUnsigned(10);
-                    else stream.readHuffmanString();
+                    const int datablock = (int)stream.readUnsigned(11);
+                    if (state) state->mountedImages[i].datablockId = datablock;
                 }
-                for (int j = 0; j < 5; ++j) stream.readFlag();
-                stream.readUnsigned(3);
+                for (int tag = 0; tag < 2; ++tag) {
+                    if (stream.readFlag()) {
+                        if (stream.readFlag()) stream.readUnsigned(10);
+                        else stream.readHuffmanString();
+                    }
+                }
+                stream.readFlag(); // animate all shapes
+                stream.readFlag(); // wet
+                stream.readFlag(); // motion
+                stream.readFlag(); // ammo
+                const bool loaded = stream.readFlag();
+                stream.readFlag(); // target
+                stream.readFlag(); // trigger down
+                stream.readFlag(); // alt trigger down
+                for (int trigger = 0; trigger < 8; ++trigger) stream.readFlag();
+                stream.readUnsigned(3); // fire count
+                stream.readUnsigned(3); // alt fire count
+                stream.readUnsigned(3); // reload count
+                const bool firing = stream.readFlag();
+                stream.readFlag(); // alt firing
+                stream.readFlag(); // reloading
+                if (state) {
+                    state->mountedImages[i].loaded = loaded;
+                    state->mountedImages[i].firing = firing;
+                    state->mountedImages[i].valid = true;
+                }
                 if (initial) stream.readFlag();
             }
         }
     }
     if (stream.readFlag()) {
         if (stream.readFlag()) {
-            if (state) state->moving = stream.readFlag();
-            else stream.readFlag();
+            if (state) {
+                state->cloaked = stream.readFlag();
+                state->hasCloak = true;
+            } else {
+                stream.readFlag();
+            }
             stream.readFlag();
             if (stream.readFlag()) {
                 stream.readFlag();
@@ -207,7 +303,11 @@ static bool readShapeBasePayload(V12BitStream& stream, bool initial,
                 stream.readFlag();
             } else {
                 stream.readNormalVector(8);
-                stream.readFloat(5);
+                const float shield = stream.readFloat(5);
+                if (state) {
+                    state->shieldLevel = shield;
+                    state->hasShield = true;
+                }
             }
         }
         if (stream.readFlag()) {
@@ -235,20 +335,75 @@ static void readMove(V12BitStream& stream) {
     for (int i = 0; i < 6; ++i) stream.readFlag();
 }
 
-static bool readVehiclePayload(V12BitStream& stream, const V12Vec3& compressionPoint) {
-    stream.readFlag(); // jetting
-    if (stream.readFlag()) return !stream.failed(); // control object shortcut
-    stream.readFloat(9);
+static bool readVehiclePayload(V12BitStream& stream, const V12Vec3& compressionPoint,
+                               PlayerGhostState* state = nullptr) {
+    const bool jetting = stream.readFlag();
+    const bool controlObject = stream.readFlag();
+    if (state) {
+        state->jetting = jetting;
+        state->hasJetting = true;
+        state->controlObject = controlObject;
+        state->hasControlObject = true;
+        state->hasVehicleState = true;
+    }
+    if (controlObject) return !stream.failed(); // controlled object shortcut
+    const float energy = stream.readFloat(9);
+    if (state) {
+        state->energy = energy * 100.0f;
+        state->hasEnergy = true;
+    }
     stream.readFloat(9);
     readMove(stream);
-    stream.readFlag(); // frozen
+    const bool frozen = stream.readFlag();
+    if (state) {
+        state->frozen = frozen;
+        state->hasFrozen = true;
+    }
     if (stream.readFlag()) {
-        stream.readCompressedPoint(compressionPoint);
-        for (int i = 0; i < 4; ++i) stream.readF32();
-        stream.readPoint3F();
+        const V12Vec3 position = stream.readCompressedPoint(compressionPoint);
+        const float qx = stream.readF32(), qy = stream.readF32();
+        const float qz = stream.readF32(), qw = stream.readF32();
+        if (state) {
+            state->position = position;
+            state->hasPosition = true;
+            state->rotation = {qx, qy, qz};
+            state->rotationW = qw;
+            state->hasRotation = true;
+        }
+        const V12Vec3 momentum = stream.readPoint3F();
+        if (state) {
+            // Vehicle packs linear momentum; use the native fallback mass.
+            state->velocity = {momentum.x / 200.0f, momentum.y / 200.0f,
+                               momentum.z / 200.0f};
+            state->hasVelocity = true;
+        }
         stream.readPoint3F();
     }
     if (stream.readFlag()) stream.readFloat(8);
+    return !stream.failed();
+}
+
+static bool readWheeledVehiclePayload(V12BitStream& stream,
+                                      bool initial,
+                                      const V12Vec3& compressionPoint,
+                                      PlayerGhostState* state = nullptr) {
+    if (!readShapeBasePayload(stream, initial, state) ||
+        !readVehiclePayload(stream, compressionPoint, state)) return false;
+    const bool braking = stream.readFlag();
+    if (state) {
+        state->braking = braking;
+        state->hasBraking = true;
+        state->hasVehicleState = true;
+    }
+    if (stream.readFlag()) {
+        for (int i = 0; i < 6; ++i) {
+            const float angularVelocity = stream.readF32();
+            const float suspension = stream.readF32();
+            const float lateral = stream.readF32();
+            if (state)
+                state->wheels[i] = {angularVelocity, suspension, lateral, true};
+        }
+    }
     return !stream.failed();
 }
 
@@ -334,13 +489,20 @@ static bool readAIObjectivePayload(V12BitStream& stream, bool initial,
 }
 
 static bool readTurretPayload(V12BitStream& stream, bool initial,
-                              const V12Vec3& compressionPoint) {
-    if (!readStaticShapePayload(stream, initial, compressionPoint)) return false;
+                              const V12Vec3& compressionPoint,
+                              PlayerGhostState* state = nullptr) {
+    if (!readStaticShapePayload(stream, initial, compressionPoint, state)) return false;
+    if (stream.readFlag()) stream.readFloat(8); // capacitor energy
     if (stream.readFlag()) return !stream.failed(); // controlling object
     if (stream.readFlag()) {
-        stream.readFloat(10); // phi
-        stream.readFloat(10); // theta
+        const float phi = stream.readFloat(10); // phi / 360 degrees
+        const float theta = stream.readFloat(10); // theta in [45, 135]
         stream.readFloat(8);  // activation
+        if (state) {
+            state->barrelPitch = theta * 3.14159265358979323846f;
+            state->barrelYaw = phi * 6.28318530717958647692f;
+            state->hasTurretAim = true;
+        }
     }
     return !stream.failed();
 }
@@ -355,16 +517,27 @@ static bool readWayPointPayload(V12BitStream& stream, bool initial,
 }
 
 static bool readLinearProjectilePayload(V12BitStream& stream, bool initial,
-                                         const V12Vec3& compressionPoint) {
-    readGameBasePayload(stream);
+                                         const V12Vec3& compressionPoint,
+                                         PlayerGhostState* state,
+                                         std::vector<ProjectileImpact>* impacts) {
+    readGameBasePayload(stream, state);
     if (stream.readFlag()) {
         if (stream.readFlag()) {
-            stream.readCompressedPoint(compressionPoint);
-            stream.readNormalVector(14);
+            const V12Vec3 position = stream.readCompressedPoint(compressionPoint);
+            const V12Vec3 normal = stream.readNormalVector(14);
+            addProjectileImpact(impacts, position, normal, state);
             stream.readFlag();
         } else {
-            stream.readCompressedPoint(compressionPoint);
-            stream.readNormalVector(14);
+            const V12Vec3 position = stream.readCompressedPoint(compressionPoint);
+            const V12Vec3 direction = stream.readNormalVector(14);
+            setProjectileMotion(state, position, direction);
+            if (state) {
+                state->beamStart = position;
+                state->beamEnd = {position.x + direction.x * 10.0f,
+                                  position.y + direction.y * 10.0f,
+                                  position.z + direction.z * 10.0f};
+                state->hasBeam = true;
+            }
             stream.readRange(0, 511);
             if (stream.readFlag()) {
                 stream.readUnsigned(10);
@@ -377,20 +550,26 @@ static bool readLinearProjectilePayload(V12BitStream& stream, bool initial,
             if (stream.readFlag()) stream.readUnsigned(10);
         }
     } else {
-        stream.readCompressedPoint(compressionPoint);
-        stream.readNormalVector(14);
+        const V12Vec3 position = stream.readCompressedPoint(compressionPoint);
+        const V12Vec3 normal = stream.readNormalVector(14);
+        addProjectileImpact(impacts, position, normal, state);
         stream.readFlag();
     }
     (void)initial;
     return !stream.failed();
 }
 
-static bool readSniperProjectilePayload(V12BitStream& stream, bool initial) {
+static bool readSniperProjectilePayload(V12BitStream& stream, bool initial,
+                                         PlayerGhostState* state) {
     readGameBasePayload(stream);
     if (stream.readFlag()) {
         stream.readFloat(7);
-        stream.readPoint3F();
-        stream.readPoint3F();
+        const V12Vec3 start = stream.readPoint3F();
+        const V12Vec3 end = stream.readPoint3F();
+        if (state) {
+            state->beamStart = start; state->beamEnd = end; state->hasBeam = true;
+            state->position = start; state->hasPosition = true;
+        }
         stream.readFlag();
         stream.readFlag();
         if (stream.readFlag()) {
@@ -413,20 +592,24 @@ static bool readSniperProjectilePayload(V12BitStream& stream, bool initial) {
     return !stream.failed();
 }
 
-static bool readBombProjectilePayload(V12BitStream& stream) {
-    readGameBasePayload(stream);
+static bool readBombProjectilePayload(V12BitStream& stream, PlayerGhostState* state,
+                                       std::vector<ProjectileImpact>* impacts) {
+    readGameBasePayload(stream, state);
     if (!stream.readFlag()) {
         if (stream.readFlag()) {
             stream.readPoint3F();
             stream.readPoint3F();
         }
-        if (!stream.readFlag()) return !stream.failed();
-        stream.readPoint3F();
-        stream.readPoint3F();
+        if (stream.readFlag()) {
+            const V12Vec3 position = stream.readPoint3F();
+            const V12Vec3 normal = stream.readPoint3F();
+            addProjectileImpact(impacts, position, normal, state);
+        }
         return !stream.failed();
     }
-    stream.readPoint3F();
-    stream.readPoint3F();
+    const V12Vec3 position = stream.readPoint3F();
+    const V12Vec3 velocity = stream.readPoint3F();
+    setProjectileMotion(state, position, velocity);
     stream.readUnsigned(12);
     if (stream.readFlag()) stream.readFlag();
     if (stream.readFlag()) {
@@ -442,16 +625,21 @@ static bool readBombProjectilePayload(V12BitStream& stream) {
     return !stream.failed();
 }
 
-static bool readGrenadeProjectilePayload(V12BitStream& stream, bool initial) {
-    readGameBasePayload(stream);
+static bool readGrenadeProjectilePayload(V12BitStream& stream, bool initial,
+                                          PlayerGhostState* state,
+                                          std::vector<ProjectileImpact>* impacts) {
+    readGameBasePayload(stream, state);
     if (stream.readFlag()) {
-        stream.readPoint3F();
-        stream.readPoint3F();
+        const V12Vec3 position = stream.readPoint3F();
+        const V12Vec3 velocity = stream.readPoint3F();
+        setProjectileMotion(state, position, velocity);
         stream.readRange(0, 4095);
         stream.readFlag();
         if (stream.readFlag()) {
+            const V12Vec3 position = stream.readPoint3F();
             stream.readPoint3F();
-            stream.readPoint3F();
+            const V12Vec3 normal = stream.readPoint3F();
+            addProjectileImpact(impacts, position, normal, state);
         }
         if (stream.readFlag()) {
             stream.readUnsigned(11);
@@ -464,8 +652,9 @@ static bool readGrenadeProjectilePayload(V12BitStream& stream, bool initial) {
             stream.readPoint3F();
         }
         if (stream.readFlag()) {
-            stream.readPoint3F();
-            stream.readPoint3F();
+            const V12Vec3 position = stream.readPoint3F();
+            const V12Vec3 normal = stream.readPoint3F();
+            addProjectileImpact(impacts, position, normal, state);
         }
     }
     (void)initial;
@@ -719,13 +908,26 @@ static bool readSkyPayload(V12BitStream& stream) {
     return !stream.failed();
 }
 
-static bool readShockLanceProjectilePayload(V12BitStream& stream, bool initial) {
-    readGameBasePayload(stream);
+static bool readShockLanceProjectilePayload(V12BitStream& stream, bool initial,
+                                             PlayerGhostState* state,
+                                             std::vector<ProjectileImpact>* impacts) {
+    readGameBasePayload(stream, state);
     if (stream.readFlag()) stream.readUnsigned(11);
     if (stream.readFlag()) {
-        stream.readPoint3F();
-        stream.readPoint3F();
-        stream.readFlag();
+        const V12Vec3 start = stream.readPoint3F();
+        const V12Vec3 end = stream.readPoint3F();
+        const bool hit = stream.readFlag();
+        if (state) {
+            state->beamStart = start;
+            state->beamEnd = end;
+            state->hasBeam = true;
+            state->position = start;
+            state->hasPosition = true;
+        }
+        if (hit && impacts) {
+            V12Vec3 normal{start.x - end.x, start.y - end.y, start.z - end.z};
+            addProjectileImpact(impacts, end, normal, state);
+        }
         if (stream.readFlag()) {
             stream.readUnsigned(11);
             stream.readUnsigned(3);
@@ -737,7 +939,8 @@ static bool readShockLanceProjectilePayload(V12BitStream& stream, bool initial) 
 
 bool readGhostPayload(V12BitStream& stream, uint16_t classId, bool initial,
                       const V12Vec3& compressionPoint,
-                      PlayerGhostState* playerState) {
+                      PlayerGhostState* playerState,
+                      std::vector<ProjectileImpact>* impacts) {
     switch (classId) {
     case 0: return readAIObjectivePayload(stream, initial, compressionPoint);
     case 1: return readAudioEmitterPayload(stream);
@@ -746,7 +949,7 @@ bool readGhostPayload(V12BitStream& stream, uint16_t classId, bool initial,
     case 7:  // EnergyProjectile: same wire format as GrenadeProjectile
     case 9:  // FlareProjectile: same wire format as GrenadeProjectile
     case 13: // GrenadeProjectile
-        return readGrenadeProjectilePayload(stream, initial);
+        return readGrenadeProjectilePayload(stream, initial, playerState, impacts);
     case 17: return readLightningPayload(stream, initial);
     case 23: return readParticleEmissionDummyPayload(stream);
     case 24: return readPhysicalZonePayload(stream, initial);
@@ -754,10 +957,10 @@ bool readGhostPayload(V12BitStream& stream, uint16_t classId, bool initial,
     case 18: // LinearFlareProjectile: same wire format as LinearProjectile
     case 19: // LinearProjectile
     case 46: // TracerProjectile: same wire format as LinearProjectile
-        return readLinearProjectilePayload(stream, initial, compressionPoint);
+        return readLinearProjectilePayload(stream, initial, compressionPoint, playerState, impacts);
     case 8: return readFireballAtmospherePayload(stream, initial);
     case 11: return readForceFieldBarePayload(stream);
-    case 3: return readBombProjectilePayload(stream);
+    case 3: return readBombProjectilePayload(stream, playerState, impacts);
     case 6: return readELFProjectilePayload(stream);
     case 4: { // Camera
         if (!readShapeBasePayload(stream, initial, nullptr)) return false;
@@ -766,14 +969,14 @@ bool readGhostPayload(V12BitStream& stream, uint16_t classId, bool initial,
         return !stream.failed();
     }
     case 10: // FlyingVehicle
-        if (!readShapeBasePayload(stream, initial, nullptr) ||
-            !readVehiclePayload(stream, compressionPoint)) return false;
+        if (!readShapeBasePayload(stream, initial, playerState) ||
+            !readVehiclePayload(stream, compressionPoint, playerState)) return false;
         if (stream.readFlag()) return !stream.failed();
         stream.readFlag(); stream.readUnsigned(3);
         return !stream.failed();
     case 14: // HoverVehicle
-        return readShapeBasePayload(stream, initial, nullptr) &&
-               readVehiclePayload(stream, compressionPoint) &&
+        return readShapeBasePayload(stream, initial, playerState) &&
+               readVehiclePayload(stream, compressionPoint, playerState) &&
                (stream.readUnsigned(3), !stream.failed());
     case 16: return readItemPayload(stream, initial, compressionPoint, playerState);
     case 20: // Marker
@@ -788,9 +991,9 @@ bool readGhostPayload(V12BitStream& stream, uint16_t classId, bool initial,
     case 28: return readRepairProjectilePayload(stream);
     case 44: return readTargetProjectilePayload(stream, initial);
     case 30: return readSeekerProjectilePayload(stream);
-    case 31: return readShapeBasePayload(stream, initial, nullptr);
+    case 31: return readShapeBasePayload(stream, initial, playerState);
     case 33: return readShockwavePayload(stream);
-    case 32: return readShockLanceProjectilePayload(stream, initial);
+    case 32: return readShockLanceProjectilePayload(stream, initial, playerState, impacts);
     case 34: // SimpleNetObject
         stream.readString(); return !stream.failed();
     case 35: return readSkyPayload(stream);
@@ -804,8 +1007,8 @@ bool readGhostPayload(V12BitStream& stream, uint16_t classId, bool initial,
         }
         return !stream.failed();
     }
-    case 38: return readSplashPayload(stream);
-    case 36: return readSniperProjectilePayload(stream, initial);
+    case 38: return readSplashPayload(stream, playerState);
+    case 36: return readSniperProjectilePayload(stream, initial, playerState);
     case 39: return readStaticShapePayload(stream, initial, compressionPoint, playerState);
     case 40: // StationFXPersonal
     case 41: // StationFXVehicle
@@ -813,19 +1016,13 @@ bool readGhostPayload(V12BitStream& stream, uint16_t classId, bool initial,
     case 42: return readSunPayload(stream);
     case 43: return readTSStaticPayload(stream);
     case 45: return readTerrainBlockPayload(stream, initial);
-    case 47: return stream.readU32(), !stream.failed();
-    case 48: return readTurretPayload(stream, initial, compressionPoint);
+    case 47: return readTriggerPayload(stream);
+    case 48: return readTurretPayload(stream, initial, compressionPoint, playerState);
     case 49: return readVehicleBlockerPayload(stream);
     case 50: return readWaterBlockPayload(stream);
     case 51: return readWayPointPayload(stream, initial, compressionPoint);
     case 52: {
-        if (!readShapeBasePayload(stream, initial, nullptr) ||
-            !readVehiclePayload(stream, compressionPoint)) return false;
-        stream.readFlag();
-        for (int i = 0; i < 4; ++i) {
-            stream.readF32(); stream.readF32(); stream.readF32();
-        }
-        return !stream.failed();
+        return readWheeledVehiclePayload(stream, initial, compressionPoint, playerState);
     }
     default: return false;
     }
@@ -908,10 +1105,42 @@ PlayerGhostState mergePlayerGhostState(const PlayerGhostState& base,
         merged.health = update.health;
         merged.hasHealth = true;
     }
+    if (update.hasMaxHealth) {
+        merged.maxHealth = update.maxHealth;
+        merged.hasMaxHealth = true;
+    }
+    if (update.hasDamageState) {
+        merged.damageState = update.damageState;
+        merged.hasDamageState = true;
+    }
     if (update.hasEnergy) {
         merged.energy = update.energy;
         merged.hasEnergy = true;
     }
+    if (update.hasStats) {
+        merged.kills = update.kills;
+        merged.deaths = update.deaths;
+        merged.score = update.score;
+        merged.team = update.team;
+        merged.hasStats = true;
+    }
+    if (update.hasJetting) {
+        merged.jetting = update.jetting;
+        merged.hasJetting = true;
+    }
+    if (update.hasControlObject) {
+        merged.controlObject = update.controlObject;
+        merged.hasControlObject = true;
+    }
+    if (update.hasFrozen) {
+        merged.frozen = update.frozen;
+        merged.hasFrozen = true;
+    }
+    if (update.hasBraking) {
+        merged.braking = update.braking;
+        merged.hasBraking = true;
+    }
+    if (update.hasVehicleState) merged.hasVehicleState = true;
     if (update.hasPosition) {
         merged.position = update.position;
         merged.hasPosition = true;
@@ -930,8 +1159,35 @@ PlayerGhostState mergePlayerGhostState(const PlayerGhostState& base,
         merged.moving = update.moving;
         merged.hasMovement = true;
     }
+    if (update.hasVelocity) {
+        merged.velocity = update.velocity;
+        merged.hasVelocity = true;
+    }
+    if (update.hasTurretAim) {
+        merged.barrelPitch = update.barrelPitch;
+        merged.barrelYaw = update.barrelYaw;
+        merged.hasTurretAim = true;
+    }
+    if (update.hasCloak) {
+        merged.cloaked = update.cloaked;
+        merged.hasCloak = true;
+    }
+    if (update.hasShield) {
+        merged.shieldLevel = update.shieldLevel;
+        merged.hasShield = true;
+    }
     for (int i = 0; i < 4; ++i) {
         if (update.threads[i].valid) merged.threads[i] = update.threads[i];
+        if (update.soundThreads[i].valid)
+            merged.soundThreads[i] = update.soundThreads[i];
+    }
+    for (int i = 0; i < 8; ++i) {
+        if (update.mountedImages[i].valid)
+            merged.mountedImages[i] = update.mountedImages[i];
+    }
+    for (int i = 0; i < 6; ++i) {
+        if (update.wheels[i].valid)
+            merged.wheels[i] = update.wheels[i];
     }
     return merged;
 }

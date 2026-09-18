@@ -1,10 +1,18 @@
 #include "net/protocol.h"
+#include "game/death_respawn.h"
+#include "game/match_runtime.h"
+#include "game/ctf_runtime.h"
+#include "game/item_parity.h"
+#include "game/movement.h"
 #include "net/v12_registry.h"
 #include "net/network.h"
 #include "core/console.h"
 #include "core/engine.h"
+#include "script/torquescript.h"
 #include "game/mission_parser.h"
+#include "game/mission_rules.h"
 #include "game/demo.h"
+#include "game/weapon.h"
 #include <cstring>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -184,10 +192,30 @@ static int32_t classNameToClassId(const std::string& name) {
     return -1;
 }
 
+static int32_t nativeGhostClassId(int32_t classId, int itemType) {
+    if (itemType >= 0) return 16; // Item
+    switch (classId) {
+        case T2Protocol::CLASS_FLAG_RED:
+        case T2Protocol::CLASS_FLAG_BLUE: return 20;
+        case 31: return 25; // legacy Player
+        case 13: return 10; // legacy FlyingVehicle
+        case 17: return 14; // legacy HoverVehicle
+        case 62: return 50; // legacy WheeledVehicle
+        case 57: return 48; // legacy Turret
+        case 5: return 4;   // legacy Camera
+        case 6: return 5;   // legacy Debris
+        case 46: return 37; // legacy SpawnSphere
+        case 24: return 20; // legacy Marker
+        case 33: return 27; // Torch projectile -> native Projectile
+        default: return classId < (int32_t)V12::GhostClassCount ? classId : -1;
+    }
+}
+
 // ─── Server ───────────────────────────────────────────────────────
 
 static void writePlayerGhost(V12BitWriter& writer, float x, float y, float z,
-                             float rotX, float rotZ, float energy) {
+                             float rotX, float rotZ, float energy,
+                             float health, int damageState) {
     auto writeFloat = [&writer](float value) {
         uint32_t bits;
         std::memcpy(&bits, &value, sizeof(bits));
@@ -195,7 +223,19 @@ static void writePlayerGhost(V12BitWriter& writer, float x, float y, float z,
     };
     writer.writeFlag(false); // GameBase mask 1
     writer.writeFlag(false); // GameBase mask 2
-    writer.writeFlag(false); // ShapeBase mask
+    writer.writeFlag(true);  // ShapeBase mask
+    writer.writeFlag(true);  // damage mask
+    const float damage = std::clamp(1.0f - health / 100.0f, 0.0f, 1.0f);
+    writer.writeUnsigned((uint32_t)std::lround(damage * 63.0f), 6);
+    writer.writeUnsigned((uint32_t)std::clamp(damageState, 0, 3), 2);
+    writer.writeFlag(false); // no whiteout
+    writer.writeUnsigned(0, 9); // damage normal phi
+    writer.writeUnsigned(0, 8); // damage normal theta
+    writer.writeFlag(false); // no animation threads
+    writer.writeFlag(false); // no sound threads
+    writer.writeFlag(false); // no mounted images
+    writer.writeFlag(false); // no cloak/shield/invincible mask
+    writer.writeFlag(false); // no mount update
     writer.writeFlag(false); // ImpactMask
     writer.writeFlag(false); // ActionMask
     writer.writeFlag(false); // ArmAction
@@ -301,6 +341,7 @@ static void writeShockwaveGhost(V12BitWriter& writer, float x, float y, float z)
 
 struct GameServer::Impl {
     int sock = -1;
+    uint16_t port = 0;
     bool running = false;
 
     // Server-side ghost
@@ -310,10 +351,12 @@ struct GameServer::Impl {
         float posX{}, posY{}, posZ{};
         float rotX{}, rotZ{};
         float health{100}, energy{100};
+        int damageState = 0;
         bool active{true};
         // Item pickup fields
         int itemType = -1;
         double respawnTime = 0;
+        float homeX{}, homeY{}, homeZ{};
         // Vehicle fields
         int passengerCi = -1; // client index driving this vehicle, -1 if none
         float vehSpeed{};     // current forward speed
@@ -339,6 +382,7 @@ struct GameServer::Impl {
         std::map<uint32_t, double> ghostFirstSent; // ghost idx -> time first sent as Create
         bool active;
         bool isBot = false;
+        bool jumpWasDown = false;
         std::string playerName = "Player";
         // Position history for lag compensation (timestamped)
         struct PosSample { double time; float x, y, z; };
@@ -350,7 +394,10 @@ struct GameServer::Impl {
         V12::ProtocolState nativeProtocol;
         V12::NetStringTable nativeStrings;
         bool native = false;
+        std::string nativeStatsDigest;
+        std::map<int, std::string> nativeFlagStates;
         bool ghosting = false;
+        bool matchStartSent = false;
         // Ghost tracking
         std::set<uint32_t> knownGhosts;
         uint32_t playerGhostIndex = 0; // index of this client's player ghost
@@ -374,6 +421,7 @@ struct GameServer::Impl {
 
     // Query socket for server info API
     int querySock = -1;
+    uint16_t queryPort = 0;
 
     // Server-side projectiles (linked to ghost indices)
     struct ServerProjectile {
@@ -391,14 +439,15 @@ struct GameServer::Impl {
     static WeaponProfile weaponProfile(int id) {
         switch (id) {
             case 1: return {80.0f, 1.0f};   // sniper-style: high damage, tiny splash
-            default: return {30.0f, 3.0f};  // disc: moderate damage, splash radius
+            default: return {gWeaponTable[0].damage, gWeaponTable[0].splashRadius};
         }
     }
     std::vector<ServerProjectile> projectiles;
 
     // Spawn points loaded from mission
-    struct SpawnPoint { float x, y, z; };
+    struct SpawnPoint { float x, y, z; int teamId = 0; };
     std::vector<SpawnPoint> spawnPoints;
+    size_t nextSpawnPoint = 0;
 
     // Bot AI state per bot
     struct BotState {
@@ -413,7 +462,14 @@ struct GameServer::Impl {
     // Game mode
     int gameMode = 0; // 0=Deathmatch, 1=Team Deathmatch
     int scoreLimit = 25;
+    bool trainingMission = false;
     int teamScore[3] = {}; // index 0=unused, 1=red, 2=blue
+    CtfRuntime::Match ctfMatch;
+    double lastModeTick = 0;
+    double matchStartTime = 0;
+    bool matchStarted = false;
+    bool matchEnded = false;
+    MatchRuntime::Clock matchClock;
 
     // Known datablock classes (simple list for transmission)
     struct DatablockInfo {
@@ -431,6 +487,15 @@ struct GameServer::Impl {
                 clients[i].addr.sin_port == from.sin_port)
                 return (int)i;
         return -1;
+    }
+
+    size_t nextTeamSpawn(int team) {
+        if (spawnPoints.empty()) return 0;
+        for (size_t n = 0; n < spawnPoints.size(); ++n) {
+            const size_t index = DeathRespawn::nextSpawn(nextSpawnPoint++, spawnPoints.size());
+            if (missionRulesTeamSpawn(spawnPoints[index].teamId, team)) return index;
+        }
+        return DeathRespawn::nextSpawn(nextSpawnPoint++, spawnPoints.size());
     }
 
     // Helper: send raw buffer to a client
@@ -499,7 +564,14 @@ struct GameServer::Impl {
             if (!clients[i].active || clients[i].isBot) continue;
             clients[i].knownGhosts.erase(ghostIndex);
             clients[i].ghostFirstSent.erase(ghostIndex);
+            if (clients[i].native) {
+                V12::ServerPacketOptions options;
+                options.ghosts.push_back({(uint16_t)ghostIndex, 0, false, true, {}});
+                const auto nativePacket = clients[i].nativeProtocol.buildServerPacket(options);
+                sendTo(clients[i].addr, nativePacket.data(), nativePacket.size());
+            } else {
                 sendWireTo(clients[i].addr, pkt.data(), pkt.size());
+            }
         }
     }
 
@@ -652,22 +724,32 @@ bool GameServer::start(uint16_t port) {
         return false;
     }
 
+    sockaddr_in bound{};
+    socklen_t boundLen = sizeof(bound);
+    if (getsockname(impl->sock, (sockaddr*)&bound, &boundLen) == 0)
+        impl->port = ntohs(bound.sin_port);
+
     int flags = fcntl(impl->sock, F_GETFL, 0);
     fcntl(impl->sock, F_SETFL, flags | O_NONBLOCK);
 
     impl->running = true;
 
-    // Set up query socket on port+1
+    // The stock LAN query listener is adjacent to the game port.  There is no
+    // meaningful adjacent port when the game port was selected dynamically.
     impl->querySock = socket(AF_INET, SOCK_DGRAM, 0);
     if (impl->querySock >= 0) {
         sockaddr_in qaddr{};
         qaddr.sin_family = AF_INET;
-        qaddr.sin_port = htons(port + 1);
+        qaddr.sin_port = htons(port == 0 || port == 65535 ? 0 : port + 1);
         qaddr.sin_addr.s_addr = INADDR_ANY;
         if (bind(impl->querySock, (sockaddr*)&qaddr, sizeof(qaddr)) == 0) {
             int qflags = fcntl(impl->querySock, F_GETFL, 0);
             fcntl(impl->querySock, F_SETFL, qflags | O_NONBLOCK);
-            Console::instance().printf(LogLevel::Info, "Server query API on port %d", port + 1);
+            sockaddr_in queryBound{};
+            socklen_t queryBoundLen = sizeof(queryBound);
+            getsockname(impl->querySock, (sockaddr*)&queryBound, &queryBoundLen);
+            impl->queryPort = ntohs(queryBound.sin_port);
+            Console::instance().printf(LogLevel::Info, "Server query API on port %d", impl->queryPort);
         } else {
             close(impl->querySock);
             impl->querySock = -1;
@@ -747,6 +829,7 @@ bool GameServer::start(uint16_t port) {
         sg.index = impl->nextGhostIndex++;
         sg.classId = sp.classId;
         sg.posX = sp.x; sg.posY = sp.y; sg.posZ = sp.z;
+        sg.homeX = sp.x; sg.homeY = sp.y; sg.homeZ = sp.z;
         sg.itemType = sp.itemType;
         impl->serverGhosts.push_back(sg);
     }
@@ -763,19 +846,36 @@ bool GameServer::start(uint16_t port) {
             Console::instance().printf(LogLevel::Warn, "Server: failed to load mission '%s', using defaults", fullPath.c_str());
         }
     }
+    // Infer the stock rule set before applying explicit server overrides.
+    std::string missionFile = mission;
+    if (!missionFile.empty() && !missionFile.ends_with(".mis")) missionFile += ".mis";
+    const std::string missionContent = missionFile.empty() ? std::string() :
+        Engine::instance().fs().readText((std::string("missions/") + missionFile).c_str());
+    const MissionRules missionRules = stockMissionRules(mission, missionContent);
+    impl->trainingMission = missionRules.type == MissionGameType::Training;
+    impl->gameMode = missionRules.type == MissionGameType::CaptureTheFlag ? 2 :
+                     missionRules.type == MissionGameType::TeamDeathmatch ? 1 : 0;
+    impl->scoreLimit = missionRules.scoreLimit;
     // Read game mode variables
     const char* modeVar = Console::instance().getStringVariable("sv_gamemode");
-    if (modeVar) {
-        if (strcmp(modeVar, "tdm") == 0 || strcmp(modeVar, "team") == 0)
+    if (modeVar && *modeVar) {
+        if (strcmp(modeVar, "ctf") == 0)
+            impl->gameMode = 2;
+        else if (strcmp(modeVar, "tdm") == 0 || strcmp(modeVar, "team") == 0)
             impl->gameMode = 1;
         else
             impl->gameMode = 0;
     }
     const char* limitVar = Console::instance().getStringVariable("sv_scorelimit");
-    if (limitVar) impl->scoreLimit = atoi(limitVar);
-    if (impl->scoreLimit < 1) impl->scoreLimit = 25;
+    if (!impl->trainingMission && limitVar && *limitVar) impl->scoreLimit = atoi(limitVar);
+    if (!impl->trainingMission && impl->scoreLimit < 1) impl->scoreLimit = 25;
+    impl->teamScore[1] = impl->teamScore[2] = 0;
+    impl->matchStartTime = 0;
+    impl->matchStarted = false;
+    impl->matchEnded = false;
+    impl->matchClock.reset();
     Console::instance().printf(LogLevel::Info, "Server: game mode %s, score limit %d",
-        impl->gameMode == 1 ? "Team Deathmatch" : "Deathmatch", impl->scoreLimit);
+        impl->trainingMission ? "Training" : impl->gameMode == 2 ? "Capture the Flag" : impl->gameMode == 1 ? "Team Deathmatch" : "Deathmatch", impl->scoreLimit);
     Console::instance().printf(LogLevel::Info, "Server started on port %d (%zu datablocks, %zu ghosts)",
         port, impl->datablocks.size(), impl->serverGhosts.size());
     return true;
@@ -791,6 +891,29 @@ bool GameServer::loadMission(const char* missionPath) {
     }
     std::string content((const char*)data.data(), data.size());
     auto objects = parseMisFile(content);
+    if (objects.empty()) {
+        Console::instance().printf(LogLevel::Warn, "Server: mission contains no objects: %s", missionPath);
+        return false;
+    }
+
+    const MissionRules rules = stockMissionRules(missionPath, content);
+    impl->trainingMission = rules.type == MissionGameType::Training;
+    impl->gameMode = rules.type == MissionGameType::CaptureTheFlag ? 2 :
+                     rules.type == MissionGameType::TeamDeathmatch ? 1 : 0;
+    impl->scoreLimit = rules.scoreLimit;
+
+    // A successful mission load replaces the previous world.  In particular,
+    // do not leave the startup fixtures or spawn points from the old map in
+    // the replicated and respawn state.
+    impl->serverGhosts.clear();
+    impl->projectiles.clear();
+    impl->spawnPoints.clear();
+    impl->nextSpawnPoint = 0;
+    impl->teamScore[1] = impl->teamScore[2] = 0;
+    impl->matchStartTime = 0;
+    impl->matchStarted = false;
+    impl->matchEnded = false;
+    impl->matchClock.reset();
 
     int spawned = 0;
     for (auto& obj : objects) {
@@ -811,15 +934,31 @@ bool GameServer::loadMission(const char* missionPath) {
             rotX = vals[0]; rotZ = vals[1];
         }
 
-        // Scale position to our world (2x factor for typical T2 missions)
-        pos.x *= 2.0f; pos.z *= 2.0f;
         if (pos.y < 1) pos.y = 2.0f; // ground clamp
+
+        const std::string datablock = getProp(obj.props, "datablock");
+        std::string objectName = obj.objName;
+        for (char& c : objectName) c = (char)std::tolower((unsigned char)c);
+        std::string lowerDatablock = datablock;
+        for (char& c : lowerDatablock) c = (char)std::tolower((unsigned char)c);
+        if (cid == 16 && lowerDatablock == "flag")
+            cid = objectName.find("team1") != std::string::npos ? T2Protocol::CLASS_FLAG_RED :
+                objectName.find("team2") != std::string::npos ? T2Protocol::CLASS_FLAG_BLUE : cid;
 
         Impl::ServerGhost sg;
         sg.index = impl->nextGhostIndex++;
         sg.classId = cid;
         sg.posX = pos.x; sg.posY = pos.y; sg.posZ = pos.z;
+        sg.homeX = pos.x; sg.homeY = pos.y; sg.homeZ = pos.z;
         sg.rotX = rotX; sg.rotZ = rotZ;
+        if (cid == 16) {
+            switch (classifyItemKind(datablock)) {
+                case ItemKind::Health: sg.itemType = 0; break;
+                case ItemKind::Energy: sg.itemType = 1; break;
+                case ItemKind::Ammo: sg.itemType = 2; break;
+                default: sg.itemType = -1; break;
+            }
+        }
         impl->serverGhosts.push_back(sg);
 
         // Collect spawn points for respawn
@@ -827,11 +966,16 @@ bool GameServer::loadMission(const char* missionPath) {
             Impl::SpawnPoint sp;
             // Use the object's worldPosition with rotation offset if available
             sp.x = pos.x; sp.y = pos.y; sp.z = pos.z;
+            sp.teamId = authoredMissionMarker(obj).teamId;
             impl->spawnPoints.push_back(sp);
         }
         spawned++;
     }
     Console::instance().printf(LogLevel::Info, "Server: spawned %d ghosts from mission '%s'", spawned, missionPath);
+    if (auto* ts = Engine::instance().script().ts()) {
+        ts->dispatchMissionCallback("onMissionLoadDone", {VMValue(missionPath)});
+        ts->dispatchMissionCallback("onMissionStart", {VMValue(missionPath)});
+    }
     return true;
 }
 
@@ -874,7 +1018,7 @@ void GameServer::spawnBot() {
     bot.energy = 100;
     // Place bot at a random spawn point
     if (!impl->spawnPoints.empty()) {
-        size_t si = (size_t)(rand() % impl->spawnPoints.size());
+        size_t si = impl->nextTeamSpawn(bot.teamId);
         bot.posX = impl->spawnPoints[si].x;
         bot.posY = impl->spawnPoints[si].y;
         bot.posZ = impl->spawnPoints[si].z;
@@ -956,26 +1100,77 @@ void GameServer::stopRecording() {
 void GameServer::changeMap(const char* mission) {
     if (!impl->running) return;
     Console::instance().printf(LogLevel::Info, "Changing map to: %s", mission);
-    // Clear existing ghosts and reset
-    impl->serverGhosts.clear();
-    impl->projectiles.clear();
-    impl->nextGhostIndex = 1;
-    // Reset client positions but keep them connected
-    for (auto& cl : impl->clients) {
-        cl.knownGhosts.clear();
-        cl.datablocksSent = false;
-        cl.playerGhostIndex = 0;
-    }
+    if (auto* ts = Engine::instance().script().ts())
+        ts->dispatchMissionCallback("onMissionEnded", {VMValue(mission)});
     // Load new mission
     std::string fullPath = std::string("missions/") + mission;
     if (!fullPath.ends_with(".mis")) fullPath += ".mis";
-    loadMission(fullPath.c_str());
+    const bool loaded = loadMission(fullPath.c_str());
+    if (!loaded) {
+        Console::instance().printf(LogLevel::Warn,
+            "Map change failed for '%s'; keeping the current map", fullPath.c_str());
+        return;
+    }
+    impl->nextGhostIndex = 1;
+    impl->projectiles.clear();
+    // Reset client protocol epochs while keeping the connections alive.
+    for (auto& cl : impl->clients) {
+        cl.knownGhosts.clear();
+        cl.ghostFirstSent.clear();
+        cl.datablocksSent = false;
+        cl.playerGhostIndex = 0;
+        cl.respawnAt = 0;
+        if (cl.native) {
+            cl.nativeProtocol.reset(cl.serverConnectSequence ^ cl.clientConnectSequence);
+            cl.nativeStrings.clear();
+            cl.nativeStatsDigest.clear();
+            cl.nativeFlagStates.clear();
+            cl.matchStartSent = false;
+            cl.ghosting = false;
+        }
+    }
+    // A map change starts a new ghost epoch. Active clients need a fresh
+    // player ghost; otherwise their next native packet can only reference the
+    // player object removed with the previous map.
+    for (auto& cl : impl->clients) {
+        if (!cl.active) continue;
+        if (!impl->spawnPoints.empty()) {
+            const auto& spawn = impl->spawnPoints[impl->nextTeamSpawn(cl.teamId)];
+            cl.posX = spawn.x;
+            cl.posY = spawn.y;
+            cl.posZ = spawn.z;
+        } else {
+            cl.posX = 0;
+            cl.posY = 5;
+            cl.posZ = 0;
+        }
+        cl.health = 100;
+        cl.energy = 100;
+        cl.respawnAt = 0;
+        Impl::ServerGhost ghost;
+        ghost.index = impl->nextGhostIndex++;
+        ghost.classId = 31;
+        ghost.posX = cl.posX;
+        ghost.posY = cl.posY;
+        ghost.posZ = cl.posZ;
+        ghost.rotX = cl.rotX;
+        ghost.rotZ = cl.rotZ;
+        ghost.health = cl.health;
+        ghost.energy = cl.energy;
+        ghost.homeX = ghost.posX; ghost.homeY = ghost.posY; ghost.homeZ = ghost.posZ;
+        impl->serverGhosts.push_back(ghost);
+        cl.playerGhostIndex = ghost.index;
+    }
     Console::instance().printf(LogLevel::Info, "Map changed, %zu ghosts spawned", impl->serverGhosts.size());
 }
 
 void GameServer::setGameMode(int mode) {
     impl->gameMode = mode;
     impl->teamScore[1] = impl->teamScore[2] = 0;
+    impl->matchStartTime = 0;
+    impl->matchStarted = false;
+    impl->matchEnded = false;
+    impl->matchClock.reset();
     Console::instance().printf(LogLevel::Info, "Game mode set to %s (0=DM, 1=TDM)",
         mode == 1 ? "Team Deathmatch" : "Deathmatch");
 }
@@ -985,7 +1180,7 @@ void GameServer::stop() {
     std::ofstream ofs("server_stats.txt");
     if (ofs.is_open()) {
         for (auto& cl : impl->clients) {
-            if (!cl.active) continue;
+            if (!cl.active || cl.isBot) continue;
             ofs << cl.kills << " " << cl.deaths << " " << (int)cl.playTime;
             ofs << " " << ntohl(cl.addr.sin_addr.s_addr) << "\n";
         }
@@ -995,16 +1190,26 @@ void GameServer::stop() {
     if (impl->sock >= 0) {
         close(impl->sock);
         impl->sock = -1;
+        impl->port = 0;
     }
     if (impl->querySock >= 0) {
         close(impl->querySock);
         impl->querySock = -1;
     }
+    impl->queryPort = 0;
     impl->running = false;
     impl->clients.clear();
     impl->serverGhosts.clear();
+    impl->projectiles.clear();
+    impl->spawnPoints.clear();
+    impl->botStates.clear();
+    impl->botLastFire.clear();
+    impl->vehUsePrev.clear();
     impl->datablocks.clear();
 }
+
+uint16_t GameServer::port() const { return impl->port; }
+uint16_t GameServer::queryPort() const { return impl->queryPort; }
 
 void GameServer::update() {
     if (!impl->running || impl->sock < 0) return;
@@ -1055,13 +1260,23 @@ void GameServer::update() {
             const uint8_t flags = query.readU8();
             const uint32_t key = query.readU32();
             if (!query.failed()) {
-                const char* mission = Console::instance().getStringVariable("sv_mission");
+                std::string mission = Console::instance().getStringVariable("sv_mission", "");
+                const size_t slash = mission.find_last_of("/\\");
+                if (slash != std::string::npos) mission.erase(0, slash + 1);
+                if (mission.ends_with(".mis")) mission.resize(mission.size() - 4);
                 const uint8_t players = (uint8_t)std::min<size_t>(255,
                     std::count_if(impl->clients.begin(), impl->clients.end(),
-                        [](const Impl::Client& client) { return client.active && !client.isBot; }));
+                        [](const Impl::Client& client) { return client.active; }));
+                const uint8_t bots = (uint8_t)std::min<size_t>(255,
+                    std::count_if(impl->clients.begin(), impl->clients.end(),
+                        [](const Impl::Client& client) { return client.active && client.isBot; }));
+                uint8_t status = 0;
+                const char* password = Console::instance().getStringVariable("sv_password", "");
+                if (password && *password) status |= 0x02;
                 const auto response = V12::buildGameInfoResponse(
-                    flags, key, "base", impl->gameMode == 1 ? "Team Deathmatch" : "Deathmatch",
-                    mission ? mission : "", 0, players, 32, 0);
+                    flags, key, "base", impl->trainingMission ? "Training" : impl->gameMode == 2 ? "Capture the Flag" :
+                        impl->gameMode == 1 ? "Team Deathmatch" : "Deathmatch",
+                    mission, status, players, 32, bots);
                 impl->sendTo(from, response.data(), response.size());
             }
             continue;
@@ -1094,6 +1309,19 @@ void GameServer::update() {
                 ci = (int)impl->clients.size() - 1;
             }
             auto& client = impl->clients[ci];
+            // A new challenge is a new connection epoch, even when the peer
+            // reuses its UDP endpoint after a lost disconnect.
+            client.active = false;
+            client.knownGhosts.clear();
+            client.ghostFirstSent.clear();
+            client.playerGhostIndex = 0;
+            client.datablocksSent = false;
+            client.nativeProtocol.reset();
+            client.nativeStrings.clear();
+            client.nativeStatsDigest.clear();
+            client.nativeFlagStates.clear();
+            client.matchStartSent = false;
+            client.ghosting = false;
             client.clientConnectSequence = clientSequence;
             std::random_device random;
             client.serverConnectSequence = random();
@@ -1126,6 +1354,20 @@ void GameServer::update() {
             if (!argv.empty() && !argv[0].empty()) client.playerName = argv[0];
             client.active = true;
             client.lastReceive = now;
+            if (!impl->trainingMission && !impl->matchStarted) {
+                impl->matchStarted = true;
+                impl->matchStartTime = now;
+                impl->matchClock.start();
+            }
+            if ((impl->gameMode == 1 || impl->gameMode == 2) && client.teamId == 0) {
+                int redCount = 0;
+                int blueCount = 0;
+                for (const auto& other : impl->clients) {
+                    if (other.teamId == 1) ++redCount;
+                    if (other.teamId == 2) ++blueCount;
+                }
+                client.teamId = MatchRuntime::balancedTeam(redCount, blueCount);
+            }
             const auto accept = V12::buildConnectAccept(
                 client.serverConnectSequence, client.clientConnectSequence);
             impl->sendTo(from, accept.data(), accept.size());
@@ -1151,8 +1393,10 @@ void GameServer::update() {
             initialPacket.ghosts.push_back({
                 (uint16_t)client.playerGhostIndex, 25, true, false,
                 [x = client.posX, y = client.posY, z = client.posZ,
-                 rx = client.rotX, rz = client.rotZ, energy = client.energy](V12BitWriter& writer) {
-                    writePlayerGhost(writer, x, y, z, rx, rz, energy);
+                 rx = client.rotX, rz = client.rotZ, energy = client.energy,
+                 health = client.health,
+                 damageState = client.health <= 0.0f ? 2 : 0](V12BitWriter& writer) {
+                     writePlayerGhost(writer, x, y, z, rx, rz, energy, health, damageState);
                 }});
             const auto dataPacket = client.nativeProtocol.buildServerPacket(initialPacket);
             if (std::find(initialPacket.emittedGhosts.begin(),
@@ -1192,7 +1436,7 @@ void GameServer::update() {
                     if (result.accepted && header.packetType == V12::PacketType::Ping) {
                         const auto ack = client.nativeProtocol.buildPacket(V12::PacketType::Ack);
                         impl->sendTo(from, ack.data(), ack.size());
-                    } else if (result.accepted &&
+                    } else if (result.accepted && result.dispatchData &&
                                header.packetType == V12::PacketType::Data) {
                         stream.readFlag(); // current rate changed
                         if (stream.readFlag()) {
@@ -1224,7 +1468,7 @@ void GameServer::update() {
                             move.lookY = 0;
                             move.flags = (y > 0 ? 1 : 0) | (z > 0 ? 2 : 0) |
                                 (z < 0 ? 4 : 0) | (triggers[0] ? 8 : 0) |
-                                (triggers[2] ? 16 : 0) | (x < 0 ? 32 : 0) |
+                                (triggers[2] ? 16 : 0) | (y < 0 ? 128 : 0) | (x < 0 ? 32 : 0) |
                                 (x > 0 ? 64 : 0);
                             client.lastMove = move;
                             client.moveSeq = (uint16_t)move.seq;
@@ -1238,15 +1482,120 @@ void GameServer::update() {
                                     if (event.hasGhostingMessage && event.ghostMessage == 1 &&
                                         event.ghostSequence == 0)
                                         client.ghosting = true;
-                                    if (event.classId == 9 && !event.message.empty())
-                                        Console::instance().printf(LogLevel::Warn,
-                                            "Server: rejected client command event from %d", ci);
+                                    if (event.classId == 9 && !event.arguments.empty()) {
+                                        if (remoteCommandCB)
+                                            remoteCommandCB(ci, event.arguments);
+                                        else
+                                            Console::instance().printf(LogLevel::Warn,
+                                                "Server: no remote command handler for client %d", ci);
+                                    }
                                 }
                             }
                         }
                         if (!stream.failed()) {
                             V12::ServerPacketOptions response;
                             response.lastMoveAck = client.moveSeq;
+                            std::string statsDigest;
+                            for (const auto& scoreboardClient : impl->clients) {
+                                if (!scoreboardClient.active) continue;
+                                statsDigest += std::to_string(scoreboardClient.playerGhostIndex) + ":" +
+                                    std::to_string(scoreboardClient.kills) + ":" +
+                                    std::to_string(scoreboardClient.deaths) + ":" +
+                                    std::to_string(scoreboardClient.teamId) + ":" +
+                                    scoreboardClient.playerName + ";";
+                            }
+                             statsDigest += "teams:" + std::to_string(impl->teamScore[1]) + ":" +
+                                 std::to_string(impl->teamScore[2]);
+                              const int64_t remainingMs = impl->matchClock.remainingMs;
+                              if (impl->matchClock.ended) impl->matchEnded = true;
+                             statsDigest += ":clock:" + std::to_string(remainingMs) +
+                                 ":ended:" + std::to_string(impl->matchEnded);
+                             for (const auto& flag : impl->serverGhosts) {
+                                 if (flag.classId != T2Protocol::CLASS_FLAG_RED &&
+                                     flag.classId != T2Protocol::CLASS_FLAG_BLUE) continue;
+                                 statsDigest += ":flag:" + std::to_string(flag.classId) + ":" +
+                                     std::to_string(flag.passengerCi) + ":" +
+                                     std::to_string(flag.active);
+                             }
+                             if (statsDigest != client.nativeStatsDigest) {
+                                 client.nativeStatsDigest = statsDigest;
+                                   if (!impl->trainingMission && impl->matchStarted && !client.matchStartSent) {
+                                      auto events = V12::buildRemoteCommandEvents(
+                                          client.nativeStrings, "MsgMissionStart", {});
+                                      response.events.insert(response.events.end(), events.begin(), events.end());
+                                      client.matchStartSent = true;
+                                  }
+                                 for (const auto& flag : impl->serverGhosts) {
+                                     if (flag.classId != T2Protocol::CLASS_FLAG_RED &&
+                                         flag.classId != T2Protocol::CLASS_FLAG_BLUE) continue;
+                                     const int team = flag.classId == T2Protocol::CLASS_FLAG_RED ? 1 : 2;
+                                     const std::string current = flag.passengerCi >= 0 ? "held" :
+                                         (flag.active ? "home" : "field");
+                                     const auto previous = client.nativeFlagStates.find(flag.classId);
+                                     if (previous != client.nativeFlagStates.end() && previous->second != current) {
+                                         const char* type = current == "held" ? "MsgCTFFlagTaken" :
+                                             current == "field" ? "MsgCTFFlagDropped" :
+                                             previous->second == "field" ? "MsgCTFFlagReturned" : "MsgCTFFlagCapped";
+                                         auto events = V12::buildRemoteCommandEvents(
+                                             client.nativeStrings, type,
+                                             {"", flag.passengerCi >= 0 ? std::to_string(flag.passengerCi) : "0",
+                                              "", std::to_string(team), ""});
+                                         response.events.insert(response.events.end(), events.begin(), events.end());
+                                     }
+                                     client.nativeFlagStates[flag.classId] = current;
+                                 }
+                                  if (!impl->trainingMission) {
+                                      auto clockEvents = V12::buildRemoteCommandEvents(
+                                          client.nativeStrings, "MsgSystemClock",
+                                          {"", std::to_string(remainingMs)});
+                                      response.events.insert(response.events.end(), clockEvents.begin(), clockEvents.end());
+                                  }
+                                  if (!impl->trainingMission && impl->matchEnded) {
+                                     auto events = V12::buildRemoteCommandEvents(
+                                         client.nativeStrings, "MsgDebriefResult", {});
+                                     response.events.insert(response.events.end(), events.begin(), events.end());
+                                 }
+                                for (const auto& scoreboardClient : impl->clients) {
+                                    if (!scoreboardClient.active) continue;
+                                    const std::string id = std::to_string(
+                                        (int)(&scoreboardClient - &impl->clients[0]));
+                                    auto events = V12::buildRemoteCommandEvents(
+                                        client.nativeStrings, "MsgPlayerScore",
+                                        {"", id, std::to_string(scoreboardClient.kills), "0", "0"});
+                                    response.events.insert(response.events.end(), events.begin(), events.end());
+                                    events = V12::buildRemoteCommandEvents(
+                                        client.nativeStrings, "MsgClientJoinTeam",
+                                        {"", "", id, std::to_string(scoreboardClient.teamId)});
+                                    response.events.insert(response.events.end(), events.begin(), events.end());
+                                    events = V12::buildRemoteCommandEvents(
+                                        client.nativeStrings, "MsgPlayerStats",
+                                        {std::to_string(scoreboardClient.playerGhostIndex),
+                                         std::to_string(scoreboardClient.kills),
+                                         std::to_string(scoreboardClient.deaths),
+                                         std::to_string(scoreboardClient.kills),
+                                         std::to_string(scoreboardClient.teamId)});
+                                    response.events.insert(response.events.end(), events.begin(), events.end());
+                                }
+                                 for (int team = 1; team <= 2; ++team) {
+                                    auto events = V12::buildRemoteCommandEvents(
+                                        client.nativeStrings, "MsgTeamScore",
+                                        {std::to_string(team), std::to_string(impl->teamScore[team]), "0", "0"});
+                                     response.events.insert(response.events.end(), events.begin(), events.end());
+                                 }
+                                 for (const auto& flag : impl->serverGhosts) {
+                                     if (flag.classId != T2Protocol::CLASS_FLAG_RED &&
+                                         flag.classId != T2Protocol::CLASS_FLAG_BLUE) continue;
+                                     const int flagTeam = flag.classId == T2Protocol::CLASS_FLAG_RED ? 1 : 2;
+                                     const char* status = flag.passengerCi >= 0 ? "Carrier" :
+                                         (flag.active ? "<At Base>" : "<In the Field>");
+                                     auto events = V12::buildRemoteCommandEvents(
+                                         client.nativeStrings, "MsgCTFAddTeam",
+                                         {"", std::to_string(flagTeam), flagTeam == 1 ? "Red" : "Blue",
+                                          status, std::to_string(impl->teamScore[flagTeam])});
+                                     response.events.insert(response.events.end(), events.begin(), events.end());
+                                 }
+                            }
+                            bool sentGhostingPass = false;
                             if (!client.ghosting) {
                                 response.events.push_back(
                                     V12::makeGhostingMessageEvent(0, 0, 0));
@@ -1256,24 +1605,22 @@ void GameServer::update() {
                                         !serverGhost.active) continue;
                                     response.ghosts.push_back({
                                         (uint16_t)serverGhost.index, 25, true, false,
-                                        [x = serverGhost.posX, y = serverGhost.posY,
-                                         z = serverGhost.posZ, rx = serverGhost.rotX,
-                                         rz = serverGhost.rotZ, energy = serverGhost.energy](V12BitWriter& writer) {
-                                            writePlayerGhost(writer, x, y, z, rx, rz, energy);
+                                         [x = serverGhost.posX, y = serverGhost.posY,
+                                          z = serverGhost.posZ, rx = serverGhost.rotX,
+                                          rz = serverGhost.rotZ, energy = serverGhost.energy,
+                                          health = serverGhost.health,
+                                          damageState = serverGhost.damageState](V12BitWriter& writer) {
+                                             writePlayerGhost(writer, x, y, z, rx, rz, energy,
+                                                              health, damageState);
                                         }});
                                     break;
                                 }
                             } else {
+                                sentGhostingPass = true;
                                 std::set<uint32_t> nativeVisible;
                                 for (const auto& serverGhost : impl->serverGhosts) {
                                     if (!serverGhost.active || serverGhost.index > 1023) continue;
-                                    if (serverGhost.classId == T2Protocol::CLASS_PLAYER ||
-                                        serverGhost.classId == 25 || serverGhost.classId == 29 ||
-                                        serverGhost.classId == 39 || serverGhost.classId == 22 ||
-                                        serverGhost.classId == 37 || serverGhost.classId == 51 ||
-                                        serverGhost.classId == 12 || serverGhost.classId == 20 ||
-                                        serverGhost.classId == 21 || serverGhost.classId == 27 ||
-                                        serverGhost.classId == 33 || serverGhost.classId == 38)
+                                    if (nativeGhostClassId(serverGhost.classId, serverGhost.itemType) >= 0)
                                         nativeVisible.insert(serverGhost.index);
                                 }
                                 for (uint32_t index : client.knownGhosts) {
@@ -1282,32 +1629,25 @@ void GameServer::update() {
                                 }
                                 for (const auto& serverGhost : impl->serverGhosts) {
                                     if (!serverGhost.active || serverGhost.index > 1023) continue;
-                                    uint8_t nativeClass = 0;
-                                    if (serverGhost.classId == T2Protocol::CLASS_PLAYER ||
-                                        serverGhost.classId == 25) nativeClass = 25;
-                                    else if (serverGhost.classId == 29 || serverGhost.classId == 39)
-                                        nativeClass = (uint8_t)serverGhost.classId;
-                                    else if (serverGhost.classId == 22 || serverGhost.classId == 37 ||
-                                             serverGhost.classId == 51)
-                                        nativeClass = (uint8_t)serverGhost.classId;
-                                    else if (serverGhost.classId == 12 || serverGhost.classId == 20 ||
-                                             serverGhost.classId == 21 || serverGhost.classId == 27 ||
-                                             serverGhost.classId == 33 || serverGhost.classId == 38)
-                                        nativeClass = (uint8_t)serverGhost.classId;
-                                    else continue;
+                                    const uint8_t nativeClass = (uint8_t)nativeGhostClassId(
+                                        serverGhost.classId, serverGhost.itemType);
+                                    if (nativeClass >= V12::GhostClassCount) continue;
                                     const bool known = client.knownGhosts.contains(serverGhost.index);
                                     response.ghosts.push_back({
                                         (uint16_t)serverGhost.index, nativeClass, !known, false,
-                                        [nativeClass, x = serverGhost.posX, y = serverGhost.posY,
-                                         z = serverGhost.posZ, rx = serverGhost.rotX,
-                                         rz = serverGhost.rotZ, energy = serverGhost.energy](V12BitWriter& writer) {
-                                            if (nativeClass == 25)
-                                                writePlayerGhost(writer, x, y, z, rx, rz, energy);
-                                             else if (nativeClass == 22 || nativeClass == 37 ||
-                                                      nativeClass == 51)
-                                                 writeMissionMarkerGhost(writer, x, y, z, rz, nativeClass);
-                                             else if (nativeClass == 20)
-                                                 writePointGhost(writer, x, y, z);
+                                         [nativeClass, x = serverGhost.posX, y = serverGhost.posY,
+                                          z = serverGhost.posZ, rx = serverGhost.rotX,
+                                          rz = serverGhost.rotZ, energy = serverGhost.energy,
+                                          health = serverGhost.health,
+                                          damageState = serverGhost.damageState](V12BitWriter& writer) {
+                                             if (nativeClass == 25)
+                                                  writePlayerGhost(writer, x, y, z, rx, rz, energy,
+                                                                   health, damageState);
+                                              else if (nativeClass == 20 || nativeClass == 22 ||
+                                                       nativeClass == 37 || nativeClass == 51)
+                                                  writeMissionMarkerGhost(writer, x, y, z, rz, nativeClass);
+                                              else if (nativeClass == 16)
+                                                  writePointGhost(writer, x, y, z);
                                              else if (nativeClass == 33)
                                                  writeShockwaveGhost(writer, x, y, z);
                                              else if (nativeClass == 38)
@@ -1320,6 +1660,12 @@ void GameServer::update() {
                                                  writeStaticShapeGhost(writer, x, y, z, rx, rz);
                                         }});
                                 }
+                            }
+                            if (sentGhostingPass && !response.ghosts.empty() &&
+                                response.emittedGhosts.size() == response.ghosts.size()) {
+                                response.events.push_back(
+                                    V12::makeGhostingMessageEvent(0, 2, 0));
+                                client.ghosting = false;
                             }
                             const auto packet = client.nativeProtocol.buildServerPacket(response);
                             for (uint16_t index : response.emittedGhosts) {
@@ -1382,11 +1728,14 @@ void GameServer::update() {
                 c.active = false;
                 impl->clients.push_back(c);
                 ci = (int)impl->clients.size() - 1;
-                // Assign team in TDM mode (alternate)
-                if (impl->gameMode == 1) {
+                // Assign the least populated team, including pending joins.
+                if (impl->gameMode == 1 || impl->gameMode == 2) {
                     int redCount = 0, blueCount = 0;
-                    for (auto& cc : impl->clients) { if (!cc.active) continue; if (cc.teamId == 1) redCount++; if (cc.teamId == 2) blueCount++; }
-                    impl->clients[ci].teamId = (redCount <= blueCount) ? 1 : 2;
+                    for (auto& cc : impl->clients) {
+                        if (cc.teamId == 1) redCount++;
+                        if (cc.teamId == 2) blueCount++;
+                    }
+                    impl->clients[ci].teamId = MatchRuntime::balancedTeam(redCount, blueCount);
                 }
             }
 
@@ -1418,6 +1767,11 @@ void GameServer::update() {
                     continue;
                 cl.active = true;
                 cl.lastReceive = now;
+                if (!impl->trainingMission && !impl->matchStarted) {
+                    impl->matchStarted = true;
+                    impl->matchStartTime = now;
+                    impl->matchClock.start();
+                }
 
                 // Send ConnectOK
                 WireHeader whdr{};
@@ -1530,37 +1884,6 @@ void GameServer::update() {
                 client.rotZ = move.rotZ;
                 client.rotX = move.rotX;
 
-                // Dead players don't process movement input (frozen until respawn)
-                if (client.respawnAt <= 0) {
-                // Compute velocity from input flags based on client orientation
-                float forward = 0, strafe = 0;
-                if (move.flags & 1) forward += 1.0f;
-                if (move.flags & 32) strafe -= 1.0f; // strafe left
-                if (move.flags & 64) strafe += 1.0f; // strafe right
-                float yaw = client.rotZ;
-                float speed = 15.0f;
-                if (move.flags & 4) speed = 30.0f; // jet boost
-                float cosYaw = cosf(yaw), sinYaw = sinf(yaw);
-                client.velX = (forward * sinYaw + strafe * cosYaw) * speed;
-                client.velZ = (forward * cosYaw - strafe * sinYaw) * speed;
-
-                // Jump: apply upward impulse if on ground
-                if ((move.flags & 2) && client.posY <= 2.1f) {
-                    client.velY = 10.0f;
-                }
-
-                // Jet: upward force, consumes energy
-                if (move.flags & 4) {
-                    client.velY += 8.0f * 0.05f; // gentle upward push per tick
-                    client.energy -= 20.0f * 0.05f; // consume energy
-                    if (client.energy < 0) client.energy = 0;
-                } else {
-                    // Recharge energy when not jetting
-                    client.energy += 5.0f * 0.05f;
-                    if (client.energy > 100) client.energy = 100;
-                }
-                }
-
                 // Handle fire input: spawn a projectile ghost (per-client cadence)
                 double now = Engine::instance().timer().now();
                 if (client.respawnAt <= 0 && (move.flags & 8) && (now - client.lastFireTime) > 0.35) {
@@ -1618,7 +1941,7 @@ void GameServer::update() {
                 update.velZ = client.velZ;
                 update.health = client.health;
                 update.energy = client.energy;
-                update.flags = 0;
+                update.flags = client.health <= 0.0f ? T2Protocol::UPDATE_DEAD : 0;
                 update.lastMoveSeq = move.seq;
 
                 uint8_t upBuf[64];
@@ -1639,39 +1962,81 @@ void GameServer::update() {
         }
     }
 
-    // Handle query API requests
+    // Handle query API requests.  Keep this endpoint additive and independent
+    // of the native OOB query format: mapper/tools use it for richer data.
     if (impl->querySock >= 0) {
+        auto missionName = [] {
+            const char* value = Console::instance().getStringVariable("sv_mission");
+            std::string mission = value ? value : "";
+            const size_t slash = mission.find_last_of("/\\");
+            if (slash != std::string::npos) mission.erase(0, slash + 1);
+            if (mission.ends_with(".mis")) mission.resize(mission.size() - 4);
+            return mission.empty() ? std::string("test") : mission;
+        };
+        auto activePlayers = [&] {
+            return std::count_if(impl->clients.begin(), impl->clients.end(),
+                [](const Impl::Client& client) { return client.active; });
+        };
+        auto activeBots = [&] {
+            return std::count_if(impl->clients.begin(), impl->clients.end(),
+                [](const Impl::Client& client) { return client.active && client.isBot; });
+        };
+        auto jsonEscape = [](const std::string& s) {
+            std::string out;
+            out.reserve(s.size() + 8);
+            for (char c : s) {
+                switch (c) {
+                    case '"': out += "\\\""; break;
+                    case '\\': out += "\\\\"; break;
+                    case '\n': out += "\\n"; break;
+                    case '\r': out += "\\r"; break;
+                    case '\t': out += "\\t"; break;
+                    default: out += c;
+                }
+            }
+            return out;
+        };
+
         sockaddr_in qfrom{};
         socklen_t qfromLen = sizeof(qfrom);
         uint8_t qbuf[256];
-        int qn = recvfrom(impl->querySock, qbuf, sizeof(qbuf), 0, (sockaddr*)&qfrom, &qfromLen);
-        if (qn > 0) {
-            if (qn >= (int)sizeof(qbuf)) qn = (int)sizeof(qbuf) - 1;
+        while (true) {
+            qfromLen = sizeof(qfrom);
+            const int qn = recvfrom(impl->querySock, qbuf, sizeof(qbuf) - 1, 0,
+                                    (sockaddr*)&qfrom, &qfromLen);
+            if (qn <= 0) break;
             qbuf[qn] = 0;
             std::string reply;
-            auto jsonEscape = [](const std::string& s) {
-                std::string out;
-                out.reserve(s.size() + 8);
-                for (char c : s) {
-                    switch (c) {
-                        case '"': out += "\\\""; break;
-                        case '\\': out += "\\\\"; break;
-                        case '\n': out += "\\n"; break;
-                        case '\r': out += "\\r"; break;
-                        case '\t': out += "\\t"; break;
-                        default: out += c;
-                    }
-                }
-                return out;
-            };
             if (strcmp((const char*)qbuf, "QUERY") == 0) {
-                // Build JSON-like response
+                const int players = activePlayers();
+                const int bots = activeBots();
+                const std::string map = missionName();
+                const int password = [&] {
+                    const char* value = Console::instance().getStringVariable("sv_password", "");
+                    return value && *value ? 1 : 0;
+                }();
                 reply = "{";
                 reply += "\"name\":\"Torch Server\",";
-                reply += "\"map\":\"test\",";
-                reply += "\"gamemode\":0,";
-                reply += "\"numplayers\":" + std::to_string((int)impl->clients.size()) + ",";
-                reply += "\"maxplayers\":32,";
+                reply += "\"map\":\"" + jsonEscape(map) + "\",";
+                reply += "\"gamemode\":" + std::to_string(impl->gameMode) + ",";
+                reply += "\"gametype\":\"" +
+                    jsonEscape(impl->trainingMission ? "Training" : impl->gameMode == 2 ? "Capture the Flag" :
+                               impl->gameMode == 1 ? "Team Deathmatch" : "Deathmatch") + "\",";
+                reply += "\"numplayers\":" + std::to_string(players) + ",";
+                reply += "\"numbots\":" + std::to_string(bots) + ",";
+                reply += "\"maxplayers\":" + std::to_string(kMaxClients) + ",";
+                reply += "\"password\":" + std::to_string(password) + ",";
+                const auto teamPlayers = [&](int team) {
+                    return std::count_if(impl->clients.begin(), impl->clients.end(),
+                        [team](const Impl::Client& client) {
+                            return client.active && client.teamId == team;
+                        });
+                };
+                reply += "\"teams\":[{";
+                reply += "\"id\":1,\"players\":" + std::to_string(teamPlayers(1)) +
+                    ",\"score\":" + std::to_string(impl->teamScore[1]) + "},{";
+                reply += "\"id\":2,\"players\":" + std::to_string(teamPlayers(2)) +
+                    ",\"score\":" + std::to_string(impl->teamScore[2]) + "}],";
                 reply += "\"players\":[";
                 bool first = true;
                 for (auto& cl : impl->clients) {
@@ -1680,7 +2045,9 @@ void GameServer::update() {
                     first = false;
                     reply += "{\"name\":\"" + jsonEscape(cl.playerName) + "\",";
                     reply += "\"kills\":" + std::to_string(cl.kills) + ",";
-                    reply += "\"deaths\":" + std::to_string(cl.deaths) + "}";
+                    reply += "\"deaths\":" + std::to_string(cl.deaths) + ",";
+                    reply += "\"team\":" + std::to_string(cl.teamId) + ",";
+                    reply += "\"bot\":" + std::to_string(cl.isBot ? 1 : 0) + "}";
                 }
                 reply += "]}";
             } else {
@@ -1699,10 +2066,75 @@ void GameServer::update() {
     float simDt = (float)(now - lastSimTime);
     if (simDt > 0.05f) simDt = 0.05f; // cap to avoid spiral of death
     lastSimTime = now;
+    if (!impl->trainingMission && !impl->matchStarted) {
+        impl->matchStarted = true;
+        impl->matchStartTime = now;
+        impl->matchClock.start();
+    }
+    if (!impl->trainingMission && impl->matchClock.tick((int)(simDt * 1000.0f)))
+        impl->matchEnded = impl->matchClock.ended;
+
+    // Credit a kill only when damage crosses the living->dead boundary.  This
+    // keeps direct and splash damage consistent and prevents repeated credits
+    // while the respawn timer is being scheduled below.
+    auto applyDamage = [&](Impl::Client& victim, float amount, int ownerCi) {
+        if (impl->trainingMission || impl->matchEnded || amount <= 0.0f || victim.health <= 0.0f) return;
+        victim.health -= amount;
+        if (victim.health > 0.0f) return;
+        victim.health = 0.0f;
+        ++victim.deaths;
+        if (impl->matchEnded || ownerCi < 0 || ownerCi >= (int)impl->clients.size() ||
+            ownerCi == (int)(&victim - &impl->clients[0])) return;
+        auto& killer = impl->clients[ownerCi];
+        ++killer.kills;
+        if (impl->gameMode == 1 && killer.teamId > 0 && killer.teamId < 3) {
+            ++impl->teamScore[killer.teamId];
+            if (impl->teamScore[killer.teamId] >= impl->scoreLimit) {
+                impl->matchEnded = true;
+                Console::instance().printf(LogLevel::Info, "Team %d wins!", killer.teamId);
+            }
+        } else if (impl->gameMode == 0 && killer.kills >= impl->scoreLimit) {
+            impl->matchEnded = true;
+            Console::instance().printf(LogLevel::Info, "Player %d wins with %d kills!",
+                ownerCi, killer.kills);
+        }
+    };
 
     for (auto& cl : impl->clients) {
         if (!cl.active) continue;
         cl.playTime += simDt;
+        if (cl.native && cl.respawnAt <= 0 && (cl.lastMove.flags & 8)) {
+            if (now - cl.lastFireTime > 0.35) {
+                cl.lastFireTime = now;
+                const float pitch = cl.rotX;
+                const float yaw = cl.rotZ;
+                const float dirX = sinf(yaw) * cosf(pitch);
+                const float dirY = sinf(pitch);
+                const float dirZ = cosf(yaw) * cosf(pitch);
+                Impl::ServerProjectile projectile;
+                projectile.ghostIndex = impl->nextGhostIndex++;
+                projectile.posX = cl.posX + dirX * 2.0f;
+                projectile.posY = cl.posY + 1.5f;
+                projectile.posZ = cl.posZ + dirZ * 2.0f;
+                projectile.velX = cl.velX + dirX * gWeaponTable[0].speed;
+                projectile.velY = cl.velY + dirY * gWeaponTable[0].speed;
+                projectile.velZ = cl.velZ + dirZ * gWeaponTable[0].speed;
+                projectile.ownerCi = (int)(&cl - &impl->clients[0]);
+                const auto profile = Impl::weaponProfile(0);
+                projectile.damage = profile.damage;
+                projectile.splashRadius = profile.splash;
+                impl->projectiles.push_back(projectile);
+
+                Impl::ServerGhost ghost;
+                ghost.index = projectile.ghostIndex;
+                ghost.classId = 33;
+                ghost.posX = projectile.posX;
+                ghost.posY = projectile.posY;
+                ghost.posZ = projectile.posZ;
+                ghost.active = true;
+                impl->serverGhosts.push_back(ghost);
+            }
+        }
         // Position history for lag compensation (every ~100ms)
         if (cl.posHistory.empty() || (now - cl.posHistory.back().time) > 0.1) {
             decltype(cl.posHistory)::value_type ps = {now, cl.posX, cl.posY, cl.posZ};
@@ -1710,26 +2142,31 @@ void GameServer::update() {
             if ((int)cl.posHistory.size() > 64)
                 cl.posHistory.erase(cl.posHistory.begin());
         }
-        // Integrate position from velocity
-        cl.posX += cl.velX * simDt;
-        cl.posY += cl.velY * simDt;
-        cl.posZ += cl.velZ * simDt;
-        // Apply gravity if not jetting
         float groundY = 2.0f;
         if (heightCB) {
             float h = heightCB(cl.posX, cl.posZ, heightCtx);
             if (h > groundY) groundY = h;
         }
-        bool onGround = (cl.posY <= groundY + 0.1f);
-        if (!(cl.lastMove.flags & 4) && !onGround) {
-            cl.velY -= 25.0f * simDt; // gravity
+        MovementState movementState{{cl.posX, cl.posY, cl.posZ},
+                                    {cl.velX, cl.velY, cl.velZ}, cl.energy,
+                                    cl.posY <= groundY + 0.1f, cl.jumpWasDown};
+        MovementInput movementInput;
+        movementInput.forward = ((cl.lastMove.flags & 1) ? 1.0f : 0.0f) -
+                                ((cl.lastMove.flags & 128) ? 1.0f : 0.0f);
+        movementInput.strafe = ((cl.lastMove.flags & 64) ? 1.0f : 0.0f) -
+                               ((cl.lastMove.flags & 32) ? 1.0f : 0.0f);
+        movementInput.jump = (cl.lastMove.flags & 2) != 0;
+        movementInput.jet = (cl.lastMove.flags & 4) != 0;
+        movementInput.yaw = cl.rotZ;
+        if (cl.respawnAt <= 0) {
+            Movement::step(movementState, movementInput,
+                           {groundY, {0.0f, 1.0f, 0.0f}, false}, simDt);
+            cl.posX = movementState.position.x; cl.posY = movementState.position.y;
+            cl.posZ = movementState.position.z;
+            cl.velX = movementState.velocity.x; cl.velY = movementState.velocity.y;
+            cl.velZ = movementState.velocity.z; cl.energy = movementState.energy;
+            cl.jumpWasDown = movementState.jumpWasDown;
         }
-        // Ground clamp
-        if (cl.posY < groundY) { cl.posY = groundY; cl.velY = 0; }
-        // Friction - higher on ground, lower in air
-        float friction = onGround ? 5.0f : 0.5f;
-        cl.velX *= (1.0f - friction * simDt);
-        cl.velZ *= (1.0f - friction * simDt);
 
         // Push simulated position + vitals into player ghost
         if (cl.playerGhostIndex > 0) {
@@ -1740,6 +2177,7 @@ void GameServer::update() {
                     sg.posZ = cl.posZ;
                     sg.health = cl.health;
                     sg.energy = cl.energy;
+                    sg.damageState = cl.health <= 0.0f ? 2 : 0;
                     break;
                 }
             }
@@ -1751,7 +2189,8 @@ void GameServer::update() {
                 if (sg.index == (uint32_t)cl.flagCarried) {
                     sg.posX = cl.posX; sg.posY = cl.posY + 1; sg.posZ = cl.posZ;
                     sg.passengerCi = -1;
-                    sg.respawnTime = Engine::instance().timer().now() + 30.0;
+                    sg.respawnTime = 0;
+                    sg.active = true;
                     cl.flagCarried = 0;
                     Console::instance().printf(LogLevel::Info, "Flag %d dropped on carrier death", sg.classId);
                     break;
@@ -1761,23 +2200,32 @@ void GameServer::update() {
 
         // Death check & respawn (with delay so death is meaningful)
         double tnow = Engine::instance().timer().now();
-        const float RESPAWN_DELAY = 3.0f;
+        const float RESPAWN_DELAY = DeathRespawn::RespawnDelay;
         if (cl.health <= 0 && cl.respawnAt <= 0) {
             // Just died: freeze in place, schedule respawn. kills/deaths are
             // already credited at hit time; pin health to 0 so clients show death.
             cl.health = 0;
             cl.velX = cl.velY = cl.velZ = 0;
+            cl.lastFireTime = 0;
+            const int victimCi = (int)(&cl - &impl->clients[0]);
+            for (auto& projectile : impl->projectiles)
+                if (projectile.ownerCi == victimCi) projectile.active = false;
             cl.respawnAt = tnow + RESPAWN_DELAY;
             for (auto& sg : impl->serverGhosts)
-                if (sg.index == cl.playerGhostIndex) { sg.health = 0; break; }
+                if (sg.index == cl.playerGhostIndex) {
+                    sg.health = 0;
+                    sg.damageState = 2;
+                    break;
+                }
             Console::instance().printf(LogLevel::Info, "Client %d died (respawning in %.1fs)", (int)(&cl - &impl->clients[0]), RESPAWN_DELAY);
         }
-        if (cl.respawnAt > 0 && tnow >= cl.respawnAt) {
+        if (cl.respawnAt > 0 && tnow >= cl.respawnAt && !impl->trainingMission && !impl->matchEnded) {
             cl.health = 100; cl.energy = 100;
             cl.respawnAt = 0;
+            cl.lastFireTime = 0;
             cl.velX = cl.velY = cl.velZ = 0;
             if (!impl->spawnPoints.empty()) {
-                size_t idx = (size_t)(rand() % impl->spawnPoints.size());
+                size_t idx = impl->nextTeamSpawn(cl.teamId);
                 auto& rsp = impl->spawnPoints[idx];
                 cl.posX = rsp.x; cl.posY = rsp.y; cl.posZ = rsp.z;
                 Console::instance().printf(LogLevel::Info, "Client %d respawned at spawn %zu", (int)(&cl - &impl->clients[0]), idx);
@@ -1788,6 +2236,7 @@ void GameServer::update() {
                 if (sg.index == cl.playerGhostIndex) {
                     sg.posX = cl.posX; sg.posY = cl.posY; sg.posZ = cl.posZ;
                     sg.health = 100; sg.energy = 100;
+                    sg.damageState = 0;
                     break;
                 }
             }
@@ -1799,7 +2248,7 @@ void GameServer::update() {
     const float pickupRadius = 2.0f;
     const float pickupRadiusSq = pickupRadius * pickupRadius;
     for (auto& cl : impl->clients) {
-        if (!cl.active || cl.playerGhostIndex == 0) continue;
+        if (!cl.active || cl.playerGhostIndex == 0 || cl.health <= 0.0f) continue;
         for (auto& sg : impl->serverGhosts) {
             if (!sg.active || sg.itemType < 0) continue;
             if (sg.index == cl.playerGhostIndex) continue;
@@ -1849,7 +2298,7 @@ void GameServer::update() {
     }
 
     // CTF flag handling
-    if (impl->gameMode == 1) {
+    if (impl->gameMode == 2) {
         for (auto& cl : impl->clients) {
             if (!cl.active) continue;
             for (auto& sg : impl->serverGhosts) {
@@ -1869,21 +2318,29 @@ void GameServer::update() {
                     } else {
                         // Update flag position to carrier
                         sg.posX = carrier.posX; sg.posY = carrier.posY + 3.0f; sg.posZ = carrier.posZ;
-                        // Check for capture: carrier at own base (near original flag spawn)
+                        // Capture only at the carrier's home flag, and only
+                        // while that flag is home. Returning to the enemy
+                        // base never scores in stock CTF.
+                        const int homeClass = carrier.teamId == 1 ? T2Protocol::CLASS_FLAG_RED :
+                                              T2Protocol::CLASS_FLAG_BLUE;
                         for (auto& baseSg : impl->serverGhosts) {
-                            if (baseSg.classId == sg.classId && baseSg.index != sg.index) continue;
-                            if (baseSg.classId == sg.classId && baseSg.index == sg.index) {
+                            if (baseSg.classId == homeClass && baseSg.passengerCi < 0 &&
+                                baseSg.active) {
                                 float dx = carrier.posX - baseSg.posX;
                                 float dz = carrier.posZ - baseSg.posZ;
                                 if (dx*dx + dz*dz < 16.0f) {
                                     // Captured!
-                                    impl->teamScore[carrier.teamId] += 5;
+                                    if (impl->matchEnded) continue;
+                                    ++impl->teamScore[carrier.teamId];
+                                    if (impl->teamScore[carrier.teamId] >= impl->scoreLimit)
+                                        impl->matchEnded = true;
                                     Console::instance().printf(LogLevel::Info, "Team %d captured the flag! (Score: %d)",
                                         carrier.teamId, impl->teamScore[carrier.teamId]);
-                                    sg.active = false;
+                                    sg.active = true;
                                     sg.passengerCi = -1;
                                     carrier.flagCarried = 0;
-                                    sg.respawnTime = Engine::instance().timer().now() + 10.0;
+                                    sg.respawnTime = 0;
+                                    sg.posX = sg.homeX; sg.posY = sg.homeY; sg.posZ = sg.homeZ;
                                     // Broadcast flag delete
                                     WireHeader whdr{};
                                     whdr.sequence = 1; whdr.ack = 0; whdr.ackMask = 0;
@@ -1916,6 +2373,14 @@ void GameServer::update() {
                 float dz = cl.posZ - sg.posZ;
                 if (dx*dx + dz*dz < 9.0f) {
                     float dy = cl.posY - sg.posY;
+                    if (dy > -3.0f && dy < 3.0f && cl.teamId == flagTeam) {
+                        if (sg.respawnTime <= 0 && sg.active) {
+                            sg.posX = sg.homeX; sg.posY = sg.homeY; sg.posZ = sg.homeZ;
+                            Console::instance().printf(LogLevel::Info, "Player %d returned flag %d",
+                                (int)(&cl - &impl->clients[0]), sg.classId);
+                        }
+                        continue;
+                    }
                     if (dy > -3.0f && dy < 3.0f && cl.teamId != flagTeam) {
                         // Pick up enemy flag
                         sg.passengerCi = (int)(&cl - &impl->clients[0]);
@@ -2049,7 +2514,7 @@ void GameServer::update() {
             bool hasTarget = false;
             for (auto& other : impl->clients) {
                 if (&other == &bot || !other.active || other.isBot) continue;
-                if (impl->gameMode == 1 && other.teamId == bot.teamId) continue;
+                    if ((impl->gameMode == 1 || impl->gameMode == 2) && other.teamId == bot.teamId) continue;
                 float dx = other.posX - bot.posX;
                 float dz = other.posZ - bot.posZ;
                 float d = dx*dx + dz*dz;
@@ -2104,7 +2569,9 @@ void GameServer::update() {
                         Impl::ServerProjectile sp;
                         sp.ghostIndex = impl->nextGhostIndex++;
                         sp.posX = bot.posX + dirX * 2.0f; sp.posY = bot.posY + 1.5f; sp.posZ = bot.posZ + dirZ * 2.0f;
-                        sp.velX = bot.velX + dirX * 40.0f; sp.velY = bot.velY + dirY * 40.0f; sp.velZ = bot.velZ + dirZ * 40.0f;
+                        sp.velX = bot.velX + dirX * gWeaponTable[0].speed;
+                        sp.velY = bot.velY + dirY * gWeaponTable[0].speed;
+                        sp.velZ = bot.velZ + dirZ * gWeaponTable[0].speed;
                         sp.ownerCi = (int)(&bot - &impl->clients[0]);
                         auto bwp = Impl::weaponProfile(0);
                         sp.damage = bwp.damage; sp.splashRadius = bwp.splash;
@@ -2168,10 +2635,21 @@ void GameServer::update() {
     // Projectile simulation
     for (auto& sp : impl->projectiles) {
         if (!sp.active) continue;
+        const float oldX = sp.posX, oldY = sp.posY, oldZ = sp.posZ;
         sp.posX += sp.velX * simDt;
         sp.posY += sp.velY * simDt;
         sp.posZ += sp.velZ * simDt;
         sp.velY -= 15.0f * simDt;
+
+        if (rayCB) {
+            const float dx = sp.posX - oldX, dy = sp.posY - oldY, dz = sp.posZ - oldZ;
+            const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (distance > 0.0001f && rayCB(oldX, oldY, oldZ, dx / distance, dy / distance,
+                                             dz / distance, distance, rayCtx)) {
+                sp.active = false;
+                continue;
+            }
+        }
 
         Impl::ServerGhost* projGhost = nullptr;
         for (auto& sg : impl->serverGhosts)
@@ -2189,18 +2667,20 @@ void GameServer::update() {
                 if (!client.active || client.respawnAt > 0) continue;
                 if (sp.ownerCi >= 0 && sp.ownerCi < (int)impl->clients.size()) {
                     auto& own = impl->clients[sp.ownerCi];
-                    if (impl->gameMode == 1 && own.teamId == client.teamId && client.teamId != 0)
+                    if ((impl->gameMode == 1 || impl->gameMode == 2) && own.teamId == client.teamId && client.teamId != 0)
                         continue; // friendly fire: no splash damage
                 }
                 float dx = client.posX - sp.posX, dy = client.posY - sp.posY, dz = client.posZ - sp.posZ;
                 float dist2 = dx*dx + dy*dy + dz*dz;
-                if (dist2 < sp.splashRadius * sp.splashRadius && dist2 > 0.01f) {
+                if (dist2 < sp.splashRadius * sp.splashRadius) {
                     float frac = 1.0f - sqrtf(dist2) / sp.splashRadius;
-                    client.health -= sp.damage * frac;
-                    float invDist = 1.0f / sqrtf(dist2);
-                    client.velX += dx * invDist * frac * 10.0f;
-                    client.velY += dy * invDist * frac * 10.0f;
-                    client.velZ += dz * invDist * frac * 10.0f;
+                    applyDamage(client, sp.damage * frac, sp.ownerCi);
+                    if (dist2 > 0.0001f) {
+                        const float invDist = 1.0f / sqrtf(dist2);
+                        client.velX += dx * invDist * frac * 10.0f;
+                        client.velY += dy * invDist * frac * 10.0f;
+                        client.velZ += dz * invDist * frac * 10.0f;
+                    }
                 }
             }
             continue;
@@ -2229,24 +2709,13 @@ void GameServer::update() {
                     bool friendlyFire = false;
                     if (sp.ownerCi >= 0 && sp.ownerCi < (int)impl->clients.size()) {
                         auto& killer = impl->clients[sp.ownerCi];
-                        friendlyFire = (impl->gameMode == 1 && killer.teamId == client.teamId && client.teamId != 0);
+                        friendlyFire = ((impl->gameMode == 1 || impl->gameMode == 2) &&
+                                        killer.teamId == client.teamId && client.teamId != 0);
                     }
                     if (!friendlyFire) {
-                        client.health -= sp.damage;
-                        // Track kills/deaths with game mode
-                        if (sp.ownerCi >= 0 && sp.ownerCi < (int)impl->clients.size()) {
+                        applyDamage(client, sp.damage, sp.ownerCi);
+                        if (client.health <= 0.0f && sp.ownerCi >= 0 && sp.ownerCi < (int)impl->clients.size()) {
                             auto& killer = impl->clients[sp.ownerCi];
-                            killer.kills++;
-                            client.deaths++;
-                            if (impl->gameMode == 1) {
-                                impl->teamScore[killer.teamId]++;
-                                if (impl->teamScore[killer.teamId] >= impl->scoreLimit) {
-                                    Console::instance().printf(LogLevel::Info, "Team %d wins!", killer.teamId);
-                                }
-                            } else if (killer.kills >= impl->scoreLimit) {
-                                Console::instance().printf(LogLevel::Info, "Player %d wins with %d kills!",
-                                    sp.ownerCi, killer.kills);
-                            }
                             // Kill feed (E)
                             {
                                 T2Protocol::ChatMessage kf{};

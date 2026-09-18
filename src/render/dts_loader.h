@@ -9,7 +9,8 @@ struct DTSLoadResult {
     std::vector<SkinInfo> skins;            // parallel to meshes
     std::vector<Texture> textures;
     std::vector<uint32_t> materialFlags;
-    std::vector<int8_t> materialLightmapIndex;
+    std::vector<float> materialReflectionAmount;
+    std::vector<int16_t> materialLightmapIndex;
     std::vector<Texture> lightmaps;
     std::vector<std::string> materialNames;
     std::vector<DTSShape::DetailLevel> details;

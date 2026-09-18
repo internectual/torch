@@ -55,8 +55,26 @@ namespace Math {
     constexpr float PI = 3.14159265358979323846f;
     constexpr float DEG2RAD(float d) { return d * PI / 180.0f; }
     constexpr float RAD2DEG(float r) { return r * 180.0f / PI; }
-    constexpr float lerp(float a, float b, float t) { return a + (b - a) * t; }
     inline float clamp(float v, float mn, float mx) { return v < mn ? mn : (v > mx ? mx : v); }
+    // Torque stores camera FOV as the horizontal angle. OpenGL's symmetric
+    // perspective builder takes the vertical angle.
+    inline float horizontalFovToVertical(float horizontalDeg, float aspect) {
+        const float safeAspect = std::isfinite(aspect) && aspect > 1e-6f
+            ? aspect : 4.0f / 3.0f;
+        const float safeFov = std::isfinite(horizontalDeg)
+            ? clamp(horizontalDeg, 0.01f, 179.99f) : 90.0f;
+        return RAD2DEG(2.0f * std::atan(std::tan(DEG2RAD(safeFov) * 0.5f) /
+                                        safeAspect));
+    }
+    inline float verticalFovToHorizontal(float verticalDeg, float aspect) {
+        const float safeAspect = std::isfinite(aspect) && aspect > 1e-6f
+            ? aspect : 4.0f / 3.0f;
+        const float safeFov = std::isfinite(verticalDeg)
+            ? clamp(verticalDeg, 0.01f, 179.99f) : horizontalFovToVertical(90.0f, safeAspect);
+        return RAD2DEG(2.0f * std::atan(std::tan(DEG2RAD(safeFov) * 0.5f) *
+                                        safeAspect));
+    }
+    constexpr float lerp(float a, float b, float t) { return a + (b - a) * t; }
     inline float min(float a, float b) { return a < b ? a : b; }
     inline float max(float a, float b) { return a > b ? a : b; }
     inline QuatF quatSlerp(const QuatF& a, const QuatF& b, float t) {
@@ -118,5 +136,14 @@ namespace Math {
         torqueRotation.setRotationAxis(axis, angle);
         MatrixF basis = czUpToYUp();
         return basis * torqueRotation * basis.inverse();
+    }
+
+    // Torque cameras look down their local +Y axis (Camera::getEyeTransform),
+    // not the renderer's conventional -Z axis.
+    inline Point3F torqueCameraForwardToYUp(const Point3F& axis, float angle) {
+        MatrixF torqueRotation;
+        torqueRotation.setRotationAxis(axis, angle);
+        return czUpToYUp().transformNormal(
+            torqueRotation.transformNormal({0, 1, 0}));
     }
 }

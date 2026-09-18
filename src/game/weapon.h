@@ -13,6 +13,7 @@ enum class ProjectileType : uint8_t {
 
 struct Projectile {
     Point3F pos;
+    Point3F previousPos;
     Point3F vel;
     ProjectileType type = ProjectileType::Disc;
     float lifetime = 0;
@@ -57,6 +58,23 @@ struct Weapon {
     void updateTimers(float dt);
 };
 
+// Ammo is the supported loadout state: -1 is infinite, zero is unavailable.
+inline bool weaponIsSelectable(const Weapon& weapon) {
+    return weapon.type >= 0 && weapon.ammo != 0;
+}
+
+inline int32_t nextSelectableWeapon(const std::vector<Weapon>& weapons,
+                                    int32_t current, int32_t direction) {
+    if (weapons.empty() || direction == 0) return current;
+    const int32_t count = (int32_t)weapons.size();
+    int32_t candidate = current;
+    for (int32_t checked = 0; checked < count; ++checked) {
+        candidate = (candidate + (direction > 0 ? 1 : -1) + count) % count;
+        if (weaponIsSelectable(weapons[candidate])) return candidate;
+    }
+    return current;
+}
+
 void loadWeaponSounds(Weapon& w);
 
 extern const WeaponData gWeaponTable[];
@@ -64,4 +82,4 @@ extern const int gWeaponCount;
 
 Point3F computeProjectileSpawn(const Point3F& cameraPos, const Point3F& targetDir, float spread = 0);
 void updateProjectile(Projectile& p, float dt);
-bool checkProjectileCollision(Projectile& p, float& groundHeight);
+bool checkProjectileCollision(Projectile& p, float& groundHeight, Point3F& impactNormal);

@@ -1,5 +1,6 @@
 #pragma once
 #include "script/script_engine.h"
+#include "script/script_scheduler.h"
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -67,10 +68,21 @@ public:
     const std::string& dbgFile() const;
     int dbgLine() const;
     VMValue callFunction(const std::string& name, const std::vector<VMValue>& args);
+    int scheduleEvent(double now, double delay, const std::string& object,
+                      const std::string& command, const std::vector<VMValue>& args);
+    bool cancelEvent(int id);
+    size_t cancelEventsForObject(const std::string& object);
+    bool isEventPending(int id) const;
+    size_t processScheduledEvents(double now);
+    void clearScheduledEvents();
     void registerMessageCallback(const std::string& messageType,
                                  const std::string& functionName);
     void dispatchMessageCallback(const std::string& messageType,
                                  const std::vector<VMValue>& args);
+    bool dispatchClientCommand(const std::vector<std::string>& args);
+    bool dispatchServerCommand(const std::vector<std::string>& args);
+    bool dispatchMissionCallback(const std::string& name,
+                                 const std::vector<VMValue>& args = {});
 
     void setGlobal(const std::string& name, const VMValue& val);
     VMValue getGlobal(const std::string& name);
@@ -87,6 +99,8 @@ public:
     const std::unordered_map<std::string, NativeFunc>& getNatives() const;
 
 private:
+    bool dispatchPrefixedFunction(const std::string& prefix,
+                                  const std::vector<std::string>& words);
     struct Impl;
     Impl* impl;
 };

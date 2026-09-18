@@ -348,11 +348,15 @@ std::vector<uint8_t> ProtocolState::buildServerPacket(ServerPacketOptions& optio
     writer.writeFlag(false); // camera FOV
     writer.writeFlag(false); // no unguaranteed events
     for (const ClientEvent& event : options.events) {
-        writer.writeFlag(true);
-        writer.writeFlag(false);
-        writer.writeUnsigned(event.sequence & 0x7f, 7);
-        writer.writeUnsigned(event.classId, EventClassBits);
-        if (event.write) event.write(writer);
+        V12BitWriter encodedEvent;
+        encodedEvent.writeFlag(true);
+        encodedEvent.writeFlag(false);
+        encodedEvent.writeUnsigned(event.sequence & 0x7f, 7);
+        encodedEvent.writeUnsigned(event.classId, EventClassBits);
+        if (event.write) event.write(encodedEvent);
+        // Keep scoreboard/event additions from consuming the ghost section.
+        if (writer.sizeBits() + encodedEvent.sizeBits() + 1 > 450 * 8) break;
+        writer.writeBits(encodedEvent.data().data(), encodedEvent.sizeBits());
     }
     writer.writeFlag(false); // end guaranteed events
     writer.writeFlag(!options.ghosts.empty());
