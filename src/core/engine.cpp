@@ -689,6 +689,156 @@ bool Engine::init(int argc, char* argv[]) {
 
     // Game
     g->init();
+    scr->setDemoStateProvider([this]() { return g->isDemoPlaying(); });
+    scr->setServerStateProvider([this]() { return g->gameServer().isRunning(); });
+    scr->setClientStateProvider([]() { return true; });
+    scr->setConnectionStateProvider([this]() {
+        ScriptConnectionState state;
+        const auto& config = g->config();
+        state.clientName = config.playerName;
+        state.online = config.online && g->isConnected();
+        state.missionName = g->liveMissionDisplayName();
+        state.missionType = g->liveMissionType();
+        state.missionCrc = g->getLiveMissionCrc();
+        if (auto* connection = g->activeConnection()) {
+            state.serverAddress = connection->address().toString();
+            state.serverPort = connection->address().port;
+            state.observer = connection->isObserverMode();
+        }
+        return state;
+    });
+    scr->setControlObjectProvider([this]() {
+        if (g->isDemoPlaying()) return g->getControlGhostIndex();
+        if (auto* connection = g->activeConnection()) {
+            const auto snapshot = connection->observerSnapshot();
+            return snapshot.controlGhost ? (int)snapshot.controlGhost : -1;
+        }
+        return -1;
+    });
+    scr->setCameraObjectProvider([this]() {
+        if (g->isDemoPlaying()) {
+            const int spectate = g->getSpectateGhostIndex();
+            return spectate >= 0 ? spectate : g->getControlGhostIndex();
+        }
+        if (auto* connection = g->activeConnection()) {
+            const auto snapshot = connection->observerSnapshot();
+            return snapshot.controlGhost ? (int)snapshot.controlGhost : -1;
+        }
+        return -1;
+    });
+    scr->setObjectStateProvider([this](int id, ScriptObjectState& state) {
+        const GhostEntry* ghost = nullptr;
+        if (g->isDemoPlaying() && g->getDemoParser())
+            ghost = g->getDemoParser()->getGhostTracker().getGhost(id);
+        if (!ghost) ghost = g->getLiveGhost(id);
+        if (!ghost) return false;
+        state.datablockId = ghost->datablockId > 0 ? ghost->datablockId : 0;
+        state.className = ghost->className;
+         state.shapeName = ghost->shapePath.empty() ? ghost->shapeName : ghost->shapePath;
+         state.name = ghost->playerName;
+         state.position = {ghost->position.x, ghost->position.y, ghost->position.z};
+         state.rotation = {ghost->rotation.x, ghost->rotation.y, ghost->rotation.z};
+         state.rotationW = ghost->rotation.w;
+         state.velocity = {ghost->velocity.x, ghost->velocity.y, ghost->velocity.z};
+         state.health = ghost->health;
+         state.maxHealth = ghost->maxHealth;
+          state.energy = ghost->energy;
+          state.repairRate = 0.0f;
+         state.sensorGroup = ghost->sensorGroup;
+         state.hasRotation = ghost->hasRotation;
+         state.hasVelocity = ghost->hasVelocity;
+         state.hasHealth = true;
+         state.hasMaxHealth = true;
+          state.hasEnergy = true;
+         for (int i = 0; i < 8; ++i) {
+             state.mountedImages[i].datablockId = ghost->mountedImages[i].datablockId;
+             state.mountedImages[i].mountPoint = ghost->mountedImages[i].mountPoint;
+             state.mountedImages[i].loaded = ghost->mountedImages[i].loaded;
+             state.mountedImages[i].firing = ghost->mountedImages[i].isFiring;
+         }
+         state.teamId = ghost->teamId >= 0 ? ghost->teamId : 0;
+        state.state = ghost->damageState;
+        return true;
+    });
+    scr->setLoadoutStateProvider([this]() {
+        ScriptLoadoutState state;
+        if (g->isDemoPlaying() && g->getDemoParser()) {
+            const auto& parser = *g->getDemoParser();
+            const auto& weapons = parser.getWeaponsHud();
+            state.hasWeapons = true;
+            state.weaponAmmo = weapons.slots;
+            state.currentWeapon = weapons.activeIndex;
+            auto ammo = weapons.slots.find(weapons.activeIndex);
+            state.ammo = ammo == weapons.slots.end() ? -1 : ammo->second;
+            if (state.ammo < 0 && parser.getAmmoHud().count >= 0)
+                state.ammo = parser.getAmmoHud().count;
+            state.weaponCount = (int)weapons.slots.size();
+            const auto& inventory = parser.getInventoryHud();
+            state.hasInventory = true;
+            for (const auto& item : inventory.slots)
+                state.inventory[std::to_string(item.first)] = item.second;
+            const auto& backpack = parser.getBackpackHud();
+            state.hasBackpack = true;
+            state.backpackIndex = backpack.packIndex;
+            state.backpackActive = backpack.active;
+            return state;
+        }
+        const auto& player = g->player();
+        state.hasWeapons = true;
+        state.weaponCount = player.weaponCount();
+        state.currentWeapon = player.currentWeapon();
+        for (int i = 0; i < player.weaponCount(); ++i)
+            state.weaponAmmo[i] = player.weapon(i).ammo;
+        if (state.currentWeapon >= 0 && state.currentWeapon < player.weaponCount())
+            state.ammo = player.weapon(state.currentWeapon).ammo;
+        return state;
+    });
+    // Script mutations are accepted only for the currently controlled live
+    // player.  Demo ghosts and other clients remain read-only snapshots.
+    auto isControlledPlayer = [this](int objectId) {
+        return objectId > 0 && objectId == g->getControlGhostIndex() &&
+               !g->isDemoPlaying() &&
+               (!g->activeConnection() || !g->activeConnection()->isObserverMode());
+    };
+    scr->setHealthMutationProvider([this, isControlledPlayer](int objectId, float health) {
+        if (!isControlledPlayer(objectId)) return false;
+        g->player().setHealth(health);
+        return true;
+    });
+    scr->setEnergyMutationProvider([this, isControlledPlayer](int objectId, float energy) {
+        if (!isControlledPlayer(objectId)) return false;
+        g->player().setEnergy(energy);
+        return true;
+    });
+    scr->setRepairRateMutationProvider([this, isControlledPlayer](int objectId, float rate) {
+        if (!isControlledPlayer(objectId)) return false;
+        g->player().setRepairRate(rate);
+        return true;
+    });
+    scr->setWeaponAmmoMutationProvider([this, isControlledPlayer](int objectId, int slot, int ammo) {
+        if (!isControlledPlayer(objectId) || slot < 0 || slot >= g->player().weaponCount())
+            return false;
+        auto& weapon = g->player().weapon(slot);
+        if (weapon.type < 0) return false;
+        weapon.ammo = ammo;
+        return true;
+    });
+    scr->setCurrentWeaponMutationProvider([this, isControlledPlayer](int objectId, int slot) {
+        if (!isControlledPlayer(objectId) || slot < 0 || slot >= g->player().weaponCount() ||
+            !weaponIsSelectable(g->player().weapon(slot))) return false;
+        g->player().selectWeapon(slot);
+        return true;
+    });
+    scr->setTeamMutationProvider([this, isControlledPlayer](int objectId, int team) {
+        if (!isControlledPlayer(objectId) || team < 0) return false;
+        g->player().setTeam(team);
+        return true;
+    });
+    // Mounted images and control-object changes require server-side vehicle
+    // state that the current client model does not own.  Leave them rejected
+    // rather than creating a script-only state that gameplay cannot observe.
+    scr->setMountedImageMutationProvider([](int, int, int) { return false; });
+    scr->setControlObjectMutationProvider([](int, int) { return false; });
 
     // Register console commands
     con->addCommand("setDetailScale", [](int32_t argc, const char* const* argv) {

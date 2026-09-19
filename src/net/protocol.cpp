@@ -27,12 +27,21 @@
 #include <sys/time.h>
 #include <chrono>
 #include <random>
+#include <cctype>
 
 namespace {
 constexpr size_t kMaxClients = 64;
 
 bool challengeMatches(const uint32_t expected[2], const uint32_t actual[2]) {
     return ((expected[0] ^ actual[0]) | (expected[1] ^ actual[1])) == 0;
+}
+
+bool authorizedRemoteCommand(const std::vector<std::string>& args) {
+    if (args.size() != 2 || args[0].size() != 7) return false;
+    std::string command = args[0];
+    std::transform(command.begin(), command.end(), command.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    return command == "sv_name" && !args[1].empty() && args[1].size() <= 255;
 }
 }
 
@@ -902,6 +911,9 @@ bool GameServer::loadMission(const char* missionPath) {
                      rules.type == MissionGameType::TeamDeathmatch ? 1 : 0;
     impl->scoreLimit = rules.scoreLimit;
 
+    // No callback from the previous mission may run after its world is gone.
+    if (auto* ts = Engine::instance().script().ts()) ts->clearScheduledEvents();
+
     // A successful mission load replaces the previous world.  In particular,
     // do not leave the startup fixtures or spawn points from the old map in
     // the replicated and respawn state.
@@ -1100,6 +1112,7 @@ void GameServer::stopRecording() {
 void GameServer::changeMap(const char* mission) {
     if (!impl->running) return;
     Console::instance().printf(LogLevel::Info, "Changing map to: %s", mission);
+    if (auto* ts = Engine::instance().script().ts()) ts->clearScheduledEvents();
     if (auto* ts = Engine::instance().script().ts())
         ts->dispatchMissionCallback("onMissionEnded", {VMValue(mission)});
     // Load new mission
@@ -1210,6 +1223,7 @@ void GameServer::stop() {
 
 uint16_t GameServer::port() const { return impl->port; }
 uint16_t GameServer::queryPort() const { return impl->queryPort; }
+bool GameServer::isRunning() const { return impl->running; }
 
 void GameServer::update() {
     if (!impl->running || impl->sock < 0) return;
@@ -1483,11 +1497,14 @@ void GameServer::update() {
                                         event.ghostSequence == 0)
                                         client.ghosting = true;
                                     if (event.classId == 9 && !event.arguments.empty()) {
-                                        if (remoteCommandCB)
+                                        // Client-originated script events must never become
+                                        // arbitrary server console execution.  The only
+                                        // supported mutation is the player's display name.
+                                        if (authorizedRemoteCommand(event.arguments) && remoteCommandCB)
                                             remoteCommandCB(ci, event.arguments);
                                         else
                                             Console::instance().printf(LogLevel::Warn,
-                                                "Server: no remote command handler for client %d", ci);
+                                                "Server: rejected unauthorized remote command from client %d", ci);
                                     }
                                 }
                             }

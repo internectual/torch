@@ -388,6 +388,7 @@ public:
     // Recording
     void startRecording(const char* path);
     void stopRecording();
+    bool isRunning() const;
 
 private:
     struct Impl;

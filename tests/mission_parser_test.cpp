@@ -190,6 +190,7 @@ int main() {
     )");
     assert(authoredObjective.size() == 3);
     const auto objective = authoredMissionObjective(authoredObjective[2]);
+    assert(objective.objectName == "AIOAttackObject");
     assert(objective.marker.teamId == 2);
     assert(objective.description == "Attack the GeneratorLarge");
     assert(objective.targetObject == "Generator3" && objective.targetObjectId == 3234);

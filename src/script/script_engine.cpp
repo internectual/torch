@@ -47,6 +47,17 @@ struct ScriptTarget {
 std::unordered_map<int, ScriptTarget> s_scriptTargets;
 int s_nextScriptTarget = 1;
 
+static void clearScriptMissionState() {
+    s_scriptTargets.clear();
+    s_nextScriptTarget = 1;
+    if (auto* taskList = ScriptEngine::instance().findObject("TaskList")) {
+        taskList->fields["currentTaskClient"] = VMValue("");
+        taskList->fields["currentAIObjective"] = VMValue("");
+        taskList->fields["currentTaskIsTeam"] = VMValue("0");
+        taskList->fields["currentTaskDescription"] = VMValue("");
+    }
+}
+
 static bool parseFogColor(const std::vector<VMValue>& args, float& r, float& g,
                           float& b, float& a) {
     if (args.size() >= 4) {
@@ -1323,6 +1334,8 @@ ScriptEngine& ScriptEngine::instance() {
     return *instance_;
 }
 
+bool ScriptEngine::exists() { return instance_ != nullptr; }
+
 static bool s_clientPrefsExportAllowed = false;
 void allowClientPrefsExport(bool allowed) { s_clientPrefsExportAllowed = allowed; }
 bool clientPrefsExportAllowed() { return s_clientPrefsExportAllowed; }
@@ -1381,9 +1394,228 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("strikeLightning", strikeScriptLightning);
     tsInstance->registerNative("Lightning::strike", strikeScriptLightning);
     tsInstance->registerNative("MissionCleanup", [](const auto&) -> VMValue {
+        clearScriptMissionState();
         Engine::instance().game().world().cleanupMission();
         return VMValue(1);
     });
+    auto setMissionObjectEnabled = [](const auto& args, bool enabled) -> VMValue {
+        if (args.empty() || args[0].toString().empty()) return VMValue(0);
+        return VMValue(Engine::instance().game().world().setMissionObjectEnabled(
+            args[0].toString(), enabled) ? 1 : 0);
+    };
+    auto setMissionObjectHidden = [](const auto& args) -> VMValue {
+        if (args.size() < 2 || args[0].toString().empty()) return VMValue(0);
+        return VMValue(Engine::instance().game().world().setMissionObjectHidden(
+            args[0].toString(), args[1].toBool()) ? 1 : 0);
+    };
+    auto setMissionObjectTransform = [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        return VMValue(Engine::instance().game().world().setMissionObjectTransform(
+            args[0].toString(), args[1].toString()) ? 1 : 0);
+    };
+    auto mountMissionObjectImage = [](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        return VMValue(Engine::instance().game().world().mountMissionObjectImage(
+            args[0].toString(), args[1].toString(), args[2].toInt()) ? 1 : 0);
+    };
+    auto unmountMissionObjectImage = [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        return VMValue(Engine::instance().game().world().unmountMissionObjectImage(
+            args[0].toString(), args[1].toInt()) ? 1 : 0);
+    };
+    tsInstance->registerNative("setHidden", setMissionObjectHidden);
+    tsInstance->registerNative("setTransform", setMissionObjectTransform);
+    tsInstance->registerNative("mountImage", mountMissionObjectImage);
+    tsInstance->registerNative("unmountImage", unmountMissionObjectImage);
+    tsInstance->registerNative("activate", [setMissionObjectEnabled](const auto& args) {
+        return setMissionObjectEnabled(args, true);
+    });
+    tsInstance->registerNative("deactivate", [setMissionObjectEnabled](const auto& args) {
+        return setMissionObjectEnabled(args, false);
+    });
+    const std::array<const char*, 6> lifecycleClasses = {
+        "StaticShape", "TSStatic", "Turret", "Item", "Player", "Vehicle"};
+    for (const char* className : lifecycleClasses) {
+        const std::string prefix = std::string(className) + "::";
+        tsInstance->registerNative(prefix + "setHidden", setMissionObjectHidden);
+        tsInstance->registerNative(prefix + "setTransform", setMissionObjectTransform);
+        tsInstance->registerNative(prefix + "mountImage", mountMissionObjectImage);
+        tsInstance->registerNative(prefix + "unmountImage", unmountMissionObjectImage);
+        tsInstance->registerNative(prefix + "activate", [setMissionObjectEnabled](const auto& args) {
+            return setMissionObjectEnabled(args, true);
+        });
+        tsInstance->registerNative(prefix + "deactivate", [setMissionObjectEnabled](const auto& args) {
+            return setMissionObjectEnabled(args, false);
+        });
+        tsInstance->registerNative(prefix + "enable", [setMissionObjectEnabled](const auto& args) {
+            return setMissionObjectEnabled(args, true);
+        });
+        tsInstance->registerNative(prefix + "disable", [setMissionObjectEnabled](const auto& args) {
+            return setMissionObjectEnabled(args, false);
+        });
+    }
+    tsInstance->registerNative("setMissionObjectEnabled", [setMissionObjectEnabled](const auto& args) {
+        return setMissionObjectEnabled(args, args.size() > 1 && args[1].toBool());
+    });
+    tsInstance->registerNative("enable", [setMissionObjectEnabled](const auto& args) {
+        return setMissionObjectEnabled(args, true);
+    });
+    tsInstance->registerNative("disable", [setMissionObjectEnabled](const auto& args) {
+        return setMissionObjectEnabled(args, false);
+    });
+    tsInstance->registerNative("PhysicalZone::setActive", [setMissionObjectEnabled](const auto& args) {
+            return setMissionObjectEnabled(args, args.size() > 1 && args[1].toBool());
+        });
+    tsInstance->registerNative("PhysicalZone::setEnabled", [setMissionObjectEnabled](const auto& args) {
+            return setMissionObjectEnabled(args, args.size() > 1 && args[1].toBool());
+        });
+    tsInstance->registerNative("ForceFieldBare::setEnabled", [setMissionObjectEnabled](const auto& args) {
+            return setMissionObjectEnabled(args, args.size() > 1 && args[1].toBool());
+        });
+    vmInstance->registerNativeFunction("PhysicalZone::setActive", [setMissionObjectEnabled](const auto& args) {
+        return setMissionObjectEnabled(args, args.size() > 1 && args[1].toBool());
+    });
+    vmInstance->registerNativeFunction("PhysicalZone::setEnabled", [setMissionObjectEnabled](const auto& args) {
+        return setMissionObjectEnabled(args, args.size() > 1 && args[1].toBool());
+    });
+    vmInstance->registerNativeFunction("ForceFieldBare::setEnabled", [setMissionObjectEnabled](const auto& args) {
+        return setMissionObjectEnabled(args, args.size() > 1 && args[1].toBool());
+    });
+    vmInstance->registerNativeFunction("setHidden", setMissionObjectHidden);
+    vmInstance->registerNativeFunction("setTransform", setMissionObjectTransform);
+    vmInstance->registerNativeFunction("mountImage", mountMissionObjectImage);
+    vmInstance->registerNativeFunction("unmountImage", unmountMissionObjectImage);
+    vmInstance->registerNativeFunction("activate", [setMissionObjectEnabled](const auto& args) {
+        return setMissionObjectEnabled(args, true);
+    });
+    vmInstance->registerNativeFunction("deactivate", [setMissionObjectEnabled](const auto& args) {
+        return setMissionObjectEnabled(args, false);
+    });
+    for (const char* className : lifecycleClasses) {
+        const std::string prefix = std::string(className) + "::";
+        vmInstance->registerNativeFunction((prefix + "setHidden").c_str(), setMissionObjectHidden);
+        vmInstance->registerNativeFunction((prefix + "setTransform").c_str(), setMissionObjectTransform);
+        vmInstance->registerNativeFunction((prefix + "mountImage").c_str(), mountMissionObjectImage);
+        vmInstance->registerNativeFunction((prefix + "unmountImage").c_str(), unmountMissionObjectImage);
+        vmInstance->registerNativeFunction((prefix + "activate").c_str(), [setMissionObjectEnabled](const auto& args) {
+            return setMissionObjectEnabled(args, true);
+        });
+        vmInstance->registerNativeFunction((prefix + "deactivate").c_str(), [setMissionObjectEnabled](const auto& args) {
+            return setMissionObjectEnabled(args, false);
+        });
+        vmInstance->registerNativeFunction((prefix + "enable").c_str(), [setMissionObjectEnabled](const auto& args) {
+            return setMissionObjectEnabled(args, true);
+        });
+        vmInstance->registerNativeFunction((prefix + "disable").c_str(), [setMissionObjectEnabled](const auto& args) {
+            return setMissionObjectEnabled(args, false);
+        });
+    }
+    auto objectiveName = [](const std::vector<VMValue>& args) {
+        return args.empty() ? std::string{} : args[0].toString();
+    };
+    auto objectiveActive = [objectiveName](const auto& args, bool active) -> VMValue {
+        return VMValue(Engine::instance().game().world().setObjectiveActive(
+            objectiveName(args), active) ? 1 : 0);
+    };
+    auto objectiveState = [objectiveName](const auto& args, int state) -> VMValue {
+        return VMValue(Engine::instance().game().world().setObjectiveState(
+            objectiveName(args), state) ? 1 : 0);
+    };
+    auto objectiveTarget = [objectiveName](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        return VMValue(Engine::instance().game().world().setObjectiveTarget(
+            objectiveName(args), args[1].toString(), args.size() > 2 ? args[2].toInt() : -1) ? 1 : 0);
+    };
+    auto objectiveWeight = [objectiveName](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        const int level = args[1].toInt();
+        const int index = level >= 1 && level <= 4 ? level - 1 : level;
+        return VMValue(Engine::instance().game().world().setObjectiveWeight(
+            objectiveName(args), index, args[2].toFloat()) ? 1 : 0);
+    };
+    auto objectiveScore = [objectiveName](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        return VMValue(Engine::instance().game().world().setObjectiveScore(
+            objectiveName(args), args[1].toFloat()) ? 1 : 0);
+    };
+    auto objectiveTeam = [objectiveName](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        return VMValue(Engine::instance().game().world().setObjectiveTeam(
+            objectiveName(args), args[1].toInt()) ? 1 : 0);
+    };
+    auto setTaskInfo = [](const auto& args) -> VMValue {
+        if (args.size() < 5) return VMValue(0);
+        auto* taskList = ScriptEngine::instance().findObject(args[0].toString().c_str());
+        if (!taskList || taskList->name != "TaskList") return VMValue(0);
+        taskList->fields["currentTaskClient"] = args[1];
+        taskList->fields["currentAIObjective"] = args[2];
+        taskList->fields["currentTaskIsTeam"] = args[3];
+        taskList->fields["currentTaskDescription"] = args[4];
+        return VMValue(1);
+    };
+    auto clearTaskInfo = [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto* taskList = ScriptEngine::instance().findObject(args[0].toString().c_str());
+        if (!taskList || taskList->name != "TaskList") return VMValue(0);
+        taskList->fields["currentTaskClient"] = VMValue("");
+        taskList->fields["currentAIObjective"] = VMValue("");
+        taskList->fields["currentTaskIsTeam"] = VMValue("0");
+        taskList->fields["currentTaskDescription"] = VMValue("");
+        return VMValue(1);
+    };
+    auto registerObjectiveCommands = [&](auto* vm) {
+        vm->registerNativeFunction("AIObjective::activate", [objectiveActive](const auto& a) {
+            return objectiveActive(a, true);
+        });
+        vm->registerNativeFunction("AIObjective::deactivate", [objectiveActive](const auto& a) {
+            return objectiveActive(a, false);
+        });
+        vm->registerNativeFunction("AIObjective::setState", [objectiveState](const auto& a) {
+            return objectiveState(a, a.size() > 1 ? a[1].toInt() : -1);
+        });
+        vm->registerNativeFunction("AIObjective::setObjectiveState", [objectiveState](const auto& a) {
+            return objectiveState(a, a.size() > 1 ? a[1].toInt() : -1);
+        });
+        vm->registerNativeFunction("AIObjective::setTargetObject", objectiveTarget);
+        vm->registerNativeFunction("AIObjective::setWeight", objectiveWeight);
+        vm->registerNativeFunction("AIObjective::setWeightLevel", objectiveWeight);
+        vm->registerNativeFunction("AIObjective::setScore", objectiveScore);
+        vm->registerNativeFunction("AIObjective::setTeam", objectiveTeam);
+        vm->registerNativeFunction("AIObjective::complete", [objectiveState](const auto& a) {
+            return objectiveState(a, 2);
+        });
+        vm->registerNativeFunction("AIObjective::fail", [objectiveState](const auto& a) {
+            return objectiveState(a, 3);
+        });
+        vm->registerNativeFunction("TaskList::setTaskInfo", setTaskInfo);
+        vm->registerNativeFunction("TaskList::clearTaskInfo", clearTaskInfo);
+    };
+    tsInstance->registerNative("AIObjective::activate", [objectiveActive](const auto& a) {
+        return objectiveActive(a, true);
+    });
+    tsInstance->registerNative("AIObjective::deactivate", [objectiveActive](const auto& a) {
+        return objectiveActive(a, false);
+    });
+    tsInstance->registerNative("AIObjective::setState", [objectiveState](const auto& a) {
+        return objectiveState(a, a.size() > 1 ? a[1].toInt() : -1);
+    });
+    tsInstance->registerNative("AIObjective::setObjectiveState", [objectiveState](const auto& a) {
+        return objectiveState(a, a.size() > 1 ? a[1].toInt() : -1);
+    });
+    tsInstance->registerNative("AIObjective::setTargetObject", objectiveTarget);
+    tsInstance->registerNative("AIObjective::setWeight", objectiveWeight);
+    tsInstance->registerNative("AIObjective::setWeightLevel", objectiveWeight);
+    tsInstance->registerNative("AIObjective::setScore", objectiveScore);
+    tsInstance->registerNative("AIObjective::setTeam", objectiveTeam);
+    tsInstance->registerNative("AIObjective::complete", [objectiveState](const auto& a) {
+        return objectiveState(a, 2);
+    });
+    tsInstance->registerNative("AIObjective::fail", [objectiveState](const auto& a) {
+        return objectiveState(a, 3);
+    });
+    tsInstance->registerNative("TaskList::setTaskInfo", setTaskInfo);
+    tsInstance->registerNative("TaskList::clearTaskInfo", clearTaskInfo);
+    registerObjectiveCommands(vmInstance);
     tsInstance->registerNative("setWaterLevel", setScriptWaterLevel);
     tsInstance->registerNative("setWaterType", setScriptWaterType);
     tsInstance->registerNative("setLiquidType", setScriptWaterType);
@@ -1483,11 +1715,73 @@ bool ScriptEngine::init() {
         std::string name = args[0].toString();
         if (name.empty()) return VMValue(0);
         auto& engine = ScriptEngine::instance();
+        char* end = nullptr;
+        const long id = std::strtol(name.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0) {
+            ScriptObjectState state;
+            if (engine.objectState((int)id, state)) return VMValue(1);
+        }
         if (engine.findObject(name.c_str())) return VMValue(1);
         auto* item = Console::instance().find(name.c_str());
         if (item) return VMValue(1);
         return VMValue(0);
     });
+
+    auto objectState = [](const std::vector<VMValue>& args, ScriptObjectState& state) {
+        if (args.empty()) return false;
+        char* end = nullptr;
+        const std::string value = args[0].toString();
+        const long id = std::strtol(value.c_str(), &end, 10);
+        return end && *end == '\0' && id > 0 &&
+               ScriptEngine::instance().objectState((int)id, state);
+    };
+    auto getDataBlock = [objectState](const auto& args) -> VMValue {
+        ScriptObjectState state;
+        return VMValue(objectState(args, state) ? state.datablockId : 0);
+    };
+    auto getClassName = [objectState](const auto& args) -> VMValue {
+        ScriptObjectState state;
+        return VMValue(objectState(args, state) ? state.className : "");
+    };
+    auto getShapeFile = [objectState](const auto& args) -> VMValue {
+        ScriptObjectState state;
+        return VMValue(objectState(args, state) ? state.shapeName : "");
+    };
+    auto getObjectName = [objectState](const auto& args) -> VMValue {
+        ScriptObjectState state;
+        return VMValue(objectState(args, state) ? state.name : "");
+    };
+    auto getPosition = [objectState](const auto& args) -> VMValue {
+        ScriptObjectState state;
+        if (!objectState(args, state)) return VMValue("0 0 0");
+        char value[96];
+        snprintf(value, sizeof(value), "%g %g %g", state.position.x,
+                 state.position.y, state.position.z);
+        return VMValue(value);
+    };
+    auto getTeam = [objectState](const auto& args) -> VMValue {
+        ScriptObjectState state;
+        return VMValue(objectState(args, state) ? state.teamId : 0);
+    };
+    auto getState = [objectState](const auto& args) -> VMValue {
+        ScriptObjectState state;
+        return VMValue(objectState(args, state) ? state.state : 0);
+    };
+    tsInstance->registerNative("getDataBlock", getDataBlock);
+    tsInstance->registerNative("getClassName", getClassName);
+    tsInstance->registerNative("getShapeFile", getShapeFile);
+    tsInstance->registerNative("getName", getObjectName);
+    tsInstance->registerNative("getPosition", getPosition);
+    tsInstance->registerNative("getTeam", getTeam);
+    tsInstance->registerNative("setTeam", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const int objectId = args[0].toInt();
+        const int team = args[1].toInt();
+        if (objectId <= 0 || team < 0) return VMValue(0);
+        return VMValue(ScriptEngine::instance().mutateTeam(objectId, team) ? 1 : 0);
+    });
+    tsInstance->registerNative("getState", getState);
+    tsInstance->registerNative("getDamageState", getState);
 
     // call(%func, %a1, %a2, ...) — invoke the function named by the first
     // argument, forwarding the rest. T2 uses this for callbacks stored in
@@ -1521,7 +1815,89 @@ bool ScriptEngine::init() {
     });
 
     tsInstance->registerNative("isDemo", [](const auto&) -> VMValue {
-        return VMValue(0);
+        return VMValue(ScriptEngine::instance().isDemoPlaying() ? 1 : 0);
+    });
+    tsInstance->registerNative("isServer", [](const auto&) -> VMValue {
+        return VMValue(ScriptEngine::instance().isServer() ? 1 : 0);
+    });
+    tsInstance->registerNative("isClient", [](const auto&) -> VMValue {
+        return VMValue(ScriptEngine::instance().isClient() ? 1 : 0);
+    });
+    auto controlObject = [](const auto&) -> VMValue {
+        return VMValue(ScriptEngine::instance().controlObjectId());
+    };
+    auto cameraObject = [](const auto&) -> VMValue {
+        return VMValue(ScriptEngine::instance().cameraObjectId());
+    };
+    tsInstance->registerNative("getControlObject", controlObject);
+    tsInstance->registerNative("getControlObjectId", controlObject);
+    tsInstance->registerNative("ServerConnection::getControlObject", controlObject);
+    tsInstance->registerNative("GameConnection::getControlObject", controlObject);
+    tsInstance->registerNative("setControlObject", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const int connectionId = args[0].toInt();
+        const int objectId = args[1].toInt();
+        if (connectionId < 0 || objectId <= 0) return VMValue(0);
+        return VMValue(ScriptEngine::instance().mutateControlObject(connectionId, objectId) ? 1 : 0);
+    });
+    tsInstance->registerNative("ServerConnection::setControlObject", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const int connectionId = args[0].toInt();
+        const int objectId = args[1].toInt();
+        if (connectionId < 0 || objectId <= 0) return VMValue(0);
+        return VMValue(ScriptEngine::instance().mutateControlObject(connectionId, objectId) ? 1 : 0);
+    });
+    tsInstance->registerNative("GameConnection::setControlObject", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const int connectionId = args[0].toInt();
+        const int objectId = args[1].toInt();
+        if (connectionId < 0 || objectId <= 0) return VMValue(0);
+        return VMValue(ScriptEngine::instance().mutateControlObject(connectionId, objectId) ? 1 : 0);
+    });
+    tsInstance->registerNative("getCameraObject", cameraObject);
+    tsInstance->registerNative("ServerConnection::getCameraObject", cameraObject);
+    tsInstance->registerNative("GameConnection::getCameraObject", cameraObject);
+    vmInstance->registerNativeFunction("isServer", [](const auto&) -> VMValue {
+        return VMValue(ScriptEngine::instance().isServer() ? 1 : 0);
+    });
+    vmInstance->registerNativeFunction("isClient", [](const auto&) -> VMValue {
+        return VMValue(ScriptEngine::instance().isClient() ? 1 : 0);
+    });
+    vmInstance->registerNativeFunction("getControlObject", controlObject);
+    vmInstance->registerNativeFunction("getControlObjectId", controlObject);
+    vmInstance->registerNativeFunction("ServerConnection::getControlObject", controlObject);
+    vmInstance->registerNativeFunction("GameConnection::getControlObject", controlObject);
+    vmInstance->registerNativeFunction("getCameraObject", cameraObject);
+    vmInstance->registerNativeFunction("ServerConnection::getCameraObject", cameraObject);
+    vmInstance->registerNativeFunction("GameConnection::getCameraObject", cameraObject);
+
+    auto connectionState = [] { return ScriptEngine::instance().connectionState(); };
+    tsInstance->registerNative("getServerAddress", [connectionState](const auto&) -> VMValue {
+        return VMValue(connectionState().serverAddress);
+    });
+    tsInstance->registerNative("getServerPort", [connectionState](const auto&) -> VMValue {
+        return VMValue((int32_t)connectionState().serverPort);
+    });
+    tsInstance->registerNative("getClientName", [connectionState](const auto&) -> VMValue {
+        return VMValue(connectionState().clientName);
+    });
+    tsInstance->registerNative("getClientId", [connectionState](const auto&) -> VMValue {
+        return VMValue((int32_t)connectionState().clientId);
+    });
+    tsInstance->registerNative("getMissionName", [connectionState](const auto&) -> VMValue {
+        return VMValue(connectionState().missionName);
+    });
+    tsInstance->registerNative("getMissionType", [connectionState](const auto&) -> VMValue {
+        return VMValue(connectionState().missionType);
+    });
+    tsInstance->registerNative("getMissionCRC", [connectionState](const auto&) -> VMValue {
+        return VMValue((int32_t)connectionState().missionCrc);
+    });
+    tsInstance->registerNative("isOnline", [connectionState](const auto&) -> VMValue {
+        return VMValue(connectionState().online ? 1 : 0);
+    });
+    tsInstance->registerNative("isObserver", [connectionState](const auto&) -> VMValue {
+        return VMValue(connectionState().observer ? 1 : 0);
     });
 
     // String utility functions
@@ -2211,6 +2587,7 @@ bool ScriptEngine::init() {
     vmInstance->registerNativeFunction("strikeLightning", strikeScriptLightning);
     vmInstance->registerNativeFunction("Lightning::strike", strikeScriptLightning);
     vmInstance->registerNativeFunction("MissionCleanup", [](const auto&) -> VMValue {
+        clearScriptMissionState();
         Engine::instance().game().world().cleanupMission();
         return VMValue(1);
     });
@@ -3714,6 +4091,13 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("getName", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
         const std::string objectName = args[0].toString();
+        char* end = nullptr;
+        const long id = std::strtol(objectName.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0) {
+            ScriptObjectState state;
+            if (ScriptEngine::instance().objectState((int)id, state))
+                return VMValue(state.name);
+        }
         if (auto* object = ScriptEngine::instance().findObject(objectName.c_str()))
             return VMValue(object->name);
         return VMValue(objectName);
@@ -3721,6 +4105,13 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("getClassName", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
         const std::string objectName = args[0].toString();
+        char* end = nullptr;
+        const long id = std::strtol(objectName.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0) {
+            ScriptObjectState state;
+            if (ScriptEngine::instance().objectState((int)id, state))
+                return VMValue(state.className);
+        }
         if (auto* object = ScriptEngine::instance().findObject(objectName.c_str()))
             return VMValue(object->className);
         return VMValue("");
@@ -3729,47 +4120,103 @@ bool ScriptEngine::init() {
         return args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str());
     };
     tsInstance->registerNative("getInventory", [inventoryObject](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const auto state = ScriptEngine::instance().loadoutState();
+        const auto item = state.inventory.find(args[1].toString());
+        if (state.hasInventory)
+            return VMValue(item == state.inventory.end() ? 0 : item->second);
         auto* object = inventoryObject(args);
-        if (!object || args.size() < 2) return VMValue(0);
+        if (!object) return VMValue(0);
         return object->fields["inventory::" + args[1].toString()];
     });
     tsInstance->registerNative("setInventory", [inventoryObject](const auto& args) -> VMValue {
-        auto* object = inventoryObject(args);
-        if (!object || args.size() < 3) return VMValue(0);
-        object->fields["inventory::" + args[1].toString()] = args[2];
-        return VMValue(1);
+        if (args.size() < 3 || args[1].toString().empty()) return VMValue(0);
+        (void)inventoryObject;
+        return VMValue(ScriptEngine::instance().mutateInventory(
+            args[0].toInt(), args[1].toString(), args[2].toInt()) ? 1 : 0);
     });
     tsInstance->registerNative("incInventory", [inventoryObject](const auto& args) -> VMValue {
-        auto* object = inventoryObject(args);
-        if (!object || args.size() < 3) return VMValue(0);
-        const std::string key = "inventory::" + args[1].toString();
-        const int amount = object->fields[key].toInt() + args[2].toInt();
-        object->fields[key] = VMValue(amount);
-        return VMValue(amount);
+        if (args.size() < 3 || args[1].toString().empty()) return VMValue(0);
+        (void)inventoryObject;
+        return VMValue(ScriptEngine::instance().mutateInventory(
+            args[0].toInt(), args[1].toString(), args[2].toInt()) ? 1 : 0);
     });
     tsInstance->registerNative("decInventory", [inventoryObject](const auto& args) -> VMValue {
-        auto* object = inventoryObject(args);
-        if (!object || args.size() < 3) return VMValue(0);
-        const std::string key = "inventory::" + args[1].toString();
-        const int amount = std::max(0, object->fields[key].toInt() - args[2].toInt());
-        object->fields[key] = VMValue(amount);
-        return VMValue(amount);
+        if (args.size() < 3 || args[1].toString().empty()) return VMValue(0);
+        (void)inventoryObject;
+        return VMValue(ScriptEngine::instance().mutateInventory(
+            args[0].toInt(), args[1].toString(), -args[2].toInt()) ? 1 : 0);
     });
     tsInstance->registerNative("maxInventory", [inventoryObject](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const auto state = ScriptEngine::instance().loadoutState();
+        const auto item = state.maxInventory.find(args[1].toString());
+        if (state.hasInventory)
+            return VMValue(item == state.maxInventory.end() ? 0 : item->second);
         auto* object = inventoryObject(args);
-        if (!object || args.size() < 2) return VMValue(0);
+        if (!object) return VMValue(0);
         return object->fields["maxInventory::" + args[1].toString()];
+    });
+    auto loadout = [](const auto& args) {
+        const auto state = ScriptEngine::instance().loadoutState();
+        const int slot = args.empty() ? -1 : args[0].toInt();
+        auto weapon = state.weaponAmmo.find(slot);
+        return std::pair<ScriptLoadoutState, int>(state,
+            weapon == state.weaponAmmo.end() ? -1 : weapon->second);
+    };
+    tsInstance->registerNative("getWeaponAmmo", [loadout](const auto& args) -> VMValue {
+        return VMValue(loadout(args).second);
+    });
+    tsInstance->registerNative("getAmmo", [loadout](const auto& args) -> VMValue {
+        const auto state = ScriptEngine::instance().loadoutState();
+        return VMValue(state.hasWeapons ? state.ammo : -1);
+    });
+    tsInstance->registerNative("getCurrentWeapon", [](const auto&) -> VMValue {
+        const auto state = ScriptEngine::instance().loadoutState();
+        return VMValue(state.hasWeapons ? state.currentWeapon : -1);
+    });
+    tsInstance->registerNative("getWeaponCount", [](const auto&) -> VMValue {
+        const auto state = ScriptEngine::instance().loadoutState();
+        return VMValue(state.hasWeapons ? state.weaponCount : 0);
+    });
+    tsInstance->registerNative("getBackpack", [](const auto&) -> VMValue {
+        const auto state = ScriptEngine::instance().loadoutState();
+        return VMValue(state.hasBackpack && state.backpackActive ? state.backpackIndex : -1);
+    });
+    tsInstance->registerNative("setWeaponAmmo", [](const auto& args) -> VMValue {
+        if (args.size() < 3 || args[0].toInt() <= 0 || args[1].toInt() < 0 ||
+            args[2].toInt() < -1) return VMValue(0);
+        auto& engine = ScriptEngine::instance();
+        const int objectId = args[0].toInt();
+        const int slot = args[1].toInt();
+        const int ammo = args[2].toInt();
+        return VMValue(engine.mutateWeaponAmmo(objectId, slot, ammo) ? 1 : 0);
+    });
+    tsInstance->registerNative("setCurrentWeapon", [](const auto& args) -> VMValue {
+        if (args.size() < 2 || args[1].toInt() < 0) return VMValue(0);
+        auto& engine = ScriptEngine::instance();
+        return VMValue(engine.mutateCurrentWeapon(args[0].toInt(), args[1].toInt()) ? 1 : 0);
     });
     tsInstance->registerNative("getDataBlock", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
+        char* end = nullptr;
+        const std::string value = args[0].toString();
+        const long id = std::strtol(value.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0) {
+            ScriptObjectState state;
+            if (ScriptEngine::instance().objectState((int)id, state))
+                return VMValue(state.datablockId);
+        }
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
             return object->fields["dataBlock"];
         return VMValue("");
     });
     tsInstance->registerNative("getTarget", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(-1);
-        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
-            return object->fields["target"].toInt();
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
+            const int id = object->fields["target"].toInt();
+            return s_scriptTargets.count(id) ? VMValue(id) : VMValue(-1);
+        }
         return VMValue(-1);
     });
 
@@ -3777,7 +4224,8 @@ bool ScriptEngine::init() {
     // and sensor HUD entries. Keep their mutable state separate from script
     // objects so targets remain valid after their owner changes fields.
     tsInstance->registerNative("createTarget", [](const auto& args) -> VMValue {
-        if (args.size() < 6) return VMValue(-1);
+        if (args.size() < 6 || args[0].toString().empty() || args[5].toInt() < 0 || args[5].toInt() >= 32)
+            return VMValue(-1);
         ScriptTarget target;
         target.objectName = args[0].toString();
         target.nameTag = args[1];
@@ -3792,7 +4240,7 @@ bool ScriptEngine::init() {
         return VMValue(id);
     });
     tsInstance->registerNative("allocTarget", [](const auto& args) -> VMValue {
-        if (args.size() < 5) return VMValue(-1);
+        if (args.size() < 5 || args[4].toInt() < 0 || args[4].toInt() >= 32) return VMValue(-1);
         ScriptTarget target;
         target.nameTag = args[0];
         target.skinTag = args[1];
@@ -3807,7 +4255,8 @@ bool ScriptEngine::init() {
         return VMValue(id);
     });
     tsInstance->registerNative("allocClientTarget", [](const auto& args) -> VMValue {
-        if (args.size() < 5) return VMValue(-1);
+        if (args.size() < 5 || args[0].toString().empty() || args[4].toInt() < 0 || args[4].toInt() >= 32)
+            return VMValue(-1);
         ScriptTarget target;
         target.objectName = args[0].toString();
         target.nameTag = args[1];
@@ -3848,6 +4297,7 @@ bool ScriptEngine::init() {
         if (args.size() < 2) return VMValue(0);
         auto it = s_scriptTargets.find(args[0].toInt());
         if (it == s_scriptTargets.end()) return VMValue(0);
+        if (args[1].toInt() < 0) return VMValue(0);
         it->second.renderMask = (uint32_t)args[1].toInt();
         return VMValue(1);
     });
@@ -3886,6 +4336,7 @@ bool ScriptEngine::init() {
         if (args.size() < 2) return VMValue(0);
         auto it = s_scriptTargets.find(args[0].toInt());
         if (it == s_scriptTargets.end()) return VMValue(0);
+        if (args[1].toInt() < 0 || args[1].toInt() >= 32) return VMValue(0);
         it->second.sensorGroup = args[1].toInt();
         return VMValue(1);
     });
@@ -3898,8 +4349,29 @@ bool ScriptEngine::init() {
         if (args.size() < 2) return VMValue(0);
         auto it = s_scriptTargets.find(args[0].toInt());
         if (it == s_scriptTargets.end()) return VMValue(0);
+        if (args[1].toInt() < 0) return VMValue(0);
         it->second.alwaysVisMask = (uint32_t)args[1].toInt();
         return VMValue(1);
+    });
+    tsInstance->registerNative("getTargetName", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        auto it = s_scriptTargets.find(args[0].toInt());
+        return it == s_scriptTargets.end() ? VMValue("") : it->second.nameTag;
+    });
+    tsInstance->registerNative("getTargetSkin", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        auto it = s_scriptTargets.find(args[0].toInt());
+        return it == s_scriptTargets.end() ? VMValue("") : it->second.skinTag;
+    });
+    tsInstance->registerNative("getTargetType", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto it = s_scriptTargets.find(args[0].toInt());
+        return it == s_scriptTargets.end() ? VMValue(0) : it->second.typeTag;
+    });
+    tsInstance->registerNative("getTargetAlwaysVisMask", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto it = s_scriptTargets.find(args[0].toInt());
+        return it == s_scriptTargets.end() ? VMValue(0) : VMValue((int32_t)it->second.alwaysVisMask);
     });
     tsInstance->registerNative("resetTargetManager", [](const auto&) -> VMValue {
         s_scriptTargets.clear();
@@ -3909,6 +4381,7 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("setTarget", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
+            if (!s_scriptTargets.count(args[1].toInt())) return VMValue(0);
             object->fields["target"] = args[1];
             return VMValue(1);
         }
@@ -3917,6 +4390,7 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("setTargetObject", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
+            if (!s_scriptTargets.count(object->fields["target"].toInt())) return VMValue(0);
             object->fields["targetObject"] = args[1];
             return VMValue(1);
         }
@@ -4004,17 +4478,29 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("getMountedImage", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
+        ScriptObjectState state;
+        char* end = nullptr;
+        const std::string objectName = args[0].toString();
+        const long id = std::strtol(objectName.c_str(), &end, 10);
+        const int slot = args[1].toInt();
+        if (end && *end == '\0' && id > 0 && slot >= 0 && slot < 8 &&
+            ScriptEngine::instance().objectState((int)id, state))
+            return VMValue(state.mountedImages[slot].datablockId);
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
             return object->fields["mountedImage::" + std::to_string(args[1].toInt())];
         return VMValue(0);
     });
     tsInstance->registerNative("setMountedImage", [](const auto& args) -> VMValue {
         if (args.size() < 3) return VMValue(0);
-        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
-            object->fields["mountedImage::" + std::to_string(args[1].toInt())] = args[2];
-            return VMValue(1);
-        }
-        return VMValue(0);
+        char* end = nullptr;
+        const std::string objectName = args[0].toString();
+        const long id = std::strtol(objectName.c_str(), &end, 10);
+        const int slot = args[1].toInt();
+        const int datablock = args[2].toInt();
+        if (!end || *end != '\0' || id <= 0 || slot < 0 || slot >= 8 || datablock < 0)
+            return VMValue(0);
+        return VMValue(ScriptEngine::instance().mutateMountedImage(
+            (int)id, slot, datablock) ? 1 : 0);
     });
     tsInstance->registerNative("getMountNodeObject", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
@@ -4024,18 +4510,24 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("getTransform", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
+        ScriptObjectState state;
+        char* end = nullptr;
+        const std::string objectName = args[0].toString();
+        const long id = std::strtol(objectName.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state)) {
+            char value[160];
+            snprintf(value, sizeof(value), "%g %g %g %g %g %g %g",
+                     state.position.x, state.position.y, state.position.z,
+                     state.rotation.x, state.rotation.y, state.rotation.z,
+                     state.rotationW);
+            return VMValue(value);
+        }
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
             return object->fields["transform"];
         return VMValue("");
     });
-    tsInstance->registerNative("setTransform", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
-            object->fields["transform"] = args[1];
-            return VMValue(1);
-        }
-        return VMValue(0);
-    });
+    // Mission object transforms are handled by World. Unknown/network-only
+    // objects deliberately return failure rather than creating a shadow state.
     tsInstance->registerNative("getWorldBoxCenter", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
@@ -4047,6 +4539,14 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("getDamageState", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
+        char* end = nullptr;
+        const std::string value = args[0].toString();
+        const long id = std::strtol(value.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0) {
+            ScriptObjectState state;
+            if (ScriptEngine::instance().objectState((int)id, state))
+                return VMValue(state.state);
+        }
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
             return object->fields["damageState"];
         return VMValue("");
@@ -4073,23 +4573,71 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("setDamageLevel", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
-        auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str());
-        if (!object) return VMValue(0);
-        object->fields["damageLevel"] = args[1];
+        auto& engine = ScriptEngine::instance();
+        const float damage = std::clamp(args[1].toFloat(), 0.0f, 1.0f);
+        return VMValue(engine.mutateHealth(args[0].toInt(), (1.0f - damage) * 100.0f) ? 1 : 0);
+    });
+    tsInstance->registerNative("setHealth", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const int objectId = args[0].toInt();
+        const float health = args[1].toFloat();
+        if (objectId <= 0 || !std::isfinite(health)) return VMValue(0);
+        return VMValue(ScriptEngine::instance().mutateHealth(
+            objectId, std::clamp(health, 0.0f, 100.0f)) ? 1 : 0);
+    });
+    auto applyDamageOrRepair = [](const auto& args, bool repair) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const int objectId = args[0].toInt();
+        const float amount = args[1].toFloat();
+        if (objectId <= 0 || !std::isfinite(amount) || amount < 0.0f) return VMValue(0);
+        ScriptObjectState state;
+        if (!ScriptEngine::instance().objectState(objectId, state) || !state.hasHealth)
+            return VMValue(0);
+        const float health = std::clamp(state.health + (repair ? amount : -amount),
+                                       0.0f, state.hasMaxHealth ? state.maxHealth : 100.0f);
+        if (!ScriptEngine::instance().mutateHealth(objectId, health)) return VMValue(0);
+            if (auto* ts = ScriptEngine::instance().ts()) {
+                const std::string callback = state.className + (repair ? "::onRepair" : "::onDamage");
+            std::string nativeCallback = callback;
+            for (char& c : nativeCallback) c = (char)std::tolower((unsigned char)c);
+            if (!state.className.empty() &&
+                (ts->hasFunction(callback) || ts->getNatives().count(nativeCallback)))
+                ts->callFunction(callback, {VMValue(objectId), VMValue(amount)});
+        }
         return VMValue(1);
+    };
+    tsInstance->registerNative("damage", [applyDamageOrRepair](const auto& args) {
+        return applyDamageOrRepair(args, false);
+    });
+    tsInstance->registerNative("repair", [applyDamageOrRepair](const auto& args) {
+        return applyDamageOrRepair(args, true);
+    });
+    tsInstance->registerNative("setEnergyLevel", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        const int objectId = args[0].toInt();
+        const float energy = args[1].toFloat();
+        if (objectId <= 0 || !std::isfinite(energy)) return VMValue(0);
+        return VMValue(ScriptEngine::instance().mutateEnergy(
+            objectId, std::clamp(energy, 0.0f, 100.0f)) ? 1 : 0);
     });
     tsInstance->registerNative("getRepairRate", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0.0f);
+        ScriptObjectState state;
+        char* end = nullptr;
+        const std::string value = args[0].toString();
+        const long id = std::strtol(value.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state))
+            return VMValue(state.repairRate);
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
             return object->fields["repairRate"];
         return VMValue(0.0f);
     });
     tsInstance->registerNative("setRepairRate", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
-        auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str());
-        if (!object) return VMValue(0);
-        object->fields["repairRate"] = args[1];
-        return VMValue(1);
+        const int objectId = args[0].toInt();
+        const float rate = args[1].toFloat();
+        if (objectId <= 0 || !std::isfinite(rate) || rate < 0.0f) return VMValue(0);
+        return VMValue(ScriptEngine::instance().mutateRepairRate(objectId, rate) ? 1 : 0);
     });
     tsInstance->registerNative("getControllingClient", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
@@ -4111,15 +4659,96 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("getVelocity", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
+        ScriptObjectState state;
+        char* end = nullptr;
+        const std::string objectName = args[0].toString();
+        const long id = std::strtol(objectName.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state)) {
+            char value[96];
+            snprintf(value, sizeof(value), "%g %g %g", state.velocity.x,
+                     state.velocity.y, state.velocity.z);
+            return VMValue(value);
+        }
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
             return object->fields["velocity"];
         return VMValue("");
     });
+    tsInstance->registerNative("getRotation", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("0 0 0 1");
+        ScriptObjectState state;
+        char* end = nullptr;
+        const std::string objectName = args[0].toString();
+        const long id = std::strtol(objectName.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state)) {
+            char value[128];
+            snprintf(value, sizeof(value), "%g %g %g %g", state.rotation.x,
+                     state.rotation.y, state.rotation.z, state.rotationW);
+            return VMValue(value);
+        }
+        if (auto* object = ScriptEngine::instance().findObject(objectName.c_str()))
+            return object->fields["rotation"];
+        return VMValue("0 0 0 1");
+    });
+    auto objectNumericState = [](const std::vector<VMValue>& args,
+                                 float ScriptObjectState::*member,
+                                 bool ScriptObjectState::*available,
+                                 float fallback) -> VMValue {
+        if (args.empty()) return VMValue(fallback);
+        char* end = nullptr;
+        const std::string objectName = args[0].toString();
+        const long id = std::strtol(objectName.c_str(), &end, 10);
+        ScriptObjectState state;
+        if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state))
+            return VMValue(state.*available ? state.*member : fallback);
+        return VMValue(fallback);
+    };
+    tsInstance->registerNative("getHealth", [objectNumericState](const auto& args) {
+        return objectNumericState(args, &ScriptObjectState::health,
+                                   &ScriptObjectState::hasHealth, 0.0f);
+    });
+    tsInstance->registerNative("getMaxHealth", [objectNumericState](const auto& args) {
+        return objectNumericState(args, &ScriptObjectState::maxHealth,
+                                   &ScriptObjectState::hasMaxHealth, 0.0f);
+    });
+    tsInstance->registerNative("getEnergyLevel", [objectNumericState](const auto& args) {
+        return objectNumericState(args, &ScriptObjectState::energy,
+                                   &ScriptObjectState::hasEnergy, 0.0f);
+    });
     tsInstance->registerNative("getEnergyPercent", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0.0f);
+        ScriptObjectState state;
+        char* end = nullptr;
+        const std::string objectName = args[0].toString();
+        const long id = std::strtol(objectName.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state))
+            return VMValue(state.hasEnergy ? state.energy : 0.0f);
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
             return object->fields["energyPercent"];
         return VMValue(0.0f);
+    });
+    tsInstance->registerNative("isTargetVisible", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        ScriptObjectState target;
+        char* end = nullptr;
+        const std::string targetName = args[0].toString();
+        const long targetId = std::strtol(targetName.c_str(), &end, 10);
+        if (!end || *end != '\0' || targetId <= 0 ||
+            !ScriptEngine::instance().objectState((int)targetId, target)) return VMValue(0);
+        int listenerGroup = 0;
+        ScriptObjectState listener;
+        const int controlId = ScriptEngine::instance().controlObjectId();
+        if (controlId > 0 && ScriptEngine::instance().objectState(controlId, listener))
+            listenerGroup = listener.sensorGroup >= 0 ? listener.sensorGroup : 0;
+        if (args.size() > 1) {
+            const std::string listenerName = args[1].toString();
+            const long listenerId = std::strtol(listenerName.c_str(), &end, 10);
+            if (end && *end == '\0' && listenerId > 0 &&
+                ScriptEngine::instance().objectState((int)listenerId, listener))
+                listenerGroup = listener.sensorGroup >= 0 ? listener.sensorGroup : 0;
+            else listenerGroup = args[1].toInt();
+        }
+        return VMValue(Engine::instance().game().isSensorGroupTargetVisible(
+            listenerGroup, target.sensorGroup) ? 1 : 0);
     });
     tsInstance->registerNative("getDamagePercent", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0.0f);
@@ -4145,6 +4774,9 @@ bool ScriptEngine::init() {
                 return VMValue(1);
             }
         }
+        if (args.size() >= 2)
+            return VMValue(Engine::instance().game().world().setMissionObjectEnabled(
+                args[0].toString(), args[1].toBool()) ? 1 : 0);
         return VMValue(0);
     });
     tsInstance->registerNative("delete", [](const auto& args) -> VMValue {
@@ -4152,7 +4784,7 @@ bool ScriptEngine::init() {
              std::string objName = args[0].toString();
              ScriptEngine::instance().ts()->cancelEventsForObject(objName);
             auto* obj = ScriptEngine::instance().findObject(objName.c_str());
-                if (obj) {
+              if (obj) {
                 if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 ||
                     obj->className.find("Hud") == 0) {
                     Engine::instance().guiRenderer().removeControl(objName);
@@ -4197,6 +4829,9 @@ bool ScriptEngine::init() {
                 ScriptEngine::instance().objects.erase(objName);
                 delete obj;
             }
+            // Mission objects are not ScriptObject instances. Remove them
+            // through World so schedules and lifecycle callbacks agree.
+            Engine::instance().game().world().deleteMissionObject(objName);
         }
         return VMValue(1);
     });
@@ -4248,6 +4883,19 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("getPosition", [getListCtrl](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("0 0");
+        char* end = nullptr;
+        const std::string value = args[0].toString();
+        const long id = std::strtol(value.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0) {
+            ScriptObjectState state;
+            if (ScriptEngine::instance().objectState((int)id, state)) {
+                char position[96];
+                snprintf(position, sizeof(position), "%g %g %g", state.position.x,
+                         state.position.y, state.position.z);
+                return VMValue(position);
+            }
+            return VMValue("0 0 0");
+        }
         auto* ctl = getListCtrl(args[0].toString());
         if (!ctl) return VMValue("0 0");
         return VMValue(std::to_string((int)ctl->posX) + " " + std::to_string((int)ctl->posY));
@@ -4565,42 +5213,50 @@ bool ScriptEngine::init() {
     };
     tsInstance->registerNative("setWeaponBitmap", [hudSlot](const auto& args) -> VMValue {
         auto [ctl, slot] = hudSlot(args, 3);
-        if (ctl) { ctl->hudSlots[slot].bitmap = args[2].toString(); ctl->hudSlots[slot].visible = true; }
+        if (!ctl) return VMValue(0);
+        ctl->hudSlots[slot].bitmap = args[2].toString(); ctl->hudSlots[slot].visible = true;
         return VMValue(1);
     });
     tsInstance->registerNative("setInventoryBitmap", [hudSlot](const auto& args) -> VMValue {
         auto [ctl, slot] = hudSlot(args, 3);
-        if (ctl) { ctl->hudSlots[slot].bitmap = args[2].toString(); ctl->hudSlots[slot].visible = true; }
+        if (!ctl) return VMValue(0);
+        ctl->hudSlots[slot].bitmap = args[2].toString(); ctl->hudSlots[slot].visible = true;
         return VMValue(1);
     });
     tsInstance->registerNative("addWeapon", [hudSlot](const auto& args) -> VMValue {
         auto [ctl, slot] = hudSlot(args, 3);
-        if (ctl) { ctl->hudSlots[slot].amount = args[2].toInt(); ctl->hudSlots[slot].visible = true; }
+        if (!ctl) return VMValue(0);
+        ctl->hudSlots[slot].amount = args[2].toInt(); ctl->hudSlots[slot].visible = true;
         return VMValue(1);
     });
     tsInstance->registerNative("addInventory", [hudSlot](const auto& args) -> VMValue {
         auto [ctl, slot] = hudSlot(args, 3);
-        if (ctl) { ctl->hudSlots[slot].amount = args[2].toInt(); ctl->hudSlots[slot].visible = true; }
+        if (!ctl) return VMValue(0);
+        ctl->hudSlots[slot].amount = args[2].toInt(); ctl->hudSlots[slot].visible = true;
         return VMValue(1);
     });
     tsInstance->registerNative("removeWeapon", [hudSlot](const auto& args) -> VMValue {
         auto [ctl, slot] = hudSlot(args, 2);
-        if (ctl) ctl->hudSlots[slot].visible = false;
+        if (!ctl) return VMValue(0);
+        ctl->hudSlots[slot].visible = false;
         return VMValue(1);
     });
     tsInstance->registerNative("removeInventory", [hudSlot](const auto& args) -> VMValue {
         auto [ctl, slot] = hudSlot(args, 2);
-        if (ctl) ctl->hudSlots[slot].visible = false;
+        if (!ctl) return VMValue(0);
+        ctl->hudSlots[slot].visible = false;
         return VMValue(1);
     });
     tsInstance->registerNative("setAmmo", [hudSlot](const auto& args) -> VMValue {
         auto [ctl, slot] = hudSlot(args, 3);
-        if (ctl) ctl->hudSlots[slot].amount = args[2].toInt();
+        if (!ctl) return VMValue(0);
+        ctl->hudSlots[slot].amount = args[2].toInt();
         return VMValue(1);
     });
     tsInstance->registerNative("setAmount", [hudSlot](const auto& args) -> VMValue {
         auto [ctl, slot] = hudSlot(args, 3);
-        if (ctl) ctl->hudSlots[slot].amount = args[2].toInt();
+        if (!ctl) return VMValue(0);
+        ctl->hudSlots[slot].amount = args[2].toInt();
         return VMValue(1);
     });
     tsInstance->registerNative("setActiveWeapon", [getListCtrl](const auto& args) -> VMValue {
@@ -5380,33 +6036,45 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("setSensorGroupCount", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
+        if (args.empty() || args[0].toInt() < 0 || args[0].toInt() > 32) return VMValue(0);
         Engine::instance().game().setSensorGroupCount(args[0].toInt());
         return VMValue(1);
     });
     tsInstance->registerNative("setSensorGroupListenMask", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
+        if (args.size() < 2 || args[0].toInt() < 0 || args[0].toInt() >= 32) return VMValue(0);
+        char* end = nullptr;
+        const std::string text = args[1].toString();
+        const unsigned long mask = std::strtoul(text.c_str(), &end, 0);
+        if (!end || *end != '\0' || mask > 0xfffffffful) return VMValue(0);
         Engine::instance().game().setSensorGroupListenMask(args[0].toInt(),
-                                                            (uint32_t)args[1].toInt());
+                                                            (uint32_t)mask);
         return VMValue(1);
     });
     tsInstance->registerNative("setSensorGroupFriendlyMask", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
+        if (args.size() < 2 || args[0].toInt() < 0 || args[0].toInt() >= 32) return VMValue(0);
+        char* end = nullptr;
+        const std::string text = args[1].toString();
+        const unsigned long mask = std::strtoul(text.c_str(), &end, 0);
+        if (!end || *end != '\0' || mask > 0xfffffffful) return VMValue(0);
         Engine::instance().game().setSensorGroupFriendlyMask(args[0].toInt(),
-                                                              (uint32_t)args[1].toInt());
+                                                              (uint32_t)mask);
         return VMValue(1);
     });
     tsInstance->registerNative("setTargetFriendlyMask", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
+        if (args.size() < 2 || args[0].toInt() < 0 || args[0].toInt() >= 32) return VMValue(0);
+        char* end = nullptr;
+        const std::string text = args[1].toString();
+        const unsigned long mask = std::strtoul(text.c_str(), &end, 0);
+        if (!end || *end != '\0' || mask > 0xfffffffful) return VMValue(0);
         Engine::instance().game().setTargetFriendlyMask(args[0].toInt(),
-                                                        (uint32_t)args[1].toInt());
+                                                         (uint32_t)mask);
         return VMValue(1);
     });
     tsInstance->registerNative("setSensorGroupColor", [](const auto& args) -> VMValue {
-        if (args.size() < 3) return VMValue(0);
+        if (args.size() < 3 || args[0].toInt() < 0 || args[0].toInt() >= 32) return VMValue(0);
         std::istringstream color(args[2].toString());
         ColorF value{};
-        color >> value.r >> value.g >> value.b >> value.a;
+        if (!(color >> value.r >> value.g >> value.b >> value.a)) return VMValue(0);
         if (value.a > 1.0f) {
             value.r /= 255.0f; value.g /= 255.0f;
             value.b /= 255.0f; value.a /= 255.0f;
@@ -6016,7 +6684,14 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("getDamageLevel", [](const auto& args) -> VMValue {
         if (!args.empty()) {
-            if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            ScriptObjectState state;
+            char* end = nullptr;
+            const std::string value = args[0].toString();
+            const long id = std::strtol(value.c_str(), &end, 10);
+            if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state))
+                return VMValue(state.hasMaxHealth && state.maxHealth > 0.0f
+                    ? std::clamp(1.0f - state.health / state.maxHealth, 0.0f, 1.0f) : 0.0f);
+            if (auto* object = ScriptEngine::instance().findObject(value.c_str()))
                 return object->fields["damageLevel"];
             return VMValue(0.0f);
         }

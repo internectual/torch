@@ -865,6 +865,7 @@ void Player::applyDamage(float amount) {
 void Player::respawn() {
     hp = 100.0f;
     eng = 100.0f;
+    repairRate = 0.0f;
     heatLevel = 0.0f;
     arm = 0.0f;
     vel = {0,0,0};
@@ -1006,7 +1007,20 @@ bool World::setFogTransition(float duration, float distance, const ColorF* color
 }
 
 void World::cleanupMission() {
-    if (auto* ts = Engine::instance().script().ts()) ts->clearScheduledEvents();
+    if (auto* ts = Engine::instance().script().ts()) {
+        for (const auto& object : worldObjects) {
+            if (object.objectName.empty()) continue;
+            if (object.className == "StaticShape" || object.className == "TSStatic" ||
+                object.className == "Turret" || object.className.ends_with("Turret") ||
+                object.className == "Item" ||
+                object.className == "Player" || object.className == "Vehicle" ||
+                object.className.ends_with("Vehicle"))
+                ts->callFunction(object.className + "::onRemove", {VMValue(object.objectName)});
+        }
+        // An onRemove callback may schedule work, but mission-owned work must
+        // never survive the removal pass.
+        ts->clearScheduledEvents();
+    }
     clearEffects();
     terrainBlock.reset();
     skyBox.reset();
@@ -1703,7 +1717,7 @@ bool World::load(const char* mapName) {
                 marker.missionVolume = obj.className == "Trigger" ||
                                        obj.className == "PhysicalZone";
                  if (obj.className == "SpawnSphere") marker.volumeRadius = authored.radius;
-                if (obj.className == "PhysicalZone") {
+                 if (obj.className == "PhysicalZone") {
                     const std::string velocity = getProp(obj.props, "velocityMod");
                     const std::string gravity = getProp(obj.props, "gravityMod");
                     const std::string force = getProp(obj.props, "appliedForce");
@@ -1712,9 +1726,12 @@ bool World::load(const char* mapName) {
                     if (sscanf(force.c_str(), "%f %f %f", &marker.physicalForce.x,
                                &marker.physicalForce.y, &marker.physicalForce.z) != 3)
                         marker.physicalForce = {};
-                    const std::string active = getProp(obj.props, "active");
-                    if (!active.empty()) marker.physicalActive = std::atoi(active.c_str()) != 0;
-                }
+                     const std::string active = getProp(obj.props, "active");
+                     if (!active.empty()) marker.physicalActive = std::atoi(active.c_str()) != 0;
+                     marker.trigger = triggerBox({marker.scale.x * 0.5f, marker.scale.y * 0.5f,
+                                                  marker.scale.z * 0.5f});
+                     marker.triggerVolume = true;
+                 }
                  addObject(marker);
                  continue;
              }
@@ -1733,10 +1750,14 @@ bool World::load(const char* mapName) {
                  objective.objectiveMode = authored.mode;
                  objective.objectiveTarget = authored.targetObject;
                  objective.objectiveTargetId = authored.targetObjectId;
-                 objective.objectiveWeight = authored.weight[0];
-                 objective.objectiveOffense = authored.offense;
-                 objective.objectiveDefense = authored.defense;
-                 objective.collidable = false;
+                  objective.objectiveWeight = authored.weight[0];
+                  for (int i = 0; i < 4; ++i) objective.objectiveWeights[i] = authored.weight[i];
+                  objective.objectiveOffense = authored.offense;
+                  objective.objectiveDefense = authored.defense;
+                  // AI objectives are activated by mission script callbacks.
+                  objective.objectiveActive = false;
+                  objective.objectiveState = 0;
+                  objective.collidable = false;
                  objective.visible = authoredVisible(obj);
                  addObject(objective);
                  continue;
@@ -1755,7 +1776,8 @@ bool World::load(const char* mapName) {
 
             if (!isRenderableMissionShape(obj.className) && obj.className != "ForceFieldBare") continue;
 
-            WorldObject wo;
+             WorldObject wo;
+             wo.objectName = obj.objName;
              wo.pos = parsePos(getProp(obj.props, "position"));
              wo.visible = authoredVisible(obj);
             {
@@ -2540,22 +2562,23 @@ void World::update(float dt) {
             if (!ghost || ghost->className != "Player") continue;
             actors.push_back({std::to_string(index), {ghost->renderPos.x, ghost->renderPos.y, ghost->renderPos.z}});
         }
-        for (auto& trigger : worldObjects) {
-            if (!trigger.triggerVolume) continue;
+         for (auto& trigger : worldObjects) {
+             if (!trigger.triggerVolume) continue;
             std::vector<Point3F> transformed;
             transformed.reserve(trigger.trigger.vertices.size());
             for (const auto& vertex : trigger.trigger.vertices)
                 transformed.push_back(transformTrigger(trigger, vertex));
             const TriggerPolyhedron worldHull = triggerFromVertices(transformed);
             std::unordered_set<std::string> current;
-            for (const auto& actor : actors) {
-                const bool inside = worldHull.contains(actor.second);
-                if (inside) current.insert(actor.first);
-                const bool wasInside = trigger.triggerOccupants.count(actor.first) != 0;
-                if (inside != wasInside) dispatch(trigger, inside ? "onEnter" : "onLeave", actor.first);
-            }
-            trigger.triggerOccupants = std::move(current);
-        }
+             const bool active = trigger.className != "PhysicalZone" || trigger.physicalActive;
+             for (const auto& actor : actors) {
+                 const bool inside = active && worldHull.contains(actor.second);
+                 if (inside) current.insert(actor.first);
+             }
+             const auto transitions = triggerTransitions(trigger.triggerOccupants, current);
+             for (const auto& actor : transitions.entered) dispatch(trigger, "onEnter", actor);
+             for (const auto& actor : transitions.left) dispatch(trigger, "onLeave", actor);
+         }
     }
 
     // Update item pickups
@@ -3444,11 +3467,209 @@ void World::addObject(const WorldObject& obj) {
             });
     }
     worldObjects.push_back(std::move(stored));
+    const auto& added = worldObjects.back();
+    if (ScriptEngine::exists() && !added.objectName.empty() &&
+         (added.className == "StaticShape" || added.className == "TSStatic" ||
+          added.className == "Turret" || added.className.ends_with("Turret") ||
+          added.className == "Item" ||
+          added.className == "Player" || added.className == "Vehicle" ||
+         added.className.ends_with("Vehicle"))) {
+        if (auto* ts = ScriptEngine::instance().ts())
+            ts->callFunction(added.className + "::onAdd", {VMValue(added.objectName)});
+    }
+}
+
+namespace {
+World::WorldObject* findObjective(std::vector<World::WorldObject>& objects,
+                                   const std::string& name) {
+    for (auto& object : objects)
+        if (object.missionObjective && object.objectName == name) return &object;
+    return nullptr;
+}
+
+void dispatchObjectiveLifecycle(const World::WorldObject& objective, const char* callback) {
+    if (!ScriptEngine::exists()) return;
+    auto* ts = ScriptEngine::instance().ts();
+    if (!ts || objective.objectName.empty()) return;
+    const std::string function = std::string("AIObjective::") + callback;
+    // callFunction also resolves native callbacks, which stock compatibility
+    // hooks use when no TorqueScript definition was loaded.
+    ts->callFunction(function, {VMValue(objective.objectName), VMValue(objective.objectiveState)});
+}
+}
+
+bool World::setObjectiveActive(const std::string& name, bool active) {
+    auto* objective = findObjective(worldObjects, name);
+    if (!objective) return false;
+    if (objective->objectiveActive == active) return true;
+    objective->objectiveActive = active;
+    objective->objectiveState = active ? 1 : 0;
+    dispatchObjectiveLifecycle(*objective, active ? "onActivate" : "onDeactivate");
+    return true;
+}
+
+bool World::setObjectiveState(const std::string& name, int state) {
+    if (state < 0 || state > 3) return false;
+    auto* objective = findObjective(worldObjects, name);
+    if (!objective) return false;
+    if (objective->objectiveState == state) return true;
+    objective->objectiveState = state;
+    objective->objectiveActive = state != 2 && state != 3;
+    if (state == 1) dispatchObjectiveLifecycle(*objective, "onActivate");
+    else if (state == 2) dispatchObjectiveLifecycle(*objective, "onComplete");
+    else if (state == 3) dispatchObjectiveLifecycle(*objective, "onFail");
+    else dispatchObjectiveLifecycle(*objective, "onDeactivate");
+    return true;
+}
+
+bool World::setObjectiveTarget(const std::string& name, const std::string& target, int targetId) {
+    auto* objective = findObjective(worldObjects, name);
+    if (!objective || (target.empty() && targetId < 0)) return false;
+    objective->objectiveTarget = target;
+    objective->objectiveTargetId = targetId;
+    return true;
+}
+
+bool World::setObjectiveWeight(const std::string& name, int level, float weight) {
+    if (level < 0 || level >= 4 || !std::isfinite(weight)) return false;
+    auto* objective = findObjective(worldObjects, name);
+    if (!objective) return false;
+    objective->objectiveWeights[level] = weight;
+    if (level == 0) objective->objectiveWeight = weight;
+    return true;
+}
+
+bool World::setObjectiveScore(const std::string& name, float score) {
+    if (!std::isfinite(score)) return false;
+    auto* objective = findObjective(worldObjects, name);
+    if (!objective) return false;
+    objective->objectiveScore = score;
+    return true;
+}
+
+bool World::setObjectiveTeam(const std::string& name, int team) {
+    if (team < 0) return false;
+    auto* objective = findObjective(worldObjects, name);
+    if (!objective) return false;
+    objective->teamId = team;
+    return true;
 }
 
 void World::resetTriggerTracking() {
     for (auto& object : worldObjects)
         object.triggerOccupants.clear();
+}
+
+bool World::setMissionObjectEnabled(const std::string& name, bool enabled) {
+    for (auto& object : worldObjects) {
+        if (object.objectName != name) continue;
+        if (object.className == "PhysicalZone") {
+            object.physicalActive = enabled;
+            return true;
+        }
+        if (object.className == "ForceFieldBare") {
+            object.forceFieldOpen = !enabled;
+            return true;
+        }
+        if (object.className == "Item") {
+            object.itemActive = enabled;
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+bool World::setMissionObjectHidden(const std::string& name, bool hidden) {
+    for (auto& object : worldObjects) {
+        if (object.objectName != name) continue;
+        if (object.className != "StaticShape" && object.className != "TSStatic" &&
+            object.className != "Turret" && object.className != "Item" &&
+            object.className != "Vehicle" && !object.className.ends_with("Vehicle"))
+            return false;
+        object.visible = !hidden;
+        return true;
+    }
+    return false;
+}
+
+bool World::setMissionObjectTransform(const std::string& name, const std::string& transform) {
+    float values[7]{};
+    if (sscanf(transform.c_str(), "%f %f %f %f %f %f %f", &values[0], &values[1],
+               &values[2], &values[3], &values[4], &values[5], &values[6]) != 7)
+        return false;
+    for (float value : values) if (!std::isfinite(value)) return false;
+    for (auto& object : worldObjects) {
+        if (object.objectName != name) continue;
+        if (object.className != "StaticShape" && object.className != "TSStatic" &&
+            object.className != "Turret" && object.className != "Item" &&
+            object.className != "Vehicle" && !object.className.ends_with("Vehicle"))
+            return false;
+        object.pos = {values[0], values[1], values[2]};
+        object.rot = {values[3], values[4], values[5]};
+        object.rotAngleDeg = values[6];
+        return true;
+    }
+    return false;
+}
+
+bool World::mountMissionObjectImage(const std::string& name, const std::string& image, int slot) {
+    if (image.empty() || slot < 0 || slot >= 8) return false;
+    for (auto& object : worldObjects) {
+        if (object.objectName != name) continue;
+        if (object.className != "Turret" && !object.className.ends_with("Turret") &&
+            object.className != "Vehicle" &&
+            !object.className.ends_with("Vehicle")) return false;
+        object.mountedImages[slot] = image;
+        if (slot == 0) object.mountedShapeName = image;
+        if (auto* ts = ScriptEngine::instance().ts()) {
+            const std::string callback = object.className + "::onMount";
+            if (ts->hasFunction(callback))
+                ts->callFunction(callback, {VMValue(name), VMValue(image), VMValue(slot)});
+        }
+        return true;
+    }
+    return false;
+}
+
+bool World::unmountMissionObjectImage(const std::string& name, int slot) {
+    if (slot < 0 || slot >= 8) return false;
+    for (auto& object : worldObjects) {
+        if (object.objectName != name) continue;
+        if (object.className != "Turret" && !object.className.ends_with("Turret") &&
+            object.className != "Vehicle" &&
+            !object.className.ends_with("Vehicle")) return false;
+        const std::string image = object.mountedImages[slot];
+        object.mountedImages[slot].clear();
+        if (slot == 0) {
+            object.mountedShapeName.clear();
+            object.mountedShape = nullptr;
+        }
+        if (auto* ts = ScriptEngine::instance().ts()) {
+            const std::string callback = object.className + "::onUnmount";
+            if (ts->hasFunction(callback))
+                ts->callFunction(callback, {VMValue(name), VMValue(image), VMValue(slot)});
+        }
+        return true;
+    }
+    return false;
+}
+
+bool World::deleteMissionObject(const std::string& name) {
+    if (name.empty()) return false;
+    auto it = std::find_if(worldObjects.begin(), worldObjects.end(),
+        [&name](const WorldObject& object) { return object.objectName == name; });
+    if (it == worldObjects.end()) return false;
+    if (auto* ts = ScriptEngine::instance().ts()) {
+        ts->cancelEventsForObject(name);
+        if (!it->className.empty()) {
+            const std::string callback = it->className + "::onRemove";
+            if (ts->hasFunction(callback)) ts->callFunction(callback, {VMValue(name)});
+        }
+    }
+    worldObjects.erase(it);
+    for (auto& object : worldObjects) object.triggerOccupants.erase(name);
+    return true;
 }
 
 void Game::selectMapperObserverCamera(int index) {
@@ -7705,7 +7926,7 @@ void Game::dispatchHudClientCommand(const std::vector<std::string>& args) {
          "resetcommandmap", "scopecommandermap", "cameraattachresponse",
          "controlobjectresponse", "controlobjectreset",
          "resettasklist", "taskinfo", "potentialteamtask", "potentialtask",
-        "taskdeclined", "taskaccepted", "taskcompleted", "acceptedtask"
+         "taskdeclined", "taskaccepted", "taskcompleted", "taskfailed", "acceptedtask"
     };
     if (!allowed.count(lower)) return;
     if (!command.empty()) command[0] = (char)std::toupper((unsigned char)command[0]);
@@ -7727,8 +7948,14 @@ void Game::dispatchHudClientCommand(const std::vector<std::string>& args) {
         }
         if (hud) hud->setObjectiveTask(args[4].c_str());
     } else if (lower == "resettasklist") {
+        if (auto* taskList = Engine::instance().script().findObject("TaskList")) {
+            taskList->fields["currentTaskClient"] = VMValue("");
+            taskList->fields["currentAIObjective"] = VMValue("");
+            taskList->fields["currentTaskIsTeam"] = VMValue("0");
+            taskList->fields["currentTaskDescription"] = VMValue("");
+        }
         if (hud) hud->clearObjectiveTask();
-    } else if (lower == "taskcompleted" || lower == "acceptedtask") {
+    } else if (lower == "taskcompleted" || lower == "taskfailed" || lower == "acceptedtask") {
         if (hud && args.size() >= 2) hud->setObjectiveTask(args[1].c_str());
     }
 }
@@ -9025,6 +9252,7 @@ void Game::disconnectedCleanup() {
 }
 
 void Game::resetLiveMissionState() {
+    if (auto* ts = Engine::instance().script().ts()) ts->clearScheduledEvents();
     auto& audio = Engine::instance().audio();
     audio.stopAll();
     clearProjectileAudio();

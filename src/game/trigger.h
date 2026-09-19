@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 struct TriggerPolyhedron {
@@ -19,6 +20,24 @@ struct TriggerPolyhedron {
         return true;
     }
 };
+
+struct TriggerTransitions {
+    std::vector<std::string> entered;
+    std::vector<std::string> left;
+};
+
+inline TriggerTransitions triggerTransitions(std::unordered_set<std::string>& previous,
+                                              const std::unordered_set<std::string>& current) {
+    TriggerTransitions result;
+    for (const auto& actor : current)
+        if (!previous.count(actor)) result.entered.push_back(actor);
+    for (const auto& actor : previous)
+        if (!current.count(actor)) result.left.push_back(actor);
+    std::sort(result.entered.begin(), result.entered.end());
+    std::sort(result.left.begin(), result.left.end());
+    previous = current;
+    return result;
+}
 
 inline std::vector<float> triggerNumbers(const std::string& value) {
     std::vector<float> result;

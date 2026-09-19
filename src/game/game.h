@@ -51,6 +51,7 @@ public:
     void setPosition(const Point3F& p) { pos = p; }
     void setRotation(const Point3F& r) { rot = r; }
     void setEnergy(float e) { eng = e; }
+    void setRepairRate(float rate) { repairRate = std::clamp(rate, 0.0f, 100.0f); }
     void setVelocity(const Point3F& v) { vel = v; }
     void setOnGround(bool g) { onGround = g; }
 
@@ -61,6 +62,7 @@ public:
 
     float health() const { return hp; }
     float energy() const { return eng; }
+    float getRepairRate() const { return repairRate; }
     float heat() const { return heatLevel; }
     float armor() const { return arm; }
     int team() const { return teamId; }
@@ -106,6 +108,7 @@ private:
     Point3F vel{0, 0, 0};
     float hp = 100.0f;
     float eng = 100.0f;
+    float repairRate = 0.0f;
     float heatLevel = 0.0f;
     float arm = 0.0f;
     int teamId = 1;
@@ -249,6 +252,7 @@ public:
         bool translucent = false;
         std::string mountedShapeName;
         DTSShape* mountedShape{};
+        std::array<std::string, 8> mountedImages{};
         bool collidable = true;
         bool forceField = false;
         std::vector<uint32_t> forceFieldFrames;
@@ -290,12 +294,28 @@ public:
         float objectiveWeight = 0.0f;
         bool objectiveOffense = false;
         bool objectiveDefense = false;
+        bool objectiveActive = true;
+        int objectiveState = 0;
+        float objectiveScore = 0.0f;
+        float objectiveWeights[4]{};
     };
 
     void addObject(const WorldObject& obj);
     void resetTriggerTracking();
+    bool setMissionObjectEnabled(const std::string& name, bool enabled);
+    bool setMissionObjectHidden(const std::string& name, bool hidden);
+    bool setMissionObjectTransform(const std::string& name, const std::string& transform);
+    bool mountMissionObjectImage(const std::string& name, const std::string& image, int slot);
+    bool unmountMissionObjectImage(const std::string& name, int slot);
+    bool deleteMissionObject(const std::string& name);
     const std::vector<WorldObject>& objects() const { return worldObjects; }
     const std::vector<AuthoredMissionObjective>& objectives() const { return missionObjectives; }
+    bool setObjectiveActive(const std::string& name, bool active);
+    bool setObjectiveState(const std::string& name, int state);
+    bool setObjectiveTarget(const std::string& name, const std::string& target, int targetId);
+    bool setObjectiveWeight(const std::string& name, int level, float weight);
+    bool setObjectiveScore(const std::string& name, float score);
+    bool setObjectiveTeam(const std::string& name, int team);
     const AuthoredNavigationGraph& navigationGraph() const { return navGraph; }
     const std::vector<ObserverCamera>& observerCameras() const { return cameras; }
 
@@ -623,6 +643,7 @@ public:
     void disconnectedCleanup();
 
     GameConfig& config() { return cfg; }
+    const GameConfig& config() const { return cfg; }
     Player& player() { return *pl; }
     const Player& player() const { return *pl; }
     World& world() { return *w; }
@@ -704,7 +725,10 @@ public:
     float getDemoTime() const { return demoTime; }
     float getDemoTotalTime() const { return demoTotalTime; }
     bool demoHasPosition() const { return demoHasPos; }
-    int getControlGhostIndex() const { return controlGhostIndex; }
+    int getControlGhostIndex() const {
+        if (demoPlaying) return controlGhostIndex;
+        return serverPlayerGhostSynced ? (int)serverPlayerGhostIndex : -1;
+    }
     int getSpectateGhostIndex() const { return spectateGhostIndex; }
     bool targetFinderOpen() const { return targetFinderShown; }
     void toggleTargetFinder();

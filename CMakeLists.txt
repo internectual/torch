@@ -206,6 +206,11 @@ target_include_directories(torch_transform_test PRIVATE src)
 target_compile_options(torch_transform_test PRIVATE -UNDEBUG)
 add_test(NAME torch_transform COMMAND torch_transform_test)
 
+add_executable(torch_script_object_state_test tests/script_object_state_test.cpp)
+target_include_directories(torch_script_object_state_test PRIVATE src)
+target_compile_options(torch_script_object_state_test PRIVATE -UNDEBUG)
+add_test(NAME torch_script_object_state COMMAND torch_script_object_state_test)
+
 add_executable(torch_safety_policy_test
     tests/safety_policy_test.cpp
     src/fs/path_policy.cpp

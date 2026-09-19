@@ -363,6 +363,7 @@ struct AuthoredMissionMarker {
 };
 
 struct AuthoredMissionObjective {
+    std::string objectName;
     AuthoredMissionMarker marker;
     std::string description;
     std::string mode;
@@ -448,6 +449,7 @@ struct AuthoredNavigationGraph {
 
 [[maybe_unused]] static AuthoredMissionObjective authoredMissionObjective(const MisObject& object) {
     AuthoredMissionObjective objective;
+    objective.objectName = object.objName;
     objective.marker = authoredMissionMarker(object);
     objective.description = getProp(object.props, "description");
     objective.mode = getProp(object.props, "mode");

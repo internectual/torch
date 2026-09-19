@@ -21,5 +21,15 @@ int main() {
     assert(!scheduler.cancel(first));
     scheduler.clear();
     assert(scheduler.size() == 0);
+
+    const int canceller = scheduler.schedule(20.0, 0.0, "Mission", "canceller", {});
+    const int cancelled = scheduler.schedule(20.0, 0.0, "Mission", "cancelled", {});
+    std::vector<int> reentrant;
+    assert(scheduler.advance(20.0, [&](const auto& event) {
+        reentrant.push_back(event.id);
+        if (event.id == canceller) assert(scheduler.cancel(cancelled));
+    }) == 1);
+    assert(reentrant == std::vector<int>{canceller});
+    assert(!scheduler.pending(cancelled) && !scheduler.pending(canceller));
     return 0;
 }
