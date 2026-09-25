@@ -1,10 +1,12 @@
 #include "script/script_engine.h"
+#include "script/conversion_parity.h"
 #include "script/torquescript.h"
 #include "core/console.h"
 #include "core/console_args.h"
 #include "core/config.h"
 #include "core/engine.h"
 #include "core/string_table.h"
+#include "game/damage_parity.h"
 #include "game/mission_parser.h"
 #include "game/mission_discovery.h"
 #include "game/demo.h"
@@ -16,7 +18,10 @@
 #include <stack>
 #include <cstring>
 #include <cstdlib>
+#include <climits>
 #include <unistd.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <sys/stat.h>
 #include <cmath>
 #include <algorithm>
@@ -25,10 +30,130 @@
 #include <set>
 #include <filesystem>
 #include <fnmatch.h>
+#include <chrono>
+
+extern char** environ;
 
 namespace {
 std::map<int, std::string> s_taggedStrings;
 int s_nextTaggedStringId = 1;
+
+static bool sameFieldName(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)b[i])) return false;
+    return true;
+}
+
+static bool sameObjectValue(const VMValue& a, const VMValue& b) {
+    return a.type == b.type && a.toString() == b.toString();
+}
+
+static VMValue* findObjectField(ScriptObject* object, const std::string& name) {
+    if (!object) return nullptr;
+    for (auto& [field, value] : object->fields)
+        if (sameFieldName(field, name)) return &value;
+    return nullptr;
+}
+
+static ScriptObject* namedScriptObject(const std::string& name) {
+    return name.empty() ? nullptr : ScriptEngine::instance().findObject(name.c_str());
+}
+
+static bool providerObjectId(const std::string& value, int& id) {
+    char* end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &end, 10);
+    if (!end || *end != '\0' || parsed <= 0 || parsed > INT32_MAX) return false;
+    id = (int)parsed;
+    return true;
+}
+
+static VMValue providerField(const ScriptObjectState& state, const std::string& field) {
+    if (sameFieldName(field, "datablock")) return VMValue(state.datablockId);
+    if (sameFieldName(field, "class") || sameFieldName(field, "classname")) return VMValue(state.className);
+    if (sameFieldName(field, "name")) return VMValue(state.name);
+    if (sameFieldName(field, "shapeFile")) return VMValue(state.shapeName);
+    if (sameFieldName(field, "skin")) return VMValue(state.skinName);
+    if (sameFieldName(field, "profile")) return VMValue(state.profileName);
+    if (sameFieldName(field, "type")) return VMValue(state.type);
+    if (sameFieldName(field, "position")) {
+        char value[96];
+        snprintf(value, sizeof(value), "%g %g %g", state.position.x, state.position.y, state.position.z);
+        return VMValue(value);
+    }
+    if (sameFieldName(field, "velocity")) {
+        char value[96];
+        snprintf(value, sizeof(value), "%g %g %g", state.velocity.x, state.velocity.y, state.velocity.z);
+        return VMValue(value);
+    }
+    if (sameFieldName(field, "rotation")) {
+        char value[128];
+        snprintf(value, sizeof(value), "%g %g %g %g", state.rotation.x,
+                 state.rotation.y, state.rotation.z, state.rotationW);
+        return VMValue(value);
+    }
+    if (sameFieldName(field, "health") && state.hasHealth) return VMValue(state.health);
+    if (sameFieldName(field, "maxHealth") && state.hasMaxHealth) return VMValue(state.maxHealth);
+    if (sameFieldName(field, "energy") && state.hasEnergy) return VMValue(state.energy);
+    if (sameFieldName(field, "damageState") && state.hasDamageState) return VMValue(state.damageState);
+    if (sameFieldName(field, "repairRate")) return VMValue(state.repairRate);
+    if (sameFieldName(field, "sensorGroup")) return VMValue(state.sensorGroup);
+    if (sameFieldName(field, "jetting") && state.hasVehicleState) return VMValue(state.jetting ? 1 : 0);
+    if (sameFieldName(field, "frozen") && state.hasVehicleState) return VMValue(state.frozen ? 1 : 0);
+    if (sameFieldName(field, "braking") && state.hasVehicleState) return VMValue(state.braking ? 1 : 0);
+    if (sameFieldName(field, "cloaked") && state.hasCloak) return VMValue(state.cloaked ? 1 : 0);
+    if (sameFieldName(field, "headRotation") && state.hasHeadAngles) {
+        char value[64];
+        snprintf(value, sizeof(value), "%g %g", state.headPitch, state.headYaw);
+        return VMValue(value);
+    }
+    if (sameFieldName(field, "barrelRotation") && state.hasTurretAim) {
+        char value[64];
+        snprintf(value, sizeof(value), "%g %g", state.barrelPitch, state.barrelYaw);
+        return VMValue(value);
+    }
+    if (sameFieldName(field, "shieldLevel") && state.hasShield)
+        return VMValue(state.shieldLevel);
+    if (sameFieldName(field, "team")) return VMValue(state.teamId);
+    if (sameFieldName(field, "state") || sameFieldName(field, "damageState")) return VMValue(state.state);
+    return VMValue("");
+}
+
+static std::vector<std::string> splitFields(const std::string& value) {
+    std::vector<std::string> result;
+    size_t start = 0;
+    while (start <= value.size()) {
+        size_t end = value.find('\t', start);
+        result.push_back(value.substr(start, end == std::string::npos ? end : end - start));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return result;
+}
+
+static std::vector<std::string> splitScriptWords(const std::string& value) {
+    std::vector<std::string> result;
+    size_t pos = 0;
+    while (pos < value.size()) {
+        while (pos < value.size() && std::isspace((unsigned char)value[pos])) ++pos;
+        if (pos == value.size()) break;
+        const size_t start = pos;
+        while (pos < value.size() && !std::isspace((unsigned char)value[pos])) ++pos;
+        result.push_back(value.substr(start, pos - start));
+    }
+    return result;
+}
+
+static std::string replaceAll(std::string value, const std::string& from,
+                              const std::string& to) {
+    if (from.empty()) return value;
+    size_t pos = 0;
+    while ((pos = value.find(from, pos)) != std::string::npos) {
+        value.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+    return value;
+}
 
 struct ScriptTarget {
     std::string objectName;
@@ -303,7 +428,12 @@ bool VMValue::toBool() const {
     switch (type) {
         case Int: return i != 0;
         case Float: return f != 0.0;
-        case String: return !str.empty() && str != "0" && str != "false";
+        case String: {
+            std::string value = str;
+            std::transform(value.begin(), value.end(), value.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            return !value.empty() && value != "0" && value != "false";
+        }
         default: return false;
     }
 }
@@ -313,6 +443,8 @@ ScriptObject* findScriptObject(const char* name) {
     auto& objs = ScriptEngine::instance().objects;
     auto it = objs.find(StringTable::instance().insert(name));
     if (it != objs.end()) return it->second;
+    for (const auto& [objectName, object] : objs)
+        if (sameFieldName(objectName, name ? name : "")) return object;
     return nullptr;
 }
 
@@ -365,6 +497,21 @@ void VirtualMachine::registerNativeFunction(const char* name, NativeFunc fn) {
     impl->natives[name] = std::move(fn);
 }
 
+bool VirtualMachine::unloadScript(const char* name) {
+    if (!name) return false;
+    bool removed = false;
+    for (auto it = impl->loaded.begin(); it != impl->loaded.end();) {
+        if (*it && (*it)->filename == name) {
+            delete *it;
+            it = impl->loaded.erase(it);
+            removed = true;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
 VMValue VirtualMachine::getVariable(const char* name) {
     auto it = impl->globals.find(name);
     if (it != impl->globals.end()) return it->second;
@@ -394,6 +541,13 @@ bool VirtualMachine::loadScript(const uint8_t* data, size_t size, const char* na
     DSOReader reader;
     if (!reader.read(data, size, *dso)) {
         Console::instance().printf(LogLevel::Warn, "VM: failed to load DSO: %s", name ? name : "unknown");
+        delete dso;
+        return false;
+    }
+    if (dso->version != 33 && dso->version != 174) {
+        Console::instance().printf(LogLevel::Warn,
+                                   "VM: unsupported DSO version %u: %s",
+                                   dso->version, name ? name : "unknown");
         delete dso;
         return false;
     }
@@ -432,7 +586,8 @@ bool VirtualMachine::loadScript(const uint8_t* data, size_t size, const char* na
         switch (static_cast<DSOOpcode>(op & 0xFF)) {
             case DSOOpcode::OP_FUNC_DECL: {
                 DSOFunction fn;
-                // Args: nameIdx, nsIdx, packageIdx, hasBody, endAddr, argc, [varArgs], [argNameIdxs...]
+                // Args: nameIdx, nsIdx, packageIdx, hasBody, endAddr, argc,
+                // [argNameIdxs...]. Tribes 2/TURD has no separate varargs slot.
                 if (i + 6 < opcodes.size()) {
                     uint32_t nameIdx = opcodes[i + 1];
                     uint32_t nsIdx = opcodes[i + 2];
@@ -440,34 +595,42 @@ bool VirtualMachine::loadScript(const uint8_t* data, size_t size, const char* na
                     uint32_t hasBody = opcodes[i + 4];
                     uint32_t endAddr = opcodes[i + 5];
                     uint32_t argc = opcodes[i + 6];
-                    uint32_t varArg = (i + 7 < opcodes.size()) ? opcodes[i + 7] : 0;
 
                     fn.name = reader.globalString(*dso, nameIdx);
-                    fn.ns = reader.globalString(*dso, nsIdx);
-                    fn.package = reader.globalString(*dso, pkgIdx);
+                    // TURD uses zero as the no-namespace/no-package sentinel;
+                    // offset zero in the packed string table is also a valid
+                    // function name, so only these two fields need sentinel
+                    // handling.
+                    fn.ns = nsIdx == 0 ? "" : reader.globalString(*dso, nsIdx);
+                    fn.package = pkgIdx == 0 ? "" : reader.globalString(*dso, pkgIdx);
                     fn.startIp = curIp;
                     fn.endIp = endAddr;
                     fn.argc = argc;
-                    fn.hasVarArgs = varArg != 0;
+                    fn.hasVarArgs = false;
 
                     // Read arg names
-                    uint32_t argStart = i + 7 + (hasBody ? 1 : 0);
+                    uint32_t argStart = i + 7;
                     for (uint32_t a = 0; a < argc && argStart + a < opcodes.size(); a++) {
                         fn.argNames.push_back(reader.globalString(*dso, opcodes[argStart + a]));
                     }
 
                     dso->functions.push_back(fn);
                     dso->funcMap[fn.name] = &dso->functions.back();
+                    if (!fn.ns.empty())
+                        dso->funcMap[fn.ns + "::" + fn.name] = &dso->functions.back();
 
                     Console::instance().printf(LogLevel::Debug, "VM: func %s (ip=%u, end=%u, argc=%u%s)%s%s%s",
                         fn.name.c_str(), fn.startIp, fn.endIp, fn.argc, fn.hasVarArgs ? "+" : "",
                         fn.ns.empty() ? "" : (" ns:" + fn.ns).c_str(),
                         fn.package.empty() ? "" : (" pkg:" + fn.package).c_str(),
                         hasBody ? "" : " [ext]");
-                    // Skip func decl: opcode(1) + name+ns+pkg+hasBody+endAddr+argc(6)
-                    i += 7;
-                    if (hasBody) i++; // varArgs flag
-                    i += argc; // arg names
+                    // Function bodies can contain byte value 0, which is also
+                    // OP_FUNC_DECL. Skip directly to the compiler's exclusive
+                    // end address instead of scanning body operands as new
+                    // declarations.
+                    const size_t nextFunction = hasBody && endAddr > curIp
+                        ? (size_t)endAddr : i + 7 + argc;
+                    i = nextFunction > i ? nextFunction : i + 1;
                 } else {
                     i += 8;
                 }
@@ -480,7 +643,8 @@ bool VirtualMachine::loadScript(const uint8_t* data, size_t size, const char* na
     }
 
     impl->loaded.push_back(dso);
-    Console::instance().printf(LogLevel::Info, "VM: loaded '%s' v%u (%zu funcs)", name, dso->version, dso->functions.size());
+    dso->filename = name ? name : "";
+    Console::instance().printf(LogLevel::Info, "VM: loaded '%s' v%u (%zu funcs)", name ? name : "unknown", dso->version, dso->functions.size());
     return true;
 }
 
@@ -506,6 +670,10 @@ VMValue VirtualMachine::callFunction(const char* name, const std::vector<VMValue
     for (auto* dso : impl->loaded) {
         auto fit = dso->funcMap.find(name);
         if (fit != dso->funcMap.end()) {
+            if (!fit->second->package.empty() &&
+                (!ScriptEngine::instance().ts() ||
+                 !ScriptEngine::instance().ts()->isActivePackage(fit->second->package)))
+                continue;
             return execute(dso, fit->second->startIp, args);
         }
     }
@@ -514,35 +682,65 @@ VMValue VirtualMachine::callFunction(const char* name, const std::vector<VMValue
 }
 
 VMValue VirtualMachine::callMethod(const char* objName, const char* method, const std::vector<VMValue>& args) {
-    // objName::method lookup
+    // DSO methods receive the target as %this before explicit arguments.
     std::string fullName = std::string(objName) + "::" + method;
-    return callFunction(fullName.c_str(), args);
+    std::vector<VMValue> methodArgs;
+    methodArgs.reserve(args.size() + 1);
+    methodArgs.emplace_back(objName);
+    methodArgs.insert(methodArgs.end(), args.begin(), args.end());
+    for (auto* dso : impl->loaded) {
+        auto fit = dso->funcMap.find(fullName);
+        if (fit != dso->funcMap.end() &&
+            (fit->second->package.empty() ||
+             (ScriptEngine::instance().ts() &&
+              ScriptEngine::instance().ts()->isActivePackage(fit->second->package))))
+            return execute(dso, fit->second->startIp, methodArgs, true);
+    }
+    return {};
 }
 
-VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vector<VMValue>& args) {
+VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp,
+                                const std::vector<VMValue>& args, bool methodCall) {
     VMContext ctx;
     ctx.dso = dso;
     ctx.ip = startIp;
+    uint32_t bodyStart = startIp;
 
     // Map passed arguments to local variable names by matching to function declaration
     for (auto& fn : dso->functions) {
         if (fn.startIp == startIp) {
             // For namespaced functions, %this is the method's target object
             // (passed as args[0] from the method dispatch, before script-level args)
-            bool isMethod = (!fn.ns.empty());
+            bool isMethod = methodCall && !fn.ns.empty();
             uint32_t argOfs = 0;
             if (isMethod && args.size() > 0) {
                 ctx.locals["%this"] = args[0];
                 argOfs = 1;
             }
+            // TorqueScript exposes the complete call frame through these
+            // variables.  Keep DSO functions consistent with the source
+            // interpreter, including empty values for omitted parameters.
+            ctx.locals["%argc"] = VMValue((int32_t)args.size());
+            for (size_t ai = 0; ai < args.size(); ++ai)
+                ctx.locals["%argv[" + std::to_string(ai) + "]"] = args[ai];
             for (uint32_t ai = 0; ai < fn.argc && ai + argOfs < (uint32_t)args.size(); ai++) {
-                std::string localName = "%" + fn.argNames[ai];
+                std::string localName = ai < fn.argNames.size() ? fn.argNames[ai] : "";
+                if (localName.empty() || (localName[0] != '%' && localName[0] != '$'))
+                    localName.insert(localName.begin(), '%');
                 ctx.locals[localName] = args[ai + argOfs];
             }
-            if (fn.hasVarArgs && fn.argc < (uint32_t)args.size()) {
+            for (uint32_t ai = 0; ai < fn.argc; ++ai) {
+                std::string localName = ai < fn.argNames.size() ? fn.argNames[ai] : "";
+                if (localName.empty() || (localName[0] != '%' && localName[0] != '$'))
+                    localName.insert(localName.begin(), '%');
+                if (!ctx.locals.count(localName)) ctx.locals[localName] = VMValue("");
+            }
+            bodyStart = fn.startIp + 7 + fn.argc;
+            const uint32_t varArgStart = fn.argc + argOfs;
+            if (fn.hasVarArgs && varArgStart < (uint32_t)args.size()) {
                 std::string varargStr;
-                for (uint32_t ai = fn.argc; ai < (uint32_t)args.size(); ai++) {
-                    if (ai > fn.argc) varargStr += "\t";
+                for (uint32_t ai = varArgStart; ai < (uint32_t)args.size(); ai++) {
+                    if (ai > varArgStart) varargStr += "\t";
                     varargStr += args[ai].toString();
                 }
                 ctx.locals["%__rest__"] = VMValue(varargStr);
@@ -576,6 +774,11 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
         slotIdx++;
     }
 
+    auto identifierIndex = [&](size_t slot, uint32_t raw) -> uint32_t {
+        const auto it = dso->identTable.find((uint32_t)slot);
+        return it == dso->identTable.end() ? raw : it->second;
+    };
+
     // Convert vector to stack interface
     struct ExprStack {
         std::vector<VMValue> v;
@@ -591,7 +794,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
     for (auto& item : frame->exprStack) stack.push(item);
     frame->exprStack.clear();
 
-    size_t execIp = startIp;
+    size_t execIp = bodyStart;
     uint32_t safety = 0;
     const uint32_t MAX_OPS = 100000;
 
@@ -707,10 +910,9 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
             case (uint32_t)DSOOpcode::OP_LOADIMMED_IDENT:
             case (uint32_t)DSOOpcode::OP_TAG_TO_STR: {
                 if (execIp + 1 < opcodes.size()) {
-                    uint32_t idx = opcodes[execIp + 1];
+                    uint32_t idx = identifierIndex(execIp + 1, opcodes[execIp + 1]);
                     const char* s = "";
-                    if (idx < dso->functionStrings.size()) s = &dso->functionStrings[idx];
-                    else if (idx < dso->globalStrings.size()) s = &dso->globalStrings[idx];
+                    if (idx < dso->globalStrings.size()) s = &dso->globalStrings[idx];
                     stack.push(VMValue(s));
                 }
                 execIp++;
@@ -723,10 +925,9 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 // Clear any stale array key from previous access
                 frame->curArrayKey.clear();
                 if (execIp + 1 < opcodes.size()) {
-                    uint32_t idx = opcodes[execIp + 1];
+                    uint32_t idx = identifierIndex(execIp + 1, opcodes[execIp + 1]);
                     const char* name = "";
-                    if (idx < dso->functionStrings.size()) name = &dso->functionStrings[idx];
-                    else if (idx < dso->globalStrings.size()) name = &dso->globalStrings[idx];
+                    if (idx < dso->globalStrings.size()) name = &dso->globalStrings[idx];
 
                     // Handle $ prefix for global, % for local
                     if (name[0] == '$') {
@@ -791,7 +992,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                     VMValue a = stack.top(); stack.pop();
                     // String concatenation if either is string
                     if (a.type == VMValue::String || b.type == VMValue::String)
-                        stack.push(VMValue(a.toString() + b.toString()));
+                        stack.push(VMValue(b.toString() + a.toString()));
                     else
                         stack.push(VMValue(a.toDouble() + b.toDouble()));
                 }
@@ -802,7 +1003,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 if (stack.size() >= 2) {
                     double b = stack.top().toDouble(); stack.pop();
                     double a = stack.top().toDouble(); stack.pop();
-                    stack.push(VMValue(a - b));
+                    stack.push(VMValue(b - a));
                 }
                 break;
             }
@@ -820,7 +1021,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 if (stack.size() >= 2) {
                     double b = stack.top().toDouble(); stack.pop();
                     double a = stack.top().toDouble(); stack.pop();
-                    if (b != 0) stack.push(VMValue(a / b));
+                    if (a != 0) stack.push(VMValue(b / a));
                     else stack.push(VMValue(0));
                 }
                 break;
@@ -830,7 +1031,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 if (stack.size() >= 2) {
                     int32_t b = stack.top().toInt(); stack.pop();
                     int32_t a = stack.top().toInt(); stack.pop();
-                    if (b != 0) stack.push(VMValue(a % b));
+                    if (a != 0) stack.push(VMValue(b % a));
                     else stack.push(VMValue(0));
                 }
                 break;
@@ -870,7 +1071,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 if (stack.size() >= 2) {
                     double b = stack.top().toDouble(); stack.pop();
                     double a = stack.top().toDouble(); stack.pop();
-                    stack.push(VMValue(a > b ? 1 : 0));
+                    stack.push(VMValue(b > a ? 1 : 0));
                 }
                 break;
             }
@@ -879,7 +1080,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 if (stack.size() >= 2) {
                     double b = stack.top().toDouble(); stack.pop();
                     double a = stack.top().toDouble(); stack.pop();
-                    stack.push(VMValue(a >= b ? 1 : 0));
+                    stack.push(VMValue(b >= a ? 1 : 0));
                 }
                 break;
             }
@@ -888,7 +1089,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 if (stack.size() >= 2) {
                     double b = stack.top().toDouble(); stack.pop();
                     double a = stack.top().toDouble(); stack.pop();
-                    stack.push(VMValue(a < b ? 1 : 0));
+                    stack.push(VMValue(b < a ? 1 : 0));
                 }
                 break;
             }
@@ -897,7 +1098,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 if (stack.size() >= 2) {
                     double b = stack.top().toDouble(); stack.pop();
                     double a = stack.top().toDouble(); stack.pop();
-                    stack.push(VMValue(a <= b ? 1 : 0));
+                    stack.push(VMValue(b <= a ? 1 : 0));
                 }
                 break;
             }
@@ -939,17 +1140,15 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
             case (uint32_t)DSOOpcode::OP_CALLFUNC:
             case (uint32_t)DSOOpcode::OP_CALLFUNC_RESOLVE: {
                 if (execIp + 3 < opcodes.size()) {
-                    uint32_t nameIdx = opcodes[execIp + 1];
-                    uint32_t nsIdx = opcodes[execIp + 2];
+                    uint32_t nameIdx = identifierIndex(execIp + 1, opcodes[execIp + 1]);
+                    uint32_t nsIdx = identifierIndex(execIp + 2, opcodes[execIp + 2]);
                     (void)opcodes[execIp + 3];
 
                     const char* name = "";
-                    if (nameIdx < dso->functionStrings.size()) name = &dso->functionStrings[nameIdx];
-                    else if (nameIdx < dso->globalStrings.size()) name = &dso->globalStrings[nameIdx];
+                    if (nameIdx < dso->globalStrings.size()) name = &dso->globalStrings[nameIdx];
 
                     const char* ns = "";
-                    if (nsIdx < dso->functionStrings.size()) ns = &dso->functionStrings[nsIdx];
-                    else if (nsIdx < dso->globalStrings.size()) ns = &dso->globalStrings[nsIdx];
+                    if (nsIdx < dso->globalStrings.size()) ns = &dso->globalStrings[nsIdx];
 
                     // Collect arguments from current arg frame
                     std::vector<VMValue> callArgs;
@@ -971,11 +1170,15 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                         if (nit != impl->natives.end()) { stack.push(nit->second(callArgs)); return true; }
                         return false;
                     };
-                    auto findDSO = [&](const std::string& fn) -> bool {
+                    auto findDSO = [&](const std::string& fn, bool methodCall) -> bool {
                         for (auto* ds : impl->loaded) {
                             auto fit = ds->funcMap.find(fn);
                             if (fit != ds->funcMap.end()) {
-                                stack.push(execute(ds, fit->second->startIp, callArgs));
+                                if (!fit->second->package.empty() &&
+                                    (!ScriptEngine::instance().ts() ||
+                                     !ScriptEngine::instance().ts()->isActivePackage(fit->second->package)))
+                                    continue;
+                                stack.push(execute(ds, fit->second->startIp, callArgs, methodCall));
                                 return true;
                             }
                         }
@@ -983,7 +1186,8 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                     };
                     if (!findNative(fullName)) {
                         if (!findNative(name)) { // bare name fallback (e.g. "someField" from "SomeCtrl::someField")
-                            if (!findDSO(fullName) && !findDSO(name)) {
+                            const bool methodCall = op == (uint32_t)DSOOpcode::OP_CALLFUNC;
+                            if (!findDSO(fullName, methodCall) && !findDSO(name, methodCall)) {
                                 Console::instance().printf(LogLevel::Debug, "VM: calling unknown func %s", fullName.c_str());
                                 stack.push(VMValue(0));
                             }
@@ -1006,6 +1210,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
             }
             case (uint32_t)DSOOpcode::OP_STR_TO_NONE: {
                 // String to void - drop
+                if (!stack.empty()) stack.pop();
                 break;
             }
             case (uint32_t)DSOOpcode::OP_FLT_TO_UINT: {
@@ -1017,6 +1222,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 break;
             }
             case (uint32_t)DSOOpcode::OP_FLT_TO_NONE: {
+                if (!stack.empty()) stack.pop();
                 break;
             }
             case (uint32_t)DSOOpcode::OP_UINT_TO_FLT: {
@@ -1028,6 +1234,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 break;
             }
             case (uint32_t)DSOOpcode::OP_UINT_TO_NONE: {
+                if (!stack.empty()) stack.pop();
                 break;
             }
 
@@ -1068,9 +1275,11 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
             }
 
             case (uint32_t)DSOOpcode::OP_ADVANCE_STR: {
-                // Start string concatenation
+                // Append the current operand to the Torque string builder.
+                // Nested concatenations use ADVANCE/REWIND pairs, so this must
+                // preserve any text already accumulated in the frame.
                 if (!stack.empty()) {
-                    frame->strBuilder = stack.top().toString();
+                    frame->strBuilder += stack.top().toString();
                     stack.pop();
                 }
                 break;
@@ -1078,11 +1287,12 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
 
             case (uint32_t)DSOOpcode::OP_REWIND_STR:
             case (uint32_t)DSOOpcode::OP_TERMINATE_REWIND_STR: {
-                // Push finished concatenation
-                if (!frame->strBuilder.empty()) {
-                    stack.push(VMValue(frame->strBuilder));
-                    frame->strBuilder.clear();
+                if (!stack.empty()) {
+                    frame->strBuilder += stack.top().toString();
+                    stack.pop();
                 }
+                stack.push(VMValue(frame->strBuilder));
+                frame->strBuilder.clear();
                 break;
             }
 
@@ -1090,15 +1300,20 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
             case (uint32_t)DSOOpcode::OP_CREATE_OBJECT: {
                 // Create a new script object
                 if (execIp + 3 < opcodes.size()) {
-                    uint32_t parentIdx = opcodes[execIp + 1];
+                    uint32_t parentIdx = identifierIndex(execIp + 1, opcodes[execIp + 1]);
                     (void)opcodes[execIp + 3];
 
                     const char* parent = "";
-                    if (parentIdx < dso->functionStrings.size()) parent = &dso->functionStrings[parentIdx];
-                    else if (parentIdx < dso->globalStrings.size()) parent = &dso->globalStrings[parentIdx];
+                    if (parentIdx < dso->globalStrings.size()) parent = &dso->globalStrings[parentIdx];
 
                     auto* obj = new ScriptObject;
-                    obj->className = parent;
+                    if (!impl->argFrames.empty()) {
+                        auto objectArgs = std::move(impl->argFrames.back().args);
+                        impl->argFrames.pop_back();
+                        if (!objectArgs.empty()) obj->className = objectArgs[0].toString();
+                        if (objectArgs.size() > 1) obj->name = objectArgs[1].toString();
+                    }
+                    if (obj->className.empty()) obj->className = parent;
                     frame->curObject = obj;
                     execIp += 3;
                 }
@@ -1130,10 +1345,9 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
 
             case (uint32_t)DSOOpcode::OP_SETCURFIELD: {
                 if (execIp + 1 < opcodes.size()) {
-                    uint32_t idx = opcodes[execIp + 1];
+                    uint32_t idx = identifierIndex(execIp + 1, opcodes[execIp + 1]);
                     const char* field = "";
-                    if (idx < dso->functionStrings.size()) field = &dso->functionStrings[idx];
-                    else if (idx < dso->globalStrings.size()) field = &dso->globalStrings[idx];
+                    if (idx < dso->globalStrings.size()) field = &dso->globalStrings[idx];
                     frame->curFieldName = field;
                 }
                 execIp++;
@@ -1144,7 +1358,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
             case (uint32_t)DSOOpcode::OP_SAVEFIELD_FLT:
             case (uint32_t)DSOOpcode::OP_SAVEFIELD_STR: {
                 if (frame->curObject && !stack.empty()) {
-                    frame->curObject->fields[frame->curFieldName] = stack.top();
+                    ScriptEngine::instance().setObjectField(frame->curObject, frame->curFieldName, stack.top());
                     stack.pop();
                 }
                 break;
@@ -1154,11 +1368,9 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
             case (uint32_t)DSOOpcode::OP_LOADFIELD_FLT:
             case (uint32_t)DSOOpcode::OP_LOADFIELD_STR: {
                 if (frame->curObject) {
-                    auto it = frame->curObject->fields.find(frame->curFieldName);
-                    if (it != frame->curObject->fields.end())
-                        stack.push(it->second);
-                    else
-                        stack.push(VMValue(0));
+                    if (const auto* value = findObjectField(frame->curObject, frame->curFieldName))
+                        stack.push(*value);
+                    else stack.push(VMValue(0));
                 }
                 break;
             }
@@ -1221,10 +1433,9 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp, const std::vecto
                 }
                 // Followed by the variable name (same as SETCURVAR)
                 if (execIp + 1 < opcodes.size()) {
-                    uint32_t idx = opcodes[execIp + 1];
+                    uint32_t idx = identifierIndex(execIp + 1, opcodes[execIp + 1]);
                     const char* name = "";
-                    if (idx < dso->functionStrings.size()) name = &dso->functionStrings[idx];
-                    else if (idx < dso->globalStrings.size()) name = &dso->globalStrings[idx];
+                    if (idx < dso->globalStrings.size()) name = &dso->globalStrings[idx];
                     if (name[0] == '$')
                         frame->curVarName = name + 1;
                     else if (name[0] == '%')
@@ -1327,7 +1538,98 @@ ScriptEngine::ScriptEngine() : con(&Console::instance()) {
 }
 
 ScriptEngine::~ScriptEngine() {
+    if (vmInstance || tsInstance || !objects.empty()) shutdown();
     instance_ = nullptr;
+}
+
+void ScriptEngine::objectAdded(ScriptObject* object) {
+    if (!object || object->name.empty() || object->internals["__added"].toBool()) return;
+    object->internals["__added"] = VMValue(1);
+    if (tsInstance) {
+        const std::string callback = object->className + "::onAdd";
+        if (tsInstance->hasFunction(callback))
+            tsInstance->callFunction(callback, {VMValue(object->name)});
+    }
+}
+
+bool ScriptEngine::setObjectField(ScriptObject* object, const std::string& field,
+                                  const VMValue& value) {
+    if (!object || field.empty()) return false;
+    auto it = object->fields.end();
+    for (auto candidate = object->fields.begin(); candidate != object->fields.end(); ++candidate) {
+        if (sameFieldName(candidate->first, field)) {
+            it = candidate;
+            break;
+        }
+    }
+    const VMValue old = it == object->fields.end() ? VMValue() : it->second;
+    if (it == object->fields.end()) object->fields[field] = value;
+    else it->second = value;
+    if (!sameObjectValue(old, value) && tsInstance) {
+        const std::string callback = object->className + "::onFieldModified";
+        if (tsInstance->hasFunction(callback))
+            tsInstance->callFunction(callback, {VMValue(object->name), VMValue(field), old, value});
+    }
+    return true;
+}
+
+bool ScriptEngine::addDeleteNotify(ScriptObject* listener, ScriptObject* target) {
+    if (!listener || !target || listener == target) return false;
+    if (std::find(target->deleteNotifyListeners.begin(), target->deleteNotifyListeners.end(),
+                  listener->name) == target->deleteNotifyListeners.end())
+        target->deleteNotifyListeners.push_back(listener->name);
+    return true;
+}
+
+bool ScriptEngine::clearDeleteNotify(ScriptObject* listener, ScriptObject* target) {
+    if (!listener || !target) return false;
+    auto& listeners = target->deleteNotifyListeners;
+    const auto oldSize = listeners.size();
+    listeners.erase(std::remove(listeners.begin(), listeners.end(), listener->name), listeners.end());
+    return oldSize != listeners.size();
+}
+
+bool ScriptEngine::deleteScriptObject(const std::string& name) {
+    ScriptObject* object = findObject(name.c_str());
+    if (!object || object->name.empty()) return false;
+    const std::string objectName = object->name;
+    auto it = objects.find(objectName);
+    if (it == objects.end() || it->second != object) return false;
+    if (object->internals["__deleting"].toBool()) return false;
+    object->internals["__deleting"] = VMValue(1);
+
+    std::vector<std::string> children;
+    for (const auto& [childName, child] : objects) {
+        if (child && child->internals["parent"].toString() == objectName)
+            children.push_back(childName);
+    }
+    std::sort(children.begin(), children.end());
+    for (const auto& child : children) deleteScriptObject(child);
+
+    if (tsInstance) {
+        tsInstance->cancelEventsForObject(objectName);
+        const std::string callback = object->className + "::onRemove";
+        if (tsInstance->hasFunction(callback))
+            tsInstance->callFunction(callback, {VMValue(objectName)});
+    }
+    const auto listeners = object->deleteNotifyListeners;
+    for (const auto& listenerName : listeners) {
+        auto listenerIt = objects.find(listenerName);
+        if (listenerIt != objects.end() && listenerIt->second && tsInstance) {
+            const std::string callback = listenerIt->second->className + "::onDeleteNotify";
+            if (tsInstance->hasFunction(callback))
+                tsInstance->callFunction(callback, {VMValue(listenerName), VMValue(objectName)});
+        }
+    }
+    for (auto& [remainingName, remaining] : objects) {
+        if (!remaining || remaining == object) continue;
+        auto& notifications = remaining->deleteNotifyListeners;
+        notifications.erase(std::remove(notifications.begin(), notifications.end(), objectName),
+                            notifications.end());
+    }
+    objects.erase(it);
+    delete object;
+    return true;
 }
 
 ScriptEngine& ScriptEngine::instance() {
@@ -1341,6 +1643,7 @@ void allowClientPrefsExport(bool allowed) { s_clientPrefsExportAllowed = allowed
 bool clientPrefsExportAllowed() { return s_clientPrefsExportAllowed; }
 
 bool ScriptEngine::init() {
+    if (vmInstance || tsInstance || !objects.empty()) shutdown();
     vmInstance = new VirtualMachine(this);
     tsInstance = new TorqueScript;
 
@@ -1352,7 +1655,7 @@ bool ScriptEngine::init() {
             msg += a.toString();
         }
         Console::instance().printf(LogLevel::Info, "%s", msg.c_str());
-        return VMValue(1);
+        return VMValue();
     });
 
     tsInstance->registerNative("warn", [](const auto& args) -> VMValue {
@@ -1362,7 +1665,7 @@ bool ScriptEngine::init() {
             msg += a.toString();
         }
         Console::instance().printf(LogLevel::Warn, "%s", msg.c_str());
-        return VMValue(1);
+        return VMValue();
     });
 
     tsInstance->registerNative("error", [](const auto& args) -> VMValue {
@@ -1372,7 +1675,7 @@ bool ScriptEngine::init() {
             msg += a.toString();
         }
         Console::instance().printf(LogLevel::Error, "%s", msg.c_str());
-        return VMValue(1);
+        return VMValue();
     });
 
     tsInstance->registerNative("setFogDistance", setScriptFogDistance);
@@ -1651,6 +1954,41 @@ bool ScriptEngine::init() {
         }
         return VMValue(path);
     });
+    tsInstance->registerNative("fileName", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const std::string path = args[0].toString();
+        const size_t slash = path.find_last_of("/\\");
+        return VMValue(slash == std::string::npos ? path : path.substr(slash + 1));
+    });
+    tsInstance->registerNative("filePath", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const std::string path = args[0].toString();
+        const size_t slash = path.find_last_of("/\\");
+        return VMValue(slash == std::string::npos ? "" : path.substr(0, slash + 1));
+    });
+    tsInstance->registerNative("fileExt", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const std::string name = args[0].toString();
+        const size_t slash = name.find_last_of("/\\");
+        const size_t dot = name.find_last_of('.');
+        return VMValue(dot == std::string::npos || (slash != std::string::npos && dot < slash)
+                           ? "" : name.substr(dot + 1));
+    });
+    tsInstance->registerNative("fileBase", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string name = args[0].toString();
+        const size_t slash = name.find_last_of("/\\");
+        if (slash != std::string::npos) name.erase(0, slash + 1);
+        const size_t dot = name.find_last_of('.');
+        if (dot != std::string::npos && dot > 0) name.erase(dot);
+        return VMValue(name);
+    });
+    tsInstance->registerNative("strToInt", [](const auto& args) -> VMValue {
+        return VMValue(args.empty() ? 0 : args[0].toInt());
+    });
+    tsInstance->registerNative("strToFloat", [](const auto& args) -> VMValue {
+        return VMValue(args.empty() ? 0.0f : args[0].toFloat());
+    });
 
     // Register str functions
     tsInstance->registerNative("strLen", [](const auto& args) -> VMValue {
@@ -1660,13 +1998,111 @@ bool ScriptEngine::init() {
 
     tsInstance->registerNative("strCmp", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(-1);
-        return VMValue(strcmp(args[0].toString().c_str(), args[1].toString().c_str()));
+        const int result = strcmp(args[0].toString().c_str(), args[1].toString().c_str());
+        return VMValue(result < 0 ? -1 : result > 0 ? 1 : 0);
     });
 
     tsInstance->registerNative("strStr", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(-1);
         auto pos = args[0].toString().find(args[1].toString());
         return VMValue(pos != std::string::npos ? (int32_t)pos : -1);
+    });
+
+    auto changeCase = [](const std::vector<VMValue>& args, bool upper) -> VMValue {
+        std::string value = args.empty() ? "" : args[0].toString();
+        for (char& c : value) {
+            const unsigned char byte = (unsigned char)c;
+            c = (char)(upper ? std::toupper(byte) : std::tolower(byte));
+        }
+        return VMValue(value);
+    };
+    tsInstance->registerNative("strLwr", [changeCase](const auto& args) {
+        return changeCase(args, false);
+    });
+    tsInstance->registerNative("strUpr", [changeCase](const auto& args) {
+        return changeCase(args, true);
+    });
+    tsInstance->registerNative("trim", [](const auto& args) -> VMValue {
+        std::string value = args.empty() ? "" : args[0].toString();
+        size_t first = 0;
+        while (first < value.size() && std::isspace((unsigned char)value[first])) ++first;
+        size_t last = value.size();
+        while (last > first && std::isspace((unsigned char)value[last - 1])) --last;
+        return VMValue(value.substr(first, last - first));
+    });
+    tsInstance->registerNative("strreplace", [](const auto& args) -> VMValue {
+        if (args.size() < 3) return args.empty() ? VMValue("") : args[0];
+        return VMValue(replaceAll(args[0].toString(), args[1].toString(), args[2].toString()));
+    });
+
+    tsInstance->registerNative("getWordCount", [](const auto& args) -> VMValue {
+        return VMValue((int32_t)splitScriptWords(args.empty() ? "" : args[0].toString()).size());
+    });
+    tsInstance->registerNative("getWord", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        const auto words = splitScriptWords(args[0].toString());
+        const int index = args[1].toInt();
+        return index >= 0 && index < (int)words.size() ? VMValue(words[index]) : VMValue("");
+    });
+    tsInstance->registerNative("getWords", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        const auto words = splitScriptWords(args[0].toString());
+        const int first = std::max(0, args[1].toInt());
+        const int last = args.size() > 2 ? args[2].toInt() : INT_MAX;
+        if (first >= (int)words.size() || last < first) return VMValue("");
+        const int end = last == INT_MAX
+            ? (int)words.size() : std::min((int)words.size(), last + 1);
+        std::string result;
+        for (int i = first; i < end; ++i) {
+            if (!result.empty()) result += ' ';
+            result += words[i];
+        }
+        return VMValue(result);
+    });
+    tsInstance->registerNative("getFieldCount", [](const auto& args) -> VMValue {
+        return VMValue((int32_t)splitFields(args.empty() ? "" : args[0].toString()).size());
+    });
+    tsInstance->registerNative("getField", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        const auto fields = splitFields(args[0].toString());
+        const int index = args[1].toInt();
+        return index >= 0 && index < (int)fields.size() ? VMValue(fields[index]) : VMValue("");
+    });
+    tsInstance->registerNative("getFields", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        const auto fields = splitFields(args[0].toString());
+        const int first = std::max(0, args[1].toInt());
+        const int last = args.size() > 2 ? args[2].toInt() : INT_MAX;
+        if (first >= (int)fields.size() || last < first) return VMValue("");
+        const int end = last == INT_MAX
+            ? (int)fields.size() : std::min((int)fields.size(), last + 1);
+        std::string result;
+        for (int i = first; i < end; ++i) {
+            if (!result.empty()) result += '\t';
+            result += fields[i];
+        }
+        return VMValue(result);
+    });
+    tsInstance->registerNative("firstWord", [](const auto& args) -> VMValue {
+        return args.empty() ? VMValue("") : VMValue(splitScriptWords(args[0].toString()).empty() ? "" : splitScriptWords(args[0].toString())[0]);
+    });
+    tsInstance->registerNative("restWords", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const auto words = splitScriptWords(args[0].toString());
+        std::string result;
+        for (size_t i = 1; i < words.size(); ++i) {
+            if (!result.empty()) result += ' ';
+            result += words[i];
+        }
+        return VMValue(result);
+    });
+
+    tsInstance->registerNative("format", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        std::string result = args[0].toString();
+        for (size_t i = 1; i < args.size(); ++i)
+            result = replaceAll(result, "%" + std::to_string(i), args[i].toString());
+        return VMValue(result);
     });
 
     tsInstance->registerNative("strlen", [](const auto& args) -> VMValue {
@@ -1706,8 +2142,8 @@ bool ScriptEngine::init() {
         auto s = args[0].toString();
         int start = args[1].toInt();
         int count = args[2].toInt();
-        if (start < 0 || start >= (int)s.size() || count <= 0) return VMValue("");
-        return VMValue(s.substr(start, count));
+        if (start < 0 || start >= (int)s.size() || count == 0) return VMValue("");
+        return VMValue(s.substr(start, count < 0 ? std::string::npos : (size_t)count));
     });
 
     tsInstance->registerNative("isObject", [](const auto& args) -> VMValue {
@@ -1726,6 +2162,145 @@ bool ScriptEngine::init() {
         if (item) return VMValue(1);
         return VMValue(0);
     });
+
+    auto getObjectField = [](const std::vector<VMValue>& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        const std::string objectName = args[0].toString();
+        const std::string fieldName = args[1].toString();
+        if (auto* object = namedScriptObject(objectName)) {
+            if (const auto* value = findObjectField(object, fieldName)) return *value;
+            return VMValue("");
+        }
+        for (const auto& missionObject : ScriptEngine::instance().missionObjects()) {
+            bool matches = missionObject.name == objectName;
+            if (!matches) {
+                char* end = nullptr;
+                const long id = std::strtol(objectName.c_str(), &end, 10);
+                matches = end && *end == '\0' && id > 0 && missionObject.id == id;
+            }
+            if (!matches) continue;
+            for (const auto& [field, value] : missionObject.fields)
+                if (sameFieldName(field, fieldName)) return value;
+            return VMValue("");
+        }
+        int objectId = 0;
+        ScriptObjectState state;
+        if (providerObjectId(objectName, objectId) && ScriptEngine::instance().objectState(objectId, state))
+            return providerField(state, fieldName);
+        return VMValue("");
+    };
+    auto getObjectDataField = [](const std::vector<VMValue>& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        if (auto* object = namedScriptObject(args[0].toString())) {
+            const auto* datablock = findObjectField(object, "datablock");
+            if (!datablock) return VMValue("");
+            if (auto* dataObject = namedScriptObject(datablock->toString())) {
+                if (const auto* value = findObjectField(dataObject, args[1].toString())) return *value;
+            }
+            return VMValue("");
+        }
+        int objectId = 0;
+        ScriptObjectState state;
+        if (!providerObjectId(args[0].toString(), objectId) ||
+            !ScriptEngine::instance().objectState(objectId, state)) return VMValue("");
+        // The provider exposes the datablock id, but not its field table.
+        // Returning an empty value is safer than inventing a datablock field.
+        return VMValue("");
+    };
+    auto setObjectField = [](const std::vector<VMValue>& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        auto* object = namedScriptObject(args[0].toString());
+        if (!object) {
+            int objectId = 0;
+            if (!providerObjectId(args[0].toString(), objectId)) return VMValue(0);
+            const std::string fieldName = args[1].toString();
+            if (sameFieldName(fieldName, "health"))
+                return VMValue(ScriptEngine::instance().mutateHealth(objectId, args[2].toFloat()) ? 1 : 0);
+            if (sameFieldName(fieldName, "energy"))
+                return VMValue(ScriptEngine::instance().mutateEnergy(objectId, args[2].toFloat()) ? 1 : 0);
+            if (sameFieldName(fieldName, "repairRate"))
+                return VMValue(ScriptEngine::instance().mutateRepairRate(objectId, args[2].toFloat()) ? 1 : 0);
+            if (sameFieldName(fieldName, "team"))
+                return VMValue(ScriptEngine::instance().mutateTeam(objectId, args[2].toInt()) ? 1 : 0);
+            if (sameFieldName(fieldName, "velocity")) {
+                Point3F velocity;
+                if (!parseVector(args[2], velocity)) return VMValue(0);
+                return VMValue(ScriptEngine::instance().mutateVelocity(objectId, velocity) ? 1 : 0);
+            }
+            return VMValue(0);
+        }
+        const std::string fieldName = args[1].toString();
+        return VMValue(ScriptEngine::instance().setObjectField(object, fieldName, args[2]) ? 1 : 0);
+    };
+    auto setObjectDataField = [](const std::vector<VMValue>& args) -> VMValue {
+        if (args.size() < 3) return VMValue(0);
+        auto* object = namedScriptObject(args[0].toString());
+        if (!object) return VMValue(0);
+        const auto* datablock = findObjectField(object, "datablock");
+        auto* dataObject = datablock ? namedScriptObject(datablock->toString()) : nullptr;
+        if (!dataObject) return VMValue(0);
+        const std::string fieldName = args[1].toString();
+        return VMValue(ScriptEngine::instance().setObjectField(dataObject, fieldName, args[2]) ? 1 : 0);
+    };
+    auto getGroup = [](const std::vector<VMValue>& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        auto* object = namedScriptObject(args[0].toString());
+        if (!object) return VMValue("");
+        if (const auto it = object->internals.find("parent"); it != object->internals.end()) return it->second;
+        return VMValue("");
+    };
+    auto getGroupCount = [](const std::vector<VMValue>& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const std::string group = args[0].toString();
+        if (!namedScriptObject(group)) return VMValue(0);
+        int count = 0;
+        for (const auto& [name, object] : ScriptEngine::instance().objects) {
+            if (!object) continue;
+            const auto it = object->internals.find("parent");
+            if (it != object->internals.end() && it->second.toString() == group) ++count;
+        }
+        return VMValue(count);
+    };
+    auto getFieldString = [getObjectField](const std::vector<VMValue>& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        int objectId = 0;
+        if (namedScriptObject(args[0].toString()) || providerObjectId(args[0].toString(), objectId))
+            return getObjectField(args);
+        const int index = args[1].toInt();
+        const auto fields = splitFields(args[0].toString());
+        return index >= 0 && index < (int)fields.size() ? VMValue(fields[index]) : VMValue("");
+    };
+    auto setFieldValue = [setObjectField](const std::vector<VMValue>& args) -> VMValue {
+        if (args.size() >= 3 && namedScriptObject(args[0].toString())) return setObjectField(args);
+        if (args.size() < 3) return VMValue("");
+        auto fields = splitFields(args[0].toString());
+        const int index = args[1].toInt();
+        if (index < 0) return VMValue("");
+        while ((int)fields.size() <= index) fields.emplace_back();
+        fields[index] = args[2].toString();
+        std::string result;
+        for (const auto& field : fields) {
+            if (!result.empty()) result += '\t';
+            result += field;
+        }
+        return VMValue(result);
+    };
+    tsInstance->registerNative("getField", getFieldString);
+    tsInstance->registerNative("getFieldValue", getObjectField);
+    tsInstance->registerNative("getDataField", getObjectDataField);
+    tsInstance->registerNative("setField", setFieldValue);
+    tsInstance->registerNative("setFieldValue", setObjectField);
+    tsInstance->registerNative("setDataField", setObjectDataField);
+    tsInstance->registerNative("getGroup", getGroup);
+    tsInstance->registerNative("getCount", getGroupCount);
+    vmInstance->registerNativeFunction("getField", getFieldString);
+    vmInstance->registerNativeFunction("getFieldValue", getObjectField);
+    vmInstance->registerNativeFunction("getDataField", getObjectDataField);
+    vmInstance->registerNativeFunction("setField", setFieldValue);
+    vmInstance->registerNativeFunction("setFieldValue", setObjectField);
+    vmInstance->registerNativeFunction("setDataField", setObjectDataField);
+    vmInstance->registerNativeFunction("getGroup", getGroup);
+    vmInstance->registerNativeFunction("getCount", getGroupCount);
 
     auto objectState = [](const std::vector<VMValue>& args, ScriptObjectState& state) {
         if (args.empty()) return false;
@@ -1749,11 +2324,23 @@ bool ScriptEngine::init() {
     };
     auto getObjectName = [objectState](const auto& args) -> VMValue {
         ScriptObjectState state;
-        return VMValue(objectState(args, state) ? state.name : "");
+        if (objectState(args, state)) return VMValue(state.name);
+        if (!args.empty()) {
+            if (auto* object = namedScriptObject(args[0].toString())) return VMValue(object->name);
+        }
+        return VMValue("");
     };
     auto getPosition = [objectState](const auto& args) -> VMValue {
         ScriptObjectState state;
-        if (!objectState(args, state)) return VMValue("0 0 0");
+        if (!objectState(args, state)) {
+            if (args.empty()) return VMValue("0 0 0");
+            Point3F position;
+            if (!Engine::instance().game().world().getMissionObjectPosition(args[0].toString(), position))
+                return VMValue("0 0 0");
+            char value[96];
+            snprintf(value, sizeof(value), "%g %g %g", position.x, position.y, position.z);
+            return VMValue(value);
+        }
         char value[96];
         snprintf(value, sizeof(value), "%g %g %g", state.position.x,
                  state.position.y, state.position.z);
@@ -1772,6 +2359,15 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("getShapeFile", getShapeFile);
     tsInstance->registerNative("getName", getObjectName);
     tsInstance->registerNative("getPosition", getPosition);
+    tsInstance->registerNative("getScale", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("1 1 1");
+        Point3F scale;
+        if (!Engine::instance().game().world().getMissionObjectScale(args[0].toString(), scale))
+            return VMValue("1 1 1");
+        char value[96];
+        snprintf(value, sizeof(value), "%g %g %g", scale.x, scale.y, scale.z);
+        return VMValue(value);
+    });
     tsInstance->registerNative("getTeam", getTeam);
     tsInstance->registerNative("setTeam", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
@@ -1815,6 +2411,9 @@ bool ScriptEngine::init() {
     });
 
     tsInstance->registerNative("isDemo", [](const auto&) -> VMValue {
+        return VMValue(ScriptEngine::instance().isDemoMode() ? 1 : 0);
+    });
+    tsInstance->registerNative("isDemoPlaying", [](const auto&) -> VMValue {
         return VMValue(ScriptEngine::instance().isDemoPlaying() ? 1 : 0);
     });
     tsInstance->registerNative("isServer", [](const auto&) -> VMValue {
@@ -1990,49 +2589,6 @@ bool ScriptEngine::init() {
         return VMValue(wordCount(args[0].toString()));
     });
 
-    tsInstance->registerNative("getField", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue("");
-        std::string s = args[0].toString();
-        int idx = args[1].toInt();
-        size_t start = 0;
-        int count = 0;
-        for (size_t i = 0; i <= s.size(); i++) {
-            if (i == s.size() || s[i] == '\t') {
-                if (count == idx) return VMValue(s.substr(start, i - start));
-                count++;
-                start = i + 1;
-            }
-        }
-        return VMValue("");
-    });
-
-    tsInstance->registerNative("setField", [](const auto& args) -> VMValue {
-        if (args.size() < 3) return VMValue("");
-        std::string s = args[0].toString();
-        int idx = args[1].toInt();
-        std::string val = args[2].toString();
-        std::string result;
-        size_t start = 0;
-        int count = 0;
-        for (size_t i = 0; i <= s.size(); i++) {
-            if (i == s.size() || s[i] == '\t') {
-                if (count == idx) {
-                    result += val;
-                } else {
-                    result += s.substr(start, i - start);
-                }
-                count++;
-                if (i < s.size()) result += '\t';
-                start = i + 1;
-            }
-        }
-        if (idx >= count) {
-            if (!result.empty()) result += '\t';
-            result += val;
-        }
-        return VMValue(result);
-    });
-
     tsInstance->registerNative("getFieldCount", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         std::string s = args[0].toString();
@@ -2047,6 +2603,7 @@ bool ScriptEngine::init() {
         std::string s = args[0].toString();
         std::string from = args[1].toString();
         std::string to = args[2].toString();
+        if (from.empty()) return VMValue(s);
         size_t pos = 0;
         while ((pos = s.find(from, pos)) != std::string::npos) {
             s.replace(pos, from.length(), to);
@@ -2124,7 +2681,8 @@ bool ScriptEngine::init() {
 
     tsInstance->registerNative("strcmp", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(-1);
-        return VMValue(strcmp(args[0].toString().c_str(), args[1].toString().c_str()));
+        const int result = strcmp(args[0].toString().c_str(), args[1].toString().c_str());
+        return VMValue(result < 0 ? -1 : result > 0 ? 1 : 0);
     });
 
     // Canvas / window
@@ -2144,25 +2702,20 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("activatePackage", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         std::string name = args[0].toString();
-        // Check if already active
-        auto* total = Console::instance().find("$TotalNumberOfPackages");
-        int count = (total && total->type == Console::ConsoleItem::Variable) ? atoi(total->value.c_str()) : 0;
-        char buf[64];
-        for (int i = 0; i < count; i++) {
-            snprintf(buf, sizeof(buf), "$Package[%d]", i);
-            auto* pkg = Console::instance().find(buf);
-            if (pkg && pkg->type == Console::ConsoleItem::Variable && pkg->value == name) {
-                return VMValue(1); // already active
-            }
-        }
-        // Add to list
-        snprintf(buf, sizeof(buf), "$Package[%d]", count);
-        Console::instance().setVariable(buf, name.c_str());
-        Console::instance().setVariable("$TotalNumberOfPackages", std::to_string(count + 1).c_str());
+        auto* ts = ScriptEngine::instance().ts();
+        if (!ts || !ts->activatePackage(name)) return VMValue(0);
+        return VMValue(1);
+    });
+    tsInstance->registerNative("deactivatePackage", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto* ts = ScriptEngine::instance().ts();
+        if (!ts || !ts->deactivatePackage(args[0].toString())) return VMValue(0);
         return VMValue(1);
     });
     tsInstance->registerNative("isActivePackage", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
+        auto* ts = ScriptEngine::instance().ts();
+        if (ts) return VMValue(ts->isActivePackage(args[0].toString()) ? 1 : 0);
         const std::string wanted = args[0].toString();
         const int count = Console::instance().getIntVariable("$TotalNumberOfPackages", 0);
         for (int i = 0; i < count; ++i) {
@@ -2336,13 +2889,23 @@ bool ScriptEngine::init() {
     });
 
     tsInstance->registerNative("deleteFile", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        int ret = std::remove(args[0].toString().c_str());
-        return VMValue(ret == 0 ? 1 : 0);
+        if (args.size() != 1 || !Engine::instance().filesys) return VMValue(0);
+        return VMValue(Engine::instance().fs().removeFile(args[0].toString().c_str()) ? 1 : 0);
     });
 
     tsInstance->registerNative("getSimTime", [](const auto&) -> VMValue {
-        return VMValue((int32_t)(Timer::now() * 1000.0));
+        // Simulation time advances with Game::update and therefore follows
+        // the same time scale as the rest of the game. Keep the timer fallback
+        // for script-only users that have not created an Engine game yet.
+        const double seconds = Engine::instance().g
+            ? Engine::instance().game().gameTime() : Timer::now();
+        return VMValue((int32_t)(seconds * 1000.0));
+    });
+    tsInstance->registerNative("getRealTime", [](const auto&) -> VMValue {
+        const auto now = std::chrono::system_clock::now().time_since_epoch();
+        const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+        // Torque exposes this platform clock as a 32-bit millisecond value.
+        return VMValue((int32_t)(uint32_t)millis);
     });
 
     tsInstance->registerNative("strToPlayerName", [](const auto& args) -> VMValue {
@@ -2402,6 +2965,7 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("mAtan", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0.0);
+        if (args.size() > 1) return VMValue(atan2(args[0].toDouble(), args[1].toDouble()));
         return VMValue(atan(args[0].toDouble()));
     });
     tsInstance->registerNative("mSqrt", [](const auto& args) -> VMValue {
@@ -2420,6 +2984,24 @@ bool ScriptEngine::init() {
         if (args.empty()) return VMValue(0.0);
         return VMValue(ceil(args[0].toDouble()));
     });
+    tsInstance->registerNative("mRound", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0);
+        return VMValue(round(args[0].toDouble()));
+    });
+    tsInstance->registerNative("mClampF", [](const auto& args) -> VMValue {
+        if (args.size() < 3) return args.empty() ? VMValue(0.0) : args[0];
+        double lo = args[1].toDouble();
+        double hi = args[2].toDouble();
+        if (lo > hi) std::swap(lo, hi);
+        return VMValue(std::clamp(args[0].toDouble(), lo, hi));
+    });
+    tsInstance->registerNative("mClampI", [](const auto& args) -> VMValue {
+        if (args.size() < 3) return args.empty() ? VMValue(0) : VMValue(args[0].toInt());
+        int lo = args[1].toInt();
+        int hi = args[2].toInt();
+        if (lo > hi) std::swap(lo, hi);
+        return VMValue(std::clamp(args[0].toInt(), lo, hi));
+    });
     tsInstance->registerNative("mPow", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0.0);
         return VMValue(pow(args[0].toDouble(), args[1].toDouble()));
@@ -2429,6 +3011,7 @@ bool ScriptEngine::init() {
         return VMValue(log(args[0].toDouble()));
     });
     tsInstance->registerNative("mFloatLength", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0.0);
         if (args.size() < 2) return VMValue(args[0].toDouble());
         double val = args[0].toDouble();
         int len = args[1].toInt();
@@ -2450,11 +3033,16 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("getRandom", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue((double)rand() / RAND_MAX);
-        if (args.size() == 1) return VMValue((int32_t)(rand() % (args[0].toInt() + 1)));
-        int from = args[0].toInt();
-        int to = args[1].toInt();
+        int64_t from = 0;
+        int64_t to = args[0].toInt();
+        if (args.size() > 1) {
+            from = args[0].toInt();
+            to = args[1].toInt();
+        }
         if (from > to) std::swap(from, to);
-        return VMValue((int32_t)(from + (rand() % (to - from + 1))));
+        if (from == to) return VMValue((int32_t)from);
+        const uint64_t span = (uint64_t)(to - from) + 1u;
+        return VMValue((int32_t)(from + (int64_t)((uint64_t)rand() % span)));
     });
     tsInstance->registerNative("getMax", [](const auto& args) -> VMValue {
         if (args.size() < 2) return args.empty() ? VMValue(0.0) : args[0];
@@ -2466,15 +3054,22 @@ bool ScriptEngine::init() {
     });
 
     // Vector math functions
-    auto parseVec = [](const std::string& s) -> std::array<double, 3> {
-        std::array<double, 3> v = {0,0,0};
-        size_t pos = 0;
-        for (int i = 0; i < 3 && pos < s.size(); i++) {
-            size_t end = s.find_first_of(" \t", pos);
-            if (end == std::string::npos) end = s.size();
-            v[i] = atof(s.substr(pos, end - pos).c_str());
-            pos = end + 1;
+    auto parseVecStrict = [](const std::string& s, std::array<double, 3>& v) -> bool {
+        const char* cursor = s.c_str();
+        char* end = nullptr;
+        for (double& component : v) {
+            while (*cursor && std::isspace(static_cast<unsigned char>(*cursor))) ++cursor;
+            component = std::strtod(cursor, &end);
+            if (end == cursor || !std::isfinite(component)) return false;
+            cursor = end;
         }
+        while (*cursor && std::isspace(static_cast<unsigned char>(*cursor))) ++cursor;
+        if (*cursor != '\0') return false;
+        return true;
+    };
+    auto parseVec = [parseVecStrict](const std::string& s) -> std::array<double, 3> {
+        std::array<double, 3> v = {0, 0, 0};
+        if (!parseVecStrict(s, v)) return {0, 0, 0};
         return v;
     };
     auto fmtVec = [](double x, double y, double z) -> std::string {
@@ -2482,9 +3077,10 @@ bool ScriptEngine::init() {
         snprintf(buf, sizeof(buf), "%g %g %g", x, y, z);
         return buf;
     };
-    tsInstance->registerNative("setWindVelocity", [parseVec](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        const auto v = parseVec(args[0].toString());
+    tsInstance->registerNative("setWindVelocity", [parseVecStrict](const auto& args) -> VMValue {
+        if (args.size() != 1) return VMValue(0);
+        std::array<double, 3> v{};
+        if (!parseVecStrict(args[0].toString(), v)) return VMValue(0);
         setTorchWindVelocity(Math::torquePointToYUp({(float)v[0], (float)v[1], (float)v[2]}));
         return VMValue(1);
     });
@@ -2496,7 +3092,11 @@ bool ScriptEngine::init() {
         if (args.empty()) return VMValue("0 0 0");
         auto v = parseVec(args[0].toString());
         double len = sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-        if (len > 0) { v[0] /= len; v[1] /= len; v[2] /= len; }
+        if (len > 0 && std::isfinite(len)) {
+            v[0] /= len; v[1] /= len; v[2] /= len;
+        } else {
+            v = {0, 0, 0};
+        }
         return VMValue(fmtVec(v[0], v[1], v[2]));
     });
     tsInstance->registerNative("VectorScale", [parseVec, fmtVec](const auto& args) -> VMValue {
@@ -2545,7 +3145,7 @@ bool ScriptEngine::init() {
             msg += a.toString();
         }
         Console::instance().printf(LogLevel::Info, "%s", msg.c_str());
-        return VMValue(1);
+        return VMValue();
     });
 
     vmInstance->registerNativeFunction("warn", [](const auto& args) {
@@ -2555,7 +3155,7 @@ bool ScriptEngine::init() {
             msg += a.toString();
         }
         Console::instance().printf(LogLevel::Warn, "%s", msg.c_str());
-        return VMValue(1);
+        return VMValue();
     });
 
     vmInstance->registerNativeFunction("error", [](const auto& args) {
@@ -2565,7 +3165,7 @@ bool ScriptEngine::init() {
             msg += a.toString();
         }
         Console::instance().printf(LogLevel::Error, "%s", msg.c_str());
-        return VMValue(1);
+        return VMValue();
     });
 
     vmInstance->registerNativeFunction("setFogDistance", setScriptFogDistance);
@@ -2633,6 +3233,108 @@ bool ScriptEngine::init() {
     vmInstance->registerNativeFunction("strCat", [](const auto& args) {
         std::string result;
         for (auto& a : args) result += a.toString();
+        return VMValue(result);
+    });
+
+    vmInstance->registerNativeFunction("getWords", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const auto words = splitScriptWords(args[0].toString());
+        const int first = args.size() > 1 ? std::max(0, args[1].toInt()) : 0;
+        const int last = args.size() > 2 ? args[2].toInt() : INT_MAX;
+        if (first >= (int)words.size() || last < first) return VMValue("");
+        const int end = last == INT_MAX ? (int)words.size()
+                                        : std::min((int)words.size(), last + 1);
+        std::string result;
+        for (int i = first; i < end; ++i) {
+            if (!result.empty()) result += ' ';
+            result += words[i];
+        }
+        return VMValue(result);
+    });
+    vmInstance->registerNativeFunction("getFields", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const auto fields = splitFields(args[0].toString());
+        const int first = args.size() > 1 ? std::max(0, args[1].toInt()) : 0;
+        const int last = args.size() > 2 ? args[2].toInt() : INT_MAX;
+        if (first >= (int)fields.size() || last < first) return VMValue("");
+        const int end = last == INT_MAX ? (int)fields.size()
+                                        : std::min((int)fields.size(), last + 1);
+        std::string result;
+        for (int i = first; i < end; ++i) {
+            if (!result.empty()) result += '\t';
+            result += fields[i];
+        }
+        return VMValue(result);
+    });
+    vmInstance->registerNativeFunction("getWord", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const auto words = splitScriptWords(args[0].toString());
+        const int index = args.size() > 1 ? args[1].toInt() : 0;
+        return index >= 0 && index < (int)words.size() ? VMValue(words[index]) : VMValue("");
+    });
+    vmInstance->registerNativeFunction("getWordCount", [](const auto& args) -> VMValue {
+        return VMValue((int32_t)splitScriptWords(args.empty() ? "" : args[0].toString()).size());
+    });
+    vmInstance->registerNativeFunction("firstWord", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const auto words = splitScriptWords(args[0].toString());
+        return words.empty() ? VMValue("") : VMValue(words.front());
+    });
+    vmInstance->registerNativeFunction("setWord", [](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue("");
+        std::string s = args[0].toString();
+        const int index = args[1].toInt();
+        const std::string value = args[2].toString();
+        std::string result;
+        int count = 0;
+        size_t start = 0;
+        bool inWord = false;
+        for (size_t i = 0; i <= s.size(); ++i) {
+            if (i == s.size() || s[i] == ' ' || s[i] == '\t') {
+                if (inWord) {
+                    result += count == index ? value : s.substr(start, i - start);
+                    inWord = false;
+                    ++count;
+                }
+                if (i < s.size()) result += s[i];
+            } else if (!inWord) {
+                inWord = true;
+                start = i;
+            }
+        }
+        if (index >= count) {
+            if (!result.empty() && result.back() != ' ') result += ' ';
+            result += value;
+        }
+        return VMValue(result);
+    });
+    vmInstance->registerNativeFunction("restWords", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const std::string s = args[0].toString();
+        size_t pos = s.find_first_not_of(" \t");
+        if (pos == std::string::npos) return VMValue("");
+        pos = s.find_first_of(" \t", pos);
+        if (pos == std::string::npos) return VMValue("");
+        pos = s.find_first_not_of(" \t", pos);
+        return pos == std::string::npos ? VMValue("") : VMValue(s.substr(pos));
+    });
+    vmInstance->registerNativeFunction("getFieldCount", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const std::string s = args[0].toString();
+        if (s.empty()) return VMValue(0);
+        return VMValue((int32_t)(1 + std::count(s.begin(), s.end(), '\t')));
+    });
+    vmInstance->registerNativeFunction("strReplace", [](const auto& args) -> VMValue {
+        if (args.size() < 3) return VMValue("");
+        std::string result = args[0].toString();
+        const std::string from = args[1].toString();
+        const std::string to = args[2].toString();
+        if (from.empty()) return VMValue(result);
+        size_t pos = 0;
+        while ((pos = result.find(from, pos)) != std::string::npos) {
+            result.replace(pos, from.length(), to);
+            pos += to.length();
+        }
         return VMValue(result);
     });
 
@@ -2743,17 +3445,12 @@ bool ScriptEngine::init() {
         return VMValue(buf);
     });
     vmInstance->registerNativeFunction("DecToBin", [](const auto& args) {
-        if (args.empty()) return VMValue("0");
-        int v = args[0].toInt();
-        std::string r;
-        for (int i = 31; i >= 0; i--) r += (v & (1 << i)) ? '1' : '0';
-        // Trim leading zeros
-        auto p = r.find_first_not_of('0');
-        return VMValue(p != std::string::npos ? r.substr(p) : "0");
+        return VMValue(ScriptConversionParity::decToBin(
+            args.empty() ? 0 : args[0].toInt()));
     });
     vmInstance->registerNativeFunction("BinToDec", [](const auto& args) {
-        if (args.empty()) return VMValue(0);
-        return VMValue((int32_t)std::stoul(args[0].toString(), nullptr, 2));
+        return VMValue(ScriptConversionParity::binToDec(
+            args.empty() ? std::string() : args[0].toString()));
     });
 
     // T2 compatibility stubs (functions called by startup scripts)
@@ -2929,6 +3626,18 @@ bool ScriptEngine::init() {
         Engine::instance().platform().showMouse(false);
         return VMValue(1);
     });
+    tsInstance->registerNative("enableMouse", [](const auto&) -> VMValue {
+        return VMValue(Engine::instance().platform().enableMouse() ? 1 : 0);
+    });
+    tsInstance->registerNative("disableMouse", [](const auto&) -> VMValue {
+        return VMValue(Engine::instance().platform().disableMouse() ? 1 : 0);
+    });
+    vmInstance->registerNativeFunction("enableMouse", [](const auto&) -> VMValue {
+        return VMValue(Engine::instance().platform().enableMouse() ? 1 : 0);
+    });
+    vmInstance->registerNativeFunction("disableMouse", [](const auto&) -> VMValue {
+        return VMValue(Engine::instance().platform().disableMouse() ? 1 : 0);
+    });
     tsInstance->registerNative("setContent", [](const auto& args) -> VMValue {
         // May be called directly: setContent("Gui") or as method: Canvas.setContent("Gui")
         // In method form args = ["Canvas", "Gui"], direct form args = ["Gui"]
@@ -3002,9 +3711,11 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("fileExt", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
-        std::string path = args[0].toString();
-        auto dot = path.rfind('.');
-        if (dot != std::string::npos) return VMValue(path.substr(dot + 1));
+        const std::string path = args[0].toString();
+        const size_t slash = path.find_last_of("/\\");
+        const size_t dot = path.find_last_of('.');
+        if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+            return VMValue(path.substr(dot + 1));
         return VMValue("");
     });
     tsInstance->registerNative("getFileName", [](const auto& args) -> VMValue {
@@ -3029,6 +3740,20 @@ bool ScriptEngine::init() {
                 args[2].toString(), callbackArgs));
         }
         return VMValue(0);
+    });
+    tsInstance->registerNative("deleteNotify", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        // Method dispatch supplies the target as %this and the listener as
+        // the first explicit argument: target.deleteNotify(listener).
+        auto* target = ScriptEngine::instance().findObject(args[0].toString().c_str());
+        auto* listener = ScriptEngine::instance().findObject(args[1].toString().c_str());
+        return VMValue(ScriptEngine::instance().addDeleteNotify(listener, target) ? 1 : 0);
+    });
+    tsInstance->registerNative("clearNotify", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* target = ScriptEngine::instance().findObject(args[0].toString().c_str());
+        auto* listener = ScriptEngine::instance().findObject(args[1].toString().c_str());
+        return VMValue(ScriptEngine::instance().clearDeleteNotify(listener, target) ? 1 : 0);
     });
     tsInstance->registerNative("isEventPending", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
@@ -3167,6 +3892,12 @@ bool ScriptEngine::init() {
             std::string src((const char*)data.data(), data.size());
             auto* ts = Engine::instance().script().ts();
             if (ts) { ts->executeNested(src, execPath); }
+        } else {
+            const bool optional = args.size() > 1 && args[1].toBool();
+            Console::instance().printf(optional ? LogLevel::Debug : LogLevel::Error,
+                optional ? "TS: optional exec not found: %s" : "TS: exec file not found: %s",
+                execPath.c_str());
+            return VMValue(0);
         }
         return VMValue(1);
     });
@@ -3376,7 +4107,7 @@ bool ScriptEngine::init() {
     });
 
     // compile(path) — compile a .cs/.gui file to .dso for caching
-    tsInstance->registerNative("compile", [](const auto& args) -> VMValue {
+    tsInstance->registerNative("compile", [this](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         std::string path = args[0].toString();
         std::string ext = path.size() > 3 ? path.substr(path.size() - 3) : "";
@@ -3388,23 +4119,40 @@ bool ScriptEngine::init() {
         std::string modPath = Console::instance().getStringVariable("modPath", "base");
         if (outDir.empty()) return VMValue(0);
         std::string dsoPath = outDir + "/" + modPath + "/" + path + ".dso";
-        // Try turd compiler, fall back to source cache
-        auto dir = dsoPath.substr(0, dsoPath.rfind('/'));
-        struct stat st; if (stat(dir.c_str(), &st) != 0) { std::string cmd = "mkdir -p " + dir; system(cmd.c_str()); }
+        // Invoke the external compiler without a shell. Failed compilation
+        // must not create a valid-looking empty cache that hides source code.
+        const auto dir = dsoPath.substr(0, dsoPath.rfind('/'));
+        std::error_code fsError;
+        std::filesystem::create_directories(dir, fsError);
+        if (fsError) return VMValue(0);
         std::string tmpPath = dsoPath + ".src.tmp";
         { FILE* f = fopen(tmpPath.c_str(), "w"); if (f) { fwrite(src.data(), 1, src.size(), f); fclose(f); } }
+        if (!std::filesystem::exists(tmpPath)) return VMValue(0);
         std::string cmd = Console::instance().getStringVariable("nodePath");
         if (cmd.empty()) cmd = "node";
         std::string compilerScript = Console::instance().getStringVariable("compilerScript");
+        if (compilerScript.empty())
+            compilerScript = Console::instance().getStringVariable("$compilerScript");
         if (compilerScript.empty()) compilerScript = "torque-dso.js";
-        cmd += " " + compilerScript + " " + tmpPath + " " + dsoPath + " 2>/dev/null";
-        int ret = system(cmd.c_str());
+        std::vector<char*> compilerArgv;
+        compilerArgv.push_back(const_cast<char*>(cmd.c_str()));
+        compilerArgv.push_back(const_cast<char*>(compilerScript.c_str()));
+        compilerArgv.push_back(const_cast<char*>(tmpPath.c_str()));
+        compilerArgv.push_back(const_cast<char*>(dsoPath.c_str()));
+        static std::string target = "Tribes2";
+        compilerArgv.push_back(const_cast<char*>(target.c_str()));
+        compilerArgv.push_back(nullptr);
+        pid_t pid = 0;
+        const int spawnResult = posix_spawnp(&pid, cmd.c_str(), nullptr, nullptr,
+                                             compilerArgv.data(), environ);
+        int status = 0;
+        const int waitResult = spawnResult == 0 ? waitpid(pid, &status, 0) : -1;
         unlink(tmpPath.c_str());
-        if (ret != 0) {
-            // Fall back: write minimal source-cache DSO
-            FILE* f = fopen(dsoPath.c_str(), "wb");
-            if (f) { uint32_t ver = 0x54534F02, cnt = 0; fwrite(&ver, 4, 1, f); fwrite(&cnt, 4, 1, f); fclose(f); }
-        }
+        if (spawnResult != 0 || waitResult < 0 || !WIFEXITED(status) ||
+            WEXITSTATUS(status) != 0 || !std::filesystem::exists(dsoPath))
+            return VMValue(0);
+        if (!tsInstance->writeCompileDependencyManifest(dsoPath, path))
+            return VMValue(0);
         return VMValue(1);
     });
 
@@ -3430,6 +4178,10 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("cancel", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        return VMValue(ScriptEngine::instance().ts()->cancelEvent(args[0].toInt()) ? 1 : 0);
+    });
+    tsInstance->registerNative("cancelEvent", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         return VMValue(ScriptEngine::instance().ts()->cancelEvent(args[0].toInt()) ? 1 : 0);
     });
@@ -4116,6 +4868,51 @@ bool ScriptEngine::init() {
             return VMValue(object->className);
         return VMValue("");
     });
+    tsInstance->registerNative("getShapeName", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const std::string objectName = args[0].toString();
+        char* end = nullptr;
+        const long id = std::strtol(objectName.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0) {
+            ScriptObjectState state;
+            if (ScriptEngine::instance().objectState((int)id, state))
+                return VMValue(state.shapeName);
+        }
+        if (auto* object = ScriptEngine::instance().findObject(objectName.c_str()))
+            return object->fields.count("shapeName") ? object->fields["shapeName"] :
+                object->fields["shapeFile"];
+        return VMValue("");
+    });
+    tsInstance->registerNative("getSkinName", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const std::string objectName = args[0].toString();
+        char* end = nullptr;
+        const long id = std::strtol(objectName.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0) {
+            ScriptObjectState state;
+            if (ScriptEngine::instance().objectState((int)id, state))
+                return VMValue(state.skinName);
+        }
+        if (auto* object = ScriptEngine::instance().findObject(objectName.c_str()))
+            return object->fields.count("skin") ? object->fields["skin"] :
+                object->fields["skinName"];
+        return VMValue("");
+    });
+    tsInstance->registerNative("getProfileName", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const std::string objectName = args[0].toString();
+        char* end = nullptr;
+        const long id = std::strtol(objectName.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0) {
+            ScriptObjectState state;
+            if (ScriptEngine::instance().objectState((int)id, state))
+                return VMValue(state.profileName);
+        }
+        if (auto* object = ScriptEngine::instance().findObject(objectName.c_str()))
+            return object->fields.count("profile") ? object->fields["profile"] :
+                object->fields["profileName"];
+        return VMValue("");
+    });
     auto inventoryObject = [](const std::vector<VMValue>& args) -> ScriptObject* {
         return args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str());
     };
@@ -4198,7 +4995,7 @@ bool ScriptEngine::init() {
         return VMValue(engine.mutateCurrentWeapon(args[0].toInt(), args[1].toInt()) ? 1 : 0);
     });
     tsInstance->registerNative("getDataBlock", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue("");
+        if (args.empty()) return VMValue(0);
         char* end = nullptr;
         const std::string value = args[0].toString();
         const long id = std::strtol(value.c_str(), &end, 10);
@@ -4207,9 +5004,63 @@ bool ScriptEngine::init() {
             if (ScriptEngine::instance().objectState((int)id, state))
                 return VMValue(state.datablockId);
         }
-        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
-            return object->fields["dataBlock"];
-        return VMValue("");
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
+            auto field = object->fields.find("dataBlock");
+            if (field != object->fields.end()) return field->second;
+            field = object->fields.find("datablock");
+            if (field != object->fields.end()) return field->second;
+        }
+        return VMValue(0);
+    });
+    auto metadataObject = [](const std::vector<VMValue>& args, ScriptObjectState& state,
+                             ScriptObject*& object) {
+        object = nullptr;
+        if (args.empty()) return false;
+        const std::string name = args[0].toString();
+        char* end = nullptr;
+        const long id = std::strtol(name.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state))
+            return true;
+        object = ScriptEngine::instance().findObject(name.c_str());
+        return object != nullptr;
+    };
+    auto classMatches = [](const std::string& actual, const std::string& wanted) {
+        if (actual.empty() || wanted.empty()) return false;
+        if (actual == wanted) return true;
+        if (wanted == "SimObject") return true;
+        if (wanted == "GameBase")
+            return actual == "Player" || actual.ends_with("Vehicle") || actual.ends_with("Turret");
+        if (wanted == "ShapeBase")
+            return actual == "Player" || actual.ends_with("Vehicle") || actual.ends_with("Turret");
+        return false;
+    };
+    tsInstance->registerNative("isMemberOfClass", [metadataObject, classMatches](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        ScriptObjectState state;
+        ScriptObject* object = nullptr;
+        if (!metadataObject(args, state, object)) return VMValue(0);
+        const std::string actual = object ? object->className : state.className;
+        return VMValue(classMatches(actual, args[1].toString()) ? 1 : 0);
+    });
+    tsInstance->registerNative("isTypeOf", [metadataObject, classMatches](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        ScriptObjectState state;
+        ScriptObject* object = nullptr;
+        if (!metadataObject(args, state, object)) return VMValue(0);
+        if (args[1].type == VMValue::String) {
+            const std::string actual = object ? object->className : state.className;
+            return VMValue(classMatches(actual, args[1].toString()) ? 1 : 0);
+        }
+        if (object)
+            return VMValue(object->fields.count("type") &&
+                           object->fields.at("type").toInt() == args[1].toInt() ? 1 : 0);
+        return VMValue(state.type == args[1].toInt() ? 1 : 0);
+    });
+    tsInstance->registerNative("objectCount", [](const auto&) -> VMValue {
+        return VMValue((int32_t)ScriptEngine::instance().objects.size());
+    });
+    tsInstance->registerNative("getObjectCount", [](const auto&) -> VMValue {
+        return VMValue((int32_t)ScriptEngine::instance().objects.size());
     });
     tsInstance->registerNative("getTarget", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(-1);
@@ -4483,11 +5334,14 @@ bool ScriptEngine::init() {
         const std::string objectName = args[0].toString();
         const long id = std::strtol(objectName.c_str(), &end, 10);
         const int slot = args[1].toInt();
-        if (end && *end == '\0' && id > 0 && slot >= 0 && slot < 8 &&
-            ScriptEngine::instance().objectState((int)id, state))
+        if (slot < 0 || slot >= 8) return VMValue(0);
+        if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state))
             return VMValue(state.mountedImages[slot].datablockId);
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
             return object->fields["mountedImage::" + std::to_string(args[1].toInt())];
+        std::string image;
+        if (Engine::instance().game().world().getMissionObjectImage(
+                args[0].toString(), slot, image)) return VMValue(image);
         return VMValue(0);
     });
     tsInstance->registerNative("setMountedImage", [](const auto& args) -> VMValue {
@@ -4504,6 +5358,13 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("getMountNodeObject", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
+        char* end = nullptr;
+        const long id = std::strtol(args[0].toString().c_str(), &end, 10);
+        const int slot = args[1].toInt();
+        ScriptObjectState state;
+        if (end && *end == '\0' && id > 0 && slot >= 0 && slot < 8 &&
+            ScriptEngine::instance().objectState((int)id, state))
+            return VMValue(state.mountedImages[slot].mountNodeObjectId);
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
             return object->fields["mountNode::" + args[1].toString()];
         return VMValue(0);
@@ -4524,6 +5385,10 @@ bool ScriptEngine::init() {
         }
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
             return object->fields["transform"];
+        std::string transform;
+        if (Engine::instance().game().world().getMissionObjectTransform(
+                args[0].toString(), transform))
+            return VMValue(transform);
         return VMValue("");
     });
     // Mission object transforms are handled by World. Unknown/network-only
@@ -4567,6 +5432,15 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("getDamageLevel", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0.0f);
+        ScriptObjectState state;
+        char* end = nullptr;
+        const std::string name = args[0].toString();
+        const long id = std::strtol(name.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0 &&
+            ScriptEngine::instance().objectState((int)id, state) && state.hasHealth) {
+            const float maximum = state.hasMaxHealth ? state.maxHealth : 100.0f;
+            return VMValue(ScriptStateParity::damageLevel(state.health, maximum));
+        }
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
             return object->fields["damageLevel"];
         return VMValue(0.0f);
@@ -4632,6 +5506,18 @@ bool ScriptEngine::init() {
             return object->fields["repairRate"];
         return VMValue(0.0f);
     });
+    tsInstance->registerNative("getSensorGroup", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(-1);
+        ScriptObjectState state;
+        char* end = nullptr;
+        const std::string value = args[0].toString();
+        const long id = std::strtol(value.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state))
+            return VMValue(state.sensorGroup);
+        if (auto* object = ScriptEngine::instance().findObject(value.c_str()))
+            return object->fields["sensorGroup"];
+        return VMValue(-1);
+    });
     tsInstance->registerNative("setRepairRate", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
         const int objectId = args[0].toInt();
@@ -4653,8 +5539,17 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("getType", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
-        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
-            return object->fields["type"];
+        const std::string name = args[0].toString();
+        char* end = nullptr;
+        const long id = std::strtol(name.c_str(), &end, 10);
+        if (end && *end == '\0' && id > 0) {
+            ScriptObjectState state;
+            if (ScriptEngine::instance().objectState((int)id, state)) return VMValue(state.type);
+        }
+        if (auto* object = ScriptEngine::instance().findObject(name.c_str())) {
+            auto field = object->fields.find("type");
+            return field == object->fields.end() ? VMValue(0) : field->second;
+        }
         return VMValue(0);
     });
     tsInstance->registerNative("getVelocity", [](const auto& args) -> VMValue {
@@ -4663,7 +5558,8 @@ bool ScriptEngine::init() {
         char* end = nullptr;
         const std::string objectName = args[0].toString();
         const long id = std::strtol(objectName.c_str(), &end, 10);
-        if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state)) {
+        if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state) &&
+            state.hasVelocity) {
             char value[96];
             snprintf(value, sizeof(value), "%g %g %g", state.velocity.x,
                      state.velocity.y, state.velocity.z);
@@ -4672,6 +5568,85 @@ bool ScriptEngine::init() {
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
             return object->fields["velocity"];
         return VMValue("");
+    });
+    auto setVelocity = [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        char* end = nullptr;
+        const long id = std::strtol(args[0].toString().c_str(), &end, 10);
+        if (!end || *end != '\0' || id <= 0) return VMValue(0);
+        Point3F velocity;
+        if (args.size() == 2 ? !parseVector(args[1], velocity) : args.size() == 4) {
+            if (args.size() == 4) velocity = {args[1].toFloat(), args[2].toFloat(), args[3].toFloat()};
+            else return VMValue(0);
+        } else if (args.size() != 2) return VMValue(0);
+        if (!std::isfinite(velocity.x) || !std::isfinite(velocity.y) || !std::isfinite(velocity.z))
+            return VMValue(0);
+        return VMValue(ScriptEngine::instance().mutateVelocity((int)id, velocity) ? 1 : 0);
+    };
+    tsInstance->registerNative("setVelocity", setVelocity);
+    auto threadMutation = [](const auto& args, int operation) -> VMValue {
+        if (args.size() < 2 || args.size() > 3) return VMValue(0);
+        char* end = nullptr;
+        const long id = std::strtol(args[0].toString().c_str(), &end, 10);
+        const int slot = args[1].toInt();
+        if (!end || *end != '\0' || id <= 0 || slot < 0 || slot >= 4) return VMValue(0);
+        if ((operation == 1 || operation == 4 || operation == 5) && args.size() < 3)
+            return VMValue(0);
+        return VMValue(ScriptEngine::instance().mutateThread(
+            (int)id, slot, operation, args.size() > 2 ? args[2].toString() : "") ? 1 : 0);
+    };
+    tsInstance->registerNative("playThread", [threadMutation](const auto& args) {
+        return threadMutation(args, 1);
+    });
+    tsInstance->registerNative("stopThread", [threadMutation](const auto& args) {
+        return threadMutation(args, 2);
+    });
+    tsInstance->registerNative("pauseThread", [threadMutation](const auto& args) {
+        return threadMutation(args, 3);
+    });
+    tsInstance->registerNative("setThreadDir", [threadMutation](const auto& args) {
+        return threadMutation(args, 4);
+    });
+    tsInstance->registerNative("setThreadTimeScale", [threadMutation](const auto& args) {
+        return threadMutation(args, 5);
+    });
+    tsInstance->registerNative("getThreadState", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        ScriptObjectState state;
+        char* end = nullptr;
+        const long id = std::strtol(args[0].toString().c_str(), &end, 10);
+        const int slot = args[1].toInt();
+        if (!end || *end != '\0' || id <= 0 || slot < 0 || slot >= 4 ||
+            !ScriptEngine::instance().objectState((int)id, state) || !state.threads[slot].valid)
+            return VMValue(0);
+        return VMValue(state.threads[slot].state);
+    });
+    vmInstance->registerNativeFunction("setVelocity", setVelocity);
+    vmInstance->registerNativeFunction("playThread", [threadMutation](const auto& args) {
+        return threadMutation(args, 1);
+    });
+    vmInstance->registerNativeFunction("stopThread", [threadMutation](const auto& args) {
+        return threadMutation(args, 2);
+    });
+    vmInstance->registerNativeFunction("pauseThread", [threadMutation](const auto& args) {
+        return threadMutation(args, 3);
+    });
+    vmInstance->registerNativeFunction("setThreadDir", [threadMutation](const auto& args) {
+        return threadMutation(args, 4);
+    });
+    vmInstance->registerNativeFunction("setThreadTimeScale", [threadMutation](const auto& args) {
+        return threadMutation(args, 5);
+    });
+    vmInstance->registerNativeFunction("getThreadState", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        ScriptObjectState state;
+        char* end = nullptr;
+        const long id = std::strtol(args[0].toString().c_str(), &end, 10);
+        const int slot = args[1].toInt();
+        if (!end || *end != '\0' || id <= 0 || slot < 0 || slot >= 4 ||
+            !ScriptEngine::instance().objectState((int)id, state) || !state.threads[slot].valid)
+            return VMValue(0);
+        return VMValue(state.threads[slot].state);
     });
     tsInstance->registerNative("getRotation", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("0 0 0 1");
@@ -4683,6 +5658,13 @@ bool ScriptEngine::init() {
             char value[128];
             snprintf(value, sizeof(value), "%g %g %g %g", state.rotation.x,
                      state.rotation.y, state.rotation.z, state.rotationW);
+            return VMValue(value);
+        }
+        Point3F axis;
+        float angle = 0.0f;
+        if (Engine::instance().game().world().getMissionObjectRotation(objectName, axis, angle)) {
+            char value[128];
+            snprintf(value, sizeof(value), "%g %g %g %g", axis.x, axis.y, axis.z, angle);
             return VMValue(value);
         }
         if (auto* object = ScriptEngine::instance().findObject(objectName.c_str()))
@@ -4720,8 +5702,9 @@ bool ScriptEngine::init() {
         char* end = nullptr;
         const std::string objectName = args[0].toString();
         const long id = std::strtol(objectName.c_str(), &end, 10);
-        if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state))
-            return VMValue(state.hasEnergy ? state.energy : 0.0f);
+        if (end && *end == '\0' && id > 0 &&
+            ScriptEngine::instance().objectState((int)id, state) && state.hasEnergy)
+            return VMValue(ScriptStateParity::energyPercent(state.energy));
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
             return object->fields["energyPercent"];
         return VMValue(0.0f);
@@ -4781,57 +5764,38 @@ bool ScriptEngine::init() {
     });
     tsInstance->registerNative("delete", [](const auto& args) -> VMValue {
         if (!args.empty()) {
-             std::string objName = args[0].toString();
-             ScriptEngine::instance().ts()->cancelEventsForObject(objName);
-            auto* obj = ScriptEngine::instance().findObject(objName.c_str());
-              if (obj) {
+             const std::string objName = args[0].toString();
+             const auto missionOrder = ScriptEngine::instance().missionDeletionOrder(objName);
+             if (!missionOrder.empty()) {
+                 for (const auto& name : missionOrder) {
+                     auto it = std::find_if(ScriptEngine::instance().missionObjects().begin(),
+                         ScriptEngine::instance().missionObjects().end(),
+                         [&name](const ScriptMissionObject& object) { return object.name == name; });
+                     if (it == ScriptEngine::instance().missionObjects().end()) continue;
+                     const bool worldDeleted = ScriptEngine::instance().missionObjectsWorldBacked() &&
+                         Engine::instance().game().deleteMissionObjectIfPresent(name);
+                      if (!worldDeleted) {
+                          const std::string callback = it->className + "::onRemove";
+                          if (ScriptEngine::instance().ts()->hasFunction(callback))
+                              ScriptEngine::instance().ts()->callFunction(callback, {VMValue(name)});
+                      }
+                      ScriptEngine::instance().ts()->cancelEventsForObject(name);
+                  }
+                 ScriptEngine::instance().removeMissionObjects(missionOrder);
+                 return VMValue(1);
+             }
+              auto* obj = ScriptEngine::instance().findObject(objName.c_str());
+               if (obj) {
                 if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 ||
                     obj->className.find("Hud") == 0) {
                     Engine::instance().guiRenderer().removeControl(objName);
                 }
                 if (obj->className.find("Profile") != std::string::npos) return VMValue(1);
-                Console::instance().printf(LogLevel::Debug, "delete: removing ScriptObject '%s'", objName.c_str());
-                std::set<std::string> doomed{objName};
-                bool expanded = true;
-                while (expanded) {
-                    expanded = false;
-                    for (const auto& [candidateName, candidate] : ScriptEngine::instance().objects) {
-                        auto parent = candidate->internals.find("parent");
-                        if (parent != candidate->internals.end() &&
-                            doomed.count(parent->second.toString()) &&
-                            doomed.insert(candidateName).second)
-                            expanded = true;
-                    }
-                }
-                for (const auto& doomedName : doomed) {
-                    if (doomedName == objName) continue;
-                    auto childIt = ScriptEngine::instance().objects.find(doomedName);
-                    if (childIt != ScriptEngine::instance().objects.end()) {
-                        delete childIt->second;
-                        ScriptEngine::instance().objects.erase(childIt);
-                    }
-                }
-                const std::string parentName = obj->internals["__parent"].toString();
-                if (!parentName.empty()) {
-                    if (auto* parent = ScriptEngine::instance().findObject(parentName.c_str())) {
-                        const int count = parent->internals["__childCount"].toInt();
-                        for (int i = 0; i < count; ++i) {
-                            if (parent->internals["__child" + std::to_string(i)].toString() != objName) continue;
-                            for (int j = i + 1; j < count; ++j)
-                                parent->internals["__child" + std::to_string(j - 1)] =
-                                    parent->internals["__child" + std::to_string(j)];
-                            parent->internals.erase("__child" + std::to_string(count - 1));
-                            parent->internals["__childCount"] = VMValue(count - 1);
-                            break;
-                        }
-                    }
-                }
-                ScriptEngine::instance().objects.erase(objName);
-                delete obj;
+                 ScriptEngine::instance().deleteScriptObject(objName);
             }
             // Mission objects are not ScriptObject instances. Remove them
             // through World so schedules and lifecycle callbacks agree.
-            Engine::instance().game().world().deleteMissionObject(objName);
+             Engine::instance().game().world().deleteMissionObject(objName);
         }
         return VMValue(1);
     });
@@ -6262,10 +7226,16 @@ bool ScriptEngine::init() {
             Console::instance().printf(LogLevel::Info, "queryMasterServer: %s", masterUrl.c_str());
             Engine::instance().network().queryMasterServer(masterUrl.c_str());
         } else {
-            // Default master: check TORCH_MASTER_SERVER env var, fall back to TribesNext
             const char* envMaster = getenv("TORCH_MASTER_SERVER");
-            std::string defaultMaster = envMaster ? envMaster : "http://master.tribesnext.com/list";
-            Engine::instance().network().queryMasterServer(defaultMaster.c_str());
+            const std::string selected = selectMasterServerUrl(
+                Engine::instance().demoMode,
+                "",
+                Console::instance().getStringVariable("demoMasterServer", ""),
+                envMaster ? envMaster : "");
+            if (selected.empty() && Engine::instance().demoMode)
+                Console::instance().printf(LogLevel::Warn,
+                    "Demo master server is empty; falling back to LAN discovery");
+            Engine::instance().network().queryMasterServer(selected.c_str());
         }
         return VMValue(1);
     });
@@ -6689,14 +7659,14 @@ bool ScriptEngine::init() {
             const std::string value = args[0].toString();
             const long id = std::strtol(value.c_str(), &end, 10);
             if (end && *end == '\0' && id > 0 && ScriptEngine::instance().objectState((int)id, state))
-                return VMValue(state.hasMaxHealth && state.maxHealth > 0.0f
-                    ? std::clamp(1.0f - state.health / state.maxHealth, 0.0f, 1.0f) : 0.0f);
+                return VMValue(state.hasMaxHealth
+                    ? damageLevelForHealth(state.health, state.maxHealth) : 0.0f);
             if (auto* object = ScriptEngine::instance().findObject(value.c_str()))
                 return object->fields["damageLevel"];
             return VMValue(0.0f);
         }
-        const float health = std::clamp(Engine::instance().game().player().health(), 0.0f, 100.0f);
-        return VMValue(1.0f - health / 100.0f);
+        const auto& player = Engine::instance().game().player();
+        return VMValue(damageLevelForHealth(player.health(), player.maxHealth()));
     });
     tsInstance->registerNative("lockMouse", [](const auto& args) -> VMValue {
         const bool locked = !args.empty() && args[0].toBool();
@@ -7065,38 +8035,20 @@ bool ScriptEngine::init() {
     // getWord — extract Nth space-delimited word from a string
     tsInstance->registerNative("getWord", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
-        std::string str = args[0].toString();
-        int idx = args.size() > 1 ? args[1].toInt() : 0;
-        int word = 0;
-        size_t start = 0;
-        while (start < str.size()) {
-            size_t pos = str.find(' ', start);
-            if (word == idx) {
-                size_t end = (pos != std::string::npos) ? pos : str.size();
-                return VMValue(str.substr(start, end - start));
-            }
-            if (pos == std::string::npos) break;
-            start = pos + 1;
-            word++;
-        }
-        return VMValue("");
+        const auto words = splitScriptWords(args[0].toString());
+        const int index = args.size() > 1 ? args[1].toInt() : 0;
+        return index >= 0 && index < (int)words.size() ? VMValue(words[index]) : VMValue("");
     });
 
     tsInstance->registerNative("getWordCount", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        std::string str = args[0].toString();
-        if (str.empty()) return VMValue(0);
-        int count = 1;
-        for (char c : str) if (c == ' ') count++;
-        return VMValue(count);
+        return VMValue((int32_t)splitScriptWords(args.empty() ? "" : args[0].toString()).size());
     });
 
     // firstWord — returns first word
     tsInstance->registerNative("firstWord", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
-        std::string str = args[0].toString();
-        size_t pos = str.find(' ');
-        return VMValue(pos != std::string::npos ? str.substr(0, pos) : str);
+        const auto words = splitScriptWords(args[0].toString());
+        return words.empty() ? VMValue("") : VMValue(words.front());
     });
 
     // ─── Warrior setup / options missing natives ──────────────────────
@@ -7328,6 +8280,16 @@ bool ScriptEngine::init() {
             obj->className = "ActionMap";
             objs["GlobalActionMap"] = obj;
         }
+        // Stock input scripts copy defaults into these maps before they
+        // populate them.  They are engine singletons in Torque, not objects
+        // that depend on a particular prefs file being present.
+        for (const char* name : {"moveMap", "observerMap"}) {
+            if (objs.find(name) != objs.end()) continue;
+            auto* obj = new ScriptObject;
+            obj->name = name;
+            obj->className = "ActionMap";
+            objs[name] = obj;
+        }
     }
 
     tsInstance->registerNative("removeTaggedString", [](const auto& args) -> VMValue {
@@ -7527,6 +8489,14 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("setPosition", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
         const std::string name = args[0].toString();
+        Point3F missionPosition;
+        if (args.size() == 2 && parseVector(args[1], missionPosition)) {
+            const auto& objects = Engine::instance().game().world().objects();
+            for (const auto& object : objects)
+                if (object.objectName == name)
+                    return VMValue(Engine::instance().game().world().setMissionObjectPosition(
+                        name, missionPosition) ? 1 : 0);
+        }
         auto* ctl = Engine::instance().guiRenderer().findControl(name);
         const std::string value = args.size() >= 3
             ? args[1].toString() + " " + args[2].toString() : args[1].toString();
@@ -7544,6 +8514,22 @@ bool ScriptEngine::init() {
         if (auto* obj = ScriptEngine::instance().findObject(name.c_str()))
             obj->fields["position"] = VMValue(value);
         return VMValue(1);
+    });
+    tsInstance->registerNative("setRotation", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        Point3F axis;
+        float angle = 0.0f;
+        if (sscanf(args[1].toString().c_str(), "%f %f %f %f", &axis.x, &axis.y, &axis.z, &angle) != 4)
+            return VMValue(0);
+        return VMValue(Engine::instance().game().world().setMissionObjectRotation(
+            args[0].toString(), axis, angle) ? 1 : 0);
+    });
+    tsInstance->registerNative("setScale", [](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        Point3F scale;
+        if (!parseVector(args[1], scale)) return VMValue(0);
+        return VMValue(Engine::instance().game().world().setMissionObjectScale(
+            args[0].toString(), scale) ? 1 : 0);
     });
     tsInstance->registerNative("setExtent", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
@@ -7687,6 +8673,127 @@ bool ScriptEngine::init() {
         return VMValue(game.gameServer().start(port) ? 1 : 0);
     });
 
+    // These names are also used by GUI-specific helpers registered above.
+    // Install the object-aware forms last so ordinary SimObjects never enter
+    // a GUI lookup path that may not have a renderer/control tree.
+    tsInstance->registerNative("getName", getObjectName);
+    tsInstance->registerNative("getGroup", getGroup);
+    tsInstance->registerNative("getCount", getGroupCount);
+    tsInstance->registerNative("getField", getFieldString);
+    tsInstance->registerNative("getFieldValue", getObjectField);
+    tsInstance->registerNative("getDataField", getObjectDataField);
+    tsInstance->registerNative("setField", setFieldValue);
+    tsInstance->registerNative("setFieldValue", setObjectField);
+    tsInstance->registerNative("setDataField", setObjectDataField);
+
+    auto missionObject = [](const std::string& value) -> const ScriptMissionObject* {
+        auto& objects = ScriptEngine::instance().missionObjects();
+        char* end = nullptr;
+        const long id = std::strtol(value.c_str(), &end, 10);
+        for (const auto& object : objects) {
+            if ((end && *end == '\0' && id > 0 && object.id == id) || object.name == value)
+                return &object;
+        }
+        return nullptr;
+    };
+    auto missionChildren = [missionObject](const std::string& group) {
+        std::vector<const ScriptMissionObject*> children;
+        const auto* parent = missionObject(group);
+        const std::string parentName = parent ? parent->name : group;
+        for (const auto& object : ScriptEngine::instance().missionObjects())
+            if (object.parentName == parentName) children.push_back(&object);
+        return children;
+    };
+    tsInstance->registerNative("getId", [missionObject](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        if (const auto* object = missionObject(args[0].toString())) return VMValue(object->id);
+        return VMValue(0);
+    });
+    tsInstance->registerNative("getName", [missionObject](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        if (const auto* object = missionObject(args[0].toString())) return VMValue(object->name);
+        int id = 0;
+        ScriptObjectState state;
+        if (providerObjectId(args[0].toString(), id) && ScriptEngine::instance().objectState(id, state))
+            return VMValue(state.name);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return VMValue(object->name);
+        return VMValue("");
+    });
+    tsInstance->registerNative("getClassName", [missionObject](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        if (const auto* object = missionObject(args[0].toString())) return VMValue(object->className);
+        int id = 0;
+        ScriptObjectState state;
+        if (providerObjectId(args[0].toString(), id) && ScriptEngine::instance().objectState(id, state))
+            return VMValue(state.className);
+        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            return VMValue(object->className);
+        return VMValue("");
+    });
+    tsInstance->registerNative("isObject", [missionObject](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const std::string value = args[0].toString();
+        if (missionObject(value) || ScriptEngine::instance().findObject(value.c_str())) return VMValue(1);
+        int id = 0;
+        if (providerObjectId(value, id)) {
+            ScriptObjectState state;
+            if (ScriptEngine::instance().objectState(id, state)) return VMValue(1);
+        }
+        return VMValue(0);
+    });
+    tsInstance->registerNative("getGroup", [missionObject, getGroup](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const auto* object = missionObject(args[0].toString());
+        if (!object) return getGroup(args);
+        if (object->parentName.empty()) return VMValue(0);
+        if (const auto* parent = missionObject(object->parentName)) return VMValue(parent->id);
+        return VMValue(0);
+    });
+    tsInstance->registerNative("getCount", [missionObject, missionChildren, getGroupCount](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        if (!missionObject(args[0].toString())) return getGroupCount(args);
+        return VMValue((int32_t)missionChildren(args[0].toString()).size());
+    });
+    auto getMissionChild = [missionObject, missionChildren](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        if (!missionObject(args[0].toString())) {
+            auto* group = ScriptEngine::instance().findObject(args[0].toString().c_str());
+            if (group) return group->internals["__child" + std::to_string(args[1].toInt())];
+            return VMValue(0);
+        }
+        const int index = args[1].toInt();
+        const auto children = missionChildren(args[0].toString());
+        return index >= 0 && index < (int)children.size() ? VMValue(children[index]->id) : VMValue(0);
+    };
+    tsInstance->registerNative("getObject", getMissionChild);
+    tsInstance->registerNative("getChild", getMissionChild);
+    auto sibling = [missionObject](const auto& args, int direction) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        const auto* object = missionObject(args[0].toString());
+        if (!object) return VMValue(0);
+        std::vector<const ScriptMissionObject*> siblings;
+        for (const auto& candidate : ScriptEngine::instance().missionObjects())
+            if (candidate.parentName == object->parentName) siblings.push_back(&candidate);
+        for (size_t i = 0; i < siblings.size(); ++i)
+            if (siblings[i] == object) {
+                const int next = (int)i + direction;
+                return next >= 0 && next < (int)siblings.size() ? VMValue(siblings[next]->id) : VMValue(0);
+            }
+        return VMValue(0);
+    };
+    tsInstance->registerNative("nextObject", [sibling](const auto& args) { return sibling(args, 1); });
+    tsInstance->registerNative("prevObject", [sibling](const auto& args) { return sibling(args, -1); });
+    tsInstance->registerNative("previousObject", [sibling](const auto& args) { return sibling(args, -1); });
+    tsInstance->registerNative("getFieldValue", [missionObject, getObjectField](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        const auto* object = missionObject(args[0].toString());
+        if (!object) return getObjectField(args);
+        for (const auto& [name, value] : object->fields)
+            if (sameFieldName(name, args[1].toString())) return value;
+        return VMValue("");
+    });
+
     // Copy all TS-registered natives to DSO VM so DSO functions can find them
     for (auto& entry : tsInstance->getNatives()) {
         vmInstance->registerNativeFunction(entry.first.c_str(), entry.second);
@@ -7696,14 +8803,93 @@ bool ScriptEngine::init() {
 }
 
 void ScriptEngine::shutdown() {
-    // Clean up objects
-    for (auto& [name, obj] : objects) delete obj;
+    // Use the same lifecycle path as an explicit delete.  This keeps
+    // onRemove/delete-notify callbacks and object-owned schedules consistent
+    // during both mission teardown and process shutdown.
+    std::vector<std::string> names;
+    names.reserve(objects.size());
+    for (const auto& [name, obj] : objects)
+        if (obj) names.push_back(name);
+    std::sort(names.begin(), names.end());
+    for (const auto& name : names) deleteScriptObject(name);
     objects.clear();
+    if (tsInstance) tsInstance->clearScheduledEvents();
+    missionObjects_.clear();
+    missionObjectsWorldBacked_ = false;
     s_scriptTargets.clear();
     delete tsInstance;
     tsInstance = nullptr;
     delete vmInstance;
     vmInstance = nullptr;
+}
+
+void ScriptEngine::setMissionObjects(std::vector<ScriptMissionObject> objects, bool worldBacked) {
+    missionObjects_ = std::move(objects);
+    missionObjectsWorldBacked_ = worldBacked;
+    int nextId = 1;
+    for (auto& object : missionObjects_)
+        object.id = nextId++;
+}
+
+void ScriptEngine::clearMissionObjects() {
+    missionObjects_.clear();
+    missionObjectsWorldBacked_ = false;
+}
+
+void ScriptEngine::cancelMissionEvents() {
+    if (!tsInstance) return;
+    for (const auto& object : missionObjects_)
+        tsInstance->cancelEventsForObject(object.name);
+}
+
+void ScriptEngine::dispatchMissionObjectRemovalCallbacks() {
+    if (!tsInstance) return;
+    std::set<std::string> dispatched;
+    auto dispatch = [&](const std::string& name) {
+        if (!dispatched.insert(name).second) return;
+        const auto it = std::find_if(missionObjects_.begin(), missionObjects_.end(),
+            [&](const ScriptMissionObject& object) { return object.name == name; });
+        if (it == missionObjects_.end()) return;
+        const std::string callback = it->className + "::onRemove";
+        if (tsInstance->hasFunction(callback)) tsInstance->callFunction(callback, {VMValue(name)});
+    };
+    for (const auto& object : missionObjects_)
+        if (object.parentName.empty())
+            for (const auto& name : missionDeletionOrder(object.name)) dispatch(name);
+    for (const auto& object : missionObjects_)
+        dispatch(object.name);
+}
+
+std::vector<std::string> ScriptEngine::missionDeletionOrder(const std::string& name) const {
+    std::string resolved = name;
+    char* end = nullptr;
+    const long id = std::strtol(name.c_str(), &end, 10);
+    if (end && *end == '\0' && id > 0) {
+        for (const auto& object : missionObjects_)
+            if (object.id == id) { resolved = object.name; break; }
+    }
+    std::vector<std::string> result;
+    std::set<std::string> visited;
+    std::function<void(const std::string&)> visit = [&](const std::string& parent) {
+        if (!visited.insert(parent).second) return;
+        for (const auto& object : missionObjects_)
+            if (object.parentName == parent) visit(object.name);
+        result.push_back(parent);
+    };
+    for (const auto& object : missionObjects_) {
+        if (object.name == resolved) {
+            visit(resolved);
+            break;
+        }
+    }
+    return result;
+}
+
+void ScriptEngine::removeMissionObjects(const std::vector<std::string>& names) {
+    std::set<std::string> removed(names.begin(), names.end());
+    missionObjects_.erase(std::remove_if(missionObjects_.begin(), missionObjects_.end(),
+        [&removed](const ScriptMissionObject& object) { return removed.count(object.name) != 0; }),
+        missionObjects_.end());
 }
 
 void ScriptEngine::registerFunction(const char* name, NativeFunc fn) {

@@ -1,8 +1,43 @@
 #include "game/mission_parser.h"
 
 #include <cassert>
+#include <cmath>
 
 int main() {
+    const auto invalidPosition = parsePos("nan 2 inf");
+    assert(invalidPosition.x == 0.0f && invalidPosition.y == 2.0f &&
+           invalidPosition.z == 0.0f);
+
+    // Mission class lookup follows Torque's case-insensitive console rules,
+    // while preserving the original spelling for diagnostics and scripts.
+    assert(missionClassEquals("waterblock", "WaterBlock"));
+    assert(missionClassEquals("WATERBLOCK", "WaterBlock"));
+    assert(!missionClassEquals("WaterBlocker", "WaterBlock"));
+
+    // Mission booleans use Torque's case-insensitive console conversion.
+    const auto booleanObject = parseMisFile(R"(
+        new StaticShape(HiddenShape) {
+            hidden = "TrUe";
+            visible = "fAlSe";
+        };
+    )");
+    assert(booleanObject.size() == 1);
+    assert(authoredBool(booleanObject[0], "hidden"));
+    assert(!authoredBool(booleanObject[0], "visible"));
+
+    // A replacement mission with no parsed objects must be rejected before a
+    // live world is torn down by the loader.
+    std::string diagnostic;
+    assert(parseMisFile("not a mission", &diagnostic).empty());
+    assert(diagnostic == "no complete mission objects found");
+    assert(parseMisFile("new StaticShape(Broken) { position = \"1 2 3\";", &diagnostic).empty());
+    assert(diagnostic == "no complete mission objects found");
+    assert(parseMisFile("datablock ItemData(Broken) { shapeFile = \"x.dts\";", &diagnostic).empty());
+    assert(diagnostic == "object is missing a closing brace");
+    assert(parseMisFile("new StaticShape(Broken) { label = \"unterminated; };", &diagnostic).empty());
+    assert(diagnostic == "unterminated quoted string");
+    assert(parseMisFile("   // empty mission\n\t").empty());
+
     const auto objects = parseMisFile(R"(
         new AudioEmitter(MapWind) {
             position = "10 20 30";
@@ -109,6 +144,20 @@ int main() {
     assert(getProp(lexical[0].props, "filename") == "audio//wind.wav");
     assert(getProp(lexical[1].props, "shapefile") == "shapes/ammo.dts");
 
+    const auto blockComments = parseMisFile(R"(
+        /* The stock mission header may contain examples such as
+           new StaticShape(NotAnObject) { position = "0 0 0"; };
+        */
+        new Marker(RealObject) {
+            label = "path /* is quoted */";
+        };
+    )");
+    assert(blockComments.size() == 1);
+    assert(blockComments[0].objName == "RealObject");
+    assert(getProp(blockComments[0].props, "label") == "path /* is quoted */");
+    assert(parseMisFile("/* missing terminator", &diagnostic).empty());
+    assert(diagnostic == "unterminated block comment");
+
     const auto authored = parseMisFile(R"(
         new WayPoint() {
             position = "-4.16021 869.706 341.214";
@@ -161,10 +210,20 @@ int main() {
     assert(getProp(parity[4].props, "velocitymod") == "0.5");
     assert(getProp(parity[4].props, "appliedforce") == "1 2 3");
 
+    MisObject boolAliases;
+    boolAliases.className = "TSStatic";
+    boolAliases.props.push_back({"hidden", "on"});
+    boolAliases.props.push_back({"disablecollision", "yes"});
+    assert(!authoredVisible(boolAliases));
+    assert(!authoredCollidable(boolAliases, true));
+
     const auto marker = authoredMissionMarker(parity[2]);
     assert(marker.position.x == 7.0f && marker.position.y == 8.0f && marker.position.z == 9.0f);
     assert(marker.rotation.z == 1.0f && marker.scale.x == 1.0f);
     assert(marker.label == "Objective" && marker.teamId == 0);
+    const auto worldMarkerPosition = authoredMissionWorldPosition(marker);
+    assert(worldMarkerPosition.x == 7.0f && worldMarkerPosition.y == 9.0f &&
+           worldMarkerPosition.z == -8.0f);
 
     const auto authoredObjective = parseMisFile(R"(
         new SimGroup(Team2) {
@@ -199,6 +258,20 @@ int main() {
     assert(graph.graphFile == "Training2.nav" && graph.customArea.x == -10.0f);
     assert(graph.customAreaWidth == 30.0f && graph.customAreaHeight == 40.0f);
 
+    auto lowerCaseClass = parseMisFile(R"(
+        new navigationgraph(NativeCaseInsensitiveGraph) { GraphFile = "native.nav"; };
+    )");
+    assert(findObject(lowerCaseClass, "NavigationGraph") == &lowerCaseClass[0]);
+
+    // Runtime mission dispatch must accept the same case variants as Torque's
+    // object system for environment objects.
+    const auto lowerCaseEnvironment = parseMisFile(R"(
+        new precipitation(Rain) { maxNumDrops = "10"; };
+        new waterblock(Lake) { liquidType = "Water"; };
+    )");
+    assert(missionClassEquals(lowerCaseEnvironment[0].className, "Precipitation"));
+    assert(missionClassEquals(lowerCaseEnvironment[1].className, "WaterBlock"));
+
     const auto objectFlags = parseMisFile(R"(
         new Marker(EditorMarker) { hidden = "1"; };
         new TSStatic(Glass) { visible = "0"; disableCollision = "1"; sequence = "open"; };
@@ -222,6 +295,14 @@ int main() {
     assert(authoredMissionMarker(*teamSpawn).scale.z == 4.0f);
     const MisObject* neutralSpawn = selectAuthoredSpawn(spawns, 3);
     assert(neutralSpawn && neutralSpawn->objName == "Alpha");
+
+    const auto mixedCaseSpawns = parseMisFile(R"(
+        new sPaWnSpHeRe(MixedTeam) { position = "40 0 0"; team = "2"; };
+        new mArKeR(MixedMarker) { position = "2 0 0"; };
+    )");
+    const MisObject* mixedSpawn = selectAuthoredSpawn(mixedCaseSpawns, 2);
+    assert(mixedSpawn && mixedSpawn->objName == "MixedTeam");
+    assert(authoredMissionMarker(mixedCaseSpawns[1]).label == "MixedMarker");
 
     // interiorTest is an interior-only preview mission. It deliberately has
     // no TerrainBlock, so loading it must not manufacture a terrain failure.

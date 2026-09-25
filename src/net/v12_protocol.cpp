@@ -30,14 +30,17 @@ bool readDnetHeader(V12BitStream& stream, DnetHeader& header) {
     const uint32_t type = stream.readUnsigned(2);
     header.packetType = type <= 2 ? (PacketType)type : PacketType::Invalid;
     header.ackByteCount = (uint8_t)stream.readUnsigned(3);
-    if (header.ackByteCount > sizeof(header.ackMask)) {
+    // The wire format carries at most four ACK-mask bytes. The storage type is
+    // wider so protocol state can use a 64-bit receive window internally, but
+    // accepting five or more bytes would consume payload bits as ACK data.
+    if (header.ackByteCount > sizeof(uint32_t)) {
         header.packetType = PacketType::Invalid;
         return false;
     }
     header.ackMask = 0;
     for (uint8_t i = 0; i < header.ackByteCount; ++i)
         header.ackMask |= (uint64_t)stream.readUnsigned(8) << (i * 8);
-    return !stream.failed() && header.packetType != PacketType::Invalid;
+    return !stream.failed() && header.gameFlag && header.packetType != PacketType::Invalid;
 }
 
 void writeDnetHeader(V12BitWriter& writer, const DnetHeader& header) {
@@ -220,7 +223,9 @@ bool ReceiveWindow::accept(uint16_t sequence, bool packetConnectSequenceBit) {
     const uint16_t delta = (uint16_t)((sequence - highest) & 0x1ff);
     if (delta == 0 || delta >= 256) return false;
 
-    if (delta >= 64) {
+    // ACK masks are serialized as at most four bytes, so retain only the
+    // history the peer can represent on the wire.
+    if (delta >= 32) {
         mask = 0;
     } else {
         mask <<= delta;
@@ -434,6 +439,12 @@ ClientEvent makeGhostingMessageEvent(uint32_t sequence, uint8_t message,
     }};
 }
 
+ClientEvent makeMissionCrcEvent(uint32_t missionCrc) {
+    return {0, 13, [missionCrc](V12BitWriter& writer) {
+        writer.writeUnsigned(missionCrc, 32);
+    }};
+}
+
 std::vector<ClientEvent> buildRemoteCommandEvents(NetStringTable& strings,
                                                    const std::string& command,
                                                    const std::vector<std::string>& args) {
@@ -459,24 +470,30 @@ ProtocolResult ProtocolState::processReceived(const DnetHeader& header) {
     if (header.connectSequenceBit != (connectSequence & 1)) return {};
     if (header.ackByteCount > 4 || header.packetType == PacketType::Invalid) return {};
 
-    uint32_t sequence = header.sequence | (lastSeqReceived & 0xfffffe00u);
-    if (sequence < lastSeqReceived) sequence += MaxPacketSequence;
-    if (sequence > lastSeqReceived + 0x1f) return {};
+    int32_t sequenceDelta = (int32_t)((header.sequence - (lastSeqReceived & 0x1ffu)) & 0x1ffu);
+    if (sequenceDelta > (int32_t)(MaxPacketSequence / 2))
+        sequenceDelta -= MaxPacketSequence;
+    if (sequenceDelta > 0x1f || sequenceDelta < -0x1f) return {};
+    const uint32_t sequence = (uint32_t)((int64_t)lastSeqReceived + sequenceDelta);
 
     uint32_t ack = header.highestAck | (highestAcked & 0xfffffe00u);
     if (ack < highestAcked) ack += MaxPacketSequence;
     if (ack > lastSentSequence) return {};
 
-    const uint32_t shift = (sequence - lastSeqReceived) & 0x1f;
-    receiveMask = shift >= 32 ? 0 : receiveMask << shift;
-    if (header.packetType == PacketType::Data) receiveMask |= 1;
+    if (sequenceDelta > 0) {
+        receiveMask = sequenceDelta >= 32 ? 0 : receiveMask << sequenceDelta;
+        if (header.packetType == PacketType::Data && sequenceDelta <= 32)
+            receiveMask |= 1u << (uint32_t)(sequenceDelta - 1);
+    } else if (sequenceDelta < 0 && header.packetType == PacketType::Data) {
+        receiveMask |= 1u << (uint32_t)(-sequenceDelta - 1);
+    }
 
     ProtocolResult result;
     result.accepted = true;
     for (uint32_t sent = highestAcked + 1; sent <= ack; ++sent) {
         const uint32_t distance = (ack - sent) & 0x1f;
-        const bool acknowledged = distance < 32 &&
-            (header.ackMask & (1u << distance)) != 0;
+        const bool acknowledged = distance == 0 ||
+            (distance <= 32 && (header.ackMask & (1u << (distance - 1))) != 0);
         result.acknowledgements.push_back({sent, acknowledged});
         if (acknowledged)
             connectionEstablished = true;
@@ -484,8 +501,8 @@ ProtocolResult ProtocolState::processReceived(const DnetHeader& header) {
     if (sequence > lastReceivedAckAck + 0x20)
         lastReceivedAckAck = sequence - 0x20;
     highestAcked = ack;
-    const bool dispatch = lastSeqReceived != sequence && header.packetType == PacketType::Data;
-    lastSeqReceived = sequence;
+    const bool dispatch = sequenceDelta > 0 && header.packetType == PacketType::Data;
+    if (sequenceDelta > 0) lastSeqReceived = sequence;
     result.dispatchData = dispatch;
     return result;
 }

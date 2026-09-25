@@ -22,6 +22,42 @@ inline std::string missionRulesLower(std::string value) {
     return value;
 }
 
+inline std::string missionRulesCompact(const std::string& value) {
+    std::string compact;
+    compact.reserve(value.size());
+    for (unsigned char c : value)
+        if (std::isalnum(c)) compact.push_back((char)c);
+    return compact;
+}
+
+// Torque resolves mission class names case-insensitively. Keep runtime checks
+// from making authored objects depend on the spelling used by the .mis file.
+inline bool missionClassIs(const std::string& className, const char* expected) {
+    return expected && missionRulesLower(className) == missionRulesLower(expected);
+}
+
+// SimObject names are resolved case-insensitively by the Torque console.
+// Keep script calls to named mission objects consistent with class lookup.
+inline bool missionObjectNameIs(const std::string& authoredName,
+                                const std::string& requestedName) {
+    return authoredName.size() == requestedName.size() &&
+           missionRulesLower(authoredName) == missionRulesLower(requestedName);
+}
+
+// InteriorInstance is a renderable SceneObject and supports the same hidden
+// state as StaticShape. Mission scripts use this for doors and dynamic map
+// geometry, so it must not be rejected by the setHidden bridge.
+inline bool missionObjectCanBeHidden(const std::string& className) {
+    return missionClassIs(className, "InteriorInstance") ||
+           missionClassIs(className, "StaticShape") ||
+           missionClassIs(className, "TSStatic") ||
+           missionClassIs(className, "Turret") ||
+           missionClassIs(className, "Item") ||
+           missionClassIs(className, "ForceFieldBare") ||
+           missionClassIs(className, "Vehicle") ||
+           missionRulesLower(className).ends_with("vehicle");
+}
+
 inline bool isStockTrainingMission(const std::string& missionName) {
     std::string name = missionRulesLower(missionName);
     std::replace(name.begin(), name.end(), '\\', '/');
@@ -33,20 +69,51 @@ inline bool isStockTrainingMission(const std::string& missionName) {
            name.back() >= '1' && name.back() <= '5';
 }
 
-inline MissionRules stockMissionRules(const std::string& missionName,
-                                      const std::string& missionContent = {}) {
+// Mission filenames are resolved case-insensitively. Keep ambient weather
+// selection consistent so renamed or Windows-cased stock missions retain their
+// authored environmental sound profile.
+inline int missionWeatherType(const std::string& missionName) {
     const std::string name = missionRulesLower(missionName);
+    // Mission display names and paths may retain spaces or punctuation (for
+    // example, "Sol's Descent"). Weather selection follows the compact map
+    // identity used by the mission browser rather than the raw spelling.
+    const std::string compactName = missionRulesCompact(name);
+    if (compactName.find("whiteout") != std::string::npos ||
+        compactName.find("solsdescent") != std::string::npos)
+        return 1; // cold/windy
+    if (compactName.find("training2") != std::string::npos ||
+        compactName.find("swamp") != std::string::npos)
+        return 2; // wet
+    return 0; // dry
+}
+
+inline MissionRules stockMissionRules(const std::string& missionName,
+                                       const std::string& missionContent = {}) {
+    std::string name = missionRulesLower(missionName);
+    // Mission filenames can come from native Windows script paths even when
+    // the rest of the runtime uses slash-separated paths.
+    std::replace(name.begin(), name.end(), '\\', '/');
     const std::string content = missionRulesLower(missionContent);
+    const std::string compactContent = missionRulesCompact(content);
     MissionRules rules;
     const bool training = isStockTrainingMission(name);
-    const bool ctf = name.find("minotaur") != std::string::npos ||
-                     name.find("damnation") != std::string::npos ||
-                     content.find("ctfgame") != std::string::npos ||
-                     content.find("capturetheflag") != std::string::npos ||
-                     content.find("missiontypes = ctf") != std::string::npos;
-    const bool team = content.find("teamdeathmatch") != std::string::npos ||
-                      content.find("teamdm") != std::string::npos ||
-                      content.find("missiontypes = team") != std::string::npos;
+    // Stock CTF missions do not all embed a game-type marker in the .mis
+    // file. Keep the filename fallback aligned with the shipped map set so
+    // their team/objective HUD is selected before the mission scripts run.
+    const bool filenameCtf = name.find("minotaur") != std::string::npos ||
+                      name.find("damnation") != std::string::npos ||
+                      name.find("raindance") != std::string::npos ||
+                      name.find("katabatic") != std::string::npos ||
+                      name.find("scarabrae") != std::string::npos ||
+                      name.find("broadside") != std::string::npos ||
+                      name.find("icedagger") != std::string::npos;
+    const bool explicitCtf = compactContent.find("ctfgame") != std::string::npos ||
+                             compactContent.find("capturetheflag") != std::string::npos ||
+                             compactContent.find("missiontypesctf") != std::string::npos;
+    const bool team = compactContent.find("teamdeathmatch") != std::string::npos ||
+                      compactContent.find("teamdm") != std::string::npos ||
+                      compactContent.find("missiontypesteam") != std::string::npos;
+    const bool ctf = explicitCtf || (filenameCtf && !team);
     const bool authoredObjectives = content.find("aiobjective") != std::string::npos;
     if (training) {
         rules.type = MissionGameType::Training;

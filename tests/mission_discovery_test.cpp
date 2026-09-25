@@ -1,4 +1,5 @@
 #include "game/mission_discovery.h"
+#include "game/mission_rules.h"
 
 #include <cassert>
 
@@ -22,8 +23,19 @@ int main() {
     assert(missionIsSinglePlayer(quoted));
     assert(missionLoadPath("missions/Official/Desert.MIS") == "Official/Desert");
     assert(missionLoadPath("missions/../outside.mis").empty());
-    assert(missionLoadPath("missions\\outside.mis").empty());
+    assert(missionLoadPath("missions\\Official\\Desert.mis") == "Official/Desert");
+    const auto candidates = missionFileCandidates("BASE\\MISSIONS\\Official\\Desert.MIS");
+    assert(candidates.size() == 2);
+    assert(candidates[0] == "missions/Official/Desert.mis");
+    assert(candidates[1] == "missions/Official/Desert.misPK");
     assert(missionPreviewCandidates("missions/../outside").empty());
+
+    assert(missionWeatherType("missions/whiteout.mis") == 1);
+    assert(missionWeatherType("MISSIONS\\SolsDescent.MISPK") == 1);
+    assert(missionWeatherType("missions/Sol's Descent.mis") == 1);
+    assert(missionWeatherType("missions/TRAINING2.mis") == 2);
+    assert(missionWeatherType("missions/swamp.mis") == 2);
+    assert(missionWeatherType("missions/raindance.mis") == 0);
 
     const auto previews = missionPreviewCandidates("official/Desert");
     assert(previews.size() == 3);

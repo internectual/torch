@@ -74,8 +74,11 @@ FileSystem::FileSystem() : impl(new Impl) {}
 FileSystem::~FileSystem() { delete impl; }
 
 bool FileSystem::init(const std::vector<std::string>& dataPaths) {
+    impl->searchPaths.clear();
     for (auto& p : dataPaths) {
-        if (fs::is_directory(p))
+        std::error_code error;
+        if (fs::is_directory(p, error) &&
+            std::find(impl->searchPaths.begin(), impl->searchPaths.end(), p) == impl->searchPaths.end())
             impl->searchPaths.push_back(p);
     }
     Console::instance().printf(LogLevel::Info, "FileSystem: %zu paths, %zu archives",
@@ -86,6 +89,7 @@ bool FileSystem::init(const std::vector<std::string>& dataPaths) {
 void FileSystem::shutdown() {
     for (auto a : impl->archives) delete a;
     impl->archives.clear();
+    impl->searchPaths.clear();
 }
 
 void FileSystem::addArchive(Archive* archive) {
@@ -93,7 +97,11 @@ void FileSystem::addArchive(Archive* archive) {
 }
 
 void FileSystem::addPath(const char* path) {
-    impl->searchPaths.push_back(path);
+    if (!path || !*path) return;
+    std::error_code error;
+    if (!fs::is_directory(path, error)) return;
+    if (std::find(impl->searchPaths.begin(), impl->searchPaths.end(), path) == impl->searchPaths.end())
+        impl->searchPaths.emplace_back(path);
 }
 
 bool FileSystem::readFile(const char* path, std::vector<uint8_t>& data) {
@@ -266,6 +274,19 @@ bool FileSystem::fileExists(const char* path) const {
             ".jpg", ".png", ".gif", ".bmp", ".bm8", ".jpeg", ".tga", ".dds"};
         for (const char* extension : textureExtensions)
             if (fileExists((requested + extension).c_str())) return true;
+    }
+    return false;
+}
+
+bool FileSystem::removeFile(const char* path) {
+    if (!TorchPath::isSafeLogicalPath(path) || !path || !*path) return false;
+    for (auto root = impl->searchPaths.rbegin(); root != impl->searchPaths.rend(); ++root) {
+        std::string real;
+        if (!resolveExtractedPath(*root, path, real)) continue;
+        if (!TorchPath::staysWithinRoot(root->c_str(), real.c_str())) continue;
+        std::error_code error;
+        if (!fs::is_regular_file(real, error) || fs::is_symlink(real, error)) continue;
+        return fs::remove(real, error) && !error;
     }
     return false;
 }

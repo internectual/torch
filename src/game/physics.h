@@ -1,6 +1,21 @@
 #pragma once
 #include "core/math.h"
 #include "game/game.h"
+#include <cmath>
+
+// Camera and interaction traces are presentation-only, but they still feed
+// terrain and interior collision. Reject an incomplete view ray before its
+// normalization can turn the trace and impact effects into NaNs.
+inline bool rayCastInputUsable(const Point3F& direction, float maxDistance) {
+    if (!std::isfinite(direction.x) || !std::isfinite(direction.y) ||
+        !std::isfinite(direction.z) || !std::isfinite(maxDistance) ||
+        maxDistance <= 0.0f)
+        return false;
+    const float length = std::sqrt(direction.x * direction.x +
+                                   direction.y * direction.y +
+                                   direction.z * direction.z);
+    return std::isfinite(length) && length > 1.0e-4f;
+}
 
 class Physics {
 public:

@@ -7,6 +7,7 @@
 #include <vector>
 #include <utility>
 #include <filesystem>
+#include "fs/file_system.h"
 
 struct MissionMetadata {
     std::string file;
@@ -50,9 +51,52 @@ inline bool isSafeMissionMapName(const std::string& name) {
 }
 
 inline std::string missionLoadPath(const std::string& name) {
-    if (name.find('\\') != std::string::npos) return {};
     const std::string map = missionMapName(name);
     return isSafeMissionMapName(map) ? map : std::string();
+}
+
+inline std::vector<std::string> missionFileCandidates(const std::string& name) {
+    const std::string map = missionLoadPath(name);
+    if (map.empty()) return {};
+    return {"missions/" + map + ".mis", "missions/" + map + ".misPK"};
+}
+
+inline bool resolveMissionFile(FileSystem& fs, const std::string& name,
+                               std::string& resolvedPath, std::string& content) {
+    const std::string requested = missionLoadPath(name);
+    if (requested.empty()) return false;
+
+    for (const auto& candidate : missionFileCandidates(requested)) {
+        if (fs.readTextFile(candidate.c_str(), content) && !content.empty()) {
+            resolvedPath = candidate;
+            return true;
+        }
+    }
+
+    // Demo headers sometimes contain only a basename. Use a unique mounted
+    // mission match without discarding authored subdirectories.
+    std::vector<std::string> mounted;
+    fs.listFiles(nullptr, mounted);
+    const std::string requestedLower = missionLower(requested);
+    const size_t requestedSlash = requested.rfind('/');
+    const std::string requestedBase = missionLower(
+        requested.substr(requestedSlash == std::string::npos ? 0 : requestedSlash + 1));
+    std::string match;
+    for (const auto& candidate : mounted) {
+        const std::string candidateLower = missionLower(candidate);
+        if (!candidateLower.starts_with("missions/") || !isMissionFile(candidate)) continue;
+        const std::string map = missionMapName(candidate);
+        const std::string mapLower = missionLower(map);
+        const size_t slash = map.rfind('/');
+        const std::string base = missionLower(
+            map.substr(slash == std::string::npos ? 0 : slash + 1));
+        if (mapLower != requestedLower && base != requestedBase) continue;
+        if (!match.empty()) return false;
+        match = candidate;
+    }
+    if (match.empty() || !fs.readTextFile(match.c_str(), content) || content.empty()) return false;
+    resolvedPath = match;
+    return true;
 }
 
 inline MissionMetadata parseMissionMetadata(const std::string& file,

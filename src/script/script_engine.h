@@ -14,6 +14,11 @@
 class ScriptEngine;
 class TorqueScript;
 
+// isDemo() describes the executable build mode, not demo recording playback.
+inline bool isDemoBuildMode(bool demoBuild, bool dedicated) {
+    return demoBuild && !dedicated;
+}
+
 struct ScriptConnectionState {
     std::string serverAddress;
     uint16_t serverPort = 0;
@@ -27,16 +32,29 @@ struct ScriptConnectionState {
 };
 
 struct ScriptObjectState {
+    struct ThreadState {
+        int sequence = -1;
+        int state = 0;
+        float timescale = 1.0f;
+        float position = 0.0f;
+        bool forward = true;
+        bool atEnd = false;
+        bool valid = false;
+    };
     struct MountedImage {
         int datablockId = -1;
         int mountPoint = 0;
+        int mountNodeObjectId = 0;
         bool loaded = false;
         bool firing = false;
     };
     int datablockId = 0;
     std::string className;
     std::string shapeName;
+    std::string skinName;
+    std::string profileName;
     std::string name;
+    int type = 0;
     Point3F position{};
     Point3F rotation{};
     float rotationW = 1.0f;
@@ -44,17 +62,46 @@ struct ScriptObjectState {
     float health = 100.0f;
     float maxHealth = 100.0f;
     float energy = 100.0f;
+    int damageState = 0;
     float repairRate = 0.0f;
     int sensorGroup = -1;
+    float headPitch = 0.0f;
+    float headYaw = 0.0f;
+    float barrelPitch = 0.0f;
+    float barrelYaw = 0.0f;
+    float shieldLevel = 0.0f;
+    bool hasHeadAngles = false;
+    bool hasTurretAim = false;
+    bool hasShield = false;
     bool hasRotation = false;
     bool hasVelocity = false;
     bool hasHealth = false;
     bool hasMaxHealth = false;
     bool hasEnergy = false;
+    bool hasDamageState = false;
+    bool jetting = false;
+    bool frozen = false;
+    bool braking = false;
+    bool hasVehicleState = false;
+    bool cloaked = false;
+    bool hasCloak = false;
     MountedImage mountedImages[8]{};
+    ThreadState threads[4]{};
     int teamId = 0;
     int state = 0;
 };
+
+namespace ScriptStateParity {
+inline float damageLevel(float health, float maxHealth) {
+    if (!(maxHealth > 0.0f)) return 0.0f;
+    const float value = 1.0f - health / maxHealth;
+    return value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value;
+}
+
+inline float energyPercent(float energy) {
+    return energy < 0.0f ? 0.0f : energy > 100.0f ? 1.0f : energy / 100.0f;
+}
+}
 
 struct ScriptLoadoutState {
     std::map<std::string, int> inventory;
@@ -96,6 +143,15 @@ struct ScriptObject {
     std::string name;
     std::unordered_map<std::string, VMValue> fields;
     std::unordered_map<std::string, VMValue> internals;
+    std::vector<std::string> deleteNotifyListeners;
+};
+
+struct ScriptMissionObject {
+    int id = 0;
+    std::string className;
+    std::string name;
+    std::string parentName;
+    std::unordered_map<std::string, VMValue> fields;
 };
 
 // Action-map binding store, shared by the TS bind/bindcmd natives and the
@@ -131,8 +187,10 @@ public:
     void addObject(ScriptObject* obj);
 
     void registerNativeFunction(const char* name, NativeFunc fn);
+    bool unloadScript(const char* name);
 
-    VMValue execute(DSOFile* dso, uint32_t startIp, const std::vector<VMValue>& args);
+    VMValue execute(DSOFile* dso, uint32_t startIp, const std::vector<VMValue>& args,
+                    bool methodCall = false);
     const std::vector<DSOFile*>& loadedScripts() const;
 
 private:
@@ -160,13 +218,19 @@ public:
     VirtualMachine* vm() { return vmInstance; }
     TorqueScript* ts() { return tsInstance; }
 
-    // Stock scripts use isDemo() to select replay-only UI and input paths.
-    // Keep the source of that state injectable so the native remains testable.
+    // Stock scripts use isDemo() for the executable's retail/demo build path;
+    // playback state is tracked separately by isDemoPlaying().
     void setDemoStateProvider(std::function<bool()> provider) {
         demoStateProvider = std::move(provider);
     }
     bool isDemoPlaying() const {
         return demoStateProvider ? demoStateProvider() : false;
+    }
+    void setDemoModeProvider(std::function<bool()> provider) {
+        demoModeProvider = std::move(provider);
+    }
+    bool isDemoMode() const {
+        return demoModeProvider ? demoModeProvider() : false;
     }
     void setServerStateProvider(std::function<bool()> provider) {
         serverStateProvider = std::move(provider);
@@ -203,6 +267,8 @@ public:
     using InventoryMutation = std::function<bool(int, const std::string&, int)>;
     using ObjectMutation = std::function<bool(int, int)>;
     using ImageMutation = std::function<bool(int, int, int)>;
+    using VelocityMutation = std::function<bool(int, const Point3F&)>;
+    using ThreadMutation = std::function<bool(int, int, int, const std::string&)>;
     void setHealthMutationProvider(PlayerMutation provider) {
         healthMutationProvider = std::move(provider);
     }
@@ -226,6 +292,12 @@ public:
     }
     void setMountedImageMutationProvider(ImageMutation provider) {
         mountedImageMutationProvider = std::move(provider);
+    }
+    void setVelocityMutationProvider(VelocityMutation provider) {
+        velocityMutationProvider = std::move(provider);
+    }
+    void setThreadMutationProvider(ThreadMutation provider) {
+        threadMutationProvider = std::move(provider);
     }
     void setControlObjectMutationProvider(ObjectMutation provider) {
         controlObjectMutationProvider = std::move(provider);
@@ -254,6 +326,12 @@ public:
     bool mutateMountedImage(int objectId, int slot, int datablock) const {
         return mountedImageMutationProvider && mountedImageMutationProvider(objectId, slot, datablock);
     }
+    bool mutateVelocity(int objectId, const Point3F& velocity) const {
+        return velocityMutationProvider && velocityMutationProvider(objectId, velocity);
+    }
+    bool mutateThread(int objectId, int slot, int operation, const std::string& value = {}) const {
+        return threadMutationProvider && threadMutationProvider(objectId, slot, operation, value);
+    }
     bool mutateControlObject(int connectionId, int objectId) const {
         return controlObjectMutationProvider && controlObjectMutationProvider(connectionId, objectId);
     }
@@ -272,6 +350,21 @@ public:
 
     ScriptObject* findObject(const char* name);
 
+    void objectAdded(ScriptObject* object);
+    bool setObjectField(ScriptObject* object, const std::string& field, const VMValue& value);
+    bool addDeleteNotify(ScriptObject* listener, ScriptObject* target);
+    bool clearDeleteNotify(ScriptObject* listener, ScriptObject* target);
+    bool deleteScriptObject(const std::string& name);
+
+    void setMissionObjects(std::vector<ScriptMissionObject> objects, bool worldBacked = false);
+    bool missionObjectsWorldBacked() const { return missionObjectsWorldBacked_; }
+    void clearMissionObjects();
+    void cancelMissionEvents();
+    void dispatchMissionObjectRemovalCallbacks();
+    const std::vector<ScriptMissionObject>& missionObjects() const { return missionObjects_; }
+    std::vector<std::string> missionDeletionOrder(const std::string& name) const;
+    void removeMissionObjects(const std::vector<std::string>& names);
+
     // Global object registry
     std::unordered_map<std::string, ScriptObject*> objects;
 
@@ -281,6 +374,7 @@ private:
     TorqueScript* tsInstance{};
     Console* con{};
     std::function<bool()> demoStateProvider;
+    std::function<bool()> demoModeProvider;
     std::function<bool()> serverStateProvider;
     std::function<bool()> clientStateProvider;
     std::function<ScriptConnectionState()> connectionStateProvider;
@@ -296,7 +390,11 @@ private:
     std::function<bool(int, int)> currentWeaponMutationProvider;
     ObjectMutation teamMutationProvider;
     ImageMutation mountedImageMutationProvider;
+    VelocityMutation velocityMutationProvider;
+    ThreadMutation threadMutationProvider;
     ObjectMutation controlObjectMutationProvider;
+    std::vector<ScriptMissionObject> missionObjects_;
+    bool missionObjectsWorldBacked_ = false;
 };
 
 // Prefs-export gate: boot-time default-seeding code paths may call

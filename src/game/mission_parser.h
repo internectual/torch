@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 
 // Minimal .mis file parser
 // Extracts object definitions and their properties
@@ -27,6 +28,18 @@ struct MisObject {
     std::vector<MisProp> props;
     std::vector<MisObject> children;
 };
+
+// Torque resolves mission class names without regard to ASCII case. Keep the
+// authored spelling in MisObject, but use this helper when dispatching class
+// specific runtime behavior.
+inline bool missionClassEquals(const std::string& actual, const char* expected) {
+    if (!expected || actual.size() != std::strlen(expected)) return false;
+    for (size_t i = 0; i < actual.size(); ++i) {
+        if (std::tolower((unsigned char)actual[i]) !=
+            std::tolower((unsigned char)expected[i])) return false;
+    }
+    return true;
+}
 
 struct MisParseBudget {
     static constexpr size_t MaxContentBytes = 64u * 1024u * 1024u;
@@ -100,12 +113,13 @@ static MisObject parseMisObject(const std::string& input, size_t& pos,
     pos++; // skip {
 
     // Read properties and children
+    bool closed = false;
     while (pos < input.size()) {
         while (pos < input.size() && input[pos] <= ' ') pos++;
         if (pos >= input.size()) break;
 
         // Check for } (end of this object)
-        if (input[pos] == '}') { pos++; break; }
+        if (input[pos] == '}') { pos++; closed = true; break; }
 
         // Check for nested object (starts with "new")
         if (pos + 3 <= input.size() && input.substr(pos, 3) == "new" &&
@@ -172,16 +186,25 @@ static MisObject parseMisObject(const std::string& input, size_t& pos,
         }
     }
 
+    if (!closed) return MisObject{};
     return obj;
 }
 
-static std::vector<MisObject> parseMisFile(const std::string& content) {
+[[maybe_unused]] static std::vector<MisObject> parseMisFile(const std::string& content,
+                                                            std::string* diagnostic = nullptr) {
     std::vector<MisObject> objects;
     MisParseBudget budget;
-    if (content.size() > MisParseBudget::MaxContentBytes) return objects;
+    if (diagnostic) diagnostic->clear();
+    if (content.size() > MisParseBudget::MaxContentBytes) {
+        if (diagnostic) *diagnostic = "content exceeds 64 MiB parser limit";
+        return objects;
+    }
     size_t pos = 0;
 
-    // Remove comments without touching quoted TorqueScript strings.
+    // Remove comments without touching quoted TorqueScript strings.  Stock
+    // missions use both line and C-style block comments; leaving a block
+    // comment in place can make its example objects appear as real mission
+    // objects to the keyword scanner.
     std::string clean;
     clean.reserve(content.size());
     bool quoted = false;
@@ -189,15 +212,33 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
     for (size_t i = 0; i < content.size(); i++) {
         const char c = content[i];
         if (c == '"' && !escaped) quoted = !quoted;
-        if (!quoted && c == '/' && i + 1 < content.size() && content[i + 1] == '/') {
-            while (i < content.size() && content[i] != '\n') i++;
-            if (i < content.size()) clean += '\n';
-            escaped = false;
-            continue;
+        if (!quoted && c == '/' && i + 1 < content.size()) {
+            if (content[i + 1] == '/') {
+                while (i < content.size() && content[i] != '\n') i++;
+                if (i < content.size()) clean += '\n';
+                escaped = false;
+                continue;
+            }
+            if (content[i + 1] == '*') {
+                const size_t end = content.find("*/", i + 2);
+                if (end == std::string::npos) {
+                    if (diagnostic) *diagnostic = "unterminated block comment";
+                    return {};
+                }
+                for (size_t comment = i; comment < end + 2; ++comment)
+                    if (content[comment] == '\n') clean += '\n';
+                i = end + 1;
+                escaped = false;
+                continue;
+            }
         }
         clean += c;
         escaped = c == '\\' && !escaped;
         if (c != '\\') escaped = false;
+    }
+    if (quoted) {
+        if (diagnostic) *diagnostic = "unterminated quoted string";
+        return {};
     }
 
     // Parse objects and datablocks
@@ -216,7 +257,11 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
         size_t found = findKeyword("new");
         size_t dbFound = findKeyword("datablock");
         if (dbFound != std::string::npos && (found == std::string::npos || dbFound < found)) {
-            if (budget.objects >= MisParseBudget::MaxObjects) return {};
+            if (budget.objects >= MisParseBudget::MaxObjects) {
+                budget.exceeded = true;
+                if (diagnostic) *diagnostic = "parser budget exceeded";
+                return {};
+            }
             budget.objects++;
             // Parse datablock definition
             pos = dbFound + 10; // skip "datablock "
@@ -243,18 +288,25 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
             }
             // Expect {
             while (pos < clean.size() && clean[pos] <= ' ') pos++;
-            if (pos >= clean.size() || clean[pos] != '{') { pos++; continue; }
+            if (pos >= clean.size() || clean[pos] != '{') {
+                if (diagnostic && diagnostic->empty()) *diagnostic = "object is missing an opening brace";
+                pos++;
+                continue;
+            }
             pos++;
             // Parse properties until }
             MisObject obj;
             obj.className = className;
             obj.objName = objName;
             obj.teamId = missionTeamId(objName);
+            bool closed = false;
             while (pos < clean.size()) {
                 while (pos < clean.size() && clean[pos] <= ' ') pos++;
-                if (pos >= clean.size() || clean[pos] == '}') { if (pos < clean.size()) pos++; break; }
+                if (pos >= clean.size()) break;
+                if (clean[pos] == '}') { pos++; closed = true; break; }
                 if (obj.props.size() >= MisParseBudget::MaxPropertiesPerObject) {
                     budget.exceeded = true;
+                    if (diagnostic) *diagnostic = "parser budget exceeded";
                     return {};
                 }
                 // Read property name
@@ -281,11 +333,16 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
                 }
                 if (propValue.size() > MisParseBudget::MaxValueBytes) {
                     budget.exceeded = true;
+                    if (diagnostic) *diagnostic = "parser budget exceeded";
                     return {};
                 }
                 if (pos < clean.size() && clean[pos] == ';') pos++;
                 for (auto& c : propName) if (c >= 'A' && c <= 'Z') c += 32;
                 obj.props.push_back({propName, propValue});
+            }
+            if (!closed) {
+                if (diagnostic) *diagnostic = "object is missing a closing brace";
+                return {};
             }
             // Skip ;
             while (pos < clean.size() && clean[pos] <= ' ') pos++;
@@ -296,16 +353,23 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
         if (found == std::string::npos) break;
         pos = found;
 
+        const size_t objectStart = pos;
         MisObject obj = parseMisObject(clean, pos, budget);
         if (!obj.className.empty()) {
             objects.push_back(std::move(obj));
+        } else if (pos == objectStart && pos < clean.size()) {
+            // Malformed input must not leave the scanner at the same byte.
+            ++pos;
         }
         // Consume ; after top-level }
         while (pos < clean.size() && clean[pos] <= ' ') pos++;
         if (pos < clean.size() && clean[pos] == ';') pos++;
     }
 
-    if (budget.exceeded) return {};
+    if (budget.exceeded) {
+        if (diagnostic) *diagnostic = "parser budget exceeded";
+        return {};
+    }
 
     // Flatten children into top-level objects (recursive breadth-first)
     size_t i = 0;
@@ -320,6 +384,8 @@ static std::vector<MisObject> parseMisFile(const std::string& content) {
         i++;
     }
 
+    if (objects.empty() && diagnostic && diagnostic->empty())
+        *diagnostic = "no complete mission objects found";
     return objects;
 }
 
@@ -336,7 +402,7 @@ static std::string getProp(const std::vector<MisProp>& props, const std::string&
 // Find first object of a given class
 inline MisObject* findObject(std::vector<MisObject>& objects, const std::string& className) {
     for (auto& obj : objects) {
-        if (obj.className == className) return &obj;
+        if (missionClassEquals(obj.className, className.c_str())) return &obj;
     }
     return nullptr;
 }
@@ -346,9 +412,12 @@ static Point3F parsePos(const std::string& s) {
     Point3F p{0,0,0};
     float vals[3] = {0,0,0};
     int count = sscanf(s.c_str(), "%f %f %f", &vals[0], &vals[1], &vals[2]);
-    if (count >= 1) p.x = vals[0];
-    if (count >= 2) p.y = vals[1];
-    if (count >= 3) p.z = vals[2];
+    // Torque's vector parser leaves malformed components at zero. In
+    // particular, do not let mission text such as "nan 2 3" poison render
+    // transforms and make the affected object disappear.
+    if (count >= 1 && std::isfinite(vals[0])) p.x = vals[0];
+    if (count >= 2 && std::isfinite(vals[1])) p.y = vals[1];
+    if (count >= 3 && std::isfinite(vals[2])) p.z = vals[2];
     return p;
 }
 
@@ -361,6 +430,13 @@ struct AuthoredMissionMarker {
     int teamId = 0;
     std::string label;
 };
+
+// Mission positions are serialized in Torque's Z-up frame. Gameplay state is
+// Y-up, so authored spawn points must be converted before they become player
+// coordinates (render-only mission objects perform this conversion later).
+inline Point3F authoredMissionWorldPosition(const AuthoredMissionMarker& marker) {
+    return Math::torquePointToYUp(marker.position);
+}
 
 struct AuthoredMissionObjective {
     std::string objectName;
@@ -392,7 +468,15 @@ struct AuthoredNavigationGraph {
                                           bool defaultValue = false) {
     const std::string value = getProp(object.props, name);
     if (value.empty()) return defaultValue;
-    return value == "1" || value == "true" || value == "TRUE";
+    if (value == "1") return true;
+    if (value == "0") return false;
+    std::string normalized = value;
+    for (char& c : normalized)
+        c = (char)std::tolower((unsigned char)c);
+    // Torque's console boolean conversion accepts the textual aliases used by
+    // stock mission scripts, not only the common 0/1 and true/false forms.
+    return normalized == "true" || normalized == "on" ||
+           normalized == "yes" || normalized == "enabled";
 }
 
 // These are the object-level switches supported by the local V12 mapper.  A
@@ -432,7 +516,7 @@ struct AuthoredNavigationGraph {
     if (sscanf(scale.c_str(), "%f %f %f", &marker.scale.x, &marker.scale.y,
                &marker.scale.z) != 3)
         marker.scale = {1, 1, 1};
-    if (object.className == "SpawnSphere") {
+    if (missionClassEquals(object.className, "SpawnSphere")) {
         const std::string radius = getProp(object.props, "radius");
         marker.radius = radius.empty() ? 100.0f : std::max(0.0f, (float)std::atof(radius.c_str()));
     }
@@ -440,9 +524,9 @@ struct AuthoredNavigationGraph {
     marker.teamId = team.empty() ? object.teamId : std::atoi(team.c_str());
     marker.label = getProp(object.props, "nametag");
     if (marker.label.empty()) marker.label = getProp(object.props, "name");
-    if (marker.label.empty() && (object.className == "Marker" ||
-                                 object.className == "MissionMarker" ||
-                                 object.className == "SpawnSphere"))
+    if (marker.label.empty() && (missionClassEquals(object.className, "Marker") ||
+                                 missionClassEquals(object.className, "MissionMarker") ||
+                                 missionClassEquals(object.className, "SpawnSphere")))
         marker.label = object.objName;
     return marker;
 }
@@ -504,7 +588,7 @@ struct AuthoredNavigationGraph {
     for (int pass = 0; pass < 2; ++pass) {
         selected = nullptr;
         for (const auto& object : objects) {
-            if (object.className != "SpawnSphere") continue;
+            if (!missionClassEquals(object.className, "SpawnSphere")) continue;
             const int objectTeam = authoredMissionMarker(object).teamId;
             const bool wanted = pass == 0 ? objectTeam == teamId : objectTeam == 0;
             if (wanted && better(&object, selected)) selected = &object;
@@ -512,7 +596,7 @@ struct AuthoredNavigationGraph {
         if (selected) return selected;
     }
     for (const auto& object : objects) {
-        if (object.className != "SpawnSphere") continue;
+        if (!missionClassEquals(object.className, "SpawnSphere")) continue;
         if (better(&object, selected)) selected = &object;
     }
     return selected;

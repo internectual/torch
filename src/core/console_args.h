@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <climits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -61,6 +62,19 @@ inline bool parseConsolePort(std::string_view text, uint16_t& port) {
     return true;
 }
 
+inline bool parseNonNegativeInt(std::string_view text, int& value) {
+    if (text.empty()) return false;
+    std::string input(text);
+    char* end = nullptr;
+    errno = 0;
+    const long parsed = std::strtol(input.c_str(), &end, 10);
+    if (errno == ERANGE || end != input.c_str() + input.size() || parsed < 0 ||
+        parsed > INT_MAX)
+        return false;
+    value = static_cast<int>(parsed);
+    return true;
+}
+
 inline bool parseConsoleHostPort(std::string_view text, std::string& host, uint16_t& port) {
     const size_t colon = text.rfind(':');
     if (colon == std::string_view::npos || colon == 0 || colon + 1 >= text.size()) return false;
@@ -68,4 +82,45 @@ inline bool parseConsoleHostPort(std::string_view text, std::string& host, uint1
     if (!parseConsolePort(text.substr(colon + 1), port)) return false;
     host.assign(text.substr(0, colon));
     return true;
+}
+
+// Demo playback is a client launch mode as well as a console command. Keep
+// both historical command-line spellings on the same parsing path.
+inline std::string findDemoLaunchPath(int argc, char* const argv[]) {
+    for (int i = 1; i + 1 < argc; ++i) {
+        const std::string_view option(argv[i]);
+        if (option == "-demo" || option == "--demo" || option == "-playdemo")
+            return argv[i + 1];
+    }
+    return {};
+}
+
+// Both explicit demo builds and recording playback bypass the retail login
+// transition. Playback still uses the normal client GUI after bootstrap.
+inline bool shouldSkipLogin(bool demoMode, bool playback, bool requestedNoLogin) {
+    return requestedNoLogin || demoMode || playback;
+}
+
+// The stock login dialog is also used for the offline client.  Offline login
+// completes locally; an explicitly online launch must remain in the account
+// flow instead of silently starting a local mission.
+inline bool loginCanCompleteOffline(bool online) {
+    return !online;
+}
+
+// An explicit master URL wins; the demo-only setting must never affect the
+// normal retail path.
+inline std::string selectMasterServerUrl(bool demoMode, std::string_view requested,
+                                         std::string_view demoMasterServer,
+                                         std::string_view retailMasterServer) {
+    if (!requested.empty()) return std::string(requested);
+    return std::string(demoMode ? demoMasterServer : retailMasterServer);
+}
+
+// Demo builds may be distributed with different network permissions. Keep
+// this independent from recording playback and make it deterministic in tests.
+inline bool allowDemoConnection(bool demoMode, bool observer, bool allowConnect,
+                                bool allowWatch) {
+    if (!demoMode) return true;
+    return observer ? allowWatch : allowConnect;
 }

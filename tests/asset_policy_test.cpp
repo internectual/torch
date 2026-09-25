@@ -5,6 +5,7 @@
 #include "net/v12_events.h"
 #include "net/v12_datablocks.h"
 #include "net/v12_ghosts.h"
+#include "game/link_beam.h"
 #include "net/v12_ghost_packet.h"
 
 #include <cassert>
@@ -239,6 +240,36 @@ int main() {
     assert(actual.packetType == expected.packetType);
     assert(actual.ackByteCount == expected.ackByteCount);
     assert(actual.ackMask == expected.ackMask);
+    V12::DnetHeader noGameFlag = expected;
+    noGameFlag.gameFlag = false;
+    V12BitWriter noGameFlagWriter;
+    V12::writeDnetHeader(noGameFlagWriter, noGameFlag);
+    V12BitStream noGameFlagStream(noGameFlagWriter.data().data(),
+                                  noGameFlagWriter.data().size());
+    V12::DnetHeader rejectedGameFlag;
+    assert(!V12::readDnetHeader(noGameFlagStream, rejectedGameFlag));
+    assert(std::abs(V12::decodeVehicleSteering(0.0f) + V12::DefaultMaxSteeringAngle) < 1e-6f);
+    assert(std::abs(V12::decodeVehicleSteering(0.5f)) < 1e-6f);
+    assert(std::abs(V12::decodeVehicleSteering(1.0f) - V12::DefaultMaxSteeringAngle) < 1e-6f);
+    const auto lightning = shockLancePoints({0, 0, 0}, {2, 0, 0}, 0.5f);
+    assert(lightning.size() >= 2 && lightning.size() <= 50);
+    assert(lightning.front().x == 0.0f && lightning.back().x == 2.0f);
+    const auto repeat = shockLancePoints({0, 0, 0}, {2, 0, 0}, 0.5f);
+    assert(lightning.size() == repeat.size());
+    for (size_t i = 0; i < lightning.size(); ++i) {
+        assert(lightning[i].x == repeat[i].x);
+        assert(lightning[i].y == repeat[i].y);
+        assert(lightning[i].z == repeat[i].z);
+    }
+
+    V12::DnetHeader oversizedAck = expected;
+    oversizedAck.ackByteCount = 5;
+    V12BitWriter oversizedAckWriter;
+    V12::writeDnetHeader(oversizedAckWriter, oversizedAck);
+    V12BitStream oversizedAckStream(oversizedAckWriter.data().data(),
+                                    oversizedAckWriter.data().size());
+    V12::DnetHeader rejectedAck;
+    assert(!V12::readDnetHeader(oversizedAckStream, rejectedAck));
 
     V12::RateInfo rateExpected;
     rateExpected.hasCurrent = true;
@@ -264,6 +295,12 @@ int main() {
     assert(window.accept(13, false));
     assert((window.acknowledgementMask() & 2u) != 0);
     assert(!window.accept(12, true));
+    V12::ReceiveWindow gapWindow(false);
+    assert(gapWindow.accept(10, false));
+    assert(gapWindow.accept(44, false));
+    assert(gapWindow.acknowledgementMask() == 0);
+    assert(gapWindow.accept(45, false));
+    assert(gapWindow.acknowledgementMask() == 1);
 
     V12::ProtocolState protocol(2);
     protocol.noteSentDataPacket();
@@ -287,7 +324,19 @@ int main() {
     auto lostResult = protocol.processReceived(received);
     assert(lostResult.accepted && lostResult.acknowledgements.size() == 1 &&
            lostResult.acknowledgements[0].sequence == 2 &&
-           !lostResult.acknowledgements[0].acknowledged);
+           lostResult.acknowledgements[0].acknowledged);
+    V12::ProtocolState ordering(0);
+    V12::DnetHeader ordered = received;
+    ordered.highestAck = 0;
+    ordered.ackMask = 0;
+    ordered.sequence = 1;
+    assert(ordering.processReceived(ordered).dispatchData);
+    ordered.sequence = 3;
+    assert(ordering.processReceived(ordered).dispatchData);
+    ordered.sequence = 2;
+    const auto lateResult = ordering.processReceived(ordered);
+    assert(lateResult.accepted && !lateResult.dispatchData);
+    assert((ordering.snapshot().receiveAckMask & 1u) != 0);
     auto nativePing = protocol.buildPacket(V12::PacketType::Ping);
     V12BitStream nativePingStream(nativePing.data(), nativePing.size());
     V12::DnetHeader nativePingHeader;
@@ -454,6 +503,41 @@ int main() {
            serverPacketUpdates.size() == 1 &&
            serverPacketUpdates[0].operation == V12::GhostUpdate::Operation::Delete &&
            serverPacketGhosts.get(3) == nullptr);
+
+    // An unsupported class has no self-describing payload boundary. The
+    // decoder must stop immediately after the class id rather than consuming
+    // a guessed base-class layout.
+    V12BitWriter unknownGhostWriter;
+    unknownGhostWriter.writeFlag(true);       // ghost section present
+    unknownGhostWriter.writeUnsigned(4, 3);   // 7-bit ghost indices
+    unknownGhostWriter.writeFlag(true);       // one update
+    unknownGhostWriter.writeUnsigned(7, 7);   // index
+    unknownGhostWriter.writeFlag(false);      // not deleted
+    unknownGhostWriter.writeUnsigned(127, 7); // unsupported class
+    unknownGhostWriter.writeUnsigned(0x3ff, 10); // must remain unread
+    V12BitStream unknownGhostStream(unknownGhostWriter.data().data(),
+                                    unknownGhostWriter.data().size());
+    V12::GhostTracker unknownGhosts;
+    std::vector<V12::GhostUpdate> unknownUpdates;
+    assert(!V12::readGhostUpdates(unknownGhostStream, unknownGhosts,
+        unknownUpdates, [](V12BitStream&, uint16_t, uint16_t, bool) {
+            return false;
+        }));
+    assert(unknownUpdates.size() == 1 && unknownUpdates[0].failed);
+    assert(unknownGhostStream.position() == 20);
+    assert(unknownGhosts.size() == 0);
+
+    V12BitWriter truncatedGhostWriter;
+    truncatedGhostWriter.writeFlag(true);
+    truncatedGhostWriter.writeUnsigned(4, 3);
+    truncatedGhostWriter.writeFlag(true);
+    V12BitStream truncatedGhostStream(truncatedGhostWriter.data().data(),
+                                      truncatedGhostWriter.data().size());
+    std::vector<V12::GhostUpdate> truncatedUpdates;
+    assert(!V12::readGhostUpdates(truncatedGhostStream, unknownGhosts,
+        truncatedUpdates));
+    assert(truncatedGhostStream.failed());
+
     V12::NetStringTable commandStrings;
     auto commandEvents = V12::buildRemoteCommandEvents(
         commandStrings, "setPlayerTeam", {"0"});

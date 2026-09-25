@@ -98,6 +98,7 @@ struct Texture {
 };
 
 struct Shader {
+    ~Shader();
     uint32_t id{};
     bool loaded = false;
     std::unordered_map<std::string, int> uniformCache;
@@ -144,6 +145,7 @@ struct Font {
     bool load(const uint8_t* data, size_t size);
     bool loadDefault(int size = 8);
     bool loadGFT(const uint8_t* data, size_t size);
+    void destroy();
     void render(const char* text, float x, float y, const ColorF& color, float scale = 1.0f, bool exactColor = false, int maxChars = -1);
     Point2F measure(const char* text, float scale = 1.0f);
 };
@@ -232,6 +234,7 @@ struct DTSShape {
     std::vector<float> collisionVerts;
     std::vector<uint32_t> collisionIndices;
     bool load(const uint8_t* data, size_t size);
+    void destroy();
     int interiorZoneForPoint(const Point3F& point) const;
     void interiorVisibleZones(int zone, const Point3F& camera, const MatrixF& clipTransform,
                               std::vector<bool>& visible) const;
@@ -281,6 +284,12 @@ struct TerrainBlock {
     Texture lightmap;   // baked self-shadowing NdotL lightmap (computed from heightfield)
     std::vector<std::string> textureNames;
     bool loaded = false;
+
+    bool contains(float wx, float wz) const {
+        if (size < 2 || squareSize <= 0.0f) return false;
+        return wx >= worldOffset.x && wx <= worldOffset.x + size * squareSize &&
+               wz <= worldOffset.z && wz >= worldOffset.z - size * squareSize;
+    }
 
     float sampleHeight(float wx, float wz) const;
     void setEmptySquareRuns(const std::vector<uint32_t>& runs);
@@ -375,6 +384,7 @@ public:
     void flushSpriteBatch();
 
     Texture* loadTexture(const char* path);
+    void clearMissingTextureCache();
     // Resolve a direct texture or an existing IFL into renderable frames.
     // Durations are in seconds and are empty when the asset has no timing.
     bool loadTextureFrames(const char* path, std::vector<uint32_t>& frames,
@@ -397,7 +407,7 @@ public:
     bool screenshot(const char* path);
     bool screenshot(const char* path, const char* metaData);
     // Shadow mapping
-    void initShadowMap(int32_t size = 2048);
+    bool initShadowMap(int32_t size = 2048);
     void beginShadowPass(const Point3F& lightDir, const Point3F& sceneCenter, float sceneRadius);
     void endShadowPass();
     const MatrixF& shadowMatrix() const { return shadowBiasVP; }

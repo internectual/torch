@@ -49,6 +49,14 @@ inline uint32_t nextLoopGapMs(uint32_t& state, int32_t minimum, int32_t maximum)
 }
 }
 
+// OpenAL listener state must never receive a non-finite camera sample. Invalid
+// network/demo transforms are ignored rather than poisoning spatial audio.
+inline Point3F sanitizeListenerVector(const Point3F& value) {
+    return std::isfinite(value.x) && std::isfinite(value.y) &&
+                   std::isfinite(value.z)
+        ? value : Point3F{};
+}
+
 struct SoundBuffer {
     uint32_t buffer{};
     bool loaded = false;
@@ -196,6 +204,7 @@ public:
     SoundSource* createSource(bool persistent = false, int priority = 0);
     void releaseSource(SoundSource* source);
     bool isSourceAlive(const SoundSource* source) const;
+    bool isBufferAlive(const SoundBuffer* buffer) const;
 
     AudioConfig& config() { return cfg; }
     bool isInitialized() const { return initialized; }

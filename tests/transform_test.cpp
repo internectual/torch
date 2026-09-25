@@ -30,6 +30,15 @@ int main() {
     const MatrixF identity = Math::torqueRotationToYUp({1, 2, 3}, 0.0f);
     assertPoint(identity.transform({4, 5, 6}), {4, 5, 6});
 
+    // Axis-angle input is normalized, while a zero/non-finite axis is the
+    // deterministic identity instead of a scaled or NaN matrix.
+    MatrixF zeroAxis;
+    zeroAxis.setRotationAxis({0, 0, 0}, Math::PI * 0.5f);
+    assertPoint(zeroAxis.transform({1, 2, 3}), {1, 2, 3});
+    MatrixF scaledAxis;
+    scaledAxis.setRotationAxis({0, 0, 2}, Math::PI * 0.5f);
+    assertPoint(scaledAxis.transform({1, 0, 0}), {0, 1, 0});
+
     // ParticleEmissionDummy emits along Torque +Z, which is engine +Y.
     const MatrixF dummyRotation = Math::torqueRotationToYUp({0, 0, 1}, 0.0f);
     assertPoint(dummyRotation.transformNormal(Math::torquePointToYUp({0, 0, 1})),
@@ -40,4 +49,24 @@ int main() {
                 {0, 0, -1});
     assertPoint(Math::torqueCameraForwardToYUp({0, 0, 1}, Math::PI * 0.5f),
                 {-1, 0, 0});
+
+    const QuatF source = {0.2f, -0.3f, 0.4f, 0.8f};
+    const QuatF roundTrip = QuatF::fromMatrix(source.toMatrix());
+    assert(close(roundTrip.x * roundTrip.x + roundTrip.y * roundTrip.y +
+                 roundTrip.z * roundTrip.z + roundTrip.w * roundTrip.w, 1.0f));
+    assertPoint(roundTrip.toMatrix().transform({1, 2, 3}),
+                source.toMatrix().transform({1, 2, 3}));
+    assertPoint(QuatF{0, 0, 0, 0}.toMatrix().transform({4, 5, 6}), {4, 5, 6});
+    MatrixF malformed;
+    malformed.m[0][0] = NAN;
+    assertPoint(malformed.inverse().transform({4, 5, 6}), {4, 5, 6});
+    MatrixF singular;
+    singular.setScale({1, 0, 1});
+    assertPoint(singular.inverse().transform({4, 5, 6}), {4, 5, 6});
+
+    // A transient invalid observer/demo camera must not turn the view basis
+    // into NaNs and make the whole frame disappear.
+    MatrixF invalidView;
+    invalidView.lookAt({NAN, 0, 0}, {0, 0, 0}, {0, 1, 0});
+    assertPoint(invalidView.transform({4, 5, 6}), {4, 5, 6});
 }

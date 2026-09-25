@@ -2,6 +2,19 @@
 #include "core/math.h"
 #include <vector>
 #include <cstdint>
+#include <cmath>
+
+// Terrain is a height field, so its contact normal must follow the local
+// slope rather than being treated as an always-horizontal floor.
+inline Point3F terrainNormalFromHeights(float left, float right,
+                                        float back, float front,
+                                        float sampleSpacing = 1.0f) {
+    if (sampleSpacing <= 0.0f) return {0.0f, 1.0f, 0.0f};
+    const float dx = (right - left) / (2.0f * sampleSpacing);
+    const float dz = (front - back) / (2.0f * sampleSpacing);
+    const float length = std::sqrt(dx * dx + 1.0f + dz * dz);
+    return {-dx / length, 1.0f / length, -dz / length};
+}
 
 struct CollisionTri {
     Point3F v0, v1, v2;

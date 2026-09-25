@@ -13,6 +13,8 @@ namespace V12 {
 // Connection protocol version from the Tribes2.exe handshake. The demo file
 // header uses a different packed build/version constant.
 constexpr uint32_t ProtocolVersion = 0x33;
+// Tribes 2's native dnet transport rejects datagrams above this payload size.
+constexpr size_t MaxPacketDataSize = 1500;
 constexpr int PacketSequenceBits = 9;
 constexpr int MaxPacketSequence = 1 << PacketSequenceBits;
 constexpr uint8_t OobConnectChallengeRequest = 26;
@@ -178,7 +180,8 @@ struct ServerPacketOptions {
 
 ClientEvent makeNetStringEvent(uint16_t id, const std::string& value);
 ClientEvent makeGhostingMessageEvent(uint32_t sequence, uint8_t message,
-                                     uint16_t ghostCount);
+                                      uint16_t ghostCount);
+ClientEvent makeMissionCrcEvent(uint32_t missionCrc);
 std::vector<ClientEvent> buildRemoteCommandEvents(NetStringTable& strings,
                                                    const std::string& command,
                                                    const std::vector<std::string>& args = {});

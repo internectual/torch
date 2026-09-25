@@ -4,10 +4,19 @@
 #include "net/v12_registry.h"
 
 #include <cstdint>
+#include <algorithm>
 #include <map>
 #include <vector>
 
 namespace V12 {
+
+constexpr float DefaultMaxSteeringAngle = 0.785f;
+
+inline float decodeVehicleSteering(float packedYaw,
+                                   float maxSteeringAngle = DefaultMaxSteeringAngle) {
+    packedYaw = std::clamp(packedYaw, 0.0f, 1.0f);
+    return 2.0f * packedYaw * maxSteeringAngle - maxSteeringAngle;
+}
 
 struct GhostEntry {
     uint16_t index = 0;
@@ -49,12 +58,14 @@ struct PlayerGhostState {
     float rotationW = 1.0f;
     float health = 100.0f;
     float maxHealth = 100.0f;
+    float steeringYaw = 0.0f;
     int damageState = 0;
     float energy = 100.0f;
     bool hasHealth = false;
     bool hasMaxHealth = false;
     bool hasDamageState = false;
     bool hasEnergy = false;
+    bool hasSteering = false;
     int kills = 0;
     int deaths = 0;
     int score = 0;
@@ -109,6 +120,7 @@ public:
     void clear() { ghosts.clear(); }
 
     const GhostEntry* get(uint16_t index) const;
+    std::vector<GhostEntry> entries() const;
     size_t size() const { return ghosts.size(); }
 
 private:

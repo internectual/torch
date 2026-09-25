@@ -352,7 +352,11 @@ static bool readVehiclePayload(V12BitStream& stream, const V12Vec3& compressionP
         state->energy = energy * 100.0f;
         state->hasEnergy = true;
     }
-    stream.readFloat(9);
+    const float packedSteering = stream.readFloat(9);
+    if (state) {
+        state->steeringYaw = decodeVehicleSteering(packedSteering);
+        state->hasSteering = true;
+    }
     readMove(stream);
     const bool frozen = stream.readFlag();
     if (state) {
@@ -1210,6 +1214,13 @@ bool GhostTracker::erase(uint16_t index) {
 const GhostEntry* GhostTracker::get(uint16_t index) const {
     auto it = ghosts.find(index);
     return it == ghosts.end() ? nullptr : &it->second;
+}
+
+std::vector<GhostEntry> GhostTracker::entries() const {
+    std::vector<GhostEntry> result;
+    result.reserve(ghosts.size());
+    for (const auto& [index, ghost] : ghosts) result.push_back(ghost);
+    return result;
 }
 
 } // namespace V12

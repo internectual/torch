@@ -11,6 +11,10 @@ inline int balancedTeam(int redPlayers, int bluePlayers) {
     return redPlayers <= bluePlayers ? 1 : 2;
 }
 
+inline int joiningTeam(bool teamMode, int redPlayers, int bluePlayers) {
+    return teamMode ? balancedTeam(redPlayers, bluePlayers) : 0;
+}
+
 struct Clock {
     bool started = false;
     bool ended = false;
@@ -23,7 +27,13 @@ struct Clock {
     }
 
     void start() {
-        if (!started && !ended) started = true;
+        if (!started && !ended) {
+            if (remainingMs <= 0) {
+                ended = true;
+                return;
+            }
+            started = true;
+        }
     }
 
     bool tick(int elapsedMs) {
@@ -41,7 +51,7 @@ struct Clock {
 
 inline bool scoreKill(Clock& clock, int& playerScore, int& teamScore,
                      bool teamMode, int scoreLimit) {
-    if (clock.ended || scoreLimit < 1) return false;
+    if (!clock.started || clock.ended || scoreLimit < 1) return false;
     ++playerScore;
     if (teamMode) ++teamScore;
     if ((teamMode ? teamScore : playerScore) >= scoreLimit) {

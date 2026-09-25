@@ -2,6 +2,7 @@
 #include "audio/audio_system.h"
 #include "core/engine.h"
 #include "game/game.h"
+#include "game/collision.h"
 #include <cmath>
 
 #define WEAPON(_name, _proj, _rate, _reload, _dmg, _speed, _energy, _ammo, _splash, _auto, _alt, _fireSnd, _expSnd) \
@@ -27,22 +28,56 @@ const int gWeaponCount = sizeof(gWeaponTable) / sizeof(gWeaponTable[0]);
 bool Weapon::canFire(float energy) const {
     if (type < 0 || type >= gWeaponCount) return false;
     if (reloading) return false;
-    if (fireTimer > 0) return false;
+    // Native weapon state is rejected when a decoded/script value is not a
+    // real number.  Comparisons with NaN would otherwise pass both cooldown
+    // and energy checks, and the subsequent subtraction would poison the
+    // player's energy and projectile state.
+    if (!std::isfinite(energy) || !std::isfinite(fireTimer) || fireTimer > 0)
+        return false;
     if (energy < gWeaponTable[type].energyCost) return false;
+    // A negative count is the native unlimited-ammo sentinel, but only for
+    // datablocks that do not define a finite reserve.  Treating a malformed
+    // finite reserve as unlimited lets an empty weapon fire forever.
+    if (gWeaponTable[type].maxAmmo > 0 && ammo < 0) return false;
     if (ammo == 0) return false;
     return true;
 }
 
 void Weapon::updateTimers(float dt) {
+    // Timer state is frame-driven.  A paused frame must not mutate it, and a
+    // malformed delta must not turn a usable weapon into a permanently
+    // cooling-down or reloading weapon through NaN propagation.
+    if (!std::isfinite(dt) || dt <= 0.0f) return;
+    if (type < 0 || type >= gWeaponCount) {
+        reloading = false;
+        reloadTimer = 0.0f;
+        firing = false;
+        return;
+    }
+    // A malformed replicated cooldown must recover to the native idle state;
+    // comparing or subtracting NaN would otherwise leave the weapon stuck.
+    if (!std::isfinite(fireTimer)) {
+        fireTimer = 0.0f;
+        firing = false;
+    }
     if (fireTimer > 0) fireTimer -= dt;
     if (fireTimer <= 0) {
         fireTimer = 0;
         firing = false;
     }
     if (reloading) {
+        // A malformed replicated reload timer must not leave the weapon stuck
+        // in the reloading state forever; native weapon state falls back to
+        // idle when its timer is not a usable number.
+        if (!std::isfinite(reloadTimer)) {
+            reloading = false;
+            reloadTimer = 0.0f;
+            return;
+        }
         reloadTimer -= dt;
         if (reloadTimer <= 0) {
             reloading = false;
+            reloadTimer = 0.0f;
             int maxAmmo = gWeaponTable[type].maxAmmo;
             if (maxAmmo > 0) ammo = maxAmmo;
         }
@@ -50,22 +85,45 @@ void Weapon::updateTimers(float dt) {
 }
 
 Point3F computeProjectileSpawn(const Point3F& cameraPos, const Point3F& targetDir, float spread) {
+    // The native muzzle offset is measured in world units, so callers passing
+    // an unnormalised aim vector must not scale the offset (or spread basis).
+    const float directionLength = std::sqrt(targetDir.x * targetDir.x +
+                                             targetDir.y * targetDir.y +
+                                             targetDir.z * targetDir.z);
+    // A malformed camera target can produce an infinite vector.  Dividing an
+    // infinite component by its infinite length yields NaN and poisons the
+    // muzzle position, so treat non-finite aim vectors as zero-length.
+    const Point3F direction = std::isfinite(directionLength) && directionLength > 1.0e-6f &&
+        std::isfinite(targetDir.x) && std::isfinite(targetDir.y) &&
+        std::isfinite(targetDir.z)
+        ? Point3F{targetDir.x / directionLength, targetDir.y / directionLength,
+                  targetDir.z / directionLength}
+        : Point3F{0, 0, 0};
     Point3F spawn = cameraPos;
-    spawn.x += targetDir.x * 0.5f;
-    spawn.y += targetDir.y * 0.5f;
-    spawn.z += targetDir.z * 0.5f;
+    spawn.x += direction.x * 0.5f;
+    spawn.y += direction.y * 0.5f;
+    spawn.z += direction.z * 0.5f;
 
     if (spread > 0) {
         float r1 = ((float)rand() / RAND_MAX - 0.5f) * spread;
         float r2 = ((float)rand() / RAND_MAX - 0.5f) * spread;
-        Point3F right = {targetDir.z, 0, -targetDir.x};
+        Point3F right = {direction.z, 0, -direction.x};
         float rlen = sqrtf(right.x * right.x + right.z * right.z);
-        if (rlen > 1e-6f) { right.x /= rlen; right.z /= rlen; }
-        Point3F up = {0, 1, 0};
+        // The horizontal basis collapses when aiming straight up or down.
+        // Keep weapon spread two-dimensional instead of silently dropping r1.
+        const bool hasHorizontalBasis = rlen > 1e-6f;
+        if (hasHorizontalBasis) {
+            right.x /= rlen;
+            right.z /= rlen;
+        } else {
+            right = {1, 0, 0};
+        }
+        Point3F up = hasHorizontalBasis ? Point3F{0, 1, 0} : Point3F{0, 0, 1};
         Point3F spreadOffset = {right.x * r1 + up.x * r2, right.y * r1 + up.y * r2,
                                 right.z * r1 + up.z * r2};
         spawn.x += spreadOffset.x;
         spawn.y += spreadOffset.y;
+        spawn.z += spreadOffset.z;
     }
 
     return spawn;
@@ -73,16 +131,23 @@ Point3F computeProjectileSpawn(const Point3F& cameraPos, const Point3F& targetDi
 
 void updateProjectile(Projectile& p, float dt) {
     if (!p.active) return;
-    p.previousPos = p.pos;
-    p.lifetime -= dt;
-    if (p.lifetime <= 0) {
+    // A paused or malformed tick must not move the projectile backward or
+    // extend its lifetime indefinitely.
+    if (!std::isfinite(dt) || dt <= 0.0f) return;
+    if (projectileAdvancesPosition(p.type)) p.previousPos = p.pos;
+    if (!projectileLifetimeStep(p.lifetime, dt)) {
         p.active = false;
         return;
     }
 
     if (p.type == ProjectileType::Disc || p.type == ProjectileType::Grenade ||
         p.type == ProjectileType::Mortar) {
-        p.vel.y += -20.0f * dt;
+        const auto zone = Engine::instance().game().world().physicalZoneEffect(p.pos);
+        const Point3F acceleration = projectileZoneAcceleration(
+            Engine::instance().game().getGravity(), zone.gravityMod, zone.appliedForce);
+        p.vel.x += acceleration.x * dt;
+        p.vel.y += acceleration.y * dt;
+        p.vel.z += acceleration.z * dt;
     }
 
     p.pos.x += p.vel.x * dt;
@@ -106,18 +171,100 @@ void loadWeaponSounds(Weapon& w) {
 bool checkProjectileCollision(Projectile& p, float& groundHeight, Point3F& impactNormal) {
     auto& world = Engine::instance().game().world();
     groundHeight = world.getFloorHeight(p.pos.x, p.pos.y, p.pos.z);
-    impactNormal = {0, 1, 0};
+    constexpr float sampleSpacing = 0.25f;
+    const float left = world.getHeight(p.pos.x - sampleSpacing, p.pos.z);
+    const float right = world.getHeight(p.pos.x + sampleSpacing, p.pos.z);
+    const float back = world.getHeight(p.pos.x, p.pos.z - sampleSpacing);
+    const float front = world.getHeight(p.pos.x, p.pos.z + sampleSpacing);
+    impactNormal = (left > -1.0e9f && right > -1.0e9f &&
+                    back > -1.0e9f && front > -1.0e9f)
+        ? terrainNormalFromHeights(left, right, back, front, sampleSpacing)
+        : Point3F{0, 1, 0};
 
-    // Check terrain height
-    float th = groundHeight;
-    if (p.pos.y <= th && p.vel.y < 0) {
-        p.pos.y = th;
-        impactNormal = {0, 1, 0};
+    // Sweep the full projectile segment against the authored surface. A fast
+    // projectile can cross terrain between frames even when its final point
+    // has already passed below the surface.
+    // Interior columns can contain several upward-facing surfaces (for
+    // example, stacked floors).  The unbounded height query returns the top
+    // one, which makes a projectile on a lower floor collide with geometry
+    // above it.  Resolve each endpoint against the floor at that endpoint's
+    // height, while the interior raycast below still handles ceilings and
+    // walls.
+    const float previousSurface = world.getFloorHeight(
+        p.previousPos.x, p.previousPos.y, p.previousPos.z);
+    const float currentSurface = world.getFloorHeight(
+        p.pos.x, p.pos.y, p.pos.z);
+    float crossingT = 0.0f;
+    // A projectile can climb into a rising terrain face while its y velocity
+    // is positive; collision follows the swept segment, not velocity sign.
+    if (previousSurface > -1.0e9f && currentSurface > -1.0e9f &&
+        segmentSurfaceCrossing(p.previousPos.y, previousSurface,
+                               p.pos.y, currentSurface, crossingT)) {
+        p.pos = {p.previousPos.x + (p.pos.x - p.previousPos.x) * crossingT,
+                 p.previousPos.y + (p.pos.y - p.previousPos.y) * crossingT,
+                 p.previousPos.z + (p.pos.z - p.previousPos.z) * crossingT};
+        groundHeight = previousSurface + (currentSurface - previousSurface) * crossingT;
+        // The cached normal was sampled at the segment endpoint.  On a slope
+        // that can be a different facet from the one actually struck, causing
+        // grenades to bounce in the wrong direction.  Sample the authored
+        // surface again at the interpolated contact point.
+        const float impactLeft = world.getHeight(p.pos.x - sampleSpacing, p.pos.z);
+        const float impactRight = world.getHeight(p.pos.x + sampleSpacing, p.pos.z);
+        const float impactBack = world.getHeight(p.pos.x, p.pos.z - sampleSpacing);
+        const float impactFront = world.getHeight(p.pos.x, p.pos.z + sampleSpacing);
+        if (impactLeft > -1.0e9f && impactRight > -1.0e9f &&
+            impactBack > -1.0e9f && impactFront > -1.0e9f)
+            impactNormal = terrainNormalFromHeights(impactLeft, impactRight,
+                                                    impactBack, impactFront,
+                                                    sampleSpacing);
         if (p.type == ProjectileType::Grenade && p.bounceCount < 3) {
-            p.vel.y = -p.vel.y * 0.5f;
+            if (!projectileVelocityIntoSurface(p.vel, impactNormal)) {
+                p.pos.x += impactNormal.x * 0.001f;
+                p.pos.y += impactNormal.y * 0.001f;
+                p.pos.z += impactNormal.z * 0.001f;
+                return false;
+            }
+            p.pos.y = groundHeight;
+            reflectProjectileVelocity(p.vel, impactNormal);
             p.vel.x *= 0.7f;
             p.vel.z *= 0.7f;
             p.bounceCount++;
+            markProjectileBounce(p);
+            return false;
+        }
+        p.pos.y = groundHeight;
+        p.hasImpacted = true;
+        return true;
+    }
+
+    // A projectile that starts inside terrain and moves out is already leaving
+    // a contact resolved by an earlier frame.  Do not snap it back to the
+    // previous embedded point: that would make a bouncing grenade collide
+    // again immediately and reverse its newly applied upward velocity.
+    if (previousSurface > -1.0e9f && currentSurface > -1.0e9f &&
+        projectileExitsSurface(p.previousPos.y, previousSurface,
+                               p.pos.y, currentSurface)) {
+        return false;
+    }
+
+    // Check terrain height at the final position.
+    float th = groundHeight;
+    // Contact must resolve even when a projectile starts inside the surface
+    // or is moving upward after penetrating it in a prior frame.
+    if (projectileTouchesSurface(p.pos.y, th)) {
+        p.pos.y = th;
+        if (p.type == ProjectileType::Grenade && p.bounceCount < 3) {
+            if (!projectileVelocityIntoSurface(p.vel, impactNormal)) {
+                p.pos.x += impactNormal.x * 0.001f;
+                p.pos.y += impactNormal.y * 0.001f;
+                p.pos.z += impactNormal.z * 0.001f;
+                return false;
+            }
+            reflectProjectileVelocity(p.vel, impactNormal);
+            p.vel.x *= 0.7f;
+            p.vel.z *= 0.7f;
+            p.bounceCount++;
+            markProjectileBounce(p);
             return false; // still bouncing, not yet impacted
         }
         p.hasImpacted = true;
@@ -133,7 +280,7 @@ bool checkProjectileCollision(Projectile& p, float& groundHeight, Point3F& impac
                        p.pos.y - p.previousPos.y,
                        p.pos.z - p.previousPos.z};
         float speed = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
-        if (speed > 0.1f) {
+        if (projectileHasSweepLength(speed)) {
             dir.x /= speed; dir.y /= speed; dir.z /= speed;
             const float maxDist = speed;
             const Point3F origin = p.previousPos;
@@ -143,6 +290,13 @@ bool checkProjectileCollision(Projectile& p, float& groundHeight, Point3F& impac
                 p.hasImpacted = true;
 
                 if (p.type == ProjectileType::Grenade && p.bounceCount < 3) {
+                    if (!projectileVelocityIntoSurface(p.vel, hitNorm)) {
+                        p.pos.x += hitNorm.x * 0.001f;
+                        p.pos.y += hitNorm.y * 0.001f;
+                        p.pos.z += hitNorm.z * 0.001f;
+                        p.hasImpacted = false;
+                        return false;
+                    }
                     float dot = p.vel.x * hitNorm.x + p.vel.y * hitNorm.y + p.vel.z * hitNorm.z;
                     p.vel.x = (p.vel.x - 2 * dot * hitNorm.x) * 0.5f;
                     p.vel.y = (p.vel.y - 2 * dot * hitNorm.y) * 0.5f;

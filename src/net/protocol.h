@@ -1,5 +1,6 @@
 #pragma once
 #include "net/network.h"
+#include <cmath>
 #include <cstdint>
 #include <vector>
 #include <cstring>
@@ -240,6 +241,13 @@ namespace T2Protocol {
         char text[256]{};
     };
 
+    // Chat attribution is server-owned. Keep the bounded copy in one place so
+    // a client cannot make a message appear to come from another player.
+    inline void setAuthoritativeChatSender(ChatMessage& msg, const char* name) {
+        std::memset(msg.sender, 0, sizeof(msg.sender));
+        if (name) std::strncpy(msg.sender, name, sizeof(msg.sender) - 1);
+    }
+
     size_t encodeChat(uint8_t* buf, size_t bufSize, const ChatMessage& msg);
     bool decodeChat(const uint8_t* data, size_t size, ChatMessage& msg);
 
@@ -399,3 +407,14 @@ private:
     void* rayCtx = nullptr;
     RemoteCommandCallback remoteCommandCB;
 };
+
+// A missing terrain sample keeps the flat-world fallback. Valid samples may
+// legitimately be below that fallback (missions can place terrain below z=0).
+inline float serverGroundHeight(float fallback, float (*callback)(float, float, void*),
+                                void* context, float x, float z) {
+    if (!callback) return fallback;
+    const float height = callback(x, z, context);
+    // Invalid authored samples must not propagate into authoritative movement
+    // or projectile collision. NaN fails the comparison, but +inf does not.
+    return std::isfinite(height) && height > -1.0e9f ? height : fallback;
+}

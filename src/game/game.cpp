@@ -1,4 +1,7 @@
 #include "game/game.h"
+#include "game/precipitation_parity.h"
+#include "game/movement.h"
+#include "game/damage_parity.h"
 #include "render/material_parity.h"
 #include "render/environment_commands.h"
 #include "game/decal_runtime.h"
@@ -12,9 +15,19 @@
 #include "game/time_scale.h"
 #include "game/projectile_audio.h"
 #include "game/wind.h"
+#include "game/water_parity.h"
+#include "game/observer_parity.h"
+#include "game/ghost_parity.h"
+#include "game/demo_text.h"
 #include "game/mission_parser.h"
+#include "game/mission_rules.h"
 #include "game/mission_discovery.h"
 #include "game/objective_parity.h"
+#include "game/ctf_runtime.h"
+#include "game/trigger.h"
+#include "game/animation_parity.h"
+#include "game/particle_parity.h"
+#include "game/sky_parity.h"
 #include <SDL3/SDL.h>
 #include "render/renderer.h"
 #include "render/dts_animation.h"
@@ -33,6 +46,8 @@
 #include "fs/path_policy.h"
 #include <cstdio>
 #include <cmath>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <cctype>
 #include <sstream>
@@ -40,40 +55,29 @@
 #include <cstdlib>
 #include <utility>
 
+static constexpr int kMaxPrecipitationDrops = 65536;
+
+static int parsePrecipitationDropCount(const std::string& text) {
+    char* end = nullptr;
+    const long value = std::strtol(text.c_str(), &end, 10);
+    if (end == text.c_str() || *end != '\0' || value <= 0) return 0;
+    return (int)std::min<long>(value, kMaxPrecipitationDrops);
+}
+
 static void appendWheelNodeOverrides(const GhostEntry& ghost, DTSShape& shape,
                                      float dt, DTSShape::NodeOverride* overrides,
                                      int& overrideCount, int maxOverrides,
                                      float* wheelRotation);
 
-static std::string formatDemoRemoteText(const std::string& templ,
-                                        const std::vector<std::string>& values) {
-    std::string text = templ;
-    for (size_t i = 0; i < values.size(); ++i) {
-        const std::string key = "%" + std::to_string(i + 1);
-        size_t pos = 0;
-        while ((pos = text.find(key, pos)) != std::string::npos) {
-            text.replace(pos, key.size(), values[i]);
-            pos += values[i].size();
-        }
-    }
-    for (size_t pos = 0; (pos = text.find('%', pos)) != std::string::npos;) {
-        size_t end = pos + 1;
-        while (end < text.size() && std::isdigit((unsigned char)text[end])) ++end;
-        if (end == pos + 1) { ++pos; continue; }
-        text.erase(pos, end - pos);
-    }
-    text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char c) {
-        return c < 0x20;
-    }), text.end());
-    return text;
-}
-
 // Forward declarations
 
 static const char* liveFlagStatus(const std::string& status) {
-    if (status == "<At Base>" || status == "At Base") return "home";
-    if (status == "<In the Field>" || status == "In the Field") return "field";
-    return status.empty() ? "home" : "held";
+    switch (CtfRuntime::classifyStatusToken(status)) {
+        case CtfRuntime::StatusToken::Home: return "home";
+        case CtfRuntime::StatusToken::Field: return "field";
+        case CtfRuntime::StatusToken::Held: return "held";
+    }
+    return "home";
 }
 
 // ─── Mission shape helpers ─────────────────────────────────────────
@@ -106,22 +110,53 @@ static void scanDatablockShapesFromCS(World& world) {
 
 // Check if a .mis mission object class should be rendered as a shape
 static bool isRenderableMissionShape(const std::string& className) {
-    if (className == "InteriorInstance" || className == "TSStatic" ||
-        className == "StaticShape" || className == "ScopeAlwaysShape" ||
-        className == "Turret" || className == "Item" ||
-        className == "Camera" || className == "WayPoint" || className == "Marker" ||
-        className == "BeaconObject" || className == "Debris" ||
-        className == "WheeledVehicle" || className == "HoverVehicle" ||
-        className == "FlyingVehicle" || className == "ForceFieldBare" ||
-        className == "Sentry" || className == "Shrike" || className == "Turbograv" ||
-        className == "Wildcat" || className == "Shield" || className == "Vehicle")
+    // Mission class names are case-insensitive at the console/script layer.
+    // Keeping this lookup case-sensitive made custom missions silently omit
+    // otherwise valid shape objects when their class spelling differed.
+    std::string normalized = className;
+    for (char& c : normalized) c = (char)std::tolower((unsigned char)c);
+    if (normalized == "interiorinstance" || normalized == "tsstatic" ||
+        normalized == "staticshape" || normalized == "scopealwaysshape" ||
+        normalized == "turret" || normalized == "item" ||
+        normalized == "camera" || normalized == "waypoint" || normalized == "marker" ||
+        normalized == "beaconobject" || normalized == "debris" ||
+        normalized == "wheeledvehicle" || normalized == "hovervehicle" ||
+        normalized == "flyingvehicle" || normalized == "forcefieldbare" ||
+        normalized == "sentry" || normalized == "shrike" || normalized == "turbograv" ||
+        normalized == "wildcat" || normalized == "shield" || normalized == "vehicle")
         return true;
     // Vehicle subclasses (VehicleData-derived)
-    if (className.size() > 9 && className.compare(className.size() - 9, 9, "Vehicle") == 0)
+    if (normalized.size() > 9 && normalized.compare(normalized.size() - 9, 9, "vehicle") == 0)
         return true;
-    if (className.size() > 5 && className.compare(className.size() - 5, 5, "Turret") == 0)
+    if (normalized.size() > 5 && normalized.compare(normalized.size() - 5, 5, "turret") == 0)
         return true;
     return false;
+}
+
+static bool isMissionLifecycleObject(const World::WorldObject& object) {
+    // Class callbacks also apply to unnamed SimObjects. Only the optional
+    // object-specific callback requires an object name.
+    return !object.className.empty();
+}
+
+static void dispatchMissionLifecycle(const World::WorldObject& object, const char* event) {
+    if (!ScriptEngine::exists() || !isMissionLifecycleObject(object)) return;
+    auto* ts = ScriptEngine::instance().ts();
+    if (!ts) return;
+
+    // Torque resolves an object method before falling back to its class
+    // method.  This matters for missions that customize one trigger or item
+    // without replacing the shared datablock class callback.
+    if (!object.objectName.empty()) {
+        const std::string objectCallback = object.objectName + "::" + event;
+        if (ts->hasFunction(objectCallback)) {
+            ts->callFunction(objectCallback, {VMValue(object.objectName)});
+            return;
+        }
+    }
+    const std::string classCallback = object.className + "::" + event;
+    if (ts->hasFunction(classCallback))
+        ts->callFunction(classCallback, {VMValue(object.objectName)});
 }
 
 static const std::string* findDatablockShape(
@@ -153,22 +188,6 @@ static std::string normalizeShapePath(std::string path) {
     }
     if (path.starts_with("shapes/") || path.starts_with("interiors/")) return path;
     return path.ends_with(".dif") ? "interiors/" + path : "shapes/" + path;
-}
-
-static std::string normalizeMissionName(std::string name) {
-    for (char& c : name) {
-        if (c == '\\') c = '/';
-    }
-    std::string lower = name;
-    for (char& c : lower) c = (char)std::tolower((unsigned char)c);
-    if (lower.starts_with("base/missions/")) name.erase(0, 14);
-    else if (lower.starts_with("missions/")) name.erase(0, 9);
-    if (name.size() >= 4) {
-        std::string ext = name.substr(name.size() - 4);
-        for (char& c : ext) c = (char)std::tolower((unsigned char)c);
-        if (ext == ".mis") name.resize(name.size() - 4);
-    }
-    return name;
 }
 
 static std::vector<std::string> terrainAssetCandidates(std::string name) {
@@ -325,7 +344,19 @@ static std::string resolveShapePath(const MisObject& obj,
 // ─── Sound helpers ────────────────────────────────────────────────
 static void playChatBeep() {
     static SoundBuffer* beepBuf = nullptr;
+    static SoundSource* beepSrc = nullptr;
+    static AudioSystem* beepAudio = nullptr;
     static bool tried = false;
+    auto& audio = Engine::instance().audio();
+    if (beepAudio != &audio ||
+        (beepBuf && !audio.isBufferAlive(beepBuf)) ||
+        (beepSrc && !audio.isSourceAlive(beepSrc))) {
+        beepBuf = nullptr;
+        beepSrc = nullptr;
+        tried = false;
+        beepAudio = &audio;
+    }
+    if (!audio.isInitialized()) return;
     if (!tried) {
         tried = true;
         // Generate a 440Hz sine wave beep as WAV
@@ -374,10 +405,8 @@ static void playChatBeep() {
         }
     }
     if (!beepBuf) return;
-    auto& audio = Engine::instance().audio();
     // Reuse a single source for all chat beeps instead of leaking one per call.
-    static SoundSource* beepSrc = nullptr;
-    if (!beepSrc) beepSrc = audio.createSource();
+    if (!beepSrc) beepSrc = audio.createSource(true);
     if (beepSrc) {
         beepSrc->setVolume(0.3f);
         beepSrc->stop();
@@ -415,6 +444,32 @@ static bool parseLiveIndex(const std::string& text, int& value) {
     return true;
 }
 
+static bool botFloorContact(const World& world, const Point3F& position,
+                            float& floorY, Point3F& normal) {
+    floorY = world.getFloorHeight(position.x, position.y, position.z);
+    normal = {0.0f, 1.0f, 0.0f};
+    const auto& collision = world.collision();
+    float rayT = 0.0f;
+    Point3F point{};
+    if (collision.loaded && collision.raycast(
+            {position.x, position.y + 0.2f, position.z}, {0, -1, 0},
+            2.0f, rayT, point, normal) && normal.y >= 0.55f) {
+        floorY = point.y;
+        return true;
+    }
+
+    constexpr float sampleSpacing = 0.25f;
+    const float left = world.getHeight(position.x - sampleSpacing, position.z);
+    const float right = world.getHeight(position.x + sampleSpacing, position.z);
+    const float back = world.getHeight(position.x, position.z - sampleSpacing);
+    const float front = world.getHeight(position.x, position.z + sampleSpacing);
+    if (left <= -1.0e9f || right <= -1.0e9f ||
+        back <= -1.0e9f || front <= -1.0e9f || floorY <= -1.0e9f)
+        return false;
+    normal = terrainNormalFromHeights(left, right, back, front, sampleSpacing);
+    return normal.y >= 0.55f;
+}
+
 // Forward declarations for demo ghost shape helpers
 static bool isRenderableGhostClass(const std::string& className);
 static bool isEffectOnlyGhostClass(const std::string& className);
@@ -423,7 +478,7 @@ Player::Player() {
     for (int i = 0; i < gWeaponCount; i++) {
         Weapon w;
         w.type = i;
-        w.ammo = gWeaponTable[i].maxAmmo > 0 ? gWeaponTable[i].maxAmmo : 9999;
+        w.ammo = weaponInitialAmmo(gWeaponTable[i]);
         w.fireTimer = 0;
         w.reloadTimer = 0;
         w.firing = false;
@@ -434,8 +489,12 @@ Player::Player() {
 Player::~Player() {}
 
 void Player::update(float dt) {
+    // Do not let a stalled frame turn passive PlayerData repair into a
+    // multi-second heal. Normal one-second script timing remains intact, but
+    // extreme render hitches are bounded like the rest of simulation state.
+    if (std::isfinite(dt) && dt > 1.0f) dt = 1.0f;
     if (hp > 0) {
-        updateAnimation(dt, false);
+        hp = applyRepairRate(hp, repairRate, dt, maxHp);
     }
 }
 
@@ -545,6 +604,15 @@ void Player::loadModel() {
         }
         return;
     }
+    if (const auto* maxDamage = scriptField(datablock->second, "maxDamage"))
+        setMaxHealth(maxDamage->toFloat());
+    if (const auto* maxEnergy = scriptField(datablock->second, "maxEnergy"))
+        setMaxEnergy(maxEnergy->toFloat());
+    // PlayerData owns the passive ShapeBase repair rate. Without loading this
+    // authored field, repair stations and custom armor profiles can never
+    // restore health even though the simulation tick applies the rate.
+    if (const auto* repair = scriptField(datablock->second, "repairRate"))
+        setRepairRate(repair->toFloat());
     auto shapeField = datablock->second->fields.find("shapeFile");
     if (shapeField == datablock->second->fields.end()) {
         for (auto it = datablock->second->fields.begin();
@@ -584,7 +652,12 @@ void Player::loadModel() {
 }
 
 void Player::loadWeaponModel() {
+    // A loadout can temporarily have no usable slot (for example while a
+    // respawn inventory is being rebuilt). Do not retain the previous model
+    // or let render() index the old selection.
+    weaponLoaded = false;
     if (curWeapon < 0 || curWeapon >= (int32_t)weapons.size()) return;
+    if (weapons[curWeapon].type < 0 || weapons[curWeapon].type >= gWeaponCount) return;
     std::string itemName = gWeaponTable[weapons[curWeapon].type].name;
     if (itemName == "Spinfusor") itemName = "Disc";
     else if (itemName == "PlasmaGun") itemName = "Plasma";
@@ -614,8 +687,9 @@ void Player::loadWeaponModel() {
 }
 
 void Player::updateAnimation(float dt, bool jetting) {
-    animTime += dt;
-    weaponAnimTime += dt;
+    const float animationDt = animationDelta(dt);
+    animTime += animationDt;
+    weaponAnimTime += animationDt;
 
     AnimState newAnim;
     if (hp <= 0) {
@@ -657,16 +731,20 @@ void Player::render() {
             const char* altNames[]  = { "idle",  "run", "jump", "jet", "die"   };
             int idx = (int)anim;
             if (idx >= 0 && idx <= 4) {
-                bool found = false;
-                for (auto& a : modelShape.animations)
-                    if (a.name == animNames[idx]) { found = true; break; }
-                modelShape.renderAnimation(found ? animNames[idx] : altNames[idx], animTime);
+                // Torque animation names are case-insensitive.  Custom player
+                // shapes commonly capitalize sequence names differently from
+                // the stock model, so exact matching incorrectly selected the
+                // fallback sequence (or rendered the bind pose).
+                const auto* animation = findAnimation(modelShape, animNames[idx]);
+                modelShape.renderAnimation(animation ? animation->name.c_str() : altNames[idx],
+                                           animTime);
             } else {
                 modelShape.render(0);
             }
         }
 
-        if (weaponLoaded) {
+        if (weaponLoaded && curWeapon >= 0 &&
+            curWeapon < (int32_t)weapons.size()) {
             int weaponMount = weaponShape.findNode("Mountpoint");
             if (weaponMount < 0) weaponMount = weaponShape.findNode("mount0");
             MatrixF weaponModel;
@@ -735,12 +813,29 @@ void Player::applyMove(const Point3F& move, bool jump, bool jet, float dt) {
 
 void Player::selectWeapon(int32_t idx) {
     if (idx >= 0 && idx < (int32_t)weapons.size() && weaponIsSelectable(weapons[idx])) {
+        if (idx != curWeapon && curWeapon >= 0 && curWeapon < (int32_t)weapons.size()) {
+            // Weapon changes interrupt reloads rather than completing them in
+            // the background while another weapon is equipped.
+            cancelWeaponReload(weapons[curWeapon].reloading,
+                               weapons[curWeapon].reloadTimer);
+            // Firing is also image-local. Keep the old weapon from showing a
+            // stale muzzle/fire sequence when it is selected again before its
+            // cooldown has elapsed.
+            cancelWeaponFirePresentation(weapons[curWeapon].firing);
+        }
         curWeapon = idx;
         weapons[curWeapon].firing = false;
-        weapons[curWeapon].reloading = false;
-        weapons[curWeapon].reloadTimer = 0;
+        if (weaponNeedsReloadOnSelect(weapons[curWeapon])) {
+            const WeaponData& data = gWeaponTable[weapons[curWeapon].type];
+            beginWeaponReload(weapons[curWeapon].reloading,
+                              weapons[curWeapon].reloadTimer,
+                              weapons[curWeapon].firing,
+                              weapons[curWeapon].fireTimer,
+                              data.reloadTime);
+        }
         loadWeaponModel();
         if (auto* hud = Engine::instance().guiRenderer().findControl("weaponsHud")) {
+            if (weapons[curWeapon].type < 0 || weapons[curWeapon].type >= gWeaponCount) return;
             std::string nativeName = gWeaponTable[weapons[curWeapon].type].name;
             if (nativeName == "Spinfusor") nativeName = "Disc";
             else if (nativeName == "PlasmaGun") nativeName = "Plasma";
@@ -761,14 +856,18 @@ void Player::updateWeaponHud() {
     if (curWeapon < 0 || curWeapon >= (int32_t)weapons.size()) return;
     auto* hud = Engine::instance().guiRenderer().findControl("weaponsHud");
     if (!hud) return;
+    if (weapons[curWeapon].type < 0 || weapons[curWeapon].type >= gWeaponCount) return;
     std::string nativeName = gWeaponTable[weapons[curWeapon].type].name;
     if (nativeName == "Spinfusor") nativeName = "Disc";
     else if (nativeName == "PlasmaGun") nativeName = "Plasma";
     else if (nativeName == "ELF") nativeName = "ELFGun";
+    // The stock HUD has exactly one active weapon slot. Remote HUD updates
+    // can leave an older slot active, so clear it before refreshing ammo.
+    hud->activeHudSlot = -1;
     for (size_t slot = 0; slot < hud->hudSlots.size(); ++slot) {
-        if (hud->hudSlots[slot].name == nativeName) {
+        hud->hudSlots[slot].active = hud->hudSlots[slot].name == nativeName;
+        if (hud->hudSlots[slot].active) {
             hud->hudSlots[slot].amount = weapons[curWeapon].ammo;
-            hud->hudSlots[slot].active = true;
             hud->activeHudSlot = (int)slot;
         }
     }
@@ -778,37 +877,51 @@ void Player::fireWeapon(bool alt) {
     if (isDead()) return;
     if (curWeapon < 0 || curWeapon >= (int32_t)weapons.size()) return;
     Weapon& w = weapons[curWeapon];
+    if (w.type < 0 || w.type >= gWeaponCount) return;
     const WeaponData& wd = gWeaponTable[w.type];
-    if (alt != wd.altFire) return;
+    if (!weaponFireModeAllowed(wd, alt)) return;
     if (!w.canFire(eng)) return;
+
+    // A zero-length camera ray can occur while the view is being rebuilt.
+    // Do not consume energy/ammo or start the fire cooldown without a shot.
+    Point3F cpos = cameraPos();
+    Point3F target = cameraTarget();
+    Point3F dir = {target.x - cpos.x, target.y - cpos.y, target.z - cpos.z};
+    if (!weaponAimUsable(dir)) return;
 
     eng -= wd.energyCost;
     w.fireTimer = wd.fireRate;
     w.firing = true;
     weaponAnimTime = 0.0f;
 
-    Point3F cpos = cameraPos();
-    Point3F target = cameraTarget();
-    Point3F dir = {target.x - cpos.x, target.y - cpos.y, target.z - cpos.z};
-    float dlen = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
-    if (dlen < 0.001f) return;
+    const float dlen = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
     dir.x /= dlen; dir.y /= dlen; dir.z /= dlen;
 
     Projectile p;
     p.pos = computeProjectileSpawn(cpos, dir);
     p.previousPos = p.pos;
-    p.vel = {dir.x * wd.speed, dir.y * wd.speed, dir.z * wd.speed};
+    // Physical projectiles inherit the shooter's momentum in Tribes 2.  If
+    // this is omitted, firing while skiing or jetting makes rounds visibly
+    // lag behind the player and changes their range relative to the server.
+    p.vel = projectileLaunchVelocity(dir, wd.speed, vel);
     p.type = wd.projectileType;
     p.damage = wd.damage;
     p.splashRadius = wd.splashRadius;
     p.lifetime = 5.0f;
     p.active = true;
     p.ownerId = 0;
-    p.weaponType = curWeapon;
+    // Projectile effects are datablock-owned.  The selected slot is only a
+    // loadout position and can differ from the weapon type when a loadout is
+    // reordered; using it here plays the wrong impact sound (or none at all).
+    p.weaponType = weaponEffectType(w);
 
     if (wd.projectileType == ProjectileType::Hitscan) {
         p.lifetime = 2.0f;
-        p.vel = {dir.x * 500.0f, dir.y * 500.0f, dir.z * 500.0f};
+        // A rifle trace must cover its full range this tick. Advancing it at
+        // 500 units/second made fast targets and nearby walls appear one or
+        // more frames late, unlike the native hitscan weapons.
+        p.pos = hitscanEndpoint(p.previousPos, dir);
+        p.vel = {0.0f, 0.0f, 0.0f};
     }
 
     Engine::instance().game().world().spawnProjectile(p);
@@ -819,7 +932,9 @@ void Player::fireWeapon(bool alt) {
         auto& audio = Engine::instance().audio();
         auto* src = audio.createSource();
         if (src) {
-            src->setPosition(pos);
+            // Keep fire audio at the muzzle. Hitscan projectiles move their
+            // current position to the trace endpoint during spawn setup.
+            src->setPosition(p.previousPos);
             src->positional = true;
             src->setVolume(0.5f);
             src->play(w.fireSound);
@@ -830,6 +945,13 @@ void Player::fireWeapon(bool alt) {
     if (wd.maxAmmo > 0) {
         w.ammo--;
         if (w.ammo <= 0) w.ammo = 0;
+        // Finite weapon datablocks use their reload time when the magazine is
+        // exhausted.  Without starting this timer, weapons with a reloadTime
+        // could fire their last round once and then remain permanently empty.
+        if (weaponNeedsReload(wd, w.ammo)) {
+            beginWeaponReload(w.reloading, w.reloadTimer, w.firing, w.fireTimer,
+                              wd.reloadTime);
+        }
     }
     updateWeaponHud();
 }
@@ -842,48 +964,88 @@ void Player::weaponCycle(int32_t dir) {
 
 void Player::applyDamage(float amount) {
     // A dead ShapeBase cannot take a second lethal hit before respawn.
-    if (hp <= 0.0f && amount >= 0.0f) return;
+    if (hp <= 0.0f) return;
+    // Native damage paths only accept finite values.  Letting a malformed
+    // script or network update store NaN here makes every later health
+    // comparison false and leaves the player visibly alive but unkillable.
+    if (!isValidDamageAmount(amount)) return;
     if (amount < 0) {
         // Healing
         hp -= amount; // amount is negative, so this adds
-        if (hp > 100) hp = 100;
+        if (hp > maxHp) hp = maxHp;
         return;
     }
+    if (Engine::instance().hasGame())
+        Engine::instance().game().recordDamageFlash(amount);
     if (arm > 0) {
-        float absorbed = Math::min(arm, amount * 0.6f);
-        arm -= absorbed;
-        hp -= amount - absorbed;
+        applyArmorDamage(hp, arm, amount);
+        if (hp <= 0.0f) {
+            hp = 0.0f;
+            deaths++;
+        }
     } else {
         hp -= amount;
-    }
-    if (hp <= 0) {
-        hp = 0;
-        deaths++;
+        if (hp <= 0.0f) {
+            hp = 0.0f;
+            deaths++;
+        }
     }
 }
 
+void Game::recordDamageFlash(float amount) {
+    damageFlash = std::max(damageFlash, damageFlashForAmount(amount, pl->maxHealth()));
+}
+
 void Player::respawn() {
-    hp = 100.0f;
-    eng = 100.0f;
-    repairRate = 0.0f;
+    hp = maxHp;
+    eng = maxEng;
+    // repairRate belongs to the authored PlayerData, not to one life.
     heatLevel = 0.0f;
     arm = 0.0f;
     vel = {0,0,0};
-    pos = Engine::instance().game().world().spawnPoint();
+    // A new ShapeBase life starts in its stand sequence. Leaving the death
+    // state here renders the previous death pose until the next animation tick.
+    anim = Stand;
+    animTime = 0.0f;
+    // SpawnSphere carries the initial facing direction as well as the position.
+    // Resetting yaw to zero makes rotated team starts face the wrong objective.
+    Point3F spawnRotation{};
+    if (Engine::instance().hasGame()) {
+        if (!Engine::instance().game().world().spawnTransformForTeam(
+                teamId, pos, spawnRotation)) {
+            pos = Engine::instance().game().world().spawnPointForTeam(teamId);
+            spawnRotation = {};
+        }
+    }
+    rot = spawnRotation;
     pos.y += 1.0f;
     onGround = false;
-    curWeapon = weapons.empty() ? -1 : 0;
+    // Respawn starts a fresh movement state; the previous jump cooldown must
+    // not suppress the first jump of the new life.
+    jumpHeld = false;
+    jumpCooldown = 0.0f;
+    // Loadouts are allowed to contain unavailable or invalid slots.  Native
+    // respawn equips the first usable weapon rather than leaving the player on
+    // an empty slot that cannot fire or be represented by the HUD.
+    curWeapon = -1;
     for (auto& weapon : weapons) {
-        weapon.ammo = weapon.type >= 0 && weapon.type < gWeaponCount &&
-            gWeaponTable[weapon.type].maxAmmo > 0
-            ? gWeaponTable[weapon.type].maxAmmo : 9999;
+        weapon.ammo = weapon.type >= 0 && weapon.type < gWeaponCount
+            ? weaponInitialAmmo(gWeaponTable[weapon.type]) : 0;
         weapon.fireTimer = 0.0f;
         weapon.reloadTimer = 0.0f;
         weapon.firing = false;
         weapon.reloading = false;
     }
-    loadWeaponModel();
-    updateWeaponHud();
+    for (size_t index = 0; index < weapons.size(); ++index) {
+        if (weaponIsSelectable(weapons[index])) {
+            curWeapon = static_cast<int32_t>(index);
+            break;
+        }
+    }
+    if (Engine::instance().hasGame()) {
+        loadWeaponModel();
+        updateWeaponHud();
+    }
 }
 
 Point3F Player::cameraPos() const {
@@ -900,6 +1062,40 @@ Point3F Player::cameraTarget() const {
 World::World() {}
 World::~World() {}
 
+Point3F World::spawnPointForTeam(int teamId) const {
+    Point3F position{}, rotation{};
+    if (spawnTransformForTeam(teamId, position, rotation)) return position;
+    return playerSpawn;
+}
+
+bool World::spawnTransformForTeam(int teamId, Point3F& position,
+                                  Point3F& rotation) const {
+    // SpawnSphere positions are retained in their authored Torque frame on
+    // WorldObjects, so convert only after selecting the team-compatible one.
+    // Stock missions commonly author several spheres per team. Reusing the
+    // first one makes every respawn visibly stack at the same location.
+    for (int pass = 0; pass < 2; ++pass) {
+        std::vector<const WorldObject*> candidates;
+        for (const auto& object : worldObjects) {
+            if (!missionClassIs(object.className, "SpawnSphere")) continue;
+            const bool wanted = pass == 0 ? object.teamId == teamId : object.teamId == 0;
+            if (wanted) candidates.push_back(&object);
+        }
+        if (!candidates.empty()) {
+            size_t& cursor = spawnCursors[teamId];
+            const WorldObject* selected = candidates[cursor % candidates.size()];
+            ++cursor;
+            position = Math::torquePointToYUp(selected->pos);
+            // Player yaw uses the same +Z-forward convention as cameraTarget.
+            rotation = {0.0f, 0.0f,
+                        spawnYawFromTorqueRotation(selected->rot,
+                                                   selected->rotAngleDeg)};
+            return true;
+        }
+    }
+    return false;
+}
+
 static int findWaterBody(const std::vector<World::WaterState>& bodies,
                          const std::string& target) {
     if (target.empty()) {
@@ -909,18 +1105,33 @@ static int findWaterBody(const std::vector<World::WaterState>& bodies,
     }
     char* end = nullptr;
     const long index = std::strtol(target.c_str(), &end, 10);
-    if (end != target.c_str() && *end == '\0' && index >= 0 &&
-        index < (long)bodies.size() && bodies[index].active)
-        return (int)index;
+    if (end != target.c_str() && *end == '\0' && index >= 0) {
+        int ordinal = 0;
+        for (size_t i = 0; i < bodies.size(); ++i) {
+            if (waterBodyOrdinalMatches(bodies[i].active, ordinal, (int)index))
+                return (int)i;
+            if (bodies[i].active) ++ordinal;
+        }
+    }
     for (size_t i = 0; i < bodies.size(); ++i)
-        if (bodies[i].active && bodies[i].name == target) return (int)i;
+        if (bodies[i].active && waterBodyNameMatches(bodies[i].name, target))
+            return (int)i;
     return -1;
+}
+
+static bool isLegacyWaterBody(const std::vector<World::WaterState>& bodies,
+                              int index) {
+    if (index < 0 || index >= (int)bodies.size() || !bodies[index].active)
+        return false;
+    for (int i = 0; i < index; ++i)
+        if (bodies[i].active) return false;
+    return true;
 }
 
 bool World::setWaterLevel(const std::string& target, float level) {
     const int index = findWaterBody(waterBodies, target);
     if (index < 0 || !applyWaterLevel(waterBodies[index].level, level)) return false;
-    if (index == 0) water = waterBodies[index];
+    if (isLegacyWaterBody(waterBodies, index)) water = waterBodies[index];
     return true;
 }
 
@@ -928,7 +1139,7 @@ bool World::setWaterType(const std::string& target, int type) {
     const int index = findWaterBody(waterBodies, target);
     if (index < 0 || type < 0 || type > 7) return false;
     waterBodies[index].liquidType = type;
-    if (index == 0) water.liquidType = type;
+    if (isLegacyWaterBody(waterBodies, index)) water.liquidType = type;
     return true;
 }
 
@@ -936,16 +1147,20 @@ bool World::setWaterOpacity(const std::string& target, float opacity) {
     const int index = findWaterBody(waterBodies, target);
     if (index < 0 || !applyWaterOpacity(waterBodies[index].opacity, opacity)) return false;
     waterBodies[index].surfaceColor.a = opacity;
-    if (index == 0) water = waterBodies[index];
+    if (isLegacyWaterBody(waterBodies, index)) water = waterBodies[index];
     return true;
 }
 
 bool World::setWaterColor(const std::string& target, const ColorF& color) {
+    // Water color also carries the authored surface opacity. Reject the whole
+    // value before changing RGB so malformed alpha cannot make the renderer
+    // silently discard the surface.
+    if (!validEnvironmentColor(color)) return false;
     const int index = findWaterBody(waterBodies, target);
     if (index < 0 || !applyWaterColor(waterBodies[index].surfaceColor, color.r, color.g, color.b)) return false;
     waterBodies[index].surfaceColor.a = color.a;
     waterBodies[index].opacity = color.a;
-    if (index == 0) water = waterBodies[index];
+    if (isLegacyWaterBody(waterBodies, index)) water = waterBodies[index];
     return true;
 }
 
@@ -1007,23 +1222,36 @@ bool World::setFogTransition(float duration, float distance, const ColorF* color
 }
 
 void World::cleanupMission() {
+    spawnCursors.clear();
     if (auto* ts = Engine::instance().script().ts()) {
-        for (const auto& object : worldObjects) {
-            if (object.objectName.empty()) continue;
-            if (object.className == "StaticShape" || object.className == "TSStatic" ||
-                object.className == "Turret" || object.className.ends_with("Turret") ||
-                object.className == "Item" ||
-                object.className == "Player" || object.className == "Vehicle" ||
-                object.className.ends_with("Vehicle"))
-                ts->callFunction(object.className + "::onRemove", {VMValue(object.objectName)});
+        if (loaded || !ScriptEngine::instance().missionObjects().empty())
+            ts->dispatchMissionCallback("onMissionEnd", {});
+        const auto missionObjects = Engine::instance().script().missionObjects();
+        std::vector<std::string> order;
+        for (const auto& object : missionObjects)
+            if (object.parentName.empty()) {
+                auto part = Engine::instance().script().missionDeletionOrder(object.name);
+                order.insert(order.end(), part.begin(), part.end());
+            }
+        for (const auto& name : order) {
+            auto it = std::find_if(missionObjects.begin(), missionObjects.end(),
+                [&name](const ScriptMissionObject& object) { return object.name == name; });
+            if (it != missionObjects.end()) {
+                WorldObject callbackObject;
+                callbackObject.className = it->className;
+                callbackObject.objectName = it->name;
+                dispatchMissionLifecycle(callbackObject, "onRemove");
+            }
         }
-        // An onRemove callback may schedule work, but mission-owned work must
-        // never survive the removal pass.
-        ts->clearScheduledEvents();
+        // Cancel only mission-owned work. Global timers must survive mission
+        // teardown, while callbacks scheduled by onRemove must not escape it.
+        ScriptEngine::instance().cancelMissionEvents();
     }
+    ScriptEngine::instance().clearMissionObjects();
     clearEffects();
     terrainBlock.reset();
     skyBox.reset();
+    Engine::instance().renderer().clearMissingTextureCache();
     if (SDL_GL_GetCurrentContext()) {
         for (auto& shape : shapes) {
             for (auto& mesh : shape.meshes) mesh.destroy();
@@ -1037,6 +1265,9 @@ void World::cleanupMission() {
         }
     }
     worldObjects.clear();
+    // Pickups are mission-owned too. Leaving them behind makes a subsequent
+    // mission retain stale items even though its scene graph was replaced.
+    items.clear();
     missionObjectives.clear();
     navGraph = {};
     interiorCollision = {};
@@ -1066,11 +1297,43 @@ void World::cleanupMission() {
     config.fogColorOverride = false;
 }
 
+bool Game::deleteMissionObjectIfPresent(const std::string& name) {
+    if (!w) return false;
+    for (const auto& object : w->objects())
+        if (object.objectName == name) return w->deleteMissionObject(name);
+    return false;
+}
+
 bool World::load(const char* mapName) {
     Console::instance().printf(LogLevel::Info, "Loading map: %s", mapName);
 
-    if (auto* ts = Engine::instance().script().ts()) ts->clearScheduledEvents();
-    // Mission-owned effects must not survive a V12 scene replacement.
+    // Do not destroy the live mission until the replacement can be read.
+    if (mapName && !TorchPath::isSafeLogicalPath(mapName)) return false;
+    const std::string requestedMission = missionLoadPath(mapName ? mapName : "");
+    if (requestedMission.empty() || !TorchPath::isSafeLogicalPath(requestedMission.c_str())) {
+        Console::instance().printf(LogLevel::Error, "Rejected unsafe mission reference: %s",
+                                   mapName ? mapName : "");
+        return false;
+    }
+    auto& fs = Engine::instance().fs();
+    std::string misPath;
+    std::string misData;
+    if (!resolveMissionFile(fs, requestedMission, misPath, misData)) {
+        Console::instance().printf(LogLevel::Warn,
+            "Mission unavailable; preserving current world: %s", requestedMission.c_str());
+        return false;
+    }
+    auto parsedObjects = parseMisFile(misData);
+    if (parsedObjects.empty()) {
+        Console::instance().printf(LogLevel::Warn,
+            "Mission contains no objects: %s", misPath.c_str());
+        return false;
+    }
+
+    cleanupMission();
+
+    // Mission-owned effects must not survive a V12 scene replacement.  Do not
+    // clear the whole scheduler here: global script timers outlive missions.
     clearEffects();
 
     // A mission load replaces the native scene graph. Do not let static world
@@ -1124,29 +1387,6 @@ bool World::load(const char* mapName) {
     playerSpawn = {0, 5, 0};
     loaded = false;
 
-    auto& fs = Engine::instance().fs();
-
-    // Try to load mission file
-    if (mapName && !TorchPath::isSafeLogicalPath(mapName)) {
-        Console::instance().printf(LogLevel::Error, "Rejected unsafe mission argument: %s", mapName);
-        return false;
-    }
-    std::string missionName = mapName ? mapName : "";
-    missionName = normalizeMissionName(missionName);
-    if (!TorchPath::isSafeLogicalPath(missionName.c_str())) {
-        Console::instance().printf(LogLevel::Error, "Rejected unsafe mission path: %s", mapName ? mapName : "");
-        return false;
-    }
-    std::string misPath = std::string("missions/") + missionName + ".mis";
-    std::string misData = fs.readText(misPath.c_str());
-
-    if (misData.empty()) {
-        // FileSystem resolves case-insensitively for both loose and archived
-        // assets; try the packed mission form without reintroducing raw input.
-        misPath = std::string("missions/") + missionName + ".misPK";
-        misData = fs.readText(misPath.c_str());
-    }
-
     // Cloud layer properties (populated from Sky object if .mis available)
     float cloudHeights[3] = {0.7f, 0.5f, 0.3f};
     float cloudSpeeds[3] = {0.3f, 0.15f, 0.08f};
@@ -1156,18 +1396,32 @@ bool World::load(const char* mapName) {
         Console::instance().printf(LogLevel::Info, "Found mission: %s (%zu bytes, first 30: '%s')", misPath.c_str(), misData.size(),
             misData.substr(0, 30).c_str());
 
-        auto objects = parseMisFile(misData);
+        auto objects = std::move(parsedObjects);
+
+        std::vector<ScriptMissionObject> missionObjects;
+        missionObjects.reserve(objects.size());
+        for (const auto& object : objects) {
+            if (object.objName.empty()) continue;
+            ScriptMissionObject record;
+            record.className = object.className;
+            record.name = object.objName;
+            record.parentName = object.parentName;
+            for (const auto& property : object.props)
+                record.fields[property.name] = VMValue(property.value);
+            missionObjects.push_back(std::move(record));
+        }
+        ScriptEngine::instance().setMissionObjects(std::move(missionObjects), true);
 
         if (const MisObject* graph = findObject(objects, "NavigationGraph"))
             navGraph = authoredNavigationGraph(*graph);
         for (const auto& object : objects)
-            if (object.className == "AIObjective")
+            if (missionClassEquals(object.className, "AIObjective"))
                 missionObjectives.push_back(authoredMissionObjective(object));
         Console::instance().printf(LogLevel::Info, "  navigation graph: %s, objectives: %zu",
             navGraph.graphFile.empty() ? "none" : navGraph.graphFile.c_str(), missionObjectives.size());
 
         for (const auto& obj : objects) {
-            if (obj.className != "Camera") continue;
+            if (!missionClassEquals(obj.className, "Camera")) continue;
             std::string dataBlock = getProp(obj.props, "datablock");
             for (char& c : dataBlock)
                 c = (char)std::tolower((unsigned char)c);
@@ -1325,11 +1579,12 @@ bool World::load(const char* mapName) {
             for (int i = 1; i <= 3; ++i) {
                 const std::string volume = getProp(
                     skyObj->props, ("fogVolume" + std::to_string(i)).c_str());
-                float distance = 0.0f, minHeight = 0.0f, maxHeight = 0.0f;
-                if (sscanf(volume.c_str(), "%f %f %f", &distance, &minHeight,
-                           &maxHeight) == 3 && distance > 0.0f &&
-                    maxHeight > minHeight) {
-                    fogVolumes.push_back({distance, minHeight, maxHeight});
+                 float distance = 0.0f, minHeight = 0.0f, maxHeight = 0.0f, percentage = 1.0f;
+                 if (sscanf(volume.c_str(), "%f %f %f %f", &distance, &minHeight,
+                            &maxHeight, &percentage) >= 3 && distance > 0.0f &&
+                     percentage >= 0.0f && percentage <= 1.0f &&
+                     maxHeight > minHeight) {
+                     fogVolumes.push_back({distance, minHeight, maxHeight, percentage});
                 }
             }
             skyBox.fogVolumes.clear();
@@ -1395,8 +1650,9 @@ bool World::load(const char* mapName) {
             }
             std::string ambStr = getProp(sunObj->props, "ambient");
             if (!ambStr.empty()) {
-                float ar, ag, ab;
-                if (sscanf(ambStr.c_str(), "%f %f %f", &ar, &ag, &ab) >= 1) {
+                float ar = 0.0f, ag = 0.0f, ab = 0.0f;
+                if (sscanf(ambStr.c_str(), "%f %f %f", &ar, &ag, &ab) == 3 &&
+                    std::isfinite(ar) && std::isfinite(ag) && std::isfinite(ab)) {
                     sunAmbient = {ar, ag, ab, 1.0f};
                 }
             }
@@ -1410,7 +1666,10 @@ bool World::load(const char* mapName) {
 
         // Parse MissionArea from mission (for boundary visualization)
         for (auto& obj : objects) {
-            if (obj.className == "MissionArea") {
+            // Mission object class names are case-insensitive in Torque.
+            // Keep the boundary overlay working for missions authored with a
+            // different class spelling, just like the other mission passes.
+            if (!missionClassEquals(obj.className, "MissionArea")) continue;
                 std::string areaStr = getProp(obj.props, "area");
                 if (!areaStr.empty()) {
                     float ax, ay, aw, ah;
@@ -1427,18 +1686,17 @@ bool World::load(const char* mapName) {
                     }
                 }
                 break;
-            }
         }
 
         // Parse Precipitation from mission
         for (auto& obj : objects) {
-            if (obj.className == "Precipitation") {
+            if (missionClassEquals(obj.className, "Precipitation")) {
                 PrecipitationState ps;
                 std::string s;
                 // Native V12 names; retain the newer names as aliases.
                 s = getProp(obj.props, "maxNumDrops");
                 if (s.empty()) s = getProp(obj.props, "numDrops");
-                 if (!s.empty()) ps.numDrops = std::atoi(s.c_str());
+                 if (!s.empty()) ps.numDrops = parsePrecipitationDropCount(s);
                  ps.configuredDrops = ps.numDrops;
                  s = getProp(obj.props, "type"); if (!s.empty()) ps.type = std::atoi(s.c_str());
                  s = getProp(obj.props, "percentage"); if (!s.empty()) ps.percentage = (float)std::atof(s.c_str());
@@ -1489,7 +1747,7 @@ bool World::load(const char* mapName) {
         // Parse every WaterBlock. WaterBlock positions are the lower-left
         // corner of the fluid region, not the center of the rendered plane.
         for (auto& obj : objects) {
-            if (obj.className == "WaterBlock") {
+            if (missionClassEquals(obj.className, "WaterBlock")) {
                  WaterState body;
                  body.name = obj.objName;
                 float scaleZ = 0.0f;
@@ -1510,7 +1768,7 @@ bool World::load(const char* mapName) {
                          std::isfinite(px) && std::isfinite(py) && std::isfinite(pz) &&
                          body.sizeX > 0.0f && body.sizeY > 0.0f) {
                         body.originX = px;
-                        body.originZ = -py;
+                        body.originZ = waterOriginZ(py, body.sizeY);
                         body.level = pz + scaleZ;
                         body.active = true;
                     }
@@ -1620,10 +1878,11 @@ bool World::load(const char* mapName) {
         // Collect shape paths for all renderable mission objects
         // (TSStatic, InteriorInstance, StaticShape, Turret, Item, Camera, etc.)
         for (auto& obj : objects) {
-            if (!isRenderableMissionShape(obj.className) && obj.className != "ForceFieldBare") continue;
+            if (!isRenderableMissionShape(obj.className) &&
+                !missionClassIs(obj.className, "ForceFieldBare")) continue;
             std::string shapePath = resolveShapePath(obj, datablockShapes);
             if (!shapePath.empty()) addShapeName(shapePath);
-            if (obj.className == "Turret") {
+            if (missionClassIs(obj.className, "Turret")) {
                 std::string barrel = getProp(obj.props, "initialbarrel");
                 if (const auto* barrelPath = findDatablockShape(datablockShapes, barrel))
                     addShapeName(*barrelPath);
@@ -1654,7 +1913,7 @@ bool World::load(const char* mapName) {
         // V12 chooses a team-compatible authored sphere. Sort by authored name
         // rather than file order so equivalent missions spawn deterministically.
         if (const MisObject* spawn = selectAuthoredSpawn(objects, 1)) {
-            playerSpawn = authoredMissionMarker(*spawn).position;
+            playerSpawn = authoredMissionWorldPosition(authoredMissionMarker(*spawn));
             Console::instance().printf(LogLevel::Debug, "  spawn point: (%.1f, %.1f, %.1f)",
                                         playerSpawn.x, playerSpawn.y, playerSpawn.z);
         }
@@ -1665,7 +1924,7 @@ bool World::load(const char* mapName) {
 
         // Place objects from mission, mapping to loaded shapes
         for (auto& obj : objects) {
-             if (obj.className == "AudioEmitter") {
+             if (missionClassIs(obj.className, "AudioEmitter")) {
                 WorldObject emitter;
                 emitter.pos = parsePos(getProp(obj.props, "position"));
                 emitter.audioEmitter = true;
@@ -1683,9 +1942,11 @@ bool World::load(const char* mapName) {
                 addObject(emitter);
                 continue;
             }
-             if (obj.className == "Marker" || obj.className == "MissionMarker" ||
-                  obj.className == "SpawnSphere" ||
-                  obj.className == "Trigger" || obj.className == "PhysicalZone") {
+             if (missionClassIs(obj.className, "Marker") ||
+                  missionClassIs(obj.className, "MissionMarker") ||
+                  missionClassIs(obj.className, "SpawnSphere") ||
+                  missionClassIs(obj.className, "Trigger") ||
+                  missionClassIs(obj.className, "PhysicalZone")) {
                 WorldObject marker;
                   marker.className = obj.className;
                   const AuthoredMissionMarker authored = authoredMissionMarker(obj);
@@ -1699,7 +1960,8 @@ bool World::load(const char* mapName) {
                   // Markers are mapper guides, never world collision geometry.
                    marker.collidable = false;
                    marker.visible = authoredVisible(obj);
-                  if (obj.className == "Trigger") {
+                   if (missionClassIs(obj.className, "Trigger") ||
+                       missionClassIs(obj.className, "PhysicalZone")) {
                       std::string pointsText = getProp(obj.props, "polyhedron");
                      if (pointsText.empty()) pointsText = getProp(obj.props, "pointList");
                      if (pointsText.empty()) pointsText = getProp(obj.props, "points");
@@ -1707,35 +1969,34 @@ bool World::load(const char* mapName) {
                      std::vector<Point3F> localPoints;
                      for (size_t i = 0; i + 2 < numbers.size(); i += 3)
                          localPoints.push_back({numbers[i], numbers[i + 1], numbers[i + 2]});
-                     if (localPoints.size() >= 4)
-                         marker.trigger = triggerFromVertices(localPoints);
-                     else
-                         marker.trigger = triggerBox({marker.scale.x * 0.5f, marker.scale.y * 0.5f,
-                                                      marker.scale.z * 0.5f});
+                      if (localPoints.size() >= 4)
+                          marker.trigger = triggerFromVertices(localPoints);
+                      else
+                          marker.trigger = triggerUnitBox();
                      marker.triggerVolume = true;
                  }
-                marker.missionVolume = obj.className == "Trigger" ||
-                                       obj.className == "PhysicalZone";
-                 if (obj.className == "SpawnSphere") marker.volumeRadius = authored.radius;
-                 if (obj.className == "PhysicalZone") {
+                  marker.missionVolume = missionClassIs(obj.className, "Trigger") ||
+                                         missionClassIs(obj.className, "PhysicalZone");
+                  if (missionClassIs(obj.className, "SpawnSphere")) marker.volumeRadius = authored.radius;
+                  if (missionClassIs(obj.className, "PhysicalZone")) {
                     const std::string velocity = getProp(obj.props, "velocityMod");
                     const std::string gravity = getProp(obj.props, "gravityMod");
                     const std::string force = getProp(obj.props, "appliedForce");
-                    if (!velocity.empty()) marker.physicalVelocityMod = (float)std::atof(velocity.c_str());
-                    if (!gravity.empty()) marker.physicalGravityMod = (float)std::atof(gravity.c_str());
+                     if (!velocity.empty())
+                         marker.physicalVelocityMod = std::clamp((float)std::atof(velocity.c_str()), -40.0f, 40.0f);
+                     if (!gravity.empty())
+                         marker.physicalGravityMod = std::clamp((float)std::atof(gravity.c_str()), -40.0f, 40.0f);
                     if (sscanf(force.c_str(), "%f %f %f", &marker.physicalForce.x,
                                &marker.physicalForce.y, &marker.physicalForce.z) != 3)
                         marker.physicalForce = {};
                      const std::string active = getProp(obj.props, "active");
                      if (!active.empty()) marker.physicalActive = std::atoi(active.c_str()) != 0;
-                     marker.trigger = triggerBox({marker.scale.x * 0.5f, marker.scale.y * 0.5f,
-                                                  marker.scale.z * 0.5f});
-                     marker.triggerVolume = true;
+                       marker.triggerVolume = true;
                  }
                  addObject(marker);
                  continue;
              }
-             if (obj.className == "AIObjective") {
+              if (missionClassIs(obj.className, "AIObjective")) {
                  const AuthoredMissionObjective authored = authoredMissionObjective(obj);
                  WorldObject objective;
                  objective.className = obj.className;
@@ -1763,18 +2024,28 @@ bool World::load(const char* mapName) {
                  continue;
              }
             // Skip infrastructure / non-renderable classes (handled elsewhere)
-            if (obj.className == "SimGroup" || obj.className == "MissionArea" ||
-                obj.className == "TerrainBlock" || obj.className == "Sky" ||
-                obj.className == "Sun" || obj.className == "WaterBlock" ||
-                obj.className == "AudioEmitter" || obj.className == "MissionMarker" ||
-                obj.className == "SpawnSphere" || obj.className == "NavigationGraph" ||
-                obj.className == "AIObjective" || obj.className == "Trigger" ||
-                obj.className == "PhysicalZone" || obj.className == "Precipitation" ||
-                obj.className == "ParticleEmitter" || obj.className == "ParticleEmissionDummy" ||
-                obj.className == "Explosion" || obj.className == "Lightning")
-                continue;
+             if (missionClassIs(obj.className, "SimGroup") ||
+                 missionClassIs(obj.className, "MissionArea") ||
+                 missionClassIs(obj.className, "TerrainBlock") ||
+                 missionClassIs(obj.className, "Sky") ||
+                 missionClassIs(obj.className, "Sun") ||
+                 missionClassIs(obj.className, "WaterBlock") ||
+                 missionClassIs(obj.className, "AudioEmitter") ||
+                 missionClassIs(obj.className, "MissionMarker") ||
+                 missionClassIs(obj.className, "SpawnSphere") ||
+                 missionClassIs(obj.className, "NavigationGraph") ||
+                 missionClassIs(obj.className, "AIObjective") ||
+                 missionClassIs(obj.className, "Trigger") ||
+                 missionClassIs(obj.className, "PhysicalZone") ||
+                 missionClassIs(obj.className, "Precipitation") ||
+                 missionClassIs(obj.className, "ParticleEmitter") ||
+                 missionClassIs(obj.className, "ParticleEmissionDummy") ||
+                 missionClassIs(obj.className, "Explosion") ||
+                 missionClassIs(obj.className, "Lightning"))
+                 continue;
 
-            if (!isRenderableMissionShape(obj.className) && obj.className != "ForceFieldBare") continue;
+            if (!isRenderableMissionShape(obj.className) &&
+                !missionClassIs(obj.className, "ForceFieldBare")) continue;
 
              WorldObject wo;
              wo.objectName = obj.objName;
@@ -1800,11 +2071,11 @@ bool World::load(const char* mapName) {
              wo.shapeName = resolveShapePath(obj, datablockShapes);
               wo.shapeName = normalizeShapePath(wo.shapeName);
              wo.animName = authoredSequence(obj);
-            if (obj.className == "WayPoint") {
+             if (missionClassIs(obj.className, "WayPoint")) {
                 wo.label = getProp(obj.props, "name");
                 wo.collidable = false;
             }
-            if (obj.className == "ForceFieldBare") {
+             if (missionClassIs(obj.className, "ForceFieldBare")) {
                 wo.forceField = true;
                 wo.translucent = true;
                 const ScriptObject* datablockObject = findScriptObject(getProp(obj.props, "datablock"));
@@ -1816,8 +2087,17 @@ bool World::load(const char* mapName) {
                 float cr, cg, cb;
                 if (sscanf(color.c_str(), "%f %f %f", &cr, &cg, &cb) >= 3)
                     wo.forceFieldColor = {cr, cg, cb, 1.0f};
-                if (datablockField("baseTranslucency"))
-                    wo.forceFieldBaseTranslucency = datablockField("baseTranslucency")->toFloat();
+                 if (datablockField("baseTranslucency"))
+                     wo.forceFieldBaseTranslucency = datablockField("baseTranslucency")->toFloat();
+                 const std::string powerOffColor = datablockField("powerOffColor")
+                     ? datablockField("powerOffColor")->toString() : "";
+                 float pr, pg, pb;
+                 if (sscanf(powerOffColor.c_str(), "%f %f %f", &pr, &pg, &pb) >= 3)
+                     wo.forceFieldPowerOffColor = {pr, pg, pb, 1.0f};
+                 if (datablockField("powerOffTranslucency"))
+                     wo.forceFieldPowerOffTranslucency = datablockField("powerOffTranslucency")->toFloat();
+                 if (datablockField("fadeMS"))
+                     wo.forceFieldFadeMS = std::max(0.0f, datablockField("fadeMS")->toFloat());
                 if (datablockField("umapping"))
                     wo.forceFieldUMapping = datablockField("umapping")->toFloat();
                 if (datablockField("vmapping"))
@@ -1840,8 +2120,9 @@ bool World::load(const char* mapName) {
                     if (wo.forceFieldFrameDurations.empty())
                         wo.forceFieldFrameDurations = std::move(durations);
                 }
-                const std::string open = getProp(obj.props, "fieldopen");
-                wo.forceFieldOpen = !open.empty() && std::atoi(open.c_str()) != 0;
+                 const std::string open = getProp(obj.props, "fieldopen");
+                 wo.forceFieldOpen = !open.empty() && std::atoi(open.c_str()) != 0;
+                 wo.forceFieldFadePosition = wo.forceFieldOpen ? wo.forceFieldFadeMS : 0.0f;
                 wo.boundsRadius = std::sqrt(wo.scale.x * wo.scale.x +
                                              wo.scale.y * wo.scale.y +
                                              wo.scale.z * wo.scale.z) * 0.5f;
@@ -1850,8 +2131,8 @@ bool World::load(const char* mapName) {
             std::string datablockLower = datablock;
             for (char& c : datablockLower)
                 c = (char)std::tolower((unsigned char)c);
-            if (obj.className == "Item" && datablockLower == "flag") {
-                int team = obj.objName.starts_with("Team2") ? 2 : 1;
+            if (missionClassIs(obj.className, "Item") && datablockLower == "flag") {
+                const int team = CtfRuntime::missionFlagTeam(obj.objName);
                 std::string teamName;
                 if (auto* ts = ScriptEngine::instance().ts()) {
                     teamName = ts->getGlobal(
@@ -1863,9 +2144,9 @@ bool World::load(const char* mapName) {
                 if (Engine::instance().game().isMapperMode())
                     wo.animName.clear();
             }
-             wo.collidable = authoredCollidable(obj, obj.className != "Item");
-             wo.itemPickup = obj.className == "Item";
-            if (obj.className == "WayPoint") wo.collidable = false;
+             wo.collidable = authoredCollidable(obj, !missionClassIs(obj.className, "Item"));
+             wo.itemPickup = missionClassIs(obj.className, "Item");
+             if (missionClassIs(obj.className, "WayPoint")) wo.collidable = false;
 
             // Find matching shape
             for (auto& s : shapes) {
@@ -1885,7 +2166,7 @@ bool World::load(const char* mapName) {
                     break;
                 }
             }
-            if (obj.className == "Turret") {
+             if (missionClassIs(obj.className, "Turret")) {
                 wo.mountedShapeName = getProp(obj.props, "initialbarrel");
                 const auto* barrelPath = findDatablockShape(datablockShapes, wo.mountedShapeName);
                 std::string mountedPath = barrelPath ? *barrelPath : "";
@@ -1975,7 +2256,8 @@ bool World::load(const char* mapName) {
             return particle && loadParticle(findScriptObject(particle->toString()), emitter.particle);
         };
         for (const auto& obj : objects) {
-            if (obj.className == "ParticleEmissionDummy" || obj.className == "ParticleEmitter") {
+             if (missionClassIs(obj.className, "ParticleEmissionDummy") ||
+                 missionClassIs(obj.className, "ParticleEmitter")) {
                 std::string name = getProp(obj.props, "emitter");
                 if (name.empty()) name = getProp(obj.props, "datablock");
                 EffectEmitter emitter;
@@ -1995,7 +2277,7 @@ bool World::load(const char* mapName) {
                 }
                 if (!emitter.textures.empty()) emitter.texture = emitter.textures.front();
                 effectEmitters.push_back(std::move(emitter));
-            } else if (obj.className == "Lightning") {
+             } else if (missionClassIs(obj.className, "Lightning")) {
                 EffectLightning lightning;
                 lightning.pos = Math::torquePointToYUp(parsePos(getProp(obj.props, "position")));
                 lightning.scale = parsePos(getProp(obj.props, "scale"));
@@ -2054,13 +2336,13 @@ bool World::load(const char* mapName) {
         // Track pickups separately from their visual. Native Item shapes are
         // rendered as WorldObjects, while shape-less items use the proxy below.
         for (auto& obj : objects) {
-            if (obj.className != "Item") continue;
+             if (!missionClassIs(obj.className, "Item")) continue;
             std::string db = getProp(obj.props, "datablock");
             std::string posStr = getProp(obj.props, "position");
 
-            // Check if this item was already placed as a WorldObject with a shape
-            bool hasShape = false;
-            Point3F itemPos = parsePos(posStr);
+             // Check if this item was already placed as a WorldObject with a shape
+             bool hasShape = false;
+             Point3F itemPos = parsePos(posStr);
             for (auto& wo : worldObjects) {
                 if (wo.shape && wo.shape->loaded &&
                     std::abs(wo.pos.x - itemPos.x) < 0.01f &&
@@ -2076,28 +2358,46 @@ bool World::load(const char* mapName) {
              ItemPickup::Type type = kind == ItemKind::Health ? ItemPickup::Health
                  : kind == ItemKind::Energy ? ItemPickup::Energy : ItemPickup::Ammo;
 
-            ItemPickup item;
-            item.pos = itemPos;
-            item.type = type;
-             auto scriptIt = ScriptEngine::instance().objects.find(db);
-             if (scriptIt != ScriptEngine::instance().objects.end() && scriptIt->second) {
-                 auto* script = scriptIt->second;
-                 auto number = [&](const char* field, float fallback) {
-                     auto it = script->fields.find(field);
-                     return it == script->fields.end() ? fallback : it->second.toFloat();
-                 };
-                 item.amount = number("amount", item.amount);
-                 item.respawnDelay = number("respawnTime", number("respawn", item.respawnDelay));
+              ItemPickup item;
+              item.pos = itemWorldPosition(itemPos);
+             item.type = type;
+             // The generic ItemPickup default is the health/energy amount.
+             // Ammo datablocks use the smaller native fallback even when the
+             // script datablock is unavailable entirely.
+             item.amount = defaultItemPickupAmount(kind);
+              auto scriptIt = ScriptEngine::instance().objects.find(db);
+              if (scriptIt == ScriptEngine::instance().objects.end()) {
+                  for (auto candidate = ScriptEngine::instance().objects.begin();
+                       candidate != ScriptEngine::instance().objects.end(); ++candidate) {
+                      if (itemDatablockNameEquals(candidate->first, db)) {
+                          scriptIt = candidate;
+                          break;
+                      }
+                  }
+              }
+              if (scriptIt != ScriptEngine::instance().objects.end() && scriptIt->second) {
+                  auto* script = scriptIt->second;
+                  auto number = [&](const char* field, float fallback) {
+                      // Torque datablock fields are case-insensitive.  Do not
+                      // make custom ItemData spellings fall back to stock
+                      // values merely because their key capitalization differs.
+                      const auto* value = scriptField(script, field);
+                      return value ? value->toFloat() : fallback;
+                  };
+                  item.amount = itemPickupAmount(kind, number("amount", item.amount));
+                  item.respawnDelay = itemRespawnDelay(
+                      number("respawnTime", number("respawn", item.respawnDelay)));
              }
              item.renderProxy = !hasShape;
              for (size_t i = 0; i < worldObjects.size(); ++i) {
                  auto& wo = worldObjects[i];
-                 if (wo.itemPickup && std::abs(wo.pos.x - itemPos.x) < 0.01f &&
-                     std::abs(wo.pos.y - itemPos.y) < 0.01f &&
-                     std::abs(wo.pos.z - itemPos.z) < 0.01f) {
-                     item.worldObjectIndex = (int)i;
-                     break;
-                 }
+                  if (wo.itemPickup && std::abs(wo.pos.x - itemPos.x) < 0.01f &&
+                      std::abs(wo.pos.y - itemPos.y) < 0.01f &&
+                      std::abs(wo.pos.z - itemPos.z) < 0.01f) {
+                      item.worldObjectIndex = (int)i;
+                      item.active = wo.itemActive;
+                      break;
+                  }
              }
             items.push_back(item);
             Console::instance().printf(LogLevel::Debug, "  item (box): %s at (%.1f, %.1f, %.1f)",
@@ -2228,31 +2528,12 @@ bool World::load(const char* mapName) {
         }
         if (!dmlData.empty()) {
             std::string dmlContent((const char*)dmlData.data(), dmlData.size());
-            // Parse all lines from DML: first 6 = cubemap faces, 7th = emap, 8-10 = cloud layers
-            std::vector<std::string> faceNames;
-            size_t pos = 0;
-            int lineIdx = 0;
-            while (pos < dmlContent.size()) {
-                while (pos < dmlContent.size() && (dmlContent[pos] == ' ' || dmlContent[pos] == '\t' || dmlContent[pos] == '\r')) pos++;
-                if (pos >= dmlContent.size()) break;
-                size_t end = pos;
-                while (end < dmlContent.size() && dmlContent[end] != '\n') end++;
-                std::string line = dmlContent.substr(pos, end - pos);
-                while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r')) line.pop_back();
-                // DML comments and blank lines are not entries.  Counting them
-                // shifts the face/emap/cloud slots and makes valid sky lists
-                // resolve the wrong assets.
-                if (!line.empty() && line.front() != ';') {
-                    if (lineIdx < 6)
-                        faceNames.push_back(line);
-                    else if (lineIdx == 6)
-                        emapPath = line;
-                    else if (lineIdx >= 7 && lineIdx <= 9)
-                        cloudPaths.push_back(line);
-                    lineIdx++;
-                }
-                pos = end + 1;
-            }
+            // Parse all lines from DML: first 6 = cubemap faces, 7th = emap,
+            // 8-10 = cloud layers. Comments and blanks do not consume slots.
+            const auto entries = parseSkyMaterialList(dmlContent);
+            const auto& faceNames = entries.faces;
+            emapPath = entries.environment;
+            cloudPaths = entries.clouds;
 
             Console::instance().printf(LogLevel::Debug, "  DML face names (%zu):", faceNames.size());
             for (auto& fn : faceNames) Console::instance().printf(LogLevel::Debug, "    '%s'", fn.c_str());
@@ -2305,10 +2586,10 @@ bool World::load(const char* mapName) {
         skyBox.load(skyFaces);
         Console::instance().printf(LogLevel::Info, "  sky loaded from: %s", skyMaterialList.c_str());
 
+        const std::vector<std::string> exts = {".png", ".jpg", ".bm8"};
         // Load environment map (sphere map) from DML line 7
         if (!emapPath.empty()) {
             std::string emapFullPath;
-            std::vector<std::string> exts = {".png", ".jpg", ".bm8"};
             // Try textures/<path>.<ext> first
             for (auto& ext : exts) {
                 std::string p = "textures/" + emapPath + ext;
@@ -2339,17 +2620,32 @@ bool World::load(const char* mapName) {
                     "  native environment map not found: %s", emapPath.c_str());
             }
 
-            // Load cloud layers from DML lines 7-9
-            // Use cloud properties from Sky object (read above)
-            for (size_t ci = 0; ci < cloudPaths.size() && ci < 3; ci++) {
-                Sky::CloudLayer layer;
-                layer.scrollSpeed = cloudSpeeds[ci];
-                layer.opacity = (ci == 0) ? 0.6f : (ci == 1) ? 0.4f : 0.3f;
-                layer.height = cloudHeights[ci];
+        }
 
-                bool found = false;
+        // Cloud layers are independent of the optional environment map.
+        // Stock DML files commonly omit the emap while still defining clouds.
+        for (size_t ci = 0; ci < cloudPaths.size() && ci < 3; ci++) {
+            Sky::CloudLayer layer;
+            layer.scrollSpeed = cloudSpeeds[ci];
+            layer.opacity = (ci == 0) ? 0.6f : (ci == 1) ? 0.4f : 0.3f;
+            layer.height = cloudHeights[ci];
+
+            bool found = false;
+            for (auto& ext : exts) {
+                std::string texPath = "textures/" + cloudPaths[ci] + ext;
+                auto td = fs.read(texPath.c_str());
+                if (!td.empty()) {
+                    layer.texture.load(td.data(), td.size());
+                    if (layer.texture.loaded) {
+                        Console::instance().printf(LogLevel::Info, "  cloud layer %zu loaded: %s", ci, texPath.c_str());
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (!found) {
                 for (auto& ext : exts) {
-                    std::string texPath = "textures/" + cloudPaths[ci] + ext;
+                    std::string texPath = cloudPaths[ci] + ext;
                     auto td = fs.read(texPath.c_str());
                     if (!td.empty()) {
                         layer.texture.load(td.data(), td.size());
@@ -2360,25 +2656,11 @@ bool World::load(const char* mapName) {
                         }
                     }
                 }
-                if (!found) {
-                    for (auto& ext : exts) {
-                        std::string texPath = cloudPaths[ci] + ext;
-                        auto td = fs.read(texPath.c_str());
-                        if (!td.empty()) {
-                            layer.texture.load(td.data(), td.size());
-                            if (layer.texture.loaded) {
-                                Console::instance().printf(LogLevel::Info, "  cloud layer %zu loaded: %s", ci, texPath.c_str());
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if (!found) {
-                    Console::instance().printf(LogLevel::Debug, "  cloud layer %zu NOT FOUND: %s", ci, cloudPaths[ci].c_str());
-                }
-                skyBox.cloudLayers.push_back(std::move(layer));
             }
+            if (!found) {
+                Console::instance().printf(LogLevel::Debug, "  cloud layer %zu NOT FOUND: %s", ci, cloudPaths[ci].c_str());
+            }
+            skyBox.cloudLayers.push_back(std::move(layer));
         }
     } else {
         Console::instance().printf(LogLevel::Info, "No sky textures found, generating default");
@@ -2386,6 +2668,8 @@ bool World::load(const char* mapName) {
 
     loaded = true;
     Console::instance().printf(LogLevel::Info, "Map loaded: %s", mapName);
+    if (auto* ts = Engine::instance().script().ts())
+        ts->dispatchMissionCallback("onMissionStart", {VMValue(mapName ? mapName : "")});
     return true;
 }
 
@@ -2394,18 +2678,9 @@ bool World::loadTerrain(const char* mapName) {
     // load just the heightfield. Avoids shape/material/GL loading so a dedicated
     // server can register an authoritative ground-height callback.
     auto& fs = Engine::instance().fs();
-    std::string missionName = mapName ? mapName : "";
-    for (char& c : missionName) if (c == '\\') c = '/';
-    if (missionName.starts_with("base/")) missionName.erase(0, 5);
-    if (missionName.starts_with("missions/")) missionName.erase(0, 9);
-    if (missionName.ends_with(".mis")) missionName.erase(missionName.size() - 4);
-    std::string misPath = std::string("missions/") + missionName + ".mis";
-    std::string misData = fs.readText(misPath.c_str());
-    if (misData.empty()) {
-        misPath = std::string("Missions/") + mapName + ".mis";
-        misData = fs.readText(misPath.c_str());
-    }
-    if (misData.empty()) return false;
+    std::string misPath;
+    std::string misData;
+    if (!resolveMissionFile(fs, mapName ? mapName : "", misPath, misData)) return false;
 
     auto objects = parseMisFile(misData);
     MisObject* terrainObj = findObject(objects, "TerrainBlock");
@@ -2463,6 +2738,11 @@ bool World::loadTerrain(const char* mapName) {
 }
 
 void World::update(float dt) {
+    // Keep all world-owned timers on the same bounded simulation tick as
+    // movement and projectiles.  Without this, a paused/invalid frame can
+    // poison effect timers, while a hitch can teleport bots and animation.
+    dt = precipitationDelta(dt);
+    if (dt <= 0.0f) return;
     if (fog.transitioning) {
         fog.transitionElapsed = std::min(fog.transitionElapsed + std::max(0.0f, dt),
                                           fog.transitionDuration);
@@ -2534,9 +2814,7 @@ void World::update(float dt) {
                 axis.x /= length; axis.y /= length; axis.z /= length;
                 rotation = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(object.rotAngleDeg));
             }
-            const Point3F scaled{local.x * object.scale.x, local.y * object.scale.z,
-                                 local.z * object.scale.y};
-            const Point3F converted = Math::torquePointToYUp(scaled);
+            const Point3F converted = triggerLocalPointToYUp(local, object.scale);
             const Point3F rotated = rotation.transform(converted);
             return Point3F{rotated.x + Math::torquePointToYUp(object.pos).x,
                            rotated.y + Math::torquePointToYUp(object.pos).y,
@@ -2556,11 +2834,25 @@ void World::update(float dt) {
         };
         std::vector<std::pair<std::string, Point3F>> actors;
         const Point3F player = Engine::instance().game().player().position();
-        actors.push_back({"Player", player});
+        if (triggerActorIsActive(!Engine::instance().game().player().isDead()))
+            actors.push_back({"Player", player});
         for (int index : Engine::instance().game().getLiveGhostIndices()) {
             const GhostEntry* ghost = Engine::instance().game().getLiveGhost(index);
-            if (!ghost || ghost->className != "Player") continue;
-            actors.push_back({std::to_string(index), {ghost->renderPos.x, ghost->renderPos.y, ghost->renderPos.z}});
+             // MPBs and AIPlayers derive from Player in stock Tribes 2.  They
+             // must participate in mission trigger volumes just like a human
+             // player; filtering on the exact base class makes bot/vehicle
+             // missions silently miss onEnter/onLeave callbacks.
+              if (!ghost || !ObserverParity::isPositionReady(ghost->hasPosition) ||
+                  !ObserverParity::isPlayerTarget(
+                      ghost->className, ghost->damageState)) continue;
+             // Trigger evaluation runs before the render interpolation pass.
+             // Using renderPos here leaves remote players at their previous
+             // (often zero) position for one or more frames, so mission
+             // triggers fail to fire reliably in multiplayer.
+              actors.push_back({std::to_string(index),
+                                triggerNetworkPointToYUp({ghost->position.x,
+                                                         ghost->position.y,
+                                                         ghost->position.z})});
         }
          for (auto& trigger : worldObjects) {
              if (!trigger.triggerVolume) continue;
@@ -2570,39 +2862,78 @@ void World::update(float dt) {
                 transformed.push_back(transformTrigger(trigger, vertex));
             const TriggerPolyhedron worldHull = triggerFromVertices(transformed);
             std::unordered_set<std::string> current;
-             const bool active = trigger.className != "PhysicalZone" || trigger.physicalActive;
+              const bool active = !missionClassIs(trigger.className, "PhysicalZone") ||
+                                  trigger.physicalActive;
              for (const auto& actor : actors) {
                  const bool inside = active && worldHull.contains(actor.second);
                  if (inside) current.insert(actor.first);
              }
-             const auto transitions = triggerTransitions(trigger.triggerOccupants, current);
-             for (const auto& actor : transitions.entered) dispatch(trigger, "onEnter", actor);
-             for (const auto& actor : transitions.left) dispatch(trigger, "onLeave", actor);
-         }
-    }
+              const auto transitions = triggerTransitions(trigger.triggerOccupants, current);
+              for (const auto& actor : transitions.entered) dispatch(trigger, "onEnter", actor);
+              for (const auto& actor : transitions.left) dispatch(trigger, "onLeave", actor);
+              trigger.triggerOccupants = std::move(current);
+          }
+      }
 
     // Update item pickups
     for (auto& item : items) {
+        // Script deactivation is persistent; only advance respawn state for
+        // items that are currently enabled by their mission object.
+        if (!item.enabled) continue;
         if (!item.active) {
-            item.respawnTimer -= dt;
-            if (item.respawnTimer <= 0) {
+            if (itemRespawnReady(item.respawnTimer, dt)) {
                 item.active = true;
                 if (item.worldObjectIndex >= 0 && item.worldObjectIndex < (int)worldObjects.size())
                     worldObjects[item.worldObjectIndex].itemActive = true;
+            } else {
+                item.respawnTimer -= dt;
             }
             continue;
         }
 
         // Check player proximity
         auto& game = Engine::instance().game();
-        if (game.isMapperMode()) continue;  // No player in mapper mode
+        const bool missionVisible = item.worldObjectIndex < 0 ||
+            item.worldObjectIndex >= (int)worldObjects.size() ||
+            worldObjects[item.worldObjectIndex].visible;
+        if (!itemCanBeCollected(item.enabled, item.active, missionVisible)) continue;
+        // Dead ShapeBases cannot collect items; otherwise a health pickup is
+        // consumed even though applyDamage intentionally ignores dead players.
+        if (game.isMapperMode() || game.player().isDead()) continue;
         const Point3F& ppos = game.player().position();
         float dx = item.pos.x - ppos.x;
         float dy = item.pos.y - ppos.y;
         float dz = item.pos.z - ppos.z;
         float dist = sqrtf(dx * dx + dy * dy + dz * dz);
 
-        if (dist < 2.0f) {
+        if (itemWithinPickupRange(dist)) {
+            const ItemKind kind = item.type == ItemPickup::Health ? ItemKind::Health :
+                item.type == ItemPickup::Energy ? ItemKind::Energy : ItemKind::Ammo;
+            int32_t currentWeapon = game.player().currentWeapon();
+            float current = 0.0f;
+            float maximum = 0.0f;
+            bool hasAmmoWeapon = false;
+            if (kind == ItemKind::Health) {
+                current = game.player().health();
+                // PlayerData::maxDamage is the ShapeBase health cap.  Health
+                // items must use the authored armor maximum, not the stock
+                // 100-point default, or high-health armor can never refill.
+                maximum = game.player().maxHealth();
+            } else if (kind == ItemKind::Energy) {
+                current = game.player().energy();
+                maximum = game.player().maxEnergy();
+            } else if (currentWeapon >= 0 && currentWeapon < (int32_t)game.player().weaponCount()) {
+                const int weaponType = game.player().weapon(currentWeapon).type;
+                if (weaponType >= 0 && weaponType < gWeaponCount &&
+                    weaponAcceptsAmmoPickup(gWeaponTable[weaponType])) {
+                    hasAmmoWeapon = true;
+                    current = (float)game.player().weapon(currentWeapon).ammo;
+                    maximum = (float)gWeaponTable[weaponType].maxAmmo;
+                }
+            }
+            if (!itemPickupWouldApply(kind, current, item.amount, maximum) ||
+                (kind == ItemKind::Ammo && !hasAmmoWeapon)) continue;
+
             item.active = false;
             item.respawnTimer = item.respawnDelay;
             if (item.worldObjectIndex >= 0 && item.worldObjectIndex < (int)worldObjects.size())
@@ -2614,19 +2945,22 @@ void World::update(float dt) {
                     break;
                 case ItemPickup::Energy:
                     game.player().setEnergy(applyItemAmount(ItemKind::Energy, game.player().energy(),
-                                                            item.amount, 100.0f));
+                                                             item.amount, game.player().maxEnergy()));
                     break;
                 case ItemPickup::Ammo: {
-                    int32_t cw = game.player().currentWeapon();
-                    if (cw >= 0 && cw < (int32_t)game.player().weaponCount())
-                        game.player().weapon(cw).ammo = (int)applyItemAmount(
-                            ItemKind::Ammo, (float)game.player().weapon(cw).ammo, item.amount, 0.0f);
+                    int32_t cw = currentWeapon;
                     if (cw >= 0 && cw < (int32_t)game.player().weaponCount()) {
-                        if (auto* hud = Engine::instance().guiRenderer().findControl("weaponsHud")) {
-                            for (auto& slot : hud->hudSlots)
-                                if (slot.active) slot.amount = game.player().weapon(cw).ammo;
-                        }
+                        const int weaponType = game.player().weapon(cw).type;
+                        const float maxAmmo = weaponType >= 0 && weaponType < gWeaponCount
+                            ? (float)gWeaponTable[weaponType].maxAmmo : 0.0f;
+                        game.player().weapon(cw).ammo = (int)applyItemAmount(
+                            ItemKind::Ammo, (float)game.player().weapon(cw).ammo, item.amount, maxAmmo);
                     }
+                    // Keep each weapon slot's reserve independent.  Updating
+                    // every active slot made a pickup overwrite unrelated
+                    // weapon counters with the currently selected weapon's
+                    // ammo.
+                    game.player().updateWeaponHud();
                     break;
                 }
             }
@@ -2640,24 +2974,6 @@ void World::update(float dt) {
     for (auto& e : explosions) {
         e.lifetime -= dt;
         e.radius += dt * 4.0f;
-        // Check explosion against bots
-        for (size_t botIndex = 0; botIndex < bots.size(); botIndex++) {
-            auto& b = bots[botIndex];
-            if (!b.alive) continue;
-            if (std::find(e.damagedBots.begin(), e.damagedBots.end(), botIndex) != e.damagedBots.end())
-                continue;
-            float dx = b.pos.x - e.pos.x;
-            float dy = b.pos.y - e.pos.y;
-            float dz = b.pos.z - e.pos.z;
-            float dist = sqrtf(dx*dx + dy*dy + dz*dz);
-            if (dist < e.radius) {
-                float dmg = 30.0f * (1.0f - dist / e.radius);
-                b.health -= dmg;
-                e.damagedBots.push_back(botIndex);
-                if (b.health <= 0) { b.health = 0; b.alive = false; b.respawnTimer = 5.0f; }
-                else { b.lastHitTime = Engine::instance().game().gameTime(); }
-            }
-        }
     }
     explosions.erase(
         std::remove_if(explosions.begin(), explosions.end(),
@@ -2685,10 +3001,69 @@ void World::update(float dt) {
             spawnTrail(p.pos, trailColor, 0.15f);
         }
 
-        // Check for impact
-            float groundH = 0;
-            Point3F impactNormal{0, 1, 0};
-            if (checkProjectileCollision(p, groundH, impactNormal)) {
+        // Check dynamic bot targets along the full movement segment before
+        // terrain/interior collision. Direct hits consume the projectile and
+        // do not receive a second full splash-damage application.
+        bool directImpact = false;
+        int directBotIndex = -1;
+        float directHitT = 1.0f;
+        Projectile worldProbe = p;
+        float probeGround = 0.0f;
+        Point3F probeNormal{0, 1, 0};
+        const bool probeImpact = checkProjectileCollision(worldProbe, probeGround, probeNormal);
+        const float segmentDx = p.pos.x - p.previousPos.x;
+        const float segmentDy = p.pos.y - p.previousPos.y;
+        const float segmentDz = p.pos.z - p.previousPos.z;
+        const float segmentLengthSq = segmentDx * segmentDx + segmentDy * segmentDy + segmentDz * segmentDz;
+        const float probeDx = worldProbe.pos.x - p.previousPos.x;
+        const float probeDy = worldProbe.pos.y - p.previousPos.y;
+        const float probeDz = worldProbe.pos.z - p.previousPos.z;
+        const float probeLengthSq = probeDx * probeDx + probeDy * probeDy + probeDz * probeDz;
+        const bool worldBlocksBots = probeImpact ||
+            (segmentLengthSq > 1.0e-6f && probeLengthSq + 1.0e-4f < segmentLengthSq);
+        const float worldHitT = segmentLengthSq > 1.0e-6f
+            ? std::clamp(std::sqrt(probeLengthSq / segmentLengthSq), 0.0f, 1.0f) : 1.0f;
+        for (size_t botIndex = 0; botIndex < bots.size(); ++botIndex) {
+            auto& bot = bots[botIndex];
+            if (!bot.alive) continue;
+            float hitT = 0.0f;
+            // Bots use the same ShapeBase capsule bounds as network players.
+            // The old sphere-only test made shots grazing a player's head or
+            // feet miss locally even though the authoritative path accepted
+            // them.
+            if (!segmentPlayerHit(p.previousPos, p.pos, bot.pos, hitT)) continue;
+            if (worldBlocksBots && hitT > worldHitT + 1.0e-4f) continue;
+            // Resolve the first target along the sweep, not the first target
+            // in mission/object insertion order. This matters when several
+            // players line up behind one another.
+            if (directImpact && hitT >= directHitT) continue;
+            directImpact = true;
+            directHitT = hitT;
+            directBotIndex = (int)botIndex;
+        }
+        if (directImpact) {
+            auto& bot = bots[(size_t)directBotIndex];
+            p.pos = {p.previousPos.x + (p.pos.x - p.previousPos.x) * directHitT,
+                     p.previousPos.y + (p.pos.y - p.previousPos.y) * directHitT,
+                     p.previousPos.z + (p.pos.z - p.previousPos.z) * directHitT};
+            if (isValidDamageAmount(p.damage)) {
+                bot.health = applySignedDamage(bot.health, p.damage);
+                if (bot.health <= 0.0f) {
+                    bot.health = 0.0f;
+                    bot.alive = false;
+                     bot.respawnTimer = DeathRespawn::RespawnDelay;
+                    Engine::instance().game().player().recordKill();
+                } else {
+                    bot.lastHitTime = Engine::instance().game().gameTime();
+                }
+            }
+        }
+
+        float groundH = 0;
+        Point3F impactNormal{0, 1, 0};
+        if (directImpact)
+            markProjectileImpact(p);
+        if (directImpact || checkProjectileCollision(p, groundH, impactNormal)) {
                 if (impactNormal.y > 0.5f)
                     spawnTrail(p.pos, {0.45f, 0.42f, 0.35f, 0.55f}, 0.25f);
                 // Spawn explosion effect
@@ -2728,38 +3103,71 @@ void World::update(float dt) {
                     }
                 }
 
-                p.active = false;
-                p.hasImpacted = true;
+                markProjectileImpact(p);
             }
 
             // Apply splash damage near impact
-            if (p.hasImpacted && p.splashRadius > 0) {
+             if (p.hasImpacted && p.splashRadius > 0) {
             auto& game = Engine::instance().game();
             if (!game.isMapperMode()) {  // No player in mapper mode
-            const Point3F& ppos = game.player().position();
-            float dx = p.pos.x - ppos.x;
-            float dy = p.pos.y - ppos.y;
-            float dz = p.pos.z - ppos.z;
-            float dist = sqrtf(dx * dx + dy * dy + dz * dz);
-            if (dist < p.splashRadius) {
-                float factor = 1.0f - dist / p.splashRadius;
-                game.player().applyDamage(p.damage * factor * 0.5f);
-            }
+             const Point3F& ppos = game.player().position();
+             float dx = p.pos.x - ppos.x;
+             float dy = p.pos.y - ppos.y;
+              float dz = p.pos.z - ppos.z;
+               float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+               const auto& collision = game.world().collision();
+               const bool visible = projectileSplashCanReach(
+                   collision.loaded, !collision.loaded ||
+                       collision.lineOfSight(p.pos, ppos));
+               if (dist < p.splashRadius && visible) {
+                   game.player().applyDamage(projectileSplashEffect(
+                       p.damage, dist, p.splashRadius));
+                   if (p.damage > 0.0f) {
+                       const Point3F impulse = projectileSplashImpulse(
+                           ppos, p.pos, dist, p.splashRadius);
+                       Point3F velocity = game.player().velocity();
+                       velocity.x += impulse.x;
+                       velocity.y += impulse.y;
+                       velocity.z += impulse.z;
+                       game.player().setVelocity(velocity);
+                   }
+              }
             } // end mapper mode guard
             // Splash damage bots
-            for (auto& b : game.world().bots) {
+            for (size_t botIndex = 0; botIndex < game.world().bots.size(); ++botIndex) {
+                auto& b = game.world().bots[botIndex];
                 if (!b.alive) continue;
+                if ((int)botIndex == directBotIndex) continue;
                 float bdx = p.pos.x - b.pos.x;
-                float bdy = p.pos.y - b.pos.y;
-                float bdz = p.pos.z - b.pos.z;
-                float bdist = sqrtf(bdx*bdx + bdy*bdy + bdz*bdz);
-                if (bdist < p.splashRadius) {
-                    float factor = 1.0f - bdist / p.splashRadius;
-                    b.health -= p.damage * factor;
-                    if (b.health <= 0) { b.health = 0; b.alive = false; b.respawnTimer = 5.0f; } else { b.lastHitTime = Engine::instance().game().gameTime(); }
+                 float bdy = p.pos.y - b.pos.y;
+                  float bdz = p.pos.z - b.pos.z;
+                  float bdist = sqrtf(bdx*bdx + bdy*bdy + bdz*bdz);
+                  const auto& collision = game.world().collision();
+                  const bool visible = projectileSplashCanReach(
+                      collision.loaded, !collision.loaded ||
+                          collision.lineOfSight(p.pos, b.pos));
+                  if (bdist < p.splashRadius && visible) {
+                      const float splashDamage = projectileSplashEffect(
+                          p.damage, bdist, p.splashRadius);
+                     if (isValidDamageAmount(p.damage)) {
+                         b.health = applySignedDamage(b.health, splashDamage);
+                         if (b.health <= 0) {
+                              b.health = 0;
+                              b.alive = false;
+                               b.respawnTimer = DeathRespawn::RespawnDelay;
+                              game.player().recordKill();
+                          } else {
+                              b.lastHitTime = Engine::instance().game().gameTime();
+                          }
+                      }
                 }
             }
         }
+
+        // Hitscan weapons have already represented their complete trace this
+        // tick. Retire a miss as well as a hit so open-air rifle fire does not
+        // leave a visible endpoint/trail alive for its fallback lifetime.
+        if (projectileResolvesThisTick(p.type)) p.active = false;
     }
 
     // Remove inactive projectiles
@@ -2800,9 +3208,27 @@ void World::update(float dt) {
                 b.pos.z = b.startPos.z + cosf(b.patrolOffset) * 8.0f;
                 b.moveYaw = b.patrolOffset + 3.14159f;
             }
-            // Stay near ground
-            float th = Engine::instance().game().world().getHeight(b.pos.x, b.pos.z);
-            if (b.pos.y < th + 0.5f) b.pos.y = th + 0.5f;
+            // AIPlayers are ShapeBases too. Resolve their patrol/strafe move
+            // against loaded interiors so bots cannot walk through walls while
+            // the local player is correctly blocked by the same collision mesh.
+            const auto& collisionMesh = this->collision();
+            if (collisionMesh.loaded) {
+                Point3F pushOut{};
+                if (collisionMesh.sphereCollide(b.pos, 0.5f, pushOut)) {
+                    b.pos.x += pushOut.x;
+                    b.pos.y += pushOut.y;
+                    b.pos.z += pushOut.z;
+                }
+            }
+            // Match player grounding on ramps and interior floors. A scalar
+            // floor + 0.5 clamp makes bots float on slopes and ignores the
+            // walkable-normal test used by the native controller.
+            float floor = 0.0f;
+            Point3F floorNormal{};
+            if (botFloorContact(*this, b.pos, floor, floorNormal)) {
+                const float contactY = Movement::contactHeight(floor, 0.5f, floorNormal);
+                if (b.pos.y < contactY) b.pos.y = contactY;
+            }
             b.animTime += dt;
         } else {
             b.respawnTimer -= dt;
@@ -2810,6 +3236,8 @@ void World::update(float dt) {
                 b.health = 100.0f;
                 b.alive = true;
                 b.pos = b.startPos;
+                DeathRespawn::resetBotMotion(b.patrolOffset, b.moveYaw,
+                                              b.animTime, b.lastHitTime);
             }
         }
     }
@@ -2819,6 +3247,14 @@ void World::update(float dt) {
     for (auto& obj : worldObjects) {
         if (!obj.animName.empty() && obj.shape && obj.shape->loaded)
             obj.animTime += dt;
+        if (obj.forceField) {
+            const float target = obj.forceFieldOpen ? obj.forceFieldFadeMS : 0.0f;
+            const float step = std::max(dt, 0.0f) * 1000.0f;
+            if (obj.forceFieldFadePosition < target)
+                obj.forceFieldFadePosition = std::min(target, obj.forceFieldFadePosition + step);
+            else if (obj.forceFieldFadePosition > target)
+                obj.forceFieldFadePosition = std::max(target, obj.forceFieldFadePosition - step);
+        }
     }
 
     // Update particles
@@ -2844,9 +3280,13 @@ void World::updateRendererLights(Renderer& renderer) const {
     renderer.setDynamicLights(lights);
 }
 
-void World::render(const Point3F& cameraPos) {
+void World::render(const Point3F& cameraPos, float dt) {
     static float forceFieldTime = 0.0f;
-    forceFieldTime += 1.0f / 60.0f;
+    // ForceField animation is simulation-time driven in Torque. Using a fixed
+    // increment per render makes frames and UV scrolling run at the wrong rate
+    // on non-60 Hz displays and continue while the game is paused.
+    if (std::isfinite(dt) && dt > 0.0f)
+        forceFieldTime += std::min(dt, 0.1f);
     if (!loaded) return;
 
     auto& r = Engine::instance().renderer();
@@ -2864,7 +3304,7 @@ void World::render(const Point3F& cameraPos) {
     skyBox.fogVolumes.clear();
     for (const auto& volume : fogVolumes)
         skyBox.fogVolumes.push_back({volume.visibleDistance, volume.minHeight,
-                                     volume.maxHeight, 1.0f});
+                                     volume.maxHeight, volume.percentage});
     skyBox.render(r.view, r.projection, cameraPos.y);
     glDepthMask(GL_TRUE);
 
@@ -2899,7 +3339,7 @@ void World::render(const Point3F& cameraPos) {
         if (i < (int)fogVolumes.size() && fogVolumes[i].visibleDistance > 0.0f) {
             const auto& volume = fogVolumes[i];
             packed = {1.0f / volume.visibleDistance, volume.minHeight,
-                      volume.maxHeight, 0.0f};
+                       volume.maxHeight, volume.percentage};
         }
         defShader->setUniform((std::string("uFogVolume") + std::to_string(i)).c_str(), packed);
     }
@@ -2935,6 +3375,10 @@ void World::render(const Point3F& cameraPos) {
     std::vector<WorldObject*> renderQueue;
     renderQueue.reserve(worldObjects.size());
     for (auto& obj : worldObjects) {
+        // Hidden SceneObjects must not contribute any render pass. ForceField
+        // geometry is drawn outside the normal shape branch below, so the
+        // later shape visibility check cannot suppress it.
+        if (!obj.visible) continue;
         if (Engine::instance().game().isMapperMode() || obj.boundsRadius <= 0.0f) {
             renderQueue.push_back(&obj);
             continue;
@@ -2981,10 +3425,13 @@ void World::render(const Point3F& cameraPos) {
         if (obj.shape && obj.shape->loaded) {
              if (!obj.visible) continue;
              const bool mapperMarker = Engine::instance().game().isMapperMode() &&
-                 (obj.className == "Marker" || obj.className == "MissionMarker" ||
-                  obj.className == "SpawnSphere" || obj.className == "Trigger" ||
-                   obj.className == "PhysicalZone" || obj.className == "WayPoint" ||
-                   obj.className == "AIObjective");
+                  (missionClassIs(obj.className, "Marker") ||
+                   missionClassIs(obj.className, "MissionMarker") ||
+                   missionClassIs(obj.className, "SpawnSphere") ||
+                   missionClassIs(obj.className, "Trigger") ||
+                   missionClassIs(obj.className, "PhysicalZone") ||
+                   missionClassIs(obj.className, "WayPoint") ||
+                   missionClassIs(obj.className, "AIObjective"));
             if (mapperMarker) {
                 glDisable(GL_DEPTH_TEST);
                 glDepthMask(GL_FALSE);
@@ -3126,19 +3573,35 @@ void World::render(const Point3F& cameraPos) {
                                       {6,7},{7,4},{0,4},{1,5},{2,6},{3,7}};
             Point3F transformed[8];
             for (int i = 0; i < 8; ++i) transformed[i] = fieldModel.transform(corners[i]);
+            const float fieldAlpha = obj.forceFieldFadeMS > 0.0f
+                ? std::clamp(1.0f - obj.forceFieldFadePosition / obj.forceFieldFadeMS, 0.0f, 1.0f)
+                : (obj.forceFieldOpen ? 0.0f : 1.0f);
             glEnable(GL_BLEND);
             glDepthMask(GL_FALSE);
-            for (const auto& edge : edges)
-                r.drawLine(transformed[edge[0]], transformed[edge[1]], {0.25f, 0.85f, 1.0f, 0.65f});
-            if (!obj.forceFieldOpen && !obj.forceFieldFrames.empty()) {
-                const size_t frame = obj.forceFieldFramesPerSec > 0.0f
-                    ? (size_t)(forceFieldTime * obj.forceFieldFramesPerSec) % obj.forceFieldFrames.size() : 0;
+            if (fieldAlpha > 0.0f) {
+                for (const auto& edge : edges)
+                    r.drawLine(transformed[edge[0]], transformed[edge[1]],
+                               {0.25f, 0.85f, 1.0f, 0.65f * fieldAlpha});
+            }
+              if (fieldAlpha > 0.0f && !obj.forceFieldFrames.empty()) {
+                 const size_t frame = obj.forceFieldFrameDurations.size() == obj.forceFieldFrames.size()
+                     ? textureFrameIndex(obj.forceFieldFrameDurations,
+                                         obj.forceFieldFrames.size(), forceFieldTime)
+                     : (obj.forceFieldFramesPerSec > 0.0f
+                         ? (size_t)(forceFieldTime * obj.forceFieldFramesPerSec) % obj.forceFieldFrames.size()
+                         : 0);
                 const float u = obj.forceFieldUMapping;
                 const float v = obj.forceFieldVMapping;
                 const float scroll = forceFieldTime * obj.forceFieldScrollSpeed;
-                const ColorF tint = {obj.forceFieldColor.r, obj.forceFieldColor.g,
-                                     obj.forceFieldColor.b,
-                                     obj.forceFieldColor.a * obj.forceFieldBaseTranslucency};
+                 const ColorF tint = {
+                     obj.forceFieldPowerOffColor.r +
+                         (obj.forceFieldColor.r - obj.forceFieldPowerOffColor.r) * fieldAlpha,
+                     obj.forceFieldPowerOffColor.g +
+                         (obj.forceFieldColor.g - obj.forceFieldPowerOffColor.g) * fieldAlpha,
+                     obj.forceFieldPowerOffColor.b +
+                         (obj.forceFieldColor.b - obj.forceFieldPowerOffColor.b) * fieldAlpha,
+                     obj.forceFieldPowerOffTranslucency +
+                         (obj.forceFieldBaseTranslucency - obj.forceFieldPowerOffTranslucency) * fieldAlpha};
                 const uint32_t texture = obj.forceFieldFrames[frame];
                 r.drawTexturedQuad(transformed[0], transformed[1], transformed[2], transformed[3], texture, tint, 0, scroll, u, v + scroll);
                 r.drawTexturedQuad(transformed[4], transformed[7], transformed[6], transformed[5], texture, tint, 0, scroll, u, v + scroll);
@@ -3154,10 +3617,12 @@ void World::render(const Point3F& cameraPos) {
         // show the authored marker and volume bounds there without changing
         // gameplay collision semantics.
         if (Engine::instance().game().isMapperMode() &&
-            (obj.className == "Marker" || obj.className == "MissionMarker" ||
-             obj.className == "SpawnSphere" ||
-              obj.className == "Trigger" || obj.className == "PhysicalZone" ||
-              obj.className == "AIObjective")) {
+            (missionClassIs(obj.className, "Marker") ||
+             missionClassIs(obj.className, "MissionMarker") ||
+             missionClassIs(obj.className, "SpawnSphere") ||
+             missionClassIs(obj.className, "Trigger") ||
+             missionClassIs(obj.className, "PhysicalZone") ||
+             missionClassIs(obj.className, "AIObjective"))) {
             const Point3F center = Math::torquePointToYUp(obj.pos);
             MatrixF markerModel;
             Point3F axis = obj.rot;
@@ -3168,7 +3633,7 @@ void World::render(const Point3F& cameraPos) {
             }
             markerModel = markerModel * Math::torqueScaleToYUp(obj.scale);
             markerModel.setTranslation(center);
-            if (obj.className == "SpawnSphere") {
+            if (missionClassIs(obj.className, "SpawnSphere")) {
                 constexpr int segments = 24;
                 for (int i = 0; i < segments; ++i) {
                     const float a = Math::PI * 2.0f * (float)i / segments;
@@ -3181,7 +3646,7 @@ void World::render(const Point3F& cameraPos) {
                                {0.3f, 1.0f, 0.3f, 0.8f});
                 }
             } else if (obj.missionVolume) {
-                if (obj.className == "Trigger" && obj.trigger.vertices.size() >= 4) {
+                if (missionClassIs(obj.className, "Trigger") && obj.trigger.vertices.size() >= 4) {
                     Point3F axis = obj.rot;
                     const float length = std::sqrt(axis.x*axis.x + axis.y*axis.y + axis.z*axis.z);
                     MatrixF rotation;
@@ -3219,14 +3684,14 @@ void World::render(const Point3F& cameraPos) {
                      markerModel.transform({half.x,half.y,half.z}), markerModel.transform({-half.x,half.y,half.z})};
                 constexpr int edges[12][2] = {{0,1},{1,2},{2,3},{3,0},{4,5},{5,6},
                                               {6,7},{7,4},{0,4},{1,5},{2,6},{3,7}};
-                const ColorF color = obj.className == "Trigger"
+                 const ColorF color = missionClassIs(obj.className, "Trigger")
                     ? ColorF{1.0f, 0.7f, 0.2f, 0.8f}
                     : ColorF{0.2f, 0.7f, 1.0f, 0.8f};
                 for (const auto& edge : edges)
                     r.drawLine(corners[edge[0]], corners[edge[1]], color);
             } else {
                 r.drawLine(center, markerModel.transform({0, 1, 0}),
-                           obj.className == "AIObjective"
+                            missionClassIs(obj.className, "AIObjective")
                                ? ColorF{1.0f, 0.3f, 0.8f, 0.9f}
                                : ColorF{1.0f, 1.0f, 0.2f, 0.9f});
             }
@@ -3321,8 +3786,11 @@ skip_grid:
     // Render item pickups
     float time = Engine::instance().game().gameTime();
     for (auto& item : items) {
-        if (!item.renderProxy) continue;
-        if (!item.active) continue;
+        bool missionVisible = true;
+        if (item.worldObjectIndex >= 0 &&
+            item.worldObjectIndex < (int)worldObjects.size())
+            missionVisible = worldObjects[item.worldObjectIndex].visible;
+        if (!itemProxyVisible(item.renderProxy, item.active, missionVisible)) continue;
         float bob = sinf(time * 2.0f + item.pos.x * 0.1f) * 0.3f;
         ColorF col;
         switch (item.type) {
@@ -3468,15 +3936,7 @@ void World::addObject(const WorldObject& obj) {
     }
     worldObjects.push_back(std::move(stored));
     const auto& added = worldObjects.back();
-    if (ScriptEngine::exists() && !added.objectName.empty() &&
-         (added.className == "StaticShape" || added.className == "TSStatic" ||
-          added.className == "Turret" || added.className.ends_with("Turret") ||
-          added.className == "Item" ||
-          added.className == "Player" || added.className == "Vehicle" ||
-         added.className.ends_with("Vehicle"))) {
-        if (auto* ts = ScriptEngine::instance().ts())
-            ts->callFunction(added.className + "::onAdd", {VMValue(added.objectName)});
-    }
+    dispatchMissionLifecycle(added, "onAdd");
 }
 
 namespace {
@@ -3514,7 +3974,9 @@ bool World::setObjectiveState(const std::string& name, int state) {
     if (!objective) return false;
     if (objective->objectiveState == state) return true;
     objective->objectiveState = state;
-    objective->objectiveActive = state != 2 && state != 3;
+    // State zero is the native inactive/deactivated state.  Keep the boolean
+    // view consistent with setObjectiveActive(), which also maps false to 0.
+    objective->objectiveActive = state == 1;
     if (state == 1) dispatchObjectiveLifecycle(*objective, "onActivate");
     else if (state == 2) dispatchObjectiveLifecycle(*objective, "onComplete");
     else if (state == 3) dispatchObjectiveLifecycle(*objective, "onFail");
@@ -3560,19 +4022,41 @@ void World::resetTriggerTracking() {
         object.triggerOccupants.clear();
 }
 
+static std::string resolveMissionObjectName(const std::string& value);
+
 bool World::setMissionObjectEnabled(const std::string& name, bool enabled) {
+    const std::string resolvedName = resolveMissionObjectName(name);
     for (auto& object : worldObjects) {
-        if (object.objectName != name) continue;
-        if (object.className == "PhysicalZone") {
+        if (object.objectName != resolvedName) continue;
+        if (missionClassIs(object.className, "PhysicalZone")) {
             object.physicalActive = enabled;
+            triggerVolumeChanged(object.triggerOccupants);
             return true;
         }
-        if (object.className == "ForceFieldBare") {
+        if (missionClassIs(object.className, "ForceFieldBare")) {
             object.forceFieldOpen = !enabled;
             return true;
         }
-        if (object.className == "Item") {
+        if (missionClassIs(object.className, "Item")) {
             object.itemActive = enabled;
+            // Item pickups have a separate runtime record used by the
+            // collection loop. Keep it in lockstep with the mission object;
+            // otherwise deactivate() only hides the shape while the player
+            // can still collect the item.
+            for (auto& item : items) {
+                if (item.worldObjectIndex < 0 ||
+                    item.worldObjectIndex >= (int)worldObjects.size() ||
+                     &worldObjects[item.worldObjectIndex] != &object)
+                    continue;
+                item.enabled = enabled;
+                if (!enabled) {
+                    item.active = false;
+                } else {
+                    item.active = itemActiveAfterEnable(item.active, item.respawnTimer);
+                    if (item.active) item.respawnTimer = 0.0f;
+                }
+                object.itemActive = item.active;
+            }
             return true;
         }
         return false;
@@ -3581,13 +4065,116 @@ bool World::setMissionObjectEnabled(const std::string& name, bool enabled) {
 }
 
 bool World::setMissionObjectHidden(const std::string& name, bool hidden) {
+    const std::string resolved = resolveMissionObjectName(name);
     for (auto& object : worldObjects) {
-        if (object.objectName != name) continue;
-        if (object.className != "StaticShape" && object.className != "TSStatic" &&
-            object.className != "Turret" && object.className != "Item" &&
-            object.className != "Vehicle" && !object.className.ends_with("Vehicle"))
-            return false;
+        if (object.objectName != resolved) continue;
+        if (!missionObjectCanBeHidden(object.className)) return false;
         object.visible = !hidden;
+        return true;
+    }
+    return false;
+}
+
+static bool supportsMissionTransform(const World::WorldObject& object) {
+    // All authored scene objects have a transform in Torque, including
+    // volumes and markers that do not render a DTS shape.
+    return !object.objectName.empty() && object.className != "AudioEmitter";
+}
+
+static std::string resolveMissionObjectName(const std::string& value) {
+    char* end = nullptr;
+    const long id = std::strtol(value.c_str(), &end, 10);
+    if (end && *end == '\0' && id > 0) {
+        for (const auto& object : ScriptEngine::instance().missionObjects())
+            if (object.id == id) return object.name;
+    }
+    for (const auto& object : ScriptEngine::instance().missionObjects())
+        if (missionObjectNameIs(object.name, value)) return object.name;
+    return value;
+}
+
+bool World::setMissionObjectPosition(const std::string& name, const Point3F& position) {
+    if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z)) return false;
+    const std::string resolved = resolveMissionObjectName(name);
+    for (auto& object : worldObjects) {
+        if (object.objectName != resolved) continue;
+        if (!supportsMissionTransform(object)) return false;
+        object.pos = position;
+        if (object.triggerVolume) triggerVolumeChanged(object.triggerOccupants);
+        // Item pickups keep a converted runtime position separate from the
+        // authored WorldObject transform. Keep both in sync when scripts move
+        // an item, otherwise its mesh and collection volume diverge.
+        if (missionClassIs(object.className, "Item")) {
+            for (auto& item : items) {
+                if (item.worldObjectIndex < 0 ||
+                    item.worldObjectIndex >= (int)worldObjects.size() ||
+                    &worldObjects[item.worldObjectIndex] != &object)
+                    continue;
+                item.pos = itemWorldPosition(position);
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+bool World::getMissionObjectPosition(const std::string& name, Point3F& position) const {
+    const std::string resolved = resolveMissionObjectName(name);
+    for (const auto& object : worldObjects) {
+        if (object.objectName != resolved) continue;
+        if (!supportsMissionTransform(object)) return false;
+        position = object.pos;
+        return true;
+    }
+    return false;
+}
+
+bool World::setMissionObjectRotation(const std::string& name, const Point3F& axis, float angleDeg) {
+    if (!std::isfinite(axis.x) || !std::isfinite(axis.y) || !std::isfinite(axis.z) || !std::isfinite(angleDeg)) return false;
+    const std::string resolved = resolveMissionObjectName(name);
+    for (auto& object : worldObjects) {
+        if (object.objectName != resolved) continue;
+        if (!supportsMissionTransform(object)) return false;
+        object.rot = axis;
+        object.rotAngleDeg = angleDeg;
+        if (object.triggerVolume) triggerVolumeChanged(object.triggerOccupants);
+        return true;
+    }
+    return false;
+}
+
+bool World::getMissionObjectRotation(const std::string& name, Point3F& axis, float& angleDeg) const {
+    const std::string resolved = resolveMissionObjectName(name);
+    for (const auto& object : worldObjects) {
+        if (object.objectName != resolved) continue;
+        if (!supportsMissionTransform(object)) return false;
+        axis = object.rot;
+        angleDeg = object.rotAngleDeg;
+        return true;
+    }
+    return false;
+}
+
+bool World::setMissionObjectScale(const std::string& name, const Point3F& scale) {
+    if (!std::isfinite(scale.x) || !std::isfinite(scale.y) || !std::isfinite(scale.z) ||
+        scale.x == 0.0f || scale.y == 0.0f || scale.z == 0.0f) return false;
+    const std::string resolved = resolveMissionObjectName(name);
+    for (auto& object : worldObjects) {
+        if (object.objectName != resolved) continue;
+        if (!supportsMissionTransform(object)) return false;
+        object.scale = scale;
+        if (object.triggerVolume) triggerVolumeChanged(object.triggerOccupants);
+        return true;
+    }
+    return false;
+}
+
+bool World::getMissionObjectScale(const std::string& name, Point3F& scale) const {
+    const std::string resolved = resolveMissionObjectName(name);
+    for (const auto& object : worldObjects) {
+        if (object.objectName != resolved) continue;
+        if (!supportsMissionTransform(object)) return false;
+        scale = object.scale;
         return true;
     }
     return false;
@@ -3595,17 +4182,35 @@ bool World::setMissionObjectHidden(const std::string& name, bool hidden) {
 
 bool World::setMissionObjectTransform(const std::string& name, const std::string& transform) {
     float values[7]{};
-    if (sscanf(transform.c_str(), "%f %f %f %f %f %f %f", &values[0], &values[1],
-               &values[2], &values[3], &values[4], &values[5], &values[6]) != 7)
-        return false;
+    const char* cursor = transform.c_str();
+    for (float& value : values) {
+        while (std::isspace(static_cast<unsigned char>(*cursor))) ++cursor;
+        char* end = nullptr;
+        value = std::strtof(cursor, &end);
+        if (end == cursor) return false;
+        cursor = end;
+    }
+    while (std::isspace(static_cast<unsigned char>(*cursor))) ++cursor;
+    if (*cursor != '\0') return false;
     for (float value : values) if (!std::isfinite(value)) return false;
+    const std::string resolved = resolveMissionObjectName(name);
     for (auto& object : worldObjects) {
-        if (object.objectName != name) continue;
-        if (object.className != "StaticShape" && object.className != "TSStatic" &&
-            object.className != "Turret" && object.className != "Item" &&
-            object.className != "Vehicle" && !object.className.ends_with("Vehicle"))
-            return false;
+        if (object.objectName != resolved) continue;
+        if (!supportsMissionTransform(object)) return false;
         object.pos = {values[0], values[1], values[2]};
+        if (object.triggerVolume) triggerVolumeChanged(object.triggerOccupants);
+        // setTransform is also a supported script path for moving Item
+        // objects. Keep the pickup volume aligned with the rendered item just
+        // as setMissionObjectPosition does.
+        if (missionClassIs(object.className, "Item")) {
+            for (auto& item : items) {
+                if (item.worldObjectIndex < 0 ||
+                    item.worldObjectIndex >= (int)worldObjects.size() ||
+                    &worldObjects[item.worldObjectIndex] != &object)
+                    continue;
+                item.pos = itemWorldPosition(object.pos);
+            }
+        }
         object.rot = {values[3], values[4], values[5]};
         object.rotAngleDeg = values[6];
         return true;
@@ -3613,19 +4218,36 @@ bool World::setMissionObjectTransform(const std::string& name, const std::string
     return false;
 }
 
+bool World::getMissionObjectTransform(const std::string& name, std::string& transform) const {
+    const std::string resolved = resolveMissionObjectName(name);
+    for (const auto& object : worldObjects) {
+        if (object.objectName != resolved) continue;
+        if (!supportsMissionTransform(object)) return false;
+        char value[160];
+        snprintf(value, sizeof(value), "%g %g %g %g %g %g %g",
+                 object.pos.x, object.pos.y, object.pos.z,
+                 object.rot.x, object.rot.y, object.rot.z, object.rotAngleDeg);
+        transform = value;
+        return true;
+    }
+    return false;
+}
+
 bool World::mountMissionObjectImage(const std::string& name, const std::string& image, int slot) {
     if (image.empty() || slot < 0 || slot >= 8) return false;
+    const std::string resolved = resolveMissionObjectName(name);
     for (auto& object : worldObjects) {
-        if (object.objectName != name) continue;
-        if (object.className != "Turret" && !object.className.ends_with("Turret") &&
-            object.className != "Vehicle" &&
-            !object.className.ends_with("Vehicle")) return false;
+        if (object.objectName != resolved) continue;
+        const std::string lowerClass = missionRulesLower(object.className);
+        if (!missionClassIs(object.className, "Turret") && !lowerClass.ends_with("turret") &&
+            !missionClassIs(object.className, "Vehicle") &&
+            !lowerClass.ends_with("vehicle")) return false;
         object.mountedImages[slot] = image;
         if (slot == 0) object.mountedShapeName = image;
         if (auto* ts = ScriptEngine::instance().ts()) {
             const std::string callback = object.className + "::onMount";
             if (ts->hasFunction(callback))
-                ts->callFunction(callback, {VMValue(name), VMValue(image), VMValue(slot)});
+                 ts->callFunction(callback, {VMValue(resolved), VMValue(image), VMValue(slot)});
         }
         return true;
     }
@@ -3634,11 +4256,13 @@ bool World::mountMissionObjectImage(const std::string& name, const std::string& 
 
 bool World::unmountMissionObjectImage(const std::string& name, int slot) {
     if (slot < 0 || slot >= 8) return false;
+    const std::string resolved = resolveMissionObjectName(name);
     for (auto& object : worldObjects) {
-        if (object.objectName != name) continue;
-        if (object.className != "Turret" && !object.className.ends_with("Turret") &&
-            object.className != "Vehicle" &&
-            !object.className.ends_with("Vehicle")) return false;
+        if (object.objectName != resolved) continue;
+        const std::string lowerClass = missionRulesLower(object.className);
+        if (!missionClassIs(object.className, "Turret") && !lowerClass.ends_with("turret") &&
+            !missionClassIs(object.className, "Vehicle") &&
+            !lowerClass.ends_with("vehicle")) return false;
         const std::string image = object.mountedImages[slot];
         object.mountedImages[slot].clear();
         if (slot == 0) {
@@ -3648,8 +4272,22 @@ bool World::unmountMissionObjectImage(const std::string& name, int slot) {
         if (auto* ts = ScriptEngine::instance().ts()) {
             const std::string callback = object.className + "::onUnmount";
             if (ts->hasFunction(callback))
-                ts->callFunction(callback, {VMValue(name), VMValue(image), VMValue(slot)});
+                 ts->callFunction(callback, {VMValue(resolved), VMValue(image), VMValue(slot)});
         }
+        return true;
+    }
+    return false;
+}
+
+bool World::getMissionObjectImage(const std::string& name, int slot, std::string& image) const {
+    if (slot < 0 || slot >= 8) return false;
+    const std::string resolved = resolveMissionObjectName(name);
+    for (const auto& object : worldObjects) {
+        if (object.objectName != resolved) continue;
+        const std::string lowerClass = missionRulesLower(object.className);
+        if (!missionClassIs(object.className, "Turret") && !lowerClass.ends_with("turret") &&
+            !missionClassIs(object.className, "Vehicle") && !lowerClass.ends_with("vehicle")) return false;
+        image = object.mountedImages[slot];
         return true;
     }
     return false;
@@ -3657,18 +4295,26 @@ bool World::unmountMissionObjectImage(const std::string& name, int slot) {
 
 bool World::deleteMissionObject(const std::string& name) {
     if (name.empty()) return false;
+    const std::string resolved = resolveMissionObjectName(name);
     auto it = std::find_if(worldObjects.begin(), worldObjects.end(),
-        [&name](const WorldObject& object) { return object.objectName == name; });
+        [&resolved](const WorldObject& object) { return object.objectName == resolved; });
     if (it == worldObjects.end()) return false;
-    if (auto* ts = ScriptEngine::instance().ts()) {
-        ts->cancelEventsForObject(name);
-        if (!it->className.empty()) {
-            const std::string callback = it->className + "::onRemove";
-            if (ts->hasFunction(callback)) ts->callFunction(callback, {VMValue(name)});
-        }
-    }
+    if (auto* ts = ScriptEngine::instance().ts())
+        // Console APIs accept either an object name or its numeric ID. Event
+        // ownership and trigger occupants are keyed by the canonical name;
+        // using the original numeric token leaves callbacks from a deleted
+        // mission object alive until their original deadline.
+        ts->cancelEventsForObject(resolved);
+    dispatchMissionLifecycle(*it, "onRemove");
+    const int removedIndex = (int)std::distance(worldObjects.begin(), it);
+    items.erase(std::remove_if(items.begin(), items.end(),
+        [removedIndex](const ItemPickup& item) {
+            return item.worldObjectIndex == removedIndex;
+        }), items.end());
     worldObjects.erase(it);
-    for (auto& object : worldObjects) object.triggerOccupants.erase(name);
+    for (auto& item : items)
+        if (item.worldObjectIndex > removedIndex) --item.worldObjectIndex;
+    for (auto& object : worldObjects) object.triggerOccupants.erase(resolved);
     return true;
 }
 
@@ -3703,6 +4349,7 @@ float World::getHeight(float x, float z) const {
 
     // Fall back to terrain height
     if (!terrainBlock.loaded || terrainBlock.heights.empty() ||
+        !terrainBlock.contains(x, z) ||
         terrainBlock.isEmptySquare(x, z)) return -1e9f;
 
     return terrainBlock.sampleHeight(x, z);
@@ -3713,34 +4360,35 @@ float World::getFloorHeight(float x, float y, float z) const {
         const float interior = interiorCollision.getFloorHeight(x, y, z);
         if (interior > -1e9f) return interior;
     }
-    if (!terrainBlock.loaded || terrainBlock.heights.empty() || terrainBlock.isEmptySquare(x, z))
+    if (!terrainBlock.loaded || terrainBlock.heights.empty() ||
+        !terrainBlock.contains(x, z) || terrainBlock.isEmptySquare(x, z))
         return -1e9f;
-    const float terrain = terrainBlock.sampleHeight(x, z);
-    return terrain <= y + 0.001f ? terrain : -1e9f;
+    // A floor query must remain valid while an actor is penetrating the
+    // surface.  Rejecting terrain above the query point makes a player that
+    // crosses the terrain in one tick lose its floor and fall through it.
+    // Callers already distinguish a floor from a ceiling by the query
+    // direction/state, so return the authored terrain height unconditionally.
+    return terrainBlock.sampleHeight(x, z);
 }
 
 World::PhysicalZoneEffect World::physicalZoneEffect(const Point3F& position) const {
     PhysicalZoneEffect result;
     for (const auto& object : worldObjects) {
-        if (object.className != "PhysicalZone" || !object.physicalActive)
+        if (!missionClassIs(object.className, "PhysicalZone") || !object.physicalActive)
             continue;
 
         // Mission positions/scales are authored in T2's Z-up frame.  World
         // movement uses Y-up, and the existing mapper volume visualization
         // uses the same axis conversion.
         const Point3F center = Math::torquePointToYUp(object.pos);
-        const Point3F half{
-            std::max(0.5f, std::fabs(object.scale.x) * 0.5f),
-            std::max(0.5f, std::fabs(object.scale.z) * 0.5f),
-            std::max(0.5f, std::fabs(object.scale.y) * 0.5f)};
-        if (std::fabs(position.x - center.x) > half.x ||
-            std::fabs(position.y - center.y) > half.y ||
-            std::fabs(position.z - center.z) > half.z)
+        if (!transformedTriggerContains(object.trigger, position, center,
+                                        object.scale, object.rot, object.rotAngleDeg))
             continue;
 
-        result.velocityMod *= std::max(0.0f, object.physicalVelocityMod);
-        result.gravityMod *= std::max(0.0f, object.physicalGravityMod);
-        const Point3F force = Math::torquePointToYUp(object.physicalForce);
+        result.velocityMod *= physicalZoneModifier(object.physicalVelocityMod);
+        result.gravityMod *= physicalZoneModifier(object.physicalGravityMod);
+        const Point3F force = physicalZoneForceToYUp(
+            object.physicalForce, object.rot, object.rotAngleDeg);
         result.appliedForce.x += force.x;
         result.appliedForce.y += force.y;
         result.appliedForce.z += force.z;
@@ -3851,13 +4499,17 @@ void World::spawnExplosionEffect(const Point3F& pos,
     }
     const V12::DecodedDataBlock* selectedExplosion = explosionData;
     if (projectileData->projectileUnderwaterExplosionRef != 0) {
+        float highestWaterLevel = -std::numeric_limits<float>::infinity();
         for (const auto& body : waterBodies) {
-            if (pos.x < body.originX || pos.x > body.originX + body.sizeX ||
-                pos.z < body.originZ || pos.z > body.originZ + body.sizeY) continue;
-            if (body.level - pos.y >= projectileData->projectileDepthTolerance) {
+            if (!waterBodyCanAffectSurface(body.active, body.liquidType)) continue;
+            if (!waterBodyContainsHorizontal(pos.x, pos.z, body.originX,
+                                             body.originZ, body.sizeX, body.sizeY))
+                continue;
+            if (body.level > highestWaterLevel &&
+                body.level - pos.y >= projectileData->projectileDepthTolerance) {
                 selectedExplosion = find(projectileData->projectileUnderwaterExplosionRef);
+                highestWaterLevel = body.level;
             }
-            break;
         }
     }
     if (!selectedExplosion || !selectedExplosion->hasExplosion) {
@@ -4047,12 +4699,15 @@ void World::spawnSplashEffect(const Point3F& inputPos,
     };
     Point3F pos = inputPos;
     bool onWater = false;
+    float highestWaterLevel = -std::numeric_limits<float>::infinity();
     for (const auto& body : waterBodies) {
-        if (pos.x >= body.originX && pos.x <= body.originX + body.sizeX &&
-            pos.z >= body.originZ && pos.z <= body.originZ + body.sizeY) {
+        if (!waterBodyCanAffectSurface(body.active, body.liquidType)) continue;
+        if (waterBodyContainsHorizontal(pos.x, pos.z, body.originX,
+                                        body.originZ, body.sizeX, body.sizeY) &&
+            body.level > highestWaterLevel) {
             pos.y = body.level;
             onWater = true;
-            break;
+            highestWaterLevel = body.level;
         }
     }
     if (!onWater) {
@@ -4215,17 +4870,22 @@ void World::spawnTrail(const Point3F& pos, const ColorF& color, float size) {
 }
 
 void World::updateParticles(float dt) {
+    if (!particleTickIsUsable(dt)) return;
     for (auto& p : particles) {
         if (!p.active) continue;
-        p.lifetime -= dt;
+        p.lifetime = particleLifetimeAfterTick(p.lifetime, dt);
         if (p.lifetime <= 0) { p.active = false; continue; }
+        if (!std::isfinite(p.maxLifetime) || p.maxLifetime <= 0.0f) {
+            p.active = false;
+            continue;
+        }
         p.vel.y -= 5.0f * dt; // gravity
         p.pos.x += p.vel.x * dt;
         p.pos.y += p.vel.y * dt;
         p.pos.z += p.vel.z * dt;
         p.size += dt * 0.5f; // expand
         float t = p.lifetime / p.maxLifetime;
-        p.color.a = t; // fade out
+        p.color.a = std::clamp(std::isfinite(t) ? t : 0.0f, 0.0f, 1.0f); // fade out
     }
     // Remove dead particles
     particles.erase(std::remove_if(particles.begin(), particles.end(),
@@ -4235,7 +4895,8 @@ void World::updateParticles(float dt) {
         if (!debris.active) continue;
         debris.age += dt;
         if (debris.age >= debris.lifetime) { debris.active = false; continue; }
-        debris.vel.y -= 9.81f * debris.gravModifier * dt;
+        debris.vel.y += debrisGravityAcceleration(
+            Engine::instance().game().getGravity(), debris.gravModifier) * dt;
         if (debris.terminalVelocity > 0.0f) {
             const float speed = std::sqrt(debris.vel.x * debris.vel.x + debris.vel.y * debris.vel.y +
                                           debris.vel.z * debris.vel.z);
@@ -4401,28 +5062,30 @@ void World::updateParticles(float dt) {
                 p.texture = emitter.textures[p.textureIndex];
             }
             if (emitter.particle.keys.size() >= 2) {
-                size_t next = 1;
-                while (next < emitter.particle.keys.size() && emitter.particle.keys[next].time < t) ++next;
-                const auto& b = emitter.particle.keys[std::min(next, emitter.particle.keys.size() - 1)];
-                const auto& a = emitter.particle.keys[next < emitter.particle.keys.size() ? next - 1 : next];
-                const float span = b.time - a.time;
-                const float f = span > 0.0f ? (t - a.time) / span : 0.0f;
+                std::vector<float> keyTimes;
+                keyTimes.reserve(emitter.particle.keys.size());
+                for (const auto& key : emitter.particle.keys) keyTimes.push_back(key.time);
+                const ParticleKeyInterpolation interpolation =
+                    particleKeyInterpolation(t, keyTimes);
+                const auto& a = emitter.particle.keys[interpolation.lower];
+                const auto& b = emitter.particle.keys[interpolation.upper];
+                const float f = interpolation.fraction;
                 const auto& colorA = emitter.emitter.useEmitterColors &&
-                    emitter.emitter.colors.size() > (next < emitter.emitter.colors.size() ? next - 1 : next)
-                    ? emitter.emitter.colors[next < emitter.emitter.colors.size() ? next - 1 : next] : a;
+                    emitter.emitter.colors.size() > interpolation.lower
+                    ? emitter.emitter.colors[interpolation.lower] : a;
                 const auto& colorB = emitter.emitter.useEmitterColors &&
-                    emitter.emitter.colors.size() > std::min(next, emitter.emitter.colors.size() - 1)
-                    ? emitter.emitter.colors[std::min(next, emitter.emitter.colors.size() - 1)] : b;
+                    emitter.emitter.colors.size() > interpolation.upper
+                    ? emitter.emitter.colors[interpolation.upper] : b;
                 p.color = {colorA.red + (colorB.red - colorA.red) * f,
                            colorA.green + (colorB.green - colorA.green) * f,
                            colorA.blue + (colorB.blue - colorA.blue) * f,
                            colorA.alpha + (colorB.alpha - colorA.alpha) * f};
                 const float sizeA = emitter.emitter.useEmitterSizes &&
-                    emitter.emitter.sizes.size() > (next < emitter.emitter.sizes.size() ? next - 1 : next)
-                    ? emitter.emitter.sizes[next < emitter.emitter.sizes.size() ? next - 1 : next] : a.size * 50.0f;
+                    emitter.emitter.sizes.size() > interpolation.lower
+                    ? emitter.emitter.sizes[interpolation.lower] : a.size * 50.0f;
                 const float sizeB = emitter.emitter.useEmitterSizes &&
-                    emitter.emitter.sizes.size() > std::min(next, emitter.emitter.sizes.size() - 1)
-                    ? emitter.emitter.sizes[std::min(next, emitter.emitter.sizes.size() - 1)] : b.size * 50.0f;
+                    emitter.emitter.sizes.size() > interpolation.upper
+                    ? emitter.emitter.sizes[interpolation.upper] : b.size * 50.0f;
                 p.size = sizeA + (sizeB - sizeA) * f;
             }
         }
@@ -4667,7 +5330,8 @@ void World::renderParticles() {
 void World::initPrecipitation(const PrecipitationState& state) {
     precipitation.randomSeed = state.randomSeed;
     precipitation.textureAge = 0.0f;
-    precipitation.drops.resize(state.numDrops);
+    const int dropCount = std::clamp(state.numDrops, 0, kMaxPrecipitationDrops);
+    precipitation.drops.resize((size_t)dropCount);
     float halfW = state.boxWidth * 0.5f;
     float halfD = state.boxWidth * 0.5f;
     auto nextRandom = [&]() {
@@ -4689,6 +5353,8 @@ bool World::setPrecipitation(int type, float percentage) {
     if (type < 0 || type > 7 || !std::isfinite(percentage) || percentage < 0.0f || percentage > 1.0f)
         return false;
     precipitation.type = type;
+    if (percentage > 0.0f)
+        precipitation.configuredPercentage = percentage;
     precipitation.percentage = percentage;
     if (percentage == 0.0f) {
         precipitation.active = false;
@@ -4702,7 +5368,8 @@ bool World::setPrecipitation(int type, float percentage) {
 }
 
 bool World::setPrecipitationEnabled(bool enabled) {
-    return setPrecipitation(precipitation.type, enabled ? precipitation.percentage : 0.0f);
+    return setPrecipitation(precipitation.type,
+                             enabled ? precipitation.configuredPercentage : 0.0f);
 }
 
 bool World::setPrecipitationType(int type) {
@@ -4711,9 +5378,11 @@ bool World::setPrecipitationType(int type) {
 
 bool World::setPrecipitationWind(const Point3F& velocity) {
     if (!std::isfinite(velocity.x) || !std::isfinite(velocity.y) || !std::isfinite(velocity.z)) return false;
+    const Point3F oldWind = getTorchWindVelocity();
     setTorchWindVelocity(velocity);
     if (precipitation.active && precipitation.useWind)
-        for (auto& drop : precipitation.drops) { drop.vel.x = velocity.x; drop.vel.z = velocity.z; }
+        for (auto& drop : precipitation.drops)
+            drop.vel = precipitationWindAdjustedVelocity(drop.vel, oldWind, velocity);
     return true;
 }
 
@@ -4745,15 +5414,17 @@ bool World::strikeLightning() {
 
 void World::updatePrecipitation(float dt, const Point3F& camPos) {
     if (!precipitation.active || precipitation.drops.empty()) return;
-    precipitation.textureAge += std::max(0.0f, dt);
+    dt = precipitationDelta(dt);
+    if (dt <= 0.0f) return;
+    precipitation.textureAge += dt;
 
-    float halfW = precipitation.boxWidth * 0.5f;
-    float halfD = precipitation.boxWidth * 0.5f;
     float boxY = precipitation.origin.y + precipitation.boxHeight;
 
     for (auto& d : precipitation.drops) {
         if (!d.active) continue;
-        d.pos.y += d.vel.y * dt;
+        // Wind advects drops in all three axes; only moving Y makes weather
+        // appear vertical even though the authored wind is replicated locally.
+        d.pos = precipitationAdvancedPosition(d.pos, d.vel, dt);
         // Reset drop when it falls below the box
         if (d.pos.y < precipitation.origin.y - 5.0f) {
             d.pos.y = boxY;
@@ -4769,12 +5440,10 @@ void World::updatePrecipitation(float dt, const Point3F& camPos) {
     if (precipitation.followCam) {
         for (auto& d : precipitation.drops) {
             if (!d.active) continue;
-            float dx = d.pos.x - camPos.x;
-            float dz = d.pos.z - camPos.z;
-            if (dx > halfW) d.pos.x -= precipitation.boxWidth;
-            else if (dx < -halfW) d.pos.x += precipitation.boxWidth;
-            if (dz > halfD) d.pos.z -= precipitation.boxWidth;
-            else if (dz < -halfD) d.pos.z += precipitation.boxWidth;
+            d.pos.x = precipitationRecenterCoordinate(
+                d.pos.x, camPos.x, precipitation.boxWidth);
+            d.pos.z = precipitationRecenterCoordinate(
+                d.pos.z, camPos.z, precipitation.boxWidth);
         }
     }
 }
@@ -4814,7 +5483,7 @@ void World::renderWater() {
         if (i < (int)fogVolumes.size() && fogVolumes[i].visibleDistance > 0.0f) {
             const auto& volume = fogVolumes[i];
             packed = {1.0f / volume.visibleDistance, volume.minHeight,
-                      volume.maxHeight, 0.0f};
+                      volume.maxHeight, volume.percentage};
         }
         waterShdr->setUniform((std::string("uFogVolume") + std::to_string(i)).c_str(), packed);
     }
@@ -4854,46 +5523,32 @@ void World::renderWater() {
     glDepthMask(GL_FALSE);
 
     for (const auto& body : waterBodies) {
-        if (cam.y > body.level + 80.0f) continue;
+        // WaterBlock also represents non-liquid volumes (for example fog or
+        // damage regions).  They affect neither the native water surface nor
+        // its rendered material.
+        if (!waterBodyCanAffectSurface(body.active, body.liquidType)) continue;
+        // Do not cull by camera altitude.  WaterBlock surfaces remain visible
+        // from hills and aircraft; the horizontal distance cull below already
+        // bounds the work and matches the renderer's far-plane behavior.
         waterShdr->setUniform("uUseSurfaceTexture", (int32_t)0);
         waterShdr->setUniform("uUseShoreTexture", (int32_t)0);
         waterShdr->setUniform("uUseEnvMap", (int32_t)0);
         ColorF waterCol = body.surfaceColor;
         waterShdr->setUniform("uWaterColor", Point3F{waterCol.r, waterCol.g, waterCol.b});
-        waterShdr->setUniform("uWaterOpacity", std::clamp(body.opacity, 0.0f, 1.0f) *
-                                               std::clamp(waterCol.a, 0.0f, 1.0f));
-        uint32_t surfaceTexture = 0;
-        if (!body.surfaceFrames.empty()) {
-            surfaceTexture = body.surfaceFrames.front();
-            if (body.surfaceFrames.size() > 1) {
-                float cycle = 0.0f;
-                for (float duration : body.surfaceFrameDurations) cycle += std::max(duration, 0.001f);
-                float cursor = cycle > 0.0f ? std::fmod(time, cycle) : 0.0f;
-                for (size_t frame = 0; frame < body.surfaceFrames.size(); ++frame) {
-                    const float duration = frame < body.surfaceFrameDurations.size()
-                        ? std::max(body.surfaceFrameDurations[frame], 0.001f) : 1.0f;
-                    if (cursor < duration) { surfaceTexture = body.surfaceFrames[frame]; break; }
-                    cursor -= duration;
-                }
-            }
+         waterShdr->setUniform("uWaterOpacity", waterSurfaceOpacity(waterCol.a));
+         uint32_t surfaceTexture = 0;
+         if (!body.surfaceFrames.empty()) {
+             const size_t frame = textureFrameIndex(body.surfaceFrameDurations,
+                                                    body.surfaceFrames.size(), time);
+             surfaceTexture = body.surfaceFrames[frame];
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, surfaceTexture);
             waterShdr->setUniform("uSurfaceTexture", (int32_t)0);
             waterShdr->setUniform("uUseSurfaceTexture", (int32_t)1);
         }
-        if (!body.envFrames.empty()) {
-            size_t envFrame = 0;
-            if (body.envFrames.size() > 1) {
-                float cycle = 0.0f;
-                for (float duration : body.envFrameDurations) cycle += std::max(duration, 0.001f);
-                float cursor = cycle > 0.0f ? std::fmod(time, cycle) : 0.0f;
-                for (size_t frame = 0; frame < body.envFrames.size(); ++frame) {
-                    const float duration = frame < body.envFrameDurations.size()
-                        ? std::max(body.envFrameDurations[frame], 0.001f) : 1.0f;
-                    if (cursor < duration) { envFrame = frame; break; }
-                    cursor -= duration;
-                }
-            }
+         if (!body.envFrames.empty()) {
+             const size_t envFrame = textureFrameIndex(body.envFrameDurations,
+                                                       body.envFrames.size(), time);
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, body.envFrames[envFrame]);
             waterShdr->setUniform("uEnvMap", (int32_t)1);
@@ -4902,18 +5557,25 @@ void World::renderWater() {
         }
         waterShdr->setUniform("uTexOffset", std::fmod(time * body.waveSpeed * 0.01f, 1.0f));
         const int gridRes = 24;
-        const float stepX = body.sizeX / gridRes;
-        const float stepZ = body.sizeY / gridRes;
+        float renderOriginX = 0.0f, renderOriginZ = 0.0f;
+        float renderSizeX = 0.0f, renderSizeZ = 0.0f;
+        waterBodyRenderBounds(body.originX, body.originZ, body.sizeX, body.sizeY,
+                              renderOriginX, renderOriginZ,
+                              renderSizeX, renderSizeZ);
+        const float stepX = renderSizeX / gridRes;
+        const float stepZ = renderSizeZ / gridRes;
         for (int z = 0; z < gridRes; z++) {
             for (int x = 0; x < gridRes; x++) {
-            float wx = body.originX + x * stepX;
-            float wz = body.originZ + z * stepZ;
+            float wx = renderOriginX + x * stepX;
+            float wz = renderOriginZ + z * stepZ;
 
             // Skip quads far from camera
             float dx = wx + stepX * 0.5f - cam.x;
             float dz = wz + stepZ * 0.5f - cam.z;
             float dist = sqrtf(dx * dx + dz * dz);
-            if (dist > 400.0f) continue;
+             if (!waterQuadWithinRenderDistance(
+                     dist, Engine::instance().renderer().config().farPlane))
+                 continue;
 
             // Wave animation
             float wy = body.level;
@@ -4927,19 +5589,28 @@ void World::renderWater() {
             MatrixF scale;
             scale.setScale({stepX, 1.0f, stepZ});
             model = model * scale;
-            float shoreFactor = 1.0f;
-            if (body.shoreDepth > 0.0f && terrainBlock.loaded && !body.shoreFrames.empty()) {
-                const float terrainHeight = terrainBlock.sampleHeight(wx + stepX * 0.5f, wz + stepZ * 0.5f);
-                shoreFactor = std::clamp((body.level - terrainHeight) / body.shoreDepth, 0.0f, 1.0f);
-                glActiveTexture(GL_TEXTURE2);
-                glBindTexture(GL_TEXTURE_2D, body.shoreFrames.front());
-                waterShdr->setUniform("uShoreTexture", (int32_t)2);
-                waterShdr->setUniform("uUseShoreTexture", (int32_t)1);
-            }
+             float shoreFactor = 1.0f;
+             const bool useShoreTexture = waterShoreTextureActive(
+                 terrainBlock.loaded, !body.shoreFrames.empty(), body.shoreDepth);
+             // This is per quad. Leaving it enabled after a shoreline quad
+             // makes later quads sample the previous water body's shore map.
+             waterShdr->setUniform("uUseShoreTexture", (int32_t)(useShoreTexture ? 1 : 0));
+             if (useShoreTexture) {
+                 const float terrainHeight = terrainBlock.sampleHeight(wx + stepX * 0.5f, wz + stepZ * 0.5f);
+                 shoreFactor = std::clamp((body.level - terrainHeight) / body.shoreDepth, 0.0f, 1.0f);
+                 glActiveTexture(GL_TEXTURE2);
+                 const size_t shoreFrame = textureFrameIndex(body.shoreFrameDurations,
+                                                              body.shoreFrames.size(), time);
+                 glBindTexture(GL_TEXTURE_2D, body.shoreFrames[shoreFrame]);
+                 waterShdr->setUniform("uShoreTexture", (int32_t)2);
+             }
             waterShdr->setUniform("uShoreFactor", shoreFactor);
             waterShdr->setUniform("uModel", model);
 
-            r.drawFilledQuad(stepX, stepZ);
+             // The quad vertices already span unit UVs and unit model-space
+             // dimensions are supplied by the model scale above. Passing the
+             // world dimensions here as well squares every water tile.
+             r.drawFilledQuad(1.0f, 1.0f);
             }
         }
     }
@@ -4956,7 +5627,14 @@ Game::Game() : pl(new Player), w(new World) {
     mMenu = new Menu;
     hud = new HUD;
 }
-Game::~Game() { clearProjectileAudio(); delete pl; delete w; delete hud; }
+Game::~Game() {
+    clearProjectileAudio();
+    if (pl) { pl->modelShape.destroy(); pl->weaponShape.destroy(); }
+    testShape.destroy();
+    shapeViewerShape.destroy();
+    for (auto& [key, shape] : demoShapeCache) shape.destroy();
+    delete pl; delete w; delete hud;
+}
 
 void Game::clearProjectileAudio() {
     auto& audio = Engine::instance().audio();
@@ -5058,9 +5736,41 @@ bool Game::init() {
         if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: playdemo <path>"); return; }
         playDemo(argv[1]);
     }, "playdemo <path> - Load and play a Tribes 2 demo file");
+    con.addCommand("pauseDemo", [this](int32_t, const char* const*) { pauseDemo(); },
+        "pauseDemo - Pause demo playback");
+    con.addCommand("resumeDemo", [this](int32_t, const char* const*) { resumeDemo(); },
+        "resumeDemo - Resume demo playback");
+    con.addCommand("toggleDemoPause", [this](int32_t, const char* const*) { toggleDemoPause(); },
+        "toggleDemoPause - Toggle demo playback pause");
+    con.addCommand("stepDemo", [this](int32_t argc, const char* const* argv) {
+        const int blocks = argc > 1 ? std::max(1, atoi(argv[1])) : 1;
+        requestDemoStep(blocks);
+    }, "stepDemo [blocks] - Process demo blocks while paused");
+    con.addCommand("setDemoSpeed", [this](int32_t argc, const char* const* argv) {
+        if (argc < 2) {
+            Console::instance().printf(LogLevel::Warn, "Usage: setDemoSpeed <0.1..8>");
+            return;
+        }
+        setDemoPlaybackSpeed((float)atof(argv[1]));
+    }, "setDemoSpeed <rate> - Set demo playback speed");
+    con.addCommand("resetDemoEvents", [this](int32_t, const char* const*) { resetDemoEvents(); },
+        "resetDemoEvents - Clear the demo event log");
+    con.addCommand("resetDemoHud", [this](int32_t, const char* const*) { resetDemoHud(); },
+        "resetDemoHud - Clear demo HUD state");
+    con.addCommand("resetDemoCamera", [this](int32_t, const char* const*) { resetDemoCamera(); },
+        "resetDemoCamera - Return demo camera control to the recording");
+    con.addCommand("resetDemoEffects", [this](int32_t, const char* const*) { resetDemoEffects(); },
+        "resetDemoEffects - Clear demo audio, trails, flashes, and effects");
+    con.addCommand("resetDemo", [this](int32_t, const char* const*) { resetDemoPresentation(); },
+        "resetDemo - Reset demo events, HUD, camera, and effects");
     con.addCommand("seekDemoBlock", [this](int32_t argc, const char* const* argv) {
         if (!demoParser || argc < 2) return;
         const int target = std::max(0, atoi(argv[1]));
+        // Clear presentation state before restoring parser state. Resetting
+        // after restore would erase the HUD/timeline state captured in the
+        // selected snapshot.
+        resetDemoPresentation();
+        if (demoParser) demoParser->consumeExplosions();
         auto snapshot = demoSnapshots.upper_bound(target);
         if (snapshot != demoSnapshots.begin()) {
             --snapshot;
@@ -5079,32 +5789,8 @@ bool Game::init() {
         demoBlocksDone = target;
         demoTime = demoBlocksTotal > 0 && demoTotalTime > 0
             ? demoTotalTime * (float)target / (float)demoBlocksTotal : 0;
-        // Parser snapshots restore authoritative demo state, but these are
-        // presentation values accumulated by the game loop after the snapshot.
-        // Drop them so a seek cannot leak camera effects or events from the
-        // discarded timeline into the new one.
-        Engine::instance().audio().stopAll();
-        clearProjectileAudio();
-        demoEventLog.clear();
-        damageFlash = -1.0f;
-        whiteOut = -1.0f;
-        shakeIntensity = 0.0f;
-        shakeOffset = {0, 0, 0};
-        if (w) w->clearEffects();
-        if (demoParser) demoParser->consumeExplosions();
-        demoTrails.clear();
-          demoHasPos = false;
-          demoAuthoredCamera = false;
-         demoHasOrientation = false;
-          demoInterpolationDt = 0.0f;
-         demoMoveBlend = 1.0f;
-          demoOrbitCam = false;
-          demoFirstPersonCam = demoParser->getInitialBlock().firstPerson;
-          controlGhostIndex = demoParser->getInitialBlock().controlObjectGhostIndex;
-            demoCameraFov = -1.0f;
-         orbitCenterInit = false;
-         spectateGhostIndex = -1;
-         demoPath.clear();
+        demoInterpolationDt = 0.0f;
+        demoMoveBlend = 1.0f;
         demoPathCount = 0;
         Console::instance().printf(LogLevel::Info,
             "Demo seeked to block %d", target);
@@ -5113,9 +5799,12 @@ bool Game::init() {
     con.addCommand("listdemos", [this](int32_t argc, const char* const* argv) {
         auto& fs = Engine::instance().fs();
         std::vector<std::string> files;
-        fs.listFiles("*.demo", files);
+        // Tribes 2 stores recorded demos as .rec files.  Looking for the
+        // obsolete .demo suffix made the native recordings directory appear
+        // empty even though playdemo could open those files.
+        fs.listFiles("*.rec", files);
         if (files.empty()) {
-            Console::instance().printf(LogLevel::Info, "No demo files found (*.demo)");
+            Console::instance().printf(LogLevel::Info, "No demo files found (*.rec)");
         } else {
             Console::instance().printf(LogLevel::Info, "Demo files (%zu):", files.size());
             for (auto& f : files)
@@ -5131,10 +5820,12 @@ bool Game::init() {
             Console::instance().printf(LogLevel::Warn, "testshape: file not found: %s", argv[1]);
             return;
         }
+        testShape.destroy();
         testShape = DTSShape{};
         testShape.name = argv[1];
         if (!testShape.load(data.data(), data.size())) {
             Console::instance().printf(LogLevel::Warn, "testshape: failed to load shape");
+            testShape.destroy();
             testShape = DTSShape{};
             return;
         }
@@ -5269,6 +5960,17 @@ static void resetGameplayGui(GuiRenderer& gui) {
 }
 
 void Game::shutdown() {
+    if (activeConn) {
+        activeConn->disconnect();
+        Engine::instance().network().destroyConnection(activeConn);
+        activeConn = nullptr;
+    }
+    if (w) w->cleanupMission();
+    if (pl) { pl->modelShape.destroy(); pl->weaponShape.destroy(); }
+    testShape.destroy();
+    shapeViewerShape.destroy();
+    for (auto& [key, shape] : demoShapeCache) shape.destroy();
+    demoShapeCache.clear();
     delete mMenu;
     mMenu = nullptr;
     clearMissionAudio();
@@ -5373,23 +6075,38 @@ static SoundSource* playNativeAudioProfile(AudioSystem& audio,
 
 void Game::update(float dt) {
     Engine::instance().audio().advance(dt);
+    // Pause is a simulation boundary, not just a presentation flag.  Keep
+    // audio/UI processing alive, but do not advance clocks, damage flashes,
+    // physics, projectiles, or respawn timers while the local game is paused.
+    if (gamePaused) return;
+    demoStepFeedbackTime = std::max(0.0f, demoStepFeedbackTime - std::max(0.0f, dt));
     const float simulationDt = GameTime::scaledDelta(dt, timeScale);
     time += demoPlaying ? std::max(0.0f, dt) : simulationDt;
+    const float feedbackDt = demoPlaying ? std::max(0.0f, dt) : simulationDt;
+    if (damageFlash > 0.0f) damageFlash = std::max(0.0f, damageFlash - feedbackDt * 3.0f);
+    if (whiteOut > 0.0f) whiteOut = std::max(0.0f, whiteOut - feedbackDt * 2.0f);
 
     if (gameState == Playing) {
         // ─── Demo playback ──────────────────────────────────────
         if (demoPlaying) {
+            // A replacement can arrive before its mission asset is mounted.
+            // Retry it without touching the currently rendered presentation.
+            if (!demoMissionState.pendingMission.empty() && demoParser &&
+                demoParser->currentMission() == demoMissionState.pendingMission)
+                tryLoadDemoMission(demoMissionState.pendingMission);
             if (demoPaused && !demoStepRequest) {
                 demoJetHeld = false;
                 demoInterpolationDt = 0.0f;
                 return;
             }
             const bool stepDemo = demoStepRequest;
-            const float playbackRate = (demoFastForward || currentInput.jet) ? 4.0f : 1.0f;
+            const int stepBlocks = stepDemo ? std::max(1, demoStepBlocks) : 0;
+            const float playbackRate = (demoFastForward || currentInput.jet)
+                ? std::max(demoPlaybackRate, 4.0f) : demoPlaybackRate;
             Engine::instance().audio().setPlaybackRate(playbackRate);
             const float blockDuration = T2Demo::playbackBlockDuration(
                 demoTotalTime, demoBlocksTotal);
-            const float playbackDt = stepDemo ? blockDuration : dt * playbackRate;
+            const float playbackDt = stepDemo ? blockDuration * stepBlocks : dt * playbackRate;
             demoInterpolationDt = playbackDt;
             demoTime = std::min(demoTime + playbackDt, demoTotalTime);
             // Decay camera shake
@@ -5400,19 +6117,14 @@ void Game::update(float dt) {
                     {0.0f, 0.37f, 0.71f});
                 shakeOffset = {unit.x * shakeIntensity, unit.y * shakeIntensity,
                                unit.z * shakeIntensity};
-                shakeOffset.x *= shakeIntensity;
-                shakeOffset.y *= shakeIntensity;
-                shakeOffset.z *= shakeIntensity;
             } else {
                 shakeOffset = {0,0,0};
             }
-            // Decay damage flash and whiteout
-            if (damageFlash > 0) damageFlash = std::max(0.0f, damageFlash - dt * 3.0f);
-            if (whiteOut > 0) whiteOut = std::max(0.0f, whiteOut - dt * 2.0f);
             int blocksThisFrame;
             if (demoStepRequest) {
-                blocksThisFrame = 1;
+                blocksThisFrame = std::min(stepBlocks, 500);
                 demoStepRequest = false;
+                demoStepBlocks = 1;
             } else if (demoFastForward || currentInput.jet) {
                 demoJetHeld = currentInput.jet;
                 // Use the same playhead-to-block conversion as normal
@@ -5446,41 +6158,24 @@ void Game::update(float dt) {
                     : 0.0f;
                 const std::string previousMission = demoParser->currentMission();
                 demoParser->setCurrentBlock(demoBlocksDone - 1);
-                if (demoParser->currentMission() != previousMission) {
-                    // A demo mission change replaces the environment ghost set;
-                    // reload the authored atmosphere before applying new ghosts.
-                    if (w && !demoParser->currentMission().empty())
-                        w->load(demoParser->currentMission().c_str());
-                    demoParser->resetMissionState();
-                    clearMissionAudio();
-                    Engine::instance().audio().stopAll();
-                    clearProjectileAudio();
-                    demoTrails.clear();
-                    if (w) w->clearEffects();
-                    targetFinderShown = false;
-                    damageFlash = -1.0f;
-                    whiteOut = -1.0f;
-                    shakeIntensity = 0.0f;
-                    auto& missionGui = Engine::instance().guiRenderer();
-                    missionGui.clearDialogs();
-                    missionGui.setContent("PlayGui");
-                    resetGameplayGui(missionGui);
-                    if (hud) hud->resetState();
-                }
+                const bool missionChanged = demoParser->currentMission() != previousMission;
+                const std::string requestedMission = demoParser->currentMission();
 
                 // Extract position data from move blocks
                 if (block->type == T2Demo::BlockTypeMove && block->size >= 64) {
                     DemoMove move = demoParser->readRawMove(block->data.data(), block->data.size());
-                    if (std::fabs(move.yaw) > 0.001f || std::fabs(move.pitch) > 0.001f) {
+                    if (demoMoveOrientationValid(move.yaw, move.pitch)) {
                         demoViewYaw = move.yaw;
                         demoViewPitch = move.pitch;
                         demoHasOrientation = true;
                         if (demoHasPos) {
                             demoPrevCameraTarget = demoCameraTarget;
+                            const Vec3 direction = T2Demo::cameraDirectionFromYawPitch(
+                                demoViewYaw, demoViewPitch);
                             demoCameraTarget = {
-                                demoCameraPos.x + std::sin(demoViewYaw) * std::cos(demoViewPitch),
-                                demoCameraPos.y + std::cos(demoViewYaw) * std::cos(demoViewPitch),
-                                demoCameraPos.z + std::sin(demoViewPitch)
+                                demoCameraPos.x + direction.x,
+                                demoCameraPos.y + direction.y,
+                                demoCameraPos.z + direction.z
                             };
                             demoMoveBlend = 0.0f;
                         }
@@ -5604,16 +6299,19 @@ void Game::update(float dt) {
                               ? pd.gameState.controlObjectGhostIndex : controlGhostIndex;
                           if (demoParser) {
                               const auto* control = demoParser->getGhostTracker().getGhost(controlIndex);
-                              if (control && control->className == "Player") cp.z += 1.5f;
+                              if (control && ObserverParity::isPlayerClass(control->className)) cp.z += 1.5f;
                           }
                           demoPrevCameraPos = demoCameraPos;
                           demoPrevCameraTarget = demoCameraTarget;
-                          demoCameraPos = {cp.x, cp.y, cp.z};
-                          demoCameraTarget = demoHasOrientation
-                              ? Point3F{cp.x + std::sin(demoViewYaw) * std::cos(demoViewPitch),
-                                        cp.y + std::cos(demoViewYaw) * std::cos(demoViewPitch),
-                                        cp.z + std::sin(demoViewPitch)}
-                              : Point3F{cp.x, cp.y + 2.0f, cp.z};
+                           demoCameraPos = {cp.x, cp.y, cp.z};
+                           if (demoHasOrientation) {
+                               const Vec3 direction = T2Demo::cameraDirectionFromYawPitch(
+                                   demoViewYaw, demoViewPitch);
+                               demoCameraTarget = {cp.x + direction.x, cp.y + direction.y,
+                                                   cp.z + direction.z};
+                           } else {
+                               demoCameraTarget = {cp.x, cp.y + 2.0f, cp.z};
+                           }
                           demoMoveBlend = 0.0f;
                           demoHasPos = true;
                      }
@@ -5651,7 +6349,7 @@ void Game::update(float dt) {
                     }
 
                     // Apply sun data from demo stream if .mis didn't provide it
-                    if (!w->sunLightDirUsed) {
+                     if (!w->sunLightDirUsed) {
                         auto& sd = DemoParser::s_sunData;
                         if (sd.valid) {
                             w->sunLightDir.x = cosf(sd.elevation) * sinf(sd.azimuth);
@@ -5663,8 +6361,14 @@ void Game::update(float dt) {
                             Console::instance().printf(LogLevel::Info, "Applied sun from demo stream: az=%.0f el=%.0f color=(%d %d %d)",
                                 sd.azimuth * 180.0f / 3.14159f, sd.elevation * 180.0f / 3.14159f, sd.r, sd.g, sd.b);
                                 }
-                            }
-                        }
+                             }
+                         }
+                // Parse and apply this block's events before replacing the
+                // world. A missing mission must not drop its CRC, chat, or
+                // ghost updates; a successful replacement then clears the
+                // mission-owned presentation transactionally.
+                if (missionChanged)
+                    tryLoadDemoMission(requestedMission);
                 delete block;
                 if (demoPlaying && demoParser && (demoBlocksDone % 500) == 0)
                     demoSnapshots[demoBlocksDone] = demoParser->captureSnapshot();
@@ -5757,7 +6461,7 @@ void Game::update(float dt) {
                     for (int i : gt.getAllIndices()) {
                         auto* g = gt.getGhost(i);
                         if (g) {
-                            if (g->position.x != 0 || g->position.y != 0 || g->position.z != 0) {
+                            if (ObserverParity::isPositionReady(g->hasPosition)) {
                                 withPos++;
                                 Console::instance().printf(LogLevel::Debug, "  HAS POS: Ghost[%d] class=%d '%s' pos=(%.1f %.1f %.1f)",
                                     i, g->classId, g->className.c_str(), g->position.x, g->position.y, g->position.z);
@@ -5791,7 +6495,10 @@ void Game::update(float dt) {
             }
             prevDemoFreeCam = currentInput.freeCam;
             if (freeCamActive) {
-                float camSpeed = 50.0f * dt;
+                 float camSpeed = 50.0f * dt * freeCameraMoveScale(
+                     currentInput.forward, currentInput.backward,
+                     currentInput.left, currentInput.right,
+                     currentInput.jump, currentInput.jet);
                 float yaw = freeCamRot.z;
                 float pitch = freeCamRot.x;
                 yaw += currentInput.lookDelta.y;
@@ -5860,7 +6567,10 @@ void Game::update(float dt) {
         // Mapper mode: free-fly camera only, no player gameplay
         if (mapperMode) {
             if (freeCamActive) {
-                float camSpeed = 50.0f * dt;
+                 float camSpeed = 50.0f * dt * freeCameraMoveScale(
+                     currentInput.forward, currentInput.backward,
+                     currentInput.left, currentInput.right,
+                     currentInput.jump, currentInput.jet);
                 // Speed multipliers: Shift = 3x, Ctrl = 0.25x
                 auto& plat = Engine::instance().platform();
                 auto& keys = plat.input().keysDown;
@@ -5877,14 +6587,18 @@ void Game::update(float dt) {
                 Point3F right = {std::cos(yaw), 0, -std::sin(yaw)};
                 if (currentInput.forward) { freeCamPos.x += fwd.x * camSpeed; freeCamPos.y += fwd.y * camSpeed; freeCamPos.z += fwd.z * camSpeed; }
                 if (currentInput.backward) { freeCamPos.x -= fwd.x * camSpeed; freeCamPos.y -= fwd.y * camSpeed; freeCamPos.z -= fwd.z * camSpeed; }
-                if (currentInput.left) { freeCamPos.x += right.x * camSpeed; freeCamPos.z += right.z * camSpeed; }
-                if (currentInput.right) { freeCamPos.x -= right.x * camSpeed; freeCamPos.z -= right.z * camSpeed; }
+                // Match the normal free camera: local left is the negative
+                // right vector, so mapper strafe controls are not reversed.
+                if (currentInput.left) { freeCamPos.x -= right.x * camSpeed; freeCamPos.z -= right.z * camSpeed; }
+                if (currentInput.right) { freeCamPos.x += right.x * camSpeed; freeCamPos.z += right.z * camSpeed; }
                 if (currentInput.jump) freeCamPos.y += camSpeed;
                 if (currentInput.jet) freeCamPos.y -= camSpeed;
                 freeCamTarget = {freeCamPos.x + fwd.x, freeCamPos.y + fwd.y, freeCamPos.z + fwd.z};
             }
-            // Update world (projectiles, items, etc.)
-            w->update(dt);
+            // World simulation belongs to the same scaled clock as movement.
+            // Using the raw frame delta here made projectiles, item respawns,
+            // and fog transitions ignore local time dilation.
+            w->update(simulationDt);
             // Update audio listener from camera
             auto& audio = Engine::instance().audio();
             if (audio.config().enabled) {
@@ -5942,7 +6656,7 @@ void Game::update(float dt) {
         // Editor: place ghost on left click, cycle class on scroll
         if (editorActive && freeCamActive) {
             static bool prevClick = false;
-            bool click = plat.input().mouseButtons[0];
+            bool click = plat.input().mouseButtons[mouseLeftButton];
             if (click && !prevClick) {
                 // Place a ghost at the camera's target position
                 float dist = 20.0f;
@@ -5950,38 +6664,52 @@ void Game::update(float dt) {
                 float len = sqrtf(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
                 if (len > 0.001f) { dir.x /= len; dir.y /= len; dir.z /= len; }
                 Point3F placePos = {freeCamPos.x + dir.x * dist, freeCamPos.y + dir.y * dist, freeCamPos.z + dir.z * dist};
-                server.spawnGhost(editorPlaceClass, placePos.x, placePos.y, placePos.z);
+                editorLastGhost = server.spawnGhost(editorPlaceClass, placePos.x,
+                                                    placePos.y, placePos.z);
+                editorHasGhost = editorLastGhost != 0;
                 Console::instance().printf(LogLevel::Info, "Placed ghost class=%d at (%.1f,%.1f,%.1f)",
                     editorPlaceClass, placePos.x, placePos.y, placePos.z);
             }
             prevClick = click;
             // Right click to remove nearest ghost
             static bool prevRight = false;
-            bool right = plat.input().mouseButtons[1];
+            bool right = plat.input().mouseButtons[mouseRightButton];
             if (right && !prevRight) {
-                // Remove last spawned ghost
-                if (server.ghostCount() > 0) {
-                    // Simple approach: remove ghosts in reverse order via command
-                    Console::instance().printf(LogLevel::Info, "Right-click: remove ghost. Use 'sv_removeghost <idx>'");
+                if (editorHasGhost && server.removeGhost(editorLastGhost)) {
+                    editorHasGhost = false;
+                    Console::instance().printf(LogLevel::Info,
+                        "Removed ghost index=%u", editorLastGhost);
                 }
             }
             prevRight = right;
-            // Scroll wheel to cycle class
-            static float prevScroll = 0;
-            float scroll = plat.input().mouseWheel;
-            if (scroll != prevScroll) {
-                int delta = (scroll > prevScroll) ? 1 : -1;
-                editorPlaceClass += delta;
-                if (editorPlaceClass < 0) editorPlaceClass = 62;
-                if (editorPlaceClass > 62) editorPlaceClass = 0;
+            // Scroll wheel is a per-frame signed delta. Comparing it to the
+            // prior frame makes the following zero-input frame undo a notch.
+            const int scroll = plat.input().mouseWheel;
+            if (scroll != 0) {
+                editorPlaceClass = cycleIndexByWheel(editorPlaceClass, scroll, 63);
                 Console::instance().printf(LogLevel::Info, "Editor: placing class %d", editorPlaceClass);
             }
-            prevScroll = scroll;
+        }
+
+        // Tribes 2 maps the mouse wheel to weapon cycling during normal play.
+        // Keep editor/free-camera scrolling local to those tools instead of
+        // changing the player's loadout while inspecting a mission.
+        if (!freeCamActive && !editorActive && !pl->isDead() &&
+            plat.input().mouseWheel != 0) {
+            const int direction = plat.input().mouseWheel > 0 ? 1 : -1;
+            // A coalesced SDL event is normally only a few notches; cap a
+            // malformed accumulated value so input cannot stall the frame.
+            const int steps = std::min(mouseWheelSteps(plat.input().mouseWheel), 32);
+            for (int step = 0; step < steps; ++step)
+                pl->weaponCycle(direction);
         }
 
         if (freeCamActive) {
             // Move free camera using WASD + mouse
-            float camSpeed = 50.0f * dt;
+             float camSpeed = 50.0f * dt * freeCameraMoveScale(
+                 currentInput.forward, currentInput.backward,
+                 currentInput.left, currentInput.right,
+                 currentInput.jump, currentInput.jet);
             float yaw = freeCamRot.z;
             float pitch = freeCamRot.x;
 
@@ -6007,24 +6735,46 @@ void Game::update(float dt) {
         } else {
             // Update physics
             Physics physics;
-            physics.update(pl, dt, currentInput);
+            physics.update(pl, simulationDt, currentInput);
+            // ShapeBase repairRate is processed once per simulation tick. Keep
+            // this separate from movement so scripted repair works while the
+            // player is standing still as well as while moving.
+            pl->update(simulationDt);
 
             // Update player animation state
-            pl->updateAnimation(dt, currentInput.jet);
+            // Match movement's jetting state.  A held jet key is not enough:
+            // once energy is depleted the native player falls back to the
+            // jump animation instead of continuing to show the jet effect.
+            pl->updateAnimation(simulationDt, currentInput.jet && pl->energy() > 0.0f);
 
             // Update weapon timers
             for (int i = 0; i < pl->weaponCount(); i++) {
-                const_cast<Weapon&>(pl->weapon(i)).updateTimers(dt);
+                const_cast<Weapon&>(pl->weapon(i)).updateTimers(simulationDt);
             }
             pl->updateWeaponHud();
 
             // Fire weapon
-            if (currentInput.fire) {
+            const int32_t currentWeapon = pl->currentWeapon();
+            const bool validWeapon = currentWeapon >= 0 &&
+                currentWeapon < pl->weaponCount() &&
+                pl->weapon(currentWeapon).type >= 0 &&
+                pl->weapon(currentWeapon).type < gWeaponCount;
+            const WeaponData* currentWeaponData = validWeapon
+                ? &gWeaponTable[pl->weapon(currentWeapon).type] : nullptr;
+            const int triggerMode = currentWeaponData ? weaponTriggerMode(
+                *currentWeaponData, currentInput.fire, currentInput.altFire,
+                previousFire, previousAltFire) : 0;
+            if (triggerMode == 1) {
                 pl->fireWeapon(false);
-            }
-            if (currentInput.altFire) {
+            } else if (triggerMode == 2) {
                 pl->fireWeapon(true);
             }
+            // Consume the trigger sample after the simulation tick. Input can
+            // be sampled less often than update() (for example during a
+            // catch-up frame); leaving this edge state untouched would make a
+            // held semi-automatic trigger fire once per catch-up tick.
+            previousFire = currentInput.fire;
+            previousAltFire = currentInput.altFire;
 
             // ─── Chat input ──────────────────────────────────────
             if (cfg.online && activeConn && !activeConn->isObserverMode() &&
@@ -6077,11 +6827,22 @@ void Game::update(float dt) {
                         plat.showMouse(false);
                     }
                     prevEsc = escDown;
-                    // Backspace
-                    static bool prevBS = false;
-                    if (plat.input().keysDown[SCANCODE_BACKSPACE] && !prevBS && !chatBuf.empty())
-                        chatBuf.pop_back();
-                    prevBS = plat.input().keysDown[SCANCODE_BACKSPACE];
+                     // Backspace
+                     static bool prevBS = false;
+                     static int backspaceRepeat = 0;
+                     const bool backspaceDown = plat.input().keysDown[SCANCODE_BACKSPACE];
+                     if (backspaceDown) {
+                         // SDL key state does not expose text-input repeat. Emulate
+                         // the native editor's initial delay and repeat cadence.
+                         if (!prevBS) backspaceRepeat = 0;
+                         if ((!prevBS || backspaceRepeat++ >= 5) && !chatBuf.empty()) {
+                             chatBuf.pop_back();
+                             backspaceRepeat = 0;
+                         }
+                     } else {
+                         backspaceRepeat = 0;
+                     }
+                     prevBS = backspaceDown;
                     // Keep the editable line separate from expiring popups.
                     hud->setChatInput(chatBuf.c_str());
                 }
@@ -6091,7 +6852,7 @@ void Game::update(float dt) {
             if (cfg.online && activeConn && activeConn->state() >= Connection::Connected) {
                 uint32_t thisSeq = ++moveSeq;
                 // Store input for later reconciliation
-                pendingMoves.push_back({thisSeq, currentInput, dt});
+                pendingMoves.push_back({thisSeq, currentInput, simulationDt});
                 if (pendingMoves.size() > 128)
                     pendingMoves.pop_front();
 
@@ -6111,13 +6872,16 @@ void Game::update(float dt) {
             }
 
             // Reload
-            if (currentInput.reload) {
+            if (buttonPressed(currentInput.reload, previousReload)) {
                 int32_t cw = pl->currentWeapon();
                 if (cw >= 0 && cw < pl->weaponCount()) {
                     auto& weapon = const_cast<Weapon&>(pl->weapon(cw));
-                    if (gWeaponTable[weapon.type].maxAmmo > 0 && !weapon.reloading) {
-                        weapon.reloading = true;
-                        weapon.reloadTimer = gWeaponTable[weapon.type].reloadTime;
+                    if (weapon.type >= 0 && weapon.type < gWeaponCount &&
+                        weaponCanStartReload(gWeaponTable[weapon.type], weapon.ammo) &&
+                        !weapon.reloading) {
+                        beginWeaponReload(weapon.reloading, weapon.reloadTimer,
+                                          weapon.firing, weapon.fireTimer,
+                                          gWeaponTable[weapon.type].reloadTime);
                     }
                 }
             }
@@ -6133,7 +6897,7 @@ void Game::update(float dt) {
         }
 
         // Update world (projectiles, etc.)
-        w->update(dt);
+        w->update(simulationDt);
 
         // Update audio listener from camera
         auto& audio = Engine::instance().audio();
@@ -6149,15 +6913,15 @@ void Game::update(float dt) {
     } else if (gameState == Dead) {
         // Spectator mode when online
         if (cfg.online && activeConn && activeConn->isConnected()) {
-            auto isSpectatable = [this](int index) {
-                const GhostEntry* ghost = liveGhosts.getGhost(index);
-                if (!ghost) return false;
-                return ghost->className == "Player" ||
-                       ghost->className == "FlyingVehicle" ||
-                       ghost->className == "HoverVehicle" ||
-                       ghost->className == "WheeledVehicle" ||
-                       ghost->className == "Vehicle";
-            };
+             auto isSpectatable = [this](int index) {
+                 const GhostEntry* ghost = liveGhosts.getGhost(index);
+                 if (!ghost) return false;
+                 const auto observer = activeConn->observerSnapshot();
+                  const bool sensorVisible = isSensorGroupTargetVisible(
+                      observer.playerSensorGroup, ghost->sensorGroup);
+                  return ObserverParity::isSpectatableTarget(
+                      ghost->className, ghost->damageState, sensorVisible);
+             };
             auto spectatableIndices = liveGhosts.getAllIndices();
             spectatableIndices.erase(
                 std::remove_if(spectatableIndices.begin(), spectatableIndices.end(),
@@ -6174,7 +6938,8 @@ void Game::update(float dt) {
                 // use it before falling back to stable ghost order.
                 int initial = -1;
                 if (activeConn->isObserverMode()) {
-                    const int control = (int)activeConn->observerSnapshot().controlGhost;
+                     const int control = ObserverParity::controlGhostIndex(
+                         activeConn->observerSnapshot().controlGhost);
                     if (std::find(spectatableIndices.begin(), spectatableIndices.end(),
                                   control) != spectatableIndices.end())
                         initial = control;
@@ -6207,9 +6972,12 @@ void Game::update(float dt) {
             if (currentInput.freeCam && !prevFree) {
                 freeCamActive = !freeCamActive;
                 if (freeCamActive) {
-                    freeCamPos = {0, 10, 0};
-                    freeCamTarget = {0, 10, -1};
-                    freeCamRot = {0, 0, 0};
+                    // Enter free camera from the current view. Resetting to
+                    // world origin makes a live observer visibly teleport
+                    // across the map when toggling the camera.
+                    freeCamPos = pl->cameraPos();
+                    freeCamTarget = pl->cameraTarget();
+                    freeCamRot = pl->rotation();
                 }
             }
             prevFree = currentInput.freeCam;
@@ -6220,9 +6988,12 @@ void Game::update(float dt) {
                 pitch -= currentInput.lookDelta.x;
                 if (pitch > 1.5f) pitch = 1.5f;
                 if (pitch < -1.5f) pitch = -1.5f;
-                yaw -= currentInput.lookDelta.y;
+                yaw = freeCameraYaw(yaw, currentInput.lookDelta.y);
                 freeCamRot = {pitch, 0, yaw};
-                float camSpeed = 30.0f * dt;
+                 float camSpeed = 30.0f * dt * freeCameraMoveScale(
+                     currentInput.forward, currentInput.backward,
+                     currentInput.left, currentInput.right,
+                     currentInput.jump, currentInput.jet);
                 Point3F fwd = {sinf(yaw)*cosf(pitch), sinf(pitch), cosf(yaw)*cosf(pitch)};
                 Point3F right = {cosf(yaw), 0, -sinf(yaw)};
                 if (currentInput.forward) { freeCamPos.x += fwd.x*camSpeed; freeCamPos.y += fwd.y*camSpeed; freeCamPos.z += fwd.z*camSpeed; }
@@ -6235,13 +7006,22 @@ void Game::update(float dt) {
             }
         } else {
             // Offline: auto-respawn after delay
-            deathTimer += dt;
-            if (deathTimer >= DeathRespawn::RespawnDelay) {
+            // Respawn is simulation state too.  Using wall-clock dt here made
+            // offline deaths ignore the active Torque time scale while all
+            // other gameplay timers honored it.
+            deathTimer += simulationDt;
+            if (missionRespawn && deathTimer >= DeathRespawn::RespawnDelay) {
                 deathTimer = 0.0f;
                  liveSpectateInit = false;
-                 liveFollowGhostIndex = -1;
-                 liveFollowCenterInit = false;
-                 pl->respawn();
+                liveFollowGhostIndex = -1;
+                liveFollowCenterInit = false;
+                pl->respawn();
+                // A new life starts with fresh weapon trigger edges. Keep the
+                // current input held so a trigger can fire on the next tick,
+                // but do not let the previous life suppress semi-auto fire.
+                previousFire = false;
+                previousAltFire = false;
+                previousReload = false;
                 setState(Playing);
             }
         }
@@ -6303,19 +7083,19 @@ void Game::render(float dt) {
             int fpIdx = (spectateGhostIndex >= 0) ? spectateGhostIndex : controlGhostIndex;
             if (fpIdx >= 0 && demoParser) {
                 const GhostEntry* g = demoParser->getGhostTracker().getGhost(fpIdx);
-                if (!g || (g->position.x == 0 && g->position.y == 0 && g->position.z == 0)) {
+                if (!g || !ObserverParity::isPositionReady(g->hasPosition)) {
                     for (const int index : demoParser->getGhostTracker().getAllIndices()) {
                         const auto* candidate = demoParser->getGhostTracker().getGhost(index);
-                        if (candidate && candidate->className == "Player" &&
-                            (candidate->position.x != 0 || candidate->position.y != 0 || candidate->position.z != 0)) {
+                        if (candidate && ObserverParity::isPlayerClass(candidate->className) &&
+                            ObserverParity::isPositionReady(candidate->hasPosition)) {
                             g = candidate;
                             break;
                         }
                     }
                 }
-                if (g && (g->position.x != 0 || g->position.y != 0 || g->position.z != 0)) {
+                if (g && ObserverParity::isPositionReady(g->hasPosition)) {
                     const Vec3& position = g->hasRendered ? g->renderPos : g->position;
-                    if (g->className == "Camera" && g->hasCameraEuler) {
+                    if (ghostClassIs(g->className, "Camera") && g->hasCameraEuler) {
                         const float pitch = g->cameraEuler.x;
                         const float yaw = g->cameraEuler.z;
                         camPos = {position.x, position.y, position.z};
@@ -6349,7 +7129,7 @@ void Game::render(float dt) {
             // If spectating a specific ghost, track its position
             if (spectateGhostIndex >= 0 && demoParser) {
                 const GhostEntry* g = demoParser->getGhostTracker().getGhost(spectateGhostIndex);
-                if (g && (g->position.x != 0 || g->position.y != 0 || g->position.z != 0))
+                if (g && ObserverParity::isPositionReady(g->hasPosition))
                     targetPos = {g->position.x, g->position.y, g->position.z};
             }
             // Initialize orbit center from target position
@@ -6370,14 +7150,14 @@ void Game::render(float dt) {
             camTarget.y += 10.0f; // look slightly above center
         } else if (!demoPlaying && cfg.online && gameState == Dead && liveGhosts.size() > 0) {
             // Live spectator: follow spectated ghost
-            auto isSpectatable = [](const GhostEntry* ghost) {
-                if (!ghost) return false;
-                return ghost->className == "Player" ||
-                       ghost->className == "FlyingVehicle" ||
-                       ghost->className == "HoverVehicle" ||
-                       ghost->className == "WheeledVehicle" ||
-                       ghost->className == "Vehicle";
-            };
+             const auto observer = activeConn->observerSnapshot();
+             auto isSpectatable = [&](const GhostEntry* ghost) {
+                 if (!ghost) return false;
+                 return ObserverParity::isSpectatableTarget(
+                     ghost->className, ghost->damageState,
+                     isSensorGroupTargetVisible(observer.playerSensorGroup,
+                                                ghost->sensorGroup));
+             };
             if (!isSpectatable(liveGhosts.getGhost(spectateGhostIndex))) {
                 auto idxs = liveGhosts.getAllIndices();
                 auto first = std::find_if(idxs.begin(), idxs.end(),
@@ -6385,7 +7165,7 @@ void Game::render(float dt) {
                 spectateGhostIndex = first == idxs.end() ? -1 : *first;
             }
              const GhostEntry* g = liveGhosts.getGhost(spectateGhostIndex);
-             if (g && (g->position.x != 0 || g->position.y != 0 || g->position.z != 0)) {
+              if (g && ObserverParity::isPositionReady(g->hasPosition)) {
                 if (freeCamActive) {
                     camPos = freeCamPos;
                     camTarget = freeCamTarget;
@@ -6604,7 +7384,7 @@ void Game::render(float dt) {
         }
         r.setDynamicLights(lights);
     }
-    w->render(finalCam);
+    w->render(finalCam, dt);
     if (pl && !freeCamActive && !demoPlaying && !testShapeLoaded) pl->render();
     } // end if (!shapeViewerActive && !testShapeLoaded)
 
@@ -6613,8 +7393,10 @@ void Game::render(float dt) {
         if (font) {
             for (const auto& obj : w->objects()) {
                 if (obj.label.empty()) continue;
-                 if ((obj.className == "Marker" || obj.className == "MissionMarker" ||
-                      obj.className == "SpawnSphere" || obj.className == "AIObjective") && !mapperMode)
+                 if ((missionClassIs(obj.className, "Marker") ||
+                      missionClassIs(obj.className, "MissionMarker") ||
+                      missionClassIs(obj.className, "SpawnSphere") ||
+                      missionClassIs(obj.className, "AIObjective")) && !mapperMode)
                     continue;
                 Point3F anchor = obj.labelAnchorValid
                     ? obj.labelAnchor
@@ -6626,15 +7408,14 @@ void Game::render(float dt) {
                     screen.y < 0 || screen.y > r.config().height)
                     continue;
                  ColorF labelColor{1, 1, 1, 1};
-                 if (obj.missionObjective)
-                     labelColor = objectiveMarkerColor(obj.teamId, pl ? pl->team() : 0, true);
+                  if (obj.missionObjective)
+                      labelColor = objectiveMarkerColor(obj.teamId, pl ? pl->team() : 0, mapperMode);
                  font->render(obj.label.c_str(), screen.x - 35, screen.y - 12,
                      labelColor, 1.0f);
             }
         }
     }
 
-    const bool liveObserver = activeConn && activeConn->isConnected() && activeConn->isObserverMode();
     if (hud && !mapperMode && (gameState == Playing ||
                                (gameState == Dead && !demoPlaying)))
         hud->render(this);
@@ -6668,8 +7449,12 @@ void Game::render(float dt) {
             Point3F mn{1e9f,1e9f,1e9f}, mx{-1e9f,-1e9f,-1e9f};
             for (auto& m : testShape.meshes)
                 for (auto& v : m.vertices) {
-                    if (v.pos.x < mn.x) mn.x = v.pos.x; if (v.pos.y < mn.y) mn.y = v.pos.y; if (v.pos.z < mn.z) mn.z = v.pos.z;
-                    if (v.pos.x > mx.x) mx.x = v.pos.x; if (v.pos.y > mx.y) mx.y = v.pos.y; if (v.pos.z > mx.z) mx.z = v.pos.z;
+                    if (v.pos.x < mn.x) mn.x = v.pos.x;
+                    if (v.pos.y < mn.y) mn.y = v.pos.y;
+                    if (v.pos.z < mn.z) mn.z = v.pos.z;
+                    if (v.pos.x > mx.x) mx.x = v.pos.x;
+                    if (v.pos.y > mx.y) mx.y = v.pos.y;
+                    if (v.pos.z > mx.z) mx.z = v.pos.z;
                 }
             center = {(mn.x+mx.x)*0.5f, (mn.y+mx.y)*0.5f, (mn.z+mx.z)*0.5f};
             float dx = mx.x-mn.x, dy = mx.y-mn.y, dz = mx.z-mn.z;
@@ -6729,8 +7514,12 @@ void Game::render(float dt) {
                 int step = std::max(1, (int)m.vertices.size() / 16);
                 for (size_t vi = 0; vi < m.vertices.size(); vi += step) {
                     Point3F wp = nodeXform.transform(m.vertices[vi].pos);
-                    if (wp.x < mn.x) mn.x = wp.x; if (wp.y < mn.y) mn.y = wp.y; if (wp.z < mn.z) mn.z = wp.z;
-                    if (wp.x > mx.x) mx.x = wp.x; if (wp.y > mx.y) mx.y = wp.y; if (wp.z > mx.z) mx.z = wp.z;
+                    if (wp.x < mn.x) mn.x = wp.x;
+                    if (wp.y < mn.y) mn.y = wp.y;
+                    if (wp.z < mn.z) mn.z = wp.z;
+                    if (wp.x > mx.x) mx.x = wp.x;
+                    if (wp.y > mx.y) mx.y = wp.y;
+                    if (wp.z > mx.z) mx.z = wp.z;
                 }
             }
             shapeViewerCenter = {(mn.x+mx.x)*0.5f, (mn.y+mx.y)*0.5f, (mn.z+mx.z)*0.5f};
@@ -6771,7 +7560,8 @@ void Game::render(float dt) {
             float animTime = shapeViewerAnimTime;
             if (const char* svTime = getenv("SV_TIME"))
                 animTime = atof(svTime) * anim.duration;
-            shapeViewerShape.renderAnimation(anim.name.c_str(), fmodf(animTime, anim.duration));
+             shapeViewerShape.renderAnimation(anim.name.c_str(),
+                 animationSampleTime(animTime, anim.duration, anim.looping));
             animated = true;
             shapeViewerAnimTime += dt;
         }
@@ -6826,7 +7616,7 @@ void Game::render(float dt) {
                 }
             }
             Vec3 p = g->position;
-            if (p.x == 0 && p.y == 0 && p.z == 0) continue; // no position data yet
+            if (!ObserverParity::isPositionReady(g->hasPosition)) continue;
 
             // Skip world-level objects already rendered by World
             if (!isRenderableGhostClass(g->className)) continue;
@@ -6866,9 +7656,8 @@ void Game::render(float dt) {
             }
             rp = mg->renderPos;
 
-             const bool isProjectile = (g->className.find("Projectile") != std::string::npos ||
-                 g->className == "EnergyBolt" || g->className == "LinearFlare" ||
-                 g->className.find("Tracer") != std::string::npos);
+              const bool isProjectile = isProjectileGhostClass(g->className) ||
+                  ghostClassIs(g->className, "TracerProjectile");
              const V12::DecodedDataBlock* visualData = nullptr;
               bool hasBaseEmitter = false;
              if (isProjectile && g->hasDatablock) {
@@ -6976,7 +7765,8 @@ void Game::render(float dt) {
                                     data.projectileLightColor[2], 0.22f}, true);
               }
 
-               if (demoParser && (g->className == "ELFProjectile" || g->className == "RepairProjectile")) {
+                if (demoParser && (ghostClassIs(g->className, "ELFProjectile") ||
+                                   ghostClassIs(g->className, "RepairProjectile"))) {
                  const GhostEntry* source = demoParser->getGhostTracker().getGhost(g->linkSourceGhost);
                  const GhostEntry* target = demoParser->getGhostTracker().getGhost(g->linkTargetGhost);
                  if (source && target) {
@@ -6986,43 +7776,52 @@ void Game::render(float dt) {
                          {target->renderPos.x, target->renderPos.y, target->renderPos.z});
                      start.y += 1.4f;
                      end.y += 1.0f;
-                     const auto points = linkBeamPoints(start, end, g->className == "ELFProjectile");
-                     const ColorF color = g->className == "ELFProjectile"
-                         ? ColorF{0.25f, 0.75f, 1.0f, 0.9f}
-                         : ColorF{1.0f, 0.2f, 0.2f, 0.75f};
-                     r.drawLineStrip(points, color);
-                     r.drawSprite(end, g->className == "ELFProjectile" ? 0.5f : 0.6f,
-                                  color, 0, true);
+                      const bool elfBeam = ghostClassIs(g->className, "ELFProjectile");
+                      const auto points = linkBeamPoints(start, end, elfBeam);
+                      const ColorF color = elfBeam
+                          ? ColorF{0.25f, 0.75f, 1.0f, 0.9f}
+                          : ColorF{1.0f, 0.2f, 0.2f, 0.75f};
+                      r.drawLineStrip(points, color);
+                      r.drawSprite(end, elfBeam ? 0.5f : 0.6f,
+                                   color, 0, true);
                  }
                   continue;
               }
 
-               const bool stockBeam = g->className == "ShockLanceProjectile" ||
-                   g->className == "SniperProjectile" ||
-                   g->className == "TracerProjectile" ||
-                   g->className == "LinearFlareProjectile";
-              if (stockBeam && g->hasBeam) {
+                const bool stockBeam = ghostClassIs(g->className, "ShockLanceProjectile") ||
+                    ghostClassIs(g->className, "SniperProjectile") ||
+                    ghostClassIs(g->className, "TracerProjectile") ||
+                    ghostClassIs(g->className, "LinearFlareProjectile");
+               if (stockBeam && g->hasBeam) {
                   const Point3F start = Math::torquePointToYUp(
                       {g->beamStart.x, g->beamStart.y, g->beamStart.z});
                   const Point3F end = Math::torquePointToYUp(
                       {g->beamEnd.x, g->beamEnd.y, g->beamEnd.z});
-                  const ColorF color = g->className == "ShockLanceProjectile"
-                      ? ColorF{0.35f, 0.8f, 1.0f, 0.9f}
-                      : g->className == "TracerProjectile"
+                   const bool shockLance = ghostClassIs(g->className, "ShockLanceProjectile");
+                   const bool tracer = ghostClassIs(g->className, "TracerProjectile");
+                   const ColorF color = shockLance
+                       ? ColorF{0.35f, 0.8f, 1.0f, 0.9f}
+                       : tracer
                           ? ColorF{1.0f, 0.65f, 0.2f, 0.85f}
                           : ColorF{1.0f, 0.85f, 0.25f, 0.85f};
-                  const auto quad = projectileBeamQuad(start, end,
-                      r.cameraPos, 0.08f);
-                  std::vector<Point3F> outline{quad.front()};
-                  if (quad.size() == 4) {
-                      outline.push_back(quad[1]); outline.push_back(quad[2]);
-                      outline.push_back(quad[3]); outline.push_back(quad.front());
-                  } else {
-                      outline.push_back(quad.back());
-                  }
-                  r.drawLineStrip(outline, color);
-                  continue;
-              }
+                    if (shockLance) {
+                       r.drawLineStrip(shockLancePoints(start, end, time, 0.1f, 0), color);
+                       r.drawLineStrip(shockLancePoints(start, end, time, 0.1f, 1),
+                                       {0.55f, 0.9f, 1.0f, 0.9f});
+                   } else {
+                       const auto quad = projectileBeamQuad(start, end,
+                           r.cameraPos, 0.08f);
+                       std::vector<Point3F> outline{quad.front()};
+                       if (quad.size() == 4) {
+                           outline.push_back(quad[1]); outline.push_back(quad[2]);
+                           outline.push_back(quad[3]); outline.push_back(quad.front());
+                       } else {
+                           outline.push_back(quad.back());
+                       }
+                       r.drawLineStrip(outline, color);
+                   }
+                   continue;
+               }
 
              // Try to get or load the DTS shape for this ghost class
             DTSShape* shape = const_cast<DTSShape*>(g->shape);
@@ -7041,7 +7840,7 @@ void Game::render(float dt) {
             if (shape && shape->loaded) {
                 // Apply skin textures on first render (player ghosts only)
                 if (!mg->skinApplied && !g->skinName.empty() &&
-                    (g->className == "Player" || g->className == "MPB")) {
+                    ObserverParity::isPlayerClass(g->className)) {
                     if (shape->applySkin(g->skinName))
                         Console::instance().printf(LogLevel::Debug,
                             "Ghost[%d]: applied skin '%s' to shape '%s'",
@@ -7050,10 +7849,8 @@ void Game::render(float dt) {
                 }
 
                 // Build model matrix
-                bool isPlayer = (g->className == "Player" || g->className == "MPB");
-                bool isVehicle = (g->className.find("Vehicle") != std::string::npos ||
-                                  g->className == "Shrike" || g->className == "Turbograv" ||
-                                  g->className == "Shield" || g->className == "Wildcat");
+                bool isPlayer = ObserverParity::isPlayerClass(g->className);
+                 bool isVehicle = isVehicleGhostClass(g->className);
                 MatrixF model;
                 if (g->hasRotation) {
                     QuatF q(mg->renderRotation.x, mg->renderRotation.y, mg->renderRotation.z, mg->renderRotation.w);
@@ -7111,7 +7908,7 @@ void Game::render(float dt) {
                 // ShapeBase thread state. The DTS owns its sequence names.
                 const DTSShape::Animation* animation = nullptr;
                 float animationPosition = 0.0f;
-                bool isTurret = (g->className == "Turret" || g->className == "Sentry");
+                bool isTurret = isTurretGhostClass(g->className);
                 for (const auto& thread : g->threads) {
                     if (!thread.valid || thread.sequence < 0 ||
                         thread.sequence >= (int)shape->animations.size()) continue;
@@ -7250,7 +8047,10 @@ void Game::render(float dt) {
                          }
                          if (imageAnimation && imageAnimation->duration > 0.0f)
                              wShape->renderAnimation(imageAnimation->name.c_str(),
-                                                     fmodf(mg->threadAnimTime, imageAnimation->duration));
+                                                       animationSampleTime(
+                                                           mg->threadAnimTime,
+                                                           imageAnimation->duration,
+                                                           imageAnimation->looping));
                          else
                              wShape->render(0);
                          wShape->cloakTextureOverride = nullptr;
@@ -7286,11 +8086,10 @@ void Game::render(float dt) {
             // Shield effect: render a pulsing translucent bubble when shielded
             if (mg->shieldLevel > 0.01f) {
                 float sAlpha = mg->shieldLevel * 0.25f;
-                bool isPlr = (g->className == "Player" || g->className == "MPB");
+                 bool isPlr = ObserverParity::isPlayerClass(g->className);
                 float sSize = isPlr ? 1.0f : 1.8f;
                 float pulse = sinf(demoTime * 6.0f) * 0.08f + 0.92f;
                 sAlpha *= pulse;
-                ColorF shieldCol = {0.3f, 0.6f, 1.0f, sAlpha};
                 // Render layered boxes at different scales for sphere approximation
                 Point3F shieldPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
                 for (int i = 0; i < 3; i++) {
@@ -7309,7 +8108,7 @@ void Game::render(float dt) {
                 if (w->terrain() && w->terrain()->loaded)
                     groundH = w->getHeight(shadowPosition.x, shadowPosition.z);
                 float shadowY = std::max(groundH, 0.0f);
-                float shadowSize = (g->className == "Player" || g->className == "MPB") ? 0.8f : 1.5f;
+                 float shadowSize = ObserverParity::isPlayerClass(g->className) ? 0.8f : 1.5f;
                 float distAboveGround = shadowPosition.y - shadowY;
                 if (distAboveGround > 0 && distAboveGround < 50.0f) {
                     float shadowAlpha = std::max(0.05f, 0.4f - distAboveGround * 0.008f);
@@ -7338,16 +8137,20 @@ void Game::render(float dt) {
             if (isProjectile) {
                 // Color by projectile type
                 ColorF trailCol = {0.5f, 1.0f, 1.0f, 1.0f}; // default cyan
-                if (g->className.find("Grenade") != std::string::npos)
-                    trailCol = {0.3f, 1.0f, 0.3f, 1.0f}; // green
-                else if (g->className.find("Seeker") != std::string::npos)
-                    trailCol = {1.0f, 0.6f, 0.1f, 1.0f}; // orange
-                else if (g->className.find("Linear") != std::string::npos || g->className.find("Sniper") != std::string::npos)
-                    trailCol = {0.2f, 0.8f, 1.0f, 1.0f}; // cyan
-                else if (g->className.find("Bomb") != std::string::npos)
-                    trailCol = {1.0f, 0.3f, 0.1f, 1.0f}; // red-orange
-                else if (g->className.find("Shock") != std::string::npos)
-                    trailCol = {0.8f, 0.2f, 1.0f, 1.0f}; // purple
+                 std::string lowerGhostClass = g->className;
+                 for (char& c : lowerGhostClass)
+                     c = (char)std::tolower((unsigned char)c);
+                 if (lowerGhostClass.find("grenade") != std::string::npos)
+                     trailCol = {0.3f, 1.0f, 0.3f, 1.0f}; // green
+                 else if (lowerGhostClass.find("seeker") != std::string::npos)
+                     trailCol = {1.0f, 0.6f, 0.1f, 1.0f}; // orange
+                 else if (lowerGhostClass.find("linear") != std::string::npos ||
+                          lowerGhostClass.find("sniper") != std::string::npos)
+                     trailCol = {0.2f, 0.8f, 1.0f, 1.0f}; // cyan
+                 else if (lowerGhostClass.find("bomb") != std::string::npos)
+                     trailCol = {1.0f, 0.3f, 0.1f, 1.0f}; // red-orange
+                 else if (lowerGhostClass.find("shock") != std::string::npos)
+                     trailCol = {0.8f, 0.2f, 1.0f, 1.0f}; // purple
                 if (hasBaseEmitter) continue;
                 auto& trail = demoTrails[idx];
                 Point3F trailPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
@@ -7407,7 +8210,7 @@ void Game::render(float dt) {
                 for (int idx : indices) {
                     const GhostEntry* g = gt.getGhost(idx);
                     if (!g) continue;
-                    if (g->position.x == 0 && g->position.y == 0 && g->position.z == 0) continue;
+                    if (!ObserverParity::isPositionReady(g->hasPosition)) continue;
                     if (!isRenderableGhostClass(g->className)) continue;
                     Point3F above = Math::torquePointToYUp({g->renderPos.x, g->renderPos.y, g->renderPos.z});
                     above.y += 2.5f;
@@ -7426,12 +8229,15 @@ void Game::render(float dt) {
                     float bx = screen.x - barW/2;
                     float by = screen.y + 2;
                     r.drawBox({{bx-1, by-1, 0}, {bx+barW+1, by+barH+1, 0}}, {0, 0, 0, 0.6f});
-                    float healthFrac = (g->health > 0) ? (g->health / 100.0f) : 1.0f;
+                    // A destroyed ghost has zero health; treating missing/zero
+                    // health as full made dead players show a green full bar.
+                    const float healthFrac = HudParity::resourceFraction(
+                        g->health, g->maxHealth);
                     ColorF healthCol = healthFrac > 0.5f ? ColorF{0, 1, 0, 0.8f} :
                                       healthFrac > 0.25f ? ColorF{1, 1, 0, 0.8f} : ColorF{1, 0, 0, 0.8f};
                     r.drawBox({{bx, by, 0}, {bx + barW * healthFrac, by + barH, 0}}, healthCol);
                     float ey2 = by + barH + 1;
-                    float energyFrac = g->energy / 100.0f;
+                    const float energyFrac = HudParity::resourceFraction(g->energy);
                     r.drawBox({{bx-1, ey2-1, 0}, {bx+barW+1, ey2+barH+1, 0}}, {0, 0, 0, 0.6f});
                     r.drawBox({{bx, ey2, 0}, {bx + barW * energyFrac, ey2 + barH, 0}}, {0.3f, 0.5f, 1, 0.8f});
                 }
@@ -7454,7 +8260,9 @@ void Game::render(float dt) {
                  !isSensorGroupTargetVisible(activeConn->observerSnapshot().playerSensorGroup,
                                              g->sensorGroup)) continue;
             Vec3 p = g->position;
-            if (p.x == 0 && p.y == 0 && p.z == 0) continue;
+             // Origin is a valid mission position. Use the decoded presence
+             // bit rather than treating (0,0,0) as an uninitialized ghost.
+             if (!ObserverParity::isPositionReady(g->hasPosition)) continue;
             if (!isRenderableGhostClass(g->className)) continue;
 
             // Smooth interpolation
@@ -7510,9 +8318,7 @@ void Game::render(float dt) {
                     shapeFrame.setRotationY(Math::PI);
                     model = model * shapeFrame;
               }
-              const bool isVehicle = (g->className.find("Vehicle") != std::string::npos ||
-                                      g->className == "Shrike" || g->className == "Turbograv" ||
-                                      g->className == "Shield" || g->className == "Wildcat");
+               const bool isVehicle = isVehicleGhostClass(g->className);
               Point3F renderPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
              model.setTranslation(renderPosition);
              r.setModel(model * g->shape->upOrientation());
@@ -7532,8 +8338,7 @@ void Game::render(float dt) {
              if (defShader) defShader->setUniform("uScreenDoor", g->cloaked ? 0.5f : 0.0f);
               DTSShape::NodeOverride overrides[8]{};
               int overrideCount = 0;
-             if ((g->className == "Turret" || g->className == "Sentry") &&
-                 g->hasTurretAim) {
+              if (isTurretGhostClass(g->className) && g->hasTurretAim) {
                  int barrelNode = g->shape->findNode("barrel");
                  if (barrelNode < 0) barrelNode = g->shape->findNode("mount0");
                  if (barrelNode >= 0) {
@@ -7607,8 +8412,11 @@ void Game::render(float dt) {
                       if (imageAnimation) break;
                   }
                    if (imageAnimation && imageAnimation->duration > 0.0f)
-                       imageShape->renderAnimation(imageAnimation->name.c_str(),
-                                                   fmodf(g->threadAnimTime, imageAnimation->duration));
+                              imageShape->renderAnimation(imageAnimation->name.c_str(),
+                                                           animationSampleTime(
+                                                               g->threadAnimTime,
+                                                               imageAnimation->duration,
+                                                               imageAnimation->looping));
                    else
                        imageShape->render(0);
                    if (mounted.isFiring) {
@@ -7640,7 +8448,7 @@ void Game::render(float dt) {
                     if (serverPlayerGhostSynced && (uint32_t)idx == serverPlayerGhostIndex) continue;
                     const GhostEntry* g = liveGhosts.getGhost(idx);
                     if (!g) continue;
-                    if (g->position.x == 0 && g->position.y == 0 && g->position.z == 0) continue;
+                    if (!ObserverParity::isPositionReady(g->hasPosition)) continue;
                     if (!isRenderableGhostClass(g->className)) continue;
                     Point3F above = Math::torquePointToYUp({g->renderPos.x, g->renderPos.y, g->renderPos.z});
                     above.y += 2.5f;
@@ -7653,20 +8461,24 @@ void Game::render(float dt) {
                          if (team != liveTeamScores.end() && !team->second.name.empty())
                              label = team->second.name + " Flag";
                      }
-                     if (g->isFlag && g->flagTeamId == 1) col = {1, 0.25f, 0.25f, 1};
-                     else if (g->isFlag && g->flagTeamId == 2) col = {0.3f, 0.45f, 1, 1};
+                      // Flag labels use the same Storm/Inferno mapping as the
+                      // scoreboard. Team 1 is Storm (blue), team 2 is Inferno
+                      // (red); reversing these colors makes live flag markers
+                      // identify the wrong objective.
+                      if (g->isFlag) col = HudParity::teamColor(g->flagTeamId);
                      font->render(label.c_str(), screen.x - 30, screen.y - 20, col, 1.2f);
                      if (g->isFlag) continue;
                      float barW = 50, barH = 6;
                     float bx = screen.x - barW/2;
                     float by = screen.y + 2;
                     r.drawBox({{bx-1, by-1, 0}, {bx+barW+1, by+barH+1, 0}}, {0, 0, 0, 0.6f});
-                    float healthFrac = (g->health > 0) ? (g->health / 100.0f) : 1.0f;
+                     const float healthFrac = HudParity::resourceFraction(
+                         g->health, g->maxHealth);
                     ColorF healthCol = healthFrac > 0.5f ? ColorF{0, 1, 0, 0.8f} :
                                       healthFrac > 0.25f ? ColorF{1, 1, 0, 0.8f} : ColorF{1, 0, 0, 0.8f};
                     r.drawBox({{bx, by, 0}, {bx + barW * healthFrac, by + barH, 0}}, healthCol);
                     float ey2 = by + barH + 1;
-                    float energyFrac = (g->energy > 0) ? (g->energy / 100.0f) : 1.0f;
+                     float energyFrac = HudParity::resourceFraction(g->energy);
                     r.drawBox({{bx-1, ey2-1, 0}, {bx+barW+1, ey2+barH+1, 0}}, {0, 0, 0, 0.6f});
                     r.drawBox({{bx, ey2, 0}, {bx + barW * energyFrac, ey2 + barH, 0}}, {0.3f, 0.5f, 1, 0.8f});
                 }
@@ -7757,23 +8569,25 @@ void Game::startLocalGame(const char* map) {
     }
 
     // Classify weather by mission name for ambient audio selection
-    weatherType = 0; // dry
-    if (missionPath.find("Whiteout") != std::string::npos ||
-        missionPath.find("SolsDescent") != std::string::npos)
-        weatherType = 1; // cold/windy
-    else if (missionPath.find("Training2") != std::string::npos ||
-             missionPath.find("Swamp") != std::string::npos)
-        weatherType = 2; // wet
+    weatherType = missionWeatherType(missionPath);
 
     if (w->load(missionPath.c_str())) {
-        pl->respawn();
+        // Training missions end on death; stock multiplayer missions respawn.
+        // Update this only after a successful load so a rejected replacement
+        // cannot change the active mission's lifecycle rules.
+        missionRespawn = stockMissionRules(missionPath).respawn;
+        // Assign the local player's mission team before respawn selects a
+        // team-specific SpawnSphere. Otherwise a previous online team's
+        // replicated value can choose the wrong side during mission start.
         pl->setTeam(1);
-        // Use mission spawn point, or fall back to above terrain center
-        Point3F spawnPos = w->spawnPoint();
-        float h = w->getHeight(spawnPos.x, spawnPos.z);
-        if (spawnPos.y < h + 0.5f) spawnPos.y = h + 2.0f;
-        else if (spawnPos.y > h + 10.0f) spawnPos.y = h + 2.0f; // bring down from sky spawns
-        pl->setPosition(spawnPos);
+        pl->respawn();
+        previousFire = false;
+        previousAltFire = false;
+        previousReload = false;
+        // Player::respawn already selected the team-specific SpawnSphere (or
+        // the world's fallback spawn). Do not replace it with the generic
+        // mission spawn here: that made local games ignore their authored
+        // Storm/Inferno starting locations after the respawn selection.
         setState(Playing);
         Console::instance().printf(LogLevel::Info, "Game started on '%s'", missionPath.c_str());
 
@@ -7837,7 +8651,7 @@ void Game::startLocalGame(const char* map) {
                 if (!sound && fileName.rfind("audio/", 0) != 0)
                     sound = audio.loadSound(("audio/" + fileName).c_str());
                 if (!sound) continue;
-                 auto* source = audio.createSource();
+                  auto* source = audio.createSource(true);
                  if (!source) break;
                 const Point3F position = Math::torquePointToYUp(object.pos);
                 const bool is3D = object.audioIs3D;
@@ -7871,7 +8685,7 @@ void Game::startLocalGame(const char* map) {
             }
             ambientSound = audio.loadSound(ambPath);
             if (ambientSound) {
-                ambientSource = audio.createSource();
+                ambientSource = audio.createSource(true);
                 if (ambientSource) {
                     ambientSource->setLooping(true);
                      ambientSource->setVolume(0.3f * audio.config().masterVolume *
@@ -7965,7 +8779,17 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
         Console::instance().printf(LogLevel::Warn, "Invalid server address");
         return;
     }
+    if (!allowDemoConnection(isDemoBuildMode(Engine::instance().demoMode,
+                                             config().dedicated), observer,
+                             Console::instance().getBoolVariable("demoAllowConnect", false),
+                             Console::instance().getBoolVariable("demoAllowWatch", true))) {
+        Console::instance().printf(LogLevel::Warn,
+            "Demo mode policy rejected %s connection; set demoAllow%s=1 to allow it",
+            observer ? "observer" : "player", observer ? "Watch" : "Connect");
+        return;
+    }
     if (demoPlaying) stopDemoPlayback();
+    if (auto* ts = Engine::instance().script().ts()) ts->clearPackages();
     if (activeConn) {
         activeConn->disconnect();
         Engine::instance().network().destroyConnection(activeConn);
@@ -8379,8 +9203,11 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                  }
             });
         activeConn->setMissionCallback([this](uint32_t crc) {
-            if (liveMissionCrc != 0 && liveMissionCrc != crc)
+            if (liveMissionCrc != 0 && liveMissionCrc != crc) {
                 resetLiveMissionState();
+                if (activeConn && activeConn->isObserverMode() && w)
+                    w->cleanupMission();
+            }
             liveMissionCrc = crc;
         });
         activeConn->setServerMessageCallback([this](const std::vector<std::string>& argv) {
@@ -8409,16 +9236,25 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
             if (argv.size() >= 2 && argv[1] == "MsgMissionStart") {
                 liveMatchStarted_ = true;
                 liveMatchEnded_ = false;
+                liveClockDurationMs_ = 0;
+                liveClockReceivedAt_ = 0.0;
                 return;
             }
             if (argv.size() >= 2 && argv[1] == "MsgClientReady") {
                 liveMatchStarted_ = false;
                 liveMatchEnded_ = false;
+                liveClockDurationMs_ = 0;
+                liveClockReceivedAt_ = 0.0;
                 return;
             }
             if (argv.size() >= 2 &&
                 (argv[1] == "MsgClearDebrief" || argv[1] == "MsgDebriefResult")) {
                 liveMatchEnded_ = true;
+                liveClockDurationMs_ = 0;
+                liveClockReceivedAt_ = 0.0;
+                clearProjectileAudio();
+                clearMissionAudio();
+                if (w) w->clearEffects();
                 return;
             }
             if (argv.size() >= 5 && argv[1] == "MsgMissionDropInfo") {
@@ -8693,14 +9529,22 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                   ghost->flagTeamId = ghost->isFlag ? target->second.sensorGroup : 0;
                   if (ghost->isFlag) ghost->teamId = target->second.sensorGroup;
               }
-             ghost->position = {state->position.x, state->position.y, state->position.z};
+              if (state->hasPosition) {
+                  ghost->position = {state->position.x, state->position.y, state->position.z};
+                  ghost->hasPosition = true;
+              }
             ghost->rotation = {state->rotation.x, state->rotation.y,
                                state->rotation.z, state->rotationW};
             ghost->hasRotation = state->hasRotation;
             ghost->health = state->health;
              if (state->hasDamageState)
                  ghost->damageState = state->damageState;
-            ghost->energy = state->energy;
+             ghost->energy = state->energy;
+              if (state->hasSteering) {
+                  ghost->steeringYaw = state->steeringYaw;
+                  ghost->hasSteering = true;
+              }
+              if (state->hasFrozen) ghost->frozen = state->frozen;
              ghost->headPitch = state->headPitch;
              ghost->headYaw = state->headYaw;
              ghost->barrelPitch = state->barrelPitch;
@@ -8830,6 +9674,29 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                   }
                   w->removeProjectileTrail((int)ghostIndex);
              });
+         activeConn->setTargetControlCallback(
+             [this](bool hasTarget, uint16_t targetId, bool hasPosition,
+                    const V12Vec3& position, bool assign) {
+                 if (!hasTarget || !assign) {
+                     if (!hasTarget) {
+                         serverPlayerGhostIndex = 0;
+                         serverPlayerGhostSynced = false;
+                         spectateGhostIndex = -1;
+                         liveFollowGhostIndex = -1;
+                         liveFollowCenterInit = false;
+                     }
+                     return;
+                 }
+                 serverPlayerGhostIndex = targetId;
+                 serverPlayerGhostSynced = true;
+                 if (activeConn && activeConn->isObserverMode()) {
+                     spectateGhostIndex = targetId;
+                     if (hasPosition) {
+                         liveFollowCenter = {position.x, position.y, position.z};
+                         liveFollowCenterInit = true;
+                     }
+                 }
+             });
           activeConn->setAudioCallback([this](const V12::ServerEvent& event) {
              auto& audio = Engine::instance().audio();
              if (!audio.config().enabled || audio.config().sfxVolume <= 0)
@@ -8915,26 +9782,18 @@ static std::string extractMapName(const std::string& missionPath) {
 // Returns true if a ghost with this class name should be rendered as a 3D model
 // (as opposed to being a world-level object already rendered by World::render)
 static bool isRenderableGhostClass(const std::string& className) {
-    if (className == "InteriorInstance" || className == "StaticShape" ||
-        className == "ScopeAlwaysShape" || className == "TSStatic" ||
-        className == "TerrainBlock" || className == "Sky" || className == "Sun" ||
-        className == "Lightning" || className == "WaterBlock" ||
-        className == "MissionArea" || className == "ForceFieldBare")
-        return false;
-    return true;
+    return !isWorldLevelGhostClass(className);
 }
 
 static bool isEffectOnlyGhostClass(const std::string& className) {
-    return className.find("Projectile") != std::string::npos ||
-           className == "EnergyBolt" || className == "LinearFlare" ||
-           className == "Splash";
+    return isProjectileGhostClass(className);
 }
 
 static void appendWheelNodeOverrides(const GhostEntry& ghost, DTSShape& shape,
                                      float dt, DTSShape::NodeOverride* overrides,
                                      int& overrideCount, int maxOverrides,
                                      float* wheelRotation) {
-    if (ghost.className != "WheeledVehicle" || !shape.nativeDTS || !overrides ||
+    if (!isWheeledVehicleGhostClass(ghost.className) || !shape.nativeDTS || !overrides ||
         !wheelRotation)
         return;
     for (int i = 0; i < 6 && overrideCount < maxOverrides; ++i) {
@@ -8947,7 +9806,8 @@ static void appendWheelNodeOverrides(const GhostEntry& ghost, DTSShape& shape,
         if (wheelNode < 0) continue;
         if (wheelNode >= (int)shape.defaultTransforms.size()) continue;
 
-        wheelRotation[i] += ghost.wheels[i].angularVelocity * std::max(dt, 0.0f);
+        if (!ghost.frozen)
+            wheelRotation[i] += ghost.wheels[i].angularVelocity * std::max(dt, 0.0f);
         MatrixF lateralAndSuspension;
         lateralAndSuspension.setTranslation({ghost.wheels[i].lateral, 0.0f,
                                               ghost.wheels[i].suspension});
@@ -9025,6 +9885,8 @@ bool Game::playDemo(const char* path) {
         Console::instance().printf(LogLevel::Warn, "Usage: playdemo <path>");
         return false;
     }
+    // Do not carry menu/console key edges into the first demo frame.
+    resetInputState();
     Console::instance().printf(LogLevel::Info, "Loading demo: %s", path);
     demoPlaying = false;
     demoPaused = false;
@@ -9033,6 +9895,11 @@ bool Game::playDemo(const char* path) {
     clearProjectileAudio();
     auto failDemoLoad = [&]() {
         demoPlaying = false;
+        demoMissionState = {};
+        demoPaused = false;
+        demoStepRequest = false;
+        demoStepBlocks = 1;
+        demoPlaybackRate = 1.0f;
         demoFastForward = false;
         if (demoParser) {
             delete demoParser;
@@ -9081,38 +9948,11 @@ bool Game::playDemo(const char* path) {
         return false;
     }
     auto& demoFs = Engine::instance().fs();
-    std::string missionPath = "missions/" + loadMap + ".mis";
-    if (!demoFs.fileExists(missionPath.c_str())) {
-        std::string suffix = loadMap;
-        const auto separator = suffix.rfind('_');
-        if (separator != std::string::npos && separator + 1 < suffix.size())
-            suffix = suffix.substr(separator + 1);
-
-        std::vector<std::string> missionFiles;
-        demoFs.listFiles("missions/*.mis", missionFiles);
-        std::string matchedMission;
-        for (const auto& candidate : missionFiles) {
-            const auto slash = candidate.rfind('/');
-            const auto dot = candidate.rfind('.');
-            const std::string base = candidate.substr(
-                slash == std::string::npos ? 0 : slash + 1,
-                dot == std::string::npos ? std::string::npos : dot - slash - 1);
-            if (strcasecmp(base.c_str(), suffix.c_str()) == 0) {
-                if (!matchedMission.empty()) {
-                    matchedMission.clear();
-                    break;
-                }
-                matchedMission = base;
-            }
-        }
-        if (!matchedMission.empty()) {
-            loadMap = matchedMission;
-            missionPath = "missions/" + loadMap + ".mis";
-        }
-    }
-    if (!demoFs.fileExists(missionPath.c_str())) {
+    std::string missionPath;
+    std::string missionData;
+    if (!resolveMissionFile(demoFs, loadMap, missionPath, missionData)) {
         Console::instance().printf(LogLevel::Error,
-            "Demo: native mission '%s' is not mounted", missionPath.c_str());
+            "Demo: native mission '%s' is not mounted", loadMap.c_str());
         failDemoLoad();
         return false;
     }
@@ -9141,8 +9981,12 @@ bool Game::playDemo(const char* path) {
     demoPacketsParsed = 0;
     demoTime = 0;
     demoInterpolationDt = 0;
-    demoPaused = false;
-    demoEventLog.clear();
+    demoStepFeedbackTime = 0.0f;
+        demoPaused = false;
+        demoStepRequest = false;
+        demoStepBlocks = 1;
+        demoPlaybackRate = 1.0f;
+        demoEventLog.clear();
     demoAudioEventsPlayed.clear();
     int totalBlocks = demoParser->getBlockCount();
     const int moveBlocks = demoParser->getMoveBlockCount();
@@ -9152,6 +9996,7 @@ bool Game::playDemo(const char* path) {
     demoBlocksDone = 0;
     demoSnapshots.clear();
     demoSnapshots[0] = demoParser->captureSnapshot();
+    demoMissionState = {loadMap, {}};
     demoFastForward = false; // real-time when invoked from console
     demoFirstPersonCam = demoParser->getInitialBlock().firstPerson;
     controlGhostIndex = demoParser->getInitialBlock().controlObjectGhostIndex;
@@ -9172,8 +10017,16 @@ bool Game::playDemo(const char* path) {
 }
 
 void Game::stopDemoPlayback() {
+    if (auto* ts = Engine::instance().script().ts()) ts->clearPackages();
+    resetInputState();
     demoPlaying = false;
+    demoMissionState = {};
+    demoPaused = false;
+    demoStepRequest = false;
+    demoStepBlocks = 1;
     demoFastForward = false;
+    demoPlaybackRate = 1.0f;
+    demoStepFeedbackTime = 0.0f;
     Engine::instance().audio().setPlaybackRate(1.0f);
     Engine::instance().audio().stopAll();
     clearMissionAudio();
@@ -9196,22 +10049,129 @@ void Game::stopDemoPlayback() {
 }
 
 void Game::toggleDemoPause() {
-    demoPaused = !demoPaused;
-    if (demoPaused)
-        Engine::instance().audio().pauseAll();
-    else {
+    if (demoPaused) resumeDemo();
+    else pauseDemo();
+}
+
+void Game::pauseDemo() {
+    if (!demoPlaying || demoPaused) return;
+    demoPaused = true;
+    Engine::instance().audio().pauseAll();
+}
+
+void Game::resumeDemo() {
+    if (!demoPlaying || !demoPaused) return;
+    demoPaused = false;
+    Engine::instance().audio().setPlaybackRate(
+        (demoFastForward || currentInput.jet) ? std::max(demoPlaybackRate, 4.0f) : demoPlaybackRate);
+    Engine::instance().audio().resumeAll();
+}
+
+void Game::setDemoPlaybackSpeed(float speed) {
+    if (!std::isfinite(speed)) return;
+    demoPlaybackRate = std::clamp(speed, 0.1f, 8.0f);
+    if (demoPlaying && !demoPaused)
         Engine::instance().audio().setPlaybackRate(
-            (demoFastForward || currentInput.jet) ? 4.0f : 1.0f);
-        Engine::instance().audio().resumeAll();
+            (demoFastForward || currentInput.jet) ? std::max(demoPlaybackRate, 4.0f) : demoPlaybackRate);
+}
+
+void Game::resetDemoEvents() {
+    demoEventLog.clear();
+    if (demoParser) demoParser->clearEventLog();
+}
+
+void Game::resetDemoHud() {
+    if (demoParser) demoParser->resetHudState();
+    if (hud) hud->resetState();
+    resetGameplayGui(Engine::instance().guiRenderer());
+}
+
+void Game::resetDemoCamera() {
+    demoAuthoredCamera = false;
+    demoHasPos = false;
+    demoHasOrientation = false;
+    demoOrbitCam = false;
+    demoFirstPersonCam = demoParser ? demoParser->getInitialBlock().firstPerson : false;
+    spectateGhostIndex = -1;
+    controlGhostIndex = demoParser ? demoParser->getInitialBlock().controlObjectGhostIndex : -1;
+    demoCameraFov = -1.0f;
+    demoPath.clear();
+    demoPathCount = 0;
+    orbitCenterInit = false;
+}
+
+void Game::resetDemoEffects() {
+    Engine::instance().audio().stopAll();
+    clearMissionAudio();
+    clearProjectileAudio();
+    demoAudioEventsPlayed.clear();
+    demoTrails.clear();
+    damageFlash = -1.0f;
+    whiteOut = -1.0f;
+    shakeIntensity = 0.0f;
+    shakeOffset = {0, 0, 0};
+    if (w) w->clearEffects();
+}
+
+bool Game::tryLoadDemoMission(const std::string& mission) {
+    if (mission.empty() || mission == demoMissionState.loadedMission) {
+        if (mission == demoMissionState.loadedMission)
+            demoMissionState.pendingMission.clear();
+        return true;
     }
+    if (!w) {
+        Console::instance().printf(LogLevel::Warn,
+            "Demo mission deferred: no world is available for '%s'", mission.c_str());
+        demoMissionState.defer(mission);
+        return false;
+    }
+
+    // World::load validates and reads the replacement before tearing down the
+    // current scene. On failure this leaves camera, ghosts, HUD, audio, and
+    // effects intact for the next retry.
+    if (!w->load(mission.c_str())) {
+        if (demoMissionState.pendingMission != mission)
+            Console::instance().printf(LogLevel::Warn,
+                "Demo mission unavailable; deferring replacement: %s", mission.c_str());
+        demoMissionState.defer(mission);
+        return false;
+    }
+
+    demoMissionState.commit(mission);
+    demoParser->resetMissionState();
+    clearMissionAudio();
+    Engine::instance().audio().stopAll();
+    clearProjectileAudio();
+    demoTrails.clear();
+    w->clearEffects();
+    targetFinderShown = false;
+    damageFlash = -1.0f;
+    whiteOut = -1.0f;
+    shakeIntensity = 0.0f;
+    auto& missionGui = Engine::instance().guiRenderer();
+    missionGui.clearDialogs();
+    missionGui.setContent("PlayGui");
+    resetGameplayGui(missionGui);
+    if (hud) hud->resetState();
+    Console::instance().printf(LogLevel::Info,
+        "Demo mission replacement loaded: %s", mission.c_str());
+    return true;
+}
+
+void Game::resetDemoPresentation() {
+    resetDemoEvents();
+    resetDemoHud();
+    resetDemoCamera();
+    resetDemoEffects();
 }
 
 void Game::disconnectedCleanup() {
     if (auto* ts = Engine::instance().script().ts(); ts && ts->hasFunction("DisconnectedCleanup"))
         ts->callFunction("DisconnectedCleanup", {});
-    if (auto* ts = Engine::instance().script().ts()) ts->clearScheduledEvents();
+    ScriptEngine::instance().cancelMissionEvents();
     if (activeConn) activeConn->disconnect();
     auto& audio = Engine::instance().audio();
+    if (w) w->cleanupMission();
     audio.stopAll();
     clearProjectileAudio();
     clearMissionAudio();
@@ -9252,7 +10212,8 @@ void Game::disconnectedCleanup() {
 }
 
 void Game::resetLiveMissionState() {
-    if (auto* ts = Engine::instance().script().ts()) ts->clearScheduledEvents();
+    ScriptEngine::instance().cancelMissionEvents();
+    resetInputState();
     auto& audio = Engine::instance().audio();
     audio.stopAll();
     clearProjectileAudio();
@@ -9262,6 +10223,7 @@ void Game::resetLiveMissionState() {
     nativeDatablocks.clear();
     liveTargets.clear();
     liveSensorGroupListenMasks.clear();
+    liveMissionCrc = 0;
     liveTeamScores.clear();
     livePlayerScores.clear();
     liveClientTargetIds.clear();
@@ -9283,6 +10245,7 @@ void Game::resetLiveMissionState() {
     freeCamPos = {0, 10, 0};
     freeCamTarget = {0, 10, -1};
     freeCamRot = {0, 0, 0};
+    gamePaused = false;
     showScoreboard = false;
     targetFinderShown = false;
     serverPlayerGhostIndex = 0;
@@ -9324,7 +10287,14 @@ void Game::selectSpectateTarget(int ghostIndex) {
 }
 
 void Game::applyInput(const InputMove& input) {
+    previousFire = currentInput.fire;
+    previousAltFire = currentInput.altFire;
+    previousReload = currentInput.reload;
+    const bool nextZoomed = toggledActionState(input.zoom, previousZoom, zoomed);
+    previousZoom = input.zoom;
+    zoomed = nextZoomed;
     currentInput = input;
+    currentInput.zoom = nextZoomed;
     showScoreboard = input.showScoreboard;
 
     // Demo pause toggle on rising edge of P key
@@ -9347,38 +10317,40 @@ void Game::applyInput(const InputMove& input) {
     if (demoPlaying && observerCycle && !previousObserverCycle) {
         if (demoParser) {
             auto indices = demoParser->getGhostTracker().getAllIndices();
-            // Find all Player/MPB class ghosts
-            std::vector<int> players;
-             for (int i : indices) {
-                 const GhostEntry* g = demoParser->getGhostTracker().getGhost(i);
-                  if (g && (g->className == "Player" || g->className == "MPB") &&
-                      g->damageState == 0)
-                      players.push_back(i);
+            // Match the dead-state target filter so vehicles are reachable by
+            // the cycle control as well as the observer camera fallback.
+            std::vector<int> targets;
+            for (int i : indices) {
+                const GhostEntry* g = demoParser->getGhostTracker().getGhost(i);
+                 if (g && ObserverParity::isReadySpectatableTarget(
+                     g->className, g->damageState, g->hasPosition))
+                    targets.push_back(i);
             }
-            if (!players.empty()) {
-                // Find current spectate index (or control index) in player list
+            if (!targets.empty()) {
+                // Find current spectate index (or control index) in target list
                 int current = (spectateGhostIndex >= 0) ? spectateGhostIndex : controlGhostIndex;
-                auto it = std::find(players.begin(), players.end(), current);
-                if (it != players.end() && ++it != players.end())
+                auto it = std::find(targets.begin(), targets.end(), current);
+                if (it != targets.end() && ++it != targets.end())
                     spectateGhostIndex = *it;
                 else
-                    spectateGhostIndex = players[0];
+                    spectateGhostIndex = targets[0];
                 Console::instance().printf(LogLevel::Info, "Spectating ghost %d", spectateGhostIndex);
             }
         }
     } else if (observerCycle && !previousObserverCycle && activeConn && activeConn->isObserverMode()) {
         const auto observer = activeConn->observerSnapshot();
         const auto indices = liveGhosts.getAllIndices();
-        std::vector<int> players;
+        std::vector<int> targets;
         for (int index : indices) {
             const GhostEntry* g = liveGhosts.getGhost(index);
-            if (!g || (g->className != "Player" && g->className != "MPB") ||
-                !isSensorGroupTargetVisible(observer.playerSensorGroup, g->sensorGroup)) continue;
-            players.push_back(index);
+             if (!g || !ObserverParity::isReadySpectatableTarget(
+                 g->className, g->damageState, g->hasPosition,
+                 isSensorGroupTargetVisible(observer.playerSensorGroup, g->sensorGroup))) continue;
+            targets.push_back(index);
         }
-        if (!players.empty()) {
-            auto it = std::find(players.begin(), players.end(), spectateGhostIndex);
-            spectateGhostIndex = it != players.end() && ++it != players.end() ? *it : players.front();
+        if (!targets.empty()) {
+            auto it = std::find(targets.begin(), targets.end(), spectateGhostIndex);
+            spectateGhostIndex = it != targets.end() && ++it != targets.end() ? *it : targets.front();
             liveFollowGhostIndex = -1;
             liveFollowCenterInit = false;
         }
@@ -9388,6 +10360,11 @@ void Game::applyInput(const InputMove& input) {
 
 void Game::resetInputState() {
     currentInput = {};
+    previousFire = false;
+    previousAltFire = false;
+    previousReload = false;
+    previousZoom = false;
+    zoomed = false;
     previousDemoPause = false;
     previousDemoStep = false;
     previousDemoEvent = false;
@@ -9485,6 +10462,7 @@ void Game::shapeViewerLoadCurrent() {
         return;
     }
 
+    shapeViewerShape.destroy();
     shapeViewerShape = DTSShape{};
     shapeViewerShape.name = path;
     if (!shapeViewerShape.load(data.data(), data.size())) {

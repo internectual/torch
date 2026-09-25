@@ -42,6 +42,13 @@ struct WireHeader {
 #pragma pack(pop)
 static_assert(sizeof(WireHeader) == 15, "WireHeader must use the 15-byte wire layout");
 
+// Legacy dnet sequence numbers are compared in modular 32-bit space. A
+// signed positive difference means candidate is newer than current, including
+// the UINT32_MAX -> 0 wrap.
+inline bool isNewerWireSequence(uint32_t candidate, uint32_t current) {
+    return static_cast<int32_t>(candidate - current) > 0;
+}
+
 inline void encodeWireHeader(uint8_t* out, const WireHeader& header) {
     for (int i = 0; i < 4; ++i) out[i] = (uint8_t)(header.sequence >> (i * 8));
     for (int i = 0; i < 4; ++i) out[4 + i] = (uint8_t)(header.ack >> (i * 8));
@@ -130,6 +137,12 @@ public:
                                                uint16_t)>;
     void setTargetCallback(TargetCallback cb) { targetCb = std::move(cb); }
 
+    using TargetControlCallback = std::function<void(bool, uint16_t, bool,
+                                                       const V12Vec3&, bool)>;
+    void setTargetControlCallback(TargetControlCallback cb) {
+        targetControlCb = std::move(cb);
+    }
+
     using AudioCallback = std::function<void(const V12::ServerEvent&)>;
     void setAudioCallback(AudioCallback cb) { audioCb = std::move(cb); }
 
@@ -150,7 +163,10 @@ public:
         uint64_t epoch = 0;
         uint32_t missionCrc = 0;
         V12Vec3 compressionPoint{};
+        bool hasCameraFov = false;
+        uint8_t cameraFov = 0;
         uint16_t controlGhost = 0;
+        bool controlAssigned = false;
         uint32_t lastMoveAck = 0;
         uint8_t playerSensorGroup = 0;
         bool matchStarted = false;
@@ -161,6 +177,7 @@ public:
         V12::ProtocolStateSnapshot protocol;
         std::vector<std::pair<uint16_t, std::string>> strings;
         std::map<uint16_t, std::string> datablockShapes;
+        std::map<uint16_t, V12::DecodedDataBlock> datablocks;
         std::vector<std::pair<uint16_t, V12::PlayerGhostState>> players;
         std::vector<std::pair<uint16_t, uint16_t>> ghostClasses;
         std::vector<V12::ServerEvent::TargetInfo> targets;
@@ -213,6 +230,7 @@ private:
     CommandCallback commandCb;
     ClientCommandCallback clientCommandCb;
     TargetCallback targetCb;
+    TargetControlCallback targetControlCb;
     AudioCallback audioCb;
     MissionCallback missionCb;
     ServerMessageCallback serverMessageCb;

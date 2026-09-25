@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <vector>
 #include <cstring>
+#include <limits>
 
 namespace {
 Point3F safeUnit(Point3F value, Point3F fallback) {
@@ -74,6 +75,7 @@ bool AudioSystem::init() {
     impl->context = alcCreateContext(impl->device, nullptr);
     if (!impl->context) {
         alcCloseDevice(impl->device);
+        impl->device = nullptr;
         Console::instance().printf(LogLevel::Warn, "OpenAL: cannot create context");
         return false;
     }
@@ -152,12 +154,12 @@ void AudioSystem::shutdown() {
     for (auto& [k, v] : impl->buffers) delete v;
     impl->buffers.clear();
 
-    if (impl->underwaterFilter) {
+    if (impl->underwaterFilter && impl->deleteFilters) {
         impl->deleteFilters(1, &impl->underwaterFilter);
         impl->underwaterFilter = 0;
     }
-    if (impl->reverbSlot) impl->deleteSlots(1, &impl->reverbSlot);
-    if (impl->reverbEffect) impl->deleteEffects(1, &impl->reverbEffect);
+    if (impl->reverbSlot && impl->deleteSlots) impl->deleteSlots(1, &impl->reverbSlot);
+    if (impl->reverbEffect && impl->deleteEffects) impl->deleteEffects(1, &impl->reverbEffect);
     impl->reverbSlot = impl->reverbEffect = 0;
     impl->hasEfx = false;
 
@@ -195,8 +197,10 @@ void AudioSystem::update(const Point3F& listenerPos, const Point3F& listenerVel,
     up = safeUnit(orthogonalUp, {0.0f, 1.0f, 0.0f});
     ALfloat listenerOri[6] = {forward.x, forward.y, forward.z,
                               up.x, up.y, up.z};
-    alListener3f(AL_POSITION, listenerPos.x, listenerPos.y, listenerPos.z);
-    alListener3f(AL_VELOCITY, listenerVel.x, listenerVel.y, listenerVel.z);
+    const Point3F safeListenerPos = sanitizeListenerVector(listenerPos);
+    const Point3F safeListenerVel = sanitizeListenerVector(listenerVel);
+    alListener3f(AL_POSITION, safeListenerPos.x, safeListenerPos.y, safeListenerPos.z);
+    alListener3f(AL_VELOCITY, safeListenerVel.x, safeListenerVel.y, safeListenerVel.z);
     alListenerfv(AL_ORIENTATION, listenerOri);
     applyEnvironment();
 
@@ -373,12 +377,21 @@ bool AudioSystem::isSourceAlive(const SoundSource* source) const {
     return source && std::find(impl->sources.begin(), impl->sources.end(), source) != impl->sources.end();
 }
 
+bool AudioSystem::isBufferAlive(const SoundBuffer* buffer) const {
+    if (!buffer) return false;
+    return std::any_of(impl->buffers.begin(), impl->buffers.end(),
+        [buffer](const auto& entry) { return entry.second == buffer; });
+}
+
 void AudioSystem::releaseSource(SoundSource* source) {
     if (!source) return;
+    auto it = std::find(impl->sources.begin(), impl->sources.end(), source);
+    // Sources can be auto-reclaimed between frames. Callers keep raw handles
+    // for mission/ghost ownership, so never dereference an already retired one.
+    if (it == impl->sources.end()) return;
     source->stop();
     source->destroy();
-    auto it = std::find(impl->sources.begin(), impl->sources.end(), source);
-    if (it != impl->sources.end()) impl->sources.erase(it);
+    impl->sources.erase(it);
     delete source;
 }
 
@@ -425,8 +438,10 @@ bool SoundBuffer::loadWav(const uint8_t* data, size_t size) {
     while (ptr <= data + size - 8) {
         if (memcmp(ptr, "fmt ", 4) == 0) break;
         uint32_t chunkSize = *(uint32_t*)(ptr + 4);
-        if (chunkSize > (size_t)(data + size - ptr - 8)) return false;
-        ptr += 8 + chunkSize;
+        const size_t remaining = (size_t)(data + size - ptr - 8);
+        const size_t paddedSize = ((size_t)chunkSize + 1u) & ~size_t(1);
+        if (paddedSize > remaining) return false;
+        ptr += 8 + paddedSize;
     }
     if (ptr >= data + size - 8) return false;
 
@@ -436,14 +451,18 @@ bool SoundBuffer::loadWav(const uint8_t* data, size_t size) {
     uint16_t channels = *(uint16_t*)(ptr + 10);
     uint32_t sampleRate = *(uint32_t*)(ptr + 12);
     uint16_t bitsPerSample = *(uint16_t*)(ptr + 22);
-    ptr += 8 + fmtSize;
+    const size_t fmtPaddedSize = ((size_t)fmtSize + 1u) & ~size_t(1);
+    if (fmtPaddedSize > (size_t)(data + size - ptr - 8)) return false;
+    ptr += 8 + fmtPaddedSize;
 
     // Find data chunk
     while (ptr <= data + size - 8) {
         if (memcmp(ptr, "data", 4) == 0) break;
         uint32_t chunkSize = *(uint32_t*)(ptr + 4);
-        if (chunkSize > (size_t)(data + size - ptr - 8)) return false;
-        ptr += 8 + chunkSize;
+        const size_t remaining = (size_t)(data + size - ptr - 8);
+        const size_t paddedSize = ((size_t)chunkSize + 1u) & ~size_t(1);
+        if (paddedSize > remaining) return false;
+        ptr += 8 + paddedSize;
     }
     if (ptr >= data + size - 8) return false;
 
@@ -520,6 +539,10 @@ bool SoundBuffer::loadOgg(const uint8_t* data, size_t size) {
     if (!vi) { ov_clear(&vf); return false; }
 
     const int channels = vi->channels;
+    if ((channels != 1 && channels != 2) || vi->rate <= 0) {
+        ov_clear(&vf);
+        return false;
+    }
     ALenum format = (channels == 1) ? AL_FORMAT_MONO16 : AL_FORMAT_STEREO16;
     int freq = vi->rate;
 
@@ -528,12 +551,15 @@ bool SoundBuffer::loadOgg(const uint8_t* data, size_t size) {
     char readBuf[4096];
     int bitStream = 0;
     long bytesRead;
-    while ((bytesRead = ov_read(&vf, readBuf, sizeof(readBuf), 0, 2, 1, &bitStream)) > 0)
+    while ((bytesRead = ov_read(&vf, readBuf, sizeof(readBuf), 0, 2, 1, &bitStream)) > 0) {
+        if ((bytesRead & 1) != 0) { ov_clear(&vf); return false; }
         pcm.insert(pcm.end(), (int16_t*)readBuf, (int16_t*)(readBuf + bytesRead));
+    }
 
     ov_clear(&vf);
 
     if (pcm.empty()) return false;
+    if (pcm.size() > (size_t)std::numeric_limits<ALsizei>::max() / sizeof(int16_t)) return false;
 
     alGenBuffers(1, &buffer);
     alBufferData(buffer, format, pcm.data(), (ALsizei)(pcm.size() * sizeof(int16_t)), freq);
@@ -544,10 +570,10 @@ bool SoundBuffer::loadOgg(const uint8_t* data, size_t size) {
 }
 
 void SoundBuffer::destroy() {
-    if (buffer) {
+    if (buffer && alcGetCurrentContext()) {
         alDeleteBuffers(1, &buffer);
-        buffer = 0;
     }
+    buffer = 0;
     loaded = false;
     durationMs = 0;
 }
@@ -559,6 +585,7 @@ void SoundSource::play(SoundBuffer* buffer) {
     // its old buffer detached; assigning AL_BUFFER while playing is invalid.
     alSourceStop(source);
     alSourcei(source, AL_BUFFER, buffer->buffer);
+    alSourcef(source, AL_SEC_OFFSET, offsetSeconds);
     alSourcePlay(source);
     playing = true;
     paused = false;
@@ -738,8 +765,8 @@ bool SoundSource::isPlaying() const {
 }
 
 void SoundSource::destroy() {
-    if (source) {
+    if (source && alcGetCurrentContext()) {
         alDeleteSources(1, &source);
-        source = 0;
     }
+    source = 0;
 }

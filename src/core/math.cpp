@@ -35,14 +35,20 @@ Point3F MatrixF::transformNormal(const Point3F& n) const {
 MatrixF MatrixF::inverse() const {
     float A[4][8];
     for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) A[i][j] = m[i][j];
+        for (int j = 0; j < 4; j++) {
+            if (!std::isfinite(m[i][j])) { MatrixF id; return id; }
+            A[i][j] = m[i][j];
+        }
         for (int j = 0; j < 4; j++) A[i][4 + j] = (i == j) ? 1.0f : 0.0f;
     }
     for (int col = 0; col < 4; col++) {
         int piv = col;
         for (int r = col + 1; r < 4; r++)
             if (std::fabs(A[r][col]) > std::fabs(A[piv][col])) piv = r;
-        if (std::fabs(A[piv][col]) < 1e-8f) { MatrixF id; return id; }
+        if (!std::isfinite(A[piv][col]) || std::fabs(A[piv][col]) < 1e-8f) {
+            MatrixF id;
+            return id;
+        }
         if (piv != col) for (int j = 0; j < 8; j++) std::swap(A[col][j], A[piv][j]);
         float d = A[col][col];
         for (int j = 0; j < 8; j++) A[col][j] /= d;
@@ -55,7 +61,10 @@ MatrixF MatrixF::inverse() const {
     }
     MatrixF res;
     for (int i = 0; i < 4; i++)
-        for (int j = 0; j < 4; j++) res.m[i][j] = A[i][4 + j];
+        for (int j = 0; j < 4; j++) {
+            if (!std::isfinite(A[i][4 + j])) { MatrixF id; return id; }
+            res.m[i][j] = A[i][4 + j];
+        }
     return res;
 }
 
@@ -82,8 +91,10 @@ void MatrixF::setRotationZ(float a) {
 
 void MatrixF::setRotationAxis(const Point3F& axis, float angle) {
     identity();
+    const float length = std::hypot(std::hypot(axis.x, axis.y), axis.z);
+    if (!std::isfinite(length) || length < 1e-6f || !std::isfinite(angle)) return;
     float c = std::cos(angle), s = std::sin(angle), t = 1.0f - c;
-    float ax = axis.x, ay = axis.y, az = axis.z;
+    float ax = axis.x / length, ay = axis.y / length, az = axis.z / length;
     m[0][0] = t * ax * ax + c;     m[0][1] = t * ax * ay - s * az;  m[0][2] = t * ax * az + s * ay;
     m[1][0] = t * ax * ay + s * az; m[1][1] = t * ay * ay + c;      m[1][2] = t * ay * az - s * ax;
     m[2][0] = t * ax * az - s * ay; m[2][1] = t * ay * az + s * ax;  m[2][2] = t * az * az + c;
@@ -120,6 +131,17 @@ void MatrixF::orthographic(float left, float right, float bottom, float top, flo
 }
 
 void MatrixF::lookAt(const Point3F& eye, const Point3F& center, const Point3F& up) {
+    // Demo and observer camera state can be incomplete for one frame while a
+    // target is created or removed. Keep the view usable instead of allowing
+    // a non-finite basis to poison every vertex submitted that frame.
+    const auto finite = [](const Point3F& value) {
+        return std::isfinite(value.x) && std::isfinite(value.y) &&
+               std::isfinite(value.z);
+    };
+    if (!finite(eye) || !finite(center) || !finite(up)) {
+        identity();
+        return;
+    }
     Point3F f = { center.x - eye.x, center.y - eye.y, center.z - eye.z };
     float flen = std::sqrt(f.x * f.x + f.y * f.y + f.z * f.z);
     if (flen < 1e-6f) { f = { 0, 0, -1 }; flen = 1.0f; }
@@ -146,9 +168,12 @@ void MatrixF::lookAt(const Point3F& eye, const Point3F& center, const Point3F& u
 
 MatrixF QuatF::toMatrix() const {
     MatrixF m;
-    float x2 = x * x, y2 = y * y, z2 = z * z;
-    float xy = x * y, xz = x * z, yz = y * z;
-    float wx = w * x, wy = w * y, wz = w * z;
+    const float length = std::hypot(std::hypot(x, y), std::hypot(z, w));
+    if (!std::isfinite(length) || length < 1e-6f) return m;
+    const float nx = x / length, ny = y / length, nz = z / length, nw = w / length;
+    float x2 = nx * nx, y2 = ny * ny, z2 = nz * nz;
+    float xy = nx * ny, xz = nx * nz, yz = ny * nz;
+    float wx = nw * nx, wy = nw * ny, wz = nw * nz;
     m.m[0][0] = 1 - 2 * (y2 + z2); m.m[0][1] = 2 * (xy - wz);      m.m[0][2] = 2 * (xz + wy);
     m.m[1][0] = 2 * (xy + wz);      m.m[1][1] = 1 - 2 * (x2 + z2);  m.m[1][2] = 2 * (yz - wx);
     m.m[2][0] = 2 * (xz - wy);      m.m[2][1] = 2 * (yz + wx);      m.m[2][2] = 1 - 2 * (x2 + y2);
@@ -156,33 +181,44 @@ MatrixF QuatF::toMatrix() const {
 }
 
 QuatF QuatF::fromMatrix(const MatrixF& m) {
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col)
+            if (!std::isfinite(m.m[row][col])) return {};
     float trace = m.m[0][0] + m.m[1][1] + m.m[2][2];
     QuatF q;
     if (trace > 0) {
-        float s = 0.5f / std::sqrt(trace + 1.0f);
+        const float root = trace + 1.0f;
+        if (root <= 1e-8f) return {};
+        float s = 0.5f / std::sqrt(root);
         q.w = 0.25f / s;
         q.x = (m.m[2][1] - m.m[1][2]) * s;
         q.y = (m.m[0][2] - m.m[2][0]) * s;
         q.z = (m.m[1][0] - m.m[0][1]) * s;
     } else if (m.m[0][0] > m.m[1][1] && m.m[0][0] > m.m[2][2]) {
-        float s = 2.0f * std::sqrt(1.0f + m.m[0][0] - m.m[1][1] - m.m[2][2]);
+        float s = 2.0f * std::sqrt(std::max(0.0f, 1.0f + m.m[0][0] - m.m[1][1] - m.m[2][2]));
+        if (s < 1e-8f) return {};
         q.w = (m.m[2][1] - m.m[1][2]) / s;
         q.x = 0.25f * s;
         q.y = (m.m[0][1] + m.m[1][0]) / s;
         q.z = (m.m[0][2] + m.m[2][0]) / s;
     } else if (m.m[1][1] > m.m[2][2]) {
-        float s = 2.0f * std::sqrt(1.0f + m.m[1][1] - m.m[0][0] - m.m[2][2]);
+        float s = 2.0f * std::sqrt(std::max(0.0f, 1.0f + m.m[1][1] - m.m[0][0] - m.m[2][2]));
+        if (s < 1e-8f) return {};
         q.w = (m.m[0][2] - m.m[2][0]) / s;
         q.x = (m.m[0][1] + m.m[1][0]) / s;
         q.y = 0.25f * s;
         q.z = (m.m[1][2] + m.m[2][1]) / s;
     } else {
-        float s = 2.0f * std::sqrt(1.0f + m.m[2][2] - m.m[0][0] - m.m[1][1]);
+        float s = 2.0f * std::sqrt(std::max(0.0f, 1.0f + m.m[2][2] - m.m[0][0] - m.m[1][1]));
+        if (s < 1e-8f) return {};
         q.w = (m.m[1][0] - m.m[0][1]) / s;
         q.x = (m.m[0][2] + m.m[2][0]) / s;
         q.y = (m.m[1][2] + m.m[2][1]) / s;
         q.z = 0.25f * s;
     }
+    const float length = std::hypot(std::hypot(q.x, q.y), std::hypot(q.z, q.w));
+    if (!std::isfinite(length) || length < 1e-6f) return {};
+    q.x /= length; q.y /= length; q.z /= length; q.w /= length;
     return q;
 }
 

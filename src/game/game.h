@@ -1,5 +1,6 @@
 #pragma once
 #include "core/math.h"
+#include "core/input_parity.h"
 #include "audio/audio_system.h"
 #include "render/renderer.h"
 #include "game/collision.h"
@@ -8,8 +9,11 @@
 #include "game/demo.h"
 #include "game/mission_parser.h"
 #include "game/death_respawn.h"
+#include "game/mission_rules.h"
 #include "game/trigger.h"
 #include "game/hud.h"
+#include "game/hud_parity.h"
+#include "game/water_parity.h"
 #include <vector>
 #include <array>
 #include <limits>
@@ -29,9 +33,10 @@ struct GameConfig {
     uint16_t serverPort = T2Protocol::DEFAULT_PORT;
     bool online = false;
     bool dedicated = false;
-    float moveSpeed = 10.0f;
-    float jumpSpeed = 8.0f;
-    float jetSpeed = 12.0f;
+    // Native defaults; these remain configurable for local movement profiles.
+    float moveSpeed = 15.0f;
+    float jumpSpeed = 10.0f;
+    float jetSpeed = 35.0f;
 };
 
 class Player {
@@ -48,30 +53,62 @@ public:
     Point3F rotation() const { return rot; }
     Point3F velocity() const { return vel; }
 
-    void setPosition(const Point3F& p) { pos = p; }
-    void setRotation(const Point3F& r) { rot = r; }
-    void setEnergy(float e) { eng = e; }
-    void setRepairRate(float rate) { repairRate = std::clamp(rate, 0.0f, 100.0f); }
-    void setVelocity(const Point3F& v) { vel = v; }
+    void setPosition(const Point3F& p) {
+        if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)) pos = p;
+    }
+    void setRotation(const Point3F& r) {
+        if (!std::isfinite(r.x) || !std::isfinite(r.y) || !std::isfinite(r.z)) return;
+        rot = r;
+        rot.x = clampCameraPitch(rot.x);
+    }
+    void setEnergy(float e) {
+        if (std::isfinite(e)) eng = std::clamp(e, 0.0f, maxEng);
+    }
+    void setRepairRate(float rate) {
+        if (std::isfinite(rate)) repairRate = std::clamp(rate, 0.0f, 100.0f);
+    }
+    void setVelocity(const Point3F& v) {
+        if (std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z)) vel = v;
+    }
     void setOnGround(bool g) { onGround = g; }
 
     void applyMove(const Point3F& move, bool jump, bool jet, float dt = 1.0f / 60.0f);
     void applyDamage(float amount);
     void respawn();
-    void setHealth(float value) { hp = std::clamp(value, 0.0f, 100.0f); }
+    void setHealth(float value) {
+        if (std::isfinite(value)) hp = std::clamp(value, 0.0f, maxHp);
+    }
 
     float health() const { return hp; }
+    float maxHealth() const { return maxHp; }
+    void setMaxHealth(float value) {
+        if (!std::isfinite(value) || value <= 0.0f) return;
+        maxHp = value;
+        hp = std::clamp(hp, 0.0f, maxHp);
+    }
     float energy() const { return eng; }
+    float maxEnergy() const { return maxEng; }
+    void setMaxEnergy(float value) {
+        if (!std::isfinite(value) || value <= 0.0f) return;
+        maxEng = value;
+        eng = std::clamp(eng, 0.0f, maxEng);
+    }
     float getRepairRate() const { return repairRate; }
     float heat() const { return heatLevel; }
     float armor() const { return arm; }
     int team() const { return teamId; }
     void setTeam(int team) { teamId = team; }
-    void setHeat(float value) { heatLevel = std::clamp(value, 0.0f, 100.0f); }
+    void setHeat(float value) {
+        if (std::isfinite(value)) heatLevel = std::clamp(value, 0.0f, 100.0f);
+    }
     bool isDead() const { return hp <= 0; }
     bool isOnGround() const { return onGround; }
     bool jumpWasDown() const { return jumpHeld; }
     void setJumpWasDown(bool value) { jumpHeld = value; }
+    float jumpDelay() const { return jumpCooldown; }
+    void setJumpDelay(float value) {
+        if (std::isfinite(value)) jumpCooldown = std::max(0.0f, value);
+    }
     AnimState animState() const { return anim; }
 
     // Camera
@@ -92,6 +129,7 @@ public:
     int32_t kills = 0;
     int32_t deaths = 0;
     float score = 0.0f;
+    void recordKill() { ++kills; score += 1.0f; }
 
     // Animation
     void updateAnimation(float dt, bool jetting);
@@ -107,13 +145,16 @@ private:
     Point3F rot{0, 0, 0};
     Point3F vel{0, 0, 0};
     float hp = 100.0f;
+    float maxHp = 100.0f;
     float eng = 100.0f;
+    float maxEng = 100.0f;
     float repairRate = 0.0f;
     float heatLevel = 0.0f;
     float arm = 0.0f;
     int teamId = 1;
     bool onGround = true;
     bool jumpHeld = false;
+    float jumpCooldown = 0.0f;
     float eyeHeight = 1.5f;
     float radius = 0.5f;
     AnimState anim = Stand;
@@ -142,23 +183,31 @@ public:
     ~World();
 
     bool load(const char* mapName);
+    bool isLoaded() const { return loaded; }
     // Terrain-only load (no shapes/materials) — safe for headless dedicated servers
     // that only need authoritative ground heights for collision.
     bool loadTerrain(const char* mapName);
     void cleanupMission();
     void update(float dt);
-    void render(const Point3F& cameraPos);
+    void render(const Point3F& cameraPos, float dt = 1.0f / 60.0f);
     void updateRendererLights(Renderer& renderer) const;
 
     TerrainBlock* terrain() { return &terrainBlock; }
     Sky* sky() { return &skyBox; }
     const Point3F& spawnPoint() const { return playerSpawn; }
     float waterLevel() const {
+        // Zero is a useful no-water default, but it must not also mask a
+        // legitimate WaterBlock surface below the world origin.
         float level = 0.0f;
-        for (const auto& body : waterBodies)
-            if (body.active) level = std::max(level, body.level);
-        return level;
+        bool found = false;
+        for (const auto& body : waterBodies) {
+            if (!waterBodyCanAffectSurface(body.active, body.liquidType)) continue;
+            level = found ? std::max(level, body.level) : body.level;
+            found = true;
+        }
+        return found ? level : 0.0f;
     }
+    Point3F spawnPointForTeam(int teamId) const;
     bool setWaterLevel(const std::string& target, float level);
     bool setWaterType(const std::string& target, int type);
     bool setWaterOpacity(const std::string& target, float opacity);
@@ -170,18 +219,21 @@ public:
     bool setSunAmbient(const ColorF& color);
     bool setFogTransition(float duration, float distance, const ColorF* color = nullptr);
     bool isUnderwater(const Point3F& camera) const {
-        float highest = -std::numeric_limits<float>::infinity();
-        int highestType = 7;
         for (const auto& body : waterBodies) {
-            if (camera.x < body.originX || camera.x > body.originX + body.sizeX ||
-                camera.z < body.originZ || camera.z > body.originZ + body.sizeY)
+            if (!body.active)
                 continue;
-            if (camera.y < body.level && body.level > highest) {
-                highest = body.level;
-                highestType = body.liquidType;
-            }
+            if (!waterBodyContainsHorizontal(camera.x, camera.z, body.originX,
+                                             body.originZ, body.sizeX, body.sizeY))
+                continue;
+            // Non-water liquid types (lava/quicksand) can overlap a normal
+            // WaterBlock. They must not hide the underwater filter from a
+            // lower water volume merely because their surface is higher.
+            if (activeWaterBodySubmergesCamera(body.active, camera.y, body.level,
+                                               body.liquidType) &&
+                body.liquidType <= 3)
+                return true;
         }
-        return highest > -std::numeric_limits<float>::infinity() && highestType <= 3;
+        return false;
     }
     PhysicalZoneEffect physicalZoneEffect(const Point3F& position) const;
 
@@ -212,6 +264,7 @@ public:
         float visibleDistance = 0.0f;
         float minHeight = 0.0f;
         float maxHeight = 0.0f;
+        float percentage = 1.0f;
     };
     std::vector<FogVolume> fogVolumes;
 
@@ -257,9 +310,13 @@ public:
         bool forceField = false;
         std::vector<uint32_t> forceFieldFrames;
         std::vector<float> forceFieldFrameDurations;
-        ColorF forceFieldColor{1, 1, 1, 1};
-        float forceFieldBaseTranslucency = 1.0f;
-        float forceFieldUMapping = 1.0f;
+         ColorF forceFieldColor{1, 1, 1, 1};
+         ColorF forceFieldPowerOffColor{0, 0, 0, 1};
+         float forceFieldBaseTranslucency = 1.0f;
+         float forceFieldPowerOffTranslucency = 0.0f;
+         float forceFieldFadeMS = 1000.0f;
+         float forceFieldFadePosition = 0.0f;
+         float forceFieldUMapping = 1.0f;
         float forceFieldVMapping = 1.0f;
         float forceFieldFramesPerSec = 1.0f;
         float forceFieldScrollSpeed = 0.0f;
@@ -304,9 +361,17 @@ public:
     void resetTriggerTracking();
     bool setMissionObjectEnabled(const std::string& name, bool enabled);
     bool setMissionObjectHidden(const std::string& name, bool hidden);
+    bool setMissionObjectPosition(const std::string& name, const Point3F& position);
+    bool getMissionObjectPosition(const std::string& name, Point3F& position) const;
+    bool setMissionObjectRotation(const std::string& name, const Point3F& axis, float angleDeg);
+    bool getMissionObjectRotation(const std::string& name, Point3F& axis, float& angleDeg) const;
+    bool setMissionObjectScale(const std::string& name, const Point3F& scale);
+    bool getMissionObjectScale(const std::string& name, Point3F& scale) const;
     bool setMissionObjectTransform(const std::string& name, const std::string& transform);
+    bool getMissionObjectTransform(const std::string& name, std::string& transform) const;
     bool mountMissionObjectImage(const std::string& name, const std::string& image, int slot);
     bool unmountMissionObjectImage(const std::string& name, int slot);
+    bool getMissionObjectImage(const std::string& name, int slot, std::string& image) const;
     bool deleteMissionObject(const std::string& name);
     const std::vector<WorldObject>& objects() const { return worldObjects; }
     const std::vector<AuthoredMissionObjective>& objectives() const { return missionObjectives; }
@@ -330,6 +395,7 @@ public:
 
     float getHeight(float x, float z) const;
     float getFloorHeight(float x, float y, float z) const;
+    bool spawnTransformForTeam(int teamId, Point3F& position, Point3F& rotation) const;
     bool isPositionVisible(const Point3F& torquePosition, const Point3F& cameraPosition) const;
     const CollisionMesh& collision() const { return interiorCollision; }
     std::vector<Projectile>& projectiles() { return projList; }
@@ -371,6 +437,9 @@ private:
     Sky skyBox;
     CollisionMesh interiorCollision;
     std::vector<WorldObject> worldObjects;
+    // SpawnSphere rotation is per team. A respawn by the opposing team must
+    // not change which authored start this team receives next.
+    mutable std::unordered_map<int, size_t> spawnCursors;
     std::vector<AuthoredMissionObjective> missionObjectives;
     AuthoredNavigationGraph navGraph;
     mutable SceneState currentSceneState;
@@ -527,8 +596,11 @@ private:
         enum Type { Health, Energy, Ammo } type;
          float respawnTimer = 0.0f;
          float amount = 25.0f;
-         float respawnDelay = 15.0f;
+          // Match the native Item datablock fallback when no script
+          // datablock can be resolved during mission loading.
+          float respawnDelay = 20.0f;
          int worldObjectIndex = -1;
+         bool enabled = true;
          bool active = true;
         bool renderProxy = true;
     };
@@ -549,6 +621,9 @@ public:
         float percentage = 1.0f;
         int numDrops = 1024;
         int configuredDrops = 1024;
+        // Keep the authored coverage while the script-level enabled toggle
+        // temporarily drives the live percentage to zero.
+        float configuredPercentage = 1.0f;
         float boxWidth = 200.0f;
         float boxHeight = 100.0f;
         float dropSize = 0.5f;
@@ -624,6 +699,12 @@ public:
     void spawnBots(int count);
 };
 
+inline float spawnYawFromTorqueRotation(const Point3F& axis, float angleDeg) {
+    const Point3F forward = Math::torqueCameraForwardToYUp(
+        axis, Math::DEG2RAD(angleDeg));
+    return std::atan2(forward.x, forward.z);
+}
+
 class Game {
 public:
     Game();
@@ -647,6 +728,8 @@ public:
     Player& player() { return *pl; }
     const Player& player() const { return *pl; }
     World& world() { return *w; }
+    bool hasWorld() const { return w != nullptr; }
+    bool deleteMissionObjectIfPresent(const std::string& name);
     bool isTestShapeLoaded() const { return testShapeLoaded; }
 
     // Mapper mode access
@@ -721,7 +804,9 @@ public:
     bool isDemoPlaying() const { return demoPlaying; }
     bool isDemoPaused() const { return demoPaused; }
     bool isDemoFastForward() const { return demoFastForward || demoJetHeld; }
-    float getDemoSpeed() const { return demoPaused ? 0.0f : (isDemoFastForward() ? 4.0f : 1.0f); }
+    float getDemoSpeed() const { return isDemoFastForward() ? std::max(demoPlaybackRate, 4.0f) : demoPlaybackRate; }
+    bool demoStepFeedback() const { return demoStepFeedbackTime > 0.0f; }
+    bool demoFirstPersonCamActive() const { return demoFirstPersonCam; }
     float getDemoTime() const { return demoTime; }
     float getDemoTotalTime() const { return demoTotalTime; }
     bool demoHasPosition() const { return demoHasPos; }
@@ -736,18 +821,32 @@ public:
     void selectSpectateTarget(int ghostIndex);
     float getDamageFlash() const { return damageFlash; }
     float getWhiteOut() const { return whiteOut; }
+    void recordDamageFlash(float amount);
     bool isUnderwater() const {
         if (!w) return false;
         return w->isUnderwater(demoPlaying ? demoCameraPos : player().cameraPos());
     }
     void toggleDemoPause();
+    void pauseDemo();
+    void resumeDemo();
     void toggleDemoEvents() { demoShowEvents = !demoShowEvents; }
     bool demoEventsShown() const { return demoShowEvents; }
     bool demoOrbitCamActive() const { return demoOrbitCam; }
     const std::vector<DemoTimedEvent>& getDemoEventLog() const { return demoEventLog; }
-    void requestDemoStep() { demoStepRequest = true; }
+    void requestDemoStep(int blocks = 1) {
+        demoStepBlocks = std::max(1, blocks);
+        demoStepRequest = true;
+        demoStepFeedbackTime = 0.75f;
+    }
     const std::vector<Point3F>& getDemoPath() const { return demoPath; }
     void setDemoFastForward(bool v) { demoFastForward = v; }
+    void setDemoPlaybackSpeed(float speed);
+    void resetDemoEvents();
+    void resetDemoHud();
+    void resetDemoCamera();
+    void resetDemoEffects();
+    void resetDemoPresentation();
+    bool tryLoadDemoMission(const std::string& mission);
     DemoParser* getDemoParser() const { return demoParser; }
     Menu& menu() { return *mMenu; }
     int getDemoBlocksDone() const { return demoBlocksDone; }
@@ -790,7 +889,7 @@ public:
         return it == sensorGroupListenMasks.end() ? 0xffffffffu : it->second;
     }
     bool isSensorGroupTargetVisible(int listenerGroup, int targetGroup) const {
-        if (targetGroup < 0 || targetGroup >= sensorGroupCount) return false;
+        if (!HudParity::sensorGroupInRange(targetGroup, sensorGroupCount)) return false;
         auto native = liveSensorGroupListenMasks.find(listenerGroup);
         if (native != liveSensorGroupListenMasks.end())
             return (native->second & (uint32_t(1) << targetGroup)) != 0;
@@ -848,9 +947,10 @@ private:
     HUD* hud{};
     State gameState = MenuScreen;
     float time = 0;
-    float gravity = -25.0f;
+    float gravity = -20.0f;
     float timeScale = 1.0f;
     float deathTimer = 0.0f;
+    bool missionRespawn = true;
     SoundSource* ambientSource{};
     SoundBuffer* ambientSound{};
     std::vector<SoundSource*> emitterSources;
@@ -859,6 +959,11 @@ private:
     std::unordered_set<uint64_t> demoAudioEventsPlayed;
     int32_t weatherType = 0; // 0=dry, 1=cold, 2=wet
     InputMove currentInput;
+    bool previousFire = false;
+    bool previousAltFire = false;
+    bool previousReload = false;
+    bool previousZoom = false;
+    bool zoomed = false;
     bool freeCamActive = false;
     bool showScoreboard = false;
     Point3F freeCamPos{0, 10, 0};
@@ -871,15 +976,19 @@ private:
     // Demo playback
     DemoParser* demoParser{};
     std::map<int, DemoParserSnapshot> demoSnapshots;
+    T2Demo::MissionReplacementState demoMissionState;
     bool demoPlaying = false;
     bool gamePaused = false;
     bool demoPaused = false;
     bool demoStepRequest = false;
+    int demoStepBlocks = 1;
     bool demoJetHeld = false; // Space key held (fast-forward indicator)
+    float demoStepFeedbackTime = 0.0f;
     std::unordered_map<std::string, DTSShape> demoShapeCache;
     DTSShape testShape;
     bool testShapeLoaded = false;
-     bool demoFastForward = false;
+    bool demoFastForward = false;
+    float demoPlaybackRate = 1.0f;
     float demoTime = 0;
     float demoTotalTime = 0;
     float demoInterpolationDt = 0;
@@ -931,6 +1040,8 @@ private:
     // Editor mode
     bool editorActive = false;
     int editorPlaceClass = 31; // classId to place
+    uint32_t editorLastGhost = 0;
+    bool editorHasGhost = false;
 
     // Projectile trail system
     struct TrailPoint { float x, y, z; float life; ColorF color; };

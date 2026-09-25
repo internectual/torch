@@ -9,9 +9,9 @@
 static void put16(std::ofstream& f, uint16_t value) { f.write((char*)&value, 2); }
 static void put32(std::ofstream& f, uint32_t value) { f.write((char*)&value, 4); }
 
-static void writeStoredVl2(const std::filesystem::path& path) {
+static void writeStoredVl2(const std::filesystem::path& path, const char* textureData = "archive") {
     const std::pair<const char*, const char*> entries[] = {
-        {"Textures/GUI/Button.PNG", "archive"},
+        {"Textures/GUI/Button.PNG", textureData},
         {"Shapes/Native.DTS", "shape"},
         {"Missions/Native.MIS", "mission"},
     };
@@ -38,13 +38,13 @@ int main() {
     std::ofstream(root / "@vl2/Directory.vl2/Textures/GUI/Converted.GLB") << "converted";
     std::filesystem::create_directories(root / "@vl2/Nested/Maps.vl2/Missions");
     std::ofstream(root / "@vl2/Nested/Maps.vl2/Missions/Nested.MIS") << "nested";
-    writeStoredVl2(root / "base.vl2");
+    writeStoredVl2(root / "Base.VL2");
 
     FileSystem fs;
     fs.setOriginalOnly(true);
     fs.addPath(root.c_str());
     auto* archive = new Vl2Archive;
-    assert(archive->open((root / "base.vl2").c_str()));
+    assert(archive->open((root / "Base.VL2").c_str()));
     fs.addArchive(archive);
 
     std::vector<uint8_t> data;
@@ -81,7 +81,46 @@ int main() {
     assert(!fs.fileExists("cache/native.dts"));
     assert(!fs.fileExists("textures/gui/button.glb"));
     assert(!fs.fileExists("textures/gui/missing"));
+    std::ofstream(root / "empty.cs");
+    assert(fs.fileExists("EMPTY.CS"));
+    assert(fs.readFile("empty.cs", data));
+    assert(data.empty());
     fs.shutdown();
+
+    // A direct base root must work without its installation parent, and the
+    // active classic loose/archive layers must win over base.
+    const auto layered = root / "layered";
+    std::filesystem::create_directories(layered / "base/textures/gui");
+    std::filesystem::create_directories(layered / "classic/textures/gui");
+    std::ofstream(layered / "base/textures/gui/layer.png") << "base-loose";
+    std::ofstream(layered / "classic/textures/gui/layer.png") << "classic-loose";
+    writeStoredVl2(layered / "base/Base.VL2", "base-archive");
+    writeStoredVl2(layered / "classic/Classic.VL2", "classic-archive");
+
+    FileSystem directBase;
+    assert(directBase.init({(layered / "base").string()}));
+    assert(directBase.readFile("textures/gui/layer.png", data));
+    assert(std::string(data.begin(), data.end()) == "base-loose");
+    directBase.shutdown();
+
+    FileSystem classic;
+    classic.init({(layered / "classic").string(), (layered / "base").string()});
+    auto* baseArchive = new Vl2Archive;
+    auto* classicArchive = new Vl2Archive;
+    assert(baseArchive->open((layered / "base/Base.VL2").c_str()));
+    assert(classicArchive->open((layered / "classic/Classic.VL2").c_str()));
+    classic.addArchive(baseArchive);
+    classic.addArchive(classicArchive);
+    assert(classic.readFile("textures/gui/layer.png", data));
+    assert(std::string(data.begin(), data.end()) == "classic-loose");
+    std::filesystem::remove(layered / "classic/textures/gui/layer.png");
+    assert(classic.readFile("textures/gui/button.png", data));
+    assert(std::string(data.begin(), data.end()) == "classic-archive");
+    classic.shutdown();
+    // Invalid paths must not become mounts or escape the logical namespace.
+    FileSystem invalid;
+    invalid.addPath((layered / "does-not-exist").c_str());
+    assert(!invalid.fileExists("textures/gui/layer.png"));
     std::filesystem::remove_all(root);
     return 0;
 }

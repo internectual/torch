@@ -3,7 +3,10 @@
 #include "game/movement.h"
 #include "render/renderer.h"
 #include "core/engine.h"
+#include "core/console.h"
 #include "game/hud_parity.h"
+#include "game/observer_parity.h"
+#include "game/menu_parity.h"
 #include <GL/glew.h>
 #include <algorithm>
 #include <cmath>
@@ -67,9 +70,9 @@ void HUD::clearObjectiveTask() {
 
 void HUD::render(Game* game) {
     const bool dead = game && game->state() == Game::Dead;
-    const bool liveObserver = dead &&
-        game->isConnected() && game->activeConnection() &&
-        game->activeConnection()->isObserverMode();
+    const bool liveObserver = game && game->isConnected() &&
+        game->activeConnection() && ObserverParity::isLiveObserver(
+            game->isConnected(), game->activeConnection()->isObserverMode());
     if (!visible || !game || (game->state() != Game::Playing && !dead)) return;
 
     auto& input = Engine::instance().platform().input();
@@ -106,8 +109,10 @@ void HUD::render(Game* game) {
     r.setView(id);
     glDisable(GL_DEPTH_TEST);
 
-    // Crosshair
-    renderCrosshair();
+    // The reticle belongs to active first-person play, not dead/observer HUDs
+    // or the target-finder overlay.
+    if (HudParity::crosshairVisible(dead, liveObserver, game->targetFinderOpen()))
+        renderCrosshair();
 
     // GameRenderFilters applies these effects for both network and demo
     // snapshots. They are intentionally drawn before the HUD controls.
@@ -122,9 +127,13 @@ void HUD::render(Game* game) {
 
     char buf[128];
     if (!dead && !liveObserver) {
-        const float maxHealth = 100.0f;
+        // PlayerData::maxDamage is the local ShapeBase health cap. Using the
+        // stock 100-point default makes heavy/custom armor display the wrong
+        // bar length and HP denominator.
+        const float maxHealth = game->player().maxHealth();
         renderHealthBar(game->player().health(), maxHealth);
-        renderEnergyBar(game->player().energy(), 100.0f);
+        const float maxEnergy = game->player().maxEnergy();
+        renderEnergyBar(game->player().energy(), maxEnergy);
         const int weapon = game->player().currentWeapon();
         const int ammo = weapon >= 0 && weapon < game->player().weaponCount()
             ? game->player().weapon(weapon).ammo : -1;
@@ -137,8 +146,8 @@ void HUD::render(Game* game) {
         snprintf(buf, sizeof(buf), "HP: %.0f/%.0f  AR: %.0f",
                  game->player().health(), maxHealth, game->player().armor());
         if (font) font->render(buf, 20.0f, (float)h - 60.0f, {1, 1, 1, 1}, 2.0f);
-        snprintf(buf, sizeof(buf), "EN: %.0f/100  RECHARGE: %.1f",
-                 game->player().energy(), Movement::energyRecharge);
+        snprintf(buf, sizeof(buf), "EN: %.0f/%.0f  RECHARGE: %.1f",
+                 game->player().energy(), maxEnergy, Movement::energyRecharge);
         if (font) font->render(buf, 20.0f, (float)h - 40.0f, {0, 1, 1, 1}, 2.0f);
     }
 
@@ -155,7 +164,8 @@ void HUD::render(Game* game) {
     if (liveObserver) {
         const auto observer = game->activeConnection()->observerSnapshot();
         const int selected = game->getSpectateGhostIndex();
-        const int targetIndex = selected >= 0 ? selected : (int)observer.controlGhost;
+        const int targetIndex = selected >= 0 ? selected :
+            ObserverParity::controlGhostIndex(observer.controlGhost);
         const GhostEntry* target = game->getLiveGhost(targetIndex);
         const char* targetName = target && !target->playerName.empty()
             ? target->playerName.c_str() : "Free camera";
@@ -199,28 +209,31 @@ void HUD::render(Game* game) {
 
     // Demo playback info
     if (game->isDemoPlaying()) {
-        int mins = (int)(game->getDemoTime() / 60);
-        int secs = (int)(game->getDemoTime()) % 60;
-        int totalMins = (int)(game->getDemoTotalTime() / 60);
-        int totalSecs = (int)(game->getDemoTotalTime()) % 60;
         const char* status = "> PLAY";
-        if (game->isDemoPaused()) status = "|| PAUSE";
-        else if (game->isDemoFastForward()) status = ">> FAST";
-        ColorF statusColor = game->isDemoPaused() ? ColorF{1, 1, 0, 1} : ColorF{0, 1, 0, 1};
+        ColorF statusColor = {0, 1, 0, 1};
+        if (game->demoStepFeedback()) {
+            status = ">| STEP";
+            statusColor = {0.3f, 0.8f, 1.0f, 1};
+        } else if (game->isDemoPaused()) {
+            status = "|| PAUSE";
+            statusColor = {1, 1, 0, 1};
+        } else if (game->isDemoFastForward()) {
+            status = ">> FAST";
+        }
         // Speed display
         float speed = game->getDemoSpeed();
         char speedBuf[16];
         snprintf(speedBuf, sizeof(speedBuf), "%.1fx", speed);
 
-        snprintf(buf, sizeof(buf), "[%s] %s %02d:%02d/%02d:%02d",
-                 status, speedBuf, mins, secs, totalMins, totalSecs);
+        const std::string time = T2Demo::formatPlaybackClock(game->getDemoTime());
+        const std::string total = T2Demo::formatPlaybackClock(game->getDemoTotalTime());
+        snprintf(buf, sizeof(buf), "[%s] %s %s/%s",
+                 status, speedBuf, time.c_str(), total.c_str());
         if (font) font->render(buf, 20.0f, 20.0f, statusColor, 2.0f);
 
         // Graphical progress bar
-        float progress = game->getDemoTotalTime() > 0
-            ? game->getDemoTime() / game->getDemoTotalTime() : 0;
-        if (progress < 0) progress = 0;
-        if (progress > 1) progress = 1;
+        const float progress = T2Demo::playbackProgress(
+            game->getDemoTime(), game->getDemoTotalTime());
         float barW = 300.0f, barH = 8.0f;
         float bx = 20.0f, by = 42.0f;
         // Background
@@ -228,8 +241,10 @@ void HUD::render(Game* game) {
         r.drawBox(bgBox, {0.2f, 0.2f, 0.2f, 0.7f});
         // Fill
         float fw = barW * progress;
-        Box3F fillBox = {{bx + 1, by - barH + 1, 0}, {bx + fw - 1, by - 1, 0}};
-        r.drawBox(fillBox, {0.3f, 1.0f, 0.3f, 0.9f});
+        if (fw > 2.0f) {
+            Box3F fillBox = {{bx + 1, by - barH + 1, 0}, {bx + fw - 1, by - 1, 0}};
+            r.drawBox(fillBox, {0.3f, 1.0f, 0.3f, 0.9f});
+        }
         // Border
         r.drawLine({bx, by, 0}, {bx + barW, by, 0}, {1, 1, 1, 0.5f});
         r.drawLine({bx + barW, by, 0}, {bx + barW, by - barH, 0}, {1, 1, 1, 0.5f});
@@ -239,12 +254,18 @@ void HUD::render(Game* game) {
         // Ghost count and help text
         if (auto* dp = game->getDemoParser()) {
             int ghostCount = dp->getGhostTracker().size();
+            const char* cameraMode = game->demoOrbitCamActive() ? "ORBIT" :
+                game->isFreeCamActive() ? "FREE" :
+                game->demoFirstPersonCamActive() ? "FIRST" : "REC";
             if (game->demoOrbitCamActive()) {
-                snprintf(buf, sizeof(buf), "Ghosts: %d  [F2]orbit [A/D]rot [W/S]zoom [Spc/Shft]ht [R]target",
-                         ghostCount);
+                snprintf(buf, sizeof(buf), "Ghosts: %d  CAM:%s  [F2]orbit [F4]first [A/D]rot [W/S]zoom [Spc/Shft]ht [R]target",
+                         ghostCount, cameraMode);
+            } else if (game->isFreeCamActive()) {
+                snprintf(buf, sizeof(buf), "Ghosts: %d  CAM:%s  [F1]record [F2]orbit [F4]first [WASD]move [R]target",
+                         ghostCount, cameraMode);
             } else {
-                snprintf(buf, sizeof(buf), "Ghosts: %d  [P]ause [.]step [F1]free [F2]orbit [E]vents [Tab]score [R]target",
-                         ghostCount);
+                snprintf(buf, sizeof(buf), "Ghosts: %d  CAM:%s  [P]ause [.]step [F1]free [F2]orbit [F4]first [E]vents [Tab]score [R]target",
+                         ghostCount, cameraMode);
             }
             if (font) font->render(buf, 20.0f, 48.0f, {0.7f, 0.7f, 0.7f, 0.8f}, 2.0f);
             // Spectate target indicator
@@ -292,47 +313,55 @@ void HUD::render(Game* game) {
             for (int gi : indices) {
                 const GhostEntry* g = gt.getGhost(gi);
                 if (!g || g->playerName.empty()) continue;
-                // Only show tags for Player-class ghosts within range
-                if (g->className != "Player" && g->className != "MPB") continue;
-                float dx = g->position.x - r.cameraPos.x;
-                float dy = g->position.y - r.cameraPos.y;
-                float dz = g->position.z - r.cameraPos.z;
-                float dist = sqrtf(dx*dx + dy*dy + dz*dz);
-                if (dist > 500.0f) continue;
-                // Project world position to screen (above head)
-                Point3F wp = {g->position.x, g->position.y + 2.5f, g->position.z};
+                // AIPlayer is a Player subclass in Tribes 2. Keep bot name
+                // tags consistent with observer targeting and live triggers.
+                if (!ObserverParity::isPlayerClass(g->className)) continue;
+                 // Demo ghosts retain their native Torque Z-up coordinates;
+                 // project the same Y-up position used by shape rendering.
+                 const Point3F renderPosition = Math::torquePointToYUp(
+                     {g->position.x, g->position.y, g->position.z});
+                 float dx = renderPosition.x - r.cameraPos.x;
+                 float dy = renderPosition.y - r.cameraPos.y;
+                 float dz = renderPosition.z - r.cameraPos.z;
+                 float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+                 if (dist > 500.0f) continue;
+                 // Project world position to screen (above head)
+                 Point3F wp = {renderPosition.x, renderPosition.y + 2.5f,
+                               renderPosition.z};
                 const MatrixF& view = r.viewMatrix();
                 const MatrixF& proj = r.projectionMatrix();
-                const float* v = &view.m[0][0];
-                float cx = wp.x*v[0]+wp.y*v[4]+wp.z*v[8]+v[12];
-                float cy = wp.x*v[1]+wp.y*v[5]+wp.z*v[9]+v[13];
-                float cz = wp.x*v[2]+wp.y*v[6]+wp.z*v[10]+v[14];
-                float cw = wp.x*v[3]+wp.y*v[7]+wp.z*v[11]+v[15];
-                const float* p = &proj.m[0][0];
-                float nx = cx*p[0]+cy*p[4]+cz*p[8]+cw*p[12];
-                float ny = cx*p[1]+cy*p[5]+cz*p[9]+cw*p[13];
-                float nz = cx*p[2]+cy*p[6]+cz*p[10]+cw*p[14];
-                float nw = cx*p[3]+cy*p[7]+cz*p[11]+cw*p[15];
-                if (nw == 0 || nz < 0) continue;
+                 const float* v = &view.m[0][0];
+                 // MatrixF is row-major in its transform/operator* methods.
+                 // Using column-major indexing here displaced name tags and
+                 // rejected the near half of the visible depth range.
+                 float cx = wp.x*v[0]+wp.y*v[1]+wp.z*v[2]+v[3];
+                 float cy = wp.x*v[4]+wp.y*v[5]+wp.z*v[6]+v[7];
+                 float cz = wp.x*v[8]+wp.y*v[9]+wp.z*v[10]+v[11];
+                 float cw = wp.x*v[12]+wp.y*v[13]+wp.z*v[14]+v[15];
+                 const float* p = &proj.m[0][0];
+                 float nx = cx*p[0]+cy*p[1]+cz*p[2]+cw*p[3];
+                 float ny = cx*p[4]+cy*p[5]+cz*p[6]+cw*p[7];
+                 float nz = cx*p[8]+cy*p[9]+cz*p[10]+cw*p[11];
+                 float nw = cx*p[12]+cy*p[13]+cz*p[14]+cw*p[15];
+                 if (nw <= 0 || nz < -nw || nz > nw) continue;
                 float invW = 1.0f / nw;
                 float sx = (nx*invW*0.5f+0.5f)*w;
                 float sy = (-ny*invW*0.5f+0.5f)*h;
                 // Background box for name
                 float tw = (float)g->playerName.size() * 10.0f;
                 r.drawBox({{sx - tw/2 - 4, sy - 2, 0}, {sx + tw/2 + 4, sy + 16, 0}}, {0,0,0,0.5f});
-                // Team color dot
-                std::string sn = g->skinName;
-                for (auto& c : sn) c = (char)tolower(c);
-                ColorF nameCol = {1,1,0,1};
-                if (sn.find("red") != std::string::npos) nameCol = {1,0.3f,0.3f,1};
-                else if (sn.find("blue") != std::string::npos) nameCol = {0.3f,0.4f,1,1};
-                else if (sn.find("green") != std::string::npos) nameCol = {0.3f,1,0.3f,1};
-                font->render(g->playerName.c_str(), sx - tw/2, sy, nameCol, 2.0f);
+                 // Tribes 2 colors name tags from the replicated sensor group,
+                 // not from the selected skin filename. Custom skins must not
+                 // make a player's team appear to change.
+                 ColorF nameCol = HudParity::teamColor(g->teamId);
+                 font->render(g->playerName.c_str(), sx - tw/2, sy, nameCol, 2.0f);
                 // Health bar below name
-                float hp = std::max(0.0f, std::min(1.0f, g->health / 100.0f));
+                 // Ghosts replicate their datablock maximum health.  Heavy
+                 // armor and custom PlayerData otherwise show an incorrectly
+                 // full/empty observer health bar when using a hard-coded 100.
+                 float hp = HudParity::resourceFraction(g->health, g->maxHealth);
                 float barW = 60.0f, barH = 6.0f;
                 float bx = sx - barW/2, by = sy + 18;
-                ColorF bgCol = {0.2f, 0.0f, 0.0f, 0.7f};
                 ColorF fgCol = hp > 0.5f ? ColorF{0,1,0,0.9f} : (hp > 0.25f ? ColorF{1,1,0,0.9f} : ColorF{1,0,0,0.9f});
                 r.drawBox({{bx - 1, by - 1, 0}, {bx + barW + 1, by + barH + 1, 0}}, {0,0,0,0.5f});
                 r.drawBox({{bx, by, 0}, {bx + barW * hp, by + barH, 0}}, fgCol);
@@ -412,7 +441,10 @@ void HUD::render(Game* game) {
         auto addGhosts = [&](const std::vector<int>& indices, auto getter) {
             for (int index : indices) {
                 const GhostEntry* ghost = getter(index);
-                if (!ghost || (ghost->className != "Player" && ghost->className != "MPB")) continue;
+                // Stock observer target search includes live vehicles as well
+                // as players; keep it aligned with observer cycling.
+                 if (!ghost || !ObserverParity::isReadySpectatableTarget(
+                     ghost->className, ghost->damageState, ghost->hasPosition)) continue;
                 if (game->isConnected() && game->activeConnection()) {
                     const auto observer = game->activeConnection()->observerSnapshot();
                     if (!game->isSensorGroupTargetVisible(observer.playerSensorGroup,
@@ -453,15 +485,18 @@ void HUD::render(Game* game) {
         snprintf(search, sizeof(search), "Search: %s", impl->targetSearch.c_str());
         font->render(search, x + 24, y + 58, {0.7f, 0.9f, 1, 1}, 1.5f);
         int row = 0;
-        for (const auto& entry : entries) {
-            if (row >= 13) break;
+        constexpr int visibleRows = 13;
+        const int windowStart = HudParity::targetFinderWindowStart(
+            impl->targetSelection, count, visibleRows);
+        for (int entryIndex = windowStart;
+             entryIndex < count && row < visibleRows; ++entryIndex, ++row) {
+            const auto& entry = entries[entryIndex];
             const float ry = y + 94.0f + row * 28.0f;
-            if (row == impl->targetSelection)
+            if (entryIndex == impl->targetSelection)
                 r.drawRectFill({x + 12, ry - 3, 0}, {x + 508, ry + 23, 0}, {1, 1, 0, 0.18f});
             const std::string label = (entry.selectable ? "> " : "  ") + entry.label;
             font->render(label.c_str(), x + 24, ry,
-                         row == impl->targetSelection ? ColorF{1, 1, 0, 1} : ColorF{0.85f, 0.85f, 0.85f, 1}, 1.5f);
-            ++row;
+                         entryIndex == impl->targetSelection ? ColorF{1, 1, 0, 1} : ColorF{0.85f, 0.85f, 0.85f, 1}, 1.5f);
         }
         if (entries.empty()) font->render("No matching players or flags", x + 24, y + 100, {0.6f, 0.6f, 0.6f, 1}, 1.5f);
         font->render("UP/DOWN select  ENTER follow  ESC/F3 close", x + 24, y + 466, {0.6f, 0.7f, 0.75f, 1}, 1.2f);
@@ -484,16 +519,14 @@ void HUD::renderHealthBar(float health, float maxHealth) {
     int32_t h = Engine::instance().platform().height();
     float barW = 200.0f, barH = 16.0f;
     float x = 20.0f, y = (float)h - 80.0f;
-    float fill = maxHealth > 0.0f ? health / maxHealth : 0.0f;
-    if (fill > 1) fill = 1;
-    if (fill < 0) fill = 0;
+    const float fill = HudParity::resourceFraction(health, maxHealth);
 
     r.drawLine({x, y, 0}, {x + barW, y, 0}, {1, 1, 1, 0.5f});
     r.drawLine({x + barW, y, 0}, {x + barW, y - barH, 0}, {1, 1, 1, 0.5f});
     r.drawLine({x + barW, y - barH, 0}, {x, y - barH, 0}, {1, 1, 1, 0.5f});
     r.drawLine({x, y - barH, 0}, {x, y, 0}, {1, 1, 1, 0.5f});
 
-    if (fill > 0) {
+    if (HudParity::resourceFillVisible(health, maxHealth, barW)) {
         float fw = barW * fill;
         Box3F hBox = {{x + 1, y - barH + 1, 0}, {x + fw - 1, y - 1, 0}};
         r.drawBox(hBox, {0.2f, 1.0f, 0.2f, 0.8f});
@@ -505,16 +538,14 @@ void HUD::renderEnergyBar(float energy, float maxEnergy) {
     int32_t h = Engine::instance().platform().height();
     float barW = 200.0f, barH = 12.0f;
     float x = 20.0f, y = (float)h - 56.0f;
-    float fill = maxEnergy > 0.0f ? energy / maxEnergy : 0.0f;
-    if (fill > 1) fill = 1;
-    if (fill < 0) fill = 0;
+    const float fill = HudParity::resourceFraction(energy, maxEnergy);
 
     r.drawLine({x, y, 0}, {x + barW, y, 0}, {1, 1, 1, 0.5f});
     r.drawLine({x + barW, y, 0}, {x + barW, y - barH, 0}, {1, 1, 1, 0.5f});
     r.drawLine({x + barW, y - barH, 0}, {x, y - barH, 0}, {1, 1, 1, 0.5f});
     r.drawLine({x, y - barH, 0}, {x, y, 0}, {1, 1, 1, 0.5f});
 
-    if (fill > 0) {
+    if (HudParity::resourceFillVisible(energy, maxEnergy, barW)) {
         float fw = barW * fill;
         Box3F eBox = {{x + 1, y - barH + 1, 0}, {x + fw - 1, y - 1, 0}};
         r.drawBox(eBox, {0.2f, 0.8f, 1.0f, 0.8f});
@@ -527,16 +558,14 @@ void HUD::renderAmmo(int32_t current, int32_t max) {
     float barW = 200.0f, barH = 10.0f;
     float x = 20.0f, y = (float)h - 36.0f;
     if (max <= 0) return;
-    float fill = (float)current / (float)max;
-    if (fill > 1) fill = 1;
-    if (fill < 0) fill = 0;
+    const float fill = HudParity::resourceFraction((float)current, (float)max);
 
     r.drawLine({x, y, 0}, {x + barW, y, 0}, {1, 1, 1, 0.5f});
     r.drawLine({x + barW, y, 0}, {x + barW, y - barH, 0}, {1, 1, 1, 0.5f});
     r.drawLine({x + barW, y - barH, 0}, {x, y - barH, 0}, {1, 1, 1, 0.5f});
     r.drawLine({x, y - barH, 0}, {x, y, 0}, {1, 1, 1, 0.5f});
 
-    if (fill > 0) {
+    if (HudParity::resourceFillVisible((float)current, (float)max, barW)) {
         float fw = barW * fill;
         Box3F aBox = {{x + 1, y - barH + 1, 0}, {x + fw - 1, y - 1, 0}};
         r.drawBox(aBox, {1.0f, 0.8f, 0.2f, 0.8f});
@@ -552,7 +581,10 @@ void HUD::renderScoreboard(Game* game) {
     int32_t h = Engine::instance().platform().height();
 
     // Leave room for the team/flag strip above the player table.
-    const int teamRows = game->isConnected() ? (int)game->getLiveTeamScores().size() : 0;
+    const bool observerMode = game->isConnected() && game->activeConnection() &&
+        game->activeConnection()->isObserverMode();
+    const int teamRows = HudParity::scoreboardTeamRows(
+        game->isConnected(), observerMode, (int)game->getLiveTeamScores().size());
     float bw = 550.0f, bh = std::max(400.0f, 430.0f + teamRows * 16.0f);
     float bx = (w - bw) * 0.5f, by = (h - bh) * 0.5f;
     r.drawBox(Box3F{{bx, by, 0}, {bx + bw, by + bh, 0}}, {0, 0, 0, 0.7f});
@@ -624,21 +656,20 @@ void HUD::renderScoreboard(Game* game) {
     if (game->isDemoPlaying()) {
         auto* dp = game->getDemoParser();
         if (dp) {
-            const auto& players = dp->getPlayerInfo();
+            auto players = dp->getPlayerInfo();
+            std::stable_sort(players.begin(), players.end(), [](const auto& a, const auto& b) {
+                return HudParity::scoreboardPlayerBefore(
+                    a.teamId, a.score, a.clientId, a.name,
+                    b.teamId, b.score, b.clientId, b.name);
+            });
             for (auto& p : players) {
                 if (row >= maxRows) break;
                 float ry = headerY + 26 + row * 22;
                 ColorF col = {0.8f, 0.8f, 1.0f, 0.9f};
-                ColorF teamCol = {0.5f, 0.5f, 0.5f, 0.8f};
-                if (p.teamId == 0) teamCol = {1, 0.3f, 0.3f, 0.9f};   // Red team
-                else if (p.teamId == 1) teamCol = {0.3f, 0.4f, 1, 0.9f};  // Blue team
-                else if (p.teamId == 2) teamCol = {0.3f, 1, 0.3f, 0.9f};  // Green team
+                 const ColorF teamCol = HudParity::teamColor(p.teamId);
                 snprintf(buf, sizeof(buf), "%s", p.name.c_str());
                 if (font) font->render(buf, colX[0], ry, col, 2.0f);
-                const char* teamName = "N/A";
-                if (p.teamId == 0) teamName = "Red";
-                else if (p.teamId == 1) teamName = "Blue";
-                else if (p.teamId == 2) teamName = "Green";
+                 const char* teamName = HudParity::teamName(p.teamId);
                 if (font) font->render(teamName, colX[1], ry, teamCol, 2.0f);
                 snprintf(buf, sizeof(buf), "%d", p.score);
                 if (font) font->render(buf, colX[2], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
@@ -666,8 +697,29 @@ void HUD::renderScoreboard(Game* game) {
         if (auto* connection = game->activeConnection()) {
             const auto observer = connection->observerSnapshot();
             if (!observer.clientNames.empty()) {
-                for (const auto& [clientId, name] : observer.clientNames) {
+                std::vector<int> clientIds;
+                clientIds.reserve(observer.clientNames.size());
+                for (const auto& [clientId, name] : observer.clientNames)
+                    clientIds.push_back(clientId);
+                std::sort(clientIds.begin(), clientIds.end(), [&](int left, int right) {
+                    const auto leftName = observer.clientNames.find(left);
+                    const auto rightName = observer.clientNames.find(right);
+                    const auto leftTeam = observer.clientTeams.find(left);
+                    const auto rightTeam = observer.clientTeams.find(right);
+                    const auto leftScore = observer.playerScores.find(left);
+                    const auto rightScore = observer.playerScores.find(right);
+                    return HudParity::scoreboardPlayerBefore(
+                        leftTeam == observer.clientTeams.end() ? 0 : leftTeam->second,
+                        leftScore == observer.playerScores.end() ? 0 : leftScore->second,
+                        left, leftName == observer.clientNames.end() ? "" : leftName->second,
+                        rightTeam == observer.clientTeams.end() ? 0 : rightTeam->second,
+                        rightScore == observer.playerScores.end() ? 0 : rightScore->second,
+                        right, rightName == observer.clientNames.end() ? "" : rightName->second);
+                });
+                for (const int clientId : clientIds) {
                     if (row >= maxRows) break;
+                    const auto nameIt = observer.clientNames.find(clientId);
+                    const std::string& name = nameIt->second;
                     const auto team = observer.clientTeams.find(clientId);
                     const auto score = observer.playerScores.find(clientId);
                     const auto ping = observer.playerPings.find(clientId);
@@ -676,20 +728,22 @@ void HUD::renderScoreboard(Game* game) {
                     const GhostEntry* ghost = target == observer.clientTargets.end()
                         ? nullptr : game->getLiveGhost(target->second);
                  float ry = headerY + 26 + row * 22;
-                    ColorF nameCol = {0.8f, 0.8f, 1.0f, 0.9f};
-                    if (team != observer.clientTeams.end() && team->second == 1)
-                        nameCol = {1.0f, 0.3f, 0.3f, 0.9f};
-                    else if (team != observer.clientTeams.end() && team->second == 2)
-                        nameCol = {0.3f, 0.4f, 1.0f, 0.9f};
+                    ColorF nameCol = team == observer.clientTeams.end()
+                        ? ColorF{0.8f, 0.8f, 1.0f, 0.9f}
+                        : HudParity::teamColor(team->second);
                     if (font) font->render(name.c_str(), colX[0], ry, nameCol, 2.0f);
                     const char* teamName = team == observer.clientTeams.end() ? "N/A" :
-                        (team->second == 1 ? "Red" : team->second == 2 ? "Blue" : "N/A");
+                        HudParity::teamName(team->second);
                     if (font) font->render(teamName, colX[1], ry, nameCol, 2.0f);
                     snprintf(buf, sizeof(buf), "%d", score == observer.playerScores.end() ? 0 : score->second);
                     if (font) font->render(buf, colX[2], ry, {1, 1, 0, 0.9f}, 2.0f);
                     snprintf(buf, sizeof(buf), "-");
                     if (font) font->render(buf, colX[3], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
-                    if (ghost) snprintf(buf, sizeof(buf), "%.0f%%", ghost->health);
+                     if (ghost) {
+                         const float health = 100.0f * HudParity::resourceFraction(
+                             ghost->health, ghost->maxHealth);
+                         snprintf(buf, sizeof(buf), "%.0f%%", health);
+                     }
                     else snprintf(buf, sizeof(buf), "-");
                     if (font) font->render(buf, colX[4], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
                     snprintf(buf, sizeof(buf), "%d", ping == observer.playerPings.end() ? 0 : ping->second);
@@ -706,20 +760,23 @@ void HUD::renderScoreboard(Game* game) {
         for (auto idx : indices) {
             if (row >= maxRows) break;
             auto* g = game->getLiveGhost(idx);
-            if (!g || g->className != "Player") continue;
+            if (!g || !ObserverParity::isPlayerTarget(g->className, g->damageState))
+                continue;
              float ry = headerY + 26 + row * 22;
-            ColorF nameCol = (g->teamId == 1) ? ColorF{1,0.3f,0.3f,0.9f} :
-                             (g->teamId == 2) ? ColorF{0.3f,0.4f,1,0.9f} :
-                             ColorF{0.8f,0.8f,1,0.9f};
+            const ColorF nameCol = g->teamId == 0
+                ? ColorF{0.8f, 0.8f, 1.0f, 0.9f}
+                : HudParity::teamColor(g->teamId);
             snprintf(buf, sizeof(buf), "%s", g->playerName.empty() ? "Player" : g->playerName.c_str());
             if (font) font->render(buf, colX[0], ry, nameCol, 2.0f);
-            const char* teamName = g->teamId == 1 ? "Red" : g->teamId == 2 ? "Blue" : "N/A";
+             const char* teamName = HudParity::teamName(g->teamId);
             if (font) font->render(teamName, colX[1], ry, nameCol, 2.0f);
              snprintf(buf, sizeof(buf), "%d", g->score);
             if (font) font->render(buf, colX[2], ry, {1,1,0,0.9f}, 2.0f);
             snprintf(buf, sizeof(buf), "%d", g->deaths);
             if (font) font->render(buf, colX[3], ry, {1,0.5f,0.2f,0.9f}, 2.0f);
-            snprintf(buf, sizeof(buf), "%.0f", g->health);
+             const float health = 100.0f * HudParity::resourceFraction(
+                 g->health, g->maxHealth);
+             snprintf(buf, sizeof(buf), "%.0f", health);
             if (font) font->render(buf, colX[4], ry, {0,1,0,0.9f}, 2.0f);
             row++;
         }
@@ -729,16 +786,21 @@ void HUD::renderScoreboard(Game* game) {
     }
 
     // Fallback: local player only (single-player / demo)
-    row = 0;
     auto& p = game->player();
+    const float ry = headerY + 26.0f;
+    const ColorF teamCol = HudParity::teamColor(p.team());
     snprintf(buf, sizeof(buf), "%s", game->config().playerName.c_str());
-    if (font) font->render(buf, colX[0], by + 108 + row * 30, {0, 1, 0, 1}, 2.0f);
+    if (font) font->render(buf, colX[0], ry, teamCol, 2.0f);
+    if (font) font->render(HudParity::teamName(p.team()), colX[1], ry, teamCol, 2.0f);
     snprintf(buf, sizeof(buf), "%.0f", p.score);
-    if (font) font->render(buf, colX[1], by + 108 + row * 30, {1, 1, 1, 1}, 2.0f);
-    snprintf(buf, sizeof(buf), "%d", p.kills);
-    if (font) font->render(buf, colX[2], by + 108 + row * 30, {1, 1, 1, 1}, 2.0f);
-    snprintf(buf, sizeof(buf), "%d", p.deaths);
-    if (font) font->render(buf, colX[3], by + 108 + row * 30, {1, 1, 1, 1}, 2.0f);
+    if (font) font->render(buf, colX[2], ry, {1, 1, 1, 1}, 2.0f);
+    if (font) font->render("-", colX[3], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
+    const float healthPercent = 100.0f * HudParity::resourceFraction(
+        p.health(), p.maxHealth());
+    snprintf(buf, sizeof(buf), "%.0f%%", healthPercent);
+    if (font) font->render(buf, colX[4], ry, {0, 1, 0, 0.9f}, 2.0f);
+    if (font) font->render("-", colX[5], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
+    if (font) font->render("-", colX[6], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
 }
 
 void HUD::renderMessage(const char* text, float duration) {
@@ -768,12 +830,20 @@ void Menu::init() {}
 
 void Menu::update(float dt) {
     (void)dt;
-    if (!active) return;
+    // Menu input is edge-triggered. Clear the previous-frame state while the
+    // menu is hidden so reopening it with a held key cannot swallow the first
+    // activation edge from the new menu session.
+    static bool prevUp = false, prevDown = false, prevEnter = false, prevEsc = false;
+    static bool prevMouseBtn = false, prevBrowserMouseBtn = false;
+    if (!active) {
+        prevUp = prevDown = prevEnter = prevEsc = false;
+        prevMouseBtn = prevBrowserMouseBtn = false;
+        return;
+    }
 
     auto& input = Engine::instance().platform().input();
     auto& ren = Engine::instance().renderer();
 
-    static bool prevUp = false, prevDown = false, prevEnter = false, prevEsc = false;
     bool up = input.keysDown[SCANCODE_UP];
     bool down = input.keysDown[SCANCODE_DOWN];
     bool enter = input.keysDown[SCANCODE_RETURN] &&
@@ -784,7 +854,8 @@ void Menu::update(float dt) {
     int mx = input.mouseX;
     int my = input.mouseY;
     if (currentScreen == Main) {
-        const int itemCount = 5;
+        prevBrowserMouseBtn = false;
+        const int itemCount = mainMenuItemCount();
         float startY = 200.0f;
         float itemH = 40.0f;
         float leftX = (float)ren.config().width * 0.5f - 100.0f;
@@ -796,11 +867,11 @@ void Menu::update(float dt) {
             }
         }
         // Mouse click activates item
-        static bool prevMouseBtn = false;
         // SDL reports the left button as index 1 (SDL_BUTTON_LEFT), matching the
         // engine's GUI click path (engine.cpp uses mouseButtons[1]).
         bool mouseBtn = input.mouseButtons[1] != 0;
-        if (mouseBtn && !prevMouseBtn && !input.consumedMouse[1]) {
+        const bool mousePressed = menuButtonPressed(mouseBtn, prevMouseBtn);
+        if (mousePressed && !input.consumedMouse[1]) {
             for (int i = 0; i < itemCount; i++) {
                 float iy = startY + i * itemH;
                 if (my >= iy && my < iy + itemH && mx >= leftX && mx <= rightX) {
@@ -809,7 +880,6 @@ void Menu::update(float dt) {
                 }
             }
         }
-        prevMouseBtn = mouseBtn;
         if (up && !prevUp) { selectedItem = (selectedItem - 1 + itemCount) % itemCount; }
         if (down && !prevDown) { selectedItem = (selectedItem + 1) % itemCount; }
 
@@ -831,19 +901,29 @@ void Menu::update(float dt) {
                     currentScreen = Controls;
                     selectedItem = 0;
                     break;
-                case 4:
+                case 4: // Credits
+                    currentScreen = Credits;
+                    selectedItem = 0;
+                    break;
+                case 5:
                     Engine::instance().quit();
                     break;
                 default: break;
             }
         }
     } else if (currentScreen == ServerBrowser) {
+        prevMouseBtn = false;
         if (esc && !prevEsc) { currentScreen = Main; selectedItem = 0; }
         // Refresh list
         static double lastRefresh = 0;
         if (Engine::instance().timer().now() - lastRefresh > 2.0) {
             lastRefresh = Engine::instance().timer().now();
-            Engine::instance().network().queryLanServers();
+            const char* demoMaster = Console::instance().getStringVariable(
+                "demoMasterServer", "");
+            if (serverBrowserUsesMaster(Engine::instance().demoMode, demoMaster))
+                Engine::instance().network().queryMasterServer(demoMaster);
+            else
+                Engine::instance().network().queryLanServers();
             // Convert network servers to menu entries
             servers.clear();
             for (auto& s : Engine::instance().network().getServerList()) {
@@ -857,9 +937,21 @@ void Menu::update(float dt) {
                 servers.push_back(e);
             }
         }
+        const int browserRow = serverBrowserRowAt(
+            (float)mx, (float)my, 20.0f, (float)ren.config().width - 20.0f,
+            80.0f, 30.0f, (int)servers.size());
+        const bool browserMouseBtn = input.mouseButtons[1] != 0;
+        const bool browserMousePressed = menuButtonPressed(browserMouseBtn, prevBrowserMouseBtn);
+        if (browserRow >= 0) {
+            selServer = browserRow;
+            if (browserMousePressed &&
+                !input.consumedMouse[1])
+                enter = true;
+        }
         // Navigate list
         int count = (int)servers.size();
         if (count > 0) {
+            selServer = std::clamp(selServer, 0, count - 1);
             if (up && !prevUp) selServer = (selServer - 1 + count) % count;
             if (down && !prevDown) selServer = (selServer + 1) % count;
             if (enter && !prevEnter) {
@@ -881,8 +973,10 @@ void Menu::update(float dt) {
             }
         }
     } else if (currentScreen == Settings) {
+        prevMouseBtn = prevBrowserMouseBtn = false;
         if (esc && !prevEsc) { currentScreen = Main; selectedItem = 2; }
     } else if (currentScreen == Controls) {
+        prevMouseBtn = prevBrowserMouseBtn = false;
         if (remapActive) {
             if (esc && !prevEsc) {
                 remapActive = false;
@@ -931,6 +1025,12 @@ void Menu::update(float dt) {
             }
             remapPrevMouse = mouseDown;
         }
+    } else if (currentScreen == Credits) {
+        prevMouseBtn = prevBrowserMouseBtn = false;
+        if (esc && !prevEsc) {
+            currentScreen = Main;
+            selectedItem = 4;
+        }
     }
 
     prevUp = up; prevDown = down; prevEnter = enter; prevEsc = esc;
@@ -962,14 +1062,14 @@ void Menu::render() {
             const char* title = "TRIBES 2";
             if (font) font->render(title, w * 0.5f - 80, 100, {1, 1, 0, 1}, 2.0f);
 
-            const char* items[] = {"Start Local Game", "Server Browser", "Settings", "Controls", "Quit"};
+            const char* items[] = {"Start Local Game", "Server Browser", "Settings", "Controls", "Credits", "Quit"};
             // Hover/selection highlight box behind the active item
             {
                 float hx = w * 0.5f - 100.0f;
                 float hy = 200.0f + (float)selectedItem * 40.0f;
                 r.drawRectFill({hx, hy, 0.0f}, {hx + 200.0f, hy + 40.0f, 0.0f}, {1.0f, 1.0f, 0.0f, 0.18f});
             }
-            for (int i = 0; i < 5; i++) {
+            for (int i = 0; i < mainMenuItemCount(); i++) {
                 float ix = w * 0.5f - 80;
                 float iy = 200 + i * 40;
                 ColorF col = (i == selectedItem) ? ColorF{1, 1, 0, 1} : ColorF{1, 1, 1, 1};
@@ -992,7 +1092,13 @@ void Menu::render() {
                     snprintf(buf, sizeof(buf), "%s | %s | %d/%d | %dms",
                         servers[i].name.c_str(), servers[i].map.c_str(),
                         servers[i].players, servers[i].maxPlayers, servers[i].ping);
-                    if (font) font->render(buf, 20, 80 + i * 30, {1, 1, 1, 1}, 2.0f);
+                    const float rowY = 80.0f + (float)i * 30.0f;
+                    if ((int)i == selServer)
+                        r.drawRectFill({20.0f, rowY, 0.0f},
+                                       {w - 20.0f,
+                                        rowY + 30.0f, 0.0f},
+                                       {1.0f, 1.0f, 0.0f, 0.18f});
+                    if (font) font->render(buf, 20, rowY, {1, 1, 1, 1}, 2.0f);
                 }
             }
             break;
@@ -1050,6 +1156,19 @@ void Menu::render() {
                     font->render(bindText, 160, 290, {1, 1, 0, 1}, 1.5f);
                     font->render("ESC cancels", 270, 325, {0.8f, 0.8f, 0.8f, 1}, 1.2f);
                 }
+            }
+            break;
+        }
+        case Credits: {
+            if (font) font->render("Credits", 20, 20, {1, 1, 0, 1}, 2.0f);
+            if (font) font->render("[ESC] Back", 20, 700,
+                                  {0.7f, 0.7f, 0.7f, 0.8f}, 2.0f);
+            if (font) {
+                font->render("Torch", 20, 100, {1, 1, 1, 1}, 2.0f);
+                font->render("A Tribes 2 engine reimplementation", 20, 135,
+                             {0.8f, 0.8f, 0.8f, 1}, 1.5f);
+                font->render("Original Tribes 2 assets and gameplay compatibility", 20, 175,
+                             {0.8f, 0.8f, 0.8f, 1}, 1.5f);
             }
             break;
         }

@@ -7,6 +7,8 @@
 #include <map>
 #include <functional>
 #include <algorithm>
+#include <cstdio>
+#include <cctype>
 
 #include "core/math.h"
 #include "net/v12_datablocks.h"
@@ -53,6 +55,7 @@ public:
         bitNum = pos;
     }
     int  getBytePosition() const { return (bitNum + 7) >> 3; }
+    void fail() { error = true; }
     bool isError() const { return error; }
     int  getRemainingBits() const { return maxReadBitNum - bitNum; }
     int  getMaxPos() const { return maxReadBitNum; }
@@ -139,16 +142,72 @@ namespace T2Demo {
 
     // Demo blocks are scheduled against the recording clock, not render frames.
     inline float playbackBlockDuration(float totalTime, int totalBlocks) {
-        return totalBlocks > 0 && totalTime > 0.0f ? totalTime / totalBlocks : 0.032f;
+        return totalBlocks > 0 && std::isfinite(totalTime) && totalTime > 0.0f
+            ? totalTime / totalBlocks : 0.032f;
     }
     inline int playbackTargetBlock(float time, float totalTime, int totalBlocks) {
-        if (totalBlocks <= 0 || totalTime <= 0.0f) return 0;
+        if (!std::isfinite(time) || !std::isfinite(totalTime) ||
+            totalBlocks <= 0 || totalTime <= 0.0f) return 0;
         return std::clamp((int)std::floor(time / totalTime * totalBlocks), 0, totalBlocks);
     }
     inline float playbackBlockTime(int blockIndex, float totalTime, int totalBlocks) {
-        if (totalBlocks <= 0 || totalTime <= 0.0f) return 0.0f;
+        if (!std::isfinite(totalTime) || totalBlocks <= 0 || totalTime <= 0.0f)
+            return 0.0f;
         return std::clamp(totalTime * (float)blockIndex / (float)totalBlocks,
                           0.0f, totalTime);
+    }
+    inline float playbackProgress(float time, float totalTime) {
+        if (!std::isfinite(time) || !std::isfinite(totalTime) || totalTime <= 0.0f)
+            return 0.0f;
+        return std::clamp(time / totalTime, 0.0f, 1.0f);
+    }
+
+    // A failed replacement remains pending until the asset becomes available.
+    // Keeping this state separate from the parser's timeline prevents a
+    // missing mission from being mistaken for the successfully loaded scene.
+    struct MissionReplacementState {
+        std::string loadedMission;
+        std::string pendingMission;
+
+        static bool sameMission(const std::string& left, const std::string& right) {
+            if (left.size() != right.size()) return false;
+            for (size_t i = 0; i < left.size(); ++i)
+                if (std::tolower((unsigned char)left[i]) !=
+                    std::tolower((unsigned char)right[i])) return false;
+            return true;
+        }
+
+        bool defer(const std::string& mission) {
+            if (mission.empty() || sameMission(mission, loadedMission)) {
+                pendingMission.clear();
+                return false;
+            }
+            pendingMission = mission;
+            return true;
+        }
+
+        bool commit(const std::string& mission) {
+            if (mission.empty()) return false;
+            if (sameMission(mission, loadedMission) && pendingMission.empty()) return true;
+            if (pendingMission.empty() || !sameMission(pendingMission, mission)) return false;
+            loadedMission = mission;
+            pendingMission.clear();
+            return true;
+        }
+    };
+
+    inline std::string formatPlaybackClock(float time) {
+        const int totalSeconds = std::max(0, (int)std::floor(
+            std::isfinite(time) ? time : 0.0f));
+        const int hours = totalSeconds / 3600;
+        const int minutes = (totalSeconds / 60) % 60;
+        const int seconds = totalSeconds % 60;
+        char text[32];
+        if (hours > 0)
+            std::snprintf(text, sizeof(text), "%d:%02d:%02d", hours, minutes, seconds);
+        else
+            std::snprintf(text, sizeof(text), "%02d:%02d", minutes, seconds);
+        return text;
     }
 
     // V12 stores horizontal FOV; the renderer projection takes vertical FOV.
@@ -270,6 +329,12 @@ struct DemoMove {
     bool freeLook;
     bool trigger[6];
 };
+
+// Zero is a valid authored camera orientation. Only malformed float payloads
+// should be ignored when applying a recorded view direction.
+inline bool demoMoveOrientationValid(float yaw, float pitch) {
+    return std::isfinite(yaw) && std::isfinite(pitch);
+}
 
 struct InfoBlock {
     uint32_t value1;
@@ -510,6 +575,7 @@ struct GhostEntry {
     int classId{};
     std::string className;
     Vec3 position{};
+    bool hasPosition{};
     Vec3 velocity{};
     Vec3 linearMomentum{};
     Vec3 renderPos{};
@@ -519,6 +585,8 @@ struct GhostEntry {
     bool hasRotation{};
     bool hasCameraEuler{};
     bool hasVelocity{};
+    bool hasSteering{};
+    bool frozen{};
     Vec3 beamStart{};
     Vec3 beamEnd{};
     bool hasBeam{};
@@ -540,6 +608,7 @@ struct GhostEntry {
     bool skinApplied{};
     float health{100.0f};
     float maxHealth{100.0f};
+    float steeringYaw{};
     int damageState = 0; // 0 enabled, 1 disabled, 2 destroyed
     float energy{100.0f};
     int32_t kills{};
@@ -647,6 +716,7 @@ struct DemoParserSnapshot {
     uint32_t nextRecvEventSeq{};
     uint32_t packetsParsed{};
     std::vector<std::pair<int, std::string>> missionChanges;
+    std::vector<std::pair<int, uint32_t>> missionCrcChanges;
     std::map<int, std::string> taggedStrings;
     uint32_t currentMissionCrc{};
     std::string currentMission;
@@ -747,9 +817,11 @@ private:
 
     // Mission change tracking
     std::vector<std::pair<int, std::string>> missionChanges_;
+    std::vector<std::pair<int, uint32_t>> missionCrcChanges_;
     std::string currentMission_;
     uint32_t currentMissionCrc_{};
     int nextChangeIdx_{};
+    int parsingBlockIndex_{-1};
 
     // Demo event log
     std::vector<DemoTimedEvent> eventLog_;

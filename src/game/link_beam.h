@@ -1,6 +1,8 @@
 #pragma once
 
 #include "core/math.h"
+#include <algorithm>
+#include <cmath>
 #include <vector>
 
 inline std::vector<Point3F> linkBeamPoints(const Point3F& start, const Point3F& end,
@@ -58,5 +60,50 @@ inline std::vector<Point3F> projectileBeamQuad(const Point3F& start, const Point
     return {{start.x - side.x, start.y - side.y, start.z - side.z},
             {start.x + side.x, start.y + side.y, start.z + side.z},
             {end.x + side.x, end.y + side.y, end.z + side.z},
-            {end.x - side.x, end.y - side.y, end.z - side.z}};
+             {end.x - side.x, end.y - side.y, end.z - side.z}};
+}
+
+// ShockLanceProjectile renders two short, jittered lightning ribbons with
+// pinned endpoints. Keep the jitter deterministic so replay and live rendering
+// do not change the bolt geometry merely because frame timing differs.
+inline std::vector<Point3F> shockLancePoints(const Point3F& start, const Point3F& end,
+                                             float phase, float amplitude = 0.1f,
+                                             int strand = 0) {
+    Point3F direction{end.x - start.x, end.y - start.y, end.z - start.z};
+    const float length = std::sqrt(direction.x * direction.x + direction.y * direction.y +
+                                   direction.z * direction.z);
+    if (length <= 0.001f) return {start, end};
+    direction.x /= length; direction.y /= length; direction.z /= length;
+
+    const Point3F up = std::fabs(direction.y) < 0.9f ? Point3F{0, 1, 0} : Point3F{1, 0, 0};
+    Point3F side{direction.y * up.z - direction.z * up.y,
+                 direction.z * up.x - direction.x * up.z,
+                 direction.x * up.y - direction.y * up.x};
+    const float sideLength = std::sqrt(side.x * side.x + side.y * side.y + side.z * side.z);
+    if (sideLength <= 0.001f) return {start, end};
+    side.x /= sideLength; side.y /= sideLength; side.z /= sideLength;
+    Point3F other{direction.y * side.z - direction.z * side.y,
+                  direction.z * side.x - direction.x * side.z,
+                  direction.x * side.y - direction.y * side.x};
+
+    const int requested = std::max(2, (int)std::lround(length * 20.0f));
+    const int count = std::min(50, requested);
+    std::vector<Point3F> points;
+    points.reserve(count);
+    for (int i = 0; i < count; ++i) {
+        const float t = (float)i / (float)(count - 1);
+        Point3F point{start.x + direction.x * length * t,
+                      start.y + direction.y * length * t,
+                      start.z + direction.z * length * t};
+        if (i != 0 && i != count - 1) {
+            const float seed = (float)(i * 17 + strand * 113) + phase * 10.0f;
+            const float a = std::sin(seed * 12.9898f) * amplitude;
+            const float b = std::cos(seed * 78.233f) * amplitude;
+            point.x += side.x * a + other.x * b;
+            point.y += side.y * a + other.y * b;
+            point.z += side.z * a + other.z * b;
+        }
+        points.push_back(point);
+    }
+    return points;
 }

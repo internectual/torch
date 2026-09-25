@@ -292,6 +292,9 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
         bv.byteOffset = (int)bvArr[i]["byteOffset"].asInt();
         bv.byteLength = (int)bvArr[i]["byteLength"].asInt();
         bv.byteStride = (int)bvArr[i]["byteStride"].asInt();
+        if (bv.buffer < 0 || bv.byteOffset < 0 || bv.byteLength < 0 || bv.byteStride < 0 ||
+            (size_t)bv.byteOffset > binLen || (size_t)bv.byteLength > binLen - (size_t)bv.byteOffset)
+            return result;
         bufViews.push_back(bv);
     }
 
@@ -305,6 +308,8 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
         a.componentType = (int)accArr[i]["componentType"].asInt();
         a.count = (int)accArr[i]["count"].asInt();
         a.type = accArr[i]["type"].asStr();
+        if (a.bufferView < 0 || a.byteOffset < 0 || a.count < 0)
+            return result;
         accessors.push_back(a);
     }
 
@@ -349,13 +354,29 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
         }
         loadedTextures.push_back(std::move(tex));
     }
+    auto reloadTexture = [&](int textureIndex) -> Texture {
+        Texture tex;
+        if (textureIndex < 0 || textureIndex >= (int)texArr.size() || !binData) return tex;
+        const int source = (int)texArr[textureIndex]["source"].asInt();
+        if (source < 0 || source >= (int)glbImages.size()) return tex;
+        const int bv = glbImages[source].bufferView;
+        if (bv < 0 || bv >= (int)bufViews.size()) return tex;
+        const auto& imageView = bufViews[bv];
+        const size_t imageOffset = (size_t)imageView.byteOffset;
+        const size_t imageSize = (size_t)imageView.byteLength;
+        if (imageOffset <= binLen && imageSize <= binLen - imageOffset)
+            tex.load(binData + imageOffset, imageSize);
+        return tex;
+    };
 
     // Build per-material texture index mapping
     const JVal& matArr = root["materials"];
     struct MatInfo { int texIndex = -1; int emissiveIndex = -1; float metallic = 0; float roughness = 0.5f; float baseColorR = 1, baseColorG = 1, baseColorB = 1, baseColorA = 1; };
     std::vector<MatInfo> matInfos;
-    result.materials.resize(std::min((size_t)matArr.size(), (size_t)kMaxGLB));
-    for (size_t i = 0; i < matArr.size(); i++) {
+    const size_t materialCount = std::min((size_t)matArr.size(), (size_t)kMaxGLB);
+    result.materials.resize(materialCount);
+    matInfos.reserve(materialCount);
+    for (size_t i = 0; i < materialCount; i++) {
         MatInfo mi;
         const JVal& pbr = matArr[i]["pbrMetallicRoughness"];
         const JVal& bct = pbr["baseColorTexture"];
@@ -453,7 +474,11 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
                 }
             } else {
                 // Same texture used as both base color and emissive
-                result.materials[i].emissiveTextureIndex = matToTexIndex[i];
+                Texture lightmap = reloadTexture(ei);
+                if (lightmap.loaded) {
+                    result.materials[i].emissiveTextureIndex = (int)result.lightmaps.size();
+                    result.lightmaps.push_back(std::move(lightmap));
+                }
             }
         }
     }
@@ -501,20 +526,30 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
 
             // Get vertex data pointers
             size_t vertBase = (size_t)posBV.byteOffset + (size_t)posA.byteOffset;
-            size_t nrmOffset = 0;
-            size_t uv0Offset = 0;
+            size_t nrmBase = 0, uv0Base = 0;
+            int nrmStride = 0, uv0Stride = 0;
+            bool hasNormals = false, hasUVs = false;
 
-            // Find normal and UV offsets within the interleaved vertex
+            // Resolve normal and UV accessors independently; glTF permits
+            // each attribute to use a separate buffer view.
             if (nrmAcc >= 0 && nrmAcc < (int)accessors.size()) {
                 GLBAccessor& nrmA = accessors[nrmAcc];
-                if (nrmA.bufferView == posA.bufferView) {
-                    nrmOffset = (size_t)nrmA.byteOffset;
+                if (nrmA.bufferView >= 0 && nrmA.bufferView < (int)bufViews.size() &&
+                    nrmA.componentType == 5126 && nrmA.type == "VEC3" && nrmA.count >= vertexCount) {
+                    const auto& nrmBV = bufViews[nrmA.bufferView];
+                    nrmBase = (size_t)nrmBV.byteOffset + (size_t)nrmA.byteOffset;
+                    nrmStride = nrmBV.byteStride > 0 ? nrmBV.byteStride : 12;
+                    hasNormals = nrmStride >= 12;
                 }
             }
             if (uv0Acc >= 0 && uv0Acc < (int)accessors.size()) {
                 GLBAccessor& uv0A = accessors[uv0Acc];
-                if (uv0A.bufferView == posA.bufferView) {
-                    uv0Offset = (size_t)uv0A.byteOffset;
+                if (uv0A.bufferView >= 0 && uv0A.bufferView < (int)bufViews.size() &&
+                    uv0A.componentType == 5126 && uv0A.type == "VEC2" && uv0A.count >= vertexCount) {
+                    const auto& uv0BV = bufViews[uv0A.bufferView];
+                    uv0Base = (size_t)uv0BV.byteOffset + (size_t)uv0A.byteOffset;
+                    uv0Stride = uv0BV.byteStride > 0 ? uv0BV.byteStride : 8;
+                    hasUVs = uv0Stride >= 8;
                 }
             }
 
@@ -536,16 +571,18 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
                 } else { px = py = pz = 0; }
 
                 // NORMAL
-                if (nrmOffset > 0 && base + nrmOffset + 12 <= binLen) {
-                    nx = *(const float*)(binData + base + nrmOffset);
-                    ny = *(const float*)(binData + base + nrmOffset + 4);
-                    nz = *(const float*)(binData + base + nrmOffset + 8);
+                const size_t nrmAt = nrmBase + (size_t)vi * (size_t)nrmStride;
+                if (hasNormals && nrmAt <= binLen && binLen - nrmAt >= 12) {
+                    memcpy(&nx, binData + nrmAt, 4);
+                    memcpy(&ny, binData + nrmAt + 4, 4);
+                    memcpy(&nz, binData + nrmAt + 8, 4);
                 } else { nx = 0; ny = 1; nz = 0; }
 
                 // TEXCOORD_0
-                if (uv0Offset > 0 && base + uv0Offset + 8 <= binLen) {
-                    u  = *(const float*)(binData + base + uv0Offset);
-                    vtx = *(const float*)(binData + base + uv0Offset + 4);
+                const size_t uv0At = uv0Base + (size_t)vi * (size_t)uv0Stride;
+                if (hasUVs && uv0At <= binLen && binLen - uv0At >= 8) {
+                    memcpy(&u, binData + uv0At, 4);
+                    memcpy(&vtx, binData + uv0At + 4, 4);
                 } else { u = vtx = 0; }
 
                 // Both GLB and engine use Y-up, use directly
@@ -560,6 +597,7 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
             // Build indices
             std::vector<uint32_t> idxs;
             idxs.reserve(indexCount);
+            bool invalidIndex = false;
 
             size_t idxBase = (size_t)idxBV.byteOffset + (size_t)idxA.byteOffset;
 
@@ -575,10 +613,11 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
                         idx = binData[ioff];
                     }
                 }
+                if (idx >= (uint32_t)vertexCount) invalidIndex = true;
                 idxs.push_back(idx);
             }
 
-            if (verts.empty() || idxs.empty()) continue;
+            if (verts.empty() || idxs.empty() || invalidIndex) continue;
 
             MeshData mesh;
             mesh.vertices = std::move(verts);
@@ -637,6 +676,7 @@ GLBMesh loadGLB(const uint8_t* data, size_t size) {
             NodeChannel nc;
             nc.path = channels[ci]["target"]["path"].asStr();
             int samplerIdx = (int)channels[ci]["sampler"].asInt();
+            if (samplerIdx < 0 || samplerIdx >= (int)samplers.size()) continue;
             nc.input = (int)samplers[samplerIdx]["input"].asInt();
             nc.output = (int)samplers[samplerIdx]["output"].asInt();
             int nodeIdx = (int)channels[ci]["target"]["node"].asInt();

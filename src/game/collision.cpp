@@ -92,13 +92,36 @@ static inline bool rayTriIntersect(const Point3F& orig, const Point3F& dir,
 }
 
 void CollisionGrid::build(const std::vector<CollisionTri>& tris, float gridSize, int resolution) {
+    resolution = std::max(1, resolution);
+    gridSize = std::max(1.0f, std::fabs(gridSize));
     resX = resolution;
     resZ = resolution;
-    minX = -gridSize * 0.5f;
-    minZ = -gridSize * 0.5f;
-    cellW = gridSize / resolution;
-    cellH = gridSize / resolution;
-    cells.resize(resX * resZ);
+    if (!tris.empty()) {
+        float minTriX = std::numeric_limits<float>::max();
+        float minTriZ = std::numeric_limits<float>::max();
+        float maxTriX = std::numeric_limits<float>::lowest();
+        float maxTriZ = std::numeric_limits<float>::lowest();
+        for (const auto& tri : tris) {
+            minTriX = std::min({minTriX, tri.v0.x, tri.v1.x, tri.v2.x});
+            minTriZ = std::min({minTriZ, tri.v0.z, tri.v1.z, tri.v2.z});
+            maxTriX = std::max({maxTriX, tri.v0.x, tri.v1.x, tri.v2.x});
+            maxTriZ = std::max({maxTriZ, tri.v0.z, tri.v1.z, tri.v2.z});
+        }
+        constexpr float margin = 1.0f;
+        minX = std::floor(minTriX - margin);
+        minZ = std::floor(minTriZ - margin);
+        const float extentX = std::max(2.0f, std::ceil(maxTriX + margin) - minX);
+        const float extentZ = std::max(2.0f, std::ceil(maxTriZ + margin) - minZ);
+        const float extent = std::max(extentX, extentZ);
+        cellW = extent / resolution;
+        cellH = extent / resolution;
+    } else {
+        minX = -gridSize * 0.5f;
+        minZ = -gridSize * 0.5f;
+        cellW = gridSize / resolution;
+        cellH = gridSize / resolution;
+    }
+    cells.assign(resX * resZ, {});
 
     for (int ti = 0; ti < (int)tris.size(); ti++) {
         const auto& tri = tris[ti];
@@ -143,8 +166,19 @@ bool CollisionGrid::raycast(const std::vector<CollisionTri>& tris, const Point3F
     if (resX == 0 || resZ == 0) return false;
     // Vertical (straight up/down) ray: only the column cell at (x,z) can intersect.
     if (fabs(dir.x) < 1e-10f && fabs(dir.z) < 1e-10f) {
-        int ix = (int)((origin.x - minX) / cellW);
-        int iz = (int)((origin.z - minZ) / cellH);
+        // Cell coordinates are mathematical floor coordinates.  A C++ cast
+        // truncates negative values toward zero, so a vertical ray just
+        // outside the lower grid edge could alias into cell zero and hit an
+        // interior surface that is not under the ray.
+        const float relativeX = (origin.x - minX) / cellW;
+        const float relativeZ = (origin.z - minZ) / cellH;
+        int ix = (int)std::floor(relativeX);
+        int iz = (int)std::floor(relativeZ);
+        // A vertical ray on the inclusive upper edge belongs to the final
+        // cell.  Without this, floor/LOS queries at an interior's exact X/Z
+        // bounds are rejected even though the boundary is part of the mesh.
+        if (ix == resX && std::fabs(relativeX - resX) <= 1.0e-6f) ix = resX - 1;
+        if (iz == resZ && std::fabs(relativeZ - resZ) <= 1.0e-6f) iz = resZ - 1;
         if (ix < 0 || iz < 0 || ix >= resX || iz >= resZ) return false;
         float bestT = maxDist;
         bool hit = false;
@@ -157,7 +191,10 @@ bool CollisionGrid::raycast(const std::vector<CollisionTri>& tris, const Point3F
                           + tri.normal.y * (tri.v0.y - origin.y)
                           + tri.normal.z * (tri.v0.z - origin.z)) / denom;
             if (tPlane < 0 || tPlane > maxDist) continue;
-            if (!pointInTriXZ(origin.x, origin.z, tri)) continue;
+            // XZ projection is degenerate for walls and other edge-on faces;
+            // testing it would make those faces intersect every vertical ray.
+            const Point3F hitPoint{origin.x, origin.y + dir.y * tPlane, origin.z};
+            if (!pointInTri3D(hitPoint, tri)) continue;
             if (tPlane < bestT) { bestT = tPlane; hit = true; bestNorm = tri.normal; bestIdx = ti; }
         }
         if (hit) {
@@ -201,9 +238,19 @@ bool CollisionGrid::raycast(const std::vector<CollisionTri>& tris, const Point3F
     int stepIx = (dir.x >= 0) ? 1 : -1;
     int stepIz = (dir.z >= 0) ? 1 : -1;
 
-    int cx, cz;
-    cx = (int)((entryPoint.x - minX) / cellW);
-    cz = (int)((entryPoint.z - minZ) / cellH);
+    // A point exactly on a cell boundary belongs to the cell the ray is
+    // entering.  floor() alone selects the cell on the positive side, which
+    // skips a wall when a ray starts on that boundary and travels backwards.
+    auto entryCell = [](float coordinate, float minimum, float cellSize,
+                        float direction) {
+        const float relative = (coordinate - minimum) / cellSize;
+        int cell = (int)std::floor(relative);
+        if (direction < 0.0f && std::fabs(relative - std::round(relative)) <= 1.0e-6f)
+            --cell;
+        return cell;
+    };
+    int cx = entryCell(entryPoint.x, minX, cellW, dir.x);
+    int cz = entryCell(entryPoint.z, minZ, cellH, dir.z);
     if (cx < 0) { cx = 0; } if (cx >= resX) { cx = resX - 1; }
     if (cz < 0) { cz = 0; } if (cz >= resZ) { cz = resZ - 1; }
 
@@ -242,7 +289,16 @@ bool CollisionGrid::raycast(const std::vector<CollisionTri>& tris, const Point3F
         if (hit && bestT <= nextCellT + 1e-5f) break;
 
         // Advance to next cell
-        if (tMaxX < tMaxZ) {
+        // At a grid corner the ray enters the diagonal cell. Advancing only
+        // one axis here skips that cell entirely, allowing a thin interior
+        // surface to be missed by projectiles and line-of-sight tests.
+        if (std::fabs(tMaxX - tMaxZ) <= 1e-6f) {
+            t = tMaxX;
+            cx += stepIx;
+            cz += stepIz;
+            tMaxX += stepX;
+            tMaxZ += stepZ;
+        } else if (tMaxX < tMaxZ) {
             t = tMaxX;
             cx += stepIx;
             tMaxX += stepX;
@@ -268,18 +324,21 @@ bool CollisionGrid::sphereCollide(const std::vector<CollisionTri>& tris, const P
 {
     if (resX == 0 || resZ == 0) return false;
 
-    int cx = (int)((center.x - minX) / cellW);
-    int cz = (int)((center.z - minZ) / cellH);
-    int range = (int)(radius / std::min(cellW, cellH)) + 1;
-
     bool collided = false;
     pushOut = {0, 0, 0};
     float bestPenetration = 0.0f;
 
-    for (int dz = -range; dz <= range; dz++) {
-        for (int dx = -range; dx <= range; dx++) {
-            int gx = cx + dx, gz = cz + dz;
-            if (gx < 0 || gx >= resX || gz < 0 || gz >= resZ) continue;
+    // Query the sphere's actual XZ bounds.  Deriving a range from the center
+    // cell loses contacts when the center is just outside the grid, because
+    // C++ truncates negative cell coordinates toward zero.
+    const int ix0 = std::max(0, (int)std::floor((center.x - radius - minX) / cellW));
+    const int ix1 = std::min(resX - 1, (int)std::floor((center.x + radius - minX) / cellW));
+    const int iz0 = std::max(0, (int)std::floor((center.z - radius - minZ) / cellH));
+    const int iz1 = std::min(resZ - 1, (int)std::floor((center.z + radius - minZ) / cellH));
+    if (ix0 > ix1 || iz0 > iz1) return false;
+
+    for (int gz = iz0; gz <= iz1; ++gz) {
+        for (int gx = ix0; gx <= ix1; ++gx) {
             for (int ti : cells[gz * resX + gx]) {
                 const auto& tri = tris[ti];
                 const Point3F closest = closestPointOnTriangle(center, tri);
@@ -289,14 +348,18 @@ bool CollisionGrid::sphereCollide(const std::vector<CollisionTri>& tris, const P
                 float distance = std::sqrt(distanceSquared);
                 if (distance < 1e-6f) {
                     delta = tri.normal;
-                    distance = 1.0f;
+                    distance = 0.0f;
                 }
                 const float pen = radius - distance;
                 if (pen > bestPenetration) {
-                    const float invDistance = 1.0f / distance;
-                    pushOut = {delta.x * invDistance * pen,
-                               delta.y * invDistance * pen,
-                               delta.z * invDistance * pen};
+                    if (distance < 1e-6f) {
+                        pushOut = {delta.x * pen, delta.y * pen, delta.z * pen};
+                    } else {
+                        const float invDistance = 1.0f / distance;
+                        pushOut = {delta.x * invDistance * pen,
+                                   delta.y * invDistance * pen,
+                                   delta.z * invDistance * pen};
+                    }
                     bestPenetration = pen;
                     collided = true;
                 }
@@ -320,7 +383,10 @@ void CollisionMesh::addMesh(const float* verts, int vertCount, const uint32_t* i
         float ny = e1.z * e2.x - e1.x * e2.z;
         float nz = e1.x * e2.y - e1.y * e2.x;
         float len = sqrtf(nx * nx + ny * ny + nz * nz);
-        if (len > 1e-8f) { nx /= len; ny /= len; nz /= len; }
+        // A zero-area face has no collision surface. Keeping it makes the
+        // closest-point query treat an arbitrary edge as solid geometry.
+        if (len <= 1e-8f) continue;
+        nx /= len; ny /= len; nz /= len;
         tri.normal = {nx, ny, nz};
         triangles.push_back(tri);
     }
@@ -333,10 +399,22 @@ void CollisionMesh::build() {
 }
 
 float CollisionMesh::getHeight(float x, float z) const {
-    if (!loaded) return -1e10f;
+    // Replicated positions can be incomplete while a ShapeBase is being
+    // created.  Do not convert non-finite coordinates to grid indices.
+    if (!loaded || !std::isfinite(x) || !std::isfinite(z)) return -1e10f;
 
-    const int ix = (int)((x - grid.minX) / grid.cellW);
-    const int iz = (int)((z - grid.minZ) / grid.cellH);
+    // Cell coordinates must floor at the lower edge.  A C++ cast truncates
+    // toward zero, so points just outside a negative grid edge could alias
+    // into cell zero and report terrain height outside the mesh.
+    const float relativeX = (x - grid.minX) / grid.cellW;
+    const float relativeZ = (z - grid.minZ) / grid.cellH;
+    int ix = (int)std::floor(relativeX);
+    int iz = (int)std::floor(relativeZ);
+    // The authored mesh bounds are inclusive.  Keep a height query on the
+    // exact upper edge in the final cell, matching raycast and Torque's
+    // interior bounds rather than dropping the floor at the boundary.
+    if (ix == grid.resX && std::fabs(relativeX - grid.resX) <= 1.0e-6f) ix = grid.resX - 1;
+    if (iz == grid.resZ && std::fabs(relativeZ - grid.resZ) <= 1.0e-6f) iz = grid.resZ - 1;
     if (ix < 0 || iz < 0 || ix >= grid.resX || iz >= grid.resZ) return -1e10f;
 
     float bestHeight = -1e10f;
@@ -353,13 +431,50 @@ float CollisionMesh::getHeight(float x, float z) const {
 }
 
 float CollisionMesh::getFloorHeight(float x, float y, float z) const {
-    if (!loaded) return -1e10f;
-    float t = 0.0f;
-    Point3F position{}, normal{};
-    const float maxDist = 20000.0f;
-    if (raycast({x, y + 0.001f, z}, {0, -1, 0}, maxDist, t, position, normal))
-        return position.y;
-    return -1e10f;
+    // A malformed ghost must miss collision rather than turn NaN into an
+    // implementation-defined cell index or a poisoned floor height.
+    if (!loaded || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+        return -1e10f;
+    const float relativeX = (x - grid.minX) / grid.cellW;
+    const float relativeZ = (z - grid.minZ) / grid.cellH;
+    int ix = (int)std::floor(relativeX);
+    int iz = (int)std::floor(relativeZ);
+    if (ix == grid.resX && std::fabs(relativeX - grid.resX) <= 1.0e-6f) ix = grid.resX - 1;
+    if (iz == grid.resZ && std::fabs(relativeZ - grid.resZ) <= 1.0e-6f) iz = grid.resZ - 1;
+    if (ix < 0 || iz < 0 || ix >= grid.resX || iz >= grid.resZ) return -1e10f;
+
+    // A floor query is not a generic downward ray.  A ray from above a room
+    // can hit its ceiling first and make actors snap to the ceiling.  Select
+    // the highest upward-facing surface at or below the actor instead.
+    float bestHeight = -1e10f;
+    float legacySurface = -1e10f;
+    bool hasUpwardSurface = false;
+    float nearestAboveFloor = std::numeric_limits<float>::max();
+    for (int triIndex : grid.cells[iz * grid.resX + ix]) {
+        const auto& tri = triangles[triIndex];
+        if (!pointInTriXZ(x, z, tri) || std::fabs(tri.normal.y) <= 0.001f) continue;
+        const float height = tri.v0.y -
+            (tri.normal.x * (x - tri.v0.x) + tri.normal.z * (z - tri.v0.z)) /
+            tri.normal.y;
+        if (height <= y + 0.001f) {
+            if (tri.normal.y > 0.001f) bestHeight = std::max(bestHeight, height);
+            else legacySurface = std::max(legacySurface, height);
+        } else {
+            if (tri.normal.y > 0.001f) {
+                hasUpwardSurface = true;
+                nearestAboveFloor = std::min(nearestAboveFloor, height);
+            }
+        }
+    }
+    // Downward-facing surfaces are ceilings. Keep the legacy winding fallback
+    // only when the mesh also has an authored upward surface; a ceiling-only
+    // mesh must never turn into a floor just because it is below the actor.
+    if (bestHeight > -1e9f) return bestHeight;
+    if (hasUpwardSurface && legacySurface > -1e9f) return legacySurface;
+    // Recover from a fast downward step that crossed the floor. Returning no
+    // floor here lets the actor continue falling instead of being corrected
+    // back onto the authored surface on the next physics tick.
+    return nearestAboveFloor < std::numeric_limits<float>::max() ? nearestAboveFloor : -1e10f;
 }
 
 bool CollisionMesh::raycast(const Point3F& origin, const Point3F& dir, float maxDist, float& outT, Point3F& outPos, Point3F& outNormal) const {
@@ -373,16 +488,36 @@ bool CollisionMesh::sphereCollide(const Point3F& center, float radius, Point3F& 
 }
 
 bool CollisionMesh::lineOfSight(const Point3F& a, const Point3F& b) const {
+    // A malformed replicated transform must not turn a failed trace into a
+    // clear line of sight.  Native collision queries reject invalid points;
+    // returning true here makes damaged ghosts appear to see and hit through
+    // geometry.
+    if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z) ||
+        !std::isfinite(b.x) || !std::isfinite(b.y) || !std::isfinite(b.z))
+        return false;
     Point3F dir = {b.x - a.x, b.y - a.y, b.z - a.z};
     float dist = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
-    if (dist < 0.001f) return true;
+    // Only an exactly coincident pair of points is unconditionally visible.
+    // The old millimeter cutoff skipped nearby geometry entirely, which made
+    // point-blank traces pass through thin walls and target bounds.
+    if (dist <= 1.0e-8f) return true;
     dir.x /= dist; dir.y /= dist; dir.z /= dist;
 
     float t;
     Point3F pos, norm;
-    // Start slightly ahead of origin to avoid self-intersection
-    Point3F start = {a.x + dir.x * 0.1f, a.y + dir.y * 0.1f, a.z + dir.z * 0.1f};
-    if (raycast(start, dir, dist, t, pos, norm))
+    // Start slightly ahead of origin to avoid self-intersection, but keep the
+    // ray's far end at b.  Using dist here probes 0.1m beyond the requested
+    // endpoint and can make an obstruction behind a target block visibility.
+    // Only skip numerical self-intersections.  A tenth of a meter is large
+    // enough to put a nearby wall behind the origin, which makes point-blank
+    // visibility and weapon traces pass through geometry.
+    constexpr float startBias = 0.001f;
+    // Keep the bias away from the origin for normal sight lines, but do not
+    // skip the entire ray when the endpoints are closer than that bias.
+    const float bias = std::min(startBias, dist * 0.5f);
+    Point3F start = {a.x + dir.x * bias, a.y + dir.y * bias,
+                     a.z + dir.z * bias};
+    if (raycast(start, dir, dist - bias, t, pos, norm))
         return false;
     return true;
 }

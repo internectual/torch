@@ -95,6 +95,8 @@ public:
     void setTitle(const char* title);
     bool setVideoMode(int32_t width, int32_t height, bool fullscreen, bool vsync);
     void showMouse(bool show);
+    bool enableMouse();
+    bool disableMouse();
     void setMousePos(int32_t x, int32_t y);
     void setRelativeMouse(bool relative);
 
@@ -112,4 +114,5 @@ private:
     Impl* impl;
     InputState inputState;
     bool running = false;
+    bool mouseEnabled = true;
 };

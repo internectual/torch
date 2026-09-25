@@ -12,6 +12,8 @@ struct TextureFrameSource {
     float duration = 1.0f;
 };
 
+inline constexpr size_t MaxTextureFrames = 1024;
+
 // Parse Torque IFL lines without touching the filesystem. Durations are stored
 // in seconds; malformed or absent durations retain the native one-second
 // fallback. Missing frame files are filtered by the caller after parsing.
@@ -45,25 +47,38 @@ inline std::vector<TextureFrameSource> parseTextureFrameSources(const std::strin
                 frame.duration = milliseconds / 1000.0f;
         }
         result.push_back(std::move(frame));
+        if (result.size() >= MaxTextureFrames) break;
     }
     return result;
 }
 
 // Torque IFL durations are milliseconds on disk. Callers store them in seconds.
 inline size_t textureFrameIndex(const std::vector<float>& durations,
-                                size_t frameCount, float age) {
+                                 size_t frameCount, float age) {
     if (frameCount == 0) return 0;
+    // A mission/demo transition can briefly leave an animation clock invalid.
+    // Keep the renderer on its first frame instead of converting NaN or
+    // infinity to an implementation-defined vector index.
+    const float safeAge = std::isfinite(age) ? std::max(0.0f, age) : 0.0f;
     if (durations.size() != frameCount) {
-        const float normalized = std::clamp(age, 0.0f, 0.999999f);
-        return std::min(frameCount - 1,
-                        (size_t)std::floor(normalized * frameCount));
+        // Missing IFL durations use Torque's one-second-per-frame default and
+        // continue cycling rather than freezing on the last frame.
+        const float time = std::fmod(safeAge, (float)frameCount);
+        return std::min(frameCount - 1, (size_t)std::floor(time));
     }
     float total = 0.0f;
-    for (float duration : durations) total += std::max(0.0f, duration);
+    for (float duration : durations) {
+        // Torque treats an invalid IFL duration like an omitted duration.
+        // Do not let one malformed entry make the whole animation stall.
+        if (!(duration > 0.0f) || !std::isfinite(duration)) duration = 1.0f;
+        total += duration;
+    }
     if (total <= 0.0f) return 0;
-    float time = std::fmod(std::max(0.0f, age), total);
+    float time = std::fmod(safeAge, total);
     for (size_t i = 0; i < durations.size(); ++i) {
-        time -= std::max(0.0f, durations[i]);
+        const float duration = durations[i] > 0.0f && std::isfinite(durations[i])
+            ? durations[i] : 1.0f;
+        time -= duration;
         if (time < 0.0f) return i;
     }
     return frameCount - 1;

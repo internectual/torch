@@ -21,7 +21,8 @@ enum class TSTokenType {
     And, Or, Not, BitwiseAnd, BitwiseOr, BitwiseXor,
     Question, Shl, Shr,
     PlusPlus, MinusMinus,
-    PlusEq, MinusEq, StarEq, SlashEq, BitOrEq,
+    PlusEq, MinusEq, StarEq, SlashEq, PercentEq, BitAndEq, BitOrEq, BitXorEq,
+    ShlEq, ShrEq,
     Hash, New, If, Else, For, While, Do, Switch, Case, Default,
     Return, Break, Continue, Function, Package, Datablock, Parent, This,
     True, False, Null, SwitchStr
@@ -64,10 +65,15 @@ public:
 
     VMValue execute(const std::string& source, const std::string& filename = "");
     VMValue executeFile(const std::string& path);
+    void unloadFile(const std::string& path);
     bool hasFunction(const std::string& name) const;
     const std::string& dbgFile() const;
     int dbgLine() const;
     VMValue callFunction(const std::string& name, const std::vector<VMValue>& args);
+    bool activatePackage(const std::string& name);
+    bool deactivatePackage(const std::string& name);
+    void clearPackages();
+    bool isActivePackage(const std::string& name) const;
     int scheduleEvent(double now, double delay, const std::string& object,
                       const std::string& command, const std::vector<VMValue>& args);
     bool cancelEvent(int id);
@@ -94,6 +100,8 @@ public:
 
     // Nested exec: save outer state, execute source, restore outer state, return result
     VMValue executeNested(const std::string& source, const std::string& path);
+    bool writeCompileDependencyManifest(const std::string& dsoPath,
+                                        const std::string& sourcePath);
 
     using NativeFunc = std::function<VMValue(const std::vector<VMValue>&)>;
     const std::unordered_map<std::string, NativeFunc>& getNatives() const;

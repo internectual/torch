@@ -1,4 +1,5 @@
 #include "render/environment_commands.h"
+#include "game/water_parity.h"
 
 #include <cassert>
 #include <cmath>
@@ -22,6 +23,7 @@ int main() {
     assert(!applyFogColor(color, 0.1f, std::numeric_limits<float>::quiet_NaN(), 0.3f, 1.0f));
     assert(validEnvironmentColor({0.0f, 0.5f, 1.0f, 1.0f}));
     assert(!validEnvironmentColor({-0.1f, 0.5f, 1.0f, 1.0f}));
+    assert(!validEnvironmentColor({0.0f, 0.5f, 1.0f, std::numeric_limits<float>::quiet_NaN()}));
     assert(validSunDirection({0.0f, 1.0f, 0.0f}));
     assert(!validSunDirection({0.0f, 0.0f, 0.0f}));
 
@@ -35,6 +37,24 @@ int main() {
     assert(applyWaterColor(waterColor, 0.2f, 0.4f, 0.8f));
     assert(waterColor.r == 0.2f && waterColor.g == 0.4f && waterColor.b == 0.8f);
     assert(!applyWaterColor(waterColor, -0.1f, 0.4f, 0.8f));
+    assert(waterBodyNameMatches("RiverWater", "riverwater"));
+    assert(waterBodyNameMatches("RIVERWATER", "RiverWater"));
+    assert(!waterBodyNameMatches("RiverWater", "RiverWater2"));
+    assert(waterBodyOrdinalMatches(true, 0, 0));
+    assert(!waterBodyOrdinalMatches(false, 0, 0));
+    // Numeric WaterBlock targets enumerate active surfaces, not inactive
+    // mission entries that happen to precede them in parser storage.
+    assert(waterBodyOrdinalMatches(true, 1, 1));
+    assert(waterBodyContainsHorizontal(2.0f, -3.0f, 5.0f, -1.0f, -6.0f, -4.0f));
+    assert(!waterBodyContainsHorizontal(2.0f, 4.0f, 5.0f, -1.0f, -6.0f, -4.0f));
+    // Underwater projectile effects use the same normalized coverage for
+    // WaterBlocks whose authored extents run in the negative direction.
+    assert(waterBodyContainsHorizontal(1.0f, -4.0f, 5.0f, -1.0f, -6.0f, -4.0f));
+    float renderX = 0.0f, renderZ = 0.0f, renderSizeX = 0.0f, renderSizeZ = 0.0f;
+    waterBodyRenderBounds(5.0f, -1.0f, -6.0f, -4.0f,
+                          renderX, renderZ, renderSizeX, renderSizeZ);
+    assert(renderX == -1.0f && renderZ == -5.0f);
+    assert(renderSizeX == 6.0f && renderSizeZ == 4.0f);
     int type = -1;
     assert(parseWaterType("CrustyLava", type) && type == 6);
     assert(parseWaterType("7", type) && type == 7);

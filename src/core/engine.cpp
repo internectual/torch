@@ -1,4 +1,5 @@
 #include "core/engine.h"
+#include "core/console_args.h"
 #include "core/input_parity.h"
 #include "core/config.h"
 #include <GL/glew.h>
@@ -145,6 +146,39 @@ static bool g_treeDirty = true;
 static std::vector<std::pair<std::string, int>> g_displayList;
 static int g_treeY = 0;
 static int g_debugTab = 0;
+static std::string g_configPath = "torch.cfg";
+
+static bool persistConfigValue(const std::string& configPath, const std::string& key,
+                               const std::string& value) {
+    std::ifstream in(configPath);
+    std::vector<std::string> lines;
+    bool replaced = false;
+    std::string line;
+    while (in && std::getline(in, line)) {
+        std::string probe = line;
+        const auto eq = probe.find('=');
+        if (eq != std::string::npos) {
+            probe = probe.substr(0, eq);
+            while (!probe.empty() && (probe.back() == ' ' || probe.back() == '\t' || probe.back() == '\r'))
+                probe.pop_back();
+            while (!probe.empty() && (probe.front() == ' ' || probe.front() == '\t'))
+                probe.erase(probe.begin());
+            if (probe == key) {
+                line = key + " = " + value;
+                replaced = true;
+            }
+        }
+        lines.push_back(line);
+    }
+    if (!replaced) lines.push_back(key + " = " + value);
+
+    const std::string tempPath = configPath + ".tmp";
+    std::ofstream out(tempPath, std::ios::trunc);
+    if (!out) return false;
+    for (const auto& saved : lines) out << saved << '\n';
+    out.close();
+    return std::rename(tempPath.c_str(), configPath.c_str()) == 0;
+}
 
 Engine::Engine() {}
 Engine::~Engine() {}
@@ -155,17 +189,38 @@ Engine& Engine::instance() {
 }
 
 bool Engine::init(int argc, char* argv[]) {
+    quitRequested = false;
+    running = false;
+    maxFrames = 0;
+    demoMode = false;
+    Console::instance().setVariable("demoMode", "0");
+    // These are explicit defaults. Config and command-line values are applied
+    // after them; runtime scripts may still intentionally override them.
+    Console::instance().setVariable("demoMasterServer", "");
+    Console::instance().setVariable("demoAllowConnect", "0");
+    Console::instance().setVariable("demoAllowWatch", "1");
     // Check for help before any output
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-help") == 0 || strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             fprintf(stdout, "Torch v" TORCH_VERSION_STRING " — Tribes 2 Open Source Client\n");
             fprintf(stdout, "Usage: torch [options]\n\n");
             fprintf(stdout, "Options:\n");
-            fprintf(stdout, "  -data <dir>        Tribes 2 data directory\n");
-            fprintf(stdout, "  -demo <file.rec>   Play a demo recording\n");
+             fprintf(stdout, "  -data <dir>        Tribes 2 data directory\n");
+             fprintf(stdout, "  -output <dir>      Runtime output and console.log directory\n");
+             fprintf(stdout, "  -mod <path>        Active data mod path (default: base/classic)\n");
+             fprintf(stdout, "  -demo <file.rec>   Play a demo recording\n");
+             fprintf(stdout, "  --demo <file.rec>  Alias for -demo\n");
+             fprintf(stdout, "  -playdemo <file.rec> Alias for -demo\n");
+             fprintf(stdout, "  -demo-mode         Run stock scripts in Tribes 2 Demo mode (not playback)\n");
+             fprintf(stdout, "  -demo-master-server <url>  Override demo-mode master URL (empty = LAN)\n");
+             fprintf(stdout, "  demoMasterServer  Config: demo-mode master URL (default: empty = LAN)\n");
+             fprintf(stdout, "  demoAllowConnect  Config: allow player connects in demo mode (default: 0)\n");
+             fprintf(stdout, "  demoAllowWatch    Config: allow observer connects in demo mode (default: 1)\n");
+             fprintf(stdout, "  isDemo()          Script state: explicit demo build mode, not playback\n");
+             fprintf(stdout, "  isDemoPlaying()   Script state: active .rec recording playback\n");
             fprintf(stdout, "  -preview <map>     Load a map and take a screenshot\n");
-             fprintf(stdout, "  -mapper <map>      Load a map for inspection (t2mapper-style)\n");
-             fprintf(stdout, "  -mapper-camera <n> Use authored Observer camera n\n");
+            fprintf(stdout, "  -mapper <map>      Load a mission for free-fly inspection\n");
+            fprintf(stdout, "  -mapper-camera <n> Use authored Observer camera n\n");
             fprintf(stdout, "  -campos x y z      Preview camera position\n");
             fprintf(stdout, "  -camtarget x y z   Preview camera target\n");
             fprintf(stdout, "  -testshape <path>  Load and display a native DTS shape\n");
@@ -173,11 +228,22 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  -preload,-p <files> Comma-separated scripts/guis to preload\n");
             fprintf(stdout, "  -version,-v         Show version\n");
             fprintf(stdout, "  -init,-i <file>     Init script (auto-exec, saved to config)\n");
-            fprintf(stdout, "  -exec,-e <file>     Execute a script file at startup\n");
+            fprintf(stdout, "  -exec,-e <file>    Execute a script file at startup\n");
             fprintf(stdout, "  -compile,-c <file>  Compile a script to .dso and exit\n");
             fprintf(stdout, "  -watermark,-w <path> Preview PNG in bottom-right corner\n");
-            fprintf(stdout, "  -canvasBg <path>     Background image for GUI canvas\n");
+            fprintf(stdout, "  -canvasBg <path>   Background image for GUI canvas\n");
+            fprintf(stdout, "  -quit-after-frames <n> Stop after n rendered frames (0 = unlimited)\n");
+            fprintf(stdout, "  -debug             Enable debug logging and diagnostics\n");
             fprintf(stdout, "  -help              Show this help\n\n");
+            fprintf(stdout, "Console commands:\n");
+            fprintf(stdout, "  connect <host> [port]       Connect to a server\n");
+            fprintf(stdout, "  watchServer <host:port>     Connect as an anonymous observer\n");
+            fprintf(stdout, "  loadMission <name>          Load a local mission\n");
+            fprintf(stdout, "  startServer [port] [mission] Start a local dedicated server\n");
+             fprintf(stdout, "  playdemo <path>             Play a demo recording\n");
+            fprintf(stdout, "  quit                        Exit\n\n");
+            fprintf(stdout, "Diagnostics: stderr includes TORCH-RUN-START; console.log is written\n");
+            fprintf(stdout, "under -output (default: ~/.torch).\n\n");
             fprintf(stdout, "Script args are passed through unmodified to the init script.\n\n");
             fprintf(stdout, "Controls:\n");
             fprintf(stdout, "  WASD               Move / free camera\n");
@@ -186,10 +252,10 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  Right Click        Alt fire\n");
             fprintf(stdout, "  Space              Jump / Jet\n");
             fprintf(stdout, "  F1                 Free camera toggle\n");
-             fprintf(stdout, "  F2                 Orbit camera (demo)\n");
-             fprintf(stdout, "  1-3                Select authored camera (mapper)\n");
-             fprintf(stdout, "  R / Right Click    Cycle spectate target (demo/observer)\n");
-             fprintf(stdout, "  F3                 Open observer target finder\n");
+            fprintf(stdout, "  F2                 Orbit camera (demo)\n");
+            fprintf(stdout, "  1-3                Select authored camera (mapper)\n");
+            fprintf(stdout, "  R / Right Click    Cycle spectate target (demo/observer)\n");
+            fprintf(stdout, "  F3                 Open observer target finder\n");
             fprintf(stdout, "  P                  Pause demo\n");
             fprintf(stdout, "  .                  Step demo frame\n");
             fprintf(stdout, "  Tab                Scoreboard\n");
@@ -209,6 +275,49 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "Torch v" TORCH_VERSION_STRING "\n");
             std::exit(0);
         }
+    }
+
+    // Reject malformed engine options before taking the single-instance lock.
+    // Unknown arguments remain available to TorqueScript as passthrough args.
+    const char* valueOptions[] = {
+        "-data", "-preview", "-mapper", "-mapper-camera", "-demo", "--demo",
+                 "-playdemo", "-demo-master-server", "-testshape", "-testdif", "-exec", "-e", "-compile", "-c",
+        "-init", "-i", "-quit-after-frames", "-output", "-mod", "-preload", "-p",
+        "-previewImg", "-w", "-watermark", "-canvasBg", "-width", "-height", nullptr
+    };
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "-campos") == 0 || strcmp(argv[i], "-camtarget") == 0) {
+            if (i + 3 >= argc || argv[i + 1][0] == '-' || argv[i + 2][0] == '-' ||
+                argv[i + 3][0] == '-') {
+                fprintf(stderr, "Missing value for %s\n", argv[i]);
+                return false;
+            }
+            i += 3;
+            continue;
+        }
+        bool takesValue = false;
+        for (int n = 0; valueOptions[n]; ++n) {
+            if (strcmp(argv[i], valueOptions[n]) == 0) { takesValue = true; break; }
+        }
+        if (!takesValue) continue;
+        if (i + 1 >= argc || argv[i + 1][0] == '-') {
+            fprintf(stderr, "Missing value for %s\n", argv[i]);
+            return false;
+        }
+        if (strcmp(argv[i], "-quit-after-frames") == 0) {
+            int frames = 0;
+            if (!parseNonNegativeInt(argv[i + 1], frames)) {
+                fprintf(stderr, "Invalid frame count: %s\n", argv[i + 1]);
+                return false;
+            }
+        } else if (strcmp(argv[i], "-mapper-camera") == 0) {
+            int camera = 0;
+            if (!parseNonNegativeInt(argv[i + 1], camera)) {
+                fprintf(stderr, "Invalid mapper camera: %s\n", argv[i + 1]);
+                return false;
+            }
+        }
+        ++i;
     }
 
     Console::instance().printf(LogLevel::Info, "Torch v" TORCH_VERSION_STRING " (built " __DATE__ " " __TIME__ ")");
@@ -243,8 +352,11 @@ bool Engine::init(int argc, char* argv[]) {
     std::string dataDir = ".";
     std::string outputDir = "";
     std::string modPath = "base";
+    bool configModPath = false;
     std::string exeDir = ".";
     std::string initScriptSetting;  // from torch.cfg; empty = no init script
+    std::string configPath = "torch.cfg";
+    g_configPath = configPath;
     if (argc > 0) {
         std::string exePath = argv[0];
         auto sl = exePath.rfind('/');
@@ -256,8 +368,11 @@ bool Engine::init(int argc, char* argv[]) {
         if (!cfg) {
             // Try next to the executable
             std::string cfgPath = exeDir + "/torch.cfg";
+            cfg.clear();
             cfg.open(cfgPath);
+            if (cfg) configPath = cfgPath;
         }
+        g_configPath = configPath;
         if (cfg) {
             std::string line;
             while (std::getline(cfg, line)) {
@@ -275,7 +390,14 @@ bool Engine::init(int argc, char* argv[]) {
                 trim(key); trim(val);
                 if (key == "dataDir") dataDir = val;
                 if (key == "outputDir") outputDir = val;
+                if (key == "modPath") { modPath = val; configModPath = true; }
                 if (key == "initScript") initScriptSetting = val;
+                if (key == "demoMasterServer")
+                    Console::instance().setVariable("demoMasterServer", val.c_str());
+                if (key == "demoAllowConnect")
+                    Console::instance().setVariable("demoAllowConnect", val.c_str());
+                if (key == "demoAllowWatch")
+                    Console::instance().setVariable("demoAllowWatch", val.c_str());
                 // New rendering configuration options
                 if (key == "terrainLightmapResolution") {
                     Console::instance().setVariable("terrainLightmapResolution", val.c_str());
@@ -314,32 +436,12 @@ bool Engine::init(int argc, char* argv[]) {
         }
     };
     expandHome(dataDir);
-    expandHome(outputDir);
     if (dataDir == ".") dataDir = exeDir + "/data";
-    Console::instance().setVariable("dataDir", dataDir.c_str());
-    Console::instance().setVariable("modPath", modPath.c_str());
-    if (outputDir.empty()) {
-        const char* home = getenv("HOME");
-        outputDir = home ? std::string(home) + "/.torch" : dataDir;
-    }
-    Console::instance().setVariable("outputDir", outputDir.c_str());
-    // initScript comes from torch.cfg (may be empty). Not hardcoded to the
-    // Tribes 2 script name — that value belongs to the user config.
-    if (!initScriptSetting.empty())
-        Console::instance().setVariable("initScript", initScriptSetting.c_str());
-    // Create outputDir if it doesn't exist
-    { struct stat st; if (stat(outputDir.c_str(), &st) != 0) mkdir(outputDir.c_str(), 0755); }
-    { std::string base = outputDir + "/base"; struct stat st; if (stat(base.c_str(), &st) != 0) mkdir(base.c_str(), 0755); }
-
-    // Set up console.log in outputDir
-    Console::instance().setLogFile((outputDir + "/console.log").c_str());
-    // Expose outputDir to scripts as a console variable
-    Console::instance().setVariable("$ConsoleLogPath", (outputDir + "/console.log").c_str());
 
     // Parse args
     bool noLogin = false;
     bool explicitPreviewCamera = false;
-    bool explicitModPath = false;
+    bool explicitModPath = configModPath;
     int mapperCamera = 0;
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-data") == 0) && i + 1 < argc) dataDir = argv[i + 1];
@@ -347,12 +449,21 @@ bool Engine::init(int argc, char* argv[]) {
             Console::instance().setVariable("videoWidth", argv[i + 1]);
         if (strcmp(argv[i], "-height") == 0 && i + 1 < argc)
             Console::instance().setVariable("videoHeight", argv[i + 1]);
+        if (strcmp(argv[i], "-quit-after-frames") == 0 && i + 1 < argc) {
+            parseNonNegativeInt(argv[i + 1], maxFrames);
+        }
         if (strcmp(argv[i], "-output") == 0 && i + 1 < argc) outputDir = argv[i + 1];
         if (strcmp(argv[i], "-mod") == 0 && i + 1 < argc) {
             modPath = argv[i + 1];
             explicitModPath = true;
         }
         if (strcmp(argv[i], "-online") == 0) Console::instance().setVariable("online", "1");
+        if (strcmp(argv[i], "-demo-mode") == 0) {
+            demoMode = true;
+            Console::instance().setVariable("demoMode", "1");
+        }
+        if (strcmp(argv[i], "-demo-master-server") == 0 && i + 1 < argc)
+            Console::instance().setVariable("demoMasterServer", argv[i + 1]);
         if (strcmp(argv[i], "-nologin") == 0) noLogin = true;
         if (strcmp(argv[i], "-debug") == 0) Console::instance().setLogLevel(LogLevel::Debug);
         if (strcmp(argv[i], "-preview") == 0 && i + 1 < argc) previewMap = argv[i + 1];
@@ -373,7 +484,8 @@ bool Engine::init(int argc, char* argv[]) {
             usePreviewCam = true;
             explicitPreviewCamera = true;
         }
-        if ((strcmp(argv[i], "-demo") == 0 || strcmp(argv[i], "--demo") == 0) && i + 1 < argc)
+        if ((strcmp(argv[i], "-demo") == 0 || strcmp(argv[i], "--demo") == 0 ||
+             strcmp(argv[i], "-playdemo") == 0) && i + 1 < argc)
             demoPath = argv[i + 1];
         if (strcmp(argv[i], "-testshape") == 0 && i + 1 < argc)
             testShapePath = argv[i + 1];
@@ -386,20 +498,7 @@ bool Engine::init(int argc, char* argv[]) {
         if ((strcmp(argv[i], "-init") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) {
             execFile = argv[i + 1];
             Console::instance().setVariable("initScript", argv[i + 1]);
-            // Persist only if not already recorded (avoid duplicate lines from repeated -init runs)
-            {
-                std::ifstream cfgIn("torch.cfg");
-                std::string line, want = "initScript = " + std::string(argv[i + 1]);
-                bool found = false;
-                while (cfgIn && std::getline(cfgIn, line)) {
-                    while (!line.empty() && (line.back() == ' ' || line.back() == '\r')) line.pop_back();
-                    if (line == want) { found = true; break; }
-                }
-                if (!found) {
-                    std::ofstream of("torch.cfg", std::ios::app);
-                    if (of) of << want << std::endl;
-                }
-            }
+            persistConfigValue(g_configPath, "initScript", argv[i + 1]);
         }
         if ((strcmp(argv[i], "-compile") == 0 || strcmp(argv[i], "-c") == 0) && i + 1 < argc)
             compileFile = argv[i + 1];
@@ -423,10 +522,22 @@ bool Engine::init(int argc, char* argv[]) {
             if (!f.empty()) preloadFiles.push_back(f);
         }
     }
+    // A demo must not enter the normal login/bootstrap transition. The demo
+    // is loaded explicitly after the GUI is ready below.
+    if (demoPath.empty()) demoPath = findDemoLaunchPath(argc, argv);
+    // Preview and mapper are local inspection modes, so neither may enter the
+    // retail login transition before its world is loaded.
+    noLogin = shouldSkipLogin(demoMode, !demoPath.empty(),
+                              noLogin || mapperMode || !previewMap.empty());
 
     // Command-line output overrides are parsed after config initialization.
     // Rebind the runtime paths so previews and scripts use the same root.
+    expandHome(dataDir);
     expandHome(outputDir);
+    if (outputDir.empty()) {
+        const char* home = getenv("HOME");
+        outputDir = home ? std::string(home) + "/.torch" : dataDir;
+    }
     if (!explicitModPath && std::filesystem::is_directory(dataDir + "/classic"))
         modPath = "classic";
     Console::instance().setVariable("dataDir", dataDir.c_str());
@@ -457,9 +568,11 @@ bool Engine::init(int argc, char* argv[]) {
         // Engine flags that take 1 value arg
         auto isEngineFlagWithArg = [](const char* a) {
             const char* flags[] = {
-                "-data", "-preview", "-demo", "--demo", "-testshape",
+                "-data", "-preview", "-mapper", "-mapper-camera", "-demo", "--demo", "-playdemo", "-testshape",
                 "-testdif", "-preload", "-p", "-previewImg", "-w", "-watermark", "-canvasBg",
-                "-exec", "-e", "-compile", "-c", "-init", "-i",
+                 "-exec", "-e", "-compile", "-c", "-init", "-i", "-quit-after-frames", "-output", "-mod",
+                 "-demo-master-server",
+                "-width", "-height",
                 nullptr
             };
             for (int f = 0; flags[f]; f++)
@@ -504,7 +617,32 @@ bool Engine::init(int argc, char* argv[]) {
     // File System - only the configured stock Tribes 2 installation is a
     // production resource source. Project-local assets and generated output
     // must not silently alter startup or map rendering.
-    std::vector<std::string> paths = {dataDir, dataDir + "/base"};
+    std::vector<std::string> paths;
+    auto addDataPath = [&paths](const std::string& path) {
+        if (path.empty() || std::find(paths.begin(), paths.end(), path) != paths.end()) return;
+        std::error_code error;
+        if (std::filesystem::is_directory(path, error)) paths.push_back(path);
+    };
+
+    // Keep the configured root semantics explicit.  A dataDir may itself be
+    // the extracted base directory, or it may be an installation root with
+    // base/classic siblings.  Loose files are searched in this order.
+    const std::filesystem::path configuredRoot(dataDir);
+    const std::string configuredName = configuredRoot.filename().string();
+    const bool directBase = strcasecmp(configuredName.c_str(), "base") == 0;
+    const std::filesystem::path installRoot = directBase ? configuredRoot.parent_path() : configuredRoot;
+    const std::filesystem::path baseRoot = directBase ? configuredRoot : installRoot / "base";
+    std::filesystem::path activeRoot;
+    if (std::filesystem::path(modPath).is_absolute())
+        activeRoot = modPath;
+    else if (strcasecmp(modPath.c_str(), "base") == 0)
+        activeRoot = baseRoot;
+    else
+        activeRoot = installRoot / modPath;
+
+    addDataPath(activeRoot.string());
+    addDataPath(baseRoot.string());
+    if (!directBase) addDataPath(configuredRoot.string());
     filesys->init(paths);
     filesys->setOriginalOnly(true);
 
@@ -515,30 +653,40 @@ bool Engine::init(int argc, char* argv[]) {
     // Scan base directory for .vl2 and .vol files
     auto scanArchives = [&](const std::string& dir) {
         std::vector<std::string> found;
-        glob_t globbuf;
-        std::string pattern = dir + "/*.vl2";
-        if (glob(pattern.c_str(), 0, nullptr, &globbuf) == 0) {
-            for (size_t i = 0; i < globbuf.gl_pathc; i++)
-                found.push_back(globbuf.gl_pathv[i]);
-            globfree(&globbuf);
+        std::error_code error;
+        for (std::filesystem::directory_iterator it(dir, error), end; !error && it != end; it.increment(error)) {
+            if (!it->is_regular_file(error)) continue;
+            std::string extension = it->path().extension().string();
+            for (char& c : extension) c = (char)std::tolower((unsigned char)c);
+            if (extension == ".vl2" || extension == ".vol")
+                found.push_back(it->path().string());
         }
-        pattern = dir + "/*.vol";
-        if (glob(pattern.c_str(), 0, nullptr, &globbuf) == 0) {
-            for (size_t i = 0; i < globbuf.gl_pathc; i++)
-                found.push_back(globbuf.gl_pathv[i]);
-            globfree(&globbuf);
-        }
+        std::sort(found.begin(), found.end());
         return found;
     };
 
-    // Scan data dir and its subdirs for archives
-    archives = scanArchives(dataDir);
-    auto baseArchives = scanArchives(dataDir + "/base");
-    archives.insert(archives.end(), baseArchives.begin(), baseArchives.end());
+    // Add base/fallback archives first and the active mod last.  FileSystem
+    // searches archives in reverse mount order, matching loose-file priority.
+    std::vector<std::string> archiveRoots;
+    auto addArchiveRoot = [&archiveRoots](const std::filesystem::path& path) {
+        const std::string value = path.string();
+        if (value.empty() || std::find(archiveRoots.begin(), archiveRoots.end(), value) != archiveRoots.end()) return;
+        std::error_code error;
+        if (std::filesystem::is_directory(path, error)) archiveRoots.push_back(value);
+    };
+    addArchiveRoot(baseRoot);
+    addArchiveRoot(configuredRoot);
+    addArchiveRoot(activeRoot);
+    for (const auto& path : archiveRoots) {
+        auto found = scanArchives(path);
+        archives.insert(archives.end(), found.begin(), found.end());
+    }
 
     Console::instance().printf(LogLevel::Info, "Found %zu archives", archives.size());
     for (auto& a : archives) {
-        if (a.size() > 3 && a.substr(a.size()-3) == "vl2") {
+        std::string extension = std::filesystem::path(a).extension().string();
+        for (char& c : extension) c = (char)std::tolower((unsigned char)c);
+        if (extension == ".vl2") {
             auto* vl2 = new Vl2Archive;
             if (vl2->open(a.c_str())) {
                 fs.addArchive(vl2);
@@ -689,7 +837,12 @@ bool Engine::init(int argc, char* argv[]) {
 
     // Game
     g->init();
+    // isDemoPlaying() is the active recording state, not a pending command-line
+    // path. The latter must not survive a failed load or stopped playback.
     scr->setDemoStateProvider([this]() { return g->isDemoPlaying(); });
+    scr->setDemoModeProvider([this]() {
+        return isDemoBuildMode(demoMode, g->config().dedicated);
+    });
     scr->setServerStateProvider([this]() { return g->gameServer().isRunning(); });
     scr->setClientStateProvider([]() { return true; });
     scr->setConnectionStateProvider([this]() {
@@ -747,17 +900,36 @@ bool Engine::init(int argc, char* argv[]) {
          state.sensorGroup = ghost->sensorGroup;
          state.hasRotation = ghost->hasRotation;
          state.hasVelocity = ghost->hasVelocity;
-         state.hasHealth = true;
-         state.hasMaxHealth = true;
-          state.hasEnergy = true;
-         for (int i = 0; i < 8; ++i) {
+          state.hasHealth = true;
+          state.hasMaxHealth = true;
+           state.hasEnergy = true;
+          state.damageState = ghost->damageState;
+          state.hasDamageState = true;
+          for (int i = 0; i < 8; ++i) {
              state.mountedImages[i].datablockId = ghost->mountedImages[i].datablockId;
              state.mountedImages[i].mountPoint = ghost->mountedImages[i].mountPoint;
              state.mountedImages[i].loaded = ghost->mountedImages[i].loaded;
-             state.mountedImages[i].firing = ghost->mountedImages[i].isFiring;
-         }
+              state.mountedImages[i].firing = ghost->mountedImages[i].isFiring;
+          }
+          for (int i = 0; i < 4; ++i) {
+              state.threads[i].sequence = ghost->threads[i].sequence;
+              state.threads[i].state = ghost->threads[i].state;
+              state.threads[i].timescale = ghost->threads[i].timescale;
+              state.threads[i].position = ghost->threads[i].position;
+              state.threads[i].forward = ghost->threads[i].forward;
+              state.threads[i].atEnd = ghost->threads[i].atEnd;
+              state.threads[i].valid = ghost->threads[i].valid;
+          }
          state.teamId = ghost->teamId >= 0 ? ghost->teamId : 0;
-        state.state = ghost->damageState;
+          state.headPitch = ghost->headPitch;
+          state.headYaw = ghost->headYaw;
+          state.hasHeadAngles = ghost->headPitch != 0.0f || ghost->headYaw != 0.0f;
+          state.barrelPitch = ghost->barrelPitch;
+          state.barrelYaw = ghost->barrelYaw;
+          state.hasTurretAim = ghost->hasTurretAim;
+          state.shieldLevel = ghost->shieldLevel;
+          state.hasShield = ghost->hasShield;
+          state.state = ghost->damageState;
         return true;
     });
     scr->setLoadoutStateProvider([this]() {
@@ -860,9 +1032,11 @@ bool Engine::init(int argc, char* argv[]) {
     con->addCommand("setShadowResolution", [](int32_t argc, const char* const* argv) {
         if (argc > 1) {
             int sz = atoi(argv[1]);
-            Engine::instance().renderer().config().shadowMapSize = sz;
-            Engine::instance().renderer().initShadowMap(sz);
-            Console::instance().printf(LogLevel::Info, "Shadow map size set to %d", sz);
+            auto& renderer = Engine::instance().renderer();
+            if (renderer.initShadowMap(sz)) {
+                renderer.config().shadowMapSize = sz;
+                Console::instance().printf(LogLevel::Info, "Shadow map size set to %d", sz);
+            }
         }
     }, "setShadowResolution <size> - set shadow map resolution");
 
@@ -1120,11 +1294,22 @@ bool Engine::init(int argc, char* argv[]) {
         g->startLocalGame();
     }, "TorchLoginDone() - diagnostic transition helper");
 
-    con->addCommand("LoginProcess", [](int32_t, const char* const*) {
-        // Do not auto-complete login. The stock script must retain control of
-        // this transition until the native account/offline flow is complete.
-        Console::instance().printf(LogLevel::Warn,
-            "LoginProcess is not implemented; login remains open");
+    con->addCommand("LoginProcess", [this](int32_t, const char* const*) {
+        const bool online = std::strcmp(
+            Console::instance().getStringVariable("online", "0"), "1") == 0 ||
+            std::strcmp(Console::instance().getStringVariable("$PlayingOnline", "0"), "1") == 0;
+        if (!loginCanCompleteOffline(online)) {
+            Console::instance().printf(LogLevel::Warn,
+                "LoginProcess requires the online account flow");
+            return;
+        }
+        // Offline login has no account service.  Match the stock successful
+        // transition so the login dialog does not strand local players.
+        Console::instance().setVariable("$LaunchMode", "Offline");
+        Console::instance().setVariable("$PlayingOnline", "0");
+        gui->popDialog("LoginDlg");
+        Console::instance().printf(LogLevel::Info, "Offline login complete, starting game");
+        g->startLocalGame();
     }, "LoginProcess - attempt login");
 
     con->addCommand("CreateAccount", [](int32_t, const char* const*) {
@@ -1253,20 +1438,16 @@ bool Engine::init(int argc, char* argv[]) {
             Console::instance().printf(LogLevel::Info, "Game::argv[%zu] = %s", i, args[i].c_str());
     }
 
-    // -compile: parse/validate then exit (DSO writing not yet implemented)
+    // -compile: compile a script to a Tribes 2 DSO and exit.
     if (!compileFile.empty()) {
-        auto cdata = fs.read(compileFile.c_str());
-        if (!cdata.empty()) {
-            Console::instance().printf(LogLevel::Info, "Compile: %s (%zu bytes) - DSO writer not implemented, parsing only", compileFile.c_str(), cdata.size());
-            if (scr->ts()) {
-                scr->ts()->execute(std::string((const char*)cdata.data(), cdata.size()), compileFile);
-                Console::instance().printf(LogLevel::Info, "Compile: %s parsed successfully", compileFile.c_str());
-            }
-        } else {
-            Console::instance().printf(LogLevel::Error, "Compile: file not found: %s", compileFile.c_str());
-        }
+        const VMValue result = scr->ts()
+            ? scr->ts()->callFunction("compile", {VMValue(compileFile)}) : VMValue(0);
+        if (result.toInt() != 0)
+            Console::instance().printf(LogLevel::Info, "Compile: %s completed for Tribes2", compileFile.c_str());
+        else
+            Console::instance().printf(LogLevel::Error, "Compile: %s failed", compileFile.c_str());
         quit();
-        return true;
+        return result.toInt() != 0;
     }
 
     // Wire console commands into TorqueScript interpreter
@@ -1512,16 +1693,27 @@ bool Engine::init(int argc, char* argv[]) {
                 "scripts/inventoryHud.cs", "scripts/GameGui.cs"
             };
             for (const char* path : clientScripts) {
-                auto data = fs.read(path);
+                // Match Torque's exec search order: the selected mod overlays
+                // base resources, while missing mod files fall back to base.
+                std::vector<uint8_t> data;
+                std::string loadedPath = path;
+                if (modPath != "base") {
+                    loadedPath = modPath + "/" + path;
+                    data = fs.read(loadedPath.c_str());
+                }
+                if (data.empty()) {
+                    loadedPath = path;
+                    data = fs.read(path);
+                }
                 if (data.empty()) {
                     Console::instance().printf(LogLevel::Warn,
                         "Bootstrap: stock script not found: %s", path);
                     continue;
                 }
                 scr->ts()->executeNested(
-                    std::string((const char*)data.data(), data.size()), path);
+                    std::string((const char*)data.data(), data.size()), loadedPath);
                 Console::instance().printf(LogLevel::Debug,
-                    "Bootstrap: loaded stock script: %s", path);
+                    "Bootstrap: loaded stock script: %s", loadedPath.c_str());
             }
 
             const char* clientGuis[] = {"gui/PlayGui.gui", "gui/GameGui.gui"};
@@ -1623,6 +1815,11 @@ bool Engine::init(int argc, char* argv[]) {
     if (scr->ts() && !execFile.empty()) {
         auto* ts = scr->ts();
         auto edata = fs.read(execFile.c_str());
+        if (edata.empty()) {
+            std::ifstream localExec(execFile, std::ios::binary);
+            if (localExec)
+                edata.assign(std::istreambuf_iterator<char>(localExec), {});
+        }
         if (!edata.empty()) {
             Console::instance().printf(LogLevel::Info, "Exec: %s (%zu bytes)", execFile.c_str(), edata.size());
             ts->execute(std::string((const char*)edata.data(), edata.size()), execFile);
@@ -2236,8 +2433,6 @@ void Engine::run() {
 
         // Mouse wheel: GUI scroll (position-aware) or weapon cycle
         {
-            static float weaponCycleCooldown = 0;
-            weaponCycleCooldown -= dt;
             int wheel = plat->input().mouseWheel;
             if (wheel != 0) {
                 bool scrolled = false;
@@ -2257,9 +2452,14 @@ void Engine::run() {
                         scrolled = true;
                     }
                 }
-                if (!scrolled && weaponCycleCooldown <= 0 && !g->isMapperMode()) {
-                    g->player().weaponCycle(wheel > 0 ? 1 : -1);
-                    weaponCycleCooldown = 0.2f;
+                if (!scrolled && !g->isMapperMode()) {
+                    // SDL can coalesce several wheel notches into one frame.
+                    // Each notch is a native weapon-cycle action; collapsing
+                    // the aggregate to its sign drops selections on fast
+                    // scrolling.
+                    const int direction = wheel > 0 ? 1 : -1;
+                    for (int step = 0; step < mouseWheelSteps(wheel); ++step)
+                        g->player().weaponCycle(direction);
                 }
             }
         }
@@ -2308,22 +2508,25 @@ void Engine::run() {
                         int inputIndex = -1;
                         bool down = false;
                         const bool requiresShift = keyName.rfind("shift ", 0) == 0;
-                        if (requiresShift && !keys[SCANCODE_LSHIFT] && !keys[SCANCODE_RSHIFT])
-                            continue;
+                        const bool shiftDown = keys[SCANCODE_LSHIFT] ||
+                            keys[SCANCODE_RSHIFT];
                         if (device == 0) {
                             std::string key = keyName;
                             const auto space = key.rfind(' ');
                             if (space != std::string::npos) key = key.substr(space + 1);
                             inputIndex = GuiRenderer::keyNameToScancode(key);
                             if (inputIndex < 0 || inputIndex >= 512) continue;
-                            down = keys[inputIndex];
+                            down = modifiedBindingDown(keys[inputIndex], requiresShift,
+                                                       shiftDown);
                         } else if (device == 1 && keyName.rfind("button", 0) == 0) {
                             const int button = atoi(keyName.c_str() + 6);
                             // SDL button numbering uses 1 for left and 3 for right.
                             inputIndex = 512 + button;
                             const int platformButton = button == 0 ? 1 : button == 1 ? 3 : button;
                             if (platformButton < 0 || platformButton >= (int)sizeof(plat->input().mouseButtons)) continue;
-                            down = plat->input().mouseButtons[platformButton];
+                            down = modifiedBindingDown(
+                                plat->input().mouseButtons[platformButton], requiresShift,
+                                shiftDown);
                         } else {
                             continue;
                         }
@@ -2714,8 +2917,7 @@ void Engine::run() {
                             scr->ts()->execute(std::string((const char*)sdata.data(), sdata.size()), path);
                             gui->refresh();
                             Console::instance().setVariable("initScript", path.c_str());
-                            std::ofstream of("torch.cfg", std::ios::app);
-                            if (of) of << "initScript = " << path << std::endl;
+                             persistConfigValue(g_configPath, "initScript", path);
                         } else {
                             Console::instance().printf(LogLevel::Warn, "Script not found: %s", sp.c_str());
                         }
@@ -3404,6 +3606,8 @@ void Engine::run() {
 
         // FPS counter
         frameCount++;
+        if (maxFrames > 0 && plat->frameCount() >= (uint64_t)maxFrames)
+            quit();
         fpsTimer += dt;
         if (fpsTimer >= 1.0f) {
             Console::instance().setVariable("$FPS::Real", std::to_string(frameCount).c_str());
@@ -3423,6 +3627,8 @@ void Engine::run() {
 }
 
 void Engine::shutdown() {
+    if (!plat && !filesys && !ren && !aud && !scr && !net && !g && !gui && !tim)
+        return;
     Console::instance().printf(LogLevel::Info, "Shutting down...");
 
     // Window-close and SDL quit events bypass the console quit command. Save
@@ -3437,16 +3643,16 @@ void Engine::shutdown() {
         delete gui;
         gui = nullptr;
     }
-    g->shutdown();
-    net->shutdown();
-    scr->shutdown();
+    if (g) g->shutdown();
+    if (net) net->shutdown();
+    if (scr) scr->shutdown();
 #ifndef TORCH_DEDICATED
-    aud->shutdown();
-    ren->shutdown();
+    if (aud) aud->shutdown();
+    if (ren) ren->shutdown();
 #endif
-    filesys->shutdown();
+    if (filesys) filesys->shutdown();
 #ifndef TORCH_DEDICATED
-    plat->shutdown();
+    if (plat) plat->shutdown();
 #endif
 
     delete g; g = nullptr;

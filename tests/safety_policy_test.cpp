@@ -38,6 +38,8 @@ int main() {
     std::filesystem::create_symlink(tempOutside / "secret.cs", tempRoot / "link.cs");
     CHECK(TorchPath::staysWithinRoot(tempRoot.c_str(), (tempRoot / "link.cs").c_str()) == false);
     CHECK(TorchPath::staysWithinRoot(tempRoot.c_str(), (tempRoot / "inside.cs").c_str()));
+    std::ofstream(tempRoot / "not-a-directory") << "x";
+    CHECK(!TorchPath::safeOutputPath((tempRoot / "not-a-directory").c_str(), "out.txt", safeOutput));
     std::filesystem::remove_all(tempRoot);
     std::filesystem::remove_all(tempOutside);
 
@@ -56,6 +58,11 @@ int main() {
     CHECK(!T2Protocol::decodeChat(oversizedSender, sizeof(oversizedSender), chat));
     const uint8_t oversizedText[] = {T2Protocol::GDT_ChatMessage, 0, 0xff, 0x01};
     CHECK(!T2Protocol::decodeChat(oversizedText, sizeof(oversizedText), chat));
+    std::strcpy(chat.sender, "spoofed");
+    T2Protocol::setAuthoritativeChatSender(chat, "AuthenticatedPlayer");
+    CHECK(std::strcmp(chat.sender, "AuthenticatedPlayer") == 0);
+    T2Protocol::setAuthoritativeChatSender(chat, "abcdefghijklmnopqrstuvwxyz0123456789");
+    CHECK(std::strlen(chat.sender) == sizeof(chat.sender) - 1);
     CHECK(isObserverSetupCommand({"setPlayerTeam", "0"}));
     CHECK(isObserverSetupCommand({"ScopeCommanderMap", "1"}));
     CHECK(isObserverSetupCommand({"WatchOnly", "ImaWatcher"}));
@@ -72,6 +79,10 @@ int main() {
     CHECK(decoded.sequence == wire.sequence && decoded.ack == wire.ack &&
           decoded.ackMask == wire.ackMask && decoded.type == wire.type &&
           decoded.checksum == wire.checksum);
+    CHECK(isNewerWireSequence(0, UINT32_MAX));
+    CHECK(isNewerWireSequence(1, 0));
+    CHECK(!isNewerWireSequence(UINT32_MAX, 0));
+    CHECK(!isNewerWireSequence(42, 42));
 
 
     const auto mission = parseMisFile(

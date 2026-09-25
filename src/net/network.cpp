@@ -5,6 +5,7 @@
 #include "core/console.h"
 #include "core/config.h"
 #include "core/engine.h"
+#include "game/ctf_runtime.h"
 #include <cstring>
 #include <cstdlib>
 #include <sys/socket.h>
@@ -24,9 +25,12 @@
 #include <curl/curl.h>
 
 static const char* nativeFlagStatus(const std::string& status) {
-    if (status == "<At Base>" || status == "At Base") return "home";
-    if (status == "<In the Field>" || status == "In the Field") return "field";
-    return status.empty() ? "home" : "held";
+    switch (CtfRuntime::classifyStatusToken(status)) {
+        case CtfRuntime::StatusToken::Home: return "home";
+        case CtfRuntime::StatusToken::Field: return "field";
+        case CtfRuntime::StatusToken::Held: return "held";
+    }
+    return "home";
 }
 
 static uint16_t wireChecksum(const uint8_t* data, size_t size) {
@@ -88,6 +92,7 @@ struct Connection::Impl {
     std::map<uint16_t, V12::ServerEvent::TargetInfo> nativeTargets;
     uint32_t nativeMissionCrc = 0;
     std::map<uint16_t, std::string> nativeDatablockShapes;
+    std::map<uint16_t, V12::DecodedDataBlock> nativeDatablocks;
     std::deque<std::vector<uint8_t>> injectedObserverPackets;
     std::map<int, Connection::ObserverSnapshot::TeamState> nativeTeamScores;
     std::map<int, int> nativePlayerScores;
@@ -102,8 +107,11 @@ struct Connection::Impl {
     std::map<int, uint32_t> nativeSensorGroupListenMasks;
     V12Vec3 nativeCompressionPoint{};
     uint16_t nativeControlGhost = 0;
+    bool nativeControlAssigned = false;
     uint32_t nativeLastMoveAck = 0;
     uint8_t nativePlayerSensorGroup = 0;
+    bool nativeHasCameraFov = false;
+    uint8_t nativeCameraFov = 0;
     bool nativeMatchStarted = false;
     bool nativeMatchEnded = false;
     bool nativeGhosting = false;
@@ -137,6 +145,7 @@ struct Connection::Impl {
         nativeTargets.clear();
         nativeMissionCrc = 0;
         nativeDatablockShapes.clear();
+        nativeDatablocks.clear();
         nativeTeamScores.clear();
         nativePlayerScores.clear();
         nativePlayerKills.clear();
@@ -150,8 +159,11 @@ struct Connection::Impl {
         nativeSensorGroupListenMasks.clear();
         nativeCompressionPoint = {};
         nativeControlGhost = 0;
+        nativeControlAssigned = false;
         nativeLastMoveAck = 0;
         nativePlayerSensorGroup = 0;
+        nativeHasCameraFov = false;
+        nativeCameraFov = 0;
         nativeMatchStarted = false;
         nativeMatchEnded = false;
         nativeGhosting = false;
@@ -345,7 +357,10 @@ Connection::ObserverSnapshot Connection::observerSnapshot() const {
     snapshot.epoch = epoch;
     snapshot.missionCrc = impl->nativeMissionCrc;
     snapshot.compressionPoint = impl->nativeCompressionPoint;
+    snapshot.hasCameraFov = impl->nativeHasCameraFov;
+    snapshot.cameraFov = impl->nativeCameraFov;
     snapshot.controlGhost = impl->nativeControlGhost;
+    snapshot.controlAssigned = impl->nativeControlAssigned;
     snapshot.lastMoveAck = impl->nativeLastMoveAck;
     snapshot.playerSensorGroup = impl->nativePlayerSensorGroup;
     snapshot.matchStarted = impl->nativeMatchStarted;
@@ -356,14 +371,13 @@ Connection::ObserverSnapshot Connection::observerSnapshot() const {
     snapshot.protocol = impl->nativeProtocol.snapshot();
     snapshot.strings = impl->nativeStrings.entries();
     snapshot.datablockShapes = impl->nativeDatablockShapes;
+    snapshot.datablocks = impl->nativeDatablocks;
     snapshot.players.reserve(impl->nativePlayerStates.size());
     for (const auto& [index, state] : impl->nativePlayerStates)
         snapshot.players.emplace_back(index, state);
-    snapshot.ghostClasses.reserve(impl->nativePlayerStates.size());
-    for (const auto& [index, state] : impl->nativePlayerStates) {
-        if (const auto* ghost = impl->nativeGhosts.get(index))
-            snapshot.ghostClasses.emplace_back(index, ghost->classId);
-    }
+    snapshot.ghostClasses.reserve(impl->nativeGhosts.size());
+    for (const auto& ghost : impl->nativeGhosts.entries())
+        snapshot.ghostClasses.emplace_back(ghost.index, ghost.classId);
     snapshot.targets.reserve(impl->nativeTargets.size());
     for (const auto& [id, target] : impl->nativeTargets)
         snapshot.targets.push_back(target);
@@ -386,12 +400,15 @@ Connection::ObserverSnapshot Connection::observerSnapshot() const {
 
 bool Connection::seedObserverSnapshot(const ObserverSnapshot& snapshot) {
     if (snapshot.strings.size() > 4096 || snapshot.datablockShapes.size() > 2048 ||
-        snapshot.players.size() > 1024 || snapshot.targets.size() > 512)
+        snapshot.datablocks.size() > 2048 || snapshot.players.size() > 1024 ||
+        snapshot.targets.size() > 512)
         return false;
     for (const auto& [id, value] : snapshot.strings)
         if (id >= 4096 || value.size() > 255) return false;
     for (const auto& [id, value] : snapshot.datablockShapes)
         if (id >= 2048 || value.size() > 1024) return false;
+    for (const auto& [id, value] : snapshot.datablocks)
+        if (id >= 2048 || value.audioFilename.size() > 1024) return false;
     for (const auto& [index, state] : snapshot.players)
         if (index >= 1024) return false;
     for (size_t i = 0; i < snapshot.players.size(); ++i)
@@ -399,6 +416,10 @@ bool Connection::seedObserverSnapshot(const ObserverSnapshot& snapshot) {
             if (snapshot.players[i].first == snapshot.players[j].first) return false;
     for (const auto& [index, classId] : snapshot.ghostClasses)
         if (index >= 1024 || classId >= V12::GhostClassCount) return false;
+    if (snapshot.ghostClasses.size() > 1024) return false;
+    for (size_t i = 0; i < snapshot.ghostClasses.size(); ++i)
+        for (size_t j = i + 1; j < snapshot.ghostClasses.size(); ++j)
+            if (snapshot.ghostClasses[i].first == snapshot.ghostClasses[j].first) return false;
     for (const auto& target : snapshot.targets)
         if (target.targetId >= 512) return false;
 
@@ -411,9 +432,13 @@ bool Connection::seedObserverSnapshot(const ObserverSnapshot& snapshot) {
     impl->nativeGhostDatablocks.clear();
     impl->nativeTargets.clear();
     impl->nativeDatablockShapes = snapshot.datablockShapes;
+    impl->nativeDatablocks = snapshot.datablocks;
     impl->nativeMissionCrc = snapshot.missionCrc;
     impl->nativeCompressionPoint = snapshot.compressionPoint;
+    impl->nativeHasCameraFov = snapshot.hasCameraFov;
+    impl->nativeCameraFov = snapshot.cameraFov;
     impl->nativeControlGhost = snapshot.controlGhost;
+    impl->nativeControlAssigned = snapshot.controlAssigned;
     impl->nativeLastMoveAck = snapshot.lastMoveAck;
     impl->nativePlayerSensorGroup = snapshot.playerSensorGroup;
     impl->nativeMatchStarted = snapshot.matchStarted;
@@ -434,21 +459,20 @@ bool Connection::seedObserverSnapshot(const ObserverSnapshot& snapshot) {
     impl->nativeClientNames = snapshot.clientNames;
     impl->nativeSensorGroupColors = snapshot.sensorGroupColors;
     impl->nativeSensorGroupListenMasks = snapshot.sensorGroupListenMasks;
+    impl->nativeProjectileImpacts.clear();
+    impl->sentNativeEventPackets.clear();
+    impl->pendingNativeEvents.clear();
     for (const auto& [id, value] : snapshot.strings)
         impl->nativeStrings.set(id, value);
     for (const auto& target : snapshot.targets)
         impl->nativeTargets[target.targetId] = target;
-    for (const auto& [index, state] : snapshot.players) {
-        uint16_t classId = 25;
-        for (const auto& [classIndex, listedClass] : snapshot.ghostClasses) {
-            if (classIndex == index) { classId = listedClass; break; }
-        }
+    for (const auto& [index, classId] : snapshot.ghostClasses)
         if (!impl->nativeGhosts.create(index, classId)) return false;
+    for (const auto& [index, state] : snapshot.players) {
+        if (!impl->nativeGhosts.get(index)) return false;
         impl->nativePlayerStates[index] = state;
-    }
-    if (targetCb) {
-        for (const auto& target : snapshot.targets)
-            targetCb(&impl->nativeTargets[target.targetId], target.targetId);
+        if (state.hasDatablock)
+            impl->nativeGhostDatablocks[index] = state.datablockId;
     }
     if (serverMessageCb) {
         if (snapshot.matchStarted) serverMessageCb({"ServerMessage", "MsgMissionStart"});
@@ -497,6 +521,14 @@ bool Connection::seedObserverSnapshot(const ObserverSnapshot& snapshot) {
             ghostCb(update, &impl->nativePlayerStates[index]);
         }
     }
+    // The game callback applies target metadata to the matching live ghost,
+    // so restore ghosts before targets and the control assignment.
+    if (targetCb) {
+        for (const auto& target : snapshot.targets)
+            targetCb(&impl->nativeTargets[target.targetId], target.targetId);
+    }
+    if (targetControlCb && snapshot.controlAssigned)
+        targetControlCb(true, snapshot.controlGhost, false, {}, true);
     return true;
 }
 
@@ -538,6 +570,7 @@ void Connection::update() {
     if (connState >= Connected && impl->lastReceive > 0 &&
         now - impl->lastReceive > 15.0) {
         Console::instance().printf(LogLevel::Warn, "Connection receive timeout");
+        if (connectCb) connectCb(false);
         disconnect();
         return;
     }
@@ -556,7 +589,9 @@ void Connection::update() {
     }
 
     // ── Receive packets ──────────────────────────────────────────
-    uint8_t buf[2048];
+    // Keep one byte of headroom so an oversized UDP datagram is observable
+    // instead of being silently truncated to the native limit.
+    uint8_t buf[V12::MaxPacketDataSize + 1];
     sockaddr_in from{};
     socklen_t fromLen = sizeof(from);
 
@@ -567,6 +602,7 @@ void Connection::update() {
             const auto packet = std::move(impl->injectedObserverPackets.front());
             impl->injectedObserverPackets.pop_front();
             n = (int)packet.size();
+            if (packet.size() > V12::MaxPacketDataSize) continue;
             memcpy(buf, packet.data(), packet.size());
         } else if (impl->sock >= 0) {
             n = recvfrom(impl->sock, buf, sizeof(buf), 0, (sockaddr*)&from, &fromLen);
@@ -574,6 +610,7 @@ void Connection::update() {
         } else {
             break;
         }
+        if ((size_t)n > V12::MaxPacketDataSize) continue;
         if (!injected && (from.sin_addr.s_addr != impl->addr.sin_addr.s_addr ||
             from.sin_port != impl->addr.sin_port)
         )
@@ -678,8 +715,12 @@ void Connection::update() {
                                                      &compressionPoint, nullptr)) {
                         bool endGhosting = false;
                         impl->nativeLastMoveAck = gameState.lastMoveAck;
-                         if (gameState.hasCompressionPoint)
-                             impl->nativeCompressionPoint = gameState.compressionPoint;
+                          if (gameState.hasCompressionPoint)
+                              impl->nativeCompressionPoint = gameState.compressionPoint;
+                          if (gameState.hasCameraFov) {
+                              impl->nativeHasCameraFov = true;
+                              impl->nativeCameraFov = gameState.cameraFov;
+                          }
                          if (!gameState.sensorGroupListenMasks.empty())
                              impl->nativeSensorGroupListenMasks = gameState.sensorGroupListenMasks;
                         if (gameState.controlPresent && !gameState.controlDirty)
@@ -700,12 +741,13 @@ void Connection::update() {
                             if (event.classId == 9 && clientCommandCb)
                                 clientCommandCb(event.arguments);
                              if (event.classId == 9 && !event.arguments.empty() &&
-                                 (event.arguments[0] == "ServerMessage" ||
-                                  !event.arguments[0].empty())) {
-                                 const auto& args = event.arguments;
-                                 const bool wrapped = args[0] == "ServerMessage";
-                                 const size_t base = wrapped ? 1 : 0;
-                                 const std::string& type = args[base];
+                                  (event.arguments[0] == "ServerMessage" ||
+                                   !event.arguments[0].empty())) {
+                                  const auto& args = event.arguments;
+                                  const bool wrapped = args[0] == "ServerMessage";
+                                  const size_t base = wrapped ? 1 : 0;
+                                  if (base >= args.size()) continue;
+                                  const std::string& type = args[base];
                                  const auto value = [&](size_t index) -> const std::string& {
                                      return args[index + base];
                                  };
@@ -800,12 +842,13 @@ void Connection::update() {
                                          impl->nativeClientNames[clientId] = value(1);
                                      }
                                  } else if (type == "MsgClientDrop" && valueCount >= 3) {
-                                     const int clientId = atoi(value(2).c_str());
-                                    impl->nativeClientTargets.erase(clientId);
-                                    impl->nativeClientNames.erase(clientId);
-                                    impl->nativePlayerScores.erase(clientId);
-                                    impl->nativePlayerPings.erase(clientId);
-                                    impl->nativePlayerPacketLoss.erase(clientId);
+                                      const int clientId = atoi(value(2).c_str());
+                                     impl->nativeClientTargets.erase(clientId);
+                                     impl->nativeClientNames.erase(clientId);
+                                     impl->nativeClientTeams.erase(clientId);
+                                     impl->nativePlayerScores.erase(clientId);
+                                     impl->nativePlayerPings.erase(clientId);
+                                     impl->nativePlayerPacketLoss.erase(clientId);
                                  } else if (type == "MsgClientNameChanged" && valueCount >= 4) {
                                      const int clientId = atoi(value(3).c_str());
                                      if (clientId >= 0 && clientId < 1024)
@@ -825,7 +868,7 @@ void Connection::update() {
                                 targetCb(&event.targetInfo, event.targetInfo.targetId);
                             if (event.hasAudio && audioCb)
                                 audioCb(event);
-                            if (event.hasTargetInfo) {
+                             if (event.hasTargetInfo) {
                                 auto& target = impl->nativeTargets[event.targetInfo.targetId];
                                 target.targetId = event.targetInfo.targetId;
                                 if (event.targetInfo.hasName) {
@@ -864,11 +907,30 @@ void Connection::update() {
                                     target.hasVoicePitch = true;
                                     target.voicePitch = event.targetInfo.voicePitch;
                                 }
-                            }
-                            if (event.hasTargetFree && targetCb)
-                                targetCb(nullptr, event.targetFreeId);
-                            if (event.hasTargetFree) {
-                                impl->nativeTargets.erase(event.targetFreeId);
+                             }
+                             if (event.hasTargetTo) {
+                                 if (event.targetToAssign) {
+                                     impl->nativeControlGhost = event.targetToHasTarget
+                                         ? event.targetToId : 0;
+                                     impl->nativeControlAssigned = event.targetToHasTarget;
+                                 }
+                                 if (targetControlCb)
+                                     targetControlCb(event.targetToHasTarget,
+                                         event.targetToHasTarget ? event.targetToId : 0,
+                                         event.targetToHasPosition,
+                                         event.targetToPosition,
+                                         event.targetToAssign);
+                             }
+                             if (event.hasTargetFree && targetCb)
+                                 targetCb(nullptr, event.targetFreeId);
+                             if (event.hasTargetFree) {
+                                if (impl->nativeControlGhost == event.targetFreeId) {
+                                    impl->nativeControlGhost = 0;
+                                    impl->nativeControlAssigned = false;
+                                    if (targetControlCb)
+                                        targetControlCb(false, 0, false, {}, true);
+                                }
+                                 impl->nativeTargets.erase(event.targetFreeId);
                                 for (auto it = impl->nativeClientTargets.begin();
                                      it != impl->nativeClientTargets.end();) {
                                     if (it->second == event.targetFreeId)
@@ -877,15 +939,20 @@ void Connection::update() {
                                         ++it;
                                 }
                             }
-                            if (event.hasMissionCrc && event.missionCrc != impl->nativeMissionCrc) {
+                             if (event.hasMissionCrc && event.missionCrc != impl->nativeMissionCrc) {
                                 // Mission-scoped UI and target state must not cross the CRC boundary.
                                 impl->nativeGhosts.clear();
                                  impl->nativePlayerStates.clear();
                                  impl->pendingNativeStats.clear();
                                 impl->nativeGhostDatablocks.clear();
                                 impl->nativeProjectileImpacts.clear();
-                                impl->nativeTargets.clear();
-                                impl->nativeDatablockShapes.clear();
+                                 impl->nativeTargets.clear();
+                                 impl->nativeControlGhost = 0;
+                                 impl->nativeControlAssigned = false;
+                                 if (targetControlCb)
+                                     targetControlCb(false, 0, false, {}, true);
+                                 impl->nativeDatablockShapes.clear();
+                                 impl->nativeDatablocks.clear();
                                 impl->nativeTeamScores.clear();
                                  impl->nativePlayerScores.clear();
                                  impl->nativePlayerKills.clear();
@@ -895,16 +962,20 @@ void Connection::update() {
                                 impl->nativeClientTargets.clear();
                                 impl->nativeClientTeams.clear();
                                 impl->nativeClientNames.clear();
-                                impl->nativeSensorGroupColors.clear();
-                                impl->nativeLoadInfoLines.clear();
+                                 impl->nativeSensorGroupColors.clear();
+                                 impl->nativeSensorGroupListenMasks.clear();
+                                 impl->nativeLoadInfoLines.clear();
                                 impl->nativeMatchStarted = false;
                                 impl->nativeMatchEnded = false;
-                                impl->nativeClockRemainingMs = 0;
+                                 impl->nativeClockRemainingMs = 0;
+                                 impl->nativeHasCameraFov = false;
+                                 impl->nativeCameraFov = 0;
                                 if (missionCb) missionCb(event.missionCrc);
                                 impl->nativeMissionCrc = event.missionCrc;
                             }
-                            if (event.hasDatablock) {
-                                if (!event.datablockData.shapeFile.empty())
+                              if (event.hasDatablock) {
+                                 impl->nativeDatablocks[event.datablockObject] = event.datablockData;
+                                 if (!event.datablockData.shapeFile.empty())
                                     impl->nativeDatablockShapes[event.datablockObject] =
                                         event.datablockData.shapeFile;
                                 if (datablockCb)
@@ -915,15 +986,25 @@ void Connection::update() {
                                                 event.datablockClassName,
                                                 event.datablockData);
                             }
-                            if (event.hasGhostingMessage && event.ghostMessage == 0) {
+                             if (event.hasGhostingMessage && event.ghostMessage == 0) {
                                 // The server is beginning a fresh world pass.
                                 // Clear the transactional tracker before its
                                 // creates are decoded below.
                                  packetGhosts.clear();
-                                 impl->nativeGhosting = true;
+                                  impl->nativeGhosting = true;
+                                 impl->nativeControlGhost = 0;
+                                 impl->nativeControlAssigned = false;
+                                 if (targetControlCb)
+                                     targetControlCb(false, 0, false, {}, true);
+                                 if (targetCb) {
+                                     for (const auto& [targetId, target] : impl->nativeTargets)
+                                         targetCb(nullptr, targetId);
+                                 }
+                                 impl->nativeTargets.clear();
                                 impl->nativePlayerStates.clear();
-                                impl->nativeGhostDatablocks.clear();
-                                impl->nativeProjectileImpacts.clear();
+                                 impl->nativeGhostDatablocks.clear();
+                                 impl->nativeProjectileImpacts.clear();
+                                 impl->nativeDatablocks.clear();
                                 V12::ClientPacketOptions responseOptions;
                                 responseOptions.events.push_back(
                                     V12::makeGhostingMessageEvent(
@@ -1074,14 +1155,14 @@ void Connection::update() {
             impl->recvSeq = hdr.sequence;
             impl->recvMask = 0;
             impl->haveReceivedSequence = true;
-        } else if (hdr.sequence > impl->recvSeq) {
+        } else if (isNewerWireSequence(hdr.sequence, impl->recvSeq)) {
             const uint32_t diff = hdr.sequence - impl->recvSeq;
             if (diff < 32)
                 impl->recvMask = (impl->recvMask << diff) | (1u << (diff - 1));
             else
                 impl->recvMask = 0;
             impl->recvSeq = hdr.sequence;
-        } else if (hdr.sequence < impl->recvSeq) {
+        } else if (hdr.sequence != impl->recvSeq) {
             const uint32_t diff = impl->recvSeq - hdr.sequence;
             if (diff <= 32)
                 impl->recvMask |= 1u << (diff - 1);
@@ -1181,9 +1262,8 @@ void Connection::update() {
 }
 
 bool Connection::ingestObserverPacket(const uint8_t* data, size_t size) {
-    constexpr size_t MaxObserverPacket = 2048;
     constexpr size_t MaxQueuedObserverPackets = 256;
-    if (!data || size == 0 || size > MaxObserverPacket ||
+    if (!data || size == 0 || size > V12::MaxPacketDataSize ||
         connState < Connected || impl->injectedObserverPackets.size() >= MaxQueuedObserverPackets)
         return false;
     impl->injectedObserverPackets.emplace_back(data, data + size);
@@ -1297,7 +1377,10 @@ struct NetworkManager::Impl {
 };
 
 NetworkManager::NetworkManager() : impl(new Impl) {}
-NetworkManager::~NetworkManager() { delete impl; }
+NetworkManager::~NetworkManager() {
+    shutdown();
+    delete impl;
+}
 
 bool NetworkManager::init() {
     Console::instance().printf(LogLevel::Info, "Network initialized");
@@ -1497,6 +1580,9 @@ void NetworkManager::destroyConnection(Connection* conn) {
 }
 
 void NetworkManager::queryLanServers() {
+    Console::instance().setVariable("serverQuerySource", "lan");
+    Console::instance().setVariable("serverQueryDemoMode",
+        Engine::instance().demoMode ? "1" : "0");
     Console::instance().printf(LogLevel::Info, "Querying LAN servers...");
     int sock = impl->ensureBroadcastSock();
     if (sock < 0) return;
@@ -1537,8 +1623,13 @@ void NetworkManager::queryLanServers() {
 }
 
 void NetworkManager::queryMasterServer(const char* masterUrl) {
-    const std::string configured = masterUrl && *masterUrl
-        ? masterUrl : "http://master.tribesnext.com/list";
+    if (!masterUrl || !*masterUrl) {
+        Console::instance().printf(LogLevel::Warn,
+            "Master query skipped: no master URL configured; falling back to LAN discovery");
+        queryLanServers();
+        return;
+    }
+    const std::string configured = masterUrl;
     std::string url = configured;
     if (url.find("http://") != 0 && url.find("https://") != 0)
         url = "http://" + url;
@@ -1546,6 +1637,9 @@ void NetworkManager::queryMasterServer(const char* masterUrl) {
         url += "/list";
 
     Console::instance().printf(LogLevel::Info, "Querying master: %s", url.c_str());
+    Console::instance().setVariable("serverQuerySource", "master");
+    Console::instance().setVariable("serverQueryDemoMode",
+        Engine::instance().demoMode ? "1" : "0");
     impl->querying = false;
     impl->queryTargets.clear();
     impl->queryAttempts = 0;
@@ -1553,6 +1647,8 @@ void NetworkManager::queryMasterServer(const char* masterUrl) {
     CURL* curl = curl_easy_init();
     if (!curl) {
         Console::instance().printf(LogLevel::Error, "Master query: libcurl unavailable");
+        Console::instance().printf(LogLevel::Warn, "Falling back to LAN discovery");
+        queryLanServers();
         return;
     }
     std::string body;
@@ -1574,6 +1670,8 @@ void NetworkManager::queryMasterServer(const char* masterUrl) {
                 "Master query failed with HTTP status %ld", httpStatus);
         else
         Console::instance().printf(LogLevel::Warn, "Master query failed: %s", curl_easy_strerror(result));
+        Console::instance().printf(LogLevel::Warn, "Falling back to LAN discovery");
+        queryLanServers();
         return;
     }
 
@@ -1591,10 +1689,13 @@ void NetworkManager::queryMasterServer(const char* masterUrl) {
     std::istringstream lines(body);
     std::string line;
     const auto queryPacket = V12::buildGameQuery(V12::OobGamePingRequest, 0, 0);
+    std::set<std::string> dispatchedAddresses;
     while (std::getline(lines, line) && queried < 512) {
         std::string host;
         uint16_t port = 0;
         if (!TorchMaster::parseAddressLine(line, host, port)) continue;
+        const std::string addressKey = host + ":" + std::to_string(port);
+        if (!dispatchedAddresses.insert(addressKey).second) continue;
         addrinfo hints{};
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_DGRAM;

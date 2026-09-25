@@ -512,14 +512,24 @@ var Parser = class {
   }
   parse() {
     const stmts = [];
+    let consecutiveErrors = 0;
     while (!this.isAtEnd()) {
       try {
         const s = this.decl();
         if (s) stmts.push(s);
+        consecutiveErrors = 0;
       } catch (e) {
-        while (!this.isAtEnd()) {
-          if (this.check(62 /* RBracket */) || this.check(2 /* Function */) || this.check(1 /* Package */) || this.check(75 /* Eof */)) break;
-          this.advance();
+        consecutiveErrors++;
+        if (consecutiveErrors > 3) {
+          while (!this.isAtEnd()) {
+            if (this.check(2 /* Function */) || this.check(75 /* Eof */)) break;
+            this.advance();
+          }
+        } else {
+          while (!this.isAtEnd()) {
+            if (this.check(62 /* RBracket */) || this.check(2 /* Function */) || this.check(75 /* Eof */)) break;
+            this.advance();
+          }
         }
         if (!this.isAtEnd()) this.advance();
       }
@@ -551,11 +561,11 @@ var Parser = class {
   }
   functionDecl() {
     if (!this.match(2 /* Function */)) return null;
-    const fnName = this.consume(53 /* Label */, "Expected function name");
+    let fnName = this.consume(53 /* Label */, "Expected function name");
     let namespace = null;
     if (this.match(66 /* DoubleColon */)) {
       namespace = fnName;
-      this.consume(53 /* Label */, "Expected function name after ::");
+      fnName = this.consume(53 /* Label */, "Expected function name after ::");
     }
     this.consume(59 /* LParen */, "Expected '(' after function name");
     const args2 = [];
@@ -2090,8 +2100,8 @@ var Compiler = class {
     if (!tagName || !(tagName in this.ops.values)) return this.ops.invalid;
     return this.ops.values[tagName];
   }
-  compile(code2) {
-    const scanner = new Scanner(code2);
+  compile(code) {
+    const scanner = new Scanner(code);
     const tokens = scanner.scanTokens();
     const parser = new Parser(tokens);
     const ast = parser.parse();
@@ -2829,17 +2839,17 @@ var Compiler = class {
   }
 };
 
-// cli.ts
+// ../../../tmp/torch-turd-cli.ts
+var import_node_fs = require("node:fs");
 var args = process.argv.slice(2);
 if (args.length < 1) {
-  console.error("Usage: node cli.js <source.cs> [output.dso]");
+  console.error("Usage: node torque-dso.js <source.cs> [output.dso] [target]");
   process.exit(1);
 }
-var fs = require("fs");
 var sourcePath = args[0];
-var outPath = args[1] || sourcePath + ".dso";
-var code = fs.readFileSync(sourcePath, "utf-8");
-var compiler = new Compiler("TGE10");
-var dso = compiler.compile(code);
-fs.writeFileSync(outPath, Buffer.from(dso));
-console.log(`Compiled ${sourcePath} -> ${outPath} (${dso.length} bytes)`);
+var outputPath = args[1] || sourcePath + ".dso";
+var target = args[2] || "Tribes2";
+var compiler = new Compiler(target);
+var dso = compiler.compile((0, import_node_fs.readFileSync)(sourcePath, "utf8"));
+(0, import_node_fs.writeFileSync)(outputPath, Buffer.from(dso));
+console.log(`Compiled ${sourcePath} -> ${outputPath} (${dso.length} bytes)`);

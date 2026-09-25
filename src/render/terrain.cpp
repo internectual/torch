@@ -4,6 +4,8 @@
 #include "render/dts_animation.h"
 #include "render/dif_loader.h"
 #include "render/material_parity.h"
+#include "render/fog_math.h"
+#include "game/animation_parity.h"
 #include "core/engine.h"
 #include "stb_image.h"
 #include <GL/glew.h>
@@ -13,7 +15,10 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <climits>
 #include <algorithm>
+
+static constexpr int kMaxFontTextureDimension = 4096;
 
 float TerrainBlock::sampleHeight(float wx, float wz) const {
     if (heights.empty() || size < 2 || squareSize <= 0.0f) return 0.0f;
@@ -161,6 +166,11 @@ void TerrainBlock::bakeLightmap() {
         if (parsed > 0) LM = parsed;
     }
     std::vector<uint8_t> lm(LM * LM);
+    std::vector<uint8_t> unshadowed(LM * LM);
+    std::vector<uint8_t> visible(LM * LM);
+    const auto terrainCoord = [this, LM](int texel) {
+        return ((float)texel + 0.5f) * (float)size / (float)LM;
+    };
     auto hAt = [&](float col, float row) -> float {
         int cc = (int)std::floor(col);
         int rr = (int)std::floor(row);
@@ -184,7 +194,7 @@ void TerrainBlock::bakeLightmap() {
     // Ray-march self-shadow
     auto rayShadow = [&](float sc, float sr, float sh) -> float {
         float dCol = L.x / squareSize;       // col ~ world +X (east)
-        float dRow = L.z / squareSize;       // row ~ world +Z (south = increasing row after Y-up flip)
+        float dRow = -L.z / squareSize;      // rows increase toward world -Z
         float dHeight = L.y;                 // height ~ world +Y
         float hz = std::sqrt(dCol*dCol + dRow*dRow);
         if (hz < 0.0001f) return 1.0f;
@@ -202,21 +212,71 @@ void TerrainBlock::bakeLightmap() {
     const float eps = 0.5f;
     for (int lr = 0; lr < LM; lr++) {
         for (int lc = 0; lc < LM; lc++) {
-            float col = lc / 2.0f + 0.25f;
-            float row = lr / 2.0f + 0.25f;
-            float h = hAt(col, row);
+            float col = terrainCoord(lc);
+            float row = terrainCoord(lr);
             float hL = hAt(col - eps, row), hR = hAt(col + eps, row);
             float hU = hAt(col, row - eps), hD = hAt(col, row + eps);
             float dCol = (hR - hL) / (2 * eps);
             float dRow = (hD - hU) / (2 * eps);
-            Point3F N{-dRow, squareSize, -dCol}; // world normal (row~X, col~Z)
+            Point3F N{-dCol, squareSize, dRow}; // world normal (col~X, row~-Z)
             float nl = std::sqrt(N.x*N.x + N.y*N.y + N.z*N.z);
             if (nl > 0) { N.x/=nl; N.y/=nl; N.z/=nl; }
             float ndl = N.x*L.x + N.y*L.y + N.z*L.z;
             if (ndl < 0) ndl = 0;
-            float shadow = 1.0f;
-            if (ndl > 0) shadow = rayShadow(col, row, h);
-            lm[lr * LM + lc] = (uint8_t)(ndl * shadow * 255);
+            const size_t index = (size_t)lr * LM + lc;
+            unshadowed[index] = (uint8_t)(ndl * 255.0f);
+            lm[index] = unshadowed[index];
+        }
+    }
+
+    // Match Torque's two-pass terrain lighting: first classify each texel with
+    // one geometric visibility sample, then supersample only texels that
+    // straddle a shadow boundary. This avoids shadow-map acne and removes the
+    // stair-stepped edges produced by one binary sample per lightmap texel.
+    for (int lr = 0; lr < LM; lr++) {
+        for (int lc = 0; lc < LM; lc++) {
+            const size_t index = (size_t)lr * LM + lc;
+            if (unshadowed[index] == 0) continue;
+            const float col = (lc + 0.5f) * (float)size / (float)LM;
+            const float row = (lr + 0.5f) * (float)size / (float)LM;
+            visible[index] = rayShadow(col, row, hAt(col, row)) > 0.0f ? 1 : 0;
+            if (!visible[index]) lm[index] = 0;
+        }
+    }
+
+    constexpr int edgeSamples = 4;
+    auto isShadowEdge = [&](int lc, int lr) {
+        const size_t index = (size_t)lr * LM + lc;
+        for (int dr = -1; dr <= 1; dr++) {
+            const int nr = lr + dr;
+            if (nr < 0 || nr >= LM) continue;
+            for (int dc = -1; dc <= 1; dc++) {
+                const int nc = lc + dc;
+                if (nc < 0 || nc >= LM) continue;
+                const size_t neighbor = (size_t)nr * LM + nc;
+                if (unshadowed[neighbor] != 0 && visible[neighbor] != visible[index])
+                    return true;
+            }
+        }
+        return false;
+    };
+
+    for (int lr = 0; lr < LM; lr++) {
+        for (int lc = 0; lc < LM; lc++) {
+            const size_t index = (size_t)lr * LM + lc;
+            if (unshadowed[index] == 0 || !isShadowEdge(lc, lr)) continue;
+            int litSamples = 0;
+            for (int sr = 0; sr < edgeSamples; sr++) {
+                for (int sc = 0; sc < edgeSamples; sc++) {
+                    const float col = (lc + (sc + 0.5f) / edgeSamples) *
+                                      (float)size / (float)LM;
+                    const float row = (lr + (sr + 0.5f) / edgeSamples) *
+                                      (float)size / (float)LM;
+                    litSamples += rayShadow(col, row, hAt(col, row)) > 0.0f ? 1 : 0;
+                }
+            }
+            lm[index] = (uint8_t)((unshadowed[index] * litSamples) /
+                                  (edgeSamples * edgeSamples));
         }
     }
     // Store as an RGBA texture (R channel holds intensity)
@@ -449,10 +509,13 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
     const auto& authoredVolumes = Engine::instance().game().world().fogVolumes;
     for (int i = 0; i < 3; ++i) {
         ColorF packed{};
-        if (i < (int)authoredVolumes.size() && authoredVolumes[i].visibleDistance > 0.0f) {
+        if (i < (int)authoredVolumes.size() && fogVolumeIsUsable({
+                authoredVolumes[i].visibleDistance, authoredVolumes[i].minHeight,
+                authoredVolumes[i].maxHeight, authoredVolumes[i].percentage})) {
             const auto& volume = authoredVolumes[i];
             packed = {volume.visibleDistance > 0.0f ? 1.0f / volume.visibleDistance : 0.0f,
-                      volume.minHeight, volume.maxHeight, 0.0f};
+                      volume.minHeight, volume.maxHeight,
+                      std::clamp(volume.percentage, 0.0f, 1.0f)};
         }
         shader->setUniform((std::string("uFogVolume") + std::to_string(i)).c_str(), packed);
     }
@@ -543,8 +606,9 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
 #include "render/font8x8.h"
 
 bool Font::loadGFT(const uint8_t* data, size_t size) {
+    destroy();
     // V12 GFT format: version(u32), fontHeight(u32), baseLine(u32), charCount(u32)
-    if (size < 16) return false;
+    if (!data || size < 16) return false;
     uint32_t ver, fontHeight, baseLineVal, count;
     memcpy(&ver, data, 4); memcpy(&fontHeight, data+4, 4); memcpy(&baseLineVal, data+8, 4); memcpy(&count, data+12, 4);
     (void)ver;
@@ -580,6 +644,11 @@ bool Font::loadGFT(const uint8_t* data, size_t size) {
     // Skip bitmapCount (4 bytes) - always 1. PNG data follows immediately.
     const uint8_t* pngData = data + pngStartOff;
     size_t pngAvail = size - pngStartOff;
+    if (pngAvail > (size_t)INT_MAX) return false;
+    int infoW = 0, infoH = 0, infoChannels = 0;
+    if (!stbi_info_from_memory(pngData, (int)pngAvail, &infoW, &infoH, &infoChannels) ||
+        infoW <= 0 || infoH <= 0 || infoW > kMaxFontTextureDimension ||
+        infoH > kMaxFontTextureDimension) return false;
     int tw, th, tc;
     // GFT atlases are single-channel grayscale where intensity == coverage.
     // Decode as 1 channel and expand to RGBA (white glyph, alpha = coverage)
@@ -678,6 +747,12 @@ bool Font::loadDefault(int size) {
 
 bool Font::load(const uint8_t* data, size_t size) {
     // Load a bitmap font texture
+    destroy();
+    if (!data || size > (size_t)INT_MAX) return false;
+    int infoW = 0, infoH = 0, infoChannels = 0;
+    if (!stbi_info_from_memory(data, (int)size, &infoW, &infoH, &infoChannels) ||
+        infoW <= 0 || infoH <= 0 || infoW > kMaxFontTextureDimension ||
+        infoH > kMaxFontTextureDimension) return false;
     int w, h, channels;
     unsigned char* pixels = stbi_load_from_memory(data, (int)size, &w, &h, &channels, 4);
     if (!pixels) return false;
@@ -708,6 +783,28 @@ bool Font::load(const uint8_t* data, size_t size) {
 
     loaded = true;
     return true;
+}
+
+void Font::destroy() {
+    if (SDL_GL_GetCurrentContext()) {
+        if (texture) glDeleteTextures(1, &texture);
+        if (fontVAO) glDeleteVertexArrays(1, &fontVAO);
+        if (fontVBO) glDeleteBuffers(1, &fontVBO);
+        if (fontEBO) glDeleteBuffers(1, &fontEBO);
+    }
+    texture = fontVAO = fontVBO = fontEBO = 0;
+    loaded = false;
+}
+
+void DTSShape::destroy() {
+    for (auto& mesh : meshes) mesh.destroy();
+    for (auto& texture : materialTextures) texture.destroy();
+    for (auto& texture : lightmaps) texture.destroy();
+    meshes.clear();
+    materialTextures.clear();
+    lightmaps.clear();
+    cloakTextureOverride = nullptr;
+    loaded = false;
 }
 
 void Font::render(const char* text, float x, float y, const ColorF& color, float scale, bool exactColor, int maxChars) {
@@ -768,6 +865,11 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
         if (ctr >= maxChars) break;
         ctr++;
         unsigned char c = (unsigned char)*p;
+        // Torque script strings can retain the carriage return from CRLF
+        // files.  It is a line terminator, not a glyph; rendering it produces
+        // a visible box and advances the text unexpectedly on Windows-authored
+        // HUD and menu labels.
+        if (c == '\r') continue;
         if (c == '\n') {
             penX = x;
             penY += lh;
@@ -835,12 +937,17 @@ void Font::render(const char* text, float x, float y, const ColorF& color, float
 }
 
 Point2F Font::measure(const char* text, float scale) {
-    Point2F result;
+    // Null text is used by optional HUD labels; it must measure as empty
+    // rather than returning indeterminate coordinates.
+    Point2F result{0.0f, 0.0f};
     if (!text) return result;
     scale *= defaultScale;
     float lineWidth = 0.0f;
     int lines = 1;
     for (const char* p = text; *p; ++p) {
+        // Ignore the CR half of CRLF text, matching render() and preventing a
+        // Windows-authored label from measuring wider than it is drawn.
+        if (*p == '\r') continue;
         if (*p == '\n') {
             result.x = std::max(result.x, lineWidth);
             lineWidth = 0.0f;
@@ -902,6 +1009,9 @@ void Sky::load(const std::vector<std::string>& faces) {
     int faceW[kMaxFaces] = {0}, faceH[kMaxFaces] = {0};
     bool faceLoaded[kMaxFaces] = {false};
     int maxSize = 0;
+    GLint maxCubeSize = 0;
+    glGetIntegerv(GL_MAX_CUBE_MAP_TEXTURE_SIZE, &maxCubeSize);
+    const int maxFaceSize = std::min(4096, maxCubeSize > 0 ? maxCubeSize : 4096);
 
     for (int i = 0; i < kMaxFaces && i < (int)faces.size(); i++) {
         auto data = Engine::instance().fs().read(faces[i].c_str());
@@ -922,6 +1032,10 @@ void Sky::load(const std::vector<std::string>& faces) {
                 pixels = stbi_load_from_memory(data.data(), (int)data.size(), &w, &h, &ch, 4);
             }
             if (pixels) {
+                if (w <= 0 || h <= 0 || w > maxFaceSize || h > maxFaceSize) {
+                    if (!isBM8) stbi_image_free(pixels);
+                    continue;
+                }
                 faceW[i] = w; faceH[i] = h;
                 facePixels[i].assign(pixels, pixels + (size_t)w * h * 4);
                 faceLoaded[i] = true;
@@ -939,11 +1053,14 @@ void Sky::load(const std::vector<std::string>& faces) {
                 "Sky: required native sky face failed to load: %s",
                 i < (int)faces.size() ? faces[i].c_str() : "(missing DML face)");
             loaded = false;
+            glDeleteTextures(1, &cubemap);
+            cubemap = 0;
             return;
         }
         // Upscale small faces (e.g. the 4x4 down face) to cubemap-complete size.
         if (faceW[i] != size || faceH[i] != size) {
-            std::vector<uint8_t> scaled(size * size * 4);
+            const size_t scaledBytes = (size_t)size * (size_t)size * 4u;
+            std::vector<uint8_t> scaled(scaledBytes);
             for (int y = 0; y < size; y++) {
                 int sy = std::min((int)((int64_t)y * faceH[i] / size), faceH[i] - 1);
                 for (int x = 0; x < size; x++) {
@@ -1007,6 +1124,9 @@ void Sky::render(const MatrixF& view, const MatrixF& proj, float cameraHeight) {
     // a per-pixel world-space ray that is independent of FOV and aspect ratio.
     MatrixF invVP = (proj * view).inverse();
     shader->setUniform("uInvViewProj", invVP);
+    // Recover the camera position from the view matrix so sky sampling stays
+    // rotationally stable when the camera moves across a large mission.
+    shader->setUniform("uCameraPos", view.inverse().transform({0.0f, 0.0f, 0.0f}));
 
     // The native renderer still draws the solid sky when a requested DML face
     // is unavailable; do not leave the frame clear-color exposed.
@@ -1022,7 +1142,8 @@ void Sky::render(const MatrixF& view, const MatrixF& proj, float cameraHeight) {
     int firstVolume = -1;
     for (size_t i = 0; i < fogVolumes.size(); ++i) {
         const auto& volume = fogVolumes[i];
-        if (volume.visibleDistance > 0.0f) {
+        if (fogVolumeIsUsable({volume.visibleDistance, volume.minHeight,
+                               volume.maxHeight, volume.percentage})) {
             if (firstVolume < 0) firstVolume = (int)i;
             lastVolume = (int)i;
             fogTop = std::max(fogTop, volume.maxHeight);
@@ -1035,7 +1156,8 @@ void Sky::render(const MatrixF& view, const MatrixF& proj, float cameraHeight) {
         // below it instead of selecting only the camera's current slab.
         for (int i = 0; i < lastVolume; ++i) {
             const auto& volume = fogVolumes[i];
-            if (volume.visibleDistance <= 0.0f ||
+            if (!fogVolumeIsUsable({volume.visibleDistance, volume.minHeight,
+                                    volume.maxHeight, volume.percentage}) ||
                 volume.visibleDistance >= fogVisibility) continue;
             const float depthInVolume = cameraHeight < volume.minHeight
                 ? volume.maxHeight - volume.minHeight
@@ -1144,10 +1266,11 @@ void Sky::render(const MatrixF& view, const MatrixF& proj, float cameraHeight) {
                 // Scroll UVs over time
                 float scrollU = time * cloud.scrollSpeed * 0.001f;
 
-                // Position the cloud dome above the camera
-                MatrixF model;
-                float height = 50.0f + cloud.height * 150.0f;
-                model.setTranslation(Point3F(0, height, 0));
+             // Position the cloud dome above the camera
+             MatrixF model;
+             float height = 50.0f + cloud.height * 150.0f;
+             const Point3F cameraPosition = view.inverse().transform({0, 0, 0});
+             model.setTranslation({cameraPosition.x, height, cameraPosition.z});
 
                 MatrixF mvp = proj * view * model;
                 cloudShader->setUniform("uMVP", mvp);
@@ -1619,17 +1742,20 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     std::vector<MatrixF> nodeWorld = defaultTransforms;
     if (overrides && numOverrides > 0) {
         std::vector<MatrixF> nodeLocal = defaultLocalTransforms;
+        std::vector<const NodeOverride*> overrideByNode(nodeWorld.size(), nullptr);
         for (int i = 0; i < numOverrides; i++) {
             const int32_t nodeIndex = overrides[i].nodeIndex;
-            if (nodeIndex < 0 || nodeIndex >= (int)nodeWorld.size()) continue;
-            const int32_t parentIndex = nodes[nodeIndex].parentIndex;
-            if (parentIndex >= 0 && parentIndex < (int)nodeWorld.size())
-                nodeLocal[nodeIndex] = defaultTransforms[parentIndex].inverse() * overrides[i].transform;
-            else
-                nodeLocal[nodeIndex] = overrides[i].transform;
+            if (nodeIndex >= 0 && nodeIndex < (int)nodeWorld.size())
+                overrideByNode[nodeIndex] = &overrides[i];
         }
         for (int32_t i = 0; i < (int32_t)nodeWorld.size(); i++) {
             const int32_t parentIndex = nodes[i].parentIndex;
+            if (overrideByNode[i]) {
+                if (parentIndex >= 0 && parentIndex < (int32_t)nodeWorld.size())
+                    nodeLocal[i] = nodeWorld[parentIndex].inverse() * overrideByNode[i]->transform;
+                else
+                    nodeLocal[i] = overrideByNode[i]->transform;
+            }
             if (parentIndex >= 0 && parentIndex < (int32_t)nodeWorld.size())
                 nodeWorld[i] = nodeWorld[parentIndex] * nodeLocal[i];
             else
@@ -1905,16 +2031,9 @@ void DTSShape::renderAnimation(const char* animName, float time,
 
     const Animation* objectAnim = anim;
 
-    // Wrap time for looping animations
-    float t = time;
-    if (anim->duration > 0.0f) {
-        if (anim->looping) {
-            t = fmodf(t, anim->duration);
-            if (t < 0.0f) t += anim->duration;
-        } else {
-            t = std::max(0.0f, std::min(t, anim->duration));
-        }
-    }
+    // Keep renderer sampling consistent with the native animation clock. A
+    // reverse presentation delta must not wrap a looping sequence to its end.
+    const float t = animationSampleTime(time, anim->duration, anim->looping);
 
     int32_t numNodes = (int32_t)nodes.size();
     if (numNodes <= 0) { render(0); return; }

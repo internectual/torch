@@ -20,7 +20,10 @@ struct Console::Impl {
 };
 
 Console::Console() : impl(new Impl) {}
-Console::~Console() { delete impl; }
+Console::~Console() {
+    if (impl->logFile) fclose(impl->logFile);
+    delete impl;
+}
 
 Console& Console::instance() {
     static Console c;
@@ -130,7 +133,15 @@ void Console::list(const char* pattern) {
 
 void Console::setLogFile(const char* path) {
     if (impl->logFile) fclose(impl->logFile);
+    impl->logFile = nullptr;
+    if (!path || !*path) return;
     impl->logFile = fopen(path, "w");
+    if (!impl->logFile) return;
+    // Startup diagnostics are emitted before the output directory is known.
+    // Replay the bounded in-memory log so console.log is a complete run log.
+    for (const auto& line : impl->log)
+        fprintf(impl->logFile, "%s\n", line.c_str());
+    fflush(impl->logFile);
 }
 
 void Console::execute(const char* script) {
@@ -142,6 +153,11 @@ void Console::execute(const char* script) {
     std::string cmd;
     while (*s && *s != '(' && *s != '=' && *s != ' ' && *s != '\t')
         cmd += *s++;
+
+    // Torque accepts optional whitespace between a variable name and its
+    // assignment operator.  Keep the separator out of the value, but do not
+    // mistake `name = value` for a zero-argument script call.
+    while (*s == ' ' || *s == '\t') s++;
 
     if (*s == '=') {
         // Variable assignment

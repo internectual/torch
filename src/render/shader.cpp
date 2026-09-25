@@ -104,12 +104,12 @@ float authoredVolumeFog(vec3 point) {
         if (volume.x <= 0.0 || volume.z <= volume.y) continue;
         float low = max(min(uCamPos.y, point.y), volume.y);
         float high = min(max(uCamPos.y, point.y), volume.z);
-        float vertical = high - low;
-        float distance = length(point - uCamPos);
-        if (vertical > 0.0 && abs(point.y - uCamPos.y) > 0.0001)
-            result += distance * vertical / abs(point.y - uCamPos.y) * volume.x;
-        else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z)
-            result += distance * volume.x;
+            float vertical = high - low;
+            float distance = length(point - uCamPos);
+            if (vertical > 0.0 && abs(point.y - uCamPos.y) > 0.0001)
+                result += distance * vertical / abs(point.y - uCamPos.y) * volume.x * volume.w;
+            else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z)
+            result += distance * volume.x * volume.w;
     }
     return min(result, 1.0);
 }
@@ -454,9 +454,9 @@ void main() {
             float high = min(max(uCamPos.y, vWorldPos.y), volume.z);
             float vertical = high - low;
             if (vertical > 0.0 && abs(vWorldPos.y - uCamPos.y) > 0.0001)
-                volumeFog += dist * vertical / abs(vWorldPos.y - uCamPos.y) * volume.x;
+                volumeFog += dist * vertical / abs(vWorldPos.y - uCamPos.y) * volume.x * volume.w;
             else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z)
-                volumeFog += dist * volume.x;
+                volumeFog += dist * volume.x * volume.w;
         }
         float haze = uFogStart >= 0.0 && uFogEnd > uFogStart
             ? clamp((dist - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0)
@@ -472,6 +472,7 @@ static const char* skyVert = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 uniform mat4 uInvViewProj;
+uniform vec3 uCameraPos;
 out vec3 vWorldDir;
 
 void main() {
@@ -480,7 +481,9 @@ void main() {
     // vertex through the inverse view-projection to recover a world-space ray,
     // which is interpolated across the screen and sampled as a cube direction.
     vec4 p = uInvViewProj * vec4(aPos.xy, 1.0, 1.0);
-    vWorldDir = p.xyz / p.w;
+    // The inverse matrix returns a world-space point on the far plane.  A
+    // cubemap needs the view ray, not that point relative to world origin.
+    vWorldDir = p.xyz / p.w - uCameraPos;
     gl_Position = vec4(aPos.xy, 1.0, 1.0);
 }
 )";
@@ -678,9 +681,9 @@ void main() {
             float high = min(max(uCamPos.y, vWorldPos.y), volume.z);
             float vertical = high - low;
             if (vertical > 0.0 && abs(vWorldPos.y - uCamPos.y) > 0.0001)
-                volumeFog += dist * vertical / abs(vWorldPos.y - uCamPos.y) * volume.x;
+                volumeFog += dist * vertical / abs(vWorldPos.y - uCamPos.y) * volume.x * volume.w;
             else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z)
-                volumeFog += dist * volume.x;
+                volumeFog += dist * volume.x * volume.w;
         }
         float haze = uFogStart >= 0.0 && uFogEnd > uFogStart
             ? clamp((dist - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0)

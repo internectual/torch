@@ -41,7 +41,7 @@ static float readF32(const uint8_t*& ptr, size_t& rem) {
 }
 
 // Sanity cap on attacker-controlled element counts to prevent bad_alloc / hangs.
-static const uint32_t kMaxDIFCount = 1u << 20; // 1M elements per array
+static const uint32_t kMaxDIFCount = 1u << 16; // bounded elements per array
 static const uint32_t kMaxDetailLevels = 64;
 static inline uint32_t capU32(uint32_t v) { return v > kMaxDIFCount ? kMaxDIFCount : v; }
 
@@ -59,22 +59,10 @@ static void stripToTriangles(const std::vector<uint32_t>& windVerts,
     uint32_t numPoints = (uint32_t)windVerts.size();
     if (numPoints < 3) return;
 
-    uint32_t last = 2;
-    while (last < numPoints) {
-        // First triangle: (last-2, last-1, last)
-        outIndices.push_back(baseIndex + windVerts[last - 2]);
-        outIndices.push_back(baseIndex + windVerts[last - 1]);
-        outIndices.push_back(baseIndex + windVerts[last - 0]);
-        last++;
-
-        if (last == numPoints)
-            break;
-
-        // Second triangle: (last-1, last-2, last) - alternating to preserve CCW winding
-        outIndices.push_back(baseIndex + windVerts[last - 1]);
-        outIndices.push_back(baseIndex + windVerts[last - 2]);
-        outIndices.push_back(baseIndex + windVerts[last - 0]);
-        last++;
+    for (uint32_t i = 2; i < numPoints; ++i) {
+        outIndices.push_back(baseIndex + windVerts[i - 2]);
+        outIndices.push_back(baseIndex + windVerts[i % 2 ? i - 1 : i]);
+        outIndices.push_back(baseIndex + windVerts[i % 2 ? i : i - 1]);
     }
 }
 
@@ -855,10 +843,12 @@ static bool interiorToMeshes(DIFInterior& interior,
             std::vector<uint32_t> windVerts;
             for (uint32_t j = 0; j < surf.windingCount && (surf.windingStart + j) < interior.windings.size(); j++) {
                 uint32_t ptIdx = interior.windings[surf.windingStart + j];
-                if (ptIdx * 3 + 2 < interior.points.size()) {
-                    float px = interior.points[ptIdx * 3];
-                    float py = interior.points[ptIdx * 3 + 1];
-                    float pz = interior.points[ptIdx * 3 + 2];
+                const size_t pointOffset = (size_t)ptIdx * 3;
+                if (pointOffset <= interior.points.size() &&
+                    interior.points.size() - pointOffset >= 3) {
+                    float px = interior.points[pointOffset];
+                    float py = interior.points[pointOffset + 1];
+                    float pz = interior.points[pointOffset + 2];
                     Point3F pos = {px, py, pz};
                     Point2F uv = genUV(surf.texGenIndex, pos);
                     Point2F uv2 = {
@@ -966,13 +956,22 @@ static bool interiorToMeshes(DIFInterior& interior,
                 auto& surf = interior.surfaces[surfIdx];
                 if (surf.windingCount < 3) continue;
                 std::vector<uint32_t> collVerts;
-                for (uint32_t k = 0; k < surf.windingCount && (surf.windingStart + k) < interior.windings.size(); k++) {
-                    uint32_t ptIdx = interior.windings[surf.windingStart + k];
-                    if (ptIdx * 3 + 2 < interior.points.size()) {
+                std::vector<uint32_t> order;
+                order.push_back(0);
+                for (uint32_t k = 1; k < surf.windingCount; k += 2) order.push_back(k);
+                for (uint32_t k = (surf.windingCount - 1) & ~1u; k > 0; k -= 2) order.push_back(k);
+                for (uint32_t k : order) {
+                    if (k >= 32 || (surf.fanMask & (uint32_t(1) << k)) == 0) continue;
+                    const uint32_t windingIndex = surf.windingStart + k;
+                    if (windingIndex >= interior.windings.size()) continue;
+                    uint32_t ptIdx = interior.windings[windingIndex];
+                    const size_t pointOffset = (size_t)ptIdx * 3;
+                    if (pointOffset <= interior.points.size() &&
+                        interior.points.size() - pointOffset >= 3) {
                         uint32_t vi = (uint32_t)outCollVerts->size() / 3;
-                        outCollVerts->push_back(interior.points[ptIdx * 3]);
-                        outCollVerts->push_back(interior.points[ptIdx * 3 + 1]);
-                        outCollVerts->push_back(interior.points[ptIdx * 3 + 2]);
+                        outCollVerts->push_back(interior.points[pointOffset]);
+                        outCollVerts->push_back(interior.points[pointOffset + 1]);
+                        outCollVerts->push_back(interior.points[pointOffset + 2]);
                         collVerts.push_back(vi);
                     }
                 }
@@ -1101,10 +1100,12 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
                 uint32_t windingIndex = triFan.windingStart + i;
                 if (windingIndex >= interiors[0].windings.size()) continue;
                 uint32_t point = interiors[0].windings[windingIndex];
-                if (point * 3 + 2 >= interiors[0].points.size()) continue;
-                retained.vertices.push_back({interiors[0].points[point * 3],
-                                              interiors[0].points[point * 3 + 1],
-                                              interiors[0].points[point * 3 + 2]});
+                const size_t pointOffset = (size_t)point * 3;
+                if (pointOffset > interiors[0].points.size() ||
+                    interiors[0].points.size() - pointOffset < 3) continue;
+                retained.vertices.push_back({interiors[0].points[pointOffset],
+                                              interiors[0].points[pointOffset + 1],
+                                              interiors[0].points[pointOffset + 2]});
             }
         }
         if (retained.vertices.size() >= 3)

@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cerrno>
+#include <cmath>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -51,6 +52,28 @@ static bool sameBlocks(const std::vector<DemoBlock>& left,
 int main(int argc, char** argv) {
     CHECK(argc == 2);
 
+    // A recorded neutral view must reset a previous camera direction. The
+    // playback path must reject malformed floats without rejecting zero.
+    CHECK(demoMoveOrientationValid(0.0f, 0.0f));
+    CHECK(!demoMoveOrientationValid(NAN, 0.0f));
+    CHECK(!demoMoveOrientationValid(0.0f, INFINITY));
+
+    CHECK(T2Demo::playbackBlockDuration(10.0f, 100) == 0.1f);
+    CHECK(T2Demo::playbackTargetBlock(0.0f, 10.0f, 100) == 0);
+    CHECK(T2Demo::playbackTargetBlock(10.0f, 10.0f, 100) == 100);
+    CHECK(T2Demo::playbackTargetBlock(NAN, 10.0f, 100) == 0);
+    CHECK(T2Demo::playbackTargetBlock(1.0f, INFINITY, 100) == 0);
+    CHECK(T2Demo::playbackBlockDuration(INFINITY, 100) == 0.032f);
+    CHECK(T2Demo::playbackBlockTime(50, NAN, 100) == 0.0f);
+    CHECK(T2Demo::playbackBlockTime(25, 10.0f, 100) == 2.5f);
+    CHECK(T2Demo::playbackProgress(-1.0f, 10.0f) == 0.0f);
+    CHECK(T2Demo::playbackProgress(15.0f, 10.0f) == 1.0f);
+    CHECK(T2Demo::playbackProgress(1.0f, 0.0f) == 0.0f);
+    CHECK(T2Demo::playbackProgress(NAN, 10.0f) == 0.0f);
+    CHECK(T2Demo::playbackProgress(1.0f, INFINITY) == 0.0f);
+    CHECK(T2Demo::formatPlaybackClock(65.9f) == "01:05");
+    CHECK(T2Demo::formatPlaybackClock(3661.0f) == "1:01:01");
+
     errno = 0;
     std::FILE* recording = std::fopen(argv[1], "rb");
     if (!recording && (errno == ENOENT || errno == ENOTDIR)) {
@@ -67,6 +90,11 @@ int main(int argc, char** argv) {
     CHECK(parser.loadFile(argv[1]));
     const int blockCount = parser.getBlockCount();
     CHECK(blockCount > 8);
+    // Parse the complete supported recording before exercising seek/snapshot
+    // state. This covers packet, ghost, mission, and effect event paths.
+    CHECK(parser.seekToBlock(blockCount));
+    CHECK(parser.getBlockCursor() == blockCount);
+    CHECK(parser.seekToBlock(0));
     const std::string initialMission = parser.currentMission();
     CHECK(!parser.getInitialBlock().missionName.empty());
     for (unsigned char c : parser.getInitialBlock().missionName)
@@ -100,6 +128,9 @@ int main(int argc, char** argv) {
     CHECK(parser.getVehicleHud().vehicleType == "Bomber");
     parser.handleHudRemoteCommand("showVehicleGauges", {"showVehicleGauges", "Shrike", "0"});
     CHECK(parser.getVehicleHud().dashboardVisible);
+    CHECK(parser.getVehicleHud().vehicleType == "Shrike");
+    parser.handleHudRemoteCommand("hideVehicleGauges", {"hideVehicleGauges"});
+    CHECK(!parser.getVehicleHud().dashboardVisible);
     CHECK(parser.getVehicleHud().vehicleType == "Shrike");
 
     CHECK(parser.processBlocks(3) == 3);
@@ -149,10 +180,14 @@ int main(int argc, char** argv) {
 
     GhostTracker customGhosts;
     customGhosts.createGhost(1, 76, "Class76");
+    customGhosts.createGhost(9, 76, "Class76");
+    customGhosts.createGhost(3, 76, "Class76");
     const GhostEntry* customGhost = customGhosts.getGhost(1);
     CHECK(customGhost != nullptr);
     CHECK(customGhost->classId == 76);
     CHECK(customGhost->className == "Class76");
+    const auto customIndices = customGhosts.getAllIndices();
+    CHECK((customIndices == std::vector<int>{1, 3, 9}));
 
     return 0;
 }

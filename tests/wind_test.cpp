@@ -1,6 +1,7 @@
 #include "game/wind.h"
 #include <cassert>
 #include <cmath>
+#include <limits>
 
 static bool close(float a, float b) { return std::fabs(a - b) < 0.00001f; }
 
@@ -13,5 +14,12 @@ int main() {
     setTorchWindVelocity({});
     const Point3F zero = windAcceleration(-1.0f);
     assert(close(zero.x, 0.0f) && close(zero.y, 0.0f) && close(zero.z, 0.0f));
+    setTorchWindVelocity({3.0f, -2.0f, 4.0f});
+    const Point3F malformed = windAcceleration(std::numeric_limits<float>::quiet_NaN());
+    assert(close(malformed.x, 0.0f) && close(malformed.y, 0.0f) &&
+           close(malformed.z, 0.0f));
+    const Point3F overflowing = windAcceleration(std::numeric_limits<float>::max());
+    assert(close(overflowing.x, 0.0f) && close(overflowing.y, 0.0f) &&
+           close(overflowing.z, 0.0f));
     return 0;
 }

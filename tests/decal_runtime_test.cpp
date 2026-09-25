@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <limits>
 
 static bool close(float a, float b) { return std::fabs(a - b) < 0.0001f; }
 
@@ -20,8 +21,16 @@ int main() {
 
     assert(decalTextureFrame({0.1f, 0.2f}, 2, 0.15f, 1.0f, false, 0) == 1);
     assert(decalTextureFrame({}, 4, 0.0f, 1.0f, true, 5) == 1);
+    // Randomized decals keep their selected frame for their full lifetime;
+    // they do not snap back to frame zero on the first render after spawn.
+    assert(decalTextureFrame({}, 4, 0.5f, 1.0f, true, 5) == 1);
     assert(close(decalAlpha(0.75f, 1.0f, 250), 1.0f));
     assert(close(decalAlpha(0.875f, 1.0f, 250), 0.5f));
     assert(close(decalAlpha(1.0f, 1.0f, 250), 0.0f));
+    // A startup timestamp must not turn an otherwise visible decal into a
+    // NaN-alpha vertex.
+    assert(close(decalAlpha(std::numeric_limits<float>::quiet_NaN(), 1.0f, 250), 1.0f));
+    assert(close(decalAlpha(std::numeric_limits<float>::infinity(), 1.0f, 250), 0.0f));
+    assert(close(decalAlpha(0.0f, std::numeric_limits<float>::quiet_NaN(), 250), 1.0f));
     return 0;
 }

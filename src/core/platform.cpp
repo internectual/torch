@@ -1,4 +1,5 @@
 #include "core/platform.h"
+#include "core/input_parity.h"
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <cstdio>
@@ -59,6 +60,7 @@ bool Platform::init(const PlatformConfig& config) {
 
     impl->running = true;
     running = true;
+    mouseEnabled = true;
     return true;
 }
 
@@ -71,6 +73,7 @@ void Platform::shutdown() {
     SDL_Quit();
     impl->running = false;
     running = false;
+    mouseEnabled = false;
 }
 
 bool Platform::processEvents() {
@@ -105,11 +108,13 @@ bool Platform::processEvents() {
                 }
                 break;
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                if (!mouseEnabled) break;
                 inputState.mouseX = e.button.x;
                 inputState.mouseY = e.button.y;
                 if (e.button.button > 0 && e.button.button < 8) inputState.mouseButtons[e.button.button] = true;
                 break;
             case SDL_EVENT_MOUSE_BUTTON_UP:
+                if (!mouseEnabled) break;
                 inputState.mouseX = e.button.x;
                 inputState.mouseY = e.button.y;
                 if (e.button.button > 0 && e.button.button < 8) {
@@ -118,15 +123,21 @@ bool Platform::processEvents() {
                 }
                 break;
             case SDL_EVENT_MOUSE_MOTION:
+                if (!mouseEnabled) break;
                 inputState.mouseDeltaX += e.motion.xrel;
                 inputState.mouseDeltaY += e.motion.yrel;
                 inputState.mouseX = e.motion.x;
                 inputState.mouseY = e.motion.y;
                 break;
             case SDL_EVENT_MOUSE_WHEEL:
+                if (!mouseEnabled) break;
                 inputState.mouseX = e.wheel.mouse_x;
                 inputState.mouseY = e.wheel.mouse_y;
-                inputState.mouseWheel += (int32_t)e.wheel.y;
+                // SDL3 reports natural-scrolling devices as flipped. Convert
+                // that back to the physical wheel direction expected by the
+                // Torque input map, so weapon cycling stays consistent.
+                inputState.mouseWheel += mouseWheelDelta(
+                    e.wheel.y, e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED);
                 break;
             case SDL_EVENT_WINDOW_FOCUS_LOST:
                 // SDL does not guarantee key-up events while the window is
@@ -189,6 +200,21 @@ bool Platform::setVideoMode(int32_t width, int32_t height, bool fullscreen, bool
     return true;
 }
 void Platform::showMouse(bool show) { if (show) SDL_ShowCursor(); else SDL_HideCursor(); }
+bool Platform::enableMouse() {
+    if (!impl->window) return false;
+    mouseEnabled = true;
+    return true;
+}
+bool Platform::disableMouse() {
+    if (!impl->window) return false;
+    mouseEnabled = false;
+    for (bool& down : inputState.mouseButtons) down = false;
+    for (bool& consumed : inputState.consumedMouse) consumed = false;
+    inputState.mouseDeltaX = 0;
+    inputState.mouseDeltaY = 0;
+    inputState.mouseWheel = 0;
+    return true;
+}
 void Platform::setMousePos(int32_t x, int32_t y) { SDL_WarpMouseInWindow(impl->window, x, y); }
 void Platform::setRelativeMouse(bool relative) { SDL_SetWindowRelativeMouseMode(impl->window, relative); }
 

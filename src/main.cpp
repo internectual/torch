@@ -6,6 +6,7 @@ int main(int argc, char* argv[]) {
     auto& engine = Engine::instance();
 
     if (!engine.init(argc, argv)) {
+        engine.shutdown();
         fprintf(stderr, "Failed to initialize engine\n");
         return 1;
     }

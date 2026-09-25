@@ -12,17 +12,20 @@
 extern "C" unsigned char* stbi_write_png_to_mem(const unsigned char* pixels, int stride_bytes, int x, int y, int n, int* out_len);
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <algorithm>
 #include "render/texture_frames.h"
 #include "render/render_order.h"
 #include <cctype>
 #include <cstdlib>
+#include <climits>
 #include <cstring>
 
 struct Renderer::Impl {
     SDL_Window* window{};
     SDL_GLContext glContext{};
     std::unordered_map<std::string, Texture*> textures;
+    std::unordered_set<std::string> missingTextures;
     std::vector<Shader*> shaders;
     bool glewInit = false;
 
@@ -95,7 +98,14 @@ bool Renderer::init(void* window) {
     return true;
 }
 
-void Renderer::initShadowMap(int32_t size) {
+bool Renderer::initShadowMap(int32_t size) {
+    GLint maxTextureSize = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
+    if (size < 256 || (maxTextureSize > 0 && size > maxTextureSize)) {
+        Console::instance().printf(LogLevel::Warn, "Rejected shadow map size %d (max %d)",
+                                   size, maxTextureSize);
+        return false;
+    }
     if (shadowFbo) {
         glDeleteFramebuffers(1, &shadowFbo);
         glDeleteTextures(1, &shadowDepthTex);
@@ -134,6 +144,7 @@ void Renderer::initShadowMap(int32_t size) {
         0.0f, 0.0f, 0.0f, 1.0f
     };
     memcpy((void*)shadowBiasMatrix.data(), bias, sizeof(bias));
+    return shadowSize != 0;
 }
 
 void Renderer::beginShadowPass(const Point3F& lightDir, const Point3F& sceneCenter, float sceneRadius) {
@@ -172,10 +183,35 @@ void Renderer::endShadowPass() {
 }
 
 void Renderer::shutdown() {
+    if (!initialized && !impl->glewInit) return;
+    spriteBatchFlush();
+    if (shadowFbo) glDeleteFramebuffers(1, &shadowFbo);
+    if (shadowDepthTex) glDeleteTextures(1, &shadowDepthTex);
+    shadowFbo = shadowDepthTex = 0;
+    shadowSize = 0;
+    if (spriteVAO) glDeleteVertexArrays(1, &spriteVAO);
+    if (spriteVBO) glDeleteBuffers(1, &spriteVBO);
+    if (spriteEBO) glDeleteBuffers(1, &spriteEBO);
+    if (lineVAO) glDeleteVertexArrays(1, &lineVAO);
+    if (lineVBO) glDeleteBuffers(1, &lineVBO);
+    spriteVAO = spriteVBO = spriteEBO = lineVAO = lineVBO = 0;
+    for (auto& [key, font] : fontCache) {
+        if (font) { font->destroy(); delete font; }
+    }
+    fontCache.clear();
+    defaultFont = nullptr;
+    for (auto* shader : impl->shaders) {
+        if (shader) { shader->destroy(); delete shader; }
+    }
+    impl->shaders.clear();
     ShaderManager::destroy();
-    for (auto& [k, v] : impl->textures) delete v;
+    for (auto& [k, v] : impl->textures) {
+        if (v) { v->destroy(); delete v; }
+    }
     impl->textures.clear();
+    impl->missingTextures.clear();
     initialized = false;
+    impl->glewInit = false;
 }
 
 void Renderer::beginFrame(const ColorF& clearColor) {
@@ -336,7 +372,7 @@ void Renderer::drawLineStrip(const std::vector<Point3F>& points, const ColorF& c
     ls->bind();
     ls->setUniform("uProjection", projection);
     ls->setUniform("uView", view);
-    ls->setUniform("uColor", Point3F{color.r, color.g, color.b});
+    ls->setUniform("uColor", color);
 
     size_t vertCount = points.size();
     std::vector<float> verts;
@@ -600,7 +636,10 @@ void Renderer::drawOrientedSpriteRect(const Point3F& pos, float width, float hei
     Point3F up{toCamera.x - normal.x * projection, toCamera.y - normal.y * projection,
                toCamera.z - normal.z * projection};
     length = std::sqrt(up.x * up.x + up.y * up.y + up.z * up.z);
-    if (length < 0.0001f) { up = {0, 1, 0}; length = 1.0f; }
+    if (length < 0.0001f) {
+        up = std::fabs(normal.y) < 0.9f ? Point3F{0, 1, 0} : Point3F{1, 0, 0};
+        length = 1.0f;
+    }
     up.x /= length; up.y /= length; up.z /= length;
     Point3F right{normal.y * up.z - normal.z * up.y,
                   normal.z * up.x - normal.x * up.z,
@@ -681,6 +720,7 @@ void Renderer::drawShockwaveRing(const Point3F& center, float radius, float widt
 
 Texture* Renderer::loadTexture(const char* path) {
     if (!path || !*path) return nullptr;
+    if (impl->missingTextures.contains(path)) return nullptr;
     auto it = impl->textures.find(path);
     if (it != impl->textures.end()) {
         // Do not retain failed/no-context loads as permanent asset handles.
@@ -694,9 +734,16 @@ Texture* Renderer::loadTexture(const char* path) {
 
     std::vector<uint8_t> data;
     std::string resolvedPath;
-    if (!Engine::instance().fs().readTextureFile(path, data, &resolvedPath))
+    if (!Engine::instance().fs().readTextureFile(path, data, &resolvedPath)) {
+        impl->missingTextures.insert(path);
+        Console::instance().printf(LogLevel::Warn,
+            "Texture asset missing: '%s' (requested by renderer)", path);
         return nullptr;
+    }
     if (data.empty()) {
+        impl->missingTextures.insert(path);
+        Console::instance().printf(LogLevel::Warn,
+            "Texture asset empty: '%s' (resolved as '%s')", path, resolvedPath.c_str());
         return nullptr;
     }
 
@@ -706,6 +753,10 @@ Texture* Renderer::loadTexture(const char* path) {
     if (extension.ends_with(".bm8")) tex->loadBM8(data.data(), data.size());
     else tex->load(data.data(), data.size());
     if (!tex->loaded) {
+        impl->missingTextures.insert(path);
+        Console::instance().printf(LogLevel::Error,
+            "Texture asset decode failed: '%s' (resolved as '%s')",
+            path, resolvedPath.c_str());
         delete tex;
         return nullptr;
     }
@@ -713,6 +764,10 @@ Texture* Renderer::loadTexture(const char* path) {
     stats.textures++;
     Console::instance().printf(LogLevel::Debug, "Texture loaded: %s (%dx%d)", path, tex->width, tex->height);
     return tex;
+}
+
+void Renderer::clearMissingTextureCache() {
+    impl->missingTextures.clear();
 }
 
 bool Renderer::loadTextureFrames(const char* path, std::vector<uint32_t>& frames,
@@ -752,6 +807,7 @@ bool Renderer::loadTextureFrames(const char* path, std::vector<uint32_t>& frames
         const std::string directory = slash == std::string::npos
             ? std::string{} : iflPath.substr(0, slash + 1);
         for (const auto& source : parseTextureFrameSources(content)) {
+            if (frames.size() >= MaxTextureFrames) break;
             const std::string& frameName = source.name;
             const float duration = source.duration;
             std::vector<std::string> frameCandidates;
@@ -769,7 +825,9 @@ bool Renderer::loadTextureFrames(const char* path, std::vector<uint32_t>& frames
         }
         return !frames.empty();
     };
+    bool iflFound = false;
     for (const auto& iflPath : iflCandidates) {
+        if (Engine::instance().fs().fileExists(iflPath.c_str())) iflFound = true;
         if (readIfl(iflPath)) return true;
         frames.clear();
         durations.clear();
@@ -784,11 +842,19 @@ bool Renderer::loadTextureFrames(const char* path, std::vector<uint32_t>& frames
         for (const auto& image : candidates) {
             if (Texture* texture = loadTexture(image.c_str()); texture && texture->loaded) {
                 frames.push_back(texture->id);
+                if (iflFound) {
+                    Console::instance().printf(LogLevel::Debug,
+                        "Texture animation fallback: '%s' using still image '%s'",
+                        path, image.c_str());
+                }
                 return true;
             }
         }
     }
 
+    Console::instance().printf(LogLevel::Warn,
+        "Texture animation asset unavailable: '%s' (no usable IFL frame or image)",
+        path);
     return false;
 }
 
@@ -873,9 +939,11 @@ void MeshData::render() {
 }
 
 void MeshData::destroy() {
-    if (vao) glDeleteVertexArrays(1, &vao);
-    if (vbo) glDeleteBuffers(1, &vbo);
-    if (ebo) glDeleteBuffers(1, &ebo);
+    if (SDL_GL_GetCurrentContext()) {
+        if (vao) glDeleteVertexArrays(1, &vao);
+        if (vbo) glDeleteBuffers(1, &vbo);
+        if (ebo) glDeleteBuffers(1, &ebo);
+    }
     vao = vbo = ebo = 0;
     uploaded = false;
 }
@@ -909,6 +977,7 @@ void MeshData::setFrame(int32_t frame) {
 
 // Texture
 void Texture::load(const uint8_t* data, size_t size) {
+    destroy();
     int w, h, channels;
     unsigned char* pixels = stbi_load_from_memory(data, (int)size, &w, &h, &channels, 4);
     if (!pixels) {
@@ -960,7 +1029,7 @@ bool Texture::decodeBM8(const uint8_t* data, size_t size,
     //   U32 mipLevelOffsets[numMipLevels]
     //   GPalette: U32 version + U32 type + ColorI[256] (1024 bytes RGBA)
     //   U8 pixelData[byteSize]
-    if (size < 20) return false;
+    if (!data || size < 20) return false;
     uint32_t byteSize, w, h, bytesPerPixel, numMipLevels;
     memcpy(&byteSize, data + 0, 4);
     memcpy(&w, data + 4, 4);
@@ -970,16 +1039,16 @@ bool Texture::decodeBM8(const uint8_t* data, size_t size,
     if (w == 0 || h == 0 || w > 4096 || h > 4096) return false;
     if (bytesPerPixel != 1) return false; // only palettized supported
 
-    uint32_t mipOffsetsStart = 20;
-    uint32_t mipDataStart = mipOffsetsStart + numMipLevels * 4;
-    if (mipDataStart + 1032 > size) return false; // need palette (version+type+colors)
+    if ((size_t)numMipLevels > (size - 20) / 4) return false;
+    const size_t mipDataStart = 20u + (size_t)numMipLevels * 4u;
+    if (mipDataStart > size || size - mipDataStart < 1032) return false;
 
     // Skip GPalette version (U32) and type (U32)
-    uint32_t paletteStart = mipDataStart + 8;
-    if (paletteStart + 1024 > size) return false;
+    const size_t paletteStart = mipDataStart + 8;
+    if (paletteStart > size || size - paletteStart < 1024) return false;
 
-    uint32_t pixelOffset = paletteStart + 1024;
-    if (pixelOffset + byteSize > size) return false;
+    const size_t pixelOffset = paletteStart + 1024;
+    if (pixelOffset > size || (size_t)byteSize > size - pixelOffset) return false;
 
     uint8_t palette[1024];
     memcpy(palette, data + paletteStart, 1024);
@@ -996,11 +1065,11 @@ bool Texture::decodeBM8(const uint8_t* data, size_t size,
             palette[i * 4 + 3] = 255;
     }
 
-    uint32_t pixelCount = w * h;
+    size_t pixelCount = (size_t)w * (size_t)h;
     if (pixelCount > byteSize) pixelCount = byteSize;
 
     outPixels.resize(pixelCount * 4);
-    for (uint32_t i = 0; i < pixelCount; i++) {
+    for (size_t i = 0; i < pixelCount; i++) {
         uint8_t idx = data[pixelOffset + i];
         outPixels[i * 4 + 0] = palette[idx * 4 + 0];
         outPixels[i * 4 + 1] = palette[idx * 4 + 1];
@@ -1013,6 +1082,7 @@ bool Texture::decodeBM8(const uint8_t* data, size_t size,
 }
 
 bool Texture::loadBM8(const uint8_t* data, size_t size) {
+    destroy();
     std::vector<uint8_t> rgba;
     int32_t w, h;
     if (!decodeBM8(data, size, rgba, w, h)) return false;
@@ -1058,12 +1128,18 @@ void Texture::bind(int32_t unit) {
 }
 
 void Texture::destroy() {
-    if (id) glDeleteTextures(1, &id);
+    if (id && SDL_GL_GetCurrentContext()) glDeleteTextures(1, &id);
+    id = 0;
+    width = height = format = 0;
     loaded = false;
+    hasAlpha = false;
+    alphaZeroRatio = 0.0f;
+    nearZeroAlphaRatio = 0.0f;
 }
 
 // Shader
 bool Shader::load(const char* vertSrc, const char* fragSrc) {
+    if (id) destroy();
     auto compile = [](GLenum type, const char* src) -> uint32_t {
         uint32_t shader = glCreateShader(type);
         glShaderSource(shader, 1, &src, nullptr);
@@ -1152,12 +1228,31 @@ void Shader::setUniform(const char* name, const ColorF& v) {
     glUniform4f(getUniformLoc(name), v.r, v.g, v.b, v.a);
 }
 
-void Shader::destroy() { if (id) glDeleteProgram(id); loaded = false; }
+Shader::~Shader() { destroy(); }
+void Shader::destroy() {
+    if (id && SDL_GL_GetCurrentContext()) glDeleteProgram(id);
+    id = 0;
+    loaded = false;
+    uniformCache.clear();
+}
 
 Font* Renderer::getFont(const char* name, int size) {
+    if (!name) return defaultFont;
     std::string key = std::string(name) + "_" + std::to_string(size);
     auto it = fontCache.find(key);
     if (it != fontCache.end()) return it->second;
+    Font* closest = nullptr;
+    int closestDistance = INT_MAX;
+    for (const auto& [cachedKey, font] : fontCache) {
+        if (!font || !font->loaded || font->fontName != name) continue;
+        const int distance = std::abs(font->fontSize - size);
+        if (distance < closestDistance ||
+            (distance == closestDistance && closest && font->fontSize < closest->fontSize)) {
+            closest = font;
+            closestDistance = distance;
+        }
+    }
+    if (closest) return closest;
     return defaultFont;
 }
 
@@ -1229,8 +1324,8 @@ bool Renderer::screenshot(const char* path, const char* metaData) {
 
     // Insert tEXt chunk
     uint8_t lenBytes[4] = {
-        (dataLen >> 24) & 0xFF, (dataLen >> 16) & 0xFF,
-        (dataLen >> 8) & 0xFF, dataLen & 0xFF
+        (uint8_t)(dataLen >> 24), (uint8_t)(dataLen >> 16),
+        (uint8_t)(dataLen >> 8), (uint8_t)dataLen
     };
     out.insert(out.end(), lenBytes, lenBytes + 4);
     const char tEXt[] = "tEXt";
@@ -1240,8 +1335,8 @@ bool Renderer::screenshot(const char* path, const char* metaData) {
     crc = crc32(crc, reinterpret_cast<const uint8_t*>(tEXt), 4);
     crc = crc32(crc, reinterpret_cast<const uint8_t*>(chunkData.data()), dataLen);
     uint8_t crcBytes[4] = {
-        (crc >> 24) & 0xFF, (crc >> 16) & 0xFF,
-        (crc >> 8) & 0xFF, crc & 0xFF
+        (uint8_t)(crc >> 24), (uint8_t)(crc >> 16),
+        (uint8_t)(crc >> 8), (uint8_t)crc
     };
     out.insert(out.end(), crcBytes, crcBytes + 4);
 

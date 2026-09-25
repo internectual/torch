@@ -53,6 +53,12 @@ cmake --build build -j$(nproc)
 ./build/torch_server -p 28000 -m test
 ```
 
+Use `-data <dir>` to select the untouched Tribes 2 installation, `-mod <path>`
+to select its active mod, and `-output <dir>` to select writable runtime state
+and logs. The default output directory is `~/.torch`. Precedence is built-in
+defaults, `torch.cfg`, then command-line options; later console/script writes
+are runtime-only overrides.
+
 Dynamic projectile and explosion lights use the forward renderer's bounded
 eight-light point collection and are applied to terrain and shape/interior
 materials alongside existing sun, shadow, fog, normal-map, and lightmap terms.
@@ -63,7 +69,19 @@ light contribution when the collection is unavailable or full.
 Options:
 - `-p <port>`  – Server port (default: 28000)
 - `-m <name>`  – Mission to load (e.g. `test`, `deathmatch`)
+- `-data <dir>` – Tribes 2 data directory
+- `-output <dir>` – Runtime output directory; `console.log` is written here
 - `-h`         – Help
+
+The client accepts `-demo`, `--demo`, and `-playdemo` as equivalent demo launch
+aliases for recording playback. `-demo-mode` is a separate explicit demo-build
+mode; it does not start playback. `-mapper <map>` loads a mission without gameplay for free-fly
+inspection; `-mapper-camera <n>` selects an authored observer camera.
+`-exec <file>` (or `-e`) executes a TorqueScript file after GUI startup.
+`-quit-after-frames <n>` provides a bounded run for automation; `0` means no
+frame limit. `-debug` enables debug logging. The client writes `console.log`
+under the output directory and emits `TORCH-RUN-START` on stderr when the main
+loop begins.
 
 ## Console Commands
 
@@ -100,10 +118,32 @@ otherwise they return `0`. Water state is cleared when a mission is replaced.
 |---------|-------------|
 | `connect <host> [port]` | Connect to a server |
 | `watchServer <host:port>` | Connect as an anonymous native UDP observer |
+| `loadMission <name>` | Load a local mission |
+| `startServer [port] [mission]` | Start a local server |
 | `playdemo <path>` | Play a .rec demo file |
 | `seekDemoBlock <index>` | Seek the active demo to a block index |
 | `testshape <path>` | Load a test DTS/GLB shape |
 | `quit` | Exit |
+
+Explicit demo build mode is enabled with `-demo-mode`. It does not mean
+recording playback: `isDemo()` is true only for this client build path, while
+`isDemoPlaying()` is true only while a `.rec` recording is playing. The
+`-demo`, `--demo`, and `-playdemo` options select playback and do not enable
+`isDemo()`.
+
+Demo configuration names and defaults are:
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `demoMasterServer` | empty | Master URL used only in `-demo-mode`; empty selects LAN discovery |
+| `demoAllowConnect` | `0` | Reject player connects in `-demo-mode` |
+| `demoAllowWatch` | `1` | Permit observer connects in `-demo-mode` |
+
+Set these in `torch.cfg`; `-demo-master-server <url>` overrides
+`demoMasterServer`. An explicit master URL passed by the server browser still
+wins. Normal builds use the retail master setting and allow both connection
+types. The script variables `serverQuerySource` (`master` or `lan`) and
+`serverQueryDemoMode` expose browser query metadata.
 
 ## Controls (default)
 | Key | Action |

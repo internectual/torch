@@ -3,6 +3,7 @@
 #include "render/gui_renderer.h"
 #include "core/console.h"
 #include "core/engine.h"
+#include "fs/path_policy.h"
 #include <sys/stat.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -26,20 +27,67 @@ static std::string toLower(const std::string& s) {
     return r;
 }
 
+static bool sameName(const std::string& a, const std::string& b) {
+    return toLower(a) == toLower(b);
+}
+
+static void syncPackageConsole(const std::vector<std::string>& packages) {
+    const int oldCount = Console::instance().getIntVariable("$TotalNumberOfPackages", 0);
+    for (int i = 0; i < oldCount; ++i)
+        Console::instance().setVariable(("$Package[" + std::to_string(i) + "]").c_str(), "");
+    for (size_t i = 0; i < packages.size(); ++i)
+        Console::instance().setVariable(("$Package[" + std::to_string(i) + "]").c_str(), packages[i].c_str());
+    Console::instance().setVariable("$TotalNumberOfPackages", std::to_string(packages.size()).c_str());
+}
+
+static VMValue* findField(ScriptObject* object, const std::string& name) {
+    if (!object) return nullptr;
+    for (auto& [field, value] : object->fields)
+        if (sameName(field, name)) return &value;
+    return nullptr;
+}
+
 static bool isCompilableExt(const std::string& p) {
     auto ext = p.size() > 3 ? p.substr(p.size() - 3) : std::string();
     return ext == ".cs" || ext == ".gui" || ext == ".mis";
+}
+
+static std::string normalizedScriptPath(const std::string& path) {
+    return std::filesystem::path(path).lexically_normal().generic_string();
+}
+
+static bool readU32Bounded(const std::vector<uint8_t>& data, size_t& offset, uint32_t& value) {
+    if (offset > data.size() || data.size() - offset < sizeof(uint32_t)) return false;
+    value = (uint32_t)data[offset] | ((uint32_t)data[offset + 1] << 8) |
+            ((uint32_t)data[offset + 2] << 16) | ((uint32_t)data[offset + 3] << 24);
+    offset += sizeof(uint32_t);
+    return true;
+}
+
+static bool readStringBounded(const std::vector<uint8_t>& data, size_t& offset,
+                              std::string& value) {
+    uint32_t length = 0;
+    if (!readU32Bounded(data, offset, length) || length > data.size() - offset) return false;
+    value.assign((const char*)data.data() + offset, length);
+    offset += length;
+    return true;
 }
 
 struct TorqueScript::Impl {
     TorqueScript* outer;
     std::unordered_map<std::string, std::function<VMValue(const std::vector<VMValue>&)>> natives;
     std::unordered_map<std::string, TSFunc> functions;
+    std::unordered_map<std::string, std::unordered_map<std::string, TSFunc>> packageFunctions;
+    std::vector<std::string> activePackages;
+    std::vector<std::string> callPackages;
+    std::string parsingPackage;
     std::unordered_map<std::string, VMValue> globals;
     std::unordered_map<std::string, std::vector<std::string>> messageCallbacks;
     ScriptScheduler scheduler;
     TSLocals locals;
     bool initializing = false;
+    bool errorOccurred = false;
+    bool resolveParentNext = false;
 
     // Exec state
     const char* srcPtr{};
@@ -54,10 +102,13 @@ struct TorqueScript::Impl {
     bool returning = false;
     bool breaking = false;
     bool continuing = false;
+    bool evaluating = true;
     VMValue returnValue;
     int loopDepth = 0;
 
     std::set<std::string> loadingFiles; // prevent circular includes
+    std::vector<std::string> loadingStack;
+    std::unordered_map<std::string, std::set<std::string>> fileDependencies;
     std::string lastVarName;
     std::string lastFieldObj;  // for %obj.field = value assignment write-back
     std::string lastFieldName;
@@ -109,6 +160,8 @@ struct TorqueScript::Impl {
         argv.push_back(const_cast<char*>(compilerScript.c_str()));
         argv.push_back(const_cast<char*>(tmpPath.c_str()));
         argv.push_back(const_cast<char*>(dsoFullPath.c_str()));
+        static std::string target = "Tribes2";
+        argv.push_back(const_cast<char*>(target.c_str()));
         argv.push_back(nullptr);
         pid_t pid = 0;
         const int spawnResult = posix_spawnp(&pid, nodeBin.c_str(), nullptr, nullptr,
@@ -134,7 +187,8 @@ struct TorqueScript::Impl {
         //
         // In the future, an external compiler (like turd) should produce real DSO bytecode.
         // For now, we write a custom "source DSO" marker that the loader recognizes.
-        FILE* f = fopen(dsoPath.c_str(), "wb");
+        const std::string tempPath = dsoPath + ".tmp";
+        FILE* f = fopen(tempPath.c_str(), "wb");
         if (!f) return;
         // Write header: version 0x54534F02 ("TSO\1" — Torque Source Object)
         uint32_t version = 0x54534F02;
@@ -162,14 +216,15 @@ struct TorqueScript::Impl {
             fwrite(&bodyLen, 4, 1, f);
             fwrite(fn.body.c_str(), 1, bodyLen, f);
         }
-        fclose(f);
+        if (fclose(f) != 0 || rename(tempPath.c_str(), dsoPath.c_str()) != 0)
+            unlink(tempPath.c_str());
     }
 
     void writeBackVar(VMValue val) {
-        if (!lastFieldObj.empty() && !lastFieldName.empty()) {
+         if (evaluating && !lastFieldObj.empty() && !lastFieldName.empty()) {
             auto* obj = ScriptEngine::instance().findObject(lastFieldObj.c_str());
             if (obj) {
-                obj->fields[lastFieldName] = val;
+                ScriptEngine::instance().setObjectField(obj, lastFieldName, val);
                 syncGuiField(lastFieldObj, lastFieldName, val);
             }
         } else if (!lastVarName.empty()) {
@@ -225,13 +280,104 @@ struct TorqueScript::Impl {
     void skipStatement();
 
     void error(const std::string& msg);
+
+    static bool sourceHasPackage(const std::string& source) {
+        size_t pos = 0;
+        while ((pos = source.find("package", pos)) != std::string::npos) {
+            const bool left = pos == 0 || !std::isalnum((unsigned char)source[pos - 1]);
+            const size_t end = pos + 7;
+            const bool right = end == source.size() || !std::isalnum((unsigned char)source[end]);
+            if (left && right) return true;
+            pos = end;
+        }
+        return false;
+    }
+
+    void recordDependency(const std::string& path) {
+        if (!loadingStack.empty() && loadingStack.back() != path)
+            fileDependencies[loadingStack.back()].insert(path);
+    }
+
+    bool readDependencyManifest(const std::string& path, std::set<std::string>& deps) const {
+        std::ifstream file(path + ".deps");
+        if (!file) return false;
+        std::string dep;
+        int64_t stamp = 0;
+        while (file >> dep >> stamp) {
+            if (Engine::instance().fs().fileModifyTime(dep.c_str()) != stamp) return false;
+            deps.insert(dep);
+        }
+        return file.eof();
+    }
+
+    void writeDependencyManifest(const std::string& path, const std::set<std::string>& deps) {
+        const std::string temp = path + ".deps.tmp";
+        std::ofstream file(temp, std::ios::trunc);
+        if (!file) return;
+        for (const auto& dep : deps)
+            file << dep << '\t' << Engine::instance().fs().fileModifyTime(dep.c_str()) << '\n';
+        file.close();
+        if (!file) { unlink(temp.c_str()); return; }
+        if (rename(temp.c_str(), (path + ".deps").c_str()) != 0) unlink(temp.c_str());
+    }
 };
 
 TorqueScript::TorqueScript() : impl(new Impl) { impl->outer = this; }
 TorqueScript::~TorqueScript() { delete impl; }
 
+bool TorqueScript::writeCompileDependencyManifest(const std::string& dsoPath,
+                                                  const std::string& sourcePath) {
+    if (dsoPath.empty() || sourcePath.empty()) return false;
+    std::set<std::string> dependencies{sourcePath};
+    impl->writeDependencyManifest(dsoPath, dependencies);
+    return std::filesystem::exists(dsoPath + ".deps");
+}
+
+void TorqueScript::unloadFile(const std::string& path) {
+    for (auto it = impl->functions.begin(); it != impl->functions.end();) {
+        if (it->second.filename == path) it = impl->functions.erase(it);
+        else ++it;
+    }
+    for (auto package = impl->packageFunctions.begin(); package != impl->packageFunctions.end();) {
+        auto& functions = package->second;
+        for (auto it = functions.begin(); it != functions.end();) {
+            if (it->second.filename == path) it = functions.erase(it);
+            else ++it;
+        }
+        if (functions.empty()) {
+            impl->activePackages.erase(
+                std::remove(impl->activePackages.begin(), impl->activePackages.end(), package->first),
+                impl->activePackages.end());
+            package = impl->packageFunctions.erase(package);
+        } else {
+            ++package;
+        }
+    }
+    syncPackageConsole(impl->activePackages);
+}
+
 void TorqueScript::init() {}
-void TorqueScript::shutdown() { impl->scheduler.clear(); }
+void TorqueScript::shutdown() {
+    impl->scheduler.clear();
+    impl->loadingFiles.clear();
+    impl->loadingStack.clear();
+    impl->fileDependencies.clear();
+    impl->functions.clear();
+    impl->packageFunctions.clear();
+    clearPackages();
+    impl->callPackages.clear();
+    impl->parsingPackage.clear();
+    impl->globals.clear();
+    impl->messageCallbacks.clear();
+    impl->locals = TSLocals{};
+    impl->guiParentStack.clear();
+    impl->tokens.clear();
+    impl->tokenPos = 0;
+    impl->currentFile.clear();
+    impl->execDepth = 0;
+    impl->errorOccurred = false;
+    impl->resolveParentNext = false;
+}
 
 // Stock TorqueScript flattens indexed globals: $pref::Player[2] and
 // $pref::Player2 are THE SAME variable. Old exported prefs files use the
@@ -265,14 +411,22 @@ static std::string normalizeGlobalKey(const std::string& n) {
 }
 
 void TorqueScript::setGlobal(const std::string& name, const VMValue& val) {
-    impl->globals[normalizeGlobalKey(name)] = val;
+    const std::string key = normalizeGlobalKey(name);
+    for (auto& [stored, value] : impl->globals) {
+        if (sameName(stored, key)) {
+            value = val;
+            Console::instance().setVariable(name.c_str(), val.toString().c_str());
+            return;
+        }
+    }
+    impl->globals[key] = val;
     Console::instance().setVariable(name.c_str(), val.toString().c_str());
 }
 
 VMValue TorqueScript::getGlobal(const std::string& name) {
     std::string key = normalizeGlobalKey(name);
-    auto it = impl->globals.find(key);
-    if (it != impl->globals.end()) return it->second;
+    for (const auto& [stored, value] : impl->globals)
+        if (sameName(stored, key)) return value;
     auto* item = Console::instance().find(key.c_str());
     if (item && item->type == Console::ConsoleItem::Variable)
         return VMValue(item->value.c_str());
@@ -294,14 +448,18 @@ const std::unordered_map<std::string, std::function<VMValue(const std::vector<VM
 void TSLocals::push() { scopes.push_back({}); }
 void TSLocals::pop() { if (!scopes.empty()) scopes.pop_back(); }
 void TSLocals::set(const std::string& name, const VMValue& val) {
-    if (!scopes.empty()) scopes.back()[name] = val;
+    if (scopes.empty()) return;
+    for (auto& [stored, value] : scopes.back()) {
+        if (sameName(stored, name)) { value = val; return; }
+    }
+    scopes.back()[name] = val;
 }
 VMValue TSLocals::get(const std::string& name) {
     for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
-        auto f = it->find(name);
-        if (f != it->end()) return f->second;
+        for (const auto& [stored, value] : *it)
+            if (sameName(stored, name)) return value;
     }
-    return VMValue(0);
+    return VMValue();
 }
 
 // === Tokenizer ===
@@ -427,6 +585,7 @@ void TorqueScript::Impl::tokenize(const std::string& source) {
             else if (tok.text == "this") tok.type = TSTokenType::This;
             else if (tok.text == "true") { tok.type = TSTokenType::True; tok.numVal = 1; }
             else if (tok.text == "false") { tok.type = TSTokenType::False; tok.numVal = 0; }
+            else if (tok.text == "null") tok.type = TSTokenType::Null;
             else tok.type = TSTokenType::Ident;
 
             tokens.push_back(tok);
@@ -476,6 +635,7 @@ void TorqueScript::Impl::tokenize(const std::string& source) {
                 if (match2('+', TSTokenType::At)) continue;
                 tok = {TSTokenType::Dollar, "$", 0, tok.pos}; srcPtr++; srcCol++; break;
             case '%':
+                if (match2('=', TSTokenType::PercentEq)) continue;
                 tok = {TSTokenType::Percent, "%", 0, tok.pos}; srcPtr++; srcCol++; break;
             case '=':
                 if (match2('=', TSTokenType::EqEq)) continue;
@@ -485,10 +645,12 @@ void TorqueScript::Impl::tokenize(const std::string& source) {
                 if (match2('=', TSTokenType::Neq)) continue;
                 tok = {TSTokenType::Not, "!", 0, tok.pos}; srcPtr++; srcCol++; break;
             case '<':
+                if (match3('<', '=', TSTokenType::ShlEq)) continue;
                 if (match2('<', TSTokenType::Shl)) continue;
                 if (match2('=', TSTokenType::Le)) continue;
                 tok = {TSTokenType::Lt, "<", 0, tok.pos}; srcPtr++; srcCol++; break;
             case '>':
+                if (match3('>', '=', TSTokenType::ShrEq)) continue;
                 if (match2('>', TSTokenType::Shr)) continue;
                 if (match2('=', TSTokenType::Ge)) continue;
                 tok = {TSTokenType::Gt, ">", 0, tok.pos}; srcPtr++; srcCol++; break;
@@ -508,6 +670,7 @@ void TorqueScript::Impl::tokenize(const std::string& source) {
                 tok = {TSTokenType::Slash, "/", 0, tok.pos}; srcPtr++; srcCol++; break;
             case '&':
                 if (match2('&', TSTokenType::And)) continue;
+                if (match2('=', TSTokenType::BitAndEq)) continue;
                 tok = {TSTokenType::BitwiseAnd, "&", 0, tok.pos}; srcPtr++; srcCol++; break;
             case '|':
                 if (match2('|', TSTokenType::Or)) continue;
@@ -516,6 +679,7 @@ void TorqueScript::Impl::tokenize(const std::string& source) {
             case '?':
                 tok = {TSTokenType::Question, "?", 0, tok.pos}; srcPtr++; srcCol++; break;
             case '^':
+                if (match2('=', TSTokenType::BitXorEq)) continue;
                 tok = {TSTokenType::BitwiseXor, "^", 0, tok.pos}; srcPtr++; srcCol++; break;
 
             default:
@@ -558,6 +722,8 @@ bool TorqueScript::Impl::match(TSTokenType type) {
 }
 
 void TorqueScript::Impl::error(const std::string& msg) {
+    errorOccurred = true;
+    running = false;
     Console::instance().printf(LogLevel::Error, "TS:%s(%d): %s",
         currentFile.c_str(), srcLine, msg.c_str());
     // Include the offending source so parse errors are actionable
@@ -689,7 +855,10 @@ VMValue TorqueScript::Impl::parseBlock() {
     VMValue result;
     while (peekToken().type != TSTokenType::RBrace && peekToken().type != TSTokenType::Eof && running) {
         result = parseStatement();
-        if (returning) {
+        if (returning || breaking || continuing) {
+            // Control flow belongs to the enclosing loop/function.  Do not
+            // execute the remaining statements in a braced loop body, but do
+            // consume it so the enclosing parser resumes after the brace.
             int depth = 1;
             while (depth > 0 && peekToken().type != TSTokenType::Eof) {
                 TSToken t = nextToken();
@@ -780,10 +949,14 @@ VMValue TorqueScript::Impl::parseFor() {
     // Condition - save token range
     size_t condStart = tokenPos;
     size_t condEnd = tokenPos;
-    if (peekToken().type != TSTokenType::Semicolon) {
-        parseExpression();
-        condEnd = tokenPos;
+    int condParenDepth = 0;
+    while (peekToken().type != TSTokenType::Eof) {
+        if (peekToken().type == TSTokenType::Semicolon && condParenDepth == 0) break;
+        if (peekToken().type == TSTokenType::LParen) condParenDepth++;
+        if (peekToken().type == TSTokenType::RParen) condParenDepth--;
+        nextToken();
     }
+    condEnd = tokenPos;
     expect(TSTokenType::Semicolon);
 
     // Advance - save token range (respect paren nesting)
@@ -859,13 +1032,20 @@ VMValue TorqueScript::Impl::parseWhile() {
 
     // Save condition token range
     size_t condStart = tokenPos;
-    parseExpression();
+    int condParenDepth = 0;
+    while (peekToken().type != TSTokenType::Eof) {
+        if (peekToken().type == TSTokenType::RParen && condParenDepth == 0) break;
+        if (peekToken().type == TSTokenType::LParen) condParenDepth++;
+        if (peekToken().type == TSTokenType::RParen) condParenDepth--;
+        nextToken();
+    }
     expect(TSTokenType::RParen);
     size_t bodyStart = tokenPos; // body token range
 
     loopDepth++;
     VMValue result;
     int iterCount = 0;
+    bool bodyExecuted = false;
     const int maxIters = 1000000;
     while (running) {
         // Evaluate condition
@@ -874,7 +1054,7 @@ VMValue TorqueScript::Impl::parseWhile() {
             tokenPos = condStart;
             VMValue cond = parseExpression();
             tokenPos = saved;
-            if (!cond.toBool()) break;
+        if (!cond.toBool()) break;
         }
 
         if (iterCount++ >= maxIters) {
@@ -885,9 +1065,14 @@ VMValue TorqueScript::Impl::parseWhile() {
 
         tokenPos = bodyStart;
         result = parseStatement();
+        bodyExecuted = true;
         if (returning) break;
         if (breaking) { breaking = false; break; }
         if (continuing) { continuing = false; }
+    }
+    if (!bodyExecuted) {
+        tokenPos = bodyStart;
+        skipStatement();
     }
     loopDepth--;
     return result;
@@ -898,49 +1083,44 @@ VMValue TorqueScript::Impl::parseDo() {
     loopDepth++;
     VMValue result;
 
-    size_t condStart = tokenPos;
-    size_t condEnd = tokenPos;
-    bool hasWhile = false;
+    const size_t bodyStart = tokenPos;
+    result = parseStatement();
+    const size_t bodyEnd = tokenPos;
+    if (returning) { loopDepth--; return result; }
+    if (breaking) { breaking = false; loopDepth--; return result; }
 
-    do {
-        result = parseStatement();
-        if (returning) break;
-        if (breaking) { breaking = false; break; }
-        if (continuing) { continuing = false; }
-
-        if (match(TSTokenType::While)) {
-            hasWhile = true;
-            expect(TSTokenType::LParen);
-            condStart = tokenPos;
-            parseExpression();
-            condEnd = tokenPos;
-            expect(TSTokenType::RParen);
-        } else {
-            break;
+    if (match(TSTokenType::While)) {
+        expect(TSTokenType::LParen);
+        const size_t condStart = tokenPos;
+        int condParenDepth = 0;
+        while (peekToken().type != TSTokenType::Eof) {
+            if (peekToken().type == TSTokenType::RParen && condParenDepth == 0) break;
+            if (peekToken().type == TSTokenType::LParen) condParenDepth++;
+            if (peekToken().type == TSTokenType::RParen) condParenDepth--;
+            nextToken();
         }
-    } while (hasWhile && (condStart < condEnd));
+        expect(TSTokenType::RParen);
+        match(TSTokenType::Semicolon);
 
-    // Re-evaluate condition for proper looping
-    if (hasWhile) {
         int iterCount = 0;
         const int maxIters = 10000000;
-        while (true) {
+        while (running) {
             size_t saved = tokenPos;
             tokenPos = condStart;
             VMValue cond = parseExpression();
             tokenPos = saved;
             if (!cond.toBool()) break;
-
             if (iterCount++ >= maxIters) {
                 Console::instance().printf(LogLevel::Debug, "TS: parseDo safety break after %d iters in '%s'",
                     iterCount, currentFile.c_str());
                 break;
             }
-
+            tokenPos = bodyStart;
             result = parseStatement();
             if (returning) break;
             if (breaking) { breaking = false; break; }
             if (continuing) { continuing = false; }
+            tokenPos = bodyEnd;
         }
     }
 
@@ -963,21 +1143,21 @@ VMValue TorqueScript::Impl::parseSwitch() {
     expect(TSTokenType::LBrace);
 
     bool matched = false;
+    bool switchBroken = false;
     while (peekToken().type != TSTokenType::RBrace && peekToken().type != TSTokenType::Eof) {
         if (match(TSTokenType::Case)) {
             VMValue caseVal = parseExpression();
             expect(TSTokenType::Colon);
             bool eq = isStrSwitch
                 ? (strcasecmp(val.toString().c_str(), caseVal.toString().c_str()) == 0)
-                : (val.type == VMValue::String || caseVal.type == VMValue::String
-                    ? (strcasecmp(val.toString().c_str(), caseVal.toString().c_str()) == 0)
-                    : (val.toDouble() == caseVal.toDouble()));
+                : (val.toDouble() == caseVal.toDouble());
             if (eq) {
                 matched = true;
                 while (peekToken().type != TSTokenType::Case && peekToken().type != TSTokenType::Default &&
                        peekToken().type != TSTokenType::RBrace && peekToken().type != TSTokenType::Eof) {
                     VMValue r = parseStatement();
-                    if (returning || breaking) { matched = false; break; }
+                    if (returning) break;
+                    if (breaking) { switchBroken = true; break; }
                 }
             } else {
                 while (peekToken().type != TSTokenType::Case && peekToken().type != TSTokenType::Default &&
@@ -986,12 +1166,17 @@ VMValue TorqueScript::Impl::parseSwitch() {
                 }
             }
             breaking = false; // break inside switch exits the switch, not the enclosing loop
+            if (switchBroken) {
+                while (peekToken().type != TSTokenType::RBrace && peekToken().type != TSTokenType::Eof)
+                    skipStatement();
+                break;
+            }
         } else if (match(TSTokenType::Default)) {
             expect(TSTokenType::Colon);
-            if (!matched) {
+            if (!matched && !switchBroken) {
                 while (peekToken().type != TSTokenType::RBrace && peekToken().type != TSTokenType::Eof) {
                     VMValue r = parseStatement();
-                    if (returning || breaking) break;
+                    if (returning || breaking) { switchBroken = breaking; break; }
                 }
             } else {
                 while (peekToken().type != TSTokenType::RBrace && peekToken().type != TSTokenType::Eof) {
@@ -999,6 +1184,11 @@ VMValue TorqueScript::Impl::parseSwitch() {
                 }
             }
             breaking = false;
+            if (switchBroken) {
+                while (peekToken().type != TSTokenType::RBrace && peekToken().type != TSTokenType::Eof)
+                    skipStatement();
+                break;
+            }
         } else {
             break;
         }
@@ -1081,7 +1271,8 @@ VMValue TorqueScript::Impl::parseFunctionDecl() {
     }
 
     func.filename = currentFile;
-    functions[fullName] = func;
+    if (parsingPackage.empty()) functions[fullName] = func;
+    else packageFunctions[toLower(parsingPackage)][fullName] = func;
 
     Console::instance().printf(LogLevel::Debug, "TS: defined function '%s' (%zu params)%s",
         fullName.c_str(), func.params.size(), func.body.empty() ? "" : " [ext]");
@@ -1106,6 +1297,8 @@ VMValue TorqueScript::Impl::parsePackage() {
     expect(TSTokenType::LBrace);
 
     // Parse function declarations inside the package
+    const std::string previousPackage = parsingPackage;
+    parsingPackage = toLower(packageName);
     int depth = 1;
     while (depth > 0 && peekToken().type != TSTokenType::Eof) {
         if (peekToken().type == TSTokenType::Function) {
@@ -1120,8 +1313,14 @@ VMValue TorqueScript::Impl::parsePackage() {
             nextToken();
         }
     }
+    if (depth != 0) {
+        error("Unterminated package body");
+        parsingPackage = previousPackage;
+        return {};
+    }
     if (peekToken().type == TSTokenType::RBrace) nextToken();
     match(TSTokenType::Semicolon);
+    parsingPackage = previousPackage;
 
     return {};
 }
@@ -1144,21 +1343,27 @@ VMValue TorqueScript::Impl::parseAssignment() {
     if (peekToken().type == TSTokenType::Eq ||
         peekToken().type == TSTokenType::PlusEq ||
         peekToken().type == TSTokenType::MinusEq ||
-        peekToken().type == TSTokenType::StarEq ||
-        peekToken().type == TSTokenType::SlashEq ||
-        peekToken().type == TSTokenType::BitOrEq) {
+         peekToken().type == TSTokenType::StarEq ||
+         peekToken().type == TSTokenType::SlashEq ||
+         peekToken().type == TSTokenType::PercentEq ||
+         peekToken().type == TSTokenType::BitAndEq ||
+         peekToken().type == TSTokenType::BitOrEq ||
+         peekToken().type == TSTokenType::BitXorEq ||
+         peekToken().type == TSTokenType::ShlEq ||
+         peekToken().type == TSTokenType::ShrEq) {
         TSToken op = nextToken();
         // Save target before rhs parsing (which may overwrite lastVarName/lastField*)
-        std::string targetVar = lastVarName;
+         std::string targetVar = lastVarName;
         std::string targetFieldObj = lastFieldObj;
         std::string targetFieldName = lastFieldName;
         VMValue rhs = parseAssignment();
         // Restore target
-        lastVarName = targetVar;
+         lastVarName = targetVar;
         lastFieldObj = targetFieldObj;
         lastFieldName = targetFieldName;
 
-        if (lhs.type == VMValue::None) {
+        if (lhs.type == VMValue::None && targetVar.empty() &&
+            (targetFieldObj.empty() || targetFieldName.empty())) {
             error("Invalid assignment target");
             return rhs;
         }
@@ -1167,24 +1372,29 @@ VMValue TorqueScript::Impl::parseAssignment() {
         if (op.type == TSTokenType::PlusEq) { val = VMValue(lhs.toDouble() + rhs.toDouble()); }
         else if (op.type == TSTokenType::MinusEq) { val = VMValue(lhs.toDouble() - rhs.toDouble()); }
         else if (op.type == TSTokenType::StarEq) { val = VMValue(lhs.toDouble() * rhs.toDouble()); }
-        else if (op.type == TSTokenType::SlashEq) { val = rhs.toDouble() != 0 ? VMValue(lhs.toDouble() / rhs.toDouble()) : VMValue(0); }
-        else if (op.type == TSTokenType::BitOrEq) { val = VMValue((double)(lhs.toInt() | rhs.toInt())); }
+         else if (op.type == TSTokenType::SlashEq) { val = rhs.toDouble() != 0 ? VMValue(lhs.toDouble() / rhs.toDouble()) : VMValue(0); }
+         else if (op.type == TSTokenType::PercentEq) { val = rhs.toInt() != 0 ? VMValue(lhs.toInt() % rhs.toInt()) : VMValue(0); }
+         else if (op.type == TSTokenType::BitAndEq) { val = VMValue(lhs.toInt() & rhs.toInt()); }
+         else if (op.type == TSTokenType::BitOrEq) { val = VMValue((double)(lhs.toInt() | rhs.toInt())); }
+         else if (op.type == TSTokenType::BitXorEq) { val = VMValue(lhs.toInt() ^ rhs.toInt()); }
+         else if (op.type == TSTokenType::ShlEq) { val = VMValue(lhs.toInt() << rhs.toInt()); }
+         else if (op.type == TSTokenType::ShrEq) { val = VMValue(lhs.toInt() >> rhs.toInt()); }
 
         // Store back: object field, global, or local
-        if (!lastFieldObj.empty() && !lastFieldName.empty()) {
+        if (evaluating && !lastFieldObj.empty() && !lastFieldName.empty()) {
             auto* obj = ScriptEngine::instance().findObject(lastFieldObj.c_str());
             if (obj) {
-                obj->fields[lastFieldName] = val;
+                ScriptEngine::instance().setObjectField(obj, lastFieldName, val);
                 syncGuiField(lastFieldObj, lastFieldName, val);
             }
-        } else if (!targetFieldObj.empty() && !targetFieldName.empty()) {
+         } else if (evaluating && !targetFieldObj.empty() && !targetFieldName.empty()) {
             // Fallback: use the saved field target (bracket+field may have lost it)
             auto* obj = ScriptEngine::instance().findObject(targetFieldObj.c_str());
             if (obj) {
-                obj->fields[targetFieldName] = val;
+                ScriptEngine::instance().setObjectField(obj, targetFieldName, val);
                 syncGuiField(targetFieldObj, targetFieldName, val);
             }
-        } else if (!lastVarName.empty()) {
+         } else if (evaluating && !lastVarName.empty()) {
             if (lastVarName[0] == '$') {
                 outer->setGlobal(lastVarName, val);
             } else {
@@ -1199,9 +1409,14 @@ VMValue TorqueScript::Impl::parseAssignment() {
 VMValue TorqueScript::Impl::parseTernary() {
     VMValue cond = parseLogicalOr();
     if (match(TSTokenType::Question)) {
+        const bool savedEvaluating = evaluating;
+        const bool conditionTrue = savedEvaluating && cond.toBool();
+        evaluating = conditionTrue;
         VMValue trueVal = parseExpression();
         expect(TSTokenType::Colon);
+        evaluating = savedEvaluating && !cond.toBool();
         VMValue falseVal = parseTernary();
+        evaluating = savedEvaluating;
         return cond.toBool() ? trueVal : falseVal;
     }
     return cond;
@@ -1213,8 +1428,12 @@ VMValue TorqueScript::Impl::parseLogicalOr() {
     while (peekToken().type == TSTokenType::Or ||
            (peekToken().type == TSTokenType::Ident && peekToken().text == "or")) {
         nextToken();
+        const bool evaluateRhs = evaluating && !lhs.toBool();
+        const bool savedEvaluating = evaluating;
+        evaluating = evaluateRhs;
         VMValue rhs = parseLogicalAnd();
-        lhs = VMValue(lhs.toBool() || rhs.toBool() ? 1 : 0);
+        evaluating = savedEvaluating;
+        lhs = VMValue(lhs.toBool() || (evaluateRhs && rhs.toBool()) ? 1 : 0);
     }
     return lhs;
 }
@@ -1224,8 +1443,12 @@ VMValue TorqueScript::Impl::parseLogicalAnd() {
     while (peekToken().type == TSTokenType::And ||
            (peekToken().type == TSTokenType::Ident && peekToken().text == "and")) {
         nextToken();
+        const bool evaluateRhs = evaluating && lhs.toBool();
+        const bool savedEvaluating = evaluating;
+        evaluating = evaluateRhs;
         VMValue rhs = parseBitwiseOr();
-        lhs = VMValue(lhs.toBool() && rhs.toBool() ? 1 : 0);
+        evaluating = savedEvaluating;
+        lhs = VMValue(lhs.toBool() && evaluateRhs && rhs.toBool() ? 1 : 0);
     }
     return lhs;
 }
@@ -1270,9 +1493,7 @@ VMValue TorqueScript::Impl::parseEquality() {
         if (op == TSTokenType::StrEq || op == TSTokenType::StrNeq) {
             eq = (strcasecmp(lhs.toString().c_str(), rhs.toString().c_str()) == 0);
         } else {
-            eq = (lhs.type == VMValue::String || rhs.type == VMValue::String)
-                ? (lhs.toString() == rhs.toString())
-                : (lhs.toDouble() == rhs.toDouble());
+            eq = lhs.toDouble() == rhs.toDouble();
         }
         lhs = VMValue((op == TSTokenType::EqEq || op == TSTokenType::StrEq) == eq ? 1 : 0);
     }
@@ -1388,10 +1609,10 @@ VMValue TorqueScript::Impl::parseUnary() {
         std::string saveFieldName = lastFieldName;
         std::string saveVarName = lastVarName;
         VMValue newVal(val.toDouble() + 1);
-        if (!saveFieldObj.empty() && !saveFieldName.empty()) {
+        if (evaluating && !saveFieldObj.empty() && !saveFieldName.empty()) {
             auto* obj = ScriptEngine::instance().findObject(saveFieldObj.c_str());
-            if (obj) obj->fields[saveFieldName] = newVal;
-        } else if (!saveVarName.empty()) {
+                    if (obj) ScriptEngine::instance().setObjectField(obj, saveFieldName, newVal);
+        } else if (evaluating && !saveVarName.empty()) {
             if (saveVarName[0] == '$') outer->setGlobal(saveVarName, newVal);
             else locals.set(saveVarName, newVal);
         }
@@ -1404,10 +1625,10 @@ VMValue TorqueScript::Impl::parseUnary() {
         std::string saveFieldName = lastFieldName;
         std::string saveVarName = lastVarName;
         VMValue newVal(val.toDouble() - 1);
-        if (!saveFieldObj.empty() && !saveFieldName.empty()) {
+        if (evaluating && !saveFieldObj.empty() && !saveFieldName.empty()) {
             auto* obj = ScriptEngine::instance().findObject(saveFieldObj.c_str());
-            if (obj) obj->fields[saveFieldName] = newVal;
-        } else if (!saveVarName.empty()) {
+                    if (obj) ScriptEngine::instance().setObjectField(obj, saveFieldName, newVal);
+        } else if (evaluating && !saveVarName.empty()) {
             if (saveVarName[0] == '$') outer->setGlobal(saveVarName, newVal);
             else locals.set(saveVarName, newVal);
         }
@@ -1421,6 +1642,12 @@ VMValue TorqueScript::Impl::parseUnary() {
 // sets MBYesNoButtonYes.command right before the confirm dialog opens.
 static void syncGuiField(const std::string& objName, const std::string& field, const VMValue& val) {
     if (objName.empty()) return;
+    auto* object = ScriptEngine::instance().findObject(objName.c_str());
+    if (!object) return;
+    const std::string& className = object->className;
+    if (className.find("Gui") != 0 && className.find("Shell") != 0 &&
+        className.find("Hud") != 0 && className != "GameTSCtrl" &&
+        className != "VirtualScrollCtrl" && className != "VirtualScrollContentCtrl") return;
     GuiControl* ctl = Engine::instance().guiRenderer().findControl(objName);
     if (!ctl) return;
     if (field == "command") {
@@ -1519,8 +1746,8 @@ VMValue TorqueScript::Impl::parsePostfix() {
                     // obj.field[idx] — read from ScriptObject field
                     auto* sobj = ScriptEngine::instance().findObject(lastFieldObj.c_str());
                     if (sobj) {
-                        auto fit = sobj->fields.find(lastFieldName);
-                        val = (fit != sobj->fields.end()) ? fit->second : VMValue(0);
+                        auto* field = findField(sobj, lastFieldName);
+                        val = field ? *field : VMValue("");
                     } else {
                         val = VMValue(0);
                     }
@@ -1532,16 +1759,22 @@ VMValue TorqueScript::Impl::parsePostfix() {
                 if (peekToken().type == TSTokenType::PlusPlus) {
                     nextToken();
                     VMValue newVal(val.toDouble() + 1);
-                    if (lastVarName[0] == '$') outer->setGlobal(arrayKey, newVal);
-                    else locals.set(arrayKey, newVal);
+                    if (evaluating && !lastFieldObj.empty() && !lastFieldName.empty()) {
+                        if (auto* object = ScriptEngine::instance().findObject(lastFieldObj.c_str()))
+                            ScriptEngine::instance().setObjectField(object, lastFieldName, newVal);
+                    } else if (evaluating && lastVarName[0] == '$') outer->setGlobal(arrayKey, newVal);
+                    else if (evaluating) locals.set(arrayKey, newVal);
                     val = newVal;
                     break;
                 }
                 if (peekToken().type == TSTokenType::MinusMinus) {
                     nextToken();
                     VMValue newVal(val.toDouble() - 1);
-                    if (lastVarName[0] == '$') outer->setGlobal(arrayKey, newVal);
-                    else locals.set(arrayKey, newVal);
+                    if (evaluating && !lastFieldObj.empty() && !lastFieldName.empty()) {
+                        if (auto* object = ScriptEngine::instance().findObject(lastFieldObj.c_str()))
+                            ScriptEngine::instance().setObjectField(object, lastFieldName, newVal);
+                    } else if (evaluating && lastVarName[0] == '$') outer->setGlobal(arrayKey, newVal);
+                    else if (evaluating) locals.set(arrayKey, newVal);
                     val = newVal;
                     break;
                 }
@@ -1560,6 +1793,10 @@ VMValue TorqueScript::Impl::parsePostfix() {
                 std::vector<VMValue> args;
                 parseArgumentList(args);
                 expect(TSTokenType::RParen);
+                if (!evaluating) {
+                    val = VMValue(0);
+                    continue;
+                }
 
                 // Look up method: objClass::methodName
                 std::string objName = val.toString();
@@ -1569,21 +1806,21 @@ VMValue TorqueScript::Impl::parsePostfix() {
                 std::vector<VMValue> methodArgs;
                 methodArgs.push_back(VMValue(objName));
                 methodArgs.insert(methodArgs.end(), args.begin(), args.end());
-                // Try the bare function name first
+                // Resolve a method against its native name before falling
+                // back to an unqualified script helper.
                 std::string fullName = methodName;
-                auto fit = functions.find(fullName);
-                if (fit != functions.end()) { val = outer->callFunction(fullName, methodArgs); called = true; }
+                auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
+                std::string className = sobj ? sobj->className : "";
+                if (className.empty() && (objName == "moveMap" ||
+                                           objName == "GlobalActionMap" ||
+                                           objName == "observerMap"))
+                    className = "ActionMap";
+                std::string bareLower = fullName;
+                for (auto& c : bareLower) c = (char)tolower((unsigned char)c);
                 if (!called) {
-                    std::string lower = fullName;
-                    for (auto& c : lower) c = (char)tolower((unsigned char)c);
-                    auto nit = natives.find(lower);
-                    if (nit != natives.end()) { val = nit->second(methodArgs); called = true; }
-                }
-                if (!called) {
-                    // Try namespace-qualified: ClassName::method
+                    // Try object-qualified: objectName::method
                     std::string nsFull = objName + "::" + methodName;
-                    auto nsFit = functions.find(nsFull);
-                    if (nsFit != functions.end()) { val = outer->callFunction(nsFull, methodArgs); called = true; }
+                    if (outer->hasFunction(nsFull)) { val = outer->callFunction(nsFull, methodArgs); called = true; }
                 }
                 if (!called) {
                     std::string nsFull = objName + "::" + methodName;
@@ -1593,24 +1830,36 @@ VMValue TorqueScript::Impl::parsePostfix() {
                     if (nsNit != natives.end()) { val = nsNit->second(methodArgs); called = true; }
                 }
                 if (!called) {
-                    // Fall back to ClassName::method (e.g. moveMap.save →
-                    // ActionMap::save). Matches stock T2 namespaced dispatch.
-                    auto* sobj = ScriptEngine::instance().findObject(objName.c_str());
-                    std::string className = sobj ? sobj->className : "";
-                    if (className.empty() && (objName == "moveMap" ||
-                                               objName == "GlobalActionMap" ||
-                                               objName == "observerMap"))
-                        className = "ActionMap";
+                    // Resolve the object's namespace before a same-named
+                    // global native. Otherwise a global helper can shadow
+                    // Foo::method.
                     if (!className.empty()) {
                         std::string clsFull = className + "::" + methodName;
-                        auto clsFit = functions.find(clsFull);
-                        if (clsFit != functions.end()) { val = outer->callFunction(clsFull, methodArgs); called = true; }
+                        if (outer->hasFunction(clsFull)) {
+                            val = outer->callFunction(clsFull, methodArgs);
+                            called = true;
+                        }
                         if (!called) {
                             std::string clsLower = clsFull;
                             for (auto& c : clsLower) c = (char)tolower((unsigned char)c);
                             auto clsNit = natives.find(clsLower);
-                            if (clsNit != natives.end()) { val = clsNit->second(methodArgs); called = true; }
+                            if (clsNit != natives.end()) {
+                                val = clsNit->second(methodArgs);
+                                called = true;
+                            }
                         }
+                    }
+                }
+                if (!called) {
+                    auto nit = natives.find(bareLower);
+                    if (nit != natives.end()) { val = nit->second(methodArgs); called = true; }
+                }
+                if (!called) {
+                    // Fall back to a bare script helper only after object and
+                    // class dispatch have failed.
+                    if (outer->hasFunction(fullName)) {
+                        val = outer->callFunction(fullName, methodArgs);
+                        called = true;
                     }
                 }
                 if (!called) {
@@ -1622,30 +1871,24 @@ VMValue TorqueScript::Impl::parsePostfix() {
                 lastFieldName = member.text;
                 auto* obj = ScriptEngine::instance().findObject(lastFieldObj.c_str());
                 if (obj) {
-                    auto fit = obj->fields.find(lastFieldName);
-                    if (fit != obj->fields.end()) val = fit->second;
-                    else val = VMValue(0);
+                    auto* field = findField(obj, lastFieldName);
+                    if (field) val = *field;
+                    else val = VMValue("");
                 } else {
-                    val = VMValue(0);
+                    val = VMValue("");
                 }
             }
             continue;
         }
         if (peekToken().type == TSTokenType::PlusPlus) {
             nextToken();
-            // Target is THIS operand — stale lastField* from an earlier
-            // statement would redirect the increment (e.g. Count++ lost).
-            lastFieldObj.clear();
-            lastFieldName.clear();
-            writeBackVar(VMValue(val.toDouble() + 1));
+            if (evaluating) writeBackVar(VMValue(val.toDouble() + 1));
             val = VMValue(val.toDouble() + 1);
             break;
         }
         if (peekToken().type == TSTokenType::MinusMinus) {
             nextToken();
-            lastFieldObj.clear();
-            lastFieldName.clear();
-            writeBackVar(VMValue(val.toDouble() - 1));
+            if (evaluating) writeBackVar(VMValue(val.toDouble() - 1));
             val = VMValue(val.toDouble() - 1);
             break;
         }
@@ -1689,9 +1932,12 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 std::vector<VMValue> args;
                 parseArgumentList(args);
                 expect(TSTokenType::RParen);
+                if (!evaluating) return VMValue(0);
 
                 // Try native first
-                auto nit = natives.find(toLower(nameTok.text));
+                // Keep the complete spelling for namespaced natives.  Looking
+                // up only nameTok made $Foo::bar() resolve as $Foo().
+                auto nit = natives.find(toLower(lastVarName));
                 if (nit != natives.end()) {
                     return nit->second(args);
                 }
@@ -1699,17 +1945,16 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 // Try DSO function (via ScriptEngine VM)
                 auto& engine = ScriptEngine::instance();
                 if (engine.vm()) {
-                    VMValue vmResult = engine.vm()->callFunction(nameTok.text.c_str(), args);
+                    VMValue vmResult = engine.vm()->callFunction(lastVarName.c_str(), args);
                     if (vmResult.type != VMValue::None) return vmResult;
                 }
 
                 // Try TS function
-                auto fit = functions.find(nameTok.text);
-                if (fit != functions.end()) {
-                    return outer->callFunction(nameTok.text, args);
+                if (outer->hasFunction(lastVarName)) {
+                    return outer->callFunction(lastVarName, args);
                 }
 
-                Console::instance().printf(LogLevel::Warn, "TS: unknown function '%s'", nameTok.text.c_str());
+                Console::instance().printf(LogLevel::Warn, "TS: unknown function '%s'", lastVarName.c_str());
                 return VMValue(0);
             }
 
@@ -1725,6 +1970,7 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 std::vector<VMValue> args;
                 parseArgumentList(args);
                 expect(TSTokenType::RParen);
+                if (!evaluating) return VMValue(0);
 
                 auto nit = natives.find(toLower(nameTok.text));
                 if (nit != natives.end()) return nit->second(args);
@@ -1735,8 +1981,7 @@ VMValue TorqueScript::Impl::parsePrimary() {
                     if (vmResult.type != VMValue::None) return vmResult;
                 }
 
-                auto fit = functions.find(nameTok.text);
-                if (fit != functions.end()) return outer->callFunction(nameTok.text, args);
+                if (outer->hasFunction(nameTok.text)) return outer->callFunction(nameTok.text, args);
 
                 Console::instance().printf(LogLevel::Warn, "TS: unknown function '%s'", nameTok.text.c_str());
                 return VMValue(0);
@@ -1752,52 +1997,29 @@ VMValue TorqueScript::Impl::parsePrimary() {
 
             // Helper to look up and call a function by name with args
             auto lookupAndCall = [&](const std::string& fn, std::vector<VMValue>& args) -> VMValue {
-                // exec: use nested execution with modpath overlay
+                if (!evaluating) return VMValue(0);
+                // exec uses the same mounted filesystem and precedence as every
+                // other script load. Hard-coding modPath/base here made an
+                // include change behavior when the active mode changed.
                 if (fn == "exec" && !args.empty()) {
                     std::string execPath = args[0].toString();
-                    std::string modPath = Console::instance().getStringVariable("modPath", "base");
-                    std::vector<uint8_t> data;
-                    // Try modPath first, then base as fallback
-                    if (modPath != "base") {
-                        data = Engine::instance().fs().read((modPath + "/" + execPath).c_str());
+                    const bool optional = args.size() > 1 && args[1].toBool();
+                    const std::string normalized = normalizedScriptPath(execPath);
+                    if (!TorchPath::isSafeLogicalPath(normalized.c_str())) {
+                        Console::instance().printf(LogLevel::Error,
+                            "TS: rejecting unsafe exec path '%s'", execPath.c_str());
+                        return VMValue(0);
                     }
-                    if (data.empty()) {
-                        data = Engine::instance().fs().read(("base/" + execPath).c_str());
+                    if (loadingFiles.count(normalized)) {
+                        Console::instance().printf(LogLevel::Debug,
+                            "TS: skipping circular exec '%s'", normalized.c_str());
+                        return VMValue(1);
                     }
-                    // Fall back to direct path
-                    if (data.empty()) {
-                        data = Engine::instance().fs().read(execPath.c_str());
-                    }
-                    if (data.empty()) {
-                        std::string outDir = Console::instance().getStringVariable("outputDir", "");
-                        std::filesystem::path current = std::filesystem::path(outDir) / modPath;
-                        std::string component;
-                        std::stringstream parts(execPath);
-                        while (std::getline(parts, component, '/') && !component.empty()) {
-                            std::filesystem::path match;
-                            std::error_code ec;
-                            for (const auto& entry : std::filesystem::directory_iterator(current, ec)) {
-                                std::string name = entry.path().filename().string();
-                                std::string wanted = component;
-                                for (char& c : name) c = (char)std::tolower((unsigned char)c);
-                                for (char& c : wanted) c = (char)std::tolower((unsigned char)c);
-                                if (name == wanted) { match = entry.path(); break; }
-                            }
-                            if (match.empty()) { current.clear(); break; }
-                            current = match;
-                        }
-                        if (!current.empty()) {
-                            std::ifstream pref(current);
-                            if (pref) data.assign(std::istreambuf_iterator<char>(pref),
-                                                  std::istreambuf_iterator<char>());
-                        }
-                    }
-                    if (!data.empty()) {
-                        std::string src((const char*)data.data(), data.size());
-                        return outer->executeNested(src, execPath);
-                    }
-                    Console::instance().printf(LogLevel::Warn, "exec: file not found: %s (modPath=%s)",
-                        execPath.c_str(), modPath.c_str());
+                    if (Engine::instance().fs().fileExists(normalized.c_str()))
+                        return outer->executeFile(normalized);
+                    Console::instance().printf(optional ? LogLevel::Debug : LogLevel::Error,
+                        optional ? "TS: optional exec not found: %s"
+                                 : "TS: exec file not found: %s", execPath.c_str());
                     return VMValue(0);
                 }
                 // Try natives
@@ -1810,8 +2032,7 @@ VMValue TorqueScript::Impl::parsePrimary() {
                     if (vmResult.type != VMValue::None) return vmResult;
                 }
                 // Try TS functions
-                auto fit = functions.find(fn);
-                if (fit != functions.end()) return outer->callFunction(fn, args);
+                if (outer->hasFunction(fn)) return outer->callFunction(fn, args);
                 // Check console commands
                 auto* item = Console::instance().find(fn.c_str());
                 if (item && item->type == Console::ConsoleItem::Command) {
@@ -1846,11 +2067,15 @@ VMValue TorqueScript::Impl::parsePrimary() {
                     parseArgumentList(args);
                     expect(TSTokenType::RParen);
 
-                    auto fit = functions.find(fullName);
-                    if (fit != functions.end()) {
-                        return outer->callFunction(fullName, args);
+                    // Parent:: bypasses the active package once, then nested calls
+                    // use normal package dispatch again.
+                    if (name == "Parent") {
+                        resolveParentNext = true;
+                        return lookupAndCall(methodName, args);
                     }
-                    // Fall back to unnamespaced function (Parent:: behavior)
+                    if (outer->hasFunction(fullName)) return outer->callFunction(fullName, args);
+                    auto nativeIt = natives.find(toLower(fullName));
+                    if (nativeIt != natives.end()) return nativeIt->second(args);
                     return lookupAndCall(methodName, args);
                 }
                 return VMValue(0);
@@ -1868,17 +2093,16 @@ VMValue TorqueScript::Impl::parsePrimary() {
 
             // Variable reference: check locals then globals
             {
+                lastVarName = name;
                 VMValue lv = locals.get(name);
-                bool notFound = (lv.type == VMValue::Int && lv.toInt() == 0);
-                if (notFound) {
-                    auto git = globals.find(name);
-                    if (git != globals.end()) return git->second;
-                    // Undefined $ or % variable returns 0; bare name returns itself as string
-                    if (!name.empty() && name[0] != '$' && name[0] != '%')
-                        return VMValue(name);
-                    return VMValue(0);
+                if (lv.type != VMValue::None) return lv;
+                for (const auto& [stored, value] : globals) {
+                    if (sameName(stored, name)) return value;
                 }
-                return lv;
+                // Undefined $ or % variable returns 0; bare name returns itself as string.
+                if (!name.empty() && name[0] != '$' && name[0] != '%')
+                    return VMValue(name);
+                return VMValue(0);
             }
         }
 
@@ -1926,11 +2150,13 @@ VMValue TorqueScript::Impl::parsePrimary() {
                                 obj->className.find("Hud") == 0 ||
                                 obj->className == "VirtualScrollCtrl" ||
                                 obj->className == "VirtualScrollContentCtrl";
+            bool isContainer = isGuiControl || obj->className == "SimGroup" ||
+                               obj->className == "SimSet";
 
             if (peekToken().type == TSTokenType::LBrace) {
                 nextToken();
                 // Record this object as parent for nested new expressions
-                if (isGuiControl) guiParentStack.push_back(obj);
+                if (isContainer) guiParentStack.push_back(obj);
                 int depth = 1;
                 while (depth > 0 && peekToken().type != TSTokenType::Eof) {
                     TSToken tok = peekToken();
@@ -1955,10 +2181,20 @@ VMValue TorqueScript::Impl::parsePrimary() {
                     }
                     // Field assignment or expression
                     TSToken fieldName = nextToken();
+                    std::string fieldKey = fieldName.text;
+                    if (match(TSTokenType::LBracket)) {
+                        VMValue index = parseExpression();
+                        while (match(TSTokenType::Comma)) {
+                            VMValue nextIndex = parseExpression();
+                            index = VMValue(index.toString() + "," + nextIndex.toString());
+                        }
+                        expect(TSTokenType::RBracket);
+                        fieldKey += "[" + index.toString() + "]";
+                    }
                     if (peekToken().type == TSTokenType::Eq) {
                         nextToken();
                         VMValue fieldVal = parseExpression();
-                        obj->fields[fieldName.text] = fieldVal;
+                        ScriptEngine::instance().setObjectField(obj, fieldKey, fieldVal);
                     } else {
                         // Could be a method call or other expression
                         // Re-tokenize? No, just consume until semicolon
@@ -1968,12 +2204,12 @@ VMValue TorqueScript::Impl::parsePrimary() {
                     }
                     while (peekToken().type == TSTokenType::Semicolon) nextToken();
                 }
-                if (isGuiControl && !guiParentStack.empty()) guiParentStack.pop_back();
+                if (isContainer && !guiParentStack.empty()) guiParentStack.pop_back();
                 if (peekToken().type == TSTokenType::RBrace) nextToken();
             }
 
             // Link parent-child for GUI controls
-            if (isGuiControl && !guiParentStack.empty()) {
+            if (!guiParentStack.empty()) {
                 ScriptObject* parent = guiParentStack.back();
                 if (parent != obj) {
                     obj->internals["parent"] = VMValue(parent->name);
@@ -1986,6 +2222,7 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 outer->setGlobal("$" + obj->name, VMValue(obj->name));
                 globals[obj->name] = VMValue(obj->name);
             }
+            ScriptEngine::instance().objectAdded(obj);
             return VMValue(obj->name);
         }
 
@@ -2032,7 +2269,9 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
         std::string savedLastFieldName;
         int savedDepth;
         int savedSrcLine;
-        bool restored = false;
+         bool savedErrorOccurred;
+         bool savedResolveParentNext;
+         bool restored = false;
         ~StateGuard() {
             if (restored) return;
             impl->execDepth = savedDepth;
@@ -2048,6 +2287,8 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
             impl->lastVarName = std::move(savedLastVarName);
             impl->lastFieldObj = std::move(savedLastFieldObj);
             impl->lastFieldName = std::move(savedLastFieldName);
+            impl->errorOccurred = savedErrorOccurred;
+            impl->resolveParentNext = savedResolveParentNext;
         }
     };
     StateGuard sg{
@@ -2061,7 +2302,9 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
         std::move(impl->lastFieldObj),
         std::move(impl->lastFieldName),
         impl->execDepth,
-        impl->srcLine
+        impl->srcLine,
+        impl->errorOccurred,
+        impl->resolveParentNext
     };
 
     // Try loading DSO cache before parsing source (.cs, .gui, .mis)
@@ -2165,6 +2408,8 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
     impl->lastVarName.clear();
     impl->lastFieldObj.clear();
     impl->lastFieldName.clear();
+    impl->errorOccurred = false;
+    impl->resolveParentNext = false;
     impl->tokenize(source);
     VMValue result = impl->parseProgram();
     if (impl->returning) {
@@ -2255,6 +2500,8 @@ VMValue TorqueScript::execute(const std::string& source, const std::string& file
     impl->breaking = false;
     impl->continuing = false;
     impl->lastVarName.clear();
+    impl->errorOccurred = false;
+    impl->resolveParentNext = false;
     impl->tokenize(source);
     VMValue r = impl->parseProgram();
     impl->execDepth--;
@@ -2262,119 +2509,269 @@ VMValue TorqueScript::execute(const std::string& source, const std::string& file
 }
 
 VMValue TorqueScript::executeFile(const std::string& path) {
-    // Prevent circular includes
-    if (impl->loadingFiles.count(path)) {
-        Console::instance().printf(LogLevel::Debug, "TS: skipping already-loading file '%s'", path.c_str());
+    const std::string normalizedPath = normalizedScriptPath(path);
+    if (!TorchPath::isSafeLogicalPath(normalizedPath.c_str())) {
+        Console::instance().printf(LogLevel::Error, "TS: rejecting unsafe script path '%s'", path.c_str());
         return {};
     }
-    impl->loadingFiles.insert(path);
+    const std::string& scriptPath = normalizedPath;
+    impl->recordDependency(scriptPath);
+    // Prevent circular includes
+    if (impl->loadingFiles.count(scriptPath)) {
+        Console::instance().printf(LogLevel::Debug, "TS: skipping already-loading file '%s'", scriptPath.c_str());
+        return {};
+    }
+    impl->loadingFiles.insert(scriptPath);
+    impl->loadingStack.push_back(scriptPath);
+    struct LoadGuard {
+        Impl* impl;
+        std::string path;
+        ~LoadGuard() {
+            impl->loadingFiles.erase(path);
+            if (!impl->loadingStack.empty() && impl->loadingStack.back() == path)
+                impl->loadingStack.pop_back();
+            else
+                impl->loadingStack.erase(std::remove(impl->loadingStack.begin(), impl->loadingStack.end(), path),
+                                         impl->loadingStack.end());
+            if (!impl->loadingStack.empty()) {
+                auto& parent = impl->fileDependencies[impl->loadingStack.back()];
+                parent.insert(path);
+                const auto it = impl->fileDependencies.find(path);
+                if (it != impl->fileDependencies.end())
+                    parent.insert(it->second.begin(), it->second.end());
+            }
+        }
+    } loadGuard{impl, scriptPath};
+    // A failed reload must not retain dependencies from an earlier version.
+    impl->fileDependencies[scriptPath].clear();
+    const std::string dsoPath = scriptPath + ".dso";
+    // Replace all definitions and DSO code owned by this logical source. This
+    // prevents old package entries and function pointers surviving a reload.
+    unloadFile(scriptPath);
+    if (auto* engine = ScriptEngine::exists() ? &ScriptEngine::instance() : nullptr;
+        engine && engine->vm())
+        engine->vm()->unloadScript(dsoPath.c_str());
 
     // For modpath .cs/.mis files, try .cs.dso first (.gui files have no functions)
     // Root-level files (no '/') like console_start.cs skip DSO
-    if (isCompilableExt(path) && !isPrefsScript(path) && path.find('/') != std::string::npos && path.substr(path.size()-3) != ".gui") {
-        std::string dsoPath = path + ".dso";
-        auto dsoData = Engine::instance().fs().read(dsoPath.c_str());
-        if (dsoData.empty()) {
-            std::ifstream f(dsoPath, std::ios::binary);
+    if (isCompilableExt(scriptPath) && !isPrefsScript(scriptPath) && scriptPath.find('/') != std::string::npos && scriptPath.substr(scriptPath.size()-3) != ".gui") {
+        const std::string outDir = Console::instance().getStringVariable("outputDir", "");
+        const std::string modPath = Console::instance().getStringVariable("modPath", "base");
+        std::string configuredDsoPath;
+        if (!outDir.empty())
+            TorchPath::safeOutputPath(outDir.c_str(), (modPath + "/" + dsoPath).c_str(), configuredDsoPath);
+        const int64_t sourceTime = Engine::instance().fs().fileModifyTime(scriptPath.c_str());
+        std::vector<uint8_t> dsoData;
+        if (!configuredDsoPath.empty()) {
+            std::ifstream f(configuredDsoPath, std::ios::binary);
             if (f) dsoData = std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), {});
+        }
+        // An archive DSO is a valid cache only when the source itself came
+        // from an archive. A loose source must not be paired with an older
+        // archive cache just because its output cache was invalidated.
+        if (dsoData.empty() && sourceTime <= 0) {
+            dsoData = Engine::instance().fs().read(dsoPath.c_str());
+        }
+        // A cache from an older loose source must never shadow the source.
+        // Archive-backed assets have no meaningful host mtime and retain the
+        // normal cache behavior.
+        std::set<std::string> cachedDependencies;
+        if (!dsoData.empty() && !configuredDsoPath.empty()) {
+            std::error_code timeError;
+            const auto cacheStamp = std::filesystem::last_write_time(configuredDsoPath, timeError);
+            // Archive files have no host mtime. Do not let an output cache
+            // from an old loose install shadow a script selected from an
+            // archive (or from a different mode).
+            if (sourceTime <= 0 || timeError) {
+                dsoData.clear();
+            } else {
+                const auto systemStamp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                    cacheStamp - std::filesystem::file_time_type::clock::now() +
+                    std::chrono::system_clock::now());
+                const auto cacheSeconds = std::chrono::duration_cast<std::chrono::seconds>(
+                    systemStamp.time_since_epoch()).count();
+                if (cacheSeconds < sourceTime) dsoData.clear();
+            }
+            if (!dsoData.empty() && !impl->readDependencyManifest(configuredDsoPath, cachedDependencies))
+                dsoData.clear();
         }
         if (!dsoData.empty()) {
             // Check for custom source DSO cache (v0x54534F02)
-            if (dsoData.size() >= 8) {
-                uint32_t version = *(const uint32_t*)dsoData.data();
+            bool sourceCache = false;
+            if (dsoData.size() >= 4) {
+                size_t offset = 0;
+                uint32_t version = 0;
+                readU32Bounded(dsoData, offset, version);
                 if (version == 0x54534F02) {
+                    sourceCache = true;
+                    // Source-cache files do not encode package ownership. They
+                    // must be rebuilt from source so package order remains exact.
+                    std::vector<uint8_t> sourceData;
+                    if (Engine::instance().fs().readFile(scriptPath.c_str(), sourceData) &&
+                        Impl::sourceHasPackage(std::string((const char*)sourceData.data(), sourceData.size())))
+                        dsoData.clear();
+                    if (dsoData.empty()) sourceCache = true;
                     Console::instance().printf(LogLevel::Debug, "TS: loading source DSO cache '%s'", dsoPath.c_str());
-                    const uint8_t* p = dsoData.data() + 4;
-                    uint32_t funcCount = *(const uint32_t*)p; p += 4;
+                    uint32_t funcCount = 0;
+                    bool valid = readU32Bounded(dsoData, offset, funcCount) && funcCount <= 100000;
+                    std::vector<std::string> addedFunctions;
                     for (uint32_t fi = 0; fi < funcCount; fi++) {
-                        auto r32 = [&]() -> uint32_t { uint32_t v = *(const uint32_t*)p; p += 4; return v; };
-                        auto rstr = [&]() -> std::string {
-                            uint32_t len = r32();
-                            std::string s((const char*)p, len); p += len;
-                            return s;
-                        };
-                        std::string fnName = rstr();
-                        uint32_t paramCount = r32();
+                        std::string fnName;
+                        uint32_t paramCount = 0;
+                        if (!readStringBounded(dsoData, offset, fnName) ||
+                            !readU32Bounded(dsoData, offset, paramCount) || paramCount > 10000) {
+                            valid = false;
+                            break;
+                        }
                         std::vector<std::string> params;
-                        for (uint32_t pi = 0; pi < paramCount; pi++) params.push_back(rstr());
-                        std::string body = rstr();
+                        for (uint32_t pi = 0; pi < paramCount; pi++) {
+                            std::string param;
+                            if (!readStringBounded(dsoData, offset, param)) { valid = false; break; }
+                            params.push_back(std::move(param));
+                        }
+                        std::string body;
+                        if (!valid || !readStringBounded(dsoData, offset, body)) { valid = false; break; }
                         if (impl->functions.find(fnName) == impl->functions.end()) {
                             TSFunc fn;
                             fn.params = params;
                             fn.body = body;
-                            fn.filename = path;
+                            fn.filename = scriptPath;
                             impl->functions[fnName] = fn;
+                            addedFunctions.push_back(fnName);
                         }
                     }
-                    impl->loadingFiles.erase(path);
-                    return VMValue(1);
+                    if (valid && offset == dsoData.size()) {
+                        impl->fileDependencies[scriptPath] = std::move(cachedDependencies);
+                        impl->loadingFiles.erase(scriptPath);
+                        return VMValue(1);
+                    }
+                    for (const auto& name : addedFunctions) impl->functions.erase(name);
+                    Console::instance().printf(LogLevel::Warn,
+                        "TS: rejecting truncated DSO cache '%s'", dsoPath.c_str());
                 }
             }
-            // Try native DSO format
-            Console::instance().printf(LogLevel::Debug, "TS: loading DSO '%s' (%zu bytes)", dsoPath.c_str(), dsoData.size());
-            auto& engine = ScriptEngine::instance();
-            if (engine.vm() && engine.vm()->loadScript(dsoData.data(), dsoData.size(), dsoPath.c_str())) {
+            // A recognized source-cache marker is never a native DSO. If its
+            // payload is malformed, discard it and execute the source.
+            if (!sourceCache) {
+                Console::instance().printf(LogLevel::Debug, "TS: loading DSO '%s' (%zu bytes)", dsoPath.c_str(), dsoData.size());
+                auto& engine = ScriptEngine::instance();
+                if (engine.vm() && engine.vm()->loadScript(dsoData.data(), dsoData.size(), dsoPath.c_str())) {
                 Console::instance().printf(LogLevel::Debug, "TS: DSO loaded successfully: %s", dsoPath.c_str());
                 for (auto& dso : engine.vm()->loadedScripts()) {
                     for (auto& fn : dso->functions) {
                         std::string fullName = fn.ns.empty() ? fn.name : fn.ns + "::" + fn.name;
-                        if (impl->functions.find(fullName) == impl->functions.end()) {
+                            if (!fn.package.empty()) {
+                                impl->packageFunctions[toLower(fn.package)][fullName] = TSFunc{};
+                                auto& stub = impl->packageFunctions[toLower(fn.package)][fullName];
+                                stub.params = fn.argNames;
+                                stub.filename = scriptPath;
+                                stub.isDSO = true;
+                                stub.dsoFunc = &fn;
+                            } else if (impl->functions.find(fullName) == impl->functions.end()) {
                             TSFunc stub;
                             stub.params = fn.argNames;
-                            stub.filename = fn.filename;
+                             stub.filename = scriptPath;
                             stub.isDSO = true;
                             stub.dsoFunc = &fn;
                             impl->functions[fullName] = stub;
                         }
                     }
                 }
-                impl->loadingFiles.erase(path);
-                return VMValue(1);
+                    impl->loadingFiles.erase(scriptPath);
+                    return VMValue(1);
+                }
             }
         }
     }
 
     // Fall back to loading source
-    auto data = Engine::instance().fs().read(path.c_str());
-    if (data.empty()) {
-        // Try opening as regular file
-        std::ifstream f(path, std::ios::binary);
-        if (!f) {
-            Console::instance().printf(LogLevel::Warn, "TS: cannot open script file '%s'", path.c_str());
-            impl->loadingFiles.erase(path);
-            return {};
-        }
-        data = std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), {});
+    std::vector<uint8_t> data;
+    if (!Engine::instance().fs().readFile(scriptPath.c_str(), data)) {
+        Console::instance().printf(LogLevel::Error, "TS: cannot open script file '%s'", scriptPath.c_str());
+        impl->loadingFiles.erase(scriptPath);
+        return {};
     }
 
-    Console::instance().printf(LogLevel::Debug, "TS: executing '%s' (%zu bytes)", path.c_str(), data.size());
+    Console::instance().printf(LogLevel::Debug, "TS: executing '%s' (%zu bytes)", scriptPath.c_str(), data.size());
     std::string source((const char*)data.data(), data.size());
-    VMValue result = execute(source, path);
+    VMValue result = execute(source, scriptPath);
+
+    if (impl->errorOccurred) {
+        return result;
+    }
 
     // After successful execution, write DSO cache to outputDir/modPath
-    if (isCompilableExt(path) && !isPrefsScript(path) && path.find('/') != std::string::npos && path.substr(path.size()-3) != ".gui") {
+    if (isCompilableExt(scriptPath) && !isPrefsScript(scriptPath) && scriptPath.find('/') != std::string::npos && scriptPath.substr(scriptPath.size()-3) != ".gui") {
         std::string modPath = Console::instance().getStringVariable("modPath", "base");
         std::string outDir = Console::instance().getStringVariable("outputDir", "");
         if (!outDir.empty()) {
-            std::string dsoRelPath = modPath + "/" + path + ".dso";
-            std::string dsoFullPath = outDir + "/" + dsoRelPath;
+            std::string dsoRelPath = modPath + "/" + scriptPath + ".dso";
+            std::string dsoFullPath;
+            if (!TorchPath::safeOutputPath(outDir.c_str(), dsoRelPath.c_str(), dsoFullPath)) {
+                Console::instance().printf(LogLevel::Warn, "TS: rejected unsafe DSO output path '%s'", dsoRelPath.c_str());
+                impl->loadingFiles.erase(scriptPath);
+                return result;
+            }
             // Create parent dir
-            auto slash = dsoFullPath.rfind('/');
-            if (slash != std::string::npos) {
-                std::string dir = dsoFullPath.substr(0, slash);
-                struct stat st; if (stat(dir.c_str(), &st) != 0) mkdir(dir.c_str(), 0755);
+            std::error_code outputError;
+            std::filesystem::create_directories(std::filesystem::path(dsoFullPath).parent_path(), outputError);
+            if (outputError) {
+                Console::instance().printf(LogLevel::Warn, "TS: cannot create DSO directory for '%s'", dsoFullPath.c_str());
+                impl->loadingFiles.erase(scriptPath);
+                return result;
             }
             Console::instance().printf(LogLevel::Debug, "TS: writing DSO cache '%s' (%zu funcs)", dsoFullPath.c_str(), impl->functions.size());
-            impl->writeDSOCache(dsoFullPath, path, source);
+            if (!Impl::sourceHasPackage(source)) {
+                impl->writeDSOCache(dsoFullPath, scriptPath, source);
+                impl->writeDependencyManifest(dsoFullPath, impl->fileDependencies[scriptPath]);
+            }
         }
     }
 
-    impl->loadingFiles.erase(path);
     return result;
 }
 
 bool TorqueScript::hasFunction(const std::string& name) const {
-    return impl->functions.find(name) != impl->functions.end();
+    for (auto package = impl->activePackages.rbegin(); package != impl->activePackages.rend(); ++package) {
+        auto it = impl->packageFunctions.find(*package);
+        if (it == impl->packageFunctions.end()) continue;
+        for (const auto& [stored, function] : it->second)
+            if (sameName(stored, name)) return true;
+    }
+    for (const auto& [stored, function] : impl->functions)
+        if (sameName(stored, name)) return true;
+    return false;
+}
+
+bool TorqueScript::activatePackage(const std::string& name) {
+    if (name.empty() || isActivePackage(name)) return !name.empty();
+    const std::string package = toLower(name);
+    if (impl->packageFunctions.find(package) == impl->packageFunctions.end()) return false;
+    impl->activePackages.push_back(package);
+    syncPackageConsole(impl->activePackages);
+    return true;
+}
+
+bool TorqueScript::deactivatePackage(const std::string& name) {
+    for (auto it = impl->activePackages.begin(); it != impl->activePackages.end(); ++it) {
+        if (sameName(*it, name)) {
+            impl->activePackages.erase(it);
+            syncPackageConsole(impl->activePackages);
+            return true;
+        }
+    }
+    return false;
+}
+
+void TorqueScript::clearPackages() {
+    impl->activePackages.clear();
+    syncPackageConsole(impl->activePackages);
+    impl->resolveParentNext = false;
+}
+
+bool TorqueScript::isActivePackage(const std::string& name) const {
+    return std::any_of(impl->activePackages.begin(), impl->activePackages.end(),
+        [&](const std::string& active) { return sameName(active, name); });
 }
 
 const std::string& TorqueScript::dbgFile() const { return impl->currentFile; }
@@ -2392,8 +2789,49 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
         int& depth;
         ~CallDepthGuard() { --depth; }
     } guard{callDepth};
+    // Consume Parent:: at the call boundary. A native/missing fallback must
+    // not leave the next unrelated function call in parent-dispatch mode.
+    const bool parentCall = impl->resolveParentNext;
+    impl->resolveParentNext = false;
+    const TSFunc* selected = nullptr;
+    std::string selectedPackage;
+    if (parentCall) {
+        const std::string currentPackage = impl->callPackages.empty()
+            ? std::string() : impl->callPackages.back();
+        auto current = std::find_if(impl->activePackages.rbegin(), impl->activePackages.rend(),
+            [&](const std::string& package) { return sameName(package, currentPackage); });
+        auto begin = impl->activePackages.rend();
+        if (!currentPackage.empty() && current != impl->activePackages.rend()) begin = current + 1;
+        for (auto package = begin; package != impl->activePackages.rend() && !selected; ++package) {
+            auto packageIt = impl->packageFunctions.find(*package);
+            if (packageIt == impl->packageFunctions.end()) continue;
+            for (const auto& [stored, function] : packageIt->second) {
+                if (sameName(stored, name)) {
+                    selected = &function;
+                    selectedPackage = *package;
+                    break;
+                }
+            }
+        }
+    } else {
+        for (auto package = impl->activePackages.rbegin(); package != impl->activePackages.rend(); ++package) {
+            auto packageIt = impl->packageFunctions.find(*package);
+            if (packageIt == impl->packageFunctions.end()) continue;
+            for (const auto& [stored, function] : packageIt->second)
+                if (sameName(stored, name)) {
+                    selected = &function;
+                    selectedPackage = *package;
+                    break;
+                }
+            if (selected) break;
+        }
+    }
     auto it = impl->functions.find(name);
-    if (it == impl->functions.end()) {
+    if (!selected && it == impl->functions.end()) {
+        for (auto candidate = impl->functions.begin(); candidate != impl->functions.end(); ++candidate)
+            if (sameName(candidate->first, name)) { it = candidate; break; }
+    }
+    if (!selected && it == impl->functions.end()) {
         std::string nativeName = name;
         for (char& c : nativeName)
             c = (char)tolower((unsigned char)c);
@@ -2405,7 +2843,7 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
     }
 
 
-    TSFunc& func = it->second;
+    const TSFunc& func = selected ? *selected : it->second;
 
     // Save outer parsing state (a function call must not destroy the caller's token stream)
     std::vector<TSToken> savedTokens = std::move(impl->tokens);
@@ -2423,12 +2861,20 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
 
     // Set up locals
     impl->locals.push();
+    impl->callPackages.push_back(selectedPackage);
+    // TorqueScript exposes the actual call arguments through %argc and
+    // %argv[index].  Missing declared parameters are empty, which still
+    // converts to zero in numeric contexts.
+    impl->locals.set("argc", VMValue((int32_t)args.size()));
+    for (size_t i = 0; i < args.size(); i++)
+        impl->locals.set("argv[" + std::to_string(i) + "]", args[i]);
     for (size_t i = 0; i < func.params.size(); i++) {
-        VMValue val = (i < args.size()) ? args[i] : VMValue(0);
+        VMValue val = (i < args.size()) ? args[i] : VMValue("");
         impl->locals.set(func.params[i], val);
     }
 
     impl->returning = false;
+    impl->returnValue = VMValue();
     impl->running = true;
     impl->breaking = false;
     impl->continuing = false;
@@ -2444,10 +2890,22 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
         auto& engine = ScriptEngine::instance();
         // Find the DSO file containing this function
         for (auto* dso : engine.vm()->loadedScripts()) {
-            if (dso->funcMap.count(name)) {
-                result = engine.vm()->execute(dso, func.dsoFunc->startIp, args);
+            auto fit = dso->funcMap.find(name);
+            if (fit != dso->funcMap.end()) {
+                result = engine.vm()->execute(dso, fit->second->startIp, args);
                 break;
             }
+            const size_t separator = name.rfind("::");
+            if (separator == std::string::npos) continue;
+            const std::string namespaceName = name.substr(0, separator);
+            const std::string functionName = name.substr(separator + 2);
+            for (auto& dsoFunction : dso->functions) {
+                if (dsoFunction.ns == namespaceName && dsoFunction.name == functionName) {
+                    result = engine.vm()->execute(dso, dsoFunction.startIp, args);
+                    break;
+                }
+            }
+            if (result.type != VMValue::None) break;
         }
     } else if (!func.body.empty()) {
         impl->currentFile = func.filename;
@@ -2476,6 +2934,7 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
     impl->srcLine = savedSrcLine;
 
     impl->locals.pop();
+    impl->callPackages.pop_back();
     return result;
 }
 
@@ -2492,13 +2951,35 @@ size_t TorqueScript::cancelEventsForObject(const std::string& object) {
 bool TorqueScript::isEventPending(int id) const { return impl->scheduler.pending(id); }
 size_t TorqueScript::processScheduledEvents(double now) {
     return impl->scheduler.advance(now, [this](const ScriptScheduler::Event& event) {
-        if (hasFunction(event.command)) {
-            std::vector<VMValue> args;
-            for (const auto& value : event.args) args.emplace_back(value);
-            callFunction(event.command, args);
-        } else {
-            execute(event.command, "schedule");
+        std::vector<VMValue> args;
+        for (const auto& value : event.args) args.emplace_back(value);
+        if (!event.object.empty() && event.object != "0") {
+            ScriptObject* object = nullptr;
+            if (ScriptEngine::exists()) object = ScriptEngine::instance().findObject(event.object.c_str());
+            std::string method;
+            if (object) {
+                method = object->className + "::" + event.command;
+            } else if (ScriptEngine::exists()) {
+                for (const auto& mission : ScriptEngine::instance().missionObjects()) {
+                    char* end = nullptr;
+                    const long id = std::strtol(event.object.c_str(), &end, 10);
+                    if (mission.name == event.object ||
+                        (end && *end == '\0' && id > 0 && mission.id == id)) {
+                        method = mission.className + "::" + event.command;
+                        break;
+                    }
+                }
+            }
+            if (method.empty() || !hasFunction(method)) return;
+            // Preserve the handle spelling used by schedule.  Stock scripts
+            // may pass this value back to getName/getId, so an ID must not be
+            // silently converted into the mission object's name.
+            args.insert(args.begin(), VMValue(event.object));
+            callFunction(method, args);
+            return;
         }
+        if (hasFunction(event.command)) callFunction(event.command, args);
+        else execute(event.command, "schedule");
     });
 }
 void TorqueScript::clearScheduledEvents() { impl->scheduler.clear(); }
@@ -2529,7 +3010,10 @@ void TorqueScript::dispatchMessageCallback(const std::string& messageType,
     append("");
     if (!messageType.empty()) append(messageType);
     for (const auto& functionName : callbacks) {
-        if (hasFunction(functionName)) callFunction(functionName, args);
+        std::string lower = functionName;
+        for (char& c : lower) c = (char)tolower((unsigned char)c);
+        if (hasFunction(functionName) || impl->natives.find(lower) != impl->natives.end())
+            callFunction(functionName, args);
     }
 }
 
@@ -2542,13 +3026,15 @@ bool TorqueScript::dispatchPrefixedFunction(const std::string& prefix,
     std::vector<VMValue> values;
     values.reserve(words.size() - 1);
     for (size_t i = 1; i < words.size(); ++i) values.emplace_back(words[i]);
-    for (const auto& [name, function] : impl->functions) {
-        std::string candidate = name;
-        for (char& c : candidate) c = (char)tolower((unsigned char)c);
-        if (candidate == lower) {
-            callFunction(name, values);
-            return true;
-        }
+    // HUD/server command handlers may be native functions as well as script
+    // functions.  Keep the same case-insensitive lookup for both paths.
+    if (impl->natives.find(lower) != impl->natives.end()) {
+        callFunction(wanted, values);
+        return true;
+    }
+    if (hasFunction(wanted)) {
+        callFunction(wanted, values);
+        return true;
     }
     return false;
 }
@@ -2563,7 +3049,9 @@ bool TorqueScript::dispatchServerCommand(const std::vector<std::string>& args) {
 
 bool TorqueScript::dispatchMissionCallback(const std::string& name,
                                            const std::vector<VMValue>& args) {
-    if (!hasFunction(name)) return false;
+    std::string lower = name;
+    for (char& c : lower) c = (char)tolower((unsigned char)c);
+    if (!hasFunction(name) && impl->natives.find(lower) == impl->natives.end()) return false;
     callFunction(name, args);
     return true;
 }

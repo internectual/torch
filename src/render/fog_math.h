@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 
 struct AuthoredFogVolume {
     float visibleDistance = 0.0f;
@@ -9,10 +10,19 @@ struct AuthoredFogVolume {
     float percentage = 1.0f;
 };
 
+// Invalid mission fields must not reach the shader. A single NaN uniform can
+// make the entire terrain pass render without fog until the mission changes.
+inline bool fogVolumeIsUsable(const AuthoredFogVolume& volume) {
+    return std::isfinite(volume.visibleDistance) && volume.visibleDistance > 0.0f &&
+           std::isfinite(volume.minHeight) && std::isfinite(volume.maxHeight) &&
+           volume.maxHeight > volume.minHeight && std::isfinite(volume.percentage);
+}
+
 inline float authoredFogContribution(const AuthoredFogVolume& volume,
                                      float cameraHeight, float fragmentHeight,
                                      float distance) {
-    if (volume.visibleDistance <= 0.0f || volume.maxHeight <= volume.minHeight)
+    if (!fogVolumeIsUsable(volume) || !std::isfinite(cameraHeight) ||
+        !std::isfinite(fragmentHeight) || !std::isfinite(distance) || distance < 0.0f)
         return 0.0f;
     const float low = std::max(std::min(cameraHeight, fragmentHeight), volume.minHeight);
     const float high = std::min(std::max(cameraHeight, fragmentHeight), volume.maxHeight);

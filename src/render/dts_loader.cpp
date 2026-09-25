@@ -220,10 +220,10 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     for (int i = 0; i < numSubShapes; i++) subFirstDecal[i] = rS32();
 
     // Mesh index list (v15 only)
-    if (ver < 16) { int32_t sz = rS32(); skip(sz * 4); }
+    if (ver < 16) { int32_t sz = capCount(rS32()); skip((size_t)sz * 4); }
 
     // Keyframes (v15-v16 only)
-    if (ver < 17) { int32_t sz = rS32(); skip(sz * 3 * 4); }
+    if (ver < 17) { int32_t sz = capCount(rS32()); skip((size_t)sz * 3 * 4); }
 
     // Default node states: rotations (S16×4 per node) + translations (F32×3 per node)
     int32_t numNodeStates = readCount(100000);
@@ -236,19 +236,19 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     }
 
     // Object states (F32 vis, S32 frameIndex, S32 matFrameIndex per state)
-    int32_t numObjStates = rS32();
+    int32_t numObjStates = capCount(rS32());
     for (int i = 0; i < numObjStates; i++) { rF32(); rS32(); rS32(); }
 
     // Decal states
-    int32_t numDecalStates = rS32();
+    int32_t numDecalStates = capCount(rS32());
     for (int i = 0; i < numDecalStates; i++) rS32();
 
     // Triggers (U32 state, F32 pos per trigger)
-    int32_t numTriggers = rS32();
+    int32_t numTriggers = capCount(rS32());
     for (int i = 0; i < numTriggers; i++) { rU32(); rF32(); }
 
     // Details: nameIndex, sub, objDetail, size (4 S32s per detail)
-    int32_t numDetails = rS32();
+    int32_t numDetails = capCount(rS32());
     struct OldDetail { int32_t nameIdx, sub, objDetail; float sz; };
     std::vector<OldDetail> details(numDetails);
     for (int i = 0; i < numDetails; i++) {
@@ -256,7 +256,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     }
 
     // Sequences — complex, version-dependent. Must consume correctly.
-    int32_t numSeqs = rS32();
+    int32_t numSeqs = capCount(rS32());
     for (int s = 0; s < numSeqs; s++) {
         // Sequence::read(s, readNameIndex=true by default)
         rS32(); // nameIndex
@@ -276,7 +276,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         rS32(); // numTriggers (v>8)
         rF32(); // toolBegin (v>7)
         // TSIntegerSet reads: numInts(S32), sz(S32), sz*4 bytes
-        auto skipIntSet = [&]() { rS32(); int32_t sz = rS32(); skip(sz * 4); };
+         auto skipIntSet = [&]() { capCount(rS32()); int32_t sz = capCount(rS32()); skip((size_t)sz * 4); };
         skipIntSet(); // rotationMatters
         if (ver >= 22) skipIntSet(); // translationMatters (v22+)
         if (ver >= 22) skipIntSet(); // scaleMatters (v22+)
@@ -290,7 +290,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     }
 
     // Meshes — read meshType as S32, then mesh body
-    int32_t numMeshes = rS32();
+    int32_t numMeshes = capCount(rS32());
 
     for (int m = 0; m < numMeshes && m < 10000; m++) {
         if (eof()) break;
@@ -501,7 +501,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     }
 
     // Names
-    int32_t numNames = rS32();
+    int32_t numNames = capCount(rS32());
     std::vector<std::string> names(numNames);
     for (int i = 0; i < numNames; i++) {
         int32_t sz = rS32();
@@ -516,7 +516,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     int32_t gotList = rS32();
     if (gotList != 0) {
         uint8_t matVersion = rU8(); // TSMaterialList version (should be 1)
-        int32_t numMats = rS32();   // material count
+        int32_t numMats = capCount(rS32());   // material count
         result.materialNames.resize(numMats);
         result.materialFlags.resize(numMats, 0);
         // Read names first (MaterialList::read: version + count + names)
@@ -548,21 +548,21 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     }
 
     // Skins — read as meshes but don't add to result
-    int32_t numSkins = rS32();
+    int32_t numSkins = capCount(rS32());
     for (int i = 0; i < numSkins; i++) {
         int32_t meshType = rS32();
         if (meshType == 4) continue; // NullMeshType
         // Same body as regular mesh: numFrames, numMatFrames only (parentMesh/bounds NOT in stream)
         rS32(); rS32(); // numFrames, numMatFrames
         // numVerts, verts, tverts, norms, prims, indices, merge, vertsPerFrame, flags
-        int32_t nv = rS32(); skip(nv * 3 * 4); // verts
-        nv = rS32(); skip(nv * 2 * 4); // tverts
-        nv = rS32(); skip(nv * 3 * 4); // norms
-        nv = rS32(); // numPrims
-        if (ver < 18) { skip(nv * 2 * 4); skip(nv * 4); } // S32 pairs + matIdx
-        else { skip(nv * 2 * 2); skip(nv * 4); } // S16 pairs + matIdx
-        nv = rS32(); // numIndices
-        if (ver < 18) skip(nv * 4); else skip(nv * 2);
+        int32_t nv = capCount(rS32()); skip((size_t)nv * 3 * 4); // verts
+        nv = capCount(rS32()); skip((size_t)nv * 2 * 4); // tverts
+        nv = capCount(rS32()); skip((size_t)nv * 3 * 4); // norms
+        nv = capCount(rS32()); // numPrims
+        if (ver < 18) { skip((size_t)nv * 2 * 4); skip((size_t)nv * 4); } // S32 pairs + matIdx
+        else { skip((size_t)nv * 2 * 2); skip((size_t)nv * 4); } // S16 pairs + matIdx
+        nv = capCount(rS32()); // numIndices
+        if (ver < 18) skip((size_t)nv * 4); else skip((size_t)nv * 2);
         // mergeIndices: oldAlloc only, NOT read from stream
         rS32(); rS32(); // vertsPerFrame, flags
         // Skin extension data
@@ -629,6 +629,8 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     }
 
     // Build default transforms
+    if (defRot.empty()) defRot.push_back({0, 0, 0, 1});
+    if (defTrans.empty()) defTrans.push_back({0, 0, 0});
     int nNodes = std::max(numNodes, 1);
     result.defaultTransforms.resize(nNodes);
     result.defaultLocalTransforms.resize(nNodes);

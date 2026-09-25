@@ -3,6 +3,7 @@
 #include "game/match_runtime.h"
 #include "game/ctf_runtime.h"
 #include "game/item_parity.h"
+#include "game/damage_parity.h"
 #include "game/movement.h"
 #include "net/v12_registry.h"
 #include "net/network.h"
@@ -16,6 +17,7 @@
 #include <cstring>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <zlib.h>
 #include <fcntl.h>
 #include <vector>
 #include <map>
@@ -352,6 +354,7 @@ struct GameServer::Impl {
     int sock = -1;
     uint16_t port = 0;
     bool running = false;
+    bool missionActive = false;
 
     // Server-side ghost
     struct ServerGhost {
@@ -364,6 +367,8 @@ struct GameServer::Impl {
         bool active{true};
         // Item pickup fields
         int itemType = -1;
+        float itemAmount = 25.0f;
+        float itemRespawnDelay = 20.0f;
         double respawnTime = 0;
         float homeX{}, homeY{}, homeZ{};
         // Vehicle fields
@@ -386,12 +391,16 @@ struct GameServer::Impl {
         int teamId = 0;
         int flagCarried = 0;
         double lastFireTime = 0;            // per-client projectile spawn cadence
+        double lastMoveTime = 0;
+        int ammo = 40;                      // authoritative default Spinfusor ammo
         double acLastFire = 0;              // per-client anti-cheat fire timestamp
         double respawnAt = 0;               // >0 while waiting to respawn after death
         std::map<uint32_t, double> ghostFirstSent; // ghost idx -> time first sent as Create
         bool active;
         bool isBot = false;
         bool jumpWasDown = false;
+        bool fireWasDown = false;
+        float jumpDelay = 0.0f;
         std::string playerName = "Player";
         // Position history for lag compensation (timestamped)
         struct PosSample { double time; float x, y, z; };
@@ -406,7 +415,12 @@ struct GameServer::Impl {
         std::string nativeStatsDigest;
         std::map<int, std::string> nativeFlagStates;
         bool ghosting = false;
+        uint32_t missionCrcSent = 0;
         bool matchStartSent = false;
+        uint32_t nextWireSequence = 1;
+        uint32_t wireReceiveSequence = 0;
+        uint32_t wireReceiveMask = 0;
+        bool haveWireReceiveSequence = false;
         // Ghost tracking
         std::set<uint32_t> knownGhosts;
         uint32_t playerGhostIndex = 0; // index of this client's player ghost
@@ -489,6 +503,7 @@ struct GameServer::Impl {
         std::vector<uint8_t> payload; // class-specific data
     };
     std::vector<DatablockInfo> datablocks;
+    uint32_t missionCrc = 0;
 
     int findClient(const sockaddr_in& from) const {
         for (size_t i = 0; i < clients.size(); i++)
@@ -496,6 +511,11 @@ struct GameServer::Impl {
                 clients[i].addr.sin_port == from.sin_port)
                 return (int)i;
         return -1;
+    }
+
+    bool isBanned(const sockaddr_in& from) const {
+        const uint32_t ip = from.sin_addr.s_addr;
+        return std::find(bannedIPs.begin(), bannedIPs.end(), ip) != bannedIPs.end();
     }
 
     size_t nextTeamSpawn(int team) {
@@ -516,6 +536,13 @@ struct GameServer::Impl {
         if (!data || len < sizeof(WireHeader)) return;
         std::vector<uint8_t> packet(data, data + len);
         WireHeader header = decodeWireHeader(packet.data());
+        const int ci = findClient(addr);
+        if (ci >= 0 && ci < (int)clients.size() && !clients[ci].native) {
+            auto& client = clients[ci];
+            header.sequence = client.nextWireSequence++;
+            header.ack = client.haveWireReceiveSequence ? client.wireReceiveSequence : 0;
+            header.ackMask = client.haveWireReceiveSequence ? client.wireReceiveMask : 0;
+        }
         header.checksum = 0;
         encodeWireHeader(packet.data(), header);
         header.checksum = T2Protocol::calculateChecksum(packet.data(), packet.size());
@@ -706,6 +733,24 @@ GameServer::GameServer() : impl(new Impl) {}
 GameServer::~GameServer() { stop(); delete impl; }
 
 bool GameServer::start(uint16_t port) {
+    if (impl->running) return false;
+
+    // A stopped server may be started again using the same instance. Do not
+    // carry mission-owned state or the previous ghost index namespace into
+    // the new runtime.
+    impl->missionActive = false;
+    impl->missionCrc = 0;
+    impl->nextGhostIndex = 1;
+    impl->nextSpawnPoint = 0;
+    impl->clients.clear();
+    impl->serverGhosts.clear();
+    impl->projectiles.clear();
+    impl->spawnPoints.clear();
+    impl->botStates.clear();
+    impl->botLastFire.clear();
+    impl->vehUsePrev.clear();
+    impl->datablocks.clear();
+
     // Load previous stats
     std::ifstream ifs("server_stats.txt");
     if (ifs.is_open()) {
@@ -840,6 +885,7 @@ bool GameServer::start(uint16_t port) {
         sg.posX = sp.x; sg.posY = sp.y; sg.posZ = sp.z;
         sg.homeX = sp.x; sg.homeY = sp.y; sg.homeZ = sp.z;
         sg.itemType = sp.itemType;
+        sg.itemAmount = sp.itemType == 2 ? 10.0f : 25.0f;
         impl->serverGhosts.push_back(sg);
     }
     // Try loading a mission file (default: missions/test mis named via sv_mission)
@@ -899,20 +945,34 @@ bool GameServer::loadMission(const char* missionPath) {
         return false;
     }
     std::string content((const char*)data.data(), data.size());
-    auto objects = parseMisFile(content);
+    std::string parseDiagnostic;
+    auto objects = parseMisFile(content, &parseDiagnostic);
     if (objects.empty()) {
-        Console::instance().printf(LogLevel::Warn, "Server: mission contains no objects: %s", missionPath);
+        Console::instance().printf(LogLevel::Error,
+            "Server: malformed mission '%s': %s",
+            missionPath, parseDiagnostic.empty() ? "no complete mission objects found" : parseDiagnostic.c_str());
         return false;
     }
 
     const MissionRules rules = stockMissionRules(missionPath, content);
+    const uint32_t missionCrc = (uint32_t)crc32(0L, data.data(), (uInt)data.size());
     impl->trainingMission = rules.type == MissionGameType::Training;
     impl->gameMode = rules.type == MissionGameType::CaptureTheFlag ? 2 :
                      rules.type == MissionGameType::TeamDeathmatch ? 1 : 0;
     impl->scoreLimit = rules.scoreLimit;
+    impl->missionCrc = missionCrc;
+    for (auto& client : impl->clients)
+        if (client.native) client.missionCrcSent = 0;
 
-    // No callback from the previous mission may run after its world is gone.
-    if (auto* ts = Engine::instance().script().ts()) ts->clearScheduledEvents();
+    // End the old mission only after the replacement has been proven valid.
+    // This preserves the old mission on read/parse failure.
+    if (auto* ts = Engine::instance().script().ts()) {
+        if (impl->missionActive)
+            ts->dispatchMissionCallback("onMissionEnd", {});
+        ScriptEngine::instance().dispatchMissionObjectRemovalCallbacks();
+        ScriptEngine::instance().cancelMissionEvents();
+    }
+    ScriptEngine::instance().clearMissionObjects();
 
     // A successful mission load replaces the previous world.  In particular,
     // do not leave the startup fixtures or spawn points from the old map in
@@ -920,6 +980,10 @@ bool GameServer::loadMission(const char* missionPath) {
     impl->serverGhosts.clear();
     impl->projectiles.clear();
     impl->spawnPoints.clear();
+    // Ghost indices are mission-owned.  Reset them before creating the new
+    // mission ghosts, not after loadMission returns, so map replacement and
+    // active-client respawns share one collision-free namespace.
+    impl->nextGhostIndex = 1;
     impl->nextSpawnPoint = 0;
     impl->teamScore[1] = impl->teamScore[2] = 0;
     impl->matchStartTime = 0;
@@ -928,10 +992,23 @@ bool GameServer::loadMission(const char* missionPath) {
     impl->matchClock.reset();
 
     int spawned = 0;
+    std::vector<ScriptMissionObject> missionObjects;
+    missionObjects.reserve(objects.size());
     for (auto& obj : objects) {
+        if (!obj.objName.empty()) {
+            ScriptMissionObject record;
+            record.className = obj.className;
+            record.name = obj.objName;
+            record.parentName = obj.parentName;
+            for (const auto& property : obj.props)
+                record.fields[property.name] = VMValue(property.value);
+            missionObjects.push_back(std::move(record));
+        }
         int32_t cid = classNameToClassId(obj.className);
         if (cid < 0) {
-            Console::instance().printf(LogLevel::Debug, "Server: skipping unknown mission class '%s'", obj.className.c_str());
+            Console::instance().printf(LogLevel::Warn,
+                "Server: unsupported mission class '%s' in '%s'; object skipped",
+                obj.className.c_str(), missionPath);
             continue;
         }
 
@@ -964,11 +1041,24 @@ bool GameServer::loadMission(const char* missionPath) {
         sg.homeX = pos.x; sg.homeY = pos.y; sg.homeZ = pos.z;
         sg.rotX = rotX; sg.rotZ = rotZ;
         if (cid == 16) {
-            switch (classifyItemKind(datablock)) {
+            const ItemKind itemKind = classifyItemKind(datablock);
+            switch (itemKind) {
                 case ItemKind::Health: sg.itemType = 0; break;
                 case ItemKind::Energy: sg.itemType = 1; break;
                 case ItemKind::Ammo: sg.itemType = 2; break;
                 default: sg.itemType = -1; break;
+            }
+            sg.itemAmount = defaultItemPickupAmount(itemKind);
+            auto db = ScriptEngine::instance().objects.find(datablock);
+            if (db != ScriptEngine::instance().objects.end() && db->second) {
+                auto amount = db->second->fields.find("amount");
+                if (amount != db->second->fields.end())
+                    sg.itemAmount = itemPickupAmount(itemKind, amount->second.toFloat());
+                auto respawn = db->second->fields.find("respawnTime");
+                if (respawn == db->second->fields.end())
+                    respawn = db->second->fields.find("respawn");
+                if (respawn != db->second->fields.end())
+                    sg.itemRespawnDelay = itemRespawnDelay(respawn->second.toFloat());
             }
         }
         impl->serverGhosts.push_back(sg);
@@ -983,11 +1073,64 @@ bool GameServer::loadMission(const char* missionPath) {
         }
         spawned++;
     }
+    ScriptEngine::instance().setMissionObjects(std::move(missionObjects));
+
+    // A direct loadMission call is also a map replacement. Keep connected
+    // clients from retaining ghosts and protocol state from the old mission;
+    // changeMap uses the same path and must not duplicate player ghosts.
+    for (auto& client : impl->clients) {
+        client.knownGhosts.clear();
+        client.ghostFirstSent.clear();
+        client.datablocksSent = false;
+        client.playerGhostIndex = 0;
+        client.respawnAt = 0;
+        client.jumpDelay = 0.0f;
+        client.flagCarried = 0;
+        if (client.native) {
+            client.nativeProtocol.reset(
+                client.serverConnectSequence ^ client.clientConnectSequence);
+            client.nativeStrings.clear();
+            client.nativeStatsDigest.clear();
+            client.nativeFlagStates.clear();
+            client.matchStartSent = false;
+            client.ghosting = false;
+            client.missionCrcSent = 0;
+        }
+        if (!client.active) continue;
+        if (!impl->spawnPoints.empty()) {
+            const auto& spawn = impl->spawnPoints[impl->nextTeamSpawn(client.teamId)];
+            client.posX = spawn.x;
+            client.posY = spawn.y;
+            client.posZ = spawn.z;
+        } else {
+            client.posX = 0;
+            client.posY = 5;
+            client.posZ = 0;
+        }
+        client.health = 100;
+        client.energy = 100;
+        Impl::ServerGhost ghost;
+        ghost.index = impl->nextGhostIndex++;
+        ghost.classId = 31;
+        ghost.posX = client.posX;
+        ghost.posY = client.posY;
+        ghost.posZ = client.posZ;
+        ghost.rotX = client.rotX;
+        ghost.rotZ = client.rotZ;
+        ghost.health = client.health;
+        ghost.energy = client.energy;
+        ghost.homeX = ghost.posX;
+        ghost.homeY = ghost.posY;
+        ghost.homeZ = ghost.posZ;
+        impl->serverGhosts.push_back(ghost);
+        client.playerGhostIndex = ghost.index;
+    }
     Console::instance().printf(LogLevel::Info, "Server: spawned %d ghosts from mission '%s'", spawned, missionPath);
     if (auto* ts = Engine::instance().script().ts()) {
         ts->dispatchMissionCallback("onMissionLoadDone", {VMValue(missionPath)});
         ts->dispatchMissionCallback("onMissionStart", {VMValue(missionPath)});
     }
+    impl->missionActive = true;
     return true;
 }
 
@@ -1028,6 +1171,18 @@ void GameServer::spawnBot() {
     bot.isBot = true;
     bot.health = 100;
     bot.energy = 100;
+    // Assign the team before selecting a spawn marker.  Native team modes use
+    // the joining player's team to choose a team-specific SpawnSphere.
+    if (impl->gameMode == 1 || impl->gameMode == 2) {
+        int redCount = 0;
+        int blueCount = 0;
+        for (const auto& client : impl->clients) {
+            if (!client.active) continue;
+            if (client.teamId == 1) ++redCount;
+            else if (client.teamId == 2) ++blueCount;
+        }
+        bot.teamId = MatchRuntime::joiningTeam(true, redCount, blueCount);
+    }
     // Place bot at a random spawn point
     if (!impl->spawnPoints.empty()) {
         size_t si = impl->nextTeamSpawn(bot.teamId);
@@ -1112,9 +1267,6 @@ void GameServer::stopRecording() {
 void GameServer::changeMap(const char* mission) {
     if (!impl->running) return;
     Console::instance().printf(LogLevel::Info, "Changing map to: %s", mission);
-    if (auto* ts = Engine::instance().script().ts()) ts->clearScheduledEvents();
-    if (auto* ts = Engine::instance().script().ts())
-        ts->dispatchMissionCallback("onMissionEnded", {VMValue(mission)});
     // Load new mission
     std::string fullPath = std::string("missions/") + mission;
     if (!fullPath.ends_with(".mis")) fullPath += ".mis";
@@ -1124,61 +1276,28 @@ void GameServer::changeMap(const char* mission) {
             "Map change failed for '%s'; keeping the current map", fullPath.c_str());
         return;
     }
-    impl->nextGhostIndex = 1;
     impl->projectiles.clear();
-    // Reset client protocol epochs while keeping the connections alive.
-    for (auto& cl : impl->clients) {
-        cl.knownGhosts.clear();
-        cl.ghostFirstSent.clear();
-        cl.datablocksSent = false;
-        cl.playerGhostIndex = 0;
-        cl.respawnAt = 0;
-        if (cl.native) {
-            cl.nativeProtocol.reset(cl.serverConnectSequence ^ cl.clientConnectSequence);
-            cl.nativeStrings.clear();
-            cl.nativeStatsDigest.clear();
-            cl.nativeFlagStates.clear();
-            cl.matchStartSent = false;
-            cl.ghosting = false;
-        }
-    }
-    // A map change starts a new ghost epoch. Active clients need a fresh
-    // player ghost; otherwise their next native packet can only reference the
-    // player object removed with the previous map.
-    for (auto& cl : impl->clients) {
-        if (!cl.active) continue;
-        if (!impl->spawnPoints.empty()) {
-            const auto& spawn = impl->spawnPoints[impl->nextTeamSpawn(cl.teamId)];
-            cl.posX = spawn.x;
-            cl.posY = spawn.y;
-            cl.posZ = spawn.z;
-        } else {
-            cl.posX = 0;
-            cl.posY = 5;
-            cl.posZ = 0;
-        }
-        cl.health = 100;
-        cl.energy = 100;
-        cl.respawnAt = 0;
-        Impl::ServerGhost ghost;
-        ghost.index = impl->nextGhostIndex++;
-        ghost.classId = 31;
-        ghost.posX = cl.posX;
-        ghost.posY = cl.posY;
-        ghost.posZ = cl.posZ;
-        ghost.rotX = cl.rotX;
-        ghost.rotZ = cl.rotZ;
-        ghost.health = cl.health;
-        ghost.energy = cl.energy;
-        ghost.homeX = ghost.posX; ghost.homeY = ghost.posY; ghost.homeZ = ghost.posZ;
-        impl->serverGhosts.push_back(ghost);
-        cl.playerGhostIndex = ghost.index;
-    }
     Console::instance().printf(LogLevel::Info, "Map changed, %zu ghosts spawned", impl->serverGhosts.size());
 }
 
 void GameServer::setGameMode(int mode) {
     impl->gameMode = mode;
+    for (auto& client : impl->clients) client.flagCarried = 0;
+    if (mode == 1 || mode == 2) {
+        int redCount = 0, blueCount = 0;
+        for (auto& client : impl->clients) {
+            if (!client.active || (client.teamId != 1 && client.teamId != 2)) continue;
+            if (client.teamId == 1) ++redCount;
+            else ++blueCount;
+        }
+        for (auto& client : impl->clients) {
+            if (client.active && (client.teamId < 1 || client.teamId > 2)) {
+                client.teamId = MatchRuntime::balancedTeam(redCount, blueCount);
+                if (client.teamId == 1) ++redCount;
+                else ++blueCount;
+            }
+        }
+    }
     impl->teamScore[1] = impl->teamScore[2] = 0;
     impl->matchStartTime = 0;
     impl->matchStarted = false;
@@ -1189,6 +1308,15 @@ void GameServer::setGameMode(int mode) {
 }
 
 void GameServer::stop() {
+    stopRecording();
+    if (impl->missionActive) {
+        if (auto* ts = Engine::instance().script().ts())
+            ts->dispatchMissionCallback("onMissionEnd", {});
+        ScriptEngine::instance().dispatchMissionObjectRemovalCallbacks();
+        ScriptEngine::instance().cancelMissionEvents();
+        ScriptEngine::instance().clearMissionObjects();
+        impl->missionActive = false;
+    }
     // Save stats
     std::ofstream ofs("server_stats.txt");
     if (ofs.is_open()) {
@@ -1247,13 +1375,14 @@ void GameServer::update() {
     bool hasActive = false;
     for (auto& cl : impl->clients) { if (cl.active) { hasActive = true; break; } }
 
-    uint8_t buf[2048];
+    uint8_t buf[V12::MaxPacketDataSize + 1];
     sockaddr_in from{};
     socklen_t fromLen = sizeof(from);
 
     while (true) {
         int n = recvfrom(impl->sock, buf, sizeof(buf), 0, (sockaddr*)&from, &fromLen);
         if (n <= 0) break;
+        if ((size_t)n > V12::MaxPacketDataSize) continue;
 
         double now = Engine::instance().timer().now();
 
@@ -1307,22 +1436,32 @@ void GameServer::update() {
             const char* requiredPassword = Console::instance().getStringVariable("sv_password", "");
             if (requiredPassword && *requiredPassword && joinPassword != requiredPassword)
                 continue;
+            if (impl->isBanned(from)) continue;
             int ci = impl->findClient(from);
+            if (ci >= 0 && impl->clients[ci].active)
+                continue;
             if (ci < 0) {
-                if (impl->clients.size() >= kMaxClients)
-                    continue;
-                Impl::Client client{};
-                client.addr = from;
-                client.addrLen = fromLen;
-                client.lastReceive = now;
-                client.posY = 5;
-                client.health = 100;
-                client.energy = 100;
-                client.active = false;
-                impl->clients.push_back(client);
-                ci = (int)impl->clients.size() - 1;
+                for (size_t slot = 0; slot < impl->clients.size(); ++slot) {
+                    if (!impl->clients[slot].active && !impl->clients[slot].isBot) {
+                        ci = (int)slot;
+                        impl->clients[slot] = Impl::Client{};
+                        break;
+                    }
+                }
+                if (ci < 0) {
+                    if (impl->clients.size() >= kMaxClients) continue;
+                    impl->clients.emplace_back();
+                    ci = (int)impl->clients.size() - 1;
+                }
             }
             auto& client = impl->clients[ci];
+            client.addr = from;
+            client.addrLen = fromLen;
+            client.lastReceive = now;
+            client.posY = 5;
+            client.health = 100;
+            client.energy = 100;
+            client.active = false;
             // A new challenge is a new connection epoch, even when the peer
             // reuses its UDP endpoint after a lost disconnect.
             client.active = false;
@@ -1355,10 +1494,10 @@ void GameServer::update() {
             const uint32_t serverSequence = request.readU32();
             const uint32_t clientSequence = request.readU32();
             const uint32_t protocolVersion = request.readU32();
-            request.readFlag(); // authenticated
+            const bool authenticated = request.readFlag();
             const uint32_t argc = request.readU32();
             if (request.failed() || protocolVersion != V12::ProtocolVersion ||
-                argc > 20) continue;
+                argc > 20 || authenticated) continue;
             std::vector<std::string> argv;
             for (uint32_t i = 0; i < argc; ++i)
                 argv.push_back(request.readHuffmanString());
@@ -1401,6 +1540,10 @@ void GameServer::update() {
                 client.playerGhostIndex = ghost.index;
             }
             V12::ServerPacketOptions initialPacket;
+            if (impl->missionCrc != 0) {
+                initialPacket.events.push_back(V12::makeMissionCrcEvent(impl->missionCrc));
+                client.missionCrcSent = impl->missionCrc;
+            }
             initialPacket.events.push_back(
                 V12::makeGhostingMessageEvent(0, 0, 0));
             initialPacket.events.front().sequence = 0;
@@ -1474,7 +1617,8 @@ void GameServer::update() {
                             bool triggers[6]{};
                             for (bool& trigger : triggers) trigger = stream.readFlag();
                             if (stream.failed()) break;
-                            T2Protocol::MoveMessage move = client.lastMove;
+                             T2Protocol::MoveMessage move = client.lastMove;
+                             client.lastMoveTime = Engine::instance().timer().now();
                             move.seq = moveStart + i;
                             move.rotZ = client.rotZ += (float)yaw * 6.283185307f / 65536.0f;
                             move.rotX = client.rotX += (float)pitch * 6.283185307f / 65536.0f;
@@ -1512,6 +1656,10 @@ void GameServer::update() {
                         if (!stream.failed()) {
                             V12::ServerPacketOptions response;
                             response.lastMoveAck = client.moveSeq;
+                            if (client.missionCrcSent != impl->missionCrc) {
+                                response.events.push_back(V12::makeMissionCrcEvent(impl->missionCrc));
+                                client.missionCrcSent = impl->missionCrc;
+                            }
                             std::string statsDigest;
                             for (const auto& scoreboardClient : impl->clients) {
                                 if (!scoreboardClient.active) continue;
@@ -1613,7 +1761,7 @@ void GameServer::update() {
                                  }
                             }
                             bool sentGhostingPass = false;
-                            if (!client.ghosting) {
+                             if (!client.ghosting) {
                                 response.events.push_back(
                                     V12::makeGhostingMessageEvent(0, 0, 0));
                                 response.events.front().sequence = 0;
@@ -1632,21 +1780,29 @@ void GameServer::update() {
                                         }});
                                     break;
                                 }
-                            } else {
-                                sentGhostingPass = true;
-                                std::set<uint32_t> nativeVisible;
-                                for (const auto& serverGhost : impl->serverGhosts) {
-                                    if (!serverGhost.active || serverGhost.index > 1023) continue;
-                                    if (nativeGhostClassId(serverGhost.classId, serverGhost.itemType) >= 0)
-                                        nativeVisible.insert(serverGhost.index);
+                             } else {
+                                 sentGhostingPass = true;
+                                 std::set<uint32_t> nativeVisible;
+                                 const auto nativeInScope = [&](const Impl::ServerGhost& ghost) {
+                                     if (ghost.classId == T2Protocol::CLASS_PLAYER) return true;
+                                     const float dx = ghost.posX - client.posX;
+                                     const float dz = ghost.posZ - client.posZ;
+                                     return dx * dx + dz * dz <= 200.0f * 200.0f;
+                                 };
+                                 for (const auto& serverGhost : impl->serverGhosts) {
+                                     if (!serverGhost.active || serverGhost.index > 1023) continue;
+                                     if (!nativeInScope(serverGhost)) continue;
+                                     if (nativeGhostClassId(serverGhost.classId, serverGhost.itemType) >= 0)
+                                         nativeVisible.insert(serverGhost.index);
                                 }
                                 for (uint32_t index : client.knownGhosts) {
                                     if (!nativeVisible.contains(index))
                                         response.ghosts.push_back({(uint16_t)index, 0, false, true, {}});
                                 }
-                                for (const auto& serverGhost : impl->serverGhosts) {
-                                    if (!serverGhost.active || serverGhost.index > 1023) continue;
-                                    const uint8_t nativeClass = (uint8_t)nativeGhostClassId(
+                                 for (const auto& serverGhost : impl->serverGhosts) {
+                                     if (!serverGhost.active || serverGhost.index > 1023) continue;
+                                     if (!nativeInScope(serverGhost)) continue;
+                                     const uint8_t nativeClass = (uint8_t)nativeGhostClassId(
                                         serverGhost.classId, serverGhost.itemType);
                                     if (nativeClass >= V12::GhostClassCount) continue;
                                     const bool known = client.knownGhosts.contains(serverGhost.index);
@@ -1678,8 +1834,8 @@ void GameServer::update() {
                                         }});
                                 }
                             }
-                            if (sentGhostingPass && !response.ghosts.empty() &&
-                                response.emittedGhosts.size() == response.ghosts.size()) {
+                             if (sentGhostingPass &&
+                                 response.emittedGhosts.size() == response.ghosts.size()) {
                                 response.events.push_back(
                                     V12::makeGhostingMessageEvent(0, 2, 0));
                                 client.ghosting = false;
@@ -1701,37 +1857,69 @@ void GameServer::update() {
         }
 
         // Parse wire header (15 bytes) to get packet type
-        PacketType ptype;
-        const uint8_t* payload;
-        size_t payloadLen;
+         PacketType ptype;
+         const uint8_t* payload;
+         size_t payloadLen;
+         WireHeader incomingHeader{};
+         bool hasWireHeader = false;
 
-        if ((size_t)n >= sizeof(WireHeader)) {
-            WireHeader hdr;
-            hdr = decodeWireHeader(buf);
-            ptype = (PacketType)hdr.type;
+         if ((size_t)n >= sizeof(WireHeader)) {
+             WireHeader hdr = decodeWireHeader(buf);
+             if (hdr.type > (uint8_t)PacketType::QueryResponse) continue;
+             const uint16_t savedChecksum = hdr.checksum;
+             hdr.checksum = 0;
+             std::vector<uint8_t> checksumPacket((size_t)n);
+             encodeWireHeader(checksumPacket.data(), hdr);
+             if ((size_t)n > sizeof(WireHeader))
+                 memcpy(checksumPacket.data() + sizeof(WireHeader),
+                        buf + sizeof(WireHeader), (size_t)n - sizeof(WireHeader));
+             if (T2Protocol::calculateChecksum(checksumPacket.data(), checksumPacket.size()) !=
+                 savedChecksum)
+                 continue;
+             incomingHeader = hdr;
+             incomingHeader.checksum = savedChecksum;
+             hasWireHeader = true;
+             ptype = (PacketType)hdr.type;
             payload = buf + sizeof(WireHeader);
             payloadLen = n - sizeof(WireHeader);
         } else {
             ptype = (PacketType)buf[0];
             payload = buf + 1;
-            payloadLen = n - 1;
-        }
+             payloadLen = n - 1;
+         }
+
+         if (hasWireHeader) {
+             const int ci = impl->findClient(from);
+             if (ci >= 0 && ci < (int)impl->clients.size() && !impl->clients[ci].native) {
+                 auto& client = impl->clients[ci];
+                 if (!client.haveWireReceiveSequence) {
+                     client.wireReceiveSequence = incomingHeader.sequence;
+                     client.wireReceiveMask = 0;
+                     client.haveWireReceiveSequence = true;
+                 } else if (isNewerWireSequence(incomingHeader.sequence,
+                                                 client.wireReceiveSequence)) {
+                     const uint32_t diff = incomingHeader.sequence - client.wireReceiveSequence;
+                     client.wireReceiveMask = diff < 32
+                         ? (client.wireReceiveMask << diff) | (1u << (diff - 1)) : 0;
+                     client.wireReceiveSequence = incomingHeader.sequence;
+                 } else if (incomingHeader.sequence != client.wireReceiveSequence) {
+                     const uint32_t diff = client.wireReceiveSequence - incomingHeader.sequence;
+                     if (diff <= 32) client.wireReceiveMask |= 1u << (diff - 1);
+                 }
+             }
+         }
 
         if (ptype == PacketType::Connect) {
             Console::instance().printf(LogLevel::Info, "Server: connect from %s",
                 inet_ntoa(from.sin_addr));
 
+            if (impl->isBanned(from)) {
+                Console::instance().printf(LogLevel::Info, "Server: rejected banned connection from %s",
+                    inet_ntoa(from.sin_addr));
+                continue;
+            }
             int ci = impl->findClient(from);
             if (ci < 0) {
-                // Check ban list
-                uint32_t ip = from.sin_addr.s_addr;
-                bool banned = false;
-                for (auto b : impl->bannedIPs) { if (b == ip) { banned = true; break; } }
-                if (banned) {
-                    Console::instance().printf(LogLevel::Info, "Server: rejected banned connection from %s",
-                        inet_ntoa(from.sin_addr));
-                    continue;
-                }
                 if (impl->clients.size() >= kMaxClients)
                     continue;
                 Impl::Client c;
@@ -1753,10 +1941,15 @@ void GameServer::update() {
                         if (cc.teamId == 2) blueCount++;
                     }
                     impl->clients[ci].teamId = MatchRuntime::balancedTeam(redCount, blueCount);
-                }
-            }
+                 }
+             }
 
-            // Send Challenge
+             impl->clients[ci].nextWireSequence = 1;
+             impl->clients[ci].wireReceiveSequence = 0;
+             impl->clients[ci].wireReceiveMask = 0;
+             impl->clients[ci].haveWireReceiveSequence = false;
+
+             // Send Challenge
             T2Protocol::ChallengeMessage chal;
             std::random_device random;
             chal.challenge[0] = random();
@@ -1866,6 +2059,9 @@ void GameServer::update() {
             if (payloadLen > 0 && payload[0] == T2Protocol::GDT_ChatMessage) {
                 T2Protocol::ChatMessage chat;
                 if (T2Protocol::decodeChat(payload, payloadLen, chat)) {
+                    // The sender in a client packet is only presentation data.
+                    // Use the authenticated slot name for native chat identity.
+                    T2Protocol::setAuthoritativeChatSender(chat, client.playerName.c_str());
                     WireHeader whdr{};
                     whdr.sequence = 1; whdr.ack = 0; whdr.ackMask = 0;
                     whdr.type = (uint8_t)PacketType::GameData;
@@ -1885,6 +2081,7 @@ void GameServer::update() {
 
             T2Protocol::MoveMessage move;
             if (payloadLen > 0 && T2Protocol::decodeMove(payload, payloadLen, move)) {
+                client.lastMoveTime = Engine::instance().timer().now();
                 client.lastMove = move;
                 // Anti-cheat: validate rotation
                 float rotDiffZ = fabsf(move.rotZ - client.rotZ);
@@ -1903,8 +2100,14 @@ void GameServer::update() {
 
                 // Handle fire input: spawn a projectile ghost (per-client cadence)
                 double now = Engine::instance().timer().now();
-                if (client.respawnAt <= 0 && (move.flags & 8) && (now - client.lastFireTime) > 0.35) {
+                const bool firePressed = (move.flags & 8) &&
+                    (gWeaponTable[0].autoFire || !client.fireWasDown);
+                if (client.respawnAt <= 0 && client.ammo > 0 && firePressed &&
+                    (now - client.lastMoveTime) <= 0.2 &&
+                    weaponFireCooldownReady(now, client.lastFireTime,
+                                            gWeaponTable[0].fireRate)) {
                     client.lastFireTime = now;
+                    --client.ammo;
                     float pitch = client.rotX;
                     float pyaw = client.rotZ;
                     // Compute direction from pitch/yaw
@@ -1934,6 +2137,7 @@ void GameServer::update() {
                     impl->serverGhosts.push_back(sg);
                     Console::instance().printf(LogLevel::Debug, "Server: projectile spawned idx=%u", (unsigned)sg.index);
                 }
+                client.fireWasDown = (move.flags & 8) != 0;
 
                 // Update the player ghost's rotation immediately
                 if (client.playerGhostIndex > 0) {
@@ -2095,8 +2299,16 @@ void GameServer::update() {
     // keeps direct and splash damage consistent and prevents repeated credits
     // while the respawn timer is being scheduled below.
     auto applyDamage = [&](Impl::Client& victim, float amount, int ownerCi) {
-        if (impl->trainingMission || impl->matchEnded || amount <= 0.0f || victim.health <= 0.0f) return;
-        victim.health -= amount;
+        if (impl->trainingMission || impl->matchEnded || !std::isfinite(amount)) return;
+        if (amount < 0.0f) {
+            // RepairTool projectiles use signed damage and must repair the
+            // authoritative target rather than becoming visual-only effects.
+            if (victim.health > 0.0f)
+                victim.health = applySignedDamage(victim.health, amount);
+            return;
+        }
+        if (amount == 0.0f || victim.health <= 0.0f) return;
+        victim.health = applySignedDamage(victim.health, amount);
         if (victim.health > 0.0f) return;
         victim.health = 0.0f;
         ++victim.deaths;
@@ -2117,12 +2329,53 @@ void GameServer::update() {
         }
     };
 
+    // Explosions also occur when a projectile strikes an interior wall.  Keep
+    // the splash path shared with terrain impacts so interior geometry does
+    // not silently turn a damaging projectile into a visual-only hit.
+    auto applyProjectileSplash = [&](const Impl::ServerProjectile& projectile,
+                                      float impactX, float impactY, float impactZ) {
+        if (projectile.splashRadius <= 0.0f) return;
+        for (auto& client : impl->clients) {
+            if (!client.active || client.respawnAt > 0.0) continue;
+            if (projectile.ownerCi >= 0 && projectile.ownerCi < (int)impl->clients.size()) {
+                const auto& owner = impl->clients[projectile.ownerCi];
+                if ((impl->gameMode == 1 || impl->gameMode == 2) &&
+                    owner.teamId == client.teamId && client.teamId != 0)
+                    continue;
+            }
+            const float dx = client.posX - impactX;
+            const float dy = client.posY - impactY;
+            const float dz = client.posZ - impactZ;
+            const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (distance >= projectile.splashRadius) continue;
+            const float fraction = 1.0f - distance / projectile.splashRadius;
+            applyDamage(client, projectile.damage * fraction, projectile.ownerCi);
+            if (distance > 0.0001f) {
+                const float impulse = fraction * 10.0f / distance;
+                client.velX += dx * impulse;
+                client.velY += dy * impulse;
+                client.velZ += dz * impulse;
+            } else {
+                // Match the client-side projectileSplashImpulse fallback. A
+                // target at the blast center still receives an upward launch;
+                // omitting it here makes authoritative movement diverge from
+                // the local prediction at the most damaging point of impact.
+                client.velY += fraction * 10.0f;
+            }
+        }
+    };
+
     for (auto& cl : impl->clients) {
         if (!cl.active) continue;
         cl.playTime += simDt;
-        if (cl.native && cl.respawnAt <= 0 && (cl.lastMove.flags & 8)) {
-            if (now - cl.lastFireTime > 0.35) {
+        const bool firePressed = (cl.lastMove.flags & 8) &&
+            (gWeaponTable[0].autoFire || !cl.fireWasDown);
+        if (cl.native && cl.respawnAt <= 0 && firePressed) {
+            if (cl.ammo > 0 && now - cl.lastMoveTime <= 0.2 &&
+                weaponFireCooldownReady(now, cl.lastFireTime,
+                                        gWeaponTable[0].fireRate)) {
                 cl.lastFireTime = now;
+                --cl.ammo;
                 const float pitch = cl.rotX;
                 const float yaw = cl.rotZ;
                 const float dirX = sinf(yaw) * cosf(pitch);
@@ -2152,6 +2405,7 @@ void GameServer::update() {
                 impl->serverGhosts.push_back(ghost);
             }
         }
+        if (cl.native) cl.fireWasDown = (cl.lastMove.flags & 8) != 0;
         // Position history for lag compensation (every ~100ms)
         if (cl.posHistory.empty() || (now - cl.posHistory.back().time) > 0.1) {
             decltype(cl.posHistory)::value_type ps = {now, cl.posX, cl.posY, cl.posZ};
@@ -2159,14 +2413,20 @@ void GameServer::update() {
             if ((int)cl.posHistory.size() > 64)
                 cl.posHistory.erase(cl.posHistory.begin());
         }
+        // Keep the spawn-height fallback only when no map floor is available.
+        // The old greater-than comparison ignored valid floors below y=2 and
+        // made authoritative players snap upward on low-elevation terrain.
         float groundY = 2.0f;
         if (heightCB) {
             float h = heightCB(cl.posX, cl.posZ, heightCtx);
-            if (h > groundY) groundY = h;
+            if (h > -1.0e9f) groundY = h;
         }
         MovementState movementState{{cl.posX, cl.posY, cl.posZ},
-                                    {cl.velX, cl.velY, cl.velZ}, cl.energy,
-                                    cl.posY <= groundY + 0.1f, cl.jumpWasDown};
+                                     {cl.velX, cl.velY, cl.velZ}, cl.energy,
+                                     Movement::isGroundedAtFloor(
+                                         cl.posY, groundY, 0.5f,
+                                         {0.0f, 1.0f, 0.0f}), cl.jumpWasDown};
+        movementState.jumpDelay = cl.jumpDelay;
         MovementInput movementInput;
         movementInput.forward = ((cl.lastMove.flags & 1) ? 1.0f : 0.0f) -
                                 ((cl.lastMove.flags & 128) ? 1.0f : 0.0f);
@@ -2176,6 +2436,9 @@ void GameServer::update() {
         movementInput.jet = (cl.lastMove.flags & 4) != 0;
         movementInput.yaw = cl.rotZ;
         if (cl.respawnAt <= 0) {
+            const bool wasOnGround = movementState.onGround;
+            const float previousDownwardSpeed = std::max(0.0f, -movementState.velocity.y);
+            const float healthBeforeLanding = cl.health;
             Movement::step(movementState, movementInput,
                            {groundY, {0.0f, 1.0f, 0.0f}, false}, simDt);
             cl.posX = movementState.position.x; cl.posY = movementState.position.y;
@@ -2183,6 +2446,17 @@ void GameServer::update() {
             cl.velX = movementState.velocity.x; cl.velY = movementState.velocity.y;
             cl.velZ = movementState.velocity.z; cl.energy = movementState.energy;
             cl.jumpWasDown = movementState.jumpWasDown;
+            cl.jumpDelay = movementState.jumpDelay;
+            const float landingSpeed = std::max(movementState.landingSpeed,
+                                                previousDownwardSpeed);
+            cl.health = Movement::healthAfterLanding(
+                cl.health, wasOnGround, movementState.onGround, landingSpeed);
+            // Fall damage bypasses the projectile damage path, so account for
+            // its living-to-dead transition before respawn scheduling below.
+            if (DeathRespawn::crossesHealthBoundary(healthBeforeLanding, cl.health)) {
+                cl.health = 0.0f;
+                ++cl.deaths;
+            }
         }
 
         // Push simulated position + vitals into player ghost
@@ -2206,7 +2480,11 @@ void GameServer::update() {
                 if (sg.index == (uint32_t)cl.flagCarried) {
                     sg.posX = cl.posX; sg.posY = cl.posY + 1; sg.posZ = cl.posZ;
                     sg.passengerCi = -1;
-                    sg.respawnTime = 0;
+                    // A flag dropped by a dead carrier auto-returns after the
+                    // native CTF return delay.  Clearing this timer here made
+                    // death drops remain on the ground indefinitely.
+                    sg.respawnTime = Engine::instance().timer().now() +
+                                     CtfRuntime::DroppedFlagReturnSeconds;
                     sg.active = true;
                     cl.flagCarried = 0;
                     Console::instance().printf(LogLevel::Info, "Flag %d dropped on carrier death", sg.classId);
@@ -2224,10 +2502,12 @@ void GameServer::update() {
             cl.health = 0;
             cl.velX = cl.velY = cl.velZ = 0;
             cl.lastFireTime = 0;
+            cl.ammo = gWeaponTable[0].maxAmmo;
             const int victimCi = (int)(&cl - &impl->clients[0]);
             for (auto& projectile : impl->projectiles)
                 if (projectile.ownerCi == victimCi) projectile.active = false;
             cl.respawnAt = tnow + RESPAWN_DELAY;
+            cl.jumpDelay = 0.0f;
             for (auto& sg : impl->serverGhosts)
                 if (sg.index == cl.playerGhostIndex) {
                     sg.health = 0;
@@ -2239,7 +2519,16 @@ void GameServer::update() {
         if (cl.respawnAt > 0 && tnow >= cl.respawnAt && !impl->trainingMission && !impl->matchEnded) {
             cl.health = 100; cl.energy = 100;
             cl.respawnAt = 0;
+            cl.flagCarried = 0;
+            cl.jumpDelay = 0.0f;
             cl.lastFireTime = 0;
+            // Respawn starts a fresh input state.  Without clearing these
+            // edge trackers, a trigger held during the death camera remains
+            // pressed across the new life and suppresses the first jump/fire
+            // edge differently from the local player.
+            cl.jumpWasDown = false;
+            cl.fireWasDown = false;
+            cl.ammo = gWeaponTable[0].maxAmmo;
             cl.velX = cl.velY = cl.velZ = 0;
             if (!impl->spawnPoints.empty()) {
                 size_t idx = impl->nextTeamSpawn(cl.teamId);
@@ -2275,31 +2564,41 @@ void GameServer::update() {
             if (dx*dx + dz*dz > pickupRadiusSq) continue;
             float dy = cl.posY - sg.posY;
             if (dy > 3.0f || dy < -3.0f) continue;
+            // Stock item triggers remain in the world when the pickup would
+            // not change the matching inventory value.  Consuming a full
+            // health/energy/ammo item makes it disappear permanently until
+            // its respawn timer, which is visibly wrong and especially
+            // noticeable around base inventory stations.
+            const ItemKind itemKind = sg.itemType == 0 ? ItemKind::Health :
+                                       sg.itemType == 1 ? ItemKind::Energy :
+                                       sg.itemType == 2 ? ItemKind::Ammo : ItemKind::None;
+            const float currentValue = sg.itemType == 0 ? cl.health :
+                                       sg.itemType == 1 ? cl.energy :
+                                       sg.itemType == 2 ? (float)cl.ammo : 0.0f;
+            const float maximum = sg.itemType == 2 ? (float)gWeaponTable[0].maxAmmo : 100.0f;
+            const float pickupAmount = sg.itemAmount;
+            if (!itemPickupWouldApply(itemKind, currentValue, pickupAmount, maximum)) continue;
             // Pickup!
             switch (sg.itemType) {
-                case 0: cl.health = std::min(100.0f, cl.health + 25.0f); break;
-                case 1: cl.energy = std::min(100.0f, cl.energy + 25.0f); break;
-                case 2: break;
+                case 0:
+                    cl.health = applyItemAmount(itemKind, cl.health, pickupAmount, maximum);
+                    break;
+                case 1:
+                    cl.energy = applyItemAmount(itemKind, cl.energy, pickupAmount, maximum);
+                    break;
+                case 2:
+                    cl.ammo = std::min(gWeaponTable[0].maxAmmo, cl.ammo +
+                        (int)std::lround(std::max(0.0f, pickupAmount)));
+                    break;
                 default: break;
             }
             sg.active = false;
-            sg.respawnTime = pickupNow + 20.0;
-            WireHeader whdr{};
-            whdr.sequence = 1; whdr.ack = 0; whdr.ackMask = 0;
-            whdr.type = (uint8_t)PacketType::GameData;
-            whdr.checksum = 0;
-            T2Protocol::GhostMessage gm;
-            gm.index = sg.index;
-            gm.type = T2Protocol::Ghost_Delete;
-            uint8_t ghBuf[16];
-            size_t ghLen = T2Protocol::encodeGhostHeader(ghBuf, sizeof(ghBuf), gm);
-            if (ghLen > 0) {
-                std::vector<uint8_t> pkt(sizeof(WireHeader) + ghLen);
-                encodeWireHeader(pkt.data(), whdr);
-                memcpy(pkt.data() + sizeof(WireHeader), ghBuf, ghLen);
-                for (auto& c : impl->clients)
-                    if (c.active && !c.isBot) impl->sendWireTo(c.addr, pkt.data(), pkt.size());
-            }
+            sg.respawnTime = pickupNow + sg.itemRespawnDelay;
+            // The ghost will be recreated when its respawn timer expires.
+            // Clearing each client's known state is required; otherwise the
+            // respawn is sent as an update for a ghost the client already
+            // deleted and the pickup never becomes visible again.
+            impl->broadcastGhostDelete(sg.index, -1);
             Console::instance().printf(LogLevel::Debug, "Item %u picked up by client %d (type %d)",
                 (unsigned)sg.index, (int)(&cl - &impl->clients[0]), sg.itemType);
         }
@@ -2317,18 +2616,28 @@ void GameServer::update() {
     // CTF flag handling
     if (impl->gameMode == 2) {
         for (auto& cl : impl->clients) {
-            if (!cl.active) continue;
+            if (!cl.active || cl.health <= 0.0f || cl.respawnAt > 0.0 ||
+                cl.teamId < 1 || cl.teamId > 2) continue;
             for (auto& sg : impl->serverGhosts) {
                 if (!sg.active || (sg.classId != 100 && sg.classId != 101)) continue;
                 int flagTeam = (sg.classId == T2Protocol::CLASS_FLAG_RED) ? 1 : 2; // RedFlag=team1, BlueFlag=team2
 
                 // Flag carried by someone: sync to carrier
                 if (sg.passengerCi >= 0) {
+                    if (sg.passengerCi >= (int)impl->clients.size()) {
+                        sg.passengerCi = -1;
+                        sg.active = true;
+                        sg.respawnTime = Engine::instance().timer().now() + 30.0;
+                        continue;
+                    }
                     auto& carrier = impl->clients[sg.passengerCi];
                     if (!carrier.active || carrier.health <= 0) {
                         // Carrier died: drop flag
                         sg.posX = carrier.posX; sg.posY = carrier.posY + 1; sg.posZ = carrier.posZ;
                         sg.passengerCi = -1;
+                        // A dropped flag remains visible and immediately
+                        // recoverable; the timer only controls auto-return.
+                        sg.active = true;
                         sg.respawnTime = Engine::instance().timer().now() + 30.0;
                         carrier.flagCarried = 0;
                         Console::instance().printf(LogLevel::Info, "Flag %d dropped by dead carrier", sg.classId);
@@ -2341,8 +2650,10 @@ void GameServer::update() {
                         const int homeClass = carrier.teamId == 1 ? T2Protocol::CLASS_FLAG_RED :
                                               T2Protocol::CLASS_FLAG_BLUE;
                         for (auto& baseSg : impl->serverGhosts) {
+                            const float homeDx = baseSg.posX - baseSg.homeX;
+                            const float homeDz = baseSg.posZ - baseSg.homeZ;
                             if (baseSg.classId == homeClass && baseSg.passengerCi < 0 &&
-                                baseSg.active) {
+                                baseSg.active && homeDx * homeDx + homeDz * homeDz < 0.01f) {
                                 float dx = carrier.posX - baseSg.posX;
                                 float dz = carrier.posZ - baseSg.posZ;
                                 if (dx*dx + dz*dz < 16.0f) {
@@ -2358,22 +2669,10 @@ void GameServer::update() {
                                     carrier.flagCarried = 0;
                                     sg.respawnTime = 0;
                                     sg.posX = sg.homeX; sg.posY = sg.homeY; sg.posZ = sg.homeZ;
-                                    // Broadcast flag delete
-                                    WireHeader whdr{};
-                                    whdr.sequence = 1; whdr.ack = 0; whdr.ackMask = 0;
-                                    whdr.type = (uint8_t)PacketType::GameData;
-                                    whdr.checksum = 0;
-                                    T2Protocol::GhostMessage gm;
-                                    gm.index = sg.index; gm.type = T2Protocol::Ghost_Delete;
-                                    uint8_t ghBuf[16];
-                                    size_t ghLen = T2Protocol::encodeGhostHeader(ghBuf, sizeof(ghBuf), gm);
-                                    if (ghLen > 0) {
-                                        std::vector<uint8_t> pkt(sizeof(WireHeader) + ghLen);
-                                        encodeWireHeader(pkt.data(), whdr);
-                                        memcpy(pkt.data() + sizeof(WireHeader), ghBuf, ghLen);
-                                        for (auto& c : impl->clients)
-                                            if (c.active && !c.isBot) impl->sendWireTo(c.addr, pkt.data(), pkt.size());
-                                    }
+                                     // The flag returns as a fresh ghost after
+                                     // capture. Clear known state so both
+                                     // legacy and native clients recreate it.
+                                     impl->broadcastGhostDelete(sg.index, -1);
                                 }
                                 break;
                             }
@@ -2384,15 +2683,21 @@ void GameServer::update() {
 
                 // Near a flag on the ground (not being carried): pick it up
                 if (sg.passengerCi >= 0) continue;
-                if (sg.respawnTime > Engine::instance().timer().now()) continue;
+                // A dropped flag remains touchable while its auto-return timer
+                // runs.  The timer is only a return deadline, unlike item
+                // respawn timers which make the pickup unavailable.
+                if (sg.classId != T2Protocol::CLASS_FLAG_RED &&
+                    sg.classId != T2Protocol::CLASS_FLAG_BLUE &&
+                    sg.respawnTime > Engine::instance().timer().now()) continue;
 
                 float dx = cl.posX - sg.posX;
                 float dz = cl.posZ - sg.posZ;
                 if (dx*dx + dz*dz < 9.0f) {
                     float dy = cl.posY - sg.posY;
                     if (dy > -3.0f && dy < 3.0f && cl.teamId == flagTeam) {
-                        if (sg.respawnTime <= 0 && sg.active) {
+                        if (sg.active) {
                             sg.posX = sg.homeX; sg.posY = sg.homeY; sg.posZ = sg.homeZ;
+                            sg.respawnTime = 0;
                             Console::instance().printf(LogLevel::Info, "Player %d returned flag %d",
                                 (int)(&cl - &impl->clients[0]), sg.classId);
                         }
@@ -2412,12 +2717,15 @@ void GameServer::update() {
 
         // Respawn timed-out flags
         for (auto& sg : impl->serverGhosts) {
-            if ((sg.classId == T2Protocol::CLASS_FLAG_RED || sg.classId == T2Protocol::CLASS_FLAG_BLUE) && !sg.active && sg.respawnTime > 0 &&
+            if ((sg.classId == T2Protocol::CLASS_FLAG_RED || sg.classId == T2Protocol::CLASS_FLAG_BLUE) &&
+                sg.passengerCi < 0 && sg.respawnTime > 0 &&
                 Engine::instance().timer().now() >= sg.respawnTime) {
                 sg.active = true;
                 sg.respawnTime = 0;
-                sg.passengerCi = -1;
-                Console::instance().printf(LogLevel::Debug, "Flag %u respawned at base", (unsigned)sg.index);
+                sg.posX = sg.homeX;
+                sg.posY = sg.homeY;
+                sg.posZ = sg.homeZ;
+                Console::instance().printf(LogLevel::Debug, "Flag %u returned to base", (unsigned)sg.index);
             }
         }
     }
@@ -2442,6 +2750,7 @@ void GameServer::update() {
                 cl.posZ = sg.posZ - sinf(sg.rotZ) * exitOffset;
                 cl.posY = sg.posY + 1.0f;
                 sg.passengerCi = -1;
+                inVeh = true;
                 Console::instance().printf(LogLevel::Debug, "Client %d exited vehicle %u",
                     (int)(&cl - &impl->clients[0]), (unsigned)sg.index);
                 break;
@@ -2471,7 +2780,7 @@ void GameServer::update() {
         auto& driver = impl->clients[sg.passengerCi];
         if (!driver.active) continue;
         float forward = (driver.lastMove.flags & 1) ? 1.0f : 0;
-        float backward = 0; // could add flag later
+        float backward = (driver.lastMove.flags & 128) ? 1.0f : 0;
             bool isFlying = (sg.classId == T2Protocol::CLASS_VEHICLE_FLYING);
             bool isHover = (sg.classId == T2Protocol::CLASS_VEHICLE_HOVER);
         float accel = isFlying ? 25.0f : isHover ? 20.0f : 15.0f;
@@ -2496,8 +2805,8 @@ void GameServer::update() {
         sg.posX += sinf(sg.rotZ) * sg.vehSpeed * simDt;
         sg.posZ += cosf(sg.rotZ) * sg.vehSpeed * simDt;
         // Ground/hover height
-        float groundY = 2.0f;
-        if (heightCB) groundY = heightCB(sg.posX, sg.posZ, heightCtx);
+        const float groundY = serverGroundHeight(2.0f, heightCB, heightCtx,
+                                                 sg.posX, sg.posZ);
         if (isFlying) {
             sg.posY = groundY + 10.0f;
         } else if (isHover) {
@@ -2612,8 +2921,8 @@ void GameServer::update() {
         bot.velZ = (fwd * cosYaw - strafe * sinYaw) * speed;
 
         // Ground clamp
-        float groundY = 2.0f;
-        if (heightCB) groundY = heightCB(bot.posX, bot.posZ, heightCtx);
+        const float groundY = serverGroundHeight(2.0f, heightCB, heightCtx,
+                                                 bot.posX, bot.posZ);
         if (bot.posY < groundY) { bot.posY = groundY; bot.velY = 0; }
     }
 
@@ -2639,11 +2948,8 @@ void GameServer::update() {
                 sg.posX -= pushX;
                 sg.posZ -= pushZ;
                 // Ground clamp after push
-                float groundY = 2.0f;
-                if (heightCB) {
-                    float h = heightCB(ci.posX, ci.posZ, heightCtx);
-                    if (h > groundY) groundY = h;
-                }
+                const float groundY = serverGroundHeight(2.0f, heightCB, heightCtx,
+                                                         ci.posX, ci.posZ);
                 if (ci.posY < groundY) ci.posY = groundY;
             }
         }
@@ -2662,8 +2968,9 @@ void GameServer::update() {
             const float dx = sp.posX - oldX, dy = sp.posY - oldY, dz = sp.posZ - oldZ;
             const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
             if (distance > 0.0001f && rayCB(oldX, oldY, oldZ, dx / distance, dy / distance,
-                                             dz / distance, distance, rayCtx)) {
+                                              dz / distance, distance, rayCtx)) {
                 sp.active = false;
+                applyProjectileSplash(sp, sp.posX, sp.posY, sp.posZ);
                 continue;
             }
         }
@@ -2672,34 +2979,12 @@ void GameServer::update() {
         for (auto& sg : impl->serverGhosts)
             if (sg.index == sp.ghostIndex) { projGhost = &sg; break; }
 
-        float groundY = 2.0f;
-        if (heightCB) {
-            float h = heightCB(sp.posX, sp.posZ, heightCtx);
-            if (h > groundY) groundY = h;
-        }
+        const float groundY = serverGroundHeight(2.0f, heightCB, heightCtx,
+                                                 sp.posX, sp.posZ);
         if (sp.posY < groundY) {
             sp.active = false;
             if (projGhost) projGhost->active = false;
-            for (auto& client : impl->clients) {
-                if (!client.active || client.respawnAt > 0) continue;
-                if (sp.ownerCi >= 0 && sp.ownerCi < (int)impl->clients.size()) {
-                    auto& own = impl->clients[sp.ownerCi];
-                    if ((impl->gameMode == 1 || impl->gameMode == 2) && own.teamId == client.teamId && client.teamId != 0)
-                        continue; // friendly fire: no splash damage
-                }
-                float dx = client.posX - sp.posX, dy = client.posY - sp.posY, dz = client.posZ - sp.posZ;
-                float dist2 = dx*dx + dy*dy + dz*dz;
-                if (dist2 < sp.splashRadius * sp.splashRadius) {
-                    float frac = 1.0f - sqrtf(dist2) / sp.splashRadius;
-                    applyDamage(client, sp.damage * frac, sp.ownerCi);
-                    if (dist2 > 0.0001f) {
-                        const float invDist = 1.0f / sqrtf(dist2);
-                        client.velX += dx * invDist * frac * 10.0f;
-                        client.velY += dy * invDist * frac * 10.0f;
-                        client.velZ += dz * invDist * frac * 10.0f;
-                    }
-                }
-            }
+            applyProjectileSplash(sp, sp.posX, sp.posY, sp.posZ);
             continue;
         }
         // Hit a player? (with lag compensation: check rewind position too)
@@ -2707,17 +2992,21 @@ void GameServer::update() {
         for (auto& client : impl->clients) {
             if (!client.active || client.respawnAt > 0) continue;
             if (sp.ownerCi >= 0 && &client == &impl->clients[sp.ownerCi]) continue;
-            // Current position check
-            float dx = client.posX - sp.posX, dz = client.posZ - sp.posZ;
-            bool hit = (dx*dx + dz*dz < 2.0f);
+            const Point3F projectileStart{oldX, oldY, oldZ};
+            const Point3F projectileEnd{sp.posX, sp.posY, sp.posZ};
+            const Point3F clientPosition{client.posX, client.posY, client.posZ};
+            float hitT = 0.0f;
+            bool hit = segmentPlayerHit(projectileStart, projectileEnd,
+                                        clientPosition, hitT);
             // Rewind position check (~100ms ago for lag compensation)
             if (!hit && !client.posHistory.empty()) {
                 double rewindTime = Engine::instance().timer().now() - 0.1;
                 auto best = client.posHistory[0];
                 for (auto& ps : client.posHistory)
                     if (ps.time <= rewindTime && ps.time > best.time) best = ps;
-                float rdx = best.x - sp.posX, rdz = best.z - sp.posZ;
-                hit = (rdx*rdx + rdz*rdz < 2.0f);
+                const Point3F rewoundPosition{best.x, best.y, best.z};
+                hit = segmentPlayerHit(projectileStart, projectileEnd,
+                                       rewoundPosition, hitT);
             }
             if (hit) {
                 float dy = client.posY - sp.posY;
@@ -2751,8 +3040,10 @@ void GameServer::update() {
                                         if (c.active && !c.isBot) impl->sendWireTo(c.addr, pkt.data(), pkt.size());
                                 }
                             }
+                            }
                         }
-                    }
+                    const float dx = client.posX - sp.posX;
+                    const float dz = client.posZ - sp.posZ;
                     float dist = sqrtf(dx*dx + dz*dz);
                     if (dist > 0.01f && !friendlyFire) { client.velX += (dx/dist)*8.0f; client.velZ += (dz/dist)*8.0f; client.velY += 4.0f; }
                     Console::instance().printf(LogLevel::Debug, "Projectile %u hit! health=%.0f ff=%d", (unsigned)sp.ghostIndex, client.health, (int)friendlyFire);
@@ -2797,6 +3088,18 @@ void GameServer::update() {
         auto& cl = impl->clients[ci];
         bool disconnected = !cl.active || (now - cl.lastReceive) > 30.0;
         if (disconnected) {
+            if (cl.flagCarried != 0) {
+                for (auto& sg : impl->serverGhosts) {
+                    if (sg.index == (uint32_t)cl.flagCarried) {
+                        sg.posX = cl.posX; sg.posY = cl.posY + 1.0f; sg.posZ = cl.posZ;
+                        sg.passengerCi = -1;
+                        sg.active = true;
+                        sg.respawnTime = now + 30.0;
+                        break;
+                    }
+                }
+                cl.flagCarried = 0;
+            }
             // Clean up the player's ghost once (idempotent via playerGhostIndex reset).
             uint32_t oldG = cl.playerGhostIndex;
             if (oldG > 0) {

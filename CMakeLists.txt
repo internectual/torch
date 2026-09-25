@@ -62,7 +62,7 @@ add_executable(torch
     src/net/protocol.cpp
     src/net/connection.cpp
     src/game/world.cpp
-    src/game/player.cpp
+    src/game/game.cpp
     src/game/physics.cpp
     src/game/collision.cpp
     src/game/weapon.cpp
@@ -206,6 +206,14 @@ target_include_directories(torch_transform_test PRIVATE src)
 target_compile_options(torch_transform_test PRIVATE -UNDEBUG)
 add_test(NAME torch_transform COMMAND torch_transform_test)
 
+add_executable(torch_collision_bounds_test
+    tests/collision_bounds_test.cpp
+    src/game/collision.cpp
+)
+target_include_directories(torch_collision_bounds_test PRIVATE src)
+target_compile_options(torch_collision_bounds_test PRIVATE -UNDEBUG)
+add_test(NAME torch_collision_bounds COMMAND torch_collision_bounds_test)
+
 add_executable(torch_script_object_state_test tests/script_object_state_test.cpp)
 target_include_directories(torch_script_object_state_test PRIVATE src)
 target_compile_options(torch_script_object_state_test PRIVATE -UNDEBUG)
@@ -221,6 +229,7 @@ add_test(NAME torch_safety_policy COMMAND torch_safety_policy_test)
 
 add_executable(torch_mission_parser_test
     tests/mission_parser_test.cpp
+    src/core/math.cpp
 )
 target_include_directories(torch_mission_parser_test PRIVATE src)
 target_compile_options(torch_mission_parser_test PRIVATE -UNDEBUG)
@@ -230,6 +239,19 @@ add_executable(torch_mission_discovery_test tests/mission_discovery_test.cpp)
 target_include_directories(torch_mission_discovery_test PRIVATE src)
 target_compile_options(torch_mission_discovery_test PRIVATE -UNDEBUG)
 add_test(NAME torch_mission_discovery COMMAND torch_mission_discovery_test)
+
+add_executable(torch_mission_resolution_test
+    tests/mission_resolution_test.cpp
+    tests/console_stub.cpp
+    src/fs/file_system.cpp
+    src/fs/asset_policy.cpp
+    src/fs/path_policy.cpp
+    src/fs/vl2_archive.cpp
+)
+target_include_directories(torch_mission_resolution_test PRIVATE src)
+target_link_libraries(torch_mission_resolution_test PRIVATE ZLIB::ZLIB)
+target_compile_options(torch_mission_resolution_test PRIVATE -UNDEBUG)
+add_test(NAME torch_mission_resolution COMMAND torch_mission_resolution_test)
 
 add_executable(torch_script_scheduler_test tests/script_scheduler_test.cpp)
 target_include_directories(torch_script_scheduler_test PRIVATE src)
@@ -261,7 +283,15 @@ target_include_directories(torch_launch_args_test PRIVATE src)
 target_compile_options(torch_launch_args_test PRIVATE -UNDEBUG)
 add_test(NAME torch_launch_args COMMAND torch_launch_args_test)
 
-add_executable(torch_trigger_test tests/trigger_test.cpp)
+add_executable(torch_script_demo_contract_test tests/script_demo_contract_test.cpp)
+target_include_directories(torch_script_demo_contract_test PRIVATE src)
+target_compile_options(torch_script_demo_contract_test PRIVATE -UNDEBUG)
+add_test(NAME torch_script_demo_contract COMMAND torch_script_demo_contract_test)
+
+add_executable(torch_trigger_test
+    tests/trigger_test.cpp
+    src/core/math.cpp
+)
 target_include_directories(torch_trigger_test PRIVATE src)
 target_compile_options(torch_trigger_test PRIVATE -UNDEBUG)
 add_test(NAME torch_trigger COMMAND torch_trigger_test)
@@ -300,6 +330,16 @@ target_include_directories(torch_projectile_material_test PRIVATE src)
 target_compile_options(torch_projectile_material_test PRIVATE -UNDEBUG)
 add_test(NAME torch_projectile_material COMMAND torch_projectile_material_test)
 
+add_executable(torch_weapon_spawn_test
+    tests/weapon_spawn_test.cpp
+    src/game/weapon.cpp
+)
+target_include_directories(torch_weapon_spawn_test PRIVATE src)
+target_compile_options(torch_weapon_spawn_test PRIVATE -UNDEBUG -ffunction-sections -fdata-sections)
+target_link_options(torch_weapon_spawn_test PRIVATE -Wl,--gc-sections)
+target_link_libraries(torch_weapon_spawn_test PRIVATE m)
+add_test(NAME torch_weapon_spawn COMMAND torch_weapon_spawn_test)
+
 add_executable(torch_dynamic_lighting_test tests/dynamic_lighting_test.cpp)
 target_include_directories(torch_dynamic_lighting_test PRIVATE src)
 target_compile_options(torch_dynamic_lighting_test PRIVATE -UNDEBUG)
@@ -307,18 +347,58 @@ add_test(NAME torch_dynamic_lighting COMMAND torch_dynamic_lighting_test)
 
 add_executable(torch_parity_test
     tests/parity_test.cpp
+    src/stb_image_impl.cpp
+    src/stb_image_write_impl.cpp
+    src/core/engine.cpp
+    src/core/platform.cpp
+    src/core/console.cpp
+    src/core/math.cpp
+    src/core/timer.cpp
+    src/core/string_table.cpp
+    src/fs/file_system.cpp
+    src/fs/asset_policy.cpp
+    src/fs/path_policy.cpp
+    src/fs/vol_archive.cpp
+    src/fs/vl2_archive.cpp
+    src/script/dso_reader.cpp
+    src/script/script_engine.cpp
+    src/script/torquescript.cpp
+    src/render/renderer.cpp
+    src/render/shader.cpp
+    src/render/texture.cpp
+    src/render/mesh.cpp
+    src/render/font.cpp
+    src/render/sky.cpp
+    src/render/dts_loader.cpp
+    src/render/dif_loader.cpp
+    src/render/gui_renderer.cpp
+    src/audio/audio_system.cpp
     src/game/demo.cpp
+    src/game/game.cpp
+    src/game/world.cpp
+    src/game/player.cpp
+    src/game/physics.cpp
     src/game/collision.cpp
+    src/game/weapon.cpp
+    src/net/network.cpp
+    src/net/master_query.cpp
     src/net/v12_bitstream.cpp
+    src/net/v12_protocol.cpp
     src/net/v12_datablocks.cpp
     src/net/v12_events.cpp
     src/net/v12_ghosts.cpp
     src/net/v12_registry.cpp
+    src/net/v12_ghost_packet.cpp
+    src/net/protocol.cpp
+    src/net/connection.cpp
     src/render/terrain_holes.cpp
     src/render/terrain.cpp
 )
 target_include_directories(torch_parity_test PRIVATE src)
-target_link_libraries(torch_parity_test PRIVATE ZLIB::ZLIB m)
+target_link_libraries(torch_parity_test PRIVATE
+    OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis m dl)
+target_compile_definitions(torch_parity_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_parity_test PRIVATE -UNDEBUG -ffunction-sections -fdata-sections)
 target_link_options(torch_parity_test PRIVATE -Wl,--gc-sections)
 add_test(NAME torch_parity COMMAND torch_parity_test)
@@ -409,6 +489,18 @@ add_test(NAME torch_demo_damnation
 set_tests_properties(torch_demo_snapshot torch_demo_minotaur torch_demo_damnation
     PROPERTIES SKIP_REGULAR_EXPRESSION "^SKIP:")
 
+add_executable(torch_demo_mission_replacement_test
+    tests/demo_mission_replacement_test.cpp
+)
+target_include_directories(torch_demo_mission_replacement_test PRIVATE src)
+target_compile_options(torch_demo_mission_replacement_test PRIVATE -UNDEBUG)
+add_test(NAME torch_demo_mission_replacement COMMAND torch_demo_mission_replacement_test)
+
+add_executable(torch_demo_text_test tests/demo_text_test.cpp)
+target_include_directories(torch_demo_text_test PRIVATE src)
+target_compile_options(torch_demo_text_test PRIVATE -UNDEBUG)
+add_test(NAME torch_demo_text COMMAND torch_demo_text_test)
+
 add_executable(torch_dts_animation_test
     tests/dts_animation_test.cpp
     src/core/math.cpp
@@ -440,6 +532,15 @@ target_link_libraries(torch_filesystem_precedence_test PRIVATE ZLIB::ZLIB)
 target_compile_options(torch_filesystem_precedence_test PRIVATE -UNDEBUG)
 add_test(NAME torch_filesystem_precedence COMMAND torch_filesystem_precedence_test)
 
+add_executable(torch_dso_reader_test
+    tests/dso_reader_test.cpp
+    tests/console_stub.cpp
+    src/script/dso_reader.cpp
+)
+target_include_directories(torch_dso_reader_test PRIVATE src)
+target_compile_options(torch_dso_reader_test PRIVATE -UNDEBUG)
+add_test(NAME torch_dso_reader COMMAND torch_dso_reader_test)
+
 add_executable(torch_decal_runtime_test tests/decal_runtime_test.cpp)
 target_include_directories(torch_decal_runtime_test PRIVATE src)
 target_compile_options(torch_decal_runtime_test PRIVATE -UNDEBUG)
@@ -455,7 +556,76 @@ target_include_directories(torch_wind_test PRIVATE src)
 target_compile_options(torch_wind_test PRIVATE -UNDEBUG)
 add_test(NAME torch_wind COMMAND torch_wind_test)
 
+add_executable(torch_precipitation_parity_test tests/precipitation_parity_test.cpp)
+target_include_directories(torch_precipitation_parity_test PRIVATE src)
+target_compile_options(torch_precipitation_parity_test PRIVATE -UNDEBUG)
+add_test(NAME torch_precipitation_parity COMMAND torch_precipitation_parity_test)
+
+add_executable(torch_sky_parity_test tests/sky_parity_test.cpp)
+target_include_directories(torch_sky_parity_test PRIVATE src)
+target_compile_options(torch_sky_parity_test PRIVATE -UNDEBUG)
+add_test(NAME torch_sky_parity COMMAND torch_sky_parity_test)
+
 add_executable(torch_text_layout_test tests/text_layout_test.cpp)
 target_include_directories(torch_text_layout_test PRIVATE src)
 target_compile_options(torch_text_layout_test PRIVATE -UNDEBUG)
 add_test(NAME torch_text_layout COMMAND torch_text_layout_test)
+
+add_executable(torch_script_conversion_test tests/script_conversion_test.cpp)
+target_include_directories(torch_script_conversion_test PRIVATE src)
+target_compile_options(torch_script_conversion_test PRIVATE -UNDEBUG)
+add_test(NAME torch_script_conversion COMMAND torch_script_conversion_test)
+
+add_executable(torch_menu_parity_test tests/menu_parity_test.cpp)
+target_include_directories(torch_menu_parity_test PRIVATE src)
+target_compile_options(torch_menu_parity_test PRIVATE -UNDEBUG)
+add_test(NAME torch_menu_parity COMMAND torch_menu_parity_test)
+
+add_executable(torch_item_visibility_test tests/item_visibility_test.cpp)
+target_include_directories(torch_item_visibility_test PRIVATE src)
+target_compile_options(torch_item_visibility_test PRIVATE -UNDEBUG)
+add_test(NAME torch_item_visibility COMMAND torch_item_visibility_test)
+
+add_test(NAME torch_runtime_lifecycle
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime_lifecycle_test.sh
+        $<TARGET_FILE:torch> $<TARGET_FILE:torch_server>)
+set_tests_properties(torch_runtime_lifecycle PROPERTIES TIMEOUT 90)
+
+add_test(NAME torch_launch_matrix
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/launch_matrix_test.sh
+        $<TARGET_FILE:torch>)
+set_tests_properties(torch_launch_matrix PROPERTIES TIMEOUT 120)
+
+add_test(NAME torch_help_output
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/help_output_test.sh
+        $<TARGET_FILE:torch> $<TARGET_FILE:torch_server>)
+
+add_test(NAME torch_script_path_precedence
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/script_path_precedence_test.sh
+        $<TARGET_FILE:torch>)
+set_tests_properties(torch_script_path_precedence PROPERTIES TIMEOUT 45)
+
+add_test(NAME torch_script_dependency
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/script_dependency_test.sh
+        $<TARGET_FILE:torch>)
+set_tests_properties(torch_script_dependency PROPERTIES TIMEOUT 60)
+
+add_test(NAME torch_script_compile_failure
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/script_compile_failure_test.sh
+        $<TARGET_FILE:torch>)
+set_tests_properties(torch_script_compile_failure PROPERTIES TIMEOUT 45)
+
+add_test(NAME torch_script_dso_roundtrip
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/script_dso_roundtrip_test.sh
+        $<TARGET_FILE:torch>)
+set_tests_properties(torch_script_dso_roundtrip PROPERTIES TIMEOUT 45)
+
+add_test(NAME torch_mouse_device
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/mouse_device_test.sh
+        $<TARGET_FILE:torch>)
+set_tests_properties(torch_mouse_device PROPERTIES TIMEOUT 45)
+
+add_test(NAME torch_script_word_range
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/script_word_range_test.sh
+        $<TARGET_FILE:torch>)
+set_tests_properties(torch_script_word_range PROPERTIES TIMEOUT 45)

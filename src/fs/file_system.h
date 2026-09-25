@@ -44,6 +44,7 @@ public:
                          std::string* resolvedPath = nullptr);
     bool readTextFile(const char* path, std::string& text);
     bool fileExists(const char* path) const;
+    bool removeFile(const char* path);
     int64_t fileModifyTime(const char* path) const;
     void listFiles(const char* pattern, std::vector<std::string>& out) const;
 

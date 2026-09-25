@@ -26,6 +26,7 @@ public:
     bool isRunning() const;
 
     static Engine& instance();
+    bool hasGame() const { return g != nullptr; }
 
     Platform& platform() { return *plat; }
     Console& console() { return *con; }
@@ -97,7 +98,8 @@ public: // TEST HARNESS: temporarily public so dts_one can install an empty FS
     bool previewDone = false;
     std::string previewMap;
     std::string demoPath;
-    bool demoMode = false;
+    bool demoMode = false; // Explicit -demo-mode launch flag, not recording playback.
+    int maxFrames = 0;
     Point3F previewCamPos{0, 200, -400};
     Point3F previewCamTarget{0, 0, 0};
     bool usePreviewCam = false;

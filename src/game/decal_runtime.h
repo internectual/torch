@@ -47,12 +47,18 @@ inline bool decalIsDuplicate(const DecalBasis& a, const DecalBasis& b, uint32_t 
 inline size_t decalTextureFrame(const std::vector<float>& durations, size_t frameCount,
                                 float age, float lifetime, bool randomize, uint32_t seed) {
     if (frameCount == 0) return 0;
-    if (randomize && age == 0.0f) return seed % frameCount;
+    // DecalData::randomize chooses one texture frame when the decal is
+    // created.  Recomputing the normal animation frame on later draws made a
+    // randomized decal visibly jump back to frame zero after its first tick.
+    if (randomize) return seed % frameCount;
     return textureFrameIndex(durations, frameCount, std::max(0.0f, age));
 }
 
 inline float decalAlpha(float age, float lifetime, int32_t fadeTimeMS) {
-    const float life = std::max(0.001f, lifetime);
+    // Decal timestamps can be uninitialized during ghost/demo startup. Keep
+    // that state visible instead of allowing NaN to poison the render alpha.
+    const float life = std::isfinite(lifetime) ? std::max(0.001f, lifetime) : 0.001f;
+    if (!std::isfinite(age)) return age > 0.0f ? 0.0f : 1.0f;
     const float fade = std::clamp(fadeTimeMS / 1000.0f, 0.0f, life);
     const float fadeStart = life - fade;
     return age <= fadeStart ? 1.0f : std::clamp((life - age) / std::max(0.001f, fade), 0.0f, 1.0f);

@@ -155,6 +155,12 @@ struct GuiControl {
 
     GuiControl* findChild(const std::string& name);
     void addChild(GuiControl* child);
+    bool owns(const GuiControl* node) const {
+        if (!node) return false;
+        for (auto* current = node; current; current = current->parent)
+            if (current == this) return true;
+        return false;
+    }
 };
 
 struct FadeState {

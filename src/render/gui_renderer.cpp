@@ -4,6 +4,7 @@
 #include "core/engine.h"
 #include "core/gui_input.h"
 #include "core/gui_geometry.h"
+#include "game/hud_parity.h"
 #include "script/script_engine.h"
 #include "script/torquescript.h"
 #include <GL/glew.h>
@@ -26,8 +27,8 @@ static bool nameEqual(const std::string& a, const std::string& b) {
 }
 
 GuiControl* GuiControl::findChild(const std::string& name) {
-    for (auto* c : children) if (nameEqual(c->name, name)) return c;
-    for (auto* c : children) { auto* r = c->findChild(name); if (r) return r; }
+    for (auto* c : children) if (c && nameEqual(c->name, name)) return c;
+    for (auto* c : children) { if (!c) continue; auto* r = c->findChild(name); if (r) return r; }
     return nullptr;
 }
 
@@ -57,6 +58,15 @@ void GuiControl::addChild(GuiControl* child) {
 static uint32_t s_quadVAO{}, s_quadVBO{}, s_quadEBO{};
 static bool s_quadBatchInit = false;
 
+static void destroyQuadBatch() {
+    if (!s_quadBatchInit) return;
+    glDeleteVertexArrays(1, &s_quadVAO);
+    glDeleteBuffers(1, &s_quadVBO);
+    glDeleteBuffers(1, &s_quadEBO);
+    s_quadVAO = s_quadVBO = s_quadEBO = 0;
+    s_quadBatchInit = false;
+}
+
 static void initQuadBatch() {
     struct SV { float x,y,z; float u,v; float r,g,b,a; };
     glGenVertexArrays(1, &s_quadVAO);
@@ -81,13 +91,6 @@ static void drawQuadBatch(const void* verts, size_t vertSize, const void* indice
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexSize, indices, GL_STREAM_DRAW);
     glDisable(GL_CULL_FACE);
     glDrawElements(GL_TRIANGLES, (GLsizei)(indexSize / sizeof(uint32_t)), GL_UNSIGNED_INT, 0);
-}
-
-static void destroyQuadBatch() {
-    if (s_quadVAO) { glDeleteVertexArrays(1, &s_quadVAO); s_quadVAO = 0; }
-    if (s_quadVBO) { glDeleteBuffers(1, &s_quadVBO); s_quadVBO = 0; }
-    if (s_quadEBO) { glDeleteBuffers(1, &s_quadEBO); s_quadEBO = 0; }
-    s_quadBatchInit = false;
 }
 
 // Canonical GuiControl identity: exactly one GuiControl per ScriptObject
@@ -132,7 +135,15 @@ GuiRenderer::~GuiRenderer() {
         for (auto* child : ctl->children) self(self, child);
         delete ctl;
     };
+    s_openPopups.clear();
     if (canvas) del(del, canvas);
+    for (auto& [name, shape] : s_playerViewShapes)
+        for (auto& mesh : shape.meshes) mesh.destroy();
+    for (auto& [name, shape] : s_playerViewWeapons)
+        for (auto& mesh : shape.meshes) mesh.destroy();
+    s_playerViewShapes.clear();
+    s_playerViewWeapons.clear();
+    destroyQuadBatch();
     createdControls().clear();
 }
 
@@ -209,7 +220,34 @@ int GuiRenderer::keyNameToScancode(const std::string& name) {
 
 void GuiRenderer::init() {
     canvas = nullptr;
+    dialogStack.clear();
+    lastPushed.clear();
+    focusBeforeDialog.clear();
+    focusedCtrl = nullptr;
+    pressedCtrl = nullptr;
+    selectedList = nullptr;
+    s_openPopups.clear();
     auto& objs = ScriptEngine::instance().objects;
+
+    // The stock bootstrap names the root control "Canvas".  Keep that
+    // script object as the renderer root even when an earlier script path
+    // left its class metadata incomplete.
+    bool hasCanvas = false;
+    for (auto& [name, object] : objs) {
+        if (object && lowerKey(name) == "canvas") {
+            object->className = "GuiCanvas";
+            hasCanvas = true;
+            break;
+        }
+    }
+    if (!hasCanvas) {
+        auto* object = new ScriptObject;
+        object->name = "Canvas";
+        object->className = "GuiCanvas";
+        object->fields["extent"] = VMValue("1024 768");
+        object->fields["position"] = VMValue("0 0");
+        objs[object->name] = object;
+    }
 
     // First pass: create/adopt GuiControl objects for all GUI-related ScriptObjects
     std::unordered_map<std::string, GuiControl*> controlMap;
@@ -233,13 +271,6 @@ void GuiRenderer::init() {
             }
             ctl->name = obj->name;
             ctl->className = normalizeGuiClassName(obj->className);
-            auto rf = [&](const std::string& key, float def) {
-                auto it = obj->fields.find(key);
-                if (it != obj->fields.end()) return (float)it->second.toDouble();
-                auto it2 = obj->internals.find(key);
-                if (it2 != obj->internals.end()) return (float)it2->second.toDouble();
-                return def;
-            };
             // Parse "x y" format strings
             auto parsePair = [&](const std::string& key, float& a, float& b) {
                 auto it = obj->fields.find(key);
@@ -452,6 +483,7 @@ void GuiRenderer::render() {
     if (!s_openPopups.empty()) {
         r.flushSpriteBatch();
         for (auto* pc : s_openPopups) {
+            if (!pc || !pc->visible) continue;
             float px = pc->posX, py = pc->posY;
             for (auto* p = pc->parent; p && p != canvas; p = p->parent) { px += p->posX; py += p->posY; }
             if (pc->className == "GuiPopUpMenuCtrl") drawPopupDropdownList(r, pc, px, py);
@@ -497,18 +529,12 @@ void GuiRenderer::mapMouse(int physicalX, int physicalY, int& logicalX, int& log
 struct ClipRect { float x, y, w, h; };
 struct BmpCell { int x, y, w, h; };
 
-// Profile lookup from loaded scripts
-static std::unordered_map<std::string, ScriptObject*> s_profileCache;
 static ScriptObject* getProfile(const std::string& name) {
-    auto cit = s_profileCache.find(name);
-    if (cit != s_profileCache.end()) return cit->second;
     auto& objs = ScriptEngine::instance().objects;
     auto it = objs.find(name);
-    ScriptObject* result = nullptr;
-    if (it != objs.end() && it->second->className == "GuiControlProfile")
-        result = it->second;
-    s_profileCache[name] = result;
-    return result;
+    if (it != objs.end() && it->second && it->second->className == "GuiControlProfile")
+        return it->second;
+    return nullptr;
 }
 
 // Get font from profile's fontType/fontSize. Values referencing TS globals
@@ -584,81 +610,6 @@ static std::vector<BmpCell> detectBitmapCells(const uint8_t* rgba, int w, int h)
         y = rowBot;
     }
     return cells;
-}
-
-// 9-slice bitmap array rendering for shell textures using detected cells
-static void drawBmpArrayButton(Renderer& r, const Point3F& dstA, const Point3F& dstB,
-                                uint32_t texId, const std::vector<BmpCell>& cells,
-                                int texW, int texH,
-                                int state /* 0=normal,1=pressed,2=hover,3=disabled */) {
-    int baseIdx = 9 * state;
-    if (baseIdx + 8 >= (int)cells.size()) { r.drawTexturedRect(dstA, dstB, texId); return; }
-    auto* ss = ShaderManager::getSpriteShader();
-    if (!ss) return;
-    ss->bind();
-    ss->setUniform("uProjection", r.projection);
-    ss->setUniform("uView", r.view);
-    ss->setUniform("uUseTexture", int32_t(1));
-    ss->setUniform("uTexture", int32_t(0));
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texId);
-
-    struct SV { float x,y,z; float u,v; float r,g,b,a; };
-    auto drawCell = [&](int cellIdx, float rx, float ry, float rw, float rh, bool stretchX, bool stretchY) {
-        if (rw <= 0 || rh <= 0) return;
-        const auto& src = cells[baseIdx + cellIdx];
-        float u0 = (float)(src.x) / (float)texW, v0 = (float)(src.y) / (float)texH;
-        float u1 = (float)(src.x + src.w) / (float)texW, v1 = (float)(src.y + src.h) / (float)texH;
-        if (stretchX) { u0 += 1.0f/texW; u1 -= 1.0f/texW; }
-        if (stretchY) { v0 += 1.0f/texH; v1 -= 1.0f/texH; }
-        SV verts[4] = {
-            {rx,ry,0, u0,v0, 1,1,1,1}, {rx+rw,ry,0, u1,v0, 1,1,1,1},
-            {rx,ry+rh,0, u0,v1, 1,1,1,1}, {rx+rw,ry+rh,0, u1,v1, 1,1,1,1}
-        };
-        uint32_t ids[] = {0,1,2,1,3,2};
-        drawQuadBatch(verts, sizeof(verts), ids, sizeof(ids));
-    };
-
-    float dx = dstA.x, dy = dstA.y, dw = dstB.x - dstA.x, dh = dstB.y - dstA.y;
-    const auto& c0 = cells[baseIdx+0], c2 = cells[baseIdx+2];
-    const auto& c6 = cells[baseIdx+6], c8 = cells[baseIdx+8];
-    float lw = (float)c0.w, rw = (float)c2.w, th = (float)c0.h, bh = (float)c6.h;
-    float mw = dw - lw - rw; if (mw < 0) mw = 0;
-    float mh = dh - th - bh; if (mh < 0) mh = 0;
-
-    // Corners (no stretch)
-    drawCell(0, dx, dy, lw, th, false, false); // TL
-    drawCell(2, dx+dw-rw, dy, rw, th, false, false); // TR
-    drawCell(6, dx, dy+dh-bh, lw, bh, false, false); // BL
-    drawCell(8, dx+dw-rw, dy+dh-bh, rw, bh, false, false); // BR
-    // Edges (stretch one axis)
-    drawCell(1, dx+lw, dy, mw, th, true, false); // T
-    drawCell(7, dx+lw, dy+dh-bh, mw, bh, true, false); // B
-    drawCell(3, dx, dy+th, lw, mh, false, true); // L
-    drawCell(5, dx+dw-rw, dy+th, rw, mh, false, true); // R
-    // Fill (tile both axes using GL_REPEAT)
-    if (mw > 0 && mh > 0) {
-        const auto& src = cells[baseIdx + 4];
-        float tileW = (float)src.w, tileH = (float)src.h;
-        float repeatX = mw / tileW, repeatY = mh / tileH;
-        // Use GL_REPEAT for tiling
-        GLint oldWrap;
-        glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, &oldWrap);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-        struct SV2 { float x,y,z; float u,v; float r,g,b,a; };
-        SV2 verts[4] = {
-            {dx+lw, dy+th, 0, 0, 0, 1,1,1,1},
-            {dx+lw+mw, dy+th, 0, repeatX, 0, 1,1,1,1},
-            {dx+lw, dy+th+mh, 0, 0, repeatY, 1,1,1,1},
-            {dx+lw+mw, dy+th+mh, 0, repeatX, repeatY, 1,1,1,1}
-        };
-        uint32_t ids[] = {0,1,2,1,3,2};
-        drawQuadBatch(verts, sizeof(verts), ids, sizeof(ids));
-        // Restore wrap
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, oldWrap);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, oldWrap);
-    }
 }
 
 // Historical procedural shell generator retained only as reference while the
@@ -995,17 +946,7 @@ static Texture* getShellTexWithCells(Renderer& r, const char* name, const std::v
     return tex;
 }
 
-static int tabCellsRefSize() {
-    static int n = -1;
-    if (n < 0) {
-        Renderer* rr = nullptr; // not needed; use global cache size
-        n = (int)g_cellCache.size();
-    }
-    return n;
-}
-
 // Draw an arbitrary sub-region of a texture into a destination rect.
-static int tabCellsRefSize();
 static void drawTexRegion(Renderer& r, Texture* tex, float sx, float sy, float sw, float sh,
                           float dx, float dy, float dw, float dh,
                           const ColorF* tint = nullptr) {
@@ -1321,6 +1262,34 @@ static void drawPopupDropdownList(Renderer& r, GuiControl* ctl, float x, float y
     }
 }
 
+static std::pair<float, float> guiControlLocalPosition(const GuiControl* ctl) {
+    if (!ctl) return {0.0f, 0.0f};
+    float x = ctl->posX;
+    float y = ctl->posY;
+    if (ctl->parent) {
+        const auto horiz = ctl->fields.find("horizSizing");
+        const auto vert = ctl->fields.find("vertSizing");
+        if (horiz != ctl->fields.end() && horiz->second == "right")
+            x = ctl->parent->extentX - ctl->extentX - ctl->posX;
+        if (vert != ctl->fields.end() && vert->second == "bottom")
+            y = ctl->parent->extentY - ctl->extentY - ctl->posY;
+    }
+    return {x, y};
+}
+
+static std::pair<float, float> guiControlAbsolutePosition(const GuiControl* ctl,
+                                                            const GuiControl* canvas) {
+    if (!ctl) return {0.0f, 0.0f};
+    auto [x, y] = guiControlLocalPosition(ctl);
+    for (const GuiControl* parent = ctl->parent;
+         parent && parent != canvas; parent = parent->parent) {
+        auto [parentX, parentY] = guiControlLocalPosition(parent);
+        x += parentX;
+        y += parentY;
+    }
+    return {x, y};
+}
+
 void GuiRenderer::renderControl(GuiControl* ctl) {
     renderControlRec(this, ctl, canvas, 0, 0, nullptr);
 }
@@ -1331,29 +1300,16 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
     if (!ctl || !ctl->visible) return;
 
     auto& r = Engine::instance().renderer();
-    auto& fs = Engine::instance().fs();
     auto* font = r.getFont();
 
-    float localX = ctl->posX;
-    float localY = ctl->posY;
-    if (ctl->parent && ctl->parent != canvas) {
-        const auto horiz = ctl->fields.find("horizSizing");
-        const auto vert = ctl->fields.find("vertSizing");
-        if (horiz != ctl->fields.end() && horiz->second == "right")
-            localX = ctl->parent->extentX - ctl->extentX - ctl->posX;
-        if (vert != ctl->fields.end() && vert->second == "bottom")
-            localY = ctl->parent->extentY - ctl->extentY - ctl->posY;
-    }
+    const auto [localX, localY] = guiControlLocalPosition(ctl);
     float x = localX + scrollOfsX;
     float y = localY + scrollOfsY;
 
     // Add parent offset (walk up to canvas, excluding scroll ancestor's offset which is in scrollOfs)
-    GuiControl* p = ctl->parent;
-    while (p && p != canvas) {
-        x += p->posX;
-        y += p->posY;
-        p = p->parent;
-    }
+    const auto [absoluteX, absoluteY] = guiControlAbsolutePosition(ctl, canvas);
+    x = absoluteX + scrollOfsX;
+    y = absoluteY + scrollOfsY;
 
 
     const std::string& cn = ctl->className;
@@ -1682,7 +1638,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         float lineY = y + 2;
         float maxW = ctl->extentX - 4;
         float penX = x + 2;
-        int lineStartSpan = 0;
         for (int si = 0; si < (int)spans.size(); ) {
             // Collect spans for this line
             float lineW = 0;
@@ -1694,7 +1649,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 if (!sp.bitmap.empty()) {
                     Texture* tex = Engine::instance().renderer().loadTexture(sp.bitmap.c_str());
                     float bw = tex ? (float)tex->width : 0;
-                    float bh = tex ? (float)tex->height : 0;
                     if (lineW + bw > maxW) break;
                     lineW += bw; sj++;
                     continue;
@@ -1891,12 +1845,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
         Texture* selectedBar = getShellTex(r, "shll_bar_act.png");
         // Find scroll offset from parent scroll container
-        float listScrollY = 0, listScrollX = 0;
+        float listScrollY = 0;
         GuiControl* sp = ctl->parent;
         while (sp) {
             if (sp->className == "GuiScrollCtrl") {
                 listScrollY = sp->scrollY;
-                listScrollX = sp->scrollX;
                 break;
             }
             sp = sp->parent;
@@ -1904,13 +1857,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // Get font height
         float lineH = font ? font->charHeight + 2 : 14;
         // Get enumerate setting from ScriptObject
-        bool enumerate = false;
-        ScriptObject* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
-        if (sobj) {
-            auto ei = sobj->internals.find("enumerate");
-            if (ei == sobj->internals.end()) ei = sobj->fields.find("enumerate");
-            if (ei != sobj->internals.end()) enumerate = ei->second.toInt() != 0;
-        }
         // Draw visible rows
         float viewH = sp ? sp->extentY : ctl->extentY;
         int visibleRows = (int)(viewH / lineH) + 2;
@@ -2071,7 +2017,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // Normalize value to 0..1
         float range = ctl->sliderMax - ctl->sliderMin;
         float norm = range > 0 ? (ctl->sliderValue - ctl->sliderMin) / range : 0.5f;
-        if (norm < 0) norm = 0; if (norm > 1) norm = 1;
+        if (norm < 0) norm = 0;
+        if (norm > 1) norm = 1;
         float knobX = barX + barW * norm;
         // Bar
         r.drawRectFill({barX, barY, 0}, {barX + barW, barY + barH, 0}, fc);
@@ -2189,8 +2136,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         Texture* fillTex = getShellTexWithCells(r, "dlg_fieldfill.png", fillCells);
         if (fillTex && fillTex->loaded) {
             auto& src = fillCells && fillCells->size() >= 1 ? (*fillCells)[0] : BmpCell{0,0,fillTex->width,fillTex->height};
-            float u0 = (float)src.x/fillTex->width, v0 = (float)src.y/fillTex->height;
-            float u1 = (float)(src.x+src.w)/fillTex->width, v1 = (float)(src.y+src.h)/fillTex->height;
             GLint oldS, oldT; glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, &oldS); glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, &oldT);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
             auto* ss = ShaderManager::getSpriteShader(); if (ss) {
@@ -2367,7 +2312,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 return; // skip children too — page content hidden
             }
         }
-        ColorF fc{0.25f,0.25f,0.32f,1}, bc{0.35f,0.35f,0.45f,1}, txc{1,1,1,1};
+        ColorF fc{0.25f,0.25f,0.32f,1}, txc{1,1,1,1};
         std::string bmp, bmpBase;
         float textOfsX = 4, textOfsY = 0;
         auto* prof = getProfile(ctl->profileName);
@@ -2901,7 +2846,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // sets (addSet) whose tabs use their own bitmapBase — GameGui.cs puts
         // WARRIOR SETUP in set 1 with gui/shll_horztabbuttonB (the olive
         // variant); set-0 tabs fall back to the profile's bitmapBase.
-        Texture* tabBaseTex = nullptr;
         std::map<int, Texture*> tabTexCache;
         auto tabTexFor = [&](int setId) -> Texture* {
             auto cit = tabTexCache.find(setId);
@@ -3060,13 +3004,19 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             r.drawRectFill({x, barY, 0}, {x + ctl->extentX, barY + barH, 0}, barBg);
             float fill = ctl->hudValueSet ? ctl->hudValue : 0.5f;
             if (cn == "HudEnergy" && Engine::instance().game().state() == Game::Playing)
-                fill = Engine::instance().game().player().energy() / 100.0f;
+                fill = HudParity::resourceFraction(
+                    Engine::instance().game().player().energy(),
+                    Engine::instance().game().player().maxEnergy());
             else if (cn == "HudDamage" && Engine::instance().game().state() == Game::Playing)
-                fill = Engine::instance().game().player().health() / 100.0f;
+                fill = HudParity::resourceFraction(
+                    Engine::instance().game().player().health(),
+                    Engine::instance().game().player().maxHealth());
             else if (cn == "HudHeat" && Engine::instance().game().state() == Game::Playing)
                 fill = Engine::instance().game().player().heat() / 100.0f;
             else if (cn == "HudCapacitor" && Engine::instance().game().state() == Game::Playing)
-                fill = Engine::instance().game().player().energy() / 100.0f;
+                fill = HudParity::resourceFraction(
+                    Engine::instance().game().player().energy(),
+                    Engine::instance().game().player().maxEnergy());
             bool underDashboard = false;
             for (auto* parent = ctl->parent; parent; parent = parent->parent) {
                 if (parent->name == "dashboardHud") {
@@ -3086,9 +3036,14 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 }
                 if (ghost) {
                     if (cn == "HudDamage")
-                        fill = ghost->health / std::max(1.0f, ghost->maxHealth);
+                        fill = HudParity::resourceFraction(ghost->health, ghost->maxHealth);
                     else if (cn == "HudEnergy")
-                        fill = ghost->energy / 100.0f;
+                        // Energy is already an authored resource value.  The
+                        // generic percentage fallback below interprets any
+                        // value above one as a percentage, so feeding it
+                        // energy above 100 would turn 150 into 0.015 instead
+                        // of a full dashboard bar.
+                        fill = HudParity::resourceFraction(ghost->energy);
                 }
             }
             if (fill > 1.0f) fill /= 100.0f;
@@ -3484,7 +3439,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             }
         } else {
             // Generic HUD: transparent background, render text
-            ColorF gc{0.2f,0.2f,0.25f,1};
             bool opaque = false;
             if (prof) {
                 auto fi = prof->fields.find("fontColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), tc);
@@ -3710,11 +3664,9 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 auto savedProj = r.projectionMatrix();
                 auto savedView = r.view;
                 GLint oldScissor[4]; glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
-                GLboolean scissorWasOn = glIsEnabled(GL_SCISSOR_TEST);
                 GLint oldVP[4]; glGetIntegerv(GL_VIEWPORT, oldVP);
 
                 // Compute screen-space clip region (GL coords: origin bottom-left)
-                int w = Engine::instance().platform().width();
                 int h = Engine::instance().platform().height();
                 float sx = x, sy = y, sw = ctl->extentX, sh = ctl->extentY;
 
@@ -3771,8 +3723,12 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     int step = std::max(1, (int)m.vertices.size() / 16);
                     for (size_t vi = 0; vi < m.vertices.size(); vi += step) {
                         Point3F wp = nodeXform.transform(m.vertices[vi].pos);
-                        if (wp.x < mn.x) mn.x = wp.x; if (wp.y < mn.y) mn.y = wp.y; if (wp.z < mn.z) mn.z = wp.z;
-                        if (wp.x > mx.x) mx.x = wp.x; if (wp.y > mx.y) mx.y = wp.y; if (wp.z > mx.z) mx.z = wp.z;
+                        if (wp.x < mn.x) mn.x = wp.x;
+                        if (wp.y < mn.y) mn.y = wp.y;
+                        if (wp.z < mn.z) mn.z = wp.z;
+                        if (wp.x > mx.x) mx.x = wp.x;
+                        if (wp.y > mx.y) mx.y = wp.y;
+                        if (wp.z > mx.z) mx.z = wp.z;
                     }
                 }
                 Point3F center{(mn.x+mx.x)*0.5f, (mn.y+mx.y)*0.5f, (mn.z+mx.z)*0.5f};
@@ -3951,9 +3907,6 @@ void GuiRenderer::update(float dt) {
                 float tabX = ax + 2;
                 const float tabH = 29;
                 // Get the tab font from the profile (consistent with render path)
-                Font* tabFont = Engine::instance().renderer().getFont();
-                auto* tabProf = getProfile(ctl->profileName);
-                if (tabProf) tabFont = getProfileFont(tabProf);
                 if (my >= ay && my < ay + tabH && mx >= tabX) {
                     // Layout MUST match render/hit-test: fixed-width tabs
                     // (maxTabWidth) separated by tabSpacing — or compact
@@ -4108,25 +4061,9 @@ void GuiRenderer::updateFades(float dt) {
 
 GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
     if (!ctl || !ctl->visible || !ctl->active) return nullptr;
-    auto localPosition = [](GuiControl* control) {
-        float x = control->posX;
-        float y = control->posY;
-        if (control->parent) {
-            const auto horiz = control->fields.find("horizSizing");
-            const auto vert = control->fields.find("vertSizing");
-            if (horiz != control->fields.end() && horiz->second == "right")
-                x = control->parent->extentX - control->extentX - control->posX;
-            if (vert != control->fields.end() && vert->second == "bottom")
-                y = control->parent->extentY - control->extentY - control->posY;
-        }
-        return std::pair<float, float>{x, y};
-    };
     // Tab pages and tab frames are not click targets, but their children are.
     if (ctl->className == "GuiTabPageCtrl" || ctl->className == "ShellTabFrame") {
-        auto [localX, localY] = localPosition(ctl);
-        float x = localX, y = localY;
-        GuiControl* p = ctl->parent;
-        while (p && p != canvas) { x += p->posX; y += p->posY; p = p->parent; }
+        const auto [x, y] = guiControlAbsolutePosition(ctl, canvas);
         if (mx >= x && mx < x + ctl->extentX && my >= y && my < y + ctl->extentY) {
             // Later-defined children are top-most (T2 z-order): test them first.
             for (auto it = ctl->children.rbegin(); it != ctl->children.rend(); ++it) {
@@ -4135,15 +4072,7 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
         }
         return nullptr;
     }
-    auto [localX, localY] = localPosition(ctl);
-    float x = localX;
-    float y = localY;
-    GuiControl* p = ctl->parent;
-    while (p && p != canvas) {
-        x += p->posX;
-        y += p->posY;
-        p = p->parent;
-    }
+    const auto [x, y] = guiControlAbsolutePosition(ctl, canvas);
     float extX = ctl->extentX;
     float extY = ctl->extentY;
     if (ctl->className == "GuiListBoxCtrl" || ctl->className == "GuiTextListCtrl") {
@@ -4230,8 +4159,8 @@ GuiControl* GuiRenderer::popupMenuAt(int mx, int my) {
 }
 
 // Determine which part of a GuiScrollCtrl's scrollbars (if any) sits under
-// absolute screen point (mx,my). Returns "vup"/"vdown"/"vpage"/"hleft"/
-// "hright"/"hpage" for arrow/track clicks, or "" when not on a scrollbar.
+// absolute screen point (mx,my). Page-track hits retain the side of the thumb
+// that was clicked so a right/below-track click can advance the content.
 // Geometry mirrors the draw path in renderControlRec's GuiScrollCtrl branch.
 static std::string scrollBarHit(GuiControl* ctl, float ax, float ay, int mx, int my) {
     const float g = 4.0f;
@@ -4252,7 +4181,8 @@ static std::string scrollBarHit(GuiControl* ctl, float ax, float ay, int mx, int
         float thumbH = thumbFrac * trackLen; if (thumbH < baseThumb) thumbH = baseThumb; if (thumbH > trackLen) thumbH = trackLen;
         float maxScroll = std::max(ctl->contentH - ctl->extentY, 0.0f);
         float sPath = maxScroll > 0 ? ctl->scrollY / maxScroll : 0.0f;
-        if (sPath < 0) sPath = 0; if (sPath > 1) sPath = 1;
+        if (sPath < 0) sPath = 0;
+        if (sPath > 1) sPath = 1;
         float thumbPos = trackTop + sPath * (trackLen - thumbH);
         if (thumbPos < trackTop) thumbPos = trackTop;
         if (thumbPos + thumbH > downArrowY) thumbPos = downArrowY - thumbH;
@@ -4260,7 +4190,8 @@ static std::string scrollBarHit(GuiControl* ctl, float ax, float ay, int mx, int
         if (my >= y + downArrowY - (btnS - 2.0f * g) && my < y + downArrowY) return "vdown";
         if (mx >= btnX && mx < btnX + (btnS > thickness ? btnS : thickness)) {
             if (my >= y + thumbPos && my < y + thumbPos + thumbH) return "vthumb";
-            if (my >= y + trackTop && my < y + downArrowY) return "vpage";
+            if (my >= y + trackTop && my < y + downArrowY)
+                return my < y + thumbPos ? "vpageup" : "vpagedown";
         }
     }
     if (hasH) {
@@ -4275,13 +4206,15 @@ static std::string scrollBarHit(GuiControl* ctl, float ax, float ay, int mx, int
         float thumbW = thumbFrac * trackLen; if (thumbW < baseThumb) thumbW = baseThumb; if (thumbW > trackLen) thumbW = trackLen;
         float maxScrollX = std::max(ctl->contentW - ctl->extentX, 0.0f);
         float sPath = maxScrollX > 0 ? ctl->scrollX / maxScrollX : 0.0f;
-        if (sPath < 0) sPath = 0; if (sPath > 1) sPath = 1;
+        if (sPath < 0) sPath = 0;
+        if (sPath > 1) sPath = 1;
         float thumbPos = trackL + sPath * (trackLen - thumbW);
         if (my >= y + trackY && my < y + trackY + thickness) {
             if (mx >= x && mx < x + (btnS - 2.0f * g)) return "hleft";
             if (mx >= x + rightArrowX && mx < x + rightArrowX + (btnS - 2.0f * g)) return "hright";
             if (mx >= x + thumbPos && mx < x + thumbPos + thumbW) return "hthumb";
-            if (mx >= x + trackL && mx < x + rightArrowX) return "hpage";
+            if (mx >= x + trackL && mx < x + rightArrowX)
+                return mx < x + thumbPos ? "hpageleft" : "hpageright";
         }
     }
     return "";
@@ -4345,9 +4278,8 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     GuiControl* popupHit = popupMenuAt(x, y);
     if (popupHit) {
         // Calculate which item was clicked
-        float ax = popupHit->posX, ay = popupHit->posY;
-        for (auto* p = popupHit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
-        float popX = ax;
+        float ay = popupHit->posY;
+        for (auto* p = popupHit->parent; p && p != canvas; p = p->parent) ay += p->posY;
         float popY = ay + popupHit->extentY;
         float lineH = 20;
         int idx = (int)((y - popY) / lineH);
@@ -4368,7 +4300,7 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     {
         GuiControl* sc = nullptr;
         for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it) {
-            if (sc = hitTest(*it, x, y)) break;
+            if ((sc = hitTest(*it, x, y))) break;
         }
         if (!sc && canvas) sc = hitTest(canvas, x, y);
         while (sc) {
@@ -4378,10 +4310,12 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                 std::string sb = scrollBarHit(sc, ax, ay, x, y);
                 if (sb == "vup") sc->scrollY += sc->extentY * 0.1f;
                 else if (sb == "vdown") sc->scrollY -= sc->extentY * 0.1f;
-                else if (sb == "vpage") sc->scrollY += (y < ay + sc->extentY * 0.5f ? 1 : -1) * sc->extentY * 0.8f;
+                else if (sb == "vpageup") sc->scrollY = guiScrollAfterPage(sc->scrollY, sc->contentH, sc->extentY, 1);
+                else if (sb == "vpagedown") sc->scrollY = guiScrollAfterPage(sc->scrollY, sc->contentH, sc->extentY, -1);
                 else if (sb == "hleft") sc->scrollX -= 8;
                 else if (sb == "hright") sc->scrollX += 8;
-                else if (sb == "hpage") sc->scrollX -= sc->extentX * 0.8f;
+                else if (sb == "hpageleft") sc->scrollX = guiScrollAfterPage(sc->scrollX, sc->contentW, sc->extentX, -1);
+                else if (sb == "hpageright") sc->scrollX = guiScrollAfterPage(sc->scrollX, sc->contentW, sc->extentX, 1);
                 else if (sb == "vthumb") {
                     sc->vThumbDragging = true;
                     sc->vThumbDragStartY = (float)y;
@@ -4515,8 +4449,11 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     if (hit->className == "GuiServerBrowser") {
         // Compute absolute position of the control
         float ax = hit->posX, ay = hit->posY;
-        for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
-        float rowH = 18, headerH = 20;
+        for (auto* p = hit->parent; p && p != canvas; p = p->parent) {
+            ax += p->posX;
+            ay += p->posY;
+        }
+        float rowH = 18;
         int row = (int)((y - ay) / rowH);
         float hx = ax;
         int col = -1;
@@ -4540,8 +4477,8 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     // ShellTextList / GuiListBoxCtrl: row selection
     if (hit->className == "GuiListBoxCtrl" || hit->className == "GuiTextListCtrl") {
         selectedList = hit;
-        float ax = hit->posX, ay = hit->posY;
-        for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+        float ay = hit->posY;
+        for (auto* p = hit->parent; p && p != canvas; p = p->parent) ay += p->posY;
         // Get scroll offset
         float scrollY = 0;
         GuiControl* sp = hit->parent;
@@ -4571,8 +4508,8 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         return true;
     }
     if (hit->className == "GuiCommanderTree") {
-        float ax = hit->posX, ay = hit->posY;
-        for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+        float ay = hit->posY;
+        for (auto* p = hit->parent; p && p != canvas; p = p->parent) ay += p->posY;
         const float rowHeight = Engine::instance().renderer().getFont()
             ? Engine::instance().renderer().getFont()->charHeight + 3.0f : 16.0f;
         const int row = (int)((y - ay - 5.0f) / rowHeight);
@@ -4600,8 +4537,8 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         return true;
     }
     if (hit->className == "GuiTreeView") {
-        float ax = hit->posX, ay = hit->posY;
-        for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+        float ay = hit->posY;
+        for (auto* p = hit->parent; p && p != canvas; p = p->parent) ay += p->posY;
         const float rowHeight = Engine::instance().renderer().getFont()
             ? Engine::instance().renderer().getFont()->charHeight + 3.0f : 16.0f;
         const int wanted = (int)((y - ay - 2.0f) / rowHeight);
@@ -4685,7 +4622,10 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     if (hit->className == "ShellTabGroupCtrl" || hit->className == "GuiTabBookCtrl") {
         // Compute absolute position
         float ax = hit->posX, ay = hit->posY;
-        for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+        for (auto* p = hit->parent; p && p != canvas; p = p->parent) {
+            ax += p->posX;
+            ay += p->posY;
+        }
         const float tabH = 29;
         if (y >= ay && y < ay + tabH && x >= ax) {
             // Layout MUST match the render path: fixed-width tabs
@@ -4736,8 +4676,8 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
 
     // ShellSliderCtrl: start drag on click
     if (hit->className == "GuiSliderCtrl") {
-        float ax = hit->posX, ay = hit->posY;
-        for (auto* p = hit->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+        float ax = hit->posX;
+        for (auto* p = hit->parent; p && p != canvas; p = p->parent) ax += p->posX;
         float barInset = hit->usePlusMinus ? 16 : 0;
         float barX = ax + barInset;
         float barW = hit->extentX - barInset * 2;
@@ -4929,21 +4869,17 @@ bool GuiRenderer::handleDrag(int x, int y) {
     std::function<bool(GuiControl*)> findDrag = [&](GuiControl* ctl) -> bool {
         if (!ctl) return false;
         if (ctl->sliderDragging) {
-            float ax = ctl->posX, ay = ctl->posY;
-            for (auto* p = ctl->parent; p && p != canvas; p = p->parent) { ax += p->posX; ay += p->posY; }
+            float ax = ctl->posX;
+            for (auto* p = ctl->parent; p && p != canvas; p = p->parent) ax += p->posX;
             float barInset = ctl->usePlusMinus ? 16 : 0;
             float barX = ax + barInset;
             float barW = ctl->extentX - barInset * 2;
-            float norm = (float)(x - barX) / barW;
-            if (norm < 0) norm = 0; if (norm > 1) norm = 1;
-            float range = ctl->sliderMax - ctl->sliderMin;
             float oldVal = ctl->sliderValue;
-            ctl->sliderValue = ctl->sliderMin + range * norm;
-            // Snap to ticks
-            if (ctl->sliderTicks > 0) {
-                float step = range / (float)ctl->sliderTicks;
-                ctl->sliderValue = std::round(ctl->sliderValue / step) * step;
-            }
+            // Keep dragging identical to click placement.  Snapping relative
+            // to zero breaks authored sliders whose minimum is non-zero.
+            ctl->sliderValue = guiSliderValueAt((float)x, barX, barW,
+                                                ctl->sliderMin, ctl->sliderMax,
+                                                ctl->sliderTicks);
             // Fire command if value changed
             if (ctl->sliderValue != oldVal && !ctl->command.empty())
                 Console::instance().execute(ctl->command.c_str());
@@ -5765,25 +5701,28 @@ bool GuiRenderer::removeControl(const std::string& name) {
         onAddCalled.erase(current->name);
         delete current;
     };
+    // Remove every raw pointer into the subtree before freeing it. A child can
+    // be a dialog root or the saved focus target independently of its parent.
+    dialogStack.erase(std::remove_if(dialogStack.begin(), dialogStack.end(),
+        [&](GuiControl* entry) { return ctl->owns(entry); }), dialogStack.end());
+    s_openPopups.erase(std::remove_if(s_openPopups.begin(), s_openPopups.end(),
+        [&](GuiControl* entry) { return ctl->owns(entry); }), s_openPopups.end());
+    for (auto it = focusBeforeDialog.begin(); it != focusBeforeDialog.end(); ) {
+        if (ctl->owns(it->first) || ctl->owns(it->second))
+            it = focusBeforeDialog.erase(it);
+        else
+            ++it;
+    }
     if (ctl->parent) {
         auto& siblings = ctl->parent->children;
         siblings.erase(std::remove(siblings.begin(), siblings.end(), ctl), siblings.end());
     }
-    dialogStack.erase(std::remove(dialogStack.begin(), dialogStack.end(), ctl), dialogStack.end());
-    auto owns = [&](GuiControl* root, GuiControl* node) {
-        for (auto* current = node; current; current = current->parent)
-            if (current == root) return true;
-        return false;
-    };
-    if (focusedCtrl && owns(ctl, focusedCtrl))
-        makeFirstResponder(focusedCtrl->name, false);
-    if (pressedCtrl && owns(ctl, pressedCtrl)) {
-        if (auto* ts = Engine::instance().script().ts()) {
-            const std::string callback = pressedCtrl->name + "::onMouseUp";
-            if (ts->hasFunction(callback)) ts->callFunction(callback, {VMValue(pressedCtrl->name)});
-        }
+    if (focusedCtrl && ctl->owns(focusedCtrl))
+        focusedCtrl = nullptr;
+    if (pressedCtrl && ctl->owns(pressedCtrl)) {
         pressedCtrl = nullptr;
     }
+    if (selectedList && ctl->owns(selectedList)) selectedList = nullptr;
     destroy(ctl);
     return true;
 }

@@ -1,16 +1,19 @@
 #include "game/demo.h"
 #include "net/v12_datablocks.h"
 #include "net/v12_registry.h"
+#include "net/v12_ghosts.h"
 #include "core/console.h"
 #include "core/config.h"
 #include "core/timer.h"
+#include "game/mission_discovery.h"
+#include "game/observer_parity.h"
+#include "game/ghost_parity.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
 #include <algorithm>
 #include <memory>
-#include <set>
 #include <sstream>
 #include <zlib.h>
 
@@ -399,7 +402,13 @@ void GhostTracker::deleteGhost(int index) { ghosts.erase(index); }
 void GhostTracker::clear() { ghosts.clear(); }
 int GhostTracker::size() const { return (int)ghosts.size(); }
 std::vector<int> GhostTracker::getAllIndices() const {
-    std::vector<int> r; for (auto& [k,v] : ghosts) r.push_back(k); return r;
+    std::vector<int> r;
+    r.reserve(ghosts.size());
+    for (const auto& [k, v] : ghosts) r.push_back(k);
+    // Ghost IDs are the native presentation order for observer targets and
+    // player lists. Do not expose unordered_map iteration order to callers.
+    std::sort(r.begin(), r.end());
+    return r;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -807,6 +816,7 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
     initialPlayerInfo_.clear();
     skinToPlayer_.clear();
     missionChanges_.clear();
+    missionCrcChanges_.clear();
     eventLog_.clear();
     decompressedSize = 0;
     packetsParsed = 0;
@@ -1012,6 +1022,7 @@ DemoBlock* DemoParser::nextBlock() {
 void DemoParser::reset() {
     blockStreamOffset = 0; blockCursor_ = 0; blockCount_ = -1;
     compressionPoint = {0,0,0};
+    missionCrcChanges_.clear();
     initialBlock.taggedStrings = initialTaggedStrings_;
     playerInfo_ = initialPlayerInfo_;
     currentMissionCrc_ = initialBlock.missionCRC;
@@ -1145,6 +1156,10 @@ void DemoParser::handleHudRemoteCommand(const std::string& funcName,
         vehicleHud_.vehicleType = arg(0);
         vehicleHud_.node = number(1);
         vehicleHud_.dashboardVisible = true;
+    } else if (name == "hidevehiclegauges") {
+        // The stock HUD hides gauges independently of the active vehicle
+        // weapon, so do not discard the vehicle identity or selected weapon.
+        vehicleHud_.dashboardVisible = false;
     }
 }
 
@@ -1175,6 +1190,7 @@ DemoParserSnapshot DemoParser::captureSnapshot() const {
     snapshot.nextRecvEventSeq = nextRecvEventSeq;
     snapshot.packetsParsed = packetsParsed;
     snapshot.missionChanges = missionChanges_;
+    snapshot.missionCrcChanges = missionCrcChanges_;
     snapshot.taggedStrings = initialBlock.taggedStrings;
     snapshot.currentMissionCrc = currentMissionCrc_;
     snapshot.currentMission = currentMission_;
@@ -1222,6 +1238,7 @@ bool DemoParser::restoreSnapshot(const DemoParserSnapshot& snapshot) {
     nextRecvEventSeq = snapshot.nextRecvEventSeq;
     packetsParsed = snapshot.packetsParsed;
     missionChanges_ = snapshot.missionChanges;
+    missionCrcChanges_ = snapshot.missionCrcChanges;
     initialBlock.taggedStrings = snapshot.taggedStrings;
     currentMissionCrc_ = snapshot.currentMissionCrc;
     currentMission_ = snapshot.currentMission;
@@ -1284,15 +1301,11 @@ bool DemoParser::parseFull(std::vector<DemoBlock>& out) {
 // This handles cross-map-load demos.
 // Extract base map name from a mission path (e.g. "Missions/Katabatic.mis" -> "Katabatic")
 static std::string extractMapName(const std::string& missionPath) {
-    std::string name = missionPath;
-    for (char& c : name) if (c == '\\') c = '/';
-    auto slash = name.rfind('/');
-    if (slash != std::string::npos) name = name.substr(slash + 1);
-    auto dot = name.rfind('.');
-    if (dot != std::string::npos) name = name.substr(0, dot);
-    // Remove trailing whitespace
-    while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
-    return name;
+    return missionLoadPath(missionPath);
+}
+
+static bool sameMissionName(const std::string& left, const std::string& right) {
+    return missionLower(left) == missionLower(right);
 }
 
 static bool isMissionPath(const std::string& value) {
@@ -1304,7 +1317,7 @@ static bool isMissionPath(const std::string& value) {
     if (path.rfind("missions/", 0) != 0 &&
         path.rfind("base/missions/", 0) != 0)
         return false;
-    if (!path.ends_with(".mis")) return false;
+    if (!path.ends_with(".mis") && !path.ends_with(".mispk")) return false;
     for (char c : value) {
         if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e)
             return false;
@@ -1314,6 +1327,7 @@ static bool isMissionPath(const std::string& value) {
 
 void DemoParser::scanMissionChanges() {
     missionChanges_.clear();
+    missionCrcChanges_.clear();
     if (!decompressed) return;
     if (!initialBlock.missionName.empty()) {
         const std::string initial = extractMapName(initialBlock.missionName);
@@ -1341,7 +1355,8 @@ void DemoParser::scanMissionChanges() {
                 std::string name((const char*)d + start, j + 4 - start);
                 if (isMissionPath(name)) {
                     const std::string mapName = extractMapName(name);
-                    if (missionChanges_.empty() || mapName != missionChanges_.back().second)
+                    if (missionChanges_.empty() ||
+                        !sameMissionName(mapName, missionChanges_.back().second))
                         missionChanges_.push_back({bi, mapName});
                 }
             }
@@ -1365,6 +1380,11 @@ void DemoParser::setCurrentBlock(int blockIndex) {
            blockIndex >= missionChanges_[nextChangeIdx_].first) {
         currentMission_ = missionChanges_[nextChangeIdx_].second;
         nextChangeIdx_++;
+    }
+    currentMissionCrc_ = initialBlock.missionCRC;
+    for (const auto& change : missionCrcChanges_) {
+        if (change.first > blockIndex) break;
+        currentMissionCrc_ = change.second;
     }
 }
 
@@ -1463,7 +1483,7 @@ GameState DemoParser::readGameState(BitStream& bs) {
             gs.energy = bs.readF32();
             gs.rechargeRate = bs.readF32();
             const GhostEntry* control = ghostTracker.getGhost(gs.controlObjectGhostIndex);
-            if (control && control->className == "Camera") {
+            if (control && ghostClassIs(control->className, "Camera")) {
                 gs.cameraPosition = {bs.readF32(), bs.readF32(), bs.readF32()};
                 gs.compressionPoint = gs.cameraPosition;
                 gs.cameraPitch = bs.readF32();
@@ -1737,12 +1757,24 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents,
             ev.hasMissionCrc = true;
             ev.missionCrc = bs.readU32();
             currentMissionCrc_ = ev.missionCrc;
+            if (parsingBlockIndex_ >= 0 &&
+                (missionCrcChanges_.empty() ||
+                 missionCrcChanges_.back().first != parsingBlockIndex_ ||
+                 missionCrcChanges_.back().second != ev.missionCrc))
+                missionCrcChanges_.push_back({parsingBlockIndex_, ev.missionCrc});
         } else if (ev.classId == T2Demo::NetEventClassFirst + 12) { // SensorGroupColorEvent
             bs.readInt(4); bs.readU32();
         } else {
-            // Unknown event: break to avoid stream corruption
+            // Event payloads are not length-delimited. Do not consume a guessed
+            // base payload or reinterpret its bits as the next event/ghost.
+            Console::instance().printf(LogLevel::Error,
+                "Demo: unsupported event payload class=%d name='%s' at bit=%d; "
+                "packet parsing stopped",
+                ev.classId, ev.eventName.empty() ? "<unknown>" : ev.eventName.c_str(),
+                ev.dataBitsStart);
             ev.dataBitsEnd = bs.getCurPos();
             outEvents.push_back(ev);
+            bs.fail();
             break;
         }
         ev.dataBitsEnd = bs.getCurPos();
@@ -1927,9 +1959,15 @@ static void readVehicleData(BitStream& bs, bool isInitial, const Vec3& cp, Ghost
     if (bs.readFlag()) { // control shortcut
         return;
     }
-    bs.readFloat(9); bs.readFloat(9); // steering
+    const float packedSteering = bs.readFloat(9);
+    bs.readFloat(9); // steering Y component
+    if (entry) {
+        entry->steeringYaw = V12::decodeVehicleSteering(packedSteering);
+        entry->hasSteering = true;
+    }
     readMove(bs);
-    bs.readFlag(); // frozen
+    const bool frozen = bs.readFlag();
+    if (entry) entry->frozen = frozen;
     if (bs.readFlag()) { // PositionMask
         if (entry) {
             entry->position = bs.readCompressedPoint(cp);
@@ -2566,33 +2604,8 @@ static void readInteriorData(BitStream& bs, bool, const Vec3&, GhostEntry* entry
 // Returns true if the class was known and data was read, false if unknown.
 static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const Vec3& cp, GhostEntry* entry) {
     std::string cn = entry ? entry->className : "";
-
-    // If no tagged name, try default name by index
-    if (cn.empty() || cn.rfind("Class", 0) == 0) {
-        static const char* defaultNames[] = {
-            "GameBase", "ShapeBase", "Player", "Vehicle", "FlyingVehicle",
-            "HoverVehicle", "Item", "StaticShape", "ScopeAlwaysShape", "Marker",
-            "SimpleNetObject", "BeaconObject", "MissionMarker", "Debris",
-            "Projectile", "BombProjectile", "GrenadeProjectile", "SeekerProjectile",
-            "Turret", "InteriorInstance", "Camera", "LinearProjectile",
-            "ELFProjectile", "RepairProjectile", "TargetProjectile", "WayPoint",
-            "SpawnSphere", "ForceFieldBare", "TSStatic", "TerrainBlock",
-            "Sun", "Sky", "Lightning", "WaterBlock", "MissionArea",
-            "Splash", "Shockwave", "FireballAtmosphere", "VehicleBlocker",
-            "ParticleEmissionDummy", "Precipitation", "WheeledVehicle",
-            "Trigger", "PhysicalZone", "AudioEmitter", "StationFXPersonal",
-            "AIObjective", "SniperProjectile", "ShockLanceProjectile"
-        };
-        int idx = classId - T2Demo::NetObjectClassFirst;
-        if ((cn.empty() || cn.rfind("Class", 0) == 0) &&
-            idx >= 0 && idx < (int)(sizeof(defaultNames)/sizeof(defaultNames[0])))
-            cn = defaultNames[idx];
-    }
-
-    // Log unknown class first time
-    static std::set<int> s_logged;
     bool known = true;
-    if (cn == "Player" || cn == "MPB") readPlayerData(bs, isInitial, cp, entry);
+    if (ObserverParity::isPlayerClass(cn)) readPlayerData(bs, isInitial, cp, entry);
     else if (cn == "Vehicle") readVehicleData(bs, isInitial, cp, entry);
     else if (cn == "FlyingVehicle" || cn == "Shrike") readFlyingVehicleData(bs, isInitial, cp, entry);
     else if (cn == "HoverVehicle" || cn == "Turbograv") readHoverVehicleData(bs, isInitial, cp, entry);
@@ -2719,14 +2732,17 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
     else known = false;
 
     if (!known) {
-        if (s_logged.find(classId) == s_logged.end()) {
-            s_logged.insert(classId);
-            Console::instance().printf(LogLevel::Debug, "Ghost class %d: %s", classId, cn.c_str());
-        }
-        // Unknown class: read GameBase base data. Don't skip remaining bits.
-        readGameBaseData(bs, isInitial);
+        Console::instance().printf(LogLevel::Warn,
+            "Demo: unsupported ghost payload class=%d name='%s' initial=%d bit=%d; "
+            "payload left unconsumed",
+            classId, cn.empty() ? "<unknown>" : cn.c_str(), isInitial ? 1 : 0,
+            bs.getCurPos());
         return false;
     }
+    // A decoded ghost payload establishes a position even when that position
+    // is the valid world origin. Do not make renderers infer validity from
+    // the coordinate value.
+    if (entry) entry->hasPosition = true;
     return true;
 }
 
@@ -2734,6 +2750,12 @@ void DemoParser::readGhosts(BitStream& bs, std::vector<GhostUpdate>& outGhosts, 
     const Vec3 cp = compressionPoint ? *compressionPoint : Vec3{};
     if (!bs.readFlag()) return;
     int idSize = bs.readInt(3) + 3;
+    if (bs.isError() || idSize > T2Demo::GhostIdBitSize) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: malformed ghost section seq=%d at bit=%d: invalid id width=%d",
+            seqNumber, bs.getCurPos(), idSize);
+        return;
+    }
     int maxGhosts = 1024;
     while (bs.readFlag() && !bs.isError() && (int)outGhosts.size() < maxGhosts) {
         GhostUpdate gu{};
@@ -2766,35 +2788,24 @@ void DemoParser::readGhosts(BitStream& bs, std::vector<GhostUpdate>& outGhosts, 
         GhostEntry* entry = ghostTracker.getMutableGhost(gu.index);
         bool known = readGhostClassData(bs, gu.classId, isNew, cp, entry);
         if (!known) {
-            if (bs.readFlag()) {
-                if (bs.readFlag()) { bs.readFloat(6); bs.readInt(2); bs.readFlag(); bs.readNormalVector(8); }
-                if (bs.readFlag()) for (int i = 0; i < 4; i++) if (bs.readFlag()) { bool p = bs.readFlag(); if (p) bs.readInt(11); }
-                if (bs.readFlag()) for (int i = 0; i < 4; i++) if (bs.readFlag()) { bs.readInt(5); bs.readInt(2); bs.readFlag(); bs.readFlag(); }
-                if (bs.readFlag()) for (int i = 0; i < 8; i++) if (bs.readFlag()) {
-                    if (bs.readFlag()) bs.readInt(11);
-                    if (bs.readFlag()) { if (bs.readFlag()) bs.readInt(10); else bs.readString(); }
-                    bs.readFlag(); bs.readFlag(); bs.readFlag(); bs.readFlag(); bs.readFlag();
-                    bs.readInt(3);
-                    if (isNew) bs.readFlag();
-                }
-                if (bs.readFlag()) {
-                    if (bs.readFlag()) { bs.readFlag(); bs.readFlag(); if (bs.readFlag()) { bs.readFlag(); bs.readF32(); } }
-                    if (bs.readFlag()) { bs.readFlag(); bs.readNormalVector(8); bs.readFloat(5); if (bs.readFlag()) { bs.readU32(); bs.readU32(); } }
-                    if (bs.readFlag()) { bs.readInt(10); bs.readInt(5); }
-                }
-            }
-            if (bs.readFlag()) {
-                if (entry) entry->position = bs.readCompressedPoint(cp);
-                else bs.readCompressedPoint(cp);
-                float qx = bs.readF32(), qy = bs.readF32(), qz = bs.readF32();
-                bool qwNeg = bs.readFlag();
-                float qw = sqrtf(fmaxf(0, 1.0f - (qx*qx + qy*qy + qz*qz)));
-                if (qwNeg) qw = -qw;
-                if (entry) { entry->rotation = {qx, qy, qz, qw}; entry->hasRotation = true; }
-            }
+            if (isNew) ghostTracker.deleteGhost(gu.index);
+            Console::instance().printf(LogLevel::Error,
+                "Demo: stopped ghost section seq=%d index=%d class=%d at bit=%d; "
+                "unknown payload boundary",
+                seqNumber, gu.index, gu.classId, gu.updateBitsStart);
+            break;
         }
         gu.updateBitsEnd = bs.getCurPos();
         outGhosts.push_back(gu);
+    }
+    if (bs.isError()) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: malformed ghost section seq=%d at bit=%d/%d after %zu updates",
+            seqNumber, bs.getCurPos(), bs.getMaxPos(), outGhosts.size());
+    } else if ((int)outGhosts.size() >= maxGhosts) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: ghost section seq=%d exceeded %d updates at bit=%d",
+            seqNumber, maxGhosts, bs.getCurPos());
     }
 }
 
@@ -2833,18 +2844,44 @@ bool DemoParser::applyProtocolHeader(const DnetHeader& dnet, bool& dispatchData)
 }
 
 PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIndex) {
+    parsingBlockIndex_ = blockIndex;
     PacketData pd{};
     BitStream bs(data, size);
     pd.dnetHeader = readDnetHeader(bs);
-    bool dispatchData = false;
-    if (!applyProtocolHeader(pd.dnetHeader, dispatchData) || !dispatchData) {
+    if (bs.isError()) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: malformed packet header at bit=%d/%d (block=%d)",
+            bs.getCurPos(), bs.getMaxPos(), blockIndex);
         return pd;
     }
+    bool dispatchData = false;
+    if (!applyProtocolHeader(pd.dnetHeader, dispatchData)) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: rejected packet header seq=%d ack=%d type=%d at bit=%d (block=%d)",
+            pd.dnetHeader.seqNumber, pd.dnetHeader.highestAck,
+            pd.dnetHeader.packetType, bs.getCurPos(), blockIndex);
+        return pd;
+    }
+    if (!dispatchData) return pd;
     if (bs.readFlag()) { bs.readInt(10); bs.readInt(10); }
     if (bs.readFlag()) { bs.readInt(10); bs.readInt(10); }
     bs.setStringBufferEnabled(true);
     pd.gameState = readGameState(bs);
+    if (bs.isError()) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: malformed packet seq=%d at game state bit=%d/%d (block=%d)",
+            pd.dnetHeader.seqNumber, bs.getCurPos(), bs.getMaxPos(), blockIndex);
+        bs.setStringBufferEnabled(false);
+        return pd;
+    }
     readEvents(bs, pd.events, pd.gameState.compressionPoint);
+    if (bs.isError()) {
+        Console::instance().printf(LogLevel::Error,
+            "Demo: malformed or unsupported event section seq=%d at bit=%d/%d (block=%d)",
+            pd.dnetHeader.seqNumber, bs.getCurPos(), bs.getMaxPos(), blockIndex);
+        bs.setStringBufferEnabled(false);
+        return pd;
+    }
     readGhosts(bs, pd.ghosts, pd.dnetHeader.seqNumber, &pd.gameState.compressionPoint);
     bs.setStringBufferEnabled(false);
     if (blockIndex >= 0) {
