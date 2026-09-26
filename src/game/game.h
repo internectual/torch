@@ -1018,6 +1018,7 @@ private:
     SoundBuffer* ambientSound{};
     std::vector<SoundSource*> emitterSources;
     std::unordered_map<uint64_t, SoundSource*> shapeBaseSoundSources;
+    std::unordered_map<int, SoundSource*> demoJetSoundSources; // ghost -> looping jetSound
     std::unordered_map<uint16_t, SoundSource*> projectileSoundSources;
     std::unordered_set<uint64_t> demoAudioEventsPlayed;
     int32_t weatherType = 0; // 0=dry, 1=cold, 2=wet

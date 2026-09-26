@@ -6448,6 +6448,8 @@ void Game::clearMissionAudio() {
     for (auto& [key, source] : shapeBaseSoundSources)
         if (source) audio.releaseSource(source);
     shapeBaseSoundSources.clear();
+    for (auto& [ghost, source] : demoJetSoundSources) audio.releaseSource(source);
+    demoJetSoundSources.clear();
     audio.setUnderwater(false);
     audio.clearEnvironmentState();
     for (auto* source : emitterSources) audio.releaseSource(source);
@@ -6457,66 +6459,9 @@ void Game::clearMissionAudio() {
     ambientSound = nullptr;
 }
 
-// ─── AudioProfile scanner ────────────────────────────────────
-// Scans game scripts for AudioProfile definitions and builds a
-// profile-ID → sound-file-path mapping for demo playback.
-struct AudioProfileEntry {
-    std::string profileName;
-    std::string filename;
-};
-static std::vector<AudioProfileEntry> s_audioProfiles;
-static void scanAudioProfiles() {
-    if (!s_audioProfiles.empty()) return;
-    auto& fs = Engine::instance().fs();
-    std::vector<std::string> scriptFiles;
-    fs.listFiles("scripts/*.cs", scriptFiles);
-    std::set<std::string> seen;
-    for (auto& f : scriptFiles) {
-        if (f.size() < 3 || f.substr(f.size() - 3) != ".cs") continue;
-        if (f.find(".dso") != std::string::npos) continue;
-        if (!seen.insert(f).second) continue;
-        auto data = fs.readText(f.c_str());
-        if (data.empty()) continue;
-        const char* p = data.c_str();
-        while (true) {
-            const char* db = strstr(p, "datablock AudioProfile(");
-            if (!db) break;
-            p = db + 23;
-            const char* np = strchr(p, ')');
-            if (!np) break;
-            std::string name(p, np - p);
-            const char* ob = strchr(np, '{');
-            if (!ob) break;
-            const char* cb = strchr(ob, '}');
-            if (!cb) break;
-            std::string body(ob, cb - ob);
-            const char* fk = body.c_str();
-            const char* fnq = nullptr;
-            while ((fk = strstr(fk, "filename"))) {
-                const char* eq = strchr(fk, '=');
-                if (!eq) { fk += 8; continue; }
-                fnq = strchr(eq, '"');
-                if (fnq) break;
-                fk += 8;
-            }
-                    if (fnq) {
-                const char* fnq2 = strchr(fnq + 1, '"');
-                if (fnq2) {
-                    std::string fn(fnq + 1, fnq2 - fnq - 1);
-                    if (!fn.empty()) s_audioProfiles.push_back({name,
-                        fn.rfind("audio/", 0) == 0 ? fn : "audio/" + fn});
-                }
-            }
-            p = cb + 1;
-        }
-    }
-    Console::instance().printf(LogLevel::Info, "Audio: scanned %zu AudioProfiles from %zu scripts",
-        s_audioProfiles.size(), seen.size());
-}
-
 static SoundSource* playNativeAudioProfile(AudioSystem& audio,
     const std::map<uint32_t, ParsedDataBlock>& blocks, uint32_t profileId,
-    const Point3F& position, bool forceLoop = false) {
+    const Point3F& position, bool forceLoop = false, bool persistent = false) {
     if (!profileId || !audio.config().enabled || audio.config().sfxVolume <= 0.0f)
         return nullptr;
     auto it = blocks.find(profileId);
@@ -6525,7 +6470,7 @@ static SoundSource* playNativeAudioProfile(AudioSystem& audio,
     std::string path = profile.audioFilename;
     if (path.rfind("audio/", 0) != 0) path = "audio/" + path;
     auto* buffer = audio.loadSound(path.c_str());
-    auto* source = buffer ? audio.createSource(false) : nullptr;
+    auto* source = buffer ? audio.createSource(persistent) : nullptr;
     if (!source) return nullptr;
     source->setVolume(profile.audioVolume * audio.config().masterVolume * audio.config().sfxVolume);
     if (profile.audioIs3D) {
@@ -6669,26 +6614,14 @@ void Game::update(float dt) {
                             const uint64_t eventKey = demoAudioEventKey(
                                 demoBlocksDone - 1, static_cast<int>(eventIndex), ev);
                             if (!demoAudioEventsPlayed.insert(eventKey).second) continue;
-                            if (audio.config().enabled && audio.config().sfxVolume > 0) {
-                                scanAudioProfiles();
-                                if (ev.audioProfileId < (int)s_audioProfiles.size()) {
-                                    const auto& entry = s_audioProfiles[ev.audioProfileId];
-                                    auto* buf = audio.loadSound(entry.filename.c_str());
-                                    if (buf) {
-                                        auto* src = audio.createSource();
-                                        if (src) {
-                                            src->setVolume(0.3f * audio.config().masterVolume *
-                                                audio.config().sfxVolume);
-                                            if (ev.hasAudioPosition) {
-                                                src->setPosition(Math::torquePointToYUp({
-                                                    ev.audioPosition.x, ev.audioPosition.y,
-                                                    ev.audioPosition.z}));
-                                            }
-                                            src->play(buf);
-                                        }
-                                    }
-                                }
-                            }
+                            // The AudioProfile datablock streamed in the demo
+                            // names the sound and its description.
+                            const Point3F position = ev.hasAudioPosition
+                                ? Math::torquePointToYUp({ev.audioPosition.x, ev.audioPosition.y,
+                                                          ev.audioPosition.z})
+                                : Point3F{};
+                            playNativeAudioProfile(audio, demoParser->getInitialBlock().dataBlocks,
+                                                   static_cast<uint32_t>(ev.audioProfileId), position);
                             continue;
                         }
                         // MissionEnd or the debrief burst ends the match; the
@@ -7521,7 +7454,8 @@ void Game::render(float dt) {
 
     auto& eng = Engine::instance();
     auto& r = eng.renderer();
-    auto applyShapeBaseAudio = [&](GhostEntry& ghost, int ghostIndex, const Vec3& position) {
+    auto applyShapeBaseAudio = [&](GhostEntry& ghost, int ghostIndex, const Vec3& position,
+                                   const std::map<uint32_t, ParsedDataBlock>& blocks) {
         auto& audio = eng.audio();
         if (!audio.isInitialized()) return;
         for (int slot = 0; slot < 4; ++slot) {
@@ -7537,14 +7471,10 @@ void Game::render(float dt) {
                 continue;
             }
             if (it == shapeBaseSoundSources.end()) {
-                scanAudioProfiles();
-                if (state.profileId >= (int)s_audioProfiles.size()) continue;
-                auto* buffer = audio.loadSound(s_audioProfiles[state.profileId].filename.c_str());
-                auto* source = buffer ? audio.createSource(true) : nullptr;
+                // ShapeBase::updateAudioState plays the thread's profile.
+                auto* source = playNativeAudioProfile(audio, blocks, (uint32_t)state.profileId,
+                    Math::torquePointToYUp({position.x, position.y, position.z}), false, true);
                 if (!source) continue;
-                source->setLooping(true);
-                source->setVolume(0.3f * audio.config().masterVolume * audio.config().sfxVolume);
-                source->play(buffer);
                 it = shapeBaseSoundSources.emplace(key, source).first;
             }
             it->second->setPosition(Math::torquePointToYUp({position.x, position.y, position.z}));
@@ -8217,7 +8147,8 @@ void Game::render(float dt) {
             if (!demoMatchEnded) mg->threadAnimTime += demoInterpolationDt;
              mg->prevPosition = rp;
              mg->hasRendered = true;
-              if (!demoMatchEnded) applyShapeBaseAudio(*mg, idx, p);
+              if (!demoMatchEnded)
+                  applyShapeBaseAudio(*mg, idx, p, demoParser->getInitialBlock().dataBlocks);
 
                if (visualData && visualData->projectileMaterial != V12::DecodedDataBlock::ProjectileMaterial::None) {
                    const auto& data = *visualData;
@@ -8589,6 +8520,30 @@ void Game::render(float dt) {
                 }
                 shape->cloakTextureOverride = nullptr;
 
+                // Player::updateJet loops PlayerData jetSound while jetting.
+                if (isPlayer) {
+                    auto& audio = Engine::instance().audio();
+                    const bool jetOn = g->jetting && g->damageState < 1 && !demoMatchEnded &&
+                                       g->hasDatablock && audio.isInitialized();
+                    const Point3F soundPos = Math::torquePointToYUp({rp.x, rp.y, rp.z});
+                    auto sound = demoJetSoundSources.find(idx);
+                    if (jetOn && sound == demoJetSoundSources.end()) {
+                        const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+                        auto block = blocks.find((uint32_t)g->datablockId);
+                        const uint32_t jetSound = block != blocks.end() &&
+                            !block->second.decoded.playerSounds.empty()
+                            ? block->second.decoded.playerSounds[0] : 0;
+                        if (SoundSource* source = playNativeAudioProfile(audio, blocks, jetSound,
+                                                                         soundPos, true, true))
+                            demoJetSoundSources.emplace(idx, source);
+                    } else if (!jetOn && sound != demoJetSoundSources.end()) {
+                        audio.releaseSource(sound->second);
+                        demoJetSoundSources.erase(sound);
+                    } else if (sound != demoJetSoundSources.end()) {
+                        sound->second->setPosition(soundPos);
+                    }
+                }
+
                 // Player::updateJet: the PlayerData jetEmitter runs at the
                 // jetNozzle nodes while jetting (light armours have only the
                 // first), ejecting along the nozzle axis the jetflare mesh
@@ -8729,6 +8684,11 @@ void Game::render(float dt) {
             }
         }
         w->endProjectileTrailSync();
+        for (auto it = demoJetSoundSources.begin(); it != demoJetSoundSources.end();) {
+            if (gt.hasGhost(it->first)) { ++it; continue; }
+            Engine::instance().audio().releaseSource(it->second);
+            it = demoJetSoundSources.erase(it);
+        }
 
         // A deleted projectile can leave a few interpolated points behind;
         // discard them immediately instead of waiting for their fade timer.
@@ -8870,7 +8830,7 @@ void Game::render(float dt) {
             }
              rp = g->renderPos;
              g->threadAnimTime += dt;
-             applyShapeBaseAudio(*g, idx, p);
+             applyShapeBaseAudio(*g, idx, p, nativeDatablocks);
 
             // Try to load a shape for this ghost class
              if (!g->shape && !isEffectOnlyGhostClass(g->className)) {
@@ -10252,38 +10212,14 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
              auto& audio = Engine::instance().audio();
              if (!audio.config().enabled || audio.config().sfxVolume <= 0)
                  return;
-              // Audio profiles are indexed by the server's profile table. The
-              // decoded datablock table is authoritative for live packets.
-              // Script scanning remains a fallback for older demos that do
-              // not contain their datablock definitions.
-              auto nativeProfile = nativeDatablocks.find(
-                  static_cast<uint32_t>(event.audioProfileId));
-              if (nativeProfile != nativeDatablocks.end() &&
-                  nativeProfile->second.className == "AudioProfile") {
-                  const Point3F position = event.audioHasPosition
-                      ? Math::torquePointToYUp({event.audioPosition.x,
-                                                event.audioPosition.y,
-                                                event.audioPosition.z})
-                      : Point3F{};
-                  playNativeAudioProfile(audio, nativeDatablocks,
-                                         static_cast<uint32_t>(event.audioProfileId),
-                                         position);
-                  return;
-              }
-              scanAudioProfiles();
-             if (event.audioProfileId < 0 ||
-                 event.audioProfileId >= (int)s_audioProfiles.size()) return;
-             const auto& profile = s_audioProfiles[event.audioProfileId];
-             auto* buffer = audio.loadSound(profile.filename.c_str());
-             if (!buffer) return;
-             auto* source = audio.createSource();
-             if (!source) return;
-             source->setVolume(0.3f * audio.config().masterVolume * audio.config().sfxVolume);
-             if (event.audioHasPosition)
-                 source->setPosition(Math::torquePointToYUp({event.audioPosition.x,
-                                                              event.audioPosition.y,
-                                                              event.audioPosition.z}));
-              source->play(buffer);
+              // Audio profiles are the server's AudioProfile datablocks.
+              const Point3F position = event.audioHasPosition
+                  ? Math::torquePointToYUp({event.audioPosition.x,
+                                            event.audioPosition.y,
+                                            event.audioPosition.z})
+                  : Point3F{};
+              playNativeAudioProfile(audio, nativeDatablocks,
+                                     static_cast<uint32_t>(event.audioProfileId), position);
           });
         if (!activeConn->connect(host, port)) {
             Console::instance().printf(LogLevel::Error, "Unable to connect to %s:%d", host, port);
@@ -10429,15 +10365,10 @@ void Game::updateDemoPlayerAnimation(float tickTime) {
             image.forceFire = false;
             // State-entry sounds (setImageState), one-shot at the owner.
             for (int profile : image.animation.takeSounds()) {
-                if (!audio.isInitialized() || !audio.config().enabled || !g->hasPosition) continue;
-                scanAudioProfiles();
-                if (profile < 0 || profile >= (int)s_audioProfiles.size()) continue;
-                auto* buffer = audio.loadSound(s_audioProfiles[profile].filename.c_str());
-                auto* source = buffer ? audio.createSource() : nullptr;
-                if (!source) continue;
-                source->setVolume(0.3f * audio.config().masterVolume * audio.config().sfxVolume);
-                source->setPosition(Math::torquePointToYUp({g->position.x, g->position.y, g->position.z}));
-                source->play(buffer);
+                if (!audio.isInitialized() || !g->hasPosition || profile <= 0) continue;
+                playNativeAudioProfile(audio, demoParser->getInitialBlock().dataBlocks,
+                    (uint32_t)profile,
+                    Math::torquePointToYUp({g->position.x, g->position.y, g->position.z}));
             }
         }
         if (!g->hasPosition || !ObserverParity::isPlayerClass(g->className)) continue;
@@ -10901,6 +10832,8 @@ void Game::setDemoMatchEnded(bool ended) {
     auto& audio = Engine::instance().audio();
     for (auto& [key, source] : shapeBaseSoundSources) audio.releaseSource(source);
     shapeBaseSoundSources.clear();
+    for (auto& [ghost, source] : demoJetSoundSources) audio.releaseSource(source);
+    demoJetSoundSources.clear();
     clearProjectileAudio();
     Console::instance().printf(LogLevel::Info, "Demo: match ended at %.1f s", demoTime);
 }

@@ -144,6 +144,7 @@ struct DecodedDataBlock {
     float playerRunSurfaceAngle = 0.0f;
     float playerBoxSize[3] = {0.0f, 0.0f, 0.0f}; // Torque x, y, z
     uint32_t playerJetEmitterRef = 0; // ParticleEmitterData at jetNozzle0/1
+    std::vector<uint32_t> playerSounds; // PlayerData::Sounds AudioProfile refs
     int32_t emitterDelayMS = -1;
     float bubbleEmitTime = 0.5f;
     bool faceViewer{};

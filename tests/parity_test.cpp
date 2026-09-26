@@ -309,6 +309,8 @@ static void testGhostClassParity() {
     assert(ghostClassIs("wAtErBlOcK", "WaterBlock"));
     assert(isWorldLevelGhostClass("terrainblock"));
     assert(!isWorldLevelGhostClass("Player"));
+    assert(isWorldLevelGhostClass("AudioEmitter"));
+    assert(isWorldLevelGhostClass("VehicleBlocker"));
     assert(isProjectileGhostClass("energybolt"));
     assert(isProjectileGhostClass("customprojectile"));
     assert(isWheeledVehicleGhostClass("WHEELEDVEHICLE"));

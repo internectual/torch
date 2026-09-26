@@ -131,6 +131,29 @@ int main(int argc, char** argv) {
         if (g->isFlag) ++flagGhosts;
     }
     CHECK(flagGhosts <= 2);
+    // Demo sounds resolve through the streamed AudioProfile datablocks:
+    // every profile names a file and every image state sound is a profile.
+    const auto& dataBlocks = parser.getInitialBlock().dataBlocks;
+    int audioProfiles = 0;
+    for (const auto& [id, block] : dataBlocks) {
+        if (block.className == "AudioProfile") {
+            ++audioProfiles;
+            CHECK(!block.decoded.audioFilename.empty());
+        }
+        for (const auto& state : block.decoded.imageStates) {
+            if (!state.valid || state.sound < 0) continue;
+            auto profile = dataBlocks.find((uint32_t)state.sound);
+            CHECK(profile != dataBlocks.end() && profile->second.className == "AudioProfile");
+        }
+    }
+    CHECK(audioProfiles > 0);
+    // PlayerData::Sounds: jetSound (index 0) is an AudioProfile.
+    for (const auto& [id, block] : dataBlocks) {
+        if (!block.decoded.isPlayerData) continue;
+        CHECK(block.decoded.playerSounds.size() == 32);
+        auto jet = dataBlocks.find(block.decoded.playerSounds[0]);
+        CHECK(jet != dataBlocks.end() && jet->second.className == "AudioProfile");
+    }
     const std::vector<int>& recordedTicks = parser.getMoveTicksBefore();
     CHECK((int)recordedTicks.size() == blockCount + 1);
     CHECK(recordedTicks.back() == parser.getMoveBlockCount());

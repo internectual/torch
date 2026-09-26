@@ -17,7 +17,10 @@ inline bool ghostClassIs(const std::string& className, const char* expected) {
 inline bool isWorldLevelGhostClass(const std::string& className) {
     for (const char* name : {"InteriorInstance", "StaticShape", "ScopeAlwaysShape",
                              "TSStatic", "TerrainBlock", "Sky", "Sun", "Lightning",
-                             "WaterBlock", "MissionArea", "ForceFieldBare"}) {
+                             "WaterBlock", "MissionArea", "ForceFieldBare",
+                             // SceneObjects without a shape; World draws or
+                             // plays the mission copies.
+                             "AudioEmitter", "Precipitation", "VehicleBlocker"}) {
         if (ghostClassIs(className, name)) return true;
     }
     return false;

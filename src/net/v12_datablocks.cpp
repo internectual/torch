@@ -514,7 +514,11 @@ void player(Stream& s) {
         activeDecoded->isPlayerData = true;
     }
     f32s(s, 8);
-    s.readUnsigned(7); f32s(s, 6); f32s(s, 9); s.readF32(); refs(s, 32);
+    s.readUnsigned(7); f32s(s, 6); f32s(s, 9); s.readF32();
+    // PlayerData::Sounds (MaxSounds 32); jetSound is first, wetJetSound second.
+    std::vector<uint32_t> playerSounds(32);
+    for (auto& sound : playerSounds) sound = optionalRef(s);
+    if (activeDecoded) activeDecoded->playerSounds = std::move(playerSounds);
     const float boxX = s.readF32(), boxY = s.readF32(), boxZ = s.readF32();
     if (activeDecoded) {
         activeDecoded->playerBoxSize[0] = boxX;
