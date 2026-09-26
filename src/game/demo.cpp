@@ -1950,7 +1950,14 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
         for (int i = 0; i < 8; i++) {
             if (bs.readFlag()) {
                 const bool wasFiring = entry && entry->mountedImages[i].isFiring;
-                if (entry) entry->mountedImages[i] = {};
+                if (entry) {
+                    // The state machine persists while the image datablock
+                    // stays the same.
+                    GhostEntry::MountedImage previous = std::move(entry->mountedImages[i]);
+                    entry->mountedImages[i] = {};
+                    entry->mountedImages[i].animation = std::move(previous.animation);
+                    entry->mountedImages[i].animationDatablock = previous.animationDatablock;
+                }
                 if (bs.readFlag()) {
                     int dbId = bs.readInt(11);
                     if (entry && i < 8) entry->mountedImages[i].datablockId = dbId;
@@ -1963,18 +1970,26 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
                             entry->skinName = value;
                     }
                 }
-                bs.readFlag(); // trigger down
-                bool loaded = bs.readFlag();
-                bs.readFlag(); // ammo
-                bs.readFlag(); // wet
-                bs.readFlag(); // target
-                bool firing = bs.readInt(3) != 0;
+                const bool triggerDown = bs.readFlag();
+                const bool loaded = bs.readFlag();
+                const bool ammo = bs.readFlag();
+                const bool wet = bs.readFlag();
+                const bool target = bs.readFlag();
+                const int fireCount = bs.readInt(3);
+                const bool firing = fireCount != 0;
+                const bool extraFlag = isInitial ? bs.readFlag() : false;
                 if (entry && i < 8) {
-                    entry->mountedImages[i].loaded = loaded;
-                    entry->mountedImages[i].isFiring = firing;
+                    auto& image = entry->mountedImages[i];
+                    image.triggerDown = triggerDown;
+                    image.loaded = loaded;
+                    image.ammo = ammo;
+                    image.wet = wet;
+                    image.target = target;
+                    image.fireCount = fireCount;
+                    image.forceFire = extraFlag;
+                    image.isFiring = firing;
                     if (wasFiring != firing) entry->threadAnimTime = 0.0f;
                 }
-                if (isInitial) bs.readFlag();
             }
         }
     }

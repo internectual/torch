@@ -501,6 +501,11 @@ target_include_directories(torch_demo_text_test PRIVATE src)
 target_compile_options(torch_demo_text_test PRIVATE -UNDEBUG)
 add_test(NAME torch_demo_text COMMAND torch_demo_text_test)
 
+add_executable(torch_weapon_image_state_test tests/weapon_image_state_test.cpp)
+target_include_directories(torch_weapon_image_state_test PRIVATE src)
+target_compile_options(torch_weapon_image_state_test PRIVATE -UNDEBUG)
+add_test(NAME torch_weapon_image_state COMMAND torch_weapon_image_state_test)
+
 add_executable(torch_shape_lighting_test tests/shape_lighting_test.cpp)
 target_include_directories(torch_shape_lighting_test PRIVATE src)
 target_compile_options(torch_shape_lighting_test PRIVATE -UNDEBUG)

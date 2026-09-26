@@ -1,4 +1,5 @@
 #pragma once
+#include "game/weapon_image_state.h"
 
 #include "net/v12_bitstream.h"
 
@@ -132,6 +133,8 @@ struct DecodedDataBlock {
     };
 
     std::string shapeFile;
+    // ShapeBaseImageData states, indexed by the engine's 31 state slots.
+    std::vector<WeaponImage::StateData> imageStates;
     // TSShapeConstructor datablock.
     std::string constructorShape;
     std::vector<std::string> constructorSequences;

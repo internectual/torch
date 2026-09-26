@@ -1,5 +1,6 @@
 #pragma once
 #include "game/shape_lighting.h"
+#include "game/weapon_image_state.h"
 #include <cstdint>
 #include <cstring>
 #include <cmath>
@@ -659,6 +660,13 @@ struct GhostEntry {
         std::string shapePath;
         bool loaded = false;
         bool isFiring = false;
+        // Networked image conditions (ShapeBase ImageMask).
+        bool triggerDown = false, ammo = false, wet = false, target = false;
+        int fireCount = 0;
+        bool forceFire = false; // initial update's firing bit
+        // Client-side state machine, rebuilt when the datablock changes.
+        WeaponImage::Animation animation;
+        int16_t animationDatablock = -1;
     };
     struct WheelState {
         float angularVelocity = 0.0f;

@@ -2215,6 +2215,10 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
         std::vector<QuatF> rot; std::vector<Point3F> trans, scale;
         std::vector<bool> rotSet, transSet, scaleSet;
     };
+    // Non-blend layers are independent threads: the channels and objects
+    // they animate take the layer's values instead of the primary's.
+    struct OverlayThread { const Animation* anim; float time; };
+    std::vector<OverlayThread> overlayThreads;
     std::vector<BlendSample> blendSamples;
     for (int b = 0; b < numBlends && blends; ++b) {
         const int index = blends[b].animationIndex;
@@ -2225,10 +2229,20 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
                            std::vector<Point3F>(numNodes, {1, 1, 1}),
                            std::vector<bool>(numNodes, false), std::vector<bool>(numNodes, false),
                            std::vector<bool>(numNodes, false)};
-        sampleChannels(blendAnim,
-                       animationSampleTime(blends[b].time, blendAnim.duration, blendAnim.looping),
+        const float layerTime =
+            animationSampleTime(blends[b].time, blendAnim.duration, blendAnim.looping);
+        sampleChannels(blendAnim, layerTime,
                        sample.rot, sample.trans, sample.scale,
                        sample.rotSet, sample.transSet, sample.scaleSet);
+        if (!blendAnim.blend) {
+            for (int32_t n = 0; n < numNodes; ++n) {
+                if (sample.rotSet[n]) { nodeRot[n] = sample.rot[n]; rotSet[n] = true; }
+                if (sample.transSet[n]) { nodeTrans[n] = sample.trans[n]; transSet[n] = true; }
+                if (sample.scaleSet[n]) { nodeScale[n] = sample.scale[n]; scaleSet[n] = true; }
+            }
+            overlayThreads.push_back({&blendAnim, layerTime});
+            continue;
+        }
         blendSamples.push_back(std::move(sample));
     }
 
@@ -2347,6 +2361,23 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
             objectVisible[objIdx] = (lastVis > 0.5f);
             objectFrame[objIdx] = lastFrame;
             objectMatFrame[objIdx] = lastMatFrame;
+        }
+    }
+
+    for (const OverlayThread& thread : overlayThreads) {
+        const auto& keys = thread.anim->objectKeyframes;
+        const float objectTime = std::min(thread.time, thread.anim->duration);
+        for (size_t k = 0; k < keys.size(); ) {
+            const int32_t objIdx = keys[k].objectIndex;
+            size_t end = k;
+            while (end < keys.size() && keys[end].objectIndex == objIdx) ++end;
+            if (objIdx >= 0 && objIdx < (int32_t)objectVisible.size()) {
+                const auto sample = sampleDTSObject(keys, objIdx, objectTime);
+                objectVisible[objIdx] = sample.vis > 0.5f;
+                objectFrame[objIdx] = sample.frameIndex;
+                objectMatFrame[objIdx] = sample.matFrameIndex;
+            }
+            k = end;
         }
     }
 

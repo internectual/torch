@@ -461,20 +461,41 @@ void shapeImage(Stream& s) {
     const uint32_t lightType = s.readRange(0, 3);
     if (lightType != 0) { s.readF32(); s.readSigned(32); for (int i=0;i<4;++i)s.readFloat(7); }
     f32s(s, 3); s.readF32(); s.readF32(); refs(s, 1); s.readFlag();
+    std::vector<WeaponImage::StateData> states(31);
+    bool anyState = false;
     for (int i=0;i<31;++i) {
         const bool hasState = s.readFlag();
         if (!hasState) continue;
-        s.readString();
-        for (int j=0;j<11;++j)s.readUnsigned(5);
-        if (s.readFlag())s.readF32(); for (int j=0;j<6;++j)s.readFlag();
-        if (s.readFlag()) s.readF32();
-        s.readUnsigned(3); s.readUnsigned(3); s.readUnsigned(3);
-        if(s.readFlag())s.readSignedInt(16); if(s.readFlag())s.readSignedInt(16);
-        s.readFlag(); s.readFlag();
+        WeaponImage::StateData& st = states[i];
+        st.valid = anyState = true;
+        s.readString(); // name
+        // Engine packing order; 1-based state indices, 0 = no transition.
+        int* transitions[11] = {
+            &st.transitionOnNotLoaded, &st.transitionOnLoaded, &st.transitionOnNoAmmo,
+            &st.transitionOnAmmo, &st.transitionOnNoTarget, &st.transitionOnTarget,
+            &st.transitionOnNotWet, &st.transitionOnWet, &st.transitionOnTriggerUp,
+            &st.transitionOnTriggerDown, &st.transitionOnTimeout};
+        for (int* transition : transitions) *transition = (int)s.readUnsigned(5) - 1;
+        if (s.readFlag()) st.timeoutValue = s.readF32();
+        st.waitForTimeout = s.readFlag();
+        st.fire = s.readFlag();
+        s.readFlag(); // ejectShell
+        st.scaleAnimation = s.readFlag();
+        st.direction = s.readFlag();
+        s.readFlag(); // reload
+        if (s.readFlag()) s.readF32(); // energyDrain
+        s.readUnsigned(3); // loaded
+        st.spin = (int)s.readUnsigned(3);
+        s.readUnsigned(3); // recoil
+        if (s.readFlag()) st.sequence = s.readSignedInt(16);
+        if (s.readFlag()) st.sequenceVis = s.readSignedInt(16);
+        st.flashSequence = s.readFlag();
+        s.readFlag(); // ignoreLoadedForReady
         const bool hasEmitter = s.readFlag();
         if (hasEmitter) { s.readUnsigned(11); s.readF32(); s.readSigned(32); }
-        if (s.readFlag()) s.readUnsigned(11);
+        if (s.readFlag()) st.sound = (int)s.readUnsigned(11);
     }
+    if (activeDecoded && anyState) activeDecoded->imageStates = std::move(states);
 }
 
 void player(Stream& s) {

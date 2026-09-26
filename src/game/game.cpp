@@ -293,6 +293,53 @@ static const DTSShape::Animation* findAnimation(const DTSShape& shape,
     return nullptr;
 }
 
+// Renders a mounted image with its state machine's threads: the state
+// sequence, the flash visibility sequence, and the always-running "ambient"
+// and "spin" threads (ShapeBaseImageData::preload).
+static void renderMountedImage(DTSShape& shape, const WeaponImage::Animation& animation,
+                               float now) {
+    std::vector<DTSShape::BlendThread> threads;
+    auto duration = [&](int index) {
+        return index >= 0 && index < (int)shape.animations.size()
+            ? shape.animations[index].duration : 0.0f;
+    };
+    auto addThread = [&](const WeaponImage::Thread& thread, bool flash) {
+        if (!thread.valid() || thread.sequence >= (int)shape.animations.size()) return;
+        const auto& clip = shape.animations[thread.sequence];
+        const float scale = thread.scaleSequence >= 0 ? duration(thread.scaleSequence) : -1.0f;
+        const float position = WeaponImage::threadPosition(
+            thread, now, clip.duration, !flash && clip.looping, scale);
+        threads.push_back({thread.sequence, position * clip.duration});
+    };
+    if (animation.valid()) {
+        addThread(animation.anim(), false);
+        addThread(animation.flash(), true);
+    }
+    auto named = [&](const char* name) -> int {
+        const DTSShape::Animation* found = findAnimation(shape, name);
+        return found ? (int)(found - shape.animations.data()) : -1;
+    };
+    const int ambient = named("ambient");
+    if (ambient >= 0 && duration(ambient) > 0.0f) {
+        const float since = animation.valid() ? std::max(0.0f, now - animation.mountedAt()) : now;
+        threads.push_back({ambient, std::fmod(since, duration(ambient))});
+    }
+    const int spin = named("spin");
+    if (spin >= 0 && duration(spin) > 0.0f && animation.valid()) {
+        const float time = std::fmod(animation.spinTime(now), duration(spin));
+        threads.push_back({spin, time < 0.0f ? time + duration(spin) : time});
+    }
+    if (threads.empty()) {
+        shape.render(0);
+        return;
+    }
+    const DTSShape::BlendThread primary = threads.front();
+    shape.renderAnimationIndex(primary.animationIndex, primary.time, nullptr, 0,
+                               threads.size() > 1 ? threads.data() + 1 : nullptr,
+                               (int)threads.size() - 1);
+}
+
+
 static int findFirstNode(const DTSShape& shape,
                          std::initializer_list<const char*> names) {
     for (const char* name : names) {
@@ -8515,46 +8562,8 @@ void Game::render(float dt) {
                          r.setModel(imageModel);
                          wShape->cloakTextureOverride = shape->cloakTextureOverride;
                          wShape->lighting = shape->lighting;
-                         const DTSShape::Animation* imageAnimation = nullptr;
-                         for (const char* name : {mg->mountedImages[img].isFiring ? "fire" : "idle",
-                                                  "ambient", "spin", "stand"}) {
-                             imageAnimation = findAnimation(*wShape, name);
-                             if (imageAnimation) break;
-                         }
-                         if (imageAnimation && imageAnimation->duration > 0.0f)
-                             wShape->renderAnimation(imageAnimation->name.c_str(),
-                                                       animationSampleTime(
-                                                           mg->threadAnimTime,
-                                                           imageAnimation->duration,
-                                                           imageAnimation->looping));
-                         else
-                             wShape->render(0);
+                         renderMountedImage(*wShape, mg->mountedImages[img].animation, demoTime);
                          wShape->cloakTextureOverride = nullptr;
-
-                        // Muzzle flash and particles when firing
-                         if (mg->mountedImages[img].isFiring) {
-                             Point3F muzzlePos = mountedNodePosition(imageModel, *wShape, "Mountpoint");
-                            float flashSize = 0.15f;
-                            ColorF flashCol = {1.0f, 0.9f, 0.5f, 0.9f};
-                            r.drawSprite(muzzlePos, flashSize, flashCol);
-                            // Spawn a few spark particles
-                            for (int s = 0; s < 3; s++) {
-                                World::Particle spark;
-                                spark.pos = muzzlePos;
-                                float spread = 0.3f;
-                                spark.vel = {
-                                    ((float)std::rand() / RAND_MAX - 0.5f) * spread,
-                                    ((float)std::rand() / RAND_MAX) * spread * 0.5f,
-                                    ((float)std::rand() / RAND_MAX - 0.5f) * spread
-                                };
-                                spark.lifetime = 0.1f + ((float)std::rand() / RAND_MAX) * 0.15f;
-                                spark.maxLifetime = spark.lifetime;
-                                spark.size = 0.05f + ((float)std::rand() / RAND_MAX) * 0.05f;
-                                spark.color = {1.0f, 0.8f, 0.3f, 1.0f};
-                                spark.active = true;
-                                if (w->particles.size() < 1000) w->particles.push_back(spark);
-                            }
-                        }
                     }
                 }
             }
@@ -8851,24 +8860,7 @@ void Game::render(float dt) {
                              imageShape->upOrientation();
                   r.setModel(imageModel);
                   imageShape->lighting = g->shape->lighting;
-                  const DTSShape::Animation* imageAnimation = nullptr;
-                  for (const char* name : {mounted.isFiring ? "fire" : "idle",
-                                           "ambient", "spin", "stand"}) {
-                      imageAnimation = findAnimation(*imageShape, name);
-                      if (imageAnimation) break;
-                  }
-                   if (imageAnimation && imageAnimation->duration > 0.0f)
-                              imageShape->renderAnimation(imageAnimation->name.c_str(),
-                                                           animationSampleTime(
-                                                               g->threadAnimTime,
-                                                               imageAnimation->duration,
-                                                               imageAnimation->looping));
-                   else
-                       imageShape->render(0);
-                   if (mounted.isFiring) {
-                       const Point3F muzzle = mountedNodePosition(imageModel, *imageShape, "Mountpoint");
-                       r.drawSprite(muzzle, 0.15f, {1.0f, 0.9f, 0.5f, 0.9f});
-                   }
+                  renderMountedImage(*imageShape, mounted.animation, demoTime);
               }
           }
         }
@@ -10280,13 +10272,51 @@ static std::vector<std::string> scriptShapeSequences(const std::string& shapePat
     return sequences;
 }
 
+
 void Game::updateDemoPlayerAnimation(float tickTime) {
     if (!demoParser) return;
     const auto& blocks = demoParser->getInitialBlock().dataBlocks;
     GhostTracker& tracker = demoParser->getMutableGhostTracker();
+    auto& audio = Engine::instance().audio();
     for (int index : tracker.getAllIndices()) {
         GhostEntry* g = tracker.getMutableGhost(index);
-        if (!g || !g->hasPosition || !ObserverParity::isPlayerClass(g->className)) continue;
+        if (!g) continue;
+        // ShapeBase::updateImageState for each mounted image.
+        for (int slot = 0; slot < 8; ++slot) {
+            auto& image = g->mountedImages[slot];
+            if (image.datablockId < 0) continue;
+            if (image.animationDatablock != image.datablockId) {
+                auto block = blocks.find((uint32_t)image.datablockId);
+                std::vector<WeaponImage::StateData> states;
+                if (block != blocks.end()) states = block->second.decoded.imageStates;
+                image.animation = WeaponImage::Animation(std::move(states), tickTime,
+                    (uint32_t)(index * 8 + slot + 1) * 2654435761u);
+                image.animationDatablock = image.datablockId;
+            }
+            if (!image.animation.valid()) continue;
+            WeaponImage::Flags flags;
+            flags.triggerDown = image.triggerDown;
+            flags.loaded = image.loaded;
+            flags.ammo = image.ammo;
+            flags.wet = image.wet;
+            flags.target = image.target;
+            flags.fireCount = image.fireCount;
+            image.animation.advance(tickTime, flags, image.forceFire);
+            image.forceFire = false;
+            // State-entry sounds (setImageState), one-shot at the owner.
+            for (int profile : image.animation.takeSounds()) {
+                if (!audio.isInitialized() || !audio.config().enabled || !g->hasPosition) continue;
+                scanAudioProfiles();
+                if (profile < 0 || profile >= (int)s_audioProfiles.size()) continue;
+                auto* buffer = audio.loadSound(s_audioProfiles[profile].filename.c_str());
+                auto* source = buffer ? audio.createSource() : nullptr;
+                if (!source) continue;
+                source->setVolume(0.3f * audio.config().masterVolume * audio.config().sfxVolume);
+                source->setPosition(Math::torquePointToYUp({g->position.x, g->position.y, g->position.z}));
+                source->play(buffer);
+            }
+        }
+        if (!g->hasPosition || !ObserverParity::isPlayerClass(g->className)) continue;
         float runSurfaceAngle = 0.0f;
         float halfX = 0.0f, halfY = 0.0f;
         if (g->hasDatablock) {
