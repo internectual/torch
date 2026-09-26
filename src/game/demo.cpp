@@ -2251,7 +2251,7 @@ static void readWayPointData(BitStream& bs, bool isInitial, const Vec3& cp, Ghos
 }
 
 static void readProjectileData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
-    readGameBaseData(bs, isInitial);
+    readGameBaseData(bs, isInitial, entry);
     if (!bs.readFlag()) return; // non-full state
     if (entry) entry->position = bs.readCompressedPoint(cp);
     else bs.readCompressedPoint(cp);
@@ -2271,7 +2271,7 @@ static void readProjectileData(BitStream& bs, bool isInitial, const Vec3& cp, Gh
 }
 
 static void readELFProjectileData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
-    readGameBaseData(bs, isInitial);
+    readGameBaseData(bs, isInitial, entry);
     if (bs.readFlag() && bs.readFlag()) {
         const int source = bs.readInt(11);
         bs.readInt(3); // source image slot
@@ -2284,7 +2284,7 @@ static void readELFProjectileData(BitStream& bs, bool isInitial, const Vec3&, Gh
 }
 
 static void readRepairProjectileData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
-    readGameBaseData(bs, isInitial);
+    readGameBaseData(bs, isInitial, entry);
     if (bs.readFlag() && bs.readFlag()) {
         const int source = bs.readInt(11); // source object
         const int slot = bs.readInt(3); // source slot
@@ -2298,7 +2298,7 @@ static void readRepairProjectileData(BitStream& bs, bool isInitial, const Vec3&,
 }
 
 static void readDebrisData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
-    readGameBaseData(bs, isInitial);
+    readGameBaseData(bs, isInitial, entry);
     if (bs.readFlag()) {
         if (entry) entry->position = bs.readCompressedPoint(cp);
         else bs.readCompressedPoint(cp);
@@ -2362,7 +2362,7 @@ static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEnt
 }
 
 static void readSniperProjectileData(BitStream& bs, bool isInitial, GhostEntry* entry) {
-    readGameBaseData(bs, isInitial);
+    readGameBaseData(bs, isInitial, entry);
     if (bs.readFlag()) { // initial
         bs.readFloat(7); // energyPercentage
         Vec3 startPos = bs.readPoint3F();
@@ -2387,7 +2387,7 @@ static void readSniperProjectileData(BitStream& bs, bool isInitial, GhostEntry* 
 }
 
 static void readShockLanceProjectileData(BitStream& bs, bool isInitial, GhostEntry* entry) {
-    readGameBaseData(bs, isInitial);
+    readGameBaseData(bs, isInitial, entry);
     if (bs.readFlag()) bs.readRangedU32(0, 1024); // targetObject
     if (bs.readFlag()) { // initial update
         Vec3 start = bs.readPoint3F();
@@ -2448,7 +2448,7 @@ static void readBombProjectileData(BitStream& bs, bool, const Vec3&, GhostEntry*
 }
 
 static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
-    readGameBaseData(bs, isInitial);
+    readGameBaseData(bs, isInitial, entry);
     if (bs.readFlag()) { // InitialUpdateMask
         if (bs.readFlag()) { // hidden/already exploded
             Vec3 expPos = bs.readCompressedPoint(cp);
@@ -2490,7 +2490,7 @@ static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& 
 }
 
 static void readSeekerProjectileData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
-    readGameBaseData(bs, isInitial);
+    readGameBaseData(bs, isInitial, entry);
     const bool fullState = bs.readFlag();
     if (!fullState) {
         if (bs.readFlag()) {
@@ -2878,7 +2878,7 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
     else if (cn == "ForceFieldBare") readForceFieldBareData(bs, isInitial, cp, entry);
     else if (cn == "InteriorInstance") readInteriorData(bs, isInitial, cp, entry);
     else if (cn == "ShapeBase") readShapeBaseData(bs, isInitial, entry);
-    else if (cn == "GameBase") readGameBaseData(bs, isInitial);
+    else if (cn == "GameBase") readGameBaseData(bs, isInitial, entry);
     else known = false;
 
     if (!known) {

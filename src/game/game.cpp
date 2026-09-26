@@ -7922,8 +7922,9 @@ void Game::render(float dt) {
                     auto block = blocks.find((uint32_t)g->datablockId);
                     if (block != blocks.end() && !block->second.decoded.cloakTexture.empty()) {
                         const std::string& path = block->second.decoded.cloakTexture;
-                        cloakTexture = r.loadTexture(path.c_str());
-                        if (!cloakTexture) cloakTexture = r.loadTexture(("textures/" + path).c_str());
+                        // Datablock texture names are relative to textures/.
+                        cloakTexture = r.loadTexture(("textures/" + path).c_str());
+                        if (!cloakTexture) cloakTexture = r.loadTexture(path.c_str());
                         if (!cloakTexture) cloakTexture = r.loadTexture(("textures/" + path + ".png").c_str());
                     }
                     if (!cloakTexture) cloakTexture = r.loadTexture("textures/special/cloakTexture.png");
@@ -8442,8 +8443,9 @@ void Game::render(float dt) {
                  if (block != nativeDatablocks.end() &&
                      !block->second.decoded.cloakTexture.empty()) {
                      const std::string& path = block->second.decoded.cloakTexture;
-                     cloakTexture = r.loadTexture(path.c_str());
-                     if (!cloakTexture) cloakTexture = r.loadTexture(("textures/" + path).c_str());
+                     // Datablock texture names are relative to textures/.
+                     cloakTexture = r.loadTexture(("textures/" + path).c_str());
+                     if (!cloakTexture) cloakTexture = r.loadTexture(path.c_str());
                      if (!cloakTexture) cloakTexture = r.loadTexture(("textures/" + path + ".png").c_str());
                  }
                  if (!cloakTexture) cloakTexture = r.loadTexture("textures/special/cloakTexture.png");

@@ -777,9 +777,12 @@ bool Renderer::loadTextureFrames(const char* path, std::vector<uint32_t>& frames
     if (!path || !*path) return false;
 
     const std::string requested(path);
-    std::vector<std::string> direct = {requested};
+    // Datablock and material texture names are relative to textures/, so try
+    // that location before the literal path.
+    std::vector<std::string> direct;
     if (requested.rfind("textures/", 0) != 0)
         direct.push_back("textures/" + requested);
+    direct.push_back(requested);
     static constexpr const char* imageExtensions[] = {".png", ".bm8", ".jpg", ".gif", ".bmp", ".tga", ".dds"};
     // A companion IFL is the authored animation, so it takes precedence over
     // a same-named still image. If it has no usable frames, fall back below.
