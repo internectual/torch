@@ -2485,22 +2485,31 @@ static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& 
             if (entry) entry->position = bs.readCompressedPoint(cp);
             else bs.readCompressedPoint(cp);
              Vec3 dir = bs.readNormalVector(14); // direction
-             if (entry) {
-                 entry->beamStart = entry->position;
-                 entry->beamEnd = {entry->position.x + dir.x * 10.0f,
-                                   entry->position.y + dir.y * 10.0f,
-                                   entry->position.z + dir.z * 10.0f};
-                 entry->hasBeam = true;
-             }
             if (entry && (dir.x != 0 || dir.y != 0 || dir.z != 0)) {
                 float yaw = atan2f(dir.x, dir.y);
                 entry->rotation = torqueYawQuaternion(yaw);
                 entry->hasRotation = true;
             }
-            bs.readRangedU32(0, 511); // currTick
+            const uint32_t currTick = bs.readRangedU32(0, 511);
+            float excessVel = 0.0f;
+            Vec3 excessDir{0, 0, 0};
             if (bs.readFlag()) {
                 bs.readInt(10); bs.readRangedU32(0, 7); // source
-                if (bs.readFlag()) { bs.readRangedU32(0, 255); bs.readNormalVector(7); }
+                if (bs.readFlag()) {
+                    excessVel = (float)bs.readRangedU32(0, 255);
+                    excessDir = bs.readNormalVector(7);
+                }
+            }
+            // LinearProjectile ghosts carry the initial state; the client
+            // flies the segment (createSegments) from here.
+            if (entry) {
+                entry->linearStart = entry->position;
+                entry->linearDir = dir;
+                entry->linearExcess = {excessDir.x * excessVel, excessDir.y * excessVel,
+                                       excessDir.z * excessVel};
+                entry->linearCurrTick = (int)currTick;
+                entry->hasLinearFlight = true;
+                entry->linearSegmentValid = false;
             }
             if (bs.readFlag()) bs.readInt(10); // vehicleObject
         }

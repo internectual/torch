@@ -733,6 +733,15 @@ struct GhostEntry {
     bool repairHasHit = false;
     int repairTarget = -1;
     float repairLastTime = -1.0f;
+    // Energy bolt motion blur: recent render positions (Y-up) and times.
+    std::vector<std::pair<Point3F, float>> blurTail;
+    // LinearProjectile initial state (Torque space) and the client segment:
+    // velocity and the flight time until the first world hit or lifetime.
+    Vec3 linearStart{}, linearDir{}, linearExcess{};
+    int linearCurrTick = 0;
+    bool hasLinearFlight = false, linearSegmentValid = false;
+    Vec3 linearVelocity{};
+    float linearEndTime = 0.0f;
     bool vehicleJetting = false;
     int thrustDirection = VehicleJets::ThrustForward;
     VehicleJets::Direction jetBack, jetBottom;

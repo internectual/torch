@@ -202,6 +202,9 @@ struct DecodedDataBlock {
     enum class ProjectileMaterial : uint8_t { None, Cross, Flare, LinearFlare };
     ProjectileMaterial projectileMaterial = ProjectileMaterial::None;
     std::vector<std::string> projectileMaterialTextures;
+    bool projectileIsEnergyBolt = false; // EnergyProjectileData
+    float projectileBlurLifetime = 0.0f, projectileBlurWidth = 0.0f;
+    std::array<float, 3> projectileBlurColor{1.0f, 1.0f, 1.0f};
     std::array<float, 3> projectileMaterialSizes{1.0f, 1.0f, 1.0f};
     std::array<float, 4> projectileMaterialColor{1.0f, 1.0f, 1.0f, 1.0f};
     float projectileCrossViewAngle = 0.0f;

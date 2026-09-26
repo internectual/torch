@@ -596,6 +596,11 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
          if (activeDecoded) {
              activeDecoded->projectileMaterial = DecodedDataBlock::ProjectileMaterial::Cross;
              activeDecoded->projectileCrossViewAngle = values[0]; activeDecoded->projectileCrossSize = values[1];
+             // EnergyProjectileData: blurLifetime, blurWidth, blurColor rgb.
+             activeDecoded->projectileIsEnergyBolt = true;
+             activeDecoded->projectileRenderCross = true;
+             activeDecoded->projectileBlurLifetime = values[2]; activeDecoded->projectileBlurWidth = values[3];
+             activeDecoded->projectileBlurColor = {values[4], values[5], values[6]};
              activeDecoded->projectileMaterialTextures = textures;
          }
          break;
@@ -717,8 +722,9 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
            const bool renderCross = s.readUnsigned(8) != 0; const auto textures = materialStrings(s, 2);
            if (activeDecoded) {
                activeDecoded->projectileMaterial = DecodedDataBlock::ProjectileMaterial::Cross;
-               activeDecoded->projectileTracerLength = values[0]; activeDecoded->projectileTracerMinPixels = values[1];
-               activeDecoded->projectileTracerWidth = values[2]; activeDecoded->projectileTracerAlpha = tracerAlpha;
+               // Stream order: tracerLength, tracerWidth, tracerMinPixels.
+               activeDecoded->projectileTracerLength = values[0]; activeDecoded->projectileTracerWidth = values[1];
+               activeDecoded->projectileTracerMinPixels = values[2]; activeDecoded->projectileTracerAlpha = tracerAlpha;
                activeDecoded->projectileCrossViewAngle = cross[0]; activeDecoded->projectileCrossSize = cross[1];
                activeDecoded->projectileRenderCross = renderCross; activeDecoded->projectileMaterialTextures = textures;
                activeDecoded->projectileMaterialColor = {((color >> 0) & 0xff) / 255.0f,

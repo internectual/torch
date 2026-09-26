@@ -8169,6 +8169,84 @@ void Game::render(float dt) {
                 }
             }
             rp = mg->renderPos;
+            // LinearProjectile::createSegments / interpolateTick: the ghost
+            // carries its initial position and direction; the client flies it
+            // at the dry (or, fired underwater, wet) muzzle speed plus the
+            // shooter's excess velocity, from currTick, along one segment cut
+            // at the first world hit or the lifetime.
+            if (mg->hasLinearFlight && g->hasDatablock && !g->exploded) {
+                const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+                auto block = blocks.find((uint32_t)g->datablockId);
+                if (block != blocks.end()) {
+                    const auto& data = block->second.decoded;
+                    if (!mg->linearSegmentValid) {
+                        const Point3F startYUp = Math::torquePointToYUp(
+                            {mg->linearStart.x, mg->linearStart.y, mg->linearStart.z});
+                        const bool wetStart = w && w->isUnderwater(startYUp);
+                        const float speed = wetStart && data.projectileWetVelocity > 0.0f
+                            ? data.projectileWetVelocity : data.projectileDryVelocity;
+                        mg->linearVelocity = {mg->linearDir.x * speed + mg->linearExcess.x,
+                                              mg->linearDir.y * speed + mg->linearExcess.y,
+                                              mg->linearDir.z * speed + mg->linearExcess.z};
+                        const float lifetime = std::max(0.0f, data.projectileLifetimeMS / 1000.0f);
+                        const Point3F velYUp = Math::torquePointToYUp(
+                            {mg->linearVelocity.x, mg->linearVelocity.y, mg->linearVelocity.z});
+                        const float vlen = std::sqrt(velYUp.x * velYUp.x + velYUp.y * velYUp.y + velYUp.z * velYUp.z);
+                        float endTime = lifetime;
+                        if (vlen > 1e-4f && w) {
+                            const Point3F dirYUp{velYUp.x / vlen, velYUp.y / vlen, velYUp.z / vlen};
+                            float maxDist = vlen * lifetime;
+                            float hitDist; Point3F hitPos, hitNormal;
+                            if (w->collision().raycast(startYUp, dirYUp, maxDist, hitDist, hitPos, hitNormal))
+                                maxDist = std::min(maxDist, hitDist);
+                            // Terrain height field: march, then bisect the crossing.
+                            if (w->terrain() && w->terrain()->loaded) {
+                                const float step = 0.5f;
+                                float prev = 0.0f;
+                                // Only a crossing of the surface from above hits: a ray
+                                // that starts underneath (underground bases) passes.
+                                auto below = [&](const Point3F& p) {
+                                    return p.y < w->getHeight(p.x, p.z) && !w->terrain()->isEmptySquare(p.x, p.z);
+                                };
+                                bool wasBelow = below(startYUp);
+                                for (float d = step; d <= maxDist + step; d += step) {
+                                    const float dd = std::min(d, maxDist);
+                                    const Point3F p{startYUp.x + dirYUp.x * dd, startYUp.y + dirYUp.y * dd,
+                                                    startYUp.z + dirYUp.z * dd};
+                                    const bool isBelow = below(p);
+                                    if (isBelow && !wasBelow) {
+                                        float lo = prev, hi = dd;
+                                        for (int k = 0; k < 12; ++k) {
+                                            const float mid = 0.5f * (lo + hi);
+                                            const Point3F q{startYUp.x + dirYUp.x * mid, startYUp.y + dirYUp.y * mid,
+                                                            startYUp.z + dirYUp.z * mid};
+                                            (q.y < w->getHeight(q.x, q.z) ? hi : lo) = mid;
+                                        }
+                                        maxDist = std::min(maxDist, hi);
+                                        break;
+                                    }
+                                    wasBelow = isBelow;
+                                    prev = dd;
+                                    if (dd >= maxDist) break;
+                                }
+                            }
+                            endTime = maxDist / vlen;
+                        }
+                        mg->linearEndTime = endTime;
+                        mg->linearSegmentValid = true;
+                        // A fresh initial update (possibly a reused ghost index).
+                        mg->spawnTime = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                    }
+                    const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                    const float age = mg->linearCurrTick * 0.032f + std::max(0.0f, now - mg->spawnTime);
+                    const float t = std::min(age, mg->linearEndTime);
+                    rp = {mg->linearStart.x + mg->linearVelocity.x * t,
+                          mg->linearStart.y + mg->linearVelocity.y * t,
+                          mg->linearStart.z + mg->linearVelocity.z * t};
+                    mg->renderPos = rp;
+                    mg->velocity = mg->linearVelocity;
+                }
+            }
 
               const bool isProjectile = isProjectileGhostClass(g->className) ||
                   ghostClassIs(g->className, "TracerProjectile");
@@ -8242,7 +8320,89 @@ void Game::render(float dt) {
                    const Point3F materialPos = Math::torquePointToYUp({rp.x, rp.y, rp.z});
                    const Point3F velocity = Math::torquePointToYUp(
                        {g->velocity.x, g->velocity.y, g->velocity.z});
-                   const auto layers = projectileVisualLayers(data, mg->projectileVisualAge);
+                   // TracerProjectile / EnergyProjectile (tracer and bolt renderers,
+                   // t2-mapper tracer.ts): an additive camera-facing quad centred on
+                   // the projectile along its flight, plus an end-on cross seen
+                   // within crossViewAng of the axis; bolts add a motion-blur tail.
+                   // Unfogged.
+                   const bool crossStyle = data.projectileMaterial == V12::DecodedDataBlock::ProjectileMaterial::Cross;
+                   if (crossStyle) {
+                       const float length = data.projectileIsEnergyBolt
+                           ? (data.hasProjectileScale ? data.projectileScale.y : 20.0f) : data.projectileTracerLength;
+                       const float halfWidth = data.projectileIsEnergyBolt
+                           ? (data.hasProjectileScale ? data.projectileScale.x : 0.25f) : data.projectileTracerWidth;
+                       Point3F dir = velocity;
+                       const float dl = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+                       const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                       if (data.projectileIsEnergyBolt && data.projectileBlurLifetime > 0.0f) {
+                           auto& tail = mg->blurTail;
+                           if (!tail.empty() && now < tail.back().second) tail.clear();
+                           if (tail.empty() || now > tail.back().second) tail.push_back({materialPos, now});
+                           if (tail.size() > 32) tail.erase(tail.begin());
+                           while (!tail.empty() && now - tail.front().second > data.projectileBlurLifetime)
+                               tail.erase(tail.begin());
+                           const ColorF blurColor{data.projectileBlurColor[0], data.projectileBlurColor[1],
+                                                  data.projectileBlurColor[2], 1.0f};
+                           for (size_t i = 0; i + 1 < tail.size(); ++i) {
+                               const Point3F a = tail[i].first, b = tail[i + 1].first;
+                               const Point3F seg{b.x - a.x, b.y - a.y, b.z - a.z};
+                               const Point3F toCam{a.x - r.cameraPos.x, a.y - r.cameraPos.y, a.z - r.cameraPos.z};
+                               Point3F c{toCam.y * seg.z - toCam.z * seg.y, toCam.z * seg.x - toCam.x * seg.z,
+                                         toCam.x * seg.y - toCam.y * seg.x};
+                               const float cl = std::sqrt(c.x * c.x + c.y * c.y + c.z * c.z);
+                               if (cl < 1e-5f) continue;
+                               const float h = data.projectileBlurWidth * 0.5f / cl;
+                               c = {c.x * h, c.y * h, c.z * h};
+                               // Alpha fades with each end's age (quad tint averages them).
+                               const float alpha = std::max(0.0f, 1.0f - (now - 0.5f * (tail[i].second + tail[i + 1].second)) /
+                                                                        data.projectileBlurLifetime);
+                               r.drawTexturedQuad({a.x + c.x, a.y + c.y, a.z + c.z}, {b.x + c.x, b.y + c.y, b.z + c.z},
+                                                  {b.x - c.x, b.y - c.y, b.z - c.z}, {a.x - c.x, a.y - c.y, a.z - c.z},
+                                                  0, {blurColor.r, blurColor.g, blurColor.b, alpha}, 0, 0, 1, 1, true);
+                           }
+                       }
+                       if (dl > 1e-4f) {
+                           dir = {dir.x / dl, dir.y / dl, dir.z / dl};
+                           Point3F fromCam{materialPos.x - r.cameraPos.x, materialPos.y - r.cameraPos.y,
+                                           materialPos.z - r.cameraPos.z};
+                           Point3F c{fromCam.y * dir.z - fromCam.z * dir.y, fromCam.z * dir.x - fromCam.x * dir.z,
+                                     fromCam.x * dir.y - fromCam.y * dir.x};
+                           float cl = std::sqrt(c.x * c.x + c.y * c.y + c.z * c.z);
+                           if (cl < 1e-5f) { c = {dir.z, 0.0f, -dir.x}; cl = std::sqrt(c.x * c.x + c.z * c.z); }
+                           if (cl < 1e-5f) { c = {1, 0, 0}; cl = 1.0f; }
+                           c = {c.x / cl * halfWidth, c.y / cl * halfWidth, c.z / cl * halfWidth};
+                           const Point3F a{materialPos.x - dir.x * length * 0.5f, materialPos.y - dir.y * length * 0.5f,
+                                           materialPos.z - dir.z * length * 0.5f};
+                           const Point3F b{materialPos.x + dir.x * length * 0.5f, materialPos.y + dir.y * length * 0.5f,
+                                           materialPos.z + dir.z * length * 0.5f};
+                           const uint32_t mainTexture = texture(0);
+                           if (mainTexture != UINT32_MAX)
+                               r.drawTexturedQuad({a.x + c.x, a.y + c.y, a.z + c.z}, {b.x + c.x, b.y + c.y, b.z + c.z},
+                                                  {b.x - c.x, b.y - c.y, b.z - c.z}, {a.x - c.x, a.y - c.y, a.z - c.z},
+                                                  mainTexture, {1, 1, 1, 1}, 0, 0, 1, 1, true);
+                           const float fl = std::sqrt(fromCam.x * fromCam.x + fromCam.y * fromCam.y + fromCam.z * fromCam.z);
+                           const float along = fl > 1e-5f
+                               ? (dir.x * fromCam.x + dir.y * fromCam.y + dir.z * fromCam.z) / fl : 0.0f;
+                           const uint32_t crossTexture = texture(1);
+                           if (data.projectileRenderCross && crossTexture != UINT32_MAX &&
+                               !(along > -data.projectileCrossViewAngle && along < data.projectileCrossViewAngle)) {
+                               // A square of crossSize facing along the flight.
+                               Point3F u = std::fabs(dir.y) < 0.9f ? Point3F{dir.z, 0.0f, -dir.x} : Point3F{1, 0, 0};
+                               const float ul = std::sqrt(u.x * u.x + u.y * u.y + u.z * u.z);
+                               u = {u.x / ul, u.y / ul, u.z / ul};
+                               const Point3F v{dir.y * u.z - dir.z * u.y, dir.z * u.x - dir.x * u.z, dir.x * u.y - dir.y * u.x};
+                               const float h = data.projectileCrossSize * 0.5f;
+                               const Point3F m = materialPos;
+                               r.drawTexturedQuad({m.x + (-u.x - v.x) * h, m.y + (-u.y - v.y) * h, m.z + (-u.z - v.z) * h},
+                                                  {m.x + (u.x - v.x) * h, m.y + (u.y - v.y) * h, m.z + (u.z - v.z) * h},
+                                                  {m.x + (u.x + v.x) * h, m.y + (u.y + v.y) * h, m.z + (u.z + v.z) * h},
+                                                  {m.x + (-u.x + v.x) * h, m.y + (-u.y + v.y) * h, m.z + (-u.z + v.z) * h},
+                                                  crossTexture, {1, 1, 1, 1}, 0, 0, 1, 1, true);
+                           }
+                       }
+                   }
+                   const auto layers = crossStyle ? std::vector<ProjectileVisualLayer>{}
+                                                  : projectileVisualLayers(data, mg->projectileVisualAge);
                    for (const auto& layer : layers) {
                        if (layer.alpha <= 0.0f) continue;
                        ColorF layerColor = color;
