@@ -2343,6 +2343,7 @@ static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEnt
             Vec3 normal = bs.readPoint3F();
             DemoParser::s_pendingExplosions.push_back({expPos, normal, 0.0f,
                 entry ? entry->datablockId : -1});
+            if (entry) entry->exploded = true;
         }
         if (bs.readFlag()) { bs.readRangedU32(0, 1024); bs.readRangedU32(0, 7); } // source
         if (bs.readFlag()) bs.readRangedU32(0, 1024); // vehicleObject
@@ -2357,6 +2358,7 @@ static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEnt
             Vec3 normal = bs.readPoint3F();
             DemoParser::s_pendingExplosions.push_back({expPos, normal, 0.0f,
                 entry ? entry->datablockId : -1});
+            if (entry) entry->exploded = true;
         }
     }
 }
@@ -2456,6 +2458,7 @@ static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& 
             bool hitWater = bs.readFlag();
             DemoParser::s_pendingExplosions.push_back({expPos, normal, 0.0f,
                 entry ? entry->datablockId : -1});
+            if (entry) entry->exploded = true;
         } else { // live projectile
             if (entry) entry->position = bs.readCompressedPoint(cp);
             else bs.readCompressedPoint(cp);
@@ -2486,6 +2489,7 @@ static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& 
         bs.readFlag();
         DemoParser::s_pendingExplosions.push_back({expPos, normal, 0.0f,
             entry ? entry->datablockId : -1});
+        if (entry) entry->exploded = true;
     }
 }
 

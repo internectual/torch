@@ -642,6 +642,8 @@ struct GhostEntry {
     int flagTeamId = 0;
     // GameBase TargetMask: this object's TargetManager slot, or -1.
     int targetId = -1;
+    // Projectile has exploded; it stays hidden until the ghost is deleted.
+    bool exploded = false;
     std::string shapeName; // from datablock
     int linkSourceGhost = -1;
     int linkTargetGhost = -1;

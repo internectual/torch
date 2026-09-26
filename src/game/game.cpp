@@ -7692,6 +7692,9 @@ void Game::render(float dt) {
 
               const bool isProjectile = isProjectileGhostClass(g->className) ||
                   ghostClassIs(g->className, "TracerProjectile");
+              // LinearProjectile::processTick hides a spent projectile until
+              // its ghost is deleted.
+              if (isProjectile && g->exploded) continue;
              const V12::DecodedDataBlock* visualData = nullptr;
               bool hasBaseEmitter = false;
              if (isProjectile && g->hasDatablock) {
