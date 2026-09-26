@@ -8074,6 +8074,7 @@ void Game::render(float dt) {
                 mg->renderPos = p;
                 mg->renderRotation = g->rotation;
                 mg->prevPosition = p;
+                mg->spawnTime = demoTime;
             } else {
                 float lerpFactor = 1.0f - expf(-12.0f * demoInterpolationDt);
                 mg->renderPos.x += (p.x - mg->renderPos.x) * lerpFactor;
@@ -8238,8 +8239,64 @@ void Game::render(float dt) {
                   continue;
               }
 
+                // SniperProjectile::renderObject: a camera-facing ribbon from
+                // muzzle to impact for fadeTime seconds, alpha 1 - t. The core
+                // (last texture) widens startWidth -> endWidth; the beamColor
+                // overlay is 25% wider, its texture steps through the rip
+                // sequence and its U scrolls the pulse toward the target.
+                // Beams are drawn without fog.
+                if (ghostClassIs(g->className, "SniperProjectile")) {
+                    const auto& dataBlocks = demoParser->getInitialBlock().dataBlocks;
+                    auto dataIt = g->hasDatablock ? dataBlocks.find((uint32_t)g->datablockId)
+                                                  : dataBlocks.end();
+                    const auto* beam = dataIt != dataBlocks.end() &&
+                        dataIt->second.decoded.sniperBeam.valid &&
+                        dataIt->second.decoded.sniperBeam.textures.size() >= 12
+                        ? &dataIt->second.decoded.sniperBeam : nullptr;
+                    if (!beam || !g->hasBeam) continue;
+                    const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                    const float elapsed = now - mg->spawnTime;
+                    const float t = elapsed / std::max(0.001f, beam->fadeTime);
+                    if (t < 0.0f || t >= 1.0f) continue;
+                    const Point3F a = Math::torquePointToYUp({g->beamStart.x, g->beamStart.y, g->beamStart.z});
+                    const Point3F b = Math::torquePointToYUp({g->beamEnd.x, g->beamEnd.y, g->beamEnd.z});
+                    Point3F dir{b.x - a.x, b.y - a.y, b.z - a.z};
+                    const float length = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+                    if (length < 1e-3f) continue;
+                    dir = {dir.x / length, dir.y / length, dir.z / length};
+                    const Point3F fromCam{a.x - r.cameraPos.x, a.y - r.cameraPos.y, a.z - r.cameraPos.z};
+                    Point3F cross{fromCam.y * dir.z - fromCam.z * dir.y,
+                                  fromCam.z * dir.x - fromCam.x * dir.z,
+                                  fromCam.x * dir.y - fromCam.y * dir.x};
+                    float crossLength = std::sqrt(cross.x * cross.x + cross.y * cross.y + cross.z * cross.z);
+                    if (crossLength < 1e-4f) { cross = {dir.z, 0.0f, -dir.x}; crossLength = std::sqrt(cross.x * cross.x + cross.z * cross.z); }
+                    if (crossLength < 1e-4f) { cross = {1, 0, 0}; crossLength = 1.0f; }
+                    cross = {cross.x / crossLength, cross.y / crossLength, cross.z / crossLength};
+                    auto texture = [&](size_t index) -> uint32_t {
+                        std::vector<uint32_t> frames;
+                        std::vector<float> durations;
+                        r.loadTextureFrames(beam->textures[index].c_str(), frames, durations);
+                        return frames.empty() ? 0u : frames.front();
+                    };
+                    auto quad = [&](float width, uint32_t tex, const ColorF& tint, float u0, float u1) {
+                        const Point3F h{cross.x * width * 0.5f, cross.y * width * 0.5f, cross.z * width * 0.5f};
+                        r.drawTexturedQuad({a.x + h.x, a.y + h.y, a.z + h.z}, {b.x + h.x, b.y + h.y, b.z + h.z},
+                                           {b.x - h.x, b.y - h.y, b.z - h.z}, {a.x - h.x, a.y - h.y, a.z - h.z},
+                                           tex, tint, u0, 0.0f, u1, 1.0f, false);
+                    };
+                    const float width = beam->startWidth + (beam->endWidth - beam->startWidth) * t;
+                    const float alpha = 1.0f - t;
+                    if (const uint32_t core = texture(11))
+                        quad(width, core, {1, 1, 1, alpha}, 0.0f, 1.0f);
+                    const size_t rip = 1 + (size_t)std::clamp((int)std::lround(t * 10.0f + 1.0f) - 1, 0, 10);
+                    const float u0 = -beam->pulseSpeed * elapsed * 0.5f;
+                    if (const uint32_t pulse = texture(rip))
+                        quad(width * 1.25f, pulse, {beam->color[0], beam->color[1], beam->color[2], alpha},
+                             u0, u0 + length * beam->pulseLength);
+                    continue;
+                }
+
                 const bool stockBeam = ghostClassIs(g->className, "ShockLanceProjectile") ||
-                    ghostClassIs(g->className, "SniperProjectile") ||
                     ghostClassIs(g->className, "TracerProjectile") ||
                     ghostClassIs(g->className, "LinearFlareProjectile");
                if (stockBeam && g->hasBeam) {

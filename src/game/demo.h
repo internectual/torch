@@ -719,6 +719,7 @@ struct GhostEntry {
     float jetFlarePosition = 0.0f;
     // Vehicle jets: the networked jetting flag and thrust direction, and the
     // client's back/bottom Activate/Maintain thread state.
+    float spawnTime = -1.0f; // demo time this ghost first rendered
     bool vehicleJetting = false;
     int thrustDirection = VehicleJets::ThrustForward;
     VehicleJets::Direction jetBack, jetBottom;

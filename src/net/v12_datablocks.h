@@ -146,6 +146,14 @@ struct DecodedDataBlock {
     uint32_t playerJetEmitterRef = 0; // ParticleEmitterData at jetNozzle0/1
     std::vector<uint32_t> playerSounds; // PlayerData::Sounds AudioProfile refs
     float shapeMass = 1.0f;             // ShapeBaseData::mass
+    // SniperProjectileData beam (SniperProjectile::renderObject).
+    struct SniperBeam {
+        bool valid = false;
+        float color[4] = {1, 1, 1, 1};
+        float fadeTime = 0, startWidth = 0, endWidth = 0;
+        float pulseSpeed = 0, pulseLength = 0;
+        std::vector<std::string> textures; // [0] unused by the beam, [1..11]
+    } sniperBeam;
     // FlyingVehicleData / HoverVehicleData jets (forward, backward, down;
     // flying adds the trail emitter fourth).
     bool isFlyingVehicleData = false, isHoverVehicleData = false;

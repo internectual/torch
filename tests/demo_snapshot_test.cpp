@@ -167,6 +167,14 @@ int main(int argc, char** argv) {
     }
     if (std::getenv("TORCH_TEST_VERBOSE"))
         std::cerr << "flying vehicle datablocks: " << flyingVehicles << "\n";
+    // SniperProjectileData: twelve beam textures and a positive fade.
+    for (const auto& [id, block] : dataBlocks) {
+        const auto& beam = block.decoded.sniperBeam;
+        if (!beam.valid) continue;
+        CHECK(beam.textures.size() == 12);
+        CHECK(beam.fadeTime > 0.0f && beam.startWidth > 0.0f);
+        CHECK(!beam.textures[11].empty());
+    }
     // PlayerData::Sounds: jetSound (index 0) is an AudioProfile.
     for (const auto& [id, block] : dataBlocks) {
         if (!block.decoded.isPlayerData) continue;

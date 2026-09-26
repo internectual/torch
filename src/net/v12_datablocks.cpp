@@ -647,7 +647,28 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
     case 28: s.readF32(); break; case 29: emitter(s); break;
      case 30: player(s); break; case 31: refs(s,1);s.readUnsigned(32);s.readF32();strings(s,1);f32s(s,13);break; case 32: projectile(s);break; case 33: projectile(s);f32s(s,8);strings(s,2);break;
      case 34: s.readF32();colors(s,1);f32s(s,2);strings(s,1);f32s(s,6);if(s.readFlag())strings(s,1);break; case 35: projectile(s);f32s(s,10);s.readUnsigned(8);f32s(s,2);s.readUnsigned(32);s.readUnsigned(32);strings(s,2);refs(s,3);break; case 36: break; case 37: shapeBase(s);break; case 38: shapeImage(s);break;
-      case 39: projectile(s);f32s(s,7);refs(s,1);f32s(s,8);strings(s,4);refs(s,1);break; case 40: shockwave(s); break; case 41: break; case 42: projectile(s);f32s(s,11);colors(s,2);f32s(s,1);strings(s,12);break; case 43: splash(s); break;
+      case 39: projectile(s);f32s(s,7);refs(s,1);f32s(s,8);strings(s,4);refs(s,1);break; case 40: shockwave(s); break; case 41: break; case 42: { // SniperProjectileData
+        projectile(s);
+        f32s(s, 2); // maxRifleRange, rifleHeadMultiplier
+        const uint32_t color[4] = {s.readUnsigned(8), s.readUnsigned(8), s.readUnsigned(8), s.readUnsigned(8)};
+        const float fadeTime = s.readF32(), startWidth = s.readF32(), endWidth = s.readF32();
+        f32s(s, 4); // pulseBeamWidth, beamFlareAngle, min/maxFlareSize
+        const float pulseSpeed = s.readF32(), pulseLength = s.readF32();
+        colors(s, 1); f32s(s, 1); // lightColor, lightRadius
+        std::vector<std::string> textures = materialStrings(s, 12);
+        if (activeDecoded) {
+            auto& beam = activeDecoded->sniperBeam;
+            beam.valid = true;
+            for (int i = 0; i < 4; ++i) beam.color[i] = color[i] / 255.0f;
+            beam.fadeTime = fadeTime;
+            beam.startWidth = startWidth;
+            beam.endWidth = endWidth;
+            beam.pulseSpeed = pulseSpeed;
+            beam.pulseLength = pulseLength;
+            beam.textures = std::move(textures);
+        }
+        break;
+    } case 43: splash(s); break;
        case 44: shapeBase(s);s.readFlag();s.readUnsigned(32);break; case 45: f32s(s,10);strings(s,4);break; case 46: f32s(s,11);colors(s,1);f32s(s,6);strings(s,11);break; case 47: {
                // TSShapeConstructor: base shape plus "file.dsq alias" entries.
                std::string shape = s.readString();
