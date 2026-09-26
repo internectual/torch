@@ -342,7 +342,10 @@ void shapeBase(Stream& s) {
     if (s.readFlag()) s.readUnsigned(32);
     const std::string shape = s.readHuffmanString();
     if (activeDecoded) activeDecoded->shapeFile = shape;
-    for (int i = 0; i < 9; ++i) if (s.readFlag()) s.readF32();
+    // mass (default 1), drag, density, maxEnergy, camera distances, ...
+    const float mass = s.readFlag() ? s.readF32() : 1.0f;
+    if (activeDecoded) activeDecoded->shapeMass = mass;
+    for (int i = 0; i < 8; ++i) if (s.readFlag()) s.readF32();
     const std::string debrisShape = s.readHuffmanString();
     if (activeDecoded) activeDecoded->debrisShape = debrisShape;
     if (s.readFlag()) { s.readUnsigned(10); u32s(s, 1); }
@@ -594,8 +597,38 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
          }
          break;
      }
-    case 16: vehicle(s); refs(s,6); f32s(s,16); break; case 17: f32s(s,3); s.readFlag();s.readFlag();colors(s,2);s.readUnsigned(32);s.readUnsigned(32);f32s(s,3);strings(s,5);break;
-    case 18: break; case 19: grenade(s); break; case 20: vehicle(s); f32s(s,17);f32s(s,3);f32s(s,2);refs(s,7);f32s(s,3);break;
+    case 16: { // FlyingVehicleData
+        vehicle(s);
+        const uint32_t jetSound = optionalRef(s);
+        refs(s, 1); // jetDeactivateSound
+        std::vector<uint32_t> jetEmitters(4); // forward, backward, down, trail
+        for (auto& ref : jetEmitters) ref = optionalRef(s);
+        const float maneuveringForce = s.readF32();
+        f32s(s, 12);
+        const float minTrailSpeed = s.readF32();
+        f32s(s, 2);
+        if (activeDecoded) {
+            activeDecoded->isFlyingVehicleData = true;
+            activeDecoded->vehicleJetSound = jetSound;
+            activeDecoded->vehicleJetEmitters = std::move(jetEmitters);
+            activeDecoded->vehicleManeuveringForce = maneuveringForce;
+            activeDecoded->vehicleMinTrailSpeed = minTrailSpeed;
+        }
+        break;
+    } case 17: f32s(s,3); s.readFlag();s.readFlag();colors(s,2);s.readUnsigned(32);s.readUnsigned(32);f32s(s,3);strings(s,5);break;
+    case 18: break; case 19: grenade(s); break; case 20: { // HoverVehicleData
+        vehicle(s); f32s(s,17); f32s(s,3); f32s(s,2);
+        refs(s, 3); // floatSound, thrustSound, turboSound
+        std::vector<uint32_t> jetEmitters(3);
+        for (auto& ref : jetEmitters) ref = optionalRef(s);
+        refs(s, 1); // dustTrailEmitter
+        f32s(s, 3);
+        if (activeDecoded) {
+            activeDecoded->isHoverVehicleData = true;
+            activeDecoded->vehicleJetEmitters = std::move(jetEmitters);
+        }
+        break;
+    }
     case 21: shapeBase(s); s.readFloat(10);s.readFloat(10);s.readFlag();if(s.readFlag())s.readFloat(10);if(s.readFlag())s.readF32();if(s.readFlag()){s.readUnsigned(2);for(int j=0;j<4;++j)s.readFloat(7);s.readSigned(32);s.readF32();s.readFlag();}break;
      case 22: effect(s,22); break; case 23: refs(s,8);strings(s,8);refs(s,1);break; case 24: {
          linear(s); const uint32_t count = s.readUnsigned(32); const auto color = s.readUnsigned(32);

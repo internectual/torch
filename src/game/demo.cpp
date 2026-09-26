@@ -2104,7 +2104,8 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
 // ─── Vehicle ghost parsers ─────────────────────────────────────
 static void readVehicleData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
     readShapeBaseData(bs, isInitial, entry);
-    bs.readFlag(); // jetting
+    const bool jetting = bs.readFlag();
+    if (entry) entry->vehicleJetting = jetting;
     if (bs.readFlag()) { // control shortcut
         return;
     }
@@ -2145,12 +2146,14 @@ static void readFlyingVehicleData(BitStream& bs, bool isInitial, const Vec3& cp,
     readVehicleData(bs, isInitial, cp, entry);
     if (bs.readFlag()) return; // FlyingVehicle control shortcut
     bs.readFlag(); // createHeightOn
-    bs.readInt(3); // thrustDirection
+    const int thrust = bs.readInt(3);
+    if (entry) entry->thrustDirection = thrust;
 }
 
 static void readHoverVehicleData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
     readVehicleData(bs, isInitial, cp, entry);
-    bs.readInt(3); // thrustDirection
+    const int thrust = bs.readInt(3);
+    if (entry) entry->thrustDirection = thrust;
 }
 
 static void readWheeledVehicleData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {

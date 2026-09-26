@@ -147,6 +147,26 @@ int main(int argc, char** argv) {
         }
     }
     CHECK(audioProfiles > 0);
+    // Vehicle jets: flying vehicles carry forward/backward/down/trail
+    // emitters, hover vehicles three; emitters are ParticleEmitterData.
+    int flyingVehicles = 0;
+    for (const auto& [id, block] : dataBlocks) {
+        const auto& d = block.decoded;
+        if (!d.isFlyingVehicleData && !d.isHoverVehicleData) continue;
+        CHECK(d.vehicleJetEmitters.size() == (d.isFlyingVehicleData ? 4u : 3u));
+        CHECK(d.shapeMass > 0.0f && std::isfinite(d.shapeMass));
+        for (uint32_t ref : d.vehicleJetEmitters) {
+            if (!ref) continue;
+            auto emitter = dataBlocks.find(ref);
+            CHECK(emitter != dataBlocks.end() && emitter->second.decoded.hasEmitter);
+        }
+        if (d.isFlyingVehicleData) {
+            ++flyingVehicles;
+            CHECK(std::isfinite(d.vehicleMinTrailSpeed) && d.vehicleMinTrailSpeed >= 0.0f);
+        }
+    }
+    if (std::getenv("TORCH_TEST_VERBOSE"))
+        std::cerr << "flying vehicle datablocks: " << flyingVehicles << "\n";
     // PlayerData::Sounds: jetSound (index 0) is an AudioProfile.
     for (const auto& [id, block] : dataBlocks) {
         if (!block.decoded.isPlayerData) continue;

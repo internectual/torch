@@ -1,6 +1,7 @@
 #pragma once
 #include "game/shape_lighting.h"
 #include "game/weapon_image_state.h"
+#include "game/vehicle_jets.h"
 #include <cstdint>
 #include <cstring>
 #include <cmath>
@@ -716,6 +717,11 @@ struct GhostEntry {
     ShapeLighting::State shapeLight;
     // Jet flare thread position in [0, 1] (Player::processTick).
     float jetFlarePosition = 0.0f;
+    // Vehicle jets: the networked jetting flag and thrust direction, and the
+    // client's back/bottom Activate/Maintain thread state.
+    bool vehicleJetting = false;
+    int thrustDirection = VehicleJets::ThrustForward;
+    VehicleJets::Direction jetBack, jetBottom;
 };
 
 class GhostTracker {

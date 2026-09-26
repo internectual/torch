@@ -435,7 +435,8 @@ public:
     // Keep a ParticleEmitterData emitting at a moving node this frame.
     void syncNodeEmitter(int64_t key, uint32_t emitterRef, const Point3F& pos,
                          const Point3F& velocity, const Point3F& axis,
-                         const std::map<uint32_t, ParsedDataBlock>& dataBlocks);
+                         const std::map<uint32_t, ParsedDataBlock>& dataBlocks,
+                         float emitScale = 1.0f);
     void removeProjectileTrail(int ownerId);
 
 private:
@@ -525,6 +526,7 @@ private:
         bool nodeEmitter = false;
         int64_t nodeKey = -1;
         bool stopped = false;
+        float emitScale = 1.0f; // node emitters: share of the frame they emit over
         std::vector<uint32_t> textures;
         std::vector<float> textureDurations;
     };

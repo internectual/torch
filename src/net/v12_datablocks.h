@@ -145,6 +145,14 @@ struct DecodedDataBlock {
     float playerBoxSize[3] = {0.0f, 0.0f, 0.0f}; // Torque x, y, z
     uint32_t playerJetEmitterRef = 0; // ParticleEmitterData at jetNozzle0/1
     std::vector<uint32_t> playerSounds; // PlayerData::Sounds AudioProfile refs
+    float shapeMass = 1.0f;             // ShapeBaseData::mass
+    // FlyingVehicleData / HoverVehicleData jets (forward, backward, down;
+    // flying adds the trail emitter fourth).
+    bool isFlyingVehicleData = false, isHoverVehicleData = false;
+    std::vector<uint32_t> vehicleJetEmitters;
+    uint32_t vehicleJetSound = 0;
+    float vehicleManeuveringForce = 0.0f;
+    float vehicleMinTrailSpeed = 0.0f;
     int32_t emitterDelayMS = -1;
     float bubbleEmitTime = 0.5f;
     bool faceViewer{};

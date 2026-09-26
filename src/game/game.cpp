@@ -5155,7 +5155,8 @@ void World::endProjectileTrailSync() {
 
 void World::syncNodeEmitter(int64_t key, uint32_t emitterRef, const Point3F& pos,
                             const Point3F& velocity, const Point3F& axis,
-                            const std::map<uint32_t, ParsedDataBlock>& dataBlocks) {
+                            const std::map<uint32_t, ParsedDataBlock>& dataBlocks,
+                            float emitScale) {
     auto it = std::find_if(effectEmitters.begin(), effectEmitters.end(),
         [key](const EffectEmitter& e) { return e.nodeEmitter && !e.stopped && e.nodeKey == key; });
     if (it == effectEmitters.end()) {
@@ -5184,6 +5185,7 @@ void World::syncNodeEmitter(int64_t key, uint32_t emitterRef, const Point3F& pos
     }
     it->pos = pos;
     it->ownerVelocity = velocity;
+    it->emitScale = emitScale;
     const float length = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
     it->axis = length > 1e-4f ? Point3F{axis.x / length, axis.y / length, axis.z / length}
                               : Point3F{0, 1, 0};
@@ -5288,7 +5290,8 @@ void World::updateParticles(float dt) {
     auto random01 = []() { return (float)std::rand() / (float)RAND_MAX; };
     for (auto& emitter : effectEmitters) {
         const float previousAge = emitter.age;
-        emitter.age += dt;
+        // emitParticles(..., dt * scale): a contrail emits over part of the frame.
+        emitter.age += emitter.nodeEmitter ? dt * emitter.emitScale : dt;
         if (emitter.age < 0.0f) continue;
         auto emitOne = [&](float ageOffset) {
             EffectParticle p;
@@ -8508,13 +8511,49 @@ void Game::render(float dt) {
                                                mg->jetFlarePosition * flare->duration};
                     }
                 }
+                // FlyingVehicle/HoverVehicle::updateJet: the back jets' and the
+                // bottom jets' Activate/Maintain threads.
+                const bool isJetVehicle = ghostClassIs(g->className, "FlyingVehicle") ||
+                                          ghostClassIs(g->className, "HoverVehicle");
+                if (isJetVehicle) {
+                    const float jetDt = demoMatchEnded ? 0.0f : demoInterpolationDt;
+                    auto driveDirection = [&](VehicleJets::Direction& d, bool active,
+                                              const char* activateName, const char* maintainName) {
+                        const DTSShape::Animation* activate = findAnimation(*shape, activateName);
+                        const DTSShape::Animation* maintain = findAnimation(*shape, maintainName);
+                        if (!activate && !maintain) return;
+                        VehicleJets::step(d, active, jetDt, activate ? activate->duration : 0.0f,
+                                          maintain != nullptr, animationNow);
+                        if (activate && numBlends < 4)
+                            blends[numBlends++] = {(int)(activate - shape->animations.data()),
+                                                   d.activatePosition * activate->duration};
+                        if (d.maintaining && maintain && numBlends < 4)
+                            blends[numBlends++] = {(int)(maintain - shape->animations.data()),
+                                                   std::max(0.0f, animationNow - d.maintainStart)};
+                    };
+                    driveDirection(mg->jetBack, VehicleJets::backActive(g->thrustDirection),
+                                   "activateback", "maintainback");
+                    driveDirection(mg->jetBottom,
+                                   VehicleJets::bottomActive(g->thrustDirection, g->vehicleJetting),
+                                   "activatebot", "maintainbot");
+                }
+                // A shape with no running sequence of its own renders its
+                // first layered thread as the primary.
+                int primaryBlend = 0;
+                if (!animation && numBlends > 0) {
+                    animation = &shape->animations[blends[0].animationIndex];
+                    animationPosition = animation->duration > 0.0f
+                        ? blends[0].time / animation->duration : 0.0f;
+                    primaryBlend = 1;
+                }
                 w->applyShapeLighting(*shape, mg->shapeLight, model * shape->upOrientation(),
                                       dt * 1000.0f);
                 if (animation) {
                     shape->renderAnimationIndex((int)(animation - shape->animations.data()),
                                                 animationPosition * animation->duration,
                                                 numOverrides > 0 ? overrides : nullptr,
-                                                numOverrides, blends, numBlends);
+                                                numOverrides, blends + primaryBlend,
+                                                numBlends - primaryBlend);
                 } else {
                     shape->render(0, numOverrides > 0 ? overrides : nullptr, numOverrides);
                 }
@@ -8565,11 +8604,77 @@ void Game::render(float dt) {
                                 const MatrixF nodeWorld = world * shape->animatedNodeWorld[node];
                                 const Point3F pos{nodeWorld.m[0][3], nodeWorld.m[1][3], nodeWorld.m[2][3]};
                                 const Point3F axis{nodeWorld.m[0][2], nodeWorld.m[1][2], nodeWorld.m[2][2]};
-                                w->syncNodeEmitter((int64_t)idx * 4 + nozzle, emitterRef, pos, velocity,
+                                w->syncNodeEmitter(((int64_t)idx << 8) | nozzle, emitterRef, pos, velocity,
                                                    axis, blocks);
                             }
                             ++nozzle;
                         }
+                    }
+                }
+
+                // Vehicle jets: each thrust direction's nozzle emitters run
+                // while jetting; flying vehicles' contrails run above
+                // minTrailSpeed with a speed-ramped share of the frame; the
+                // flying jet sound loops while jetting.
+                if (isJetVehicle && g->hasDatablock && !demoMatchEnded &&
+                    shape->animatedNodeWorld.size() == shape->nodes.size()) {
+                    const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+                    auto block = blocks.find((uint32_t)g->datablockId);
+                    const V12::DecodedDataBlock* data =
+                        block != blocks.end() ? &block->second.decoded : nullptr;
+                    if (data && !data->vehicleJetEmitters.empty()) {
+                        const MatrixF world = model * shape->upOrientation();
+                        const float mass = data->shapeMass > 0.0f ? data->shapeMass : 1.0f;
+                        const Vec3 torqueVelocity = g->hasLinearMomentum
+                            ? Vec3{g->linearMomentum.x / mass, g->linearMomentum.y / mass,
+                                   g->linearMomentum.z / mass}
+                            : Vec3{0, 0, 0};
+                        const Point3F velocity = Math::torquePointToYUp(
+                            {torqueVelocity.x, torqueVelocity.y, torqueVelocity.z});
+                        auto syncAt = [&](const char* nodeName, uint32_t emitterRef, int code,
+                                          float emitScale) {
+                            const int node = shape->findNode(nodeName);
+                            if (node < 0 || !emitterRef) return;
+                            const MatrixF nodeWorld = world * shape->animatedNodeWorld[node];
+                            w->syncNodeEmitter(((int64_t)idx << 8) | code, emitterRef,
+                                {nodeWorld.m[0][3], nodeWorld.m[1][3], nodeWorld.m[2][3]}, velocity,
+                                {nodeWorld.m[0][2], nodeWorld.m[1][2], nodeWorld.m[2][2]}, blocks,
+                                emitScale);
+                        };
+                        for (int direction = 0; direction < 3; ++direction) {
+                            if (!g->vehicleJetting || g->thrustDirection != direction ||
+                                direction >= (int)data->vehicleJetEmitters.size()) continue;
+                            for (int k = 0; k < 2; ++k)
+                                syncAt(VehicleJets::NozzleNodes[direction][k],
+                                       data->vehicleJetEmitters[direction], 2 + direction * 2 + k, 1.0f);
+                        }
+                        if (data->isFlyingVehicleData && data->vehicleJetEmitters.size() > 3) {
+                            const QuatF q(g->rotation.x, g->rotation.y, g->rotation.z, g->rotation.w);
+                            const Point3F forward = q.toMatrix().transformNormal({0, 1, 0});
+                            const float speed = std::fabs(torqueVelocity.x * forward.x +
+                                torqueVelocity.y * forward.y + torqueVelocity.z * forward.z);
+                            const float scale = VehicleJets::contrailScale(speed,
+                                data->vehicleMinTrailSpeed, data->vehicleManeuveringForce / mass);
+                            if (scale > 0.0f)
+                                for (int k = 0; k < 4; ++k)
+                                    syncAt(VehicleJets::ContrailNodes[k], data->vehicleJetEmitters[3],
+                                           8 + k, scale);
+                        }
+                    }
+                    auto& audio = Engine::instance().audio();
+                    const bool soundOn = g->vehicleJetting && data && data->vehicleJetSound &&
+                                         audio.isInitialized() && g->damageState < 2;
+                    const Point3F soundPos = Math::torquePointToYUp({rp.x, rp.y, rp.z});
+                    auto sound = demoJetSoundSources.find(idx);
+                    if (soundOn && sound == demoJetSoundSources.end()) {
+                        if (SoundSource* source = playNativeAudioProfile(audio, blocks,
+                                data->vehicleJetSound, soundPos, true, true))
+                            demoJetSoundSources.emplace(idx, source);
+                    } else if (!soundOn && sound != demoJetSoundSources.end()) {
+                        audio.releaseSource(sound->second);
+                        demoJetSoundSources.erase(sound);
+                    } else if (sound != demoJetSoundSources.end()) {
+                        sound->second->setPosition(soundPos);
                     }
                 }
 
