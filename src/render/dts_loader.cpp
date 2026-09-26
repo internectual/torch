@@ -152,6 +152,272 @@ bool updateSkinnedMesh(MeshData& mesh, SkinInfo& skin,
 
 // v15-v18 old format: read directly from sequential stream (no 3-buffer header).
 // DebugGuard() values are synthetic — written to output buffer, NOT present in input.
+// Little-endian cursor over the plain (non-buffered) part of a DTS file or a
+// whole DSQ file. It shares the caller's cursor so mixed reads stay in sync.
+struct DTSPlainReader {
+    const uint8_t*& p;
+    size_t& rem;
+    DTSPlainReader(const uint8_t*& ptr, size_t& remaining) : p(ptr), rem(remaining) {}
+    bool take(void* out, size_t n) {
+        if (rem < n) { rem = 0; memset(out, 0, n); return false; }
+        memcpy(out, p, n); p += n; rem -= n; return true;
+    }
+    int32_t s32() { int32_t v; take(&v, 4); return v; }
+    float f32() { float v; take(&v, 4); return v; }
+    int16_t s16() { int16_t v; take(&v, 2); return v; }
+    uint8_t u8() { uint8_t v; take(&v, 1); return v; }
+    // Same basis as DTSBuf: swap y/z into Torch model space.
+    Point3F point3F() { float x = f32(), y = f32(), z = f32(); return {x, z, y}; }
+    QuatF quat16() {
+        int16_t x = s16(), y = s16(), z = s16(), w = s16();
+        return {(float)x/32767.f, (float)z/32767.f, (float)y/32767.f, (float)w/32767.f};
+    }
+    // Name written by TSShape::writeName: S32 length + characters.
+    std::string name() {
+        const int32_t len = s32();
+        if (len <= 0 || (size_t)len > rem) { if (len > 0) rem = 0; return {}; }
+        std::string value((const char*)p, (size_t)len);
+        p += len; rem -= len;
+        return value;
+    }
+    // TSIntegerSet: S32 numInts, S32 numWords, then numWords U32 words.
+    std::vector<int32_t> intSet() {
+        std::vector<int32_t> bits;
+        capCount(s32());
+        const int32_t nw = capCount(s32());
+        if (nw > 0 && nw < 256 && (size_t)(nw * 4) <= rem) {
+            for (int w = 0; w < nw; w++) {
+                int32_t word;
+                memcpy(&word, p, 4);
+                p += 4; rem -= 4;
+                for (int b = 0; b < 32; b++)
+                    if (word & (1 << b)) bits.push_back(w * 32 + b);
+            }
+        } else if (nw > 0 && nw < 1024) {
+            // Skip corrupted data
+            p += nw;
+            if (rem >= (size_t)nw) rem -= nw; else rem = 0;
+        }
+        return bits;
+    }
+    void skipIntSet() {
+        capCount(s32());
+        const int32_t nw = capCount(s32());
+        if (nw > 0 && nw < 256) {
+            const size_t bytes = (size_t)nw * 4;
+            if (bytes <= rem) { p += bytes; rem -= bytes; }
+        }
+    }
+};
+
+struct DTSSequenceHeader {
+    int32_t nameIndex = -1;
+    uint32_t flags = 0;
+    int32_t numKeyframes = 0;
+    float duration = 0.0f;
+    int32_t priority = 0;
+    int32_t baseRotation = 0, baseTranslation = 0, baseScale = 0, baseObjectState = 0;
+    int32_t firstTrigger = 0, numTriggers = 0;
+    int version = 0;
+    std::vector<int32_t> rotationMatters, translationMatters, scaleMatters;
+    std::vector<int32_t> visMatters, frameMatters, matFrameMatters;
+};
+
+// TSShape::Sequence::read. DSQ files store the name separately, so they pass
+// readNameIndex=false.
+static void readDTSSequenceHeader(DTSPlainReader& r, int ver, bool readNameIndex,
+                                  DTSSequenceHeader& seq) {
+    seq.version = ver;
+    if (readNameIndex) seq.nameIndex = capCount(r.s32());
+    if (ver > 21) seq.flags = (uint32_t)capCount(r.s32());
+    seq.numKeyframes = capCount(r.s32());
+    seq.duration = r.f32();
+    if (ver < 22) {
+        // blend, cyclic, makePath bools
+        const bool blend = r.u8() != 0, cyclic = r.u8() != 0;
+        r.u8();
+        if (blend) seq.flags |= 0x8;
+        if (cyclic) seq.flags |= 0x10;
+    }
+    seq.priority = r.s32();
+    capCount(r.s32()); // firstGroundFrame
+    capCount(r.s32()); // numGroundFrames
+    if (ver > 21) {
+        seq.baseRotation = capCount(r.s32());
+        seq.baseTranslation = capCount(r.s32());
+        seq.baseScale = capCount(r.s32());
+        seq.baseObjectState = capCount(r.s32());
+        capCount(r.s32()); // baseDecalState
+    } else if (ver >= 17) {
+        seq.baseRotation = capCount(r.s32());
+        seq.baseTranslation = seq.baseRotation; // baseTranslation = baseRotation for v<22
+        seq.baseObjectState = capCount(r.s32());
+        capCount(r.s32()); // baseDecalState
+    }
+    if (ver > 8) { seq.firstTrigger = capCount(r.s32()); seq.numTriggers = capCount(r.s32()); }
+    if (ver > 7) r.f32(); // toolBegin
+    seq.rotationMatters = r.intSet();
+    if (ver >= 22) {
+        seq.translationMatters = r.intSet();
+        seq.scaleMatters = r.intSet();
+    } else {
+        // v<22: translationMatters = rotationMatters; scale not animated.
+        seq.translationMatters = seq.rotationMatters;
+    }
+    if (ver > 10) r.skipIntSet(); // decalMatters
+    if (ver > 5) r.skipIntSet(); // iflMatters
+    seq.visMatters = r.intSet();
+    seq.frameMatters = r.intSet();
+    seq.matFrameMatters = r.intSet();
+    if (ver < 17) r.skipIntSet(); // nodeTransformStatic (obsolete)
+}
+
+struct DTSKeyPools {
+    const std::vector<QuatF>* rotations;
+    const std::vector<Point3F>* translations;
+    const std::vector<float>* uniformScales;
+    const std::vector<Point3F>* alignedScales;
+};
+
+// Expands a sequence's node keyframes. The r-th member of a matters set owns
+// keyframes base + r * numKeyframes; nodeFor maps the member (a node index in
+// the source shape) to this shape's node, or -1 to drop it.
+template <typename NodeFor>
+static void buildDTSNodeAnimation(DTSShape::Animation& anim, const DTSSequenceHeader& seq,
+                                  const DTSKeyPools& pools, NodeFor nodeFor) {
+    const int32_t numKFrames = seq.numKeyframes;
+    const float dur = seq.duration;
+    anim.duration = dur;
+    // TSShape::Sequence flags: Blend=0x08, Cyclic=0x10.
+    anim.looping = (seq.flags & 0x10) != 0;
+    anim.blend = (seq.flags & 0x8) != 0;
+    if (numKFrames <= 0 || dur <= 0.0f) return;
+
+    auto frameTime = [&](int k) {
+        return (numKFrames > 1) ? (float)k / (float)(numKFrames - 1) * dur : 0.0f;
+    };
+    auto keyframeFor = [&](int32_t nodeIdx, float t) -> DTSShape::Keyframe& {
+        for (auto& f : anim.keyframes)
+            if (f.nodeIndex == nodeIdx && std::abs(f.time - t) < 0.0001f) return f;
+        DTSShape::Keyframe kf;
+        kf.time = t;
+        kf.nodeIndex = nodeIdx;
+        kf.rotation = {0, 0, 0, 1};
+        kf.translation = {0, 0, 0};
+        kf.scale = {1, 1, 1};
+        // Unanimated components keep the node's bind pose.
+        kf.hasRotation = kf.hasTranslation = kf.hasScale = false;
+        anim.keyframes.push_back(kf);
+        return anim.keyframes.back();
+    };
+
+    for (size_t j = 0; j < seq.rotationMatters.size(); j++) {
+        const int32_t nodeIdx = nodeFor(seq.rotationMatters[j]);
+        if (nodeIdx < 0) continue;
+        for (int k = 0; k < numKFrames; k++) {
+            DTSShape::Keyframe& kf = keyframeFor(nodeIdx, frameTime(k));
+            kf.hasRotation = true;
+            const int32_t idx = seq.baseRotation + (int32_t)j * numKFrames + k;
+            if (idx >= 0 && idx < (int)pools.rotations->size())
+                kf.rotation = (*pools.rotations)[idx];
+        }
+    }
+    for (size_t j = 0; j < seq.translationMatters.size(); j++) {
+        const int32_t nodeIdx = nodeFor(seq.translationMatters[j]);
+        if (nodeIdx < 0) continue;
+        for (int k = 0; k < numKFrames; k++) {
+            DTSShape::Keyframe& kf = keyframeFor(nodeIdx, frameTime(k));
+            const int32_t idx = seq.baseTranslation + (int32_t)j * numKFrames + k;
+            if (idx >= 0 && idx < (int)pools.translations->size()) {
+                kf.hasTranslation = true;
+                kf.translation = (*pools.translations)[idx];
+            }
+        }
+    }
+    const bool uniformScale = (seq.flags & 0x1) != 0;
+    const bool alignedScale = (seq.flags & 0x2) != 0;
+    for (size_t j = 0; j < seq.scaleMatters.size(); j++) {
+        const int32_t nodeIdx = nodeFor(seq.scaleMatters[j]);
+        if (nodeIdx < 0) continue;
+        for (int k = 0; k < numKFrames; k++) {
+            DTSShape::Keyframe& kf = keyframeFor(nodeIdx, frameTime(k));
+            const int32_t idx = seq.baseScale + (int32_t)j * numKFrames + k;
+            if (uniformScale && idx >= 0 && idx < (int)pools.uniformScales->size()) {
+                const float value = (*pools.uniformScales)[idx];
+                kf.scale = {value, value, value};
+                kf.hasScale = true;
+            } else if (alignedScale && idx >= 0 && idx < (int)pools.alignedScales->size()) {
+                kf.scale = (*pools.alignedScales)[idx];
+                kf.hasScale = true;
+            }
+        }
+    }
+
+    // Sort keyframes by node then time for efficient lookup
+    std::sort(anim.keyframes.begin(), anim.keyframes.end(),
+        [](const DTSShape::Keyframe& a, const DTSShape::Keyframe& b) {
+            if (a.nodeIndex != b.nodeIndex) return a.nodeIndex < b.nodeIndex;
+            return a.time < b.time;
+        });
+}
+
+struct DTSObjectState { float vis; int32_t frameIndex; int32_t matFrameIndex; };
+
+// Expands a sequence's object vis/frame/material-frame keyframes.
+static void buildDTSObjectAnimation(DTSShape::Animation& anim, const DTSSequenceHeader& seq,
+                                    const std::vector<DTSObjectState>& objStates) {
+    const int32_t numKFrames = seq.numKeyframes;
+    const float dur = seq.duration;
+    const int32_t baseObjState = seq.baseObjectState;
+    const std::vector<int32_t>& visMatters = seq.visMatters;
+    const std::vector<int32_t>& frameMatters = seq.frameMatters;
+    const std::vector<int32_t>& matFrameMatters = seq.matFrameMatters;
+    // Generate object keyframes for vis/frame animation
+    if (numKFrames > 0 && dur > 0.0f && (!visMatters.empty() || !frameMatters.empty() || !matFrameMatters.empty())) {
+        // Torque packs object states using the union of all object-state
+        // memberships, rather than a separate index per membership set.
+        std::vector<int32_t> objectMatters;
+        auto addObjectMatters = [&](const std::vector<int32_t>& matters) {
+            for (int32_t object : matters) {
+                if (std::find(objectMatters.begin(), objectMatters.end(), object) == objectMatters.end())
+                    objectMatters.push_back(object);
+            }
+        };
+        addObjectMatters(visMatters);
+        addObjectMatters(frameMatters);
+        addObjectMatters(matFrameMatters);
+        std::sort(objectMatters.begin(), objectMatters.end());
+        auto objectStateNumber = [&](int32_t object) -> int32_t {
+            auto it = std::find(objectMatters.begin(), objectMatters.end(), object);
+            return it == objectMatters.end() ? -1 : (int32_t)(it - objectMatters.begin());
+        };
+        // Object state rows are indexed by the sorted union of every
+        // membership set. This also preserves material-only animations.
+        for (int j = 0; j < (int)objectMatters.size(); j++) {
+            int32_t objIdx = objectMatters[j];
+            int32_t stateObject = objectStateNumber(objIdx);
+            if (stateObject < 0) continue;
+            for (int k = 0; k < numKFrames; k++) {
+                int32_t stateIdx = baseObjState + stateObject * numKFrames + k;
+                if (stateIdx < 0 || stateIdx >= (int)objStates.size()) continue;
+                DTSShape::ObjectKeyframe okf;
+                okf.objectIndex = objIdx;
+                okf.time = (numKFrames > 1) ? (float)k / (float)(numKFrames - 1) * dur : 0.0f;
+                okf.vis = objStates[stateIdx].vis;
+                okf.frameIndex = objStates[stateIdx].frameIndex;
+                okf.matFrameIndex = objStates[stateIdx].matFrameIndex;
+                anim.objectKeyframes.push_back(okf);
+            }
+        }
+        // Sort object keyframes by object index then time
+        std::sort(anim.objectKeyframes.begin(), anim.objectKeyframes.end(),
+            [](const DTSShape::ObjectKeyframe& a, const DTSShape::ObjectKeyframe& b) {
+                if (a.objectIndex != b.objectIndex) return a.objectIndex < b.objectIndex;
+                return a.time < b.time;
+            });
+    }
+}
+
 static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* name) {
     DTSLoadResult result;
     if (!data || size < 4) return result;
@@ -239,7 +505,12 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
 
     // Object states (F32 vis, S32 frameIndex, S32 matFrameIndex per state)
     int32_t numObjStates = capCount(rS32());
-    for (int i = 0; i < numObjStates; i++) { rF32(); rS32(); rS32(); }
+    std::vector<DTSObjectState> objStates(numObjStates);
+    for (auto& state : objStates) {
+        state.vis = rF32();
+        state.frameIndex = capCount(rS32());
+        state.matFrameIndex = capCount(rS32());
+    }
 
     // Decal states
     int32_t numDecalStates = capCount(rS32());
@@ -257,38 +528,36 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         details[i].nameIdx = rS32(); details[i].sub = rS32(); details[i].objDetail = rS32(); details[i].sz = rF32();
     }
 
-    // Sequences — complex, version-dependent. Must consume correctly.
+    // Sequences. v17+ index the shared node-state pool (defaults first,
+    // then keyframes) in the old loader's native basis.
     int32_t numSeqs = capCount(rS32());
-    for (int s = 0; s < numSeqs; s++) {
-        // Sequence::read(s, readNameIndex=true by default)
-        rS32(); // nameIndex
-        if (ver > 21) rS32(); // flags
-        // keyframes: v<17 has startKeyframe+endKeyframe, v>=17 has numKeyframes
-        if (ver < 17) { rS32(); rS32(); } else { rS32(); } // keyframe count
-        rF32(); // duration
-        // bools: blend, cyclic, makePath — v<22 reads as bool (1 byte)
-        if (ver < 22) { rU8(); rU8(); rU8(); }
-        rS32(); // priority
-        rS32(); // firstGroundFrame
-        rS32(); // numGroundFrames
-        // base state indices: v>21 has 5, v17-v21 has 3
-        if (ver > 21) { rS32(); rS32(); rS32(); rS32(); rS32(); }
-        else if (ver >= 17) { rS32(); /*baseRotation*/ rS32(); /*baseObjectState*/ rS32(); /*baseDecalState*/ }
-        rS32(); // firstTrigger (v>8)
-        rS32(); // numTriggers (v>8)
-        rF32(); // toolBegin (v>7)
-        // TSIntegerSet reads: numInts(S32), sz(S32), sz*4 bytes
-         auto skipIntSet = [&]() { capCount(rS32()); int32_t sz = capCount(rS32()); skip((size_t)sz * 4); };
-        skipIntSet(); // rotationMatters
-        if (ver >= 22) skipIntSet(); // translationMatters (v22+)
-        if (ver >= 22) skipIntSet(); // scaleMatters (v22+)
-        if (ver < 17) skipIntSet(); // objectMembership (obsolete, v<17)
-        if (ver > 10) skipIntSet(); // decalMatters
-        if (ver > 5) skipIntSet(); // iflMatters
-        skipIntSet(); // visMatters
-        skipIntSet(); // frameMatters
-        skipIntSet(); // matFrameMatters
-        if (ver < 17) skipIntSet(); // nodeTransformStatic (obsolete, v<17)
+    std::vector<std::pair<int32_t, DTSShape::Animation>> oldAnimations;
+    {
+        const uint8_t* cursor = data + pos;
+        size_t remaining = size - pos;
+        DTSPlainReader reader(cursor, remaining);
+        const std::vector<float> noUniformScales;
+        const std::vector<Point3F> noAlignedScales;
+        const DTSKeyPools pools{&defRot, &defTrans, &noUniformScales, &noAlignedScales};
+        for (int s = 0; s < numSeqs; s++) {
+            DTSSequenceHeader seq;
+            if (ver < 17) {
+                // startKeyframe/endKeyframe layout: consume, but the old
+                // keyframe table is not supported.
+                reader.s32(); reader.s32(); reader.s32(); reader.f32();
+                reader.u8(); reader.u8(); reader.u8();
+                reader.s32(); reader.s32(); reader.s32();
+                reader.s32(); reader.s32(); reader.f32();
+                for (int set = 0; set < 8; ++set) reader.skipIntSet();
+                continue;
+            }
+            readDTSSequenceHeader(reader, ver, true, seq);
+            DTSShape::Animation anim;
+            buildDTSNodeAnimation(anim, seq, pools, [](int32_t node) { return node; });
+            buildDTSObjectAnimation(anim, seq, objStates);
+            oldAnimations.emplace_back(seq.nameIndex, std::move(anim));
+        }
+        pos = size - remaining;
     }
 
     // Meshes — read meshType as S32, then mesh body
@@ -601,6 +870,16 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         skip(numDetails * 4); // detailFirstSkin array
     }
 
+    for (auto& [nameIndex, anim] : oldAnimations) {
+        anim.name = nameIndex >= 0 && nameIndex < (int)names.size()
+            ? names[nameIndex] : "seq" + std::to_string(result.animations.size());
+        result.animations.push_back(std::move(anim));
+    }
+    for (const auto& object : objs) {
+        result.objectStartMesh.push_back(object.sm);
+        result.objectNumMeshes.push_back(object.nm);
+    }
+
     // Build nodes
     result.nodes.resize(numNodes);
     for (int i = 0; i < numNodes; i++) {
@@ -842,215 +1121,6 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
 }
 
 
-// Little-endian cursor over the plain (non-buffered) part of a DTS file or a
-// whole DSQ file. It shares the caller's cursor so mixed reads stay in sync.
-struct DTSPlainReader {
-    const uint8_t*& p;
-    size_t& rem;
-    DTSPlainReader(const uint8_t*& ptr, size_t& remaining) : p(ptr), rem(remaining) {}
-    bool take(void* out, size_t n) {
-        if (rem < n) { rem = 0; memset(out, 0, n); return false; }
-        memcpy(out, p, n); p += n; rem -= n; return true;
-    }
-    int32_t s32() { int32_t v; take(&v, 4); return v; }
-    float f32() { float v; take(&v, 4); return v; }
-    int16_t s16() { int16_t v; take(&v, 2); return v; }
-    uint8_t u8() { uint8_t v; take(&v, 1); return v; }
-    // Same basis as DTSBuf: swap y/z into Torch model space.
-    Point3F point3F() { float x = f32(), y = f32(), z = f32(); return {x, z, y}; }
-    QuatF quat16() {
-        int16_t x = s16(), y = s16(), z = s16(), w = s16();
-        return {(float)x/32767.f, (float)z/32767.f, (float)y/32767.f, (float)w/32767.f};
-    }
-    // Name written by TSShape::writeName: S32 length + characters.
-    std::string name() {
-        const int32_t len = s32();
-        if (len <= 0 || (size_t)len > rem) { if (len > 0) rem = 0; return {}; }
-        std::string value((const char*)p, (size_t)len);
-        p += len; rem -= len;
-        return value;
-    }
-    // TSIntegerSet: S32 numInts, S32 numWords, then numWords U32 words.
-    std::vector<int32_t> intSet() {
-        std::vector<int32_t> bits;
-        capCount(s32());
-        const int32_t nw = capCount(s32());
-        if (nw > 0 && nw < 256 && (size_t)(nw * 4) <= rem) {
-            for (int w = 0; w < nw; w++) {
-                int32_t word;
-                memcpy(&word, p, 4);
-                p += 4; rem -= 4;
-                for (int b = 0; b < 32; b++)
-                    if (word & (1 << b)) bits.push_back(w * 32 + b);
-            }
-        } else if (nw > 0 && nw < 1024) {
-            // Skip corrupted data
-            p += nw;
-            if (rem >= (size_t)nw) rem -= nw; else rem = 0;
-        }
-        return bits;
-    }
-    void skipIntSet() {
-        capCount(s32());
-        const int32_t nw = capCount(s32());
-        if (nw > 0 && nw < 256) {
-            const size_t bytes = (size_t)nw * 4;
-            if (bytes <= rem) { p += bytes; rem -= bytes; }
-        }
-    }
-};
-
-struct DTSSequenceHeader {
-    int32_t nameIndex = -1;
-    uint32_t flags = 0;
-    int32_t numKeyframes = 0;
-    float duration = 0.0f;
-    int32_t priority = 0;
-    int32_t baseRotation = 0, baseTranslation = 0, baseScale = 0, baseObjectState = 0;
-    int32_t firstTrigger = 0, numTriggers = 0;
-    int version = 0;
-    std::vector<int32_t> rotationMatters, translationMatters, scaleMatters;
-    std::vector<int32_t> visMatters, frameMatters, matFrameMatters;
-};
-
-// TSShape::Sequence::read. DSQ files store the name separately, so they pass
-// readNameIndex=false.
-static void readDTSSequenceHeader(DTSPlainReader& r, int ver, bool readNameIndex,
-                                  DTSSequenceHeader& seq) {
-    seq.version = ver;
-    if (readNameIndex) seq.nameIndex = capCount(r.s32());
-    if (ver > 21) seq.flags = (uint32_t)capCount(r.s32());
-    seq.numKeyframes = capCount(r.s32());
-    seq.duration = r.f32();
-    if (ver < 22) {
-        // blend, cyclic, makePath bools
-        const bool blend = r.u8() != 0, cyclic = r.u8() != 0;
-        r.u8();
-        if (blend) seq.flags |= 0x8;
-        if (cyclic) seq.flags |= 0x10;
-    }
-    seq.priority = r.s32();
-    capCount(r.s32()); // firstGroundFrame
-    capCount(r.s32()); // numGroundFrames
-    if (ver > 21) {
-        seq.baseRotation = capCount(r.s32());
-        seq.baseTranslation = capCount(r.s32());
-        seq.baseScale = capCount(r.s32());
-        seq.baseObjectState = capCount(r.s32());
-        capCount(r.s32()); // baseDecalState
-    } else if (ver >= 17) {
-        seq.baseRotation = capCount(r.s32());
-        seq.baseTranslation = seq.baseRotation; // baseTranslation = baseRotation for v<22
-        seq.baseObjectState = capCount(r.s32());
-        capCount(r.s32()); // baseDecalState
-    }
-    if (ver > 8) { seq.firstTrigger = capCount(r.s32()); seq.numTriggers = capCount(r.s32()); }
-    if (ver > 7) r.f32(); // toolBegin
-    seq.rotationMatters = r.intSet();
-    if (ver >= 22) {
-        seq.translationMatters = r.intSet();
-        seq.scaleMatters = r.intSet();
-    } else {
-        // v<22: translationMatters = rotationMatters; scale not animated.
-        seq.translationMatters = seq.rotationMatters;
-    }
-    if (ver > 10) r.skipIntSet(); // decalMatters
-    if (ver > 5) r.skipIntSet(); // iflMatters
-    seq.visMatters = r.intSet();
-    seq.frameMatters = r.intSet();
-    seq.matFrameMatters = r.intSet();
-    if (ver < 17) r.skipIntSet(); // nodeTransformStatic (obsolete)
-}
-
-struct DTSKeyPools {
-    const std::vector<QuatF>* rotations;
-    const std::vector<Point3F>* translations;
-    const std::vector<float>* uniformScales;
-    const std::vector<Point3F>* alignedScales;
-};
-
-// Expands a sequence's node keyframes. The r-th member of a matters set owns
-// keyframes base + r * numKeyframes; nodeFor maps the member (a node index in
-// the source shape) to this shape's node, or -1 to drop it.
-template <typename NodeFor>
-static void buildDTSNodeAnimation(DTSShape::Animation& anim, const DTSSequenceHeader& seq,
-                                  const DTSKeyPools& pools, NodeFor nodeFor) {
-    const int32_t numKFrames = seq.numKeyframes;
-    const float dur = seq.duration;
-    anim.duration = dur;
-    // TSShape::Sequence flags: Blend=0x08, Cyclic=0x10.
-    anim.looping = (seq.flags & 0x10) != 0;
-    anim.blend = (seq.flags & 0x8) != 0;
-    if (numKFrames <= 0 || dur <= 0.0f) return;
-
-    auto frameTime = [&](int k) {
-        return (numKFrames > 1) ? (float)k / (float)(numKFrames - 1) * dur : 0.0f;
-    };
-    auto keyframeFor = [&](int32_t nodeIdx, float t) -> DTSShape::Keyframe& {
-        for (auto& f : anim.keyframes)
-            if (f.nodeIndex == nodeIdx && std::abs(f.time - t) < 0.0001f) return f;
-        DTSShape::Keyframe kf;
-        kf.time = t;
-        kf.nodeIndex = nodeIdx;
-        kf.rotation = {0, 0, 0, 1};
-        kf.translation = {0, 0, 0};
-        kf.scale = {1, 1, 1};
-        // Unanimated components keep the node's bind pose.
-        kf.hasRotation = kf.hasTranslation = kf.hasScale = false;
-        anim.keyframes.push_back(kf);
-        return anim.keyframes.back();
-    };
-
-    for (size_t j = 0; j < seq.rotationMatters.size(); j++) {
-        const int32_t nodeIdx = nodeFor(seq.rotationMatters[j]);
-        if (nodeIdx < 0) continue;
-        for (int k = 0; k < numKFrames; k++) {
-            DTSShape::Keyframe& kf = keyframeFor(nodeIdx, frameTime(k));
-            kf.hasRotation = true;
-            const int32_t idx = seq.baseRotation + (int32_t)j * numKFrames + k;
-            if (idx >= 0 && idx < (int)pools.rotations->size())
-                kf.rotation = (*pools.rotations)[idx];
-        }
-    }
-    for (size_t j = 0; j < seq.translationMatters.size(); j++) {
-        const int32_t nodeIdx = nodeFor(seq.translationMatters[j]);
-        if (nodeIdx < 0) continue;
-        for (int k = 0; k < numKFrames; k++) {
-            DTSShape::Keyframe& kf = keyframeFor(nodeIdx, frameTime(k));
-            const int32_t idx = seq.baseTranslation + (int32_t)j * numKFrames + k;
-            if (idx >= 0 && idx < (int)pools.translations->size()) {
-                kf.hasTranslation = true;
-                kf.translation = (*pools.translations)[idx];
-            }
-        }
-    }
-    const bool uniformScale = (seq.flags & 0x1) != 0;
-    const bool alignedScale = (seq.flags & 0x2) != 0;
-    for (size_t j = 0; j < seq.scaleMatters.size(); j++) {
-        const int32_t nodeIdx = nodeFor(seq.scaleMatters[j]);
-        if (nodeIdx < 0) continue;
-        for (int k = 0; k < numKFrames; k++) {
-            DTSShape::Keyframe& kf = keyframeFor(nodeIdx, frameTime(k));
-            const int32_t idx = seq.baseScale + (int32_t)j * numKFrames + k;
-            if (uniformScale && idx >= 0 && idx < (int)pools.uniformScales->size()) {
-                const float value = (*pools.uniformScales)[idx];
-                kf.scale = {value, value, value};
-                kf.hasScale = true;
-            } else if (alignedScale && idx >= 0 && idx < (int)pools.alignedScales->size()) {
-                kf.scale = (*pools.alignedScales)[idx];
-                kf.hasScale = true;
-            }
-        }
-    }
-
-    // Sort keyframes by node then time for efficient lookup
-    std::sort(anim.keyframes.begin(), anim.keyframes.end(),
-        [](const DTSShape::Keyframe& a, const DTSShape::Keyframe& b) {
-            if (a.nodeIndex != b.nodeIndex) return a.nodeIndex < b.nodeIndex;
-            return a.time < b.time;
-        });
-}
-
 DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     DTSLoadResult result;
     if (!data || size < 16) return result;
@@ -1157,8 +1227,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     }
     // v < 22: ground transforms adjustment (no-op for our parser)
     // Object states (vis, frameIndex, matFrameIndex per object per frame)
-    struct ObjState { float vis; int32_t frameIndex; int32_t matFrameIndex; };
-    std::vector<ObjState> objStates(numObjStates);
+    std::vector<DTSObjectState> objStates(numObjStates);
     for (int i = 0; i < numObjStates; i++) {
         objStates[i].vis = buf.readF32();
         objStates[i].frameIndex = capCount(buf.readS32());
@@ -1488,62 +1557,12 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         // Sequence::read(s, readNameIndex=true)
         DTSSequenceHeader seq;
         readDTSSequenceHeader(seqReader, ver, true, seq);
-        const int32_t numKFrames = seq.numKeyframes;
-        const float dur = seq.duration;
-        const int32_t baseObjState = seq.baseObjectState;
-        const std::vector<int32_t>& visMatters = seq.visMatters;
-        const std::vector<int32_t>& frameMatters = seq.frameMatters;
-        const std::vector<int32_t>& matFrameMatters = seq.matFrameMatters;
-
         DTSShape::Animation anim;
         anim.name = (seq.nameIndex >= 0 && seq.nameIndex < (int)names.size())
             ? names[seq.nameIndex] : "seq" + std::to_string(s);
         buildDTSNodeAnimation(anim, seq, pools, [](int32_t node) { return node; });
 
-        // Generate object keyframes for vis/frame animation
-        if (numKFrames > 0 && dur > 0.0f && (!visMatters.empty() || !frameMatters.empty() || !matFrameMatters.empty())) {
-            // Torque packs object states using the union of all object-state
-            // memberships, rather than a separate index per membership set.
-            std::vector<int32_t> objectMatters;
-            auto addObjectMatters = [&](const std::vector<int32_t>& matters) {
-                for (int32_t object : matters) {
-                    if (std::find(objectMatters.begin(), objectMatters.end(), object) == objectMatters.end())
-                        objectMatters.push_back(object);
-                }
-            };
-            addObjectMatters(visMatters);
-            addObjectMatters(frameMatters);
-            addObjectMatters(matFrameMatters);
-            std::sort(objectMatters.begin(), objectMatters.end());
-            auto objectStateNumber = [&](int32_t object) -> int32_t {
-                auto it = std::find(objectMatters.begin(), objectMatters.end(), object);
-                return it == objectMatters.end() ? -1 : (int32_t)(it - objectMatters.begin());
-            };
-            // Object state rows are indexed by the sorted union of every
-            // membership set. This also preserves material-only animations.
-            for (int j = 0; j < (int)objectMatters.size(); j++) {
-                int32_t objIdx = objectMatters[j];
-                int32_t stateObject = objectStateNumber(objIdx);
-                if (stateObject < 0) continue;
-                for (int k = 0; k < numKFrames; k++) {
-                    int32_t stateIdx = baseObjState + stateObject * numKFrames + k;
-                    if (stateIdx < 0 || stateIdx >= (int)objStates.size()) continue;
-                    DTSShape::ObjectKeyframe okf;
-                    okf.objectIndex = objIdx;
-                    okf.time = (numKFrames > 1) ? (float)k / (float)(numKFrames - 1) * dur : 0.0f;
-                    okf.vis = objStates[stateIdx].vis;
-                    okf.frameIndex = objStates[stateIdx].frameIndex;
-                    okf.matFrameIndex = objStates[stateIdx].matFrameIndex;
-                    anim.objectKeyframes.push_back(okf);
-                }
-            }
-            // Sort object keyframes by object index then time
-            std::sort(anim.objectKeyframes.begin(), anim.objectKeyframes.end(),
-                [](const DTSShape::ObjectKeyframe& a, const DTSShape::ObjectKeyframe& b) {
-                    if (a.objectIndex != b.objectIndex) return a.objectIndex < b.objectIndex;
-                    return a.time < b.time;
-                });
-        }
+        buildDTSObjectAnimation(anim, seq, objStates);
 
         result.animations.push_back(anim);
     }

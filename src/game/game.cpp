@@ -4568,14 +4568,56 @@ void World::spawnExplosionEffect(const Point3F& pos,
             ((float)std::rand() / RAND_MAX * 2.0f - 1.0f) * effect.lifetimeVarianceMS;
         const float effectLifetime = std::max(0.0f, lifetimeMS / 1000.0f);
         const float effectDelay = std::max(0.0f, (float)effect.delayMS / 1000.0f);
-        if (effect.hasLight && effectLights.size() < maxEffectInstances) {
-            EffectLight light;
-            light.pos = effectOrigin;
-            light.delay = effectDelay;
-            light.lifetime = effectLifetime > 0.0f ? effectLifetime : 0.1f;
-            light.radius = std::clamp(std::fabs(effect.particleRadius), 0.05f, 64.0f);
-            light.color = {1.0f, 0.72f, 0.28f, 1.0f};
-            effectLights.push_back(light);
+        // Retail ExplosionData sends only a hasLight flag; its light colors
+        // and radii are not networked and default to a zero radius, so a
+        // client explosion casts no light.
+        if (!effect.shape.empty() && effectExplosionShapes.size() < maxEffectInstances) {
+            const std::string path = normalizeShapePath(effect.shape);
+            int shapeIndex = -1;
+            if (auto cached = explosionShapeIndex.find(path); cached != explosionShapeIndex.end()) {
+                shapeIndex = cached->second;
+            } else {
+                auto shapeData = Engine::instance().fs().read(path.c_str());
+                DTSShape shape;
+                shape.name = path;
+                if (!shapeData.empty() && shape.load(shapeData.data(), shapeData.size())) {
+                    shapeIndex = (int)explosionShapes.size();
+                    explosionShapes.push_back(std::move(shape));
+                }
+                explosionShapeIndex[path] = shapeIndex;
+            }
+            if (shapeIndex >= 0) {
+                EffectExplosionShape instance;
+                instance.pos = effectOrigin;
+                instance.shapeIndex = shapeIndex;
+                instance.delay = effectDelay;
+                instance.playSpeed = effect.playSpeed;
+                instance.faceViewer = effect.faceViewer;
+                instance.times = effect.times;
+                instance.sizes = effect.sizes;
+                // Explosion::explode: an "ambient" sequence replaces the
+                // datablock lifetime with its duration / |playSpeed|. The
+                // lifetime counts from onAdd, so the delay is included.
+                instance.lifetime = effectLifetime;
+                const auto& anims = explosionShapes[shapeIndex].animations;
+                for (size_t i = 0; i < anims.size(); ++i) {
+                    if (missionLower(anims[i].name) != "ambient") continue;
+                    instance.ambientIndex = (int)i;
+                    if (anims[i].duration > 0.0f && effect.playSpeed != 0.0f)
+                        instance.lifetime = anims[i].duration / std::fabs(effect.playSpeed);
+                    break;
+                }
+                // Deterministic roll so replays and seeks look the same.
+                uint32_t seed = 2166136261u;
+                auto mix = [&](float value) {
+                    uint32_t bits; std::memcpy(&bits, &value, sizeof bits);
+                    seed = (seed ^ bits) * 16777619u;
+                };
+                mix(effectOrigin.x); mix(effectOrigin.y); mix(effectOrigin.z);
+                mix((float)depth); mix((float)effect.shape.size());
+                instance.roll = (float)(seed % 65536u) / 65536.0f * 2.0f * Math::PI;
+                effectExplosionShapes.push_back(std::move(instance));
+            }
         }
         if (effect.shakeCamera && effectCameraShakes.size() < maxEffectInstances) {
             EffectCameraShake shake;
@@ -4791,6 +4833,7 @@ void World::clearEffects() {
     effectEmitters.clear();
     effectShockwaves.clear();
     effectDebris.clear();
+    effectExplosionShapes.clear();
     effectDecals.clear();
     effectLightnings.clear();
     effectLights.clear();
@@ -4893,6 +4936,13 @@ void World::updateParticles(float dt) {
     // Remove dead particles
     particles.erase(std::remove_if(particles.begin(), particles.end(),
         [](const Particle& p) { return !p.active; }), particles.end());
+
+    for (auto& shape : effectExplosionShapes) {
+        shape.age += dt;
+        if (shape.age >= shape.lifetime) shape.active = false;
+    }
+    effectExplosionShapes.erase(std::remove_if(effectExplosionShapes.begin(), effectExplosionShapes.end(),
+        [](const EffectExplosionShape& shape) { return !shape.active; }), effectExplosionShapes.end());
 
     for (auto& debris : effectDebris) {
         if (!debris.active) continue;
@@ -5243,6 +5293,73 @@ void World::renderParticles() {
             r.drawSprite(debris.pos, debris.radius * 2.0f,
                          {0.8f, 0.55f, 0.25f, alpha});
         }
+    }
+    for (auto& instance : effectExplosionShapes) {
+        if (instance.age < instance.delay || instance.shapeIndex < 0 ||
+            instance.shapeIndex >= (int)explosionShapes.size()) continue;
+        DTSShape& shape = explosionShapes[instance.shapeIndex];
+        if (!shape.loaded) continue;
+        // Size keyframes over the whole lifetime (Explosion::processTick).
+        std::array<float, 3> size{1.0f, 1.0f, 1.0f};
+        const auto& times = instance.times;
+        const auto& sizes = instance.sizes;
+        if (!sizes.empty()) {
+            const float t = instance.lifetime > 0.0f
+                ? std::clamp(instance.age / instance.lifetime, 0.0f, 1.0f) : 1.0f;
+            size = sizes.back();
+            if (times.size() == sizes.size() && t <= times.front()) size = sizes.front();
+            for (size_t i = 0; i + 1 < sizes.size() && i + 1 < times.size(); ++i) {
+                if (t >= times[i] && t <= times[i + 1]) {
+                    const float span = times[i + 1] - times[i];
+                    const float f = span > 0.0f ? (t - times[i]) / span : 0.0f;
+                    for (int c = 0; c < 3; ++c)
+                        size[c] = sizes[i][c] + (sizes[i + 1][c] - sizes[i][c]) * f;
+                    break;
+                }
+            }
+        }
+        MatrixF orient;
+        orient.identity();
+        if (instance.faceViewer) {
+            // Point the explosion's +Z at the camera, then roll about it.
+            Point3F fwd{r.cameraPos.x - instance.pos.x, r.cameraPos.y - instance.pos.y,
+                        r.cameraPos.z - instance.pos.z};
+            const float len = std::sqrt(fwd.x * fwd.x + fwd.y * fwd.y + fwd.z * fwd.z);
+            if (len > 1e-4f) {
+                fwd = {fwd.x / len, fwd.y / len, fwd.z / len};
+                Point3F up{0, 1, 0};
+                if (std::fabs(fwd.y) > 0.999f) up = {1, 0, 0};
+                Point3F right{up.y * fwd.z - up.z * fwd.y, up.z * fwd.x - up.x * fwd.z,
+                              up.x * fwd.y - up.y * fwd.x};
+                const float rl = std::sqrt(right.x * right.x + right.y * right.y + right.z * right.z);
+                right = {right.x / rl, right.y / rl, right.z / rl};
+                up = {fwd.y * right.z - fwd.z * right.y, fwd.z * right.x - fwd.x * right.z,
+                      fwd.x * right.y - fwd.y * right.x};
+                orient.m[0][0] = right.x; orient.m[0][1] = up.x; orient.m[0][2] = fwd.x;
+                orient.m[1][0] = right.y; orient.m[1][1] = up.y; orient.m[1][2] = fwd.y;
+                orient.m[2][0] = right.z; orient.m[2][1] = up.z; orient.m[2][2] = fwd.z;
+            }
+            MatrixF roll;
+            roll.setRotationAxis({0, 0, 1}, instance.roll);
+            orient = orient * roll;
+        }
+        MatrixF translate, scale, flip;
+        translate.identity();
+        translate.setTranslation(instance.pos);
+        scale.identity();
+        scale.setScale({size[0], size[1], size[2]});
+        // Explosion::prepModelView faces the shape opposite to projectiles.
+        flip.setRotationY(Math::PI);
+        r.setModel(translate * orient * scale * flip * shape.upOrientation());
+        if (debrisShader) {
+            debrisShader->setUniform("uUseTexture", (int32_t)1);
+            debrisShader->setUniform("uUseLightmap", (int32_t)0);
+        }
+        const float elapsed = std::max(0.0f, instance.age - instance.delay);
+        if (instance.ambientIndex >= 0)
+            shape.renderAnimationIndex(instance.ambientIndex, elapsed * instance.playSpeed);
+        else
+            shape.render(0);
     }
     std::vector<size_t> decalOrder(effectDecals.size());
     std::iota(decalOrder.begin(), decalOrder.end(), 0);

@@ -51,6 +51,13 @@ struct DecodedDataBlock {
         std::vector<uint32_t> particleRefs;
     };
     struct ExplosionData {
+        std::string shape; // dtsFileName
+        bool faceViewer = false;
+        std::array<float, 3> scale{1.0f, 1.0f, 1.0f};
+        float playSpeed = 1.0f;
+        // Size keyframes over the explosion lifetime (normalized times).
+        std::vector<float> times;
+        std::vector<std::array<float, 3>> sizes;
         uint32_t soundProfileRef = 0;
         uint32_t particleEmitterRef = 0;
         int32_t particleDensity{};

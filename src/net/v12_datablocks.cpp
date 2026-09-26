@@ -156,29 +156,33 @@ void emitter(Stream& s) {
 }
 void explosion(Stream& s) {
     auto* d = activeDecoded;
-    s.readString(); // dts file name
+    std::string shape = s.readString(); // dtsFileName
     const uint32_t soundProfile = optionalRef(s);
     const uint32_t particleEmitterRef = optionalRef(s);
-    const int32_t density = s.readSigned(14);
+    const int32_t density = (int32_t)s.readUnsigned(14);
     const float radius = s.readF32();
-    s.readFlag();
-    if (s.readFlag()) { s.readUnsigned(16); s.readUnsigned(16); s.readUnsigned(16); }
-    s.readSigned(14); // play speed
+    const bool faceViewer = s.readFlag();
+    std::array<float, 3> scale{1.0f, 1.0f, 1.0f};
+    if (s.readFlag())
+        for (float& value : scale) value = (float)s.readUnsigned(16) / 100.0f;
+    const float playSpeed = (float)s.readUnsigned(14) / 20.0f;
     const int32_t debrisThetaMin = (int32_t)rangedValue(s, 180);
     const int32_t debrisThetaMax = (int32_t)rangedValue(s, 180);
     const int32_t debrisPhiMin = (int32_t)rangedValue(s, 360);
     const int32_t debrisPhiMax = (int32_t)rangedValue(s, 360);
     const int32_t debrisNum = (int32_t)rangedValue(s, 1000);
     const int32_t debrisNumVariance = (int32_t)rangedValue(s, 1000);
-    const float debrisVelocity = (float)s.readSigned(14);
-    const float debrisVelocityVariance = (float)rangedValue(s, 10000);
-    const int32_t delay = s.readSigned(16) * 32;
-    const int32_t delayVariance = s.readSigned(16) * 32;
-    const int32_t lifetime = s.readSigned(16) * 32;
-    const int32_t lifetimeVariance = s.readSigned(16) * 32;
+    // ExplosionData::unpackData packs debris speeds in tenths.
+    const float debrisVelocity = (float)s.readUnsigned(14) / 10.0f;
+    const float debrisVelocityVariance = (float)rangedValue(s, 10000) / 10.0f;
+    const int32_t delay = (int32_t)s.readUnsigned(16) << 5;
+    const int32_t delayVariance = (int32_t)s.readUnsigned(16) << 5;
+    const int32_t lifetime = (int32_t)s.readUnsigned(16) << 5;
+    const int32_t lifetimeVariance = (int32_t)s.readUnsigned(16) << 5;
     const float offset = s.readF32();
-    const bool hasLight = s.readFlag();
+    // Retail order: shakeCamera, then the Tribes 2 hasLight flag.
     const bool shakeCamera = s.readFlag();
+    const bool hasLight = s.readFlag();
     std::array<float, 3> shakeFrequency{};
     std::array<float, 3> shakeAmplitude{};
     for (float& value : shakeFrequency) value = s.readF32();
@@ -193,13 +197,22 @@ void explosion(Stream& s) {
     std::vector<uint32_t> subExplosions;
     for (int i = 0; i < 5; ++i) subExplosions.push_back(optionalRef(s));
     const int timeCount = (int)s.readRange(0, 4);
-    for (int i = 0; i < timeCount; ++i) s.readFloat(8);
+    std::vector<float> times;
+    for (int i = 0; i < timeCount; ++i) times.push_back(s.readFloat(8));
+    std::vector<std::array<float, 3>> sizes;
     for (int i = 0; i < timeCount; ++i) {
-        ranged(s, 16000, 1); ranged(s, 16000, 1); ranged(s, 16000, 1);
+        std::array<float, 3> size{};
+        for (float& value : size) value = (float)rangedValue(s, 16000) / 100.0f;
+        sizes.push_back(size);
     }
     if (d) {
         d->hasExplosion = true;
-        d->explosion.soundProfileRef = soundProfile;
+        d->explosion.shape = std::move(shape);
+        d->explosion.faceViewer = faceViewer;
+        d->explosion.scale = scale;
+        d->explosion.playSpeed = playSpeed;
+        d->explosion.times = std::move(times);
+        d->explosion.sizes = std::move(sizes);
         d->explosion.soundProfileRef = soundProfile;
         d->explosion.particleEmitterRef = particleEmitterRef;
         d->explosion.particleDensity = density;

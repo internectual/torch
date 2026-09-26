@@ -528,6 +528,25 @@ private:
     std::vector<EffectDebris> effectDebris;
     std::vector<DTSShape> debrisShapes;
 
+    // ExplosionData dtsFileName: the explosion's own animated shape.
+    struct EffectExplosionShape {
+        Point3F pos{};
+        int shapeIndex = -1;
+        int ambientIndex = -1;
+        float age = 0.0f;
+        float delay = 0.0f;
+        float lifetime = 1.0f;
+        float playSpeed = 1.0f;
+        float roll = 0.0f;
+        bool faceViewer = false;
+        std::vector<float> times;
+        std::vector<std::array<float, 3>> sizes;
+        bool active = true;
+    };
+    std::vector<EffectExplosionShape> effectExplosionShapes;
+    std::vector<DTSShape> explosionShapes;
+    std::unordered_map<std::string, int> explosionShapeIndex;
+
     struct EffectLightning {
         Point3F pos{};
         Point3F scale{1, 1, 1};
