@@ -8256,6 +8256,7 @@ void Game::render(float dt) {
                         mg->linearSegmentValid = true;
                         // A fresh initial update (possibly a reused ghost index).
                         mg->spawnTime = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                        mg->flareSpikes.clear();
                     }
                     const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
                     const float age = mg->linearCurrTick * 0.032f + std::max(0.0f, now - mg->spawnTime);
@@ -8367,12 +8368,6 @@ void Game::render(float dt) {
 
                if (visualData && visualData->projectileMaterial != V12::DecodedDataBlock::ProjectileMaterial::None) {
                    const auto& data = *visualData;
-                   mg->projectileVisualAge += std::max(0.0f, dt);
-                   const float fade = projectileVisualFade(data, mg->projectileVisualAge);
-                   ColorF color{data.projectileMaterialColor[0], data.projectileMaterialColor[1],
-                                data.projectileMaterialColor[2], data.projectileMaterialColor[3] *
-                                projectileMaterialAlpha(data) * fade};
-                   const bool additive = projectileMaterialAdditive(data);
                    std::vector<uint32_t> materialTextures;
                   for (const auto& name : data.projectileMaterialTextures) {
                       std::vector<uint32_t> frames;
@@ -8467,40 +8462,60 @@ void Game::render(float dt) {
                            }
                        }
                    }
-                   const auto layers = crossStyle ? std::vector<ProjectileVisualLayer>{}
-                                                  : projectileVisualLayers(data, mg->projectileVisualAge);
-                   for (const auto& layer : layers) {
-                       if (layer.alpha <= 0.0f) continue;
-                       ColorF layerColor = color;
-                       layerColor.a *= std::clamp(layer.alpha, 0.0f, 1.0f);
-                        const bool drawTracer = (data.projectileMaterial == V12::DecodedDataBlock::ProjectileMaterial::LinearFlare ||
-                            data.projectileMaterial == V12::DecodedDataBlock::ProjectileMaterial::Cross) &&
-                            data.projectileTracerLength > 0.0f;
-                        if (drawTracer) {
-                           Point3F direction = velocity;
-                           const float length = std::sqrt(direction.x * direction.x + direction.y * direction.y + direction.z * direction.z);
-                           if (length > 0.001f) {
-                               direction.x /= length; direction.y /= length; direction.z /= length;
-                           } else direction = {0, 0, 1};
-                           const float trailLength = data.projectileTracerLength * (1.0f + 0.35f * (float)(&layer - layers.data()));
-                           const Point3F start{materialPos.x - direction.x * trailLength,
-                                               materialPos.y - direction.y * trailLength,
-                                               materialPos.z - direction.z * trailLength};
-                           const auto quad = projectileBeamQuad(start, materialPos, r.cameraPos,
-                               std::max(0.01f, layer.height));
-                           if (quad.size() == 4)
-                               r.drawTexturedQuad(quad[0], quad[1], quad[2], quad[3],
-                                                  texture(layer.textureIndex), layerColor, 0, 0, 1, 1, additive);
+                   // LinearFlareProjectile::renderObject (t2-mapper flare.ts): the
+                   // bolt's DTS (drawn with the ghost shapes), then numFlares spikes
+                   // drawn additively with flareModTexture; a bolt without a DTS
+                   // gets two additive flareBaseTexture billboards instead.
+                   const bool linearFlare = data.projectileMaterial ==
+                       V12::DecodedDataBlock::ProjectileMaterial::LinearFlare;
+                   if (linearFlare) {
+                       const ColorF flareColor{data.projectileMaterialColor[0], data.projectileMaterialColor[1],
+                                               data.projectileMaterialColor[2], 1.0f};
+                       const float scaleX = data.hasProjectileScale ? data.projectileScale.x : 1.0f;
+                       const uint32_t modTexture = texture(0), baseTexture = texture(1);
+                       if (data.shapeFile.empty() && modTexture != UINT32_MAX && baseTexture != UINT32_MAX) {
+                           r.drawSprite(materialPos, 1.2f * scaleX,
+                                        {std::sqrt(flareColor.r), std::sqrt(flareColor.g), std::sqrt(flareColor.b), 1.0f},
+                                        baseTexture, true);
+                           r.drawSprite(materialPos, 0.6f * scaleX, {1, 1, 1, 1}, baseTexture, true);
                        }
-                       const bool drawCross = data.projectileMaterial != V12::DecodedDataBlock::ProjectileMaterial::Cross ||
-                           data.projectileRenderCross || data.projectileTracerLength <= 0.0f;
-                       if (drawCross) {
-                           const float size = data.projectileMaterial == V12::DecodedDataBlock::ProjectileMaterial::Cross
-                               ? std::max(0.01f, data.projectileCrossSize > 0.0f ? data.projectileCrossSize : layer.width)
-                               : layer.width;
-                           r.drawOrientedSprite(materialPos, size, layerColor, velocity, layer.angle,
-                                                texture(layer.textureIndex), additive);
+                       if (baseTexture != UINT32_MAX && modTexture != UINT32_MAX && data.projectileFlareCount > 0) {
+                           uint32_t state = (uint32_t)idx * 2654435761u + (uint32_t)(demoTime * 977.0f) + 1u;
+                           auto random = [&]() {
+                               state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+                               return (float)(state & 0xffffff) / 16777216.0f;
+                           };
+                           const std::array<float, 3> sizes{data.projectileMaterialSizes[0],
+                               data.projectileMaterialSizes[1], data.projectileMaterialSizes[2]};
+                           auto& spikes = mg->flareSpikes;
+                           if (spikes.size() != data.projectileFlareCount) {
+                               spikes.clear();
+                               for (uint32_t i = 0; i < data.projectileFlareCount && i < 64; ++i)
+                                   spikes.push_back(FlareSpikes::spawn(sizes, random));
+                           }
+                           if (!demoMatchEnded) FlareSpikes::advance(spikes, demoInterpolationDt, sizes, random);
+                           const auto tris = FlareSpikes::triangles(spikes);
+                           for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+                               Point3F p[3];
+                               float uv[3][2];
+                               ColorF colors[3];
+                               for (int k = 0; k < 3; ++k) {
+                                   const auto& v = tris[i + k];
+                                   p[k] = {materialPos.x + v.x, materialPos.y + v.y, materialPos.z + v.z};
+                                   uv[k][0] = v.u; uv[k][1] = v.v;
+                                   colors[k] = {flareColor.r * v.shade, flareColor.g * v.shade, flareColor.b * v.shade, 1.0f};
+                               }
+                               r.drawTexturedTriangle(p, uv, colors, modTexture, true);
+                           }
                        }
+                   }
+                   // FlareProjectile: an additive flareTexture sprite of the
+                   // datablock size (t2-mapper tracer.ts createSpriteView).
+                   if (data.projectileMaterial == V12::DecodedDataBlock::ProjectileMaterial::Flare) {
+                       const uint32_t flareTexture = texture(0);
+                       if (flareTexture != UINT32_MAX)
+                           r.drawSprite(materialPos, data.projectileMaterialSizes[0], {1.0f, 0.9f, 0.5f, 1.0f},
+                                        flareTexture, true);
                    }
               }
 

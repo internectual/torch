@@ -2,6 +2,7 @@
 #include "game/shape_lighting.h"
 #include "game/weapon_image_state.h"
 #include "game/vehicle_jets.h"
+#include "game/flare_spikes.h"
 #include <cstdint>
 #include <cstring>
 #include <cmath>
@@ -623,7 +624,6 @@ struct GhostEntry {
     Vec3 prevPosition{};
     float animTime{};
     float threadAnimTime{};
-    float projectileVisualAge{};
     bool isMoving{};
     float moveYaw{};
     bool hasRendered{};
@@ -752,6 +752,7 @@ struct GhostEntry {
     bool beamHit = false, shockFresh = false;
     float shockRegenTimer = 0.0f, shockLastTime = -1.0f;
     std::vector<Point3F> shockBolts[2]; // bolt-local points along +X
+    std::vector<FlareSpikes::Spike> flareSpikes; // LinearFlareProjectile
     Point3F ballisticPos{}, ballisticVel{};
     float ballisticTime = 0.0f;
     int ballisticAgeTicks = 0;

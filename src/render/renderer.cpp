@@ -594,6 +594,19 @@ void Renderer::drawTexturedQuad(const Point3F& a, const Point3F& b, const Point3
     spriteBatchAdd(const_cast<float*>(verts), texture, additive);
 }
 
+void Renderer::drawTexturedTriangle(const Point3F p[3], const float uv[3][2], const ColorF colors[3],
+                                    uint32_t texture, bool additive) {
+    // The sprite batch takes quads of two triangles; the second is degenerate.
+    float verts[54];
+    for (int i = 0; i < 6; ++i) {
+        const int k = i < 3 ? i : 2;
+        float* v = verts + i * 9;
+        v[0] = p[k].x; v[1] = p[k].y; v[2] = p[k].z; v[3] = uv[k][0]; v[4] = uv[k][1];
+        v[5] = colors[k].r; v[6] = colors[k].g; v[7] = colors[k].b; v[8] = colors[k].a;
+    }
+    spriteBatchAdd(verts, texture, additive);
+}
+
 void Renderer::drawTexturedQuadColors(const Point3F& a, const Point3F& b, const Point3F& c,
                                       const Point3F& d, uint32_t texture, const ColorF colors[4],
                                       float u0, float v0, float u1, float v1, bool additive) {

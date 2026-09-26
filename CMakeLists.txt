@@ -517,6 +517,11 @@ target_include_directories(torch_projectile_physics_test PRIVATE src)
 target_compile_options(torch_projectile_physics_test PRIVATE -UNDEBUG)
 add_test(NAME torch_projectile_physics COMMAND torch_projectile_physics_test)
 
+add_executable(torch_flare_spikes_test tests/flare_spikes_test.cpp)
+target_include_directories(torch_flare_spikes_test PRIVATE src)
+target_compile_options(torch_flare_spikes_test PRIVATE -UNDEBUG)
+add_test(NAME torch_flare_spikes COMMAND torch_flare_spikes_test)
+
 add_executable(torch_shape_lighting_test tests/shape_lighting_test.cpp)
 target_include_directories(torch_shape_lighting_test PRIVATE src)
 target_compile_options(torch_shape_lighting_test PRIVATE -UNDEBUG)
