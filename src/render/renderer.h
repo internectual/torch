@@ -192,6 +192,10 @@ struct DTSShape {
         std::vector<ObjectKeyframe> objectKeyframes; // vis/frame animation
     };
     std::vector<Animation> animations;
+    // PlayerData action index -> animation index (see PlayerAnimation).
+    std::vector<int> actionTable;
+    // Node world transforms from the most recent render, for mounting.
+    std::vector<MatrixF> animatedNodeWorld;
     std::vector<SkinInfo> skins; // parallel to meshes
     std::vector<int32_t> objectStartMesh; // per-object: first mesh index
     std::vector<int32_t> objectNumMeshes; // per-object: number of meshes
@@ -245,6 +249,9 @@ struct DTSShape {
     };
     void render(int32_t detailLevel = 0, const NodeOverride* overrides = nullptr, int numOverrides = 0);
     void renderAnimation(const char* animName, float time,
+                         const NodeOverride* overrides = nullptr,
+                         int numOverrides = 0);
+    void renderAnimationIndex(int animationIndex, float time,
                          const NodeOverride* overrides = nullptr,
                          int numOverrides = 0);
     bool applySkin(const std::string& skinName);

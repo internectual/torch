@@ -125,6 +125,14 @@ struct DecodedDataBlock {
     };
 
     std::string shapeFile;
+    // TSShapeConstructor datablock.
+    std::string constructorShape;
+    std::vector<std::string> constructorSequences;
+    // PlayerData fields used by client-side animation.
+    bool isPlayerData = false;
+    float playerMinLookAngle = 0.0f, playerMaxLookAngle = 0.0f;
+    float playerRunSurfaceAngle = 0.0f;
+    float playerBoxSize[3] = {0.0f, 0.0f, 0.0f}; // Torque x, y, z
     int32_t emitterDelayMS = -1;
     float bubbleEmitTime = 0.5f;
     bool faceViewer{};

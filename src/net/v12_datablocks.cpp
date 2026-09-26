@@ -465,8 +465,24 @@ void shapeImage(Stream& s) {
 }
 
 void player(Stream& s) {
-    shapeBase(s); s.readFlag(); f32s(s, 13); refs(s, 2); f32s(s, 9); s.readF32(); f32s(s, 8);
-    s.readUnsigned(7); f32s(s, 6); f32s(s, 9); s.readF32(); refs(s, 32); f32s(s, 3);
+    shapeBase(s); s.readFlag();
+    const float minLookAngle = s.readF32(), maxLookAngle = s.readF32();
+    f32s(s, 11); refs(s, 2); f32s(s, 9);
+    const float runSurfaceAngle = s.readF32();
+    if (activeDecoded) {
+        activeDecoded->playerMinLookAngle = minLookAngle;
+        activeDecoded->playerMaxLookAngle = maxLookAngle;
+        activeDecoded->playerRunSurfaceAngle = runSurfaceAngle;
+        activeDecoded->isPlayerData = true;
+    }
+    f32s(s, 8);
+    s.readUnsigned(7); f32s(s, 6); f32s(s, 9); s.readF32(); refs(s, 32);
+    const float boxX = s.readF32(), boxY = s.readF32(), boxZ = s.readF32();
+    if (activeDecoded) {
+        activeDecoded->playerBoxSize[0] = boxX;
+        activeDecoded->playerBoxSize[1] = boxY;
+        activeDecoded->playerBoxSize[2] = boxZ;
+    }
     refs(s, 1); f32s(s, 2); refs(s, 1); s.readF32(); refs(s, 2); refs(s, 3); f32s(s, 11);
 }
 
@@ -557,7 +573,17 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
      case 30: player(s); break; case 31: refs(s,1);s.readUnsigned(32);s.readF32();strings(s,1);f32s(s,13);break; case 32: projectile(s);break; case 33: projectile(s);f32s(s,8);strings(s,2);break;
      case 34: s.readF32();colors(s,1);f32s(s,2);strings(s,1);f32s(s,6);if(s.readFlag())strings(s,1);break; case 35: projectile(s);f32s(s,10);s.readUnsigned(8);f32s(s,2);s.readUnsigned(32);s.readUnsigned(32);strings(s,2);refs(s,3);break; case 36: break; case 37: shapeBase(s);break; case 38: shapeImage(s);break;
       case 39: projectile(s);f32s(s,7);refs(s,1);f32s(s,8);strings(s,4);refs(s,1);break; case 40: shockwave(s); break; case 41: break; case 42: projectile(s);f32s(s,11);colors(s,2);f32s(s,1);strings(s,12);break; case 43: splash(s); break;
-       case 44: shapeBase(s);s.readFlag();s.readUnsigned(32);break; case 45: f32s(s,10);strings(s,4);break; case 46: f32s(s,11);colors(s,1);f32s(s,6);strings(s,11);break; case 47: strings(s,1);strings(s,(int)s.readUnsigned(7));break; case 48: projectile(s);s.readF32();colors(s,1);f32s(s,7);strings(s,4);break; case 49: {
+       case 44: shapeBase(s);s.readFlag();s.readUnsigned(32);break; case 45: f32s(s,10);strings(s,4);break; case 46: f32s(s,11);colors(s,1);f32s(s,6);strings(s,11);break; case 47: {
+               // TSShapeConstructor: base shape plus "file.dsq alias" entries.
+               std::string shape = s.readString();
+               const int count = (int)s.readUnsigned(7);
+               std::vector<std::string> sequences = materialStrings(s, count);
+               if (activeDecoded) {
+                   activeDecoded->constructorShape = std::move(shape);
+                   activeDecoded->constructorSequences = std::move(sequences);
+               }
+               break;
+           } case 48: projectile(s);s.readF32();colors(s,1);f32s(s,7);strings(s,4);break; case 49: {
            linear(s); float values[3]; for (float& value : values) value = s.readF32();
            const bool tracerAlpha = s.readUnsigned(8) != 0; const auto color = s.readUnsigned(32);
            float cross[2]; for (float& value : cross) value = s.readF32();

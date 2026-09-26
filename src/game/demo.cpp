@@ -19,6 +19,7 @@
 
 // Pending explosion events from projectile ghost parsers
 std::vector<DemoParser::PendingExplosion> DemoParser::s_pendingExplosions;
+float DemoParser::s_packetTime = 0.0f;
 DemoParser::SunData DemoParser::s_sunData;
 std::string DemoParser::s_pendingTerrainFile;
 
@@ -1956,10 +1957,13 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
             bs.readU32();
         }
     }
-    if (bs.readFlag()) {
+    if (bs.readFlag()) { // MountedMask
         if (bs.readFlag()) {
-            bs.readInt(10);
-            bs.readInt(5);
+            const int mount = bs.readInt(10);
+            bs.readInt(5); // mount node
+            if (entry) entry->mountObject = mount;
+        } else if (entry) {
+            entry->mountObject = -1;
         }
     }
 }
@@ -1968,8 +1972,19 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
     readShapeBaseData(bs, isInitial, entry);
     if (bs.readFlag()) bs.readInt(3); // ImpactMask
     if (bs.readFlag()) { // ActionMask - action animation
-        bs.readInt(8); bs.readFlag(); bool atEnd = bs.readFlag(); bs.readFlag();
-        if (!atEnd && bs.readFlag()) bs.readSignedFloat(6);
+        const int action = bs.readInt(8);
+        const bool holdAtEnd = bs.readFlag();
+        const bool atEnd = bs.readFlag();
+        bs.readFlag(); // first person
+        float position = 0.0f;
+        if (!atEnd && bs.readFlag()) position = bs.readSignedFloat(6);
+        if (entry) {
+            entry->actionAnim = action;
+            entry->actionHoldAtEnd = holdAtEnd;
+            entry->actionAtEnd = atEnd;
+            entry->actionAnimPos = std::clamp(position, 0.0f, 1.0f);
+            entry->actionTime = DemoParser::s_packetTime;
+        }
     }
     if (bs.readFlag()) bs.readInt(8); // ArmAction
     if (bs.readFlag()) return; // control object shortcut
@@ -1977,13 +1992,24 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
         int actionState = bs.readInt(3); // actionState: 0=Stop, 1=Walk, 2=Run, 3=Sprint
         if (entry) entry->isMoving = (actionState > 0);
         if (bs.readFlag()) bs.readInt(7); // recoverState
-        bs.readFlag(); bs.readFlag(); // move flags
+        const bool falling = bs.readFlag();
+        const bool jetting = bs.readFlag();
         if (entry) entry->position = bs.readCompressedPoint(cp);
         else bs.readCompressedPoint(cp);
-        if (bs.readFlag()) { bs.readInt(13); bs.readNormalVector(10); }
+        Vec3 velocity{};
+        if (bs.readFlag()) {
+            const float speed = bs.readInt(13) / 32.0f;
+            const Vec3 dir = bs.readNormalVector(10);
+            velocity = {dir.x * speed, dir.y * speed, dir.z * speed};
+        }
+        if (entry) {
+            entry->falling = falling;
+            entry->jetting = jetting;
+            entry->torqueVelocity = velocity;
+        }
         float headX = bs.readSignedFloat(6); // head pitch
         float headZ = bs.readSignedFloat(6); // head yaw
-    float bodyYaw = bs.readFloat(7) * (2.0f * 3.14159f); // rotationZ (0-1 maps to 0-2PI)
+    float bodyYaw = bs.readFloat(7) * (2.0f * (float)M_PI); // rotationZ (0-1 maps to 0-2PI)
         if (entry) {
             // Always update body yaw rotation from MoveMask
             float half = bodyYaw * 0.5f;
@@ -1991,6 +2017,7 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
             entry->hasRotation = true;
             entry->headPitch = headX;
             entry->headYaw = headZ;
+            entry->bodyYaw = bodyYaw;
         }
         readMove(bs);
         bs.readFlag(); // allowWarp
@@ -2928,6 +2955,7 @@ void DemoParser::recordParseFault(const char* stage, int blockIndex) {
 
 PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIndex) {
     parsingBlockIndex_ = blockIndex;
+    s_packetTime = blockIndex >= 0 ? T2Demo::playbackBlockTime(blockIndex, getMoveTicksBefore()) : 0.0f;
     PacketData pd{};
     BitStream bs(data, size);
     pd.dnetHeader = readDnetHeader(bs);

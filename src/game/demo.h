@@ -672,6 +672,23 @@ struct GhostEntry {
     // Head rotation (aim direction)
     float headPitch = 0.0f;
     float headYaw = 0.0f;
+    // Player ActionMask: the server's action index (deaths, taunts, etc.).
+    int actionAnim = -1;
+    bool actionHoldAtEnd = false, actionAtEnd = false;
+    float actionAnimPos = 0.0f;
+    float actionTime = 0.0f; // demo time the action update arrived
+    // Player MoveMask state, in Torque world space.
+    bool falling = false, jetting = false;
+    Vec3 torqueVelocity{};
+    float bodyYaw = 0.0f;
+    // ShapeBase MountedMask: object this ghost is mounted on, or -1.
+    int mountObject = -1;
+    // Client-derived movement animation, updated on simulation ticks.
+    int contactTimer = 0;
+    int moveAction = 0;
+    float moveTimeScale = 1.0f;
+    float moveStartTime = 0.0f;
+    bool moveAnimValid = false;
 };
 
 class GhostTracker {
@@ -762,6 +779,7 @@ public:
     const DemoHeader& getHeader() const { return header; }
     const InitialBlockData& getInitialBlock() const { return initialBlock; }
     const GhostTracker& getGhostTracker() const { return ghostTracker; }
+    GhostTracker& getMutableGhostTracker() { return ghostTracker; }
 
     int getBlockCount();
     int getMoveBlockCount() const;
@@ -910,6 +928,8 @@ public:
     // Pending explosion events from projectile parsers
     using PendingExplosion = DemoPendingExplosion;
     static std::vector<PendingExplosion> s_pendingExplosions;
+    // Demo time of the packet being parsed, for timestamping ghost updates.
+    static float s_packetTime;
     std::vector<PendingExplosion> consumeExplosions() { auto r = std::move(s_pendingExplosions); s_pendingExplosions.clear(); return r; }
 
     // Terrain file from ghost data (for when .mis doesn't have it)

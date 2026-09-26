@@ -1,4 +1,7 @@
 #include "game/game.h"
+#include "game/player_animation.h"
+#include "game/collision.h"
+#include "render/dts_loader.h"
 #include "game/precipitation_parity.h"
 #include "game/movement.h"
 #include "game/damage_parity.h"
@@ -5742,6 +5745,11 @@ bool Game::init() {
         "resumeDemo - Resume demo playback");
     con.addCommand("toggleDemoPause", [this](int32_t, const char* const*) { toggleDemoPause(); },
         "toggleDemoPause - Toggle demo playback pause");
+    con.addCommand("toggleDemoOrbit", [this](int32_t, const char* const*) {
+        demoFirstPersonCam = false;
+        demoOrbitCam = !demoOrbitCam;
+        freeCamActive = false;
+    }, "toggleDemoOrbit - Toggle the demo orbit camera (F2)");
     con.addCommand("stepDemo", [this](int32_t argc, const char* const* argv) {
         const int blocks = argc > 1 ? std::max(1, atoi(argv[1])) : 1;
         requestDemoStep(blocks);
@@ -6187,6 +6195,9 @@ void Game::update(float dt) {
                         }
                     }
                 }
+
+                if (block->type == T2Demo::BlockTypeMove)
+                    updateDemoPlayerAnimation(T2Demo::playbackBlockTime(demoBlocksDone, demoTicks));
 
                 // Parse packet blocks (GameState, ghost updates, events)
                 if (block->type == T2Demo::BlockTypeSendPacket) {
@@ -7915,7 +7926,52 @@ void Game::render(float dt) {
                 const DTSShape::Animation* animation = nullptr;
                 float animationPosition = 0.0f;
                 bool isTurret = isTurretGhostClass(g->className);
+                // Players animate from the PlayerData action table: the
+                // server's wired action (deaths, taunts) or the client-picked
+                // movement action.
+                const bool playerAnimated = isPlayer && !shape->actionTable.empty();
+                if (playerAnimated) {
+                    const auto& table = shape->actionTable;
+                    auto tableAnimation = [&](int action) -> int {
+                        return action >= 0 && action < (int)table.size() ? table[action] : -1;
+                    };
+                    float actionEnd = -1.0f;
+                    if (g->actionAnim >= 0 &&
+                        (g->actionAnim >= PlayerAnimation::NumTableActions || g->damageState >= 1)) {
+                        const int index = tableAnimation(g->actionAnim);
+                        if (index >= 0 && index < (int)shape->animations.size()) {
+                            const auto& clip = shape->animations[index];
+                            const float position = PlayerAnimation::sampleActionPosition(
+                                g->actionAnimPos, g->actionAtEnd, g->actionTime, demoTime, clip.duration);
+                            actionEnd = g->actionTime + clip.duration *
+                                (1.0f - (g->actionAtEnd ? 1.0f : g->actionAnimPos));
+                            const bool holds = g->actionHoldAtEnd || g->mountObject >= 0 ||
+                                g->damageState >= 1;
+                            if (position < 1.0f || holds) {
+                                animation = &clip;
+                                animationPosition = position;
+                            }
+                        }
+                    }
+                    if (!animation) {
+                        const int action = g->moveAnimValid ? g->moveAction
+                                                            : (int)PlayerAnimation::Root;
+                        const int index = tableAnimation(action);
+                        if (index >= 0 && index < (int)shape->animations.size()) {
+                            const auto& clip = shape->animations[index];
+                            const float start = std::max(g->moveStartTime, actionEnd);
+                            const float cycles = clip.duration > 0.0f
+                                ? std::max(0.0f, demoTime - start) * g->moveTimeScale / clip.duration
+                                : 0.0f;
+                            animation = &clip;
+                            animationPosition = clip.looping
+                                ? cycles - std::floor(cycles)
+                                : std::clamp(cycles, 0.0f, 1.0f);
+                        }
+                    }
+                }
                 for (const auto& thread : g->threads) {
+                    if (playerAnimated) break;
                     if (!thread.valid || thread.sequence < 0 ||
                         thread.sequence >= (int)shape->animations.size()) continue;
                     if (thread.state == 1 || thread.state == 3) continue;
@@ -7959,7 +8015,11 @@ void Game::render(float dt) {
                  appendWheelNodeOverrides(*g, *shape, dt, overrides, numOverrides,
                                           8, mg->wheelRotation);
                  // Player head aim direction
-                if (isPlayer && shape && (mg->headPitch != 0.0f || mg->headYaw != 0.0f)) {
+                // Absolute head overrides would detach the head from an
+                // animated body; animated players need the head/look blend
+                // sequences instead.
+                if (isPlayer && shape && !playerAnimated &&
+                    (mg->headPitch != 0.0f || mg->headYaw != 0.0f)) {
                     int headNode = shape->findNode("head");
                     if (headNode < 0) headNode = shape->findNode("mount4");
                      if (headNode >= 0 && numOverrides < 8) {
@@ -7980,10 +8040,10 @@ void Game::render(float dt) {
                     continue;
 
                 if (animation) {
-                    shape->renderAnimation(animation->name.c_str(),
-                                           animationPosition * animation->duration,
-                                           numOverrides > 0 ? overrides : nullptr,
-                                           numOverrides);
+                    shape->renderAnimationIndex((int)(animation - shape->animations.data()),
+                                                animationPosition * animation->duration,
+                                                numOverrides > 0 ? overrides : nullptr,
+                                                numOverrides);
                 } else {
                     shape->render(0, numOverrides > 0 ? overrides : nullptr, numOverrides);
                 }
@@ -8037,8 +8097,12 @@ void Game::render(float dt) {
                         std::string mountName = "mount" + std::to_string(mountPoint);
                         int mountNode = shape->findNode(mountName.c_str());
                         if (mountNode < 0 && mountPoint == 0) mountNode = shape->findNode("rhand");
-                        if (mountNode >= 0 && mountNode < (int)shape->defaultTransforms.size())
-                            mountedModel = mountedModel * shape->defaultTransforms[mountNode];
+                        // Mount to the node as posed by this frame's animation.
+                        const auto& mountNodes = shape->animatedNodeWorld.size() ==
+                            shape->defaultTransforms.size() ? shape->animatedNodeWorld
+                                                            : shape->defaultTransforms;
+                        if (mountNode >= 0 && mountNode < (int)mountNodes.size())
+                            mountedModel = mountedModel * mountNodes[mountNode];
                         const int imageMount = wShape->findNode("Mountpoint");
                         if (imageMount >= 0 && imageMount < (int)wShape->defaultTransforms.size())
                             mountedModel = mountedModel * wShape->defaultTransforms[imageMount].inverse();
@@ -9826,6 +9890,124 @@ static void appendWheelNodeOverrides(const GhostEntry& ghost, DTSShape& shape,
     }
 }
 
+
+// Script-defined TSShapeConstructor datablocks (scripts/*.cs) name a shape's
+// sequences as sequence0..sequenceN; the engine stops at the first empty one.
+static std::vector<std::string> scriptShapeSequences(const std::string& shapePath) {
+    std::vector<std::string> sequences;
+    const std::string pathLower = missionLower(shapePath);
+    auto fieldValue = [](const ScriptObject& object, const std::string& wanted) -> std::string {
+        for (const auto& [key, value] : object.fields)
+            if (missionLower(key) == wanted) return value.toString();
+        return {};
+    };
+    for (const auto& [name, object] : ScriptEngine::instance().objects) {
+        if (!object || missionLower(object->className) != "tsshapeconstructor") continue;
+        const std::string base = missionLower(fieldValue(*object, "baseshape"));
+        if (base.empty() || !(pathLower == base || pathLower.ends_with("/" + base))) continue;
+        for (int i = 0; i < 127; ++i) {
+            std::string entry = fieldValue(*object, "sequence" + std::to_string(i));
+            if (entry.empty()) break;
+            sequences.push_back(std::move(entry));
+        }
+        break;
+    }
+    return sequences;
+}
+
+void Game::updateDemoPlayerAnimation(float tickTime) {
+    if (!demoParser) return;
+    const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+    GhostTracker& tracker = demoParser->getMutableGhostTracker();
+    for (int index : tracker.getAllIndices()) {
+        GhostEntry* g = tracker.getMutableGhost(index);
+        if (!g || !g->hasPosition || !ObserverParity::isPlayerClass(g->className)) continue;
+        float runSurfaceAngle = 0.0f;
+        float halfX = 0.0f, halfY = 0.0f;
+        if (g->hasDatablock) {
+            auto block = blocks.find((uint32_t)g->datablockId);
+            if (block != blocks.end() && block->second.decoded.isPlayerData) {
+                runSurfaceAngle = block->second.decoded.playerRunSurfaceAngle;
+                halfX = std::max(0.0f, block->second.decoded.playerBoxSize[0] * 0.5f);
+                halfY = std::max(0.0f, block->second.decoded.playerBoxSize[1] * 0.5f);
+            }
+        }
+        // Player::updateMove contact: run-surface contact resets the timer.
+        bool contact = false;
+        if (w) {
+            const Point3F feet = Math::torquePointToYUp({g->position.x, g->position.y, g->position.z});
+            // Player::findContact queries the box footprint extended 0.03 m
+            // above and below the feet; on a slope its uphill edge touches
+            // first. Sample the footprint corners (Torque x/y map to Torch
+            // x/-z) and take the highest surface.
+            const float probe = feet.y + 0.5f;
+            const float spacing = std::max(0.25f, std::max(halfX, halfY));
+            float floor = w->getFloorHeight(feet.x, probe, feet.z);
+            for (float sx : {-halfX, halfX})
+                for (float sz : {-halfY, halfY})
+                    floor = std::max(floor, w->getFloorHeight(feet.x + sx, probe, feet.z + sz));
+            const Point3F normal = terrainNormalFromHeights(
+                w->getFloorHeight(feet.x - spacing, probe, feet.z),
+                w->getFloorHeight(feet.x + spacing, probe, feet.z),
+                w->getFloorHeight(feet.x, probe, feet.z - spacing),
+                w->getFloorHeight(feet.x, probe, feet.z + spacing), spacing);
+            contact = PlayerAnimation::hasRunContact(feet.y, floor, normal.y, runSurfaceAngle);
+        }
+        g->contactTimer = contact ? 0 : std::min(g->contactTimer + 1, 1 << 20);
+        PlayerAnimation::MoveAnimation picked;
+        if (g->mountObject < 0)
+            picked = PlayerAnimation::pickMoveAnimation(g->torqueVelocity.x, g->torqueVelocity.y,
+                g->bodyYaw, g->contactTimer, g->falling, g->jetting);
+        // Player::setActionThread ignores an unchanged action, including a
+        // direction change for the same Side action.
+        if (!g->moveAnimValid || g->moveAction != picked.action) {
+            g->moveAction = picked.action;
+            g->moveTimeScale = picked.timeScale;
+            g->moveStartTime = tickTime;
+            g->moveAnimValid = true;
+        }
+    }
+}
+
+void Game::importShapeSequences(DTSShape& shape, const std::string& shapePath,
+                                const std::vector<std::string>& sequences) {
+    auto& fs = Engine::instance().fs();
+    size_t imported = 0;
+    for (const std::string& entry : sequences) {
+        // "file.dsq alias": whitespace ends the file name; the rest renames
+        // the last imported sequence.
+        const size_t split = entry.find_first_of(" \t");
+        const std::string file = entry.substr(0, split);
+        std::string alias;
+        if (split != std::string::npos) {
+            const size_t start = entry.find_first_not_of(" \t", split);
+            if (start != std::string::npos) alias = entry.substr(start);
+            while (!alias.empty() && std::isspace((unsigned char)alias.back())) alias.pop_back();
+        }
+        if (file.empty()) continue;
+        const std::string path = "shapes/" + file;
+        if (!TorchPath::isSafeLogicalPath(path.c_str())) continue;
+        std::vector<uint8_t> data = fs.read(path.c_str());
+        if (data.empty()) {
+            Console::instance().printf(LogLevel::Warn, "Missing sequence %s for %s",
+                entry.c_str(), shapePath.c_str());
+            continue;
+        }
+        if (importDSQ(data.data(), data.size(), shape.nodes, alias, shape.animations) < 0) {
+            Console::instance().printf(LogLevel::Error, "Load sequence %s failed for %s",
+                entry.c_str(), shapePath.c_str());
+            break;
+        }
+        ++imported;
+    }
+    std::vector<std::string> names;
+    names.reserve(shape.animations.size());
+    for (const auto& animation : shape.animations) names.push_back(animation.name);
+    shape.actionTable = PlayerAnimation::buildActionTable(names);
+    Console::instance().printf(LogLevel::Debug, "Imported %zu/%zu sequences for %s",
+        imported, sequences.size(), shapePath.c_str());
+}
+
 DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::string& skinName,
                                    const std::string& datablockInstance) {
     if (className == "Camera" || className == "AIObjective" ||
@@ -9881,6 +10063,21 @@ DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::stri
 
     Console::instance().printf(LogLevel::Debug, "Demo: loaded shape for '%s' (%zu meshes)",
         path, shape.meshes.size());
+
+    // Streamed TSShapeConstructor datablocks name this shape's sequences.
+    if (demoParser) {
+        const std::string pathLower = missionLower(dbShapePath);
+        for (const auto& [id, block] : demoParser->getInitialBlock().dataBlocks) {
+            const std::string& base = block.decoded.constructorShape;
+            if (base.empty()) continue;
+            const std::string baseLower = missionLower(base);
+            if (pathLower == baseLower || (pathLower.size() > baseLower.size() &&
+                    pathLower.ends_with("/" + baseLower))) {
+                importShapeSequences(shape, dbShapePath, block.decoded.constructorSequences);
+                break;
+            }
+        }
+    }
 
     auto inserted = demoShapeCache.emplace(cacheKey, std::move(shape));
     return inserted.first->second.loaded ? &inserted.first->second : nullptr;
@@ -10481,6 +10678,11 @@ void Game::shapeViewerLoadCurrent() {
     if (!shapeViewerShape.load(data.data(), data.size())) {
         Console::instance().printf(LogLevel::Warn, "Shape Viewer: failed to load '%s'", path.c_str());
         return;
+    }
+
+    {
+        const auto sequences = scriptShapeSequences(path);
+        if (!sequences.empty()) importShapeSequences(shapeViewerShape, path, sequences);
     }
 
     shapeViewerAnimTime = 0;

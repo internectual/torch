@@ -25,6 +25,11 @@ struct DTSLoadResult {
 };
 
 DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name);
+// TSShape::importSequences: appends a DSQ's sequences, mapping its nodes to
+// `nodes` by name. A non-empty alias renames the last imported sequence, as
+// TSShapeConstructor does. Returns the number appended, or -1 on failure.
+int importDSQ(const uint8_t* data, size_t size, const std::vector<DTSShape::Node>& nodes,
+              const std::string& alias, std::vector<DTSShape::Animation>& out);
 bool updateSkinnedMesh(MeshData& mesh, SkinInfo& skin,
                        const std::vector<MatrixF>& nodeWorld,
                        const std::vector<MatrixF>& initialTransforms);

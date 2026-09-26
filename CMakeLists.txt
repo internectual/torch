@@ -501,6 +501,11 @@ target_include_directories(torch_demo_text_test PRIVATE src)
 target_compile_options(torch_demo_text_test PRIVATE -UNDEBUG)
 add_test(NAME torch_demo_text COMMAND torch_demo_text_test)
 
+add_executable(torch_player_animation_test tests/player_animation_test.cpp)
+target_include_directories(torch_player_animation_test PRIVATE src)
+target_compile_options(torch_player_animation_test PRIVATE -UNDEBUG)
+add_test(NAME torch_player_animation COMMAND torch_player_animation_test)
+
 add_executable(torch_dts_animation_test
     tests/dts_animation_test.cpp
     src/core/math.cpp

@@ -851,6 +851,12 @@ public:
     Menu& menu() { return *mMenu; }
     int getDemoBlocksDone() const { return demoBlocksDone; }
     int getDemoBlocksTotal() const { return demoBlocksTotal; }
+    // TSShapeConstructor: import each "file.dsq alias" entry from shapes/
+    // and build the shape's player action table.
+    // Client-side player animation state, advanced once per 32 ms tick.
+    void updateDemoPlayerAnimation(float tickTime);
+    void importShapeSequences(DTSShape& shape, const std::string& shapePath,
+                              const std::vector<std::string>& sequences);
     DTSShape* getOrLoadDemoShape(const std::string& className, const std::string& skinName = "",
                                  const std::string& datablockInstance = "");
 

@@ -1762,6 +1762,7 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
                 nodeWorld[i] = nodeLocal[i];
         }
     }
+    animatedNodeWorld = nodeWorld;
     const MatrixF baseModel = r.modelMatrix();
 
     if (isInterior) {
@@ -2009,6 +2010,22 @@ int DTSShape::findNode(const std::string& name) const {
 void DTSShape::renderAnimation(const char* animName, float time,
                                const NodeOverride* overrides, int numOverrides) {
     if (!loaded) return;
+    std::string wanted = animName ? animName : "";
+    for (char& c : wanted) c = (char)std::tolower((unsigned char)c);
+    for (size_t i = 0; i < animations.size(); ++i) {
+        std::string candidate = animations[i].name;
+        for (char& c : candidate) c = (char)std::tolower((unsigned char)c);
+        if (candidate == wanted) {
+            renderAnimationIndex((int)i, time, overrides, numOverrides);
+            return;
+        }
+    }
+    render(0, overrides, numOverrides);
+}
+
+void DTSShape::renderAnimationIndex(int animationIndex, float time,
+                                    const NodeOverride* overrides, int numOverrides) {
+    if (!loaded) return;
 
     // An object can be hidden in one sample and visible in the next. Reset all
     // mutable mesh state before sampling so skipped meshes cannot retain a
@@ -2018,16 +2035,11 @@ void DTSShape::renderAnimation(const char* animName, float time,
         if (mi < meshTVerts.size()) meshes[mi].remapUVs(0, meshTVerts[mi]);
     }
 
-    // Find the animation
-    const Animation* anim = nullptr;
-    std::string wanted = animName ? animName : "";
-    for (char& c : wanted) c = (char)std::tolower((unsigned char)c);
-    for (auto& a : animations) {
-        std::string candidate = a.name;
-        for (char& c : candidate) c = (char)std::tolower((unsigned char)c);
-        if (candidate == wanted) { anim = &a; break; }
+    if (animationIndex < 0 || animationIndex >= (int)animations.size()) {
+        render(0, overrides, numOverrides);
+        return;
     }
-    if (!anim) { render(0, overrides, numOverrides); return; }
+    const Animation* anim = &animations[animationIndex];
 
     const Animation* objectAnim = anim;
 
@@ -2213,6 +2225,7 @@ void DTSShape::renderAnimation(const char* animName, float time,
                 nodeWorld[i] = nodeLocal[i];
         }
     }
+    animatedNodeWorld = nodeWorld;
 
     // ── Step 4: Handle object-level vis/frame/matFrame animation ──
     std::vector<bool> objectVisible(objectStartMesh.size() > 0 ? objectStartMesh.size() : defaultTransforms.size(), true);
