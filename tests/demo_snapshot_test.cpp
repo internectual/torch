@@ -119,6 +119,18 @@ int main(int argc, char** argv) {
                   << blockCount << " blocks)\n";
     CHECK(parser.getParseFault().empty());
     CHECK(parser.getPacketsDroppedAfterFault() == 0);
+    // Target info resolves through each ghost's GameBase target id: every
+    // player gets a name, and only CTF flag items (never carriers) are flags.
+    int flagGhosts = 0;
+    for (int index : parser.getGhostTracker().getAllIndices()) {
+        const GhostEntry* g = parser.getGhostTracker().getGhost(index);
+        if (g->className == "Player") {
+            CHECK(!g->playerName.empty());
+            CHECK(!g->isFlag);
+        }
+        if (g->isFlag) ++flagGhosts;
+    }
+    CHECK(flagGhosts <= 2);
     const std::vector<int>& recordedTicks = parser.getMoveTicksBefore();
     CHECK((int)recordedTicks.size() == blockCount + 1);
     CHECK(recordedTicks.back() == parser.getMoveBlockCount());

@@ -371,6 +371,14 @@ struct QueuedMove {
     bool trigger[6]{};
 };
 
+// TargetManager slot state, keyed by target id (not ghost index).
+struct DemoTargetState {
+    std::string name, skin, type;
+    int sensorGroup = -1;
+    int renderFlags = 0;
+    bool hasRenderFlags = false;
+};
+
 struct TargetEntry {
     int targetId{};
     float sensorData{};
@@ -450,6 +458,7 @@ struct NetEventInfo {
     int targetSensorGroup = 0;
     int targetDataBlockId = -2;
     int targetRenderFlags = 0;
+    bool hasTargetRenderFlags = false;
     float targetVoicePitch = 1.0f;
     uint32_t missionCrc = 0;
 };
@@ -631,6 +640,8 @@ struct GhostEntry {
     int targetRenderFlags = 0;
     bool isFlag = false;
     int flagTeamId = 0;
+    // GameBase TargetMask: this object's TargetManager slot, or -1.
+    int targetId = -1;
     std::string shapeName; // from datablock
     int linkSourceGhost = -1;
     int linkTargetGhost = -1;
@@ -754,6 +765,7 @@ struct DemoParserSnapshot {
     std::vector<DemoTimedEvent> eventLog;
     std::vector<DemoPlayerInfo> playerInfo;
     std::map<std::string, std::string> skinToPlayer;
+    std::map<int, DemoTargetState> targets;
     WeaponsHudState weaponsHud;
     BackpackHudState backpackHud;
     InventoryHudState inventoryHud;
@@ -884,6 +896,8 @@ private:
     uint32_t recvAckMask{}, connectSequence{}, lastRecvAckAck{};
     bool connectionEstablished{};
     uint32_t nextRecvEventSeq{};
+    std::map<int, DemoTargetState> targets_, initialTargets_;
+    void applyTarget(GhostEntry& ghost) const;
     std::vector<int> moveTicksBefore_;
     uint32_t packetsParsed{};
     std::string parseFault_;
