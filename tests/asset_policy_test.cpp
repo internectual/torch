@@ -998,6 +998,7 @@ int main() {
     V12BitWriter stationFXVehicleUpdateWriter;
     stationFXVehicleUpdateWriter.writeFlag(false); // GameBase datablock
     stationFXVehicleUpdateWriter.writeFlag(false); // GameBase target
+    stationFXVehicleUpdateWriter.writeFlag(false); // InitialUpdateMask
     stationFXVehicleUpdateWriter.writeUnsigned(0x16, 5);
     V12BitStream stationFXVehicleUpdateStream(
         stationFXVehicleUpdateWriter.data().data(),
@@ -1165,6 +1166,7 @@ int main() {
     assert(repairStream.readUnsigned(5) == 0x12 && !repairStream.failed());
     V12BitWriter targetWriter;
     targetWriter.writeFlag(false); targetWriter.writeFlag(false);
+    targetWriter.writeFlag(false); // InitialUpdateMask
     targetWriter.writeFlag(false); // no source object
     for (int i = 0; i < 6; ++i) targetWriter.writeUnsigned(0, 32);
     targetWriter.writeFlag(false); // not truncated

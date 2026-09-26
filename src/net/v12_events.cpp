@@ -107,9 +107,16 @@ bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
             event.ghostCount = (uint16_t)stream.readUnsigned(11);
         } else if (header.classId == 5) {
             stream.readF32();
+        } else if (header.classId == 2) {
+            // FogChallengeEvent: no payload.
         } else if (header.classId == 6) {
-            stream.readPoint3F();
-            stream.readPoint3F();
+            // LightningStrikeEvent
+            if (stream.readFlag()) {
+                stream.readUnsigned(11); // source ghost
+                stream.readUnsigned(10); // strike x
+                stream.readUnsigned(10); // strike y
+                if (stream.readFlag()) stream.readUnsigned(11); // target ghost
+            }
         } else if (header.classId == 13) {
             event.hasMissionCrc = true;
             event.missionCrc = stream.readU32();

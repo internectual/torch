@@ -5787,8 +5787,11 @@ bool Game::init() {
             return;
         }
         demoBlocksDone = target;
-        demoTime = demoBlocksTotal > 0 && demoTotalTime > 0
-            ? demoTotalTime * (float)target / (float)demoBlocksTotal : 0;
+        demoTime = T2Demo::playbackBlockTime(target, demoParser->getMoveTicksBefore());
+        // A seek may cross a mission change in either direction.
+        if (!T2Demo::MissionReplacementState::sameMission(
+                demoParser->currentMission(), demoMissionState.loadedMission))
+            tryLoadDemoMission(demoParser->currentMission(), false);
         demoInterpolationDt = 0.0f;
         demoMoveBlend = 1.0f;
         demoPathCount = 0;
@@ -6104,9 +6107,12 @@ void Game::update(float dt) {
             const float playbackRate = (demoFastForward || currentInput.jet)
                 ? std::max(demoPlaybackRate, 4.0f) : demoPlaybackRate;
             Engine::instance().audio().setPlaybackRate(playbackRate);
-            const float blockDuration = T2Demo::playbackBlockDuration(
-                demoTotalTime, demoBlocksTotal);
-            const float playbackDt = stepDemo ? blockDuration * stepBlocks : dt * playbackRate;
+            const std::vector<int>& demoTicks = demoParser->getMoveTicksBefore();
+            const float playbackDt = stepDemo
+                ? std::max(0.0f, T2Demo::playbackBlockTime(
+                      std::min(demoBlocksDone + std::min(stepBlocks, 500), demoBlocksTotal),
+                      demoTicks) - demoTime)
+                : dt * playbackRate;
             demoInterpolationDt = playbackDt;
             demoTime = std::min(demoTime + playbackDt, demoTotalTime);
             // Decay camera shake
@@ -6130,16 +6136,18 @@ void Game::update(float dt) {
                 // Use the same playhead-to-block conversion as normal
                 // playback. Integer truncation here used to stall 4x playback
                 // whenever a frame represented less than one block.
-                const int targetDone = T2Demo::playbackTargetBlock(
-                    demoTime, demoTotalTime, demoBlocksTotal);
+                const int targetDone = T2Demo::playbackTargetBlock(demoTime, demoTicks);
                 blocksThisFrame = targetDone - demoBlocksDone;
             } else {
                 demoJetHeld = false;
                 // Match real-time: catch up to target position
-                int targetDone = T2Demo::playbackTargetBlock(
-                    demoTime, demoTotalTime, demoBlocksTotal);
+                int targetDone = T2Demo::playbackTargetBlock(demoTime, demoTicks);
                 blocksThisFrame = targetDone - demoBlocksDone;
             }
+            // Blocks after the final Move tick belong to no later tick; drain
+            // them once the clock reaches the end so playback completes.
+            if (!stepDemo && demoTime >= demoTotalTime)
+                blocksThisFrame = std::max(blocksThisFrame, 500);
             if (blocksThisFrame < 0) blocksThisFrame = 0;
             if (blocksThisFrame > 500) blocksThisFrame = 500;
 
@@ -6153,9 +6161,7 @@ void Game::update(float dt) {
                     return;
                 }
                 demoBlocksDone++;
-                const float blockTime = demoBlocksTotal > 0
-                    ? demoTotalTime * (float)(demoBlocksDone - 1) / (float)demoBlocksTotal
-                    : 0.0f;
+                const float blockTime = T2Demo::playbackBlockTime(demoBlocksDone - 1, demoTicks);
                 const std::string previousMission = demoParser->currentMission();
                 demoParser->setCurrentBlock(demoBlocksDone - 1);
                 const bool missionChanged = demoParser->currentMission() != previousMission;
@@ -9989,9 +9995,12 @@ bool Game::playDemo(const char* path) {
         demoEventLog.clear();
     demoAudioEventsPlayed.clear();
     int totalBlocks = demoParser->getBlockCount();
-    const int moveBlocks = demoParser->getMoveBlockCount();
-    demoTotalTime = hdr.demoLengthMs > 0 ? hdr.demoLengthMs / 1000.0f :
-        (moveBlocks > 0 ? moveBlocks * 0.032f : 1.0f);
+    // Playback advances one 32 ms tick per Move block. The header length is
+    // the displayed duration, but never cut playback short of the last tick.
+    const float tickTime = T2Demo::playbackBlockTime(totalBlocks,
+                                                     demoParser->getMoveTicksBefore());
+    demoTotalTime = std::max(hdr.demoLengthMs / 1000.0f, tickTime);
+    if (demoTotalTime <= 0.0f) demoTotalTime = 1.0f;
     demoBlocksTotal = totalBlocks;
     demoBlocksDone = 0;
     demoSnapshots.clear();
@@ -10009,7 +10018,7 @@ bool Game::playDemo(const char* path) {
 
     Console::instance().printf(LogLevel::Info,
         "  Total blocks: %d, move ticks: %d (%.1f seconds)",
-        totalBlocks, moveBlocks, demoTotalTime);
+        totalBlocks, demoParser->getMoveTicksBefore().back(), demoTotalTime);
     Console::instance().printf(LogLevel::Info, "Demo loaded, starting playback...");
     demoPlaying = true;
     setState(Playing);
@@ -10113,7 +10122,7 @@ void Game::resetDemoEffects() {
     if (w) w->clearEffects();
 }
 
-bool Game::tryLoadDemoMission(const std::string& mission) {
+bool Game::tryLoadDemoMission(const std::string& mission, bool resetParserState) {
     if (mission.empty() || mission == demoMissionState.loadedMission) {
         if (mission == demoMissionState.loadedMission)
             demoMissionState.pendingMission.clear();
@@ -10137,8 +10146,12 @@ bool Game::tryLoadDemoMission(const std::string& mission) {
         return false;
     }
 
+    // commit() only accepts the pending replacement; a first-attempt load
+    // has not been deferred yet.
+    demoMissionState.defer(mission);
     demoMissionState.commit(mission);
-    demoParser->resetMissionState();
+    // A seek has already rebuilt parser state for the new mission.
+    if (resetParserState) demoParser->resetMissionState();
     clearMissionAudio();
     Engine::instance().audio().stopAll();
     clearProjectileAudio();

@@ -846,7 +846,7 @@ public:
     void resetDemoCamera();
     void resetDemoEffects();
     void resetDemoPresentation();
-    bool tryLoadDemoMission(const std::string& mission);
+    bool tryLoadDemoMission(const std::string& mission, bool resetParserState = true);
     DemoParser* getDemoParser() const { return demoParser; }
     Menu& menu() { return *mMenu; }
     int getDemoBlocksDone() const { return demoBlocksDone; }

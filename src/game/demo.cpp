@@ -240,12 +240,13 @@ float BitStream::readSignedFloat(int bitCount) {
 
 int BitStream::readRangedU32(int rangeStart, int rangeEnd) {
     if (rangeEnd < rangeStart) { error = true; return rangeStart; }
-    int rangeSize = rangeEnd - rangeStart + 1;
-    int bits = 1;
-    while (bits < 31 && (1u << bits) < (unsigned)rangeSize) bits++;
-    int value = readInt(bits) + rangeStart;
-    if (value > rangeEnd) { error = true; return rangeEnd; }
-    return value;
+    // getBinLog2(getNextPow2(size)) bits; a single-value range reads none.
+    // The engine does not validate the value, so neither does the stream.
+    const unsigned rangeSize = (unsigned)(rangeEnd - rangeStart) + 1u;
+    int bits = 0;
+    while (bits < 31 && (1u << bits) < rangeSize) bits++;
+    const int value = (bits > 0 ? readInt(bits) : 0) + rangeStart;
+    return std::min(value, rangeEnd);
 }
 
 uint8_t BitStream::readU8() { return (uint8_t)readInt(8); }
@@ -309,10 +310,9 @@ BitStream::AffineTransform BitStream::readAffineTransform(const Vec3& cp) {
 }
 
 std::string BitStream::readString() {
-    // v24834 uses raw strings: U8 length + raw bytes (no Huffman, no string buffer)
-    // v25034+ uses Huffman with string buffer compression
-    // Detect format by checking if the first flag+length produces a reasonable string
-    if (stringBufferEnabled && !stringBuffer.empty() && readFlag()) {
+    // BitStream::readString: with the string buffer enabled, the prefix flag
+    // is always present, including for the first string after enabling it.
+    if (stringBufferEnabled && readFlag()) {
         int offset = readInt(8);
         stringBuffer = stringBuffer.substr(0, offset) + readHuffBuffer();
     } else {
@@ -345,9 +345,9 @@ std::string BitStream::unpackNetString() {
         case 3: { // integer
             bool neg = readFlag();
             int num;
-            if (readFlag()) num = readInt(7);     // small (0-127)
-            else if (readFlag()) num = readInt(14); // medium (0-16383)
-            else num = readInt(29);                 // large (0-536870911)
+            if (readFlag()) num = readInt(7);       // small
+            else if (readFlag()) num = readInt(15); // medium
+            else num = readInt(31);                 // large
             if (neg) num = -num;
             char buf[32];
             snprintf(buf, sizeof(buf), "%d", num);
@@ -460,18 +460,18 @@ void DemoParser::readHeader() {
     header.initialBlockSize = r32();
 }
 
-// ─── Initial Block Sub-Readers (unused for this demo, kept for future use) ───
-ScoreEntry DemoParser::readScoreEntry(BitStream& bs) {
-    ScoreEntry se{};
-    se.clientId = bs.readFlag() ? (uint32_t)bs.readInt(16) : 0;
-    se.teamId = bs.readFlag() ? (uint32_t)bs.readInt(16) : 0;
-    se.score = bs.readFlag() ? (uint32_t)bs.readInt(16) : 0;
-    se.field0 = (uint32_t)bs.readInt(6);
-    se.field1 = (uint32_t)bs.readInt(6);
-    se.field2 = (uint32_t)bs.readInt(6);
-    se.isBot = bs.readFlag();
-    for (int i = 0; i < 6; i++) se.triggerFlags[i] = bs.readFlag();
-    return se;
+// ─── Initial Block Sub-Readers ───
+QueuedMove DemoParser::readQueuedMove(BitStream& bs) {
+    QueuedMove move{};
+    move.pyaw = bs.readFlag() ? (uint32_t)bs.readInt(16) : 0;
+    move.ppitch = bs.readFlag() ? (uint32_t)bs.readInt(16) : 0;
+    move.proll = bs.readFlag() ? (uint32_t)bs.readInt(16) : 0;
+    move.px = (uint32_t)bs.readInt(6);
+    move.py = (uint32_t)bs.readInt(6);
+    move.pz = (uint32_t)bs.readInt(6);
+    move.freeLook = bs.readFlag();
+    for (bool& trigger : move.trigger) trigger = bs.readFlag();
+    return move;
 }
 
 std::vector<std::string> DemoParser::readDemoValues(BitStream& bs) {
@@ -556,8 +556,18 @@ void DemoParser::readEventStartBlock(BitStream& bs) {
         ev.classId = bs.readInt(T2Demo::NetEventClassBitSize) + T2Demo::NetEventClassFirst;
         ev.guaranteed = true;
         ev.dataBitsStart = bs.getCurPos();
+        const bool decoded = readEventPayload(bs, ev, Vec3{}, false);
         ev.dataBitsEnd = bs.getCurPos();
         initialBlock.initialEvents.push_back(ev);
+        if (!decoded) {
+            // Without a decoder the payload length is unknown; the rest of the
+            // start block cannot be read reliably.
+            Console::instance().printf(LogLevel::Error,
+                "Demo: unsupported start-block event class=%d at bit=%d",
+                ev.classId, ev.dataBitsStart);
+            bs.fail();
+            break;
+        }
     }
 }
 
@@ -768,11 +778,13 @@ bool DemoParser::readInitialBlock(const uint8_t* data, size_t size, uint32_t pro
     initialBlock.stateArray.clear();
     for (int i = 0; i < 16; ++i) initialBlock.stateArray.push_back(bs.readU32());
 
-    const uint32_t scoreCount = bs.readU32();
-    if (scoreCount > 256) return fail("score count");
-    initialBlock.scoreEntries.clear();
-    for (uint32_t i = 0; i < scoreCount; ++i)
-        initialBlock.scoreEntries.push_back(readScoreEntry(bs));
+    // A packed move is at least 3 + 18 + 1 + 6 = 28 bits.
+    const uint32_t moveCount = bs.readU32();
+    if ((uint64_t)moveCount * 28 > (uint64_t)bs.getRemainingBits())
+        return fail("move count");
+    initialBlock.queuedMoves.clear();
+    for (uint32_t i = 0; i < moveCount; ++i)
+        initialBlock.queuedMoves.push_back(readQueuedMove(bs));
     initialBlock.demoValues = readDemoValues(bs);
     extractMissionInfo();
     readComplexTargetManager(bs);
@@ -819,7 +831,10 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
     missionCrcChanges_.clear();
     eventLog_.clear();
     decompressedSize = 0;
+    moveTicksBefore_.clear();
     packetsParsed = 0;
+    parseFault_.clear();
+    packetsDroppedAfterFault_ = 0;
     s_pendingExplosions.clear();
     s_pendingTerrainFile.clear();
     s_sunData = {};
@@ -878,14 +893,6 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
         player.damage = target.damageLevel;
         player.clientId = target.targetId;
         playerInfo_.push_back(std::move(player));
-    }
-    for (const auto& score : initialBlock.scoreEntries) {
-        auto player = std::find_if(playerInfo_.begin(), playerInfo_.end(),
-            [&](const DemoPlayerInfo& entry) { return entry.clientId == (int)score.clientId; });
-        if (player != playerInfo_.end()) {
-            player->teamId = (int)score.teamId;
-            player->score = (int)score.score;
-        }
     }
     // The recordings.cs PLAYERLIST demo value uses the same roster field
     // order as MapGenius: name, ..., client id, ..., ping, packet loss.
@@ -1003,6 +1010,20 @@ int DemoParser::getMoveBlockCount() const {
     return count;
 }
 
+const std::vector<int>& DemoParser::getMoveTicksBefore() {
+    if (!moveTicksBefore_.empty() || !decompressed) return moveTicksBefore_;
+    moveTicksBefore_.push_back(0);
+    int off = 0;
+    while (off + 2 <= (int)decompressedSize) {
+        const int header = decompressed[off] | (decompressed[off + 1] << 8);
+        off += 2 + (header & 0xfff);
+        if (off > (int)decompressedSize) break;
+        moveTicksBefore_.push_back(moveTicksBefore_.back() +
+            ((header >> 12) == T2Demo::BlockTypeMove ? 1 : 0));
+    }
+    return moveTicksBefore_;
+}
+
 DemoBlock* DemoParser::nextBlock() {
     if (!decompressed || blockStreamOffset + 2 > (int)decompressedSize) return nullptr;
     int ts = decompressed[blockStreamOffset] | (decompressed[blockStreamOffset+1] << 8);
@@ -1053,6 +1074,8 @@ void DemoParser::reset() {
     connectionEstablished = initialBlock.connectionState.connectionEstablished;
     nextRecvEventSeq = initialBlock.nextRecvEventSeq;
     packetsParsed = 0;
+    parseFault_.clear();
+    packetsDroppedAfterFault_ = 0;
 }
 
 void DemoParser::resetMissionState() {
@@ -1189,6 +1212,8 @@ DemoParserSnapshot DemoParser::captureSnapshot() const {
     snapshot.connectionEstablished = connectionEstablished;
     snapshot.nextRecvEventSeq = nextRecvEventSeq;
     snapshot.packetsParsed = packetsParsed;
+    snapshot.parseFault = parseFault_;
+    snapshot.packetsDroppedAfterFault = packetsDroppedAfterFault_;
     snapshot.missionChanges = missionChanges_;
     snapshot.missionCrcChanges = missionCrcChanges_;
     snapshot.taggedStrings = initialBlock.taggedStrings;
@@ -1237,6 +1262,8 @@ bool DemoParser::restoreSnapshot(const DemoParserSnapshot& snapshot) {
     connectionEstablished = snapshot.connectionEstablished;
     nextRecvEventSeq = snapshot.nextRecvEventSeq;
     packetsParsed = snapshot.packetsParsed;
+    parseFault_ = snapshot.parseFault;
+    packetsDroppedAfterFault_ = snapshot.packetsDroppedAfterFault;
     missionChanges_ = snapshot.missionChanges;
     missionCrcChanges_ = snapshot.missionCrcChanges;
     initialBlock.taggedStrings = snapshot.taggedStrings;
@@ -1609,169 +1636,17 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents,
             ev.eventName = "Event" + std::to_string(rawId);
         }
         ev.dataBitsStart = bs.getCurPos();
-        // Parse known event payloads
-        if (ev.classId == T2Demo::NetEventClassFirst + 22) { // SimpleMessageEvent
-            ev.message = bs.readString();
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 9) { // RemoteCommandEvent
-            int argc = bs.readInt(5);
-            for (int i = 0; i < argc; i++) {
-                std::string arg = bs.unpackNetString();
-                if (arg.size() > 2 && arg[0] == '\\' && arg[1] == 'x') {
-                    int tag = atoi(arg.c_str() + 2);
-                    auto it = initialBlock.taggedStrings.find(tag);
-                    if (it != initialBlock.taggedStrings.end()) arg = it->second;
-                }
-                ev.arguments.push_back(arg);
-                if (!ev.message.empty()) ev.message += ' ';
-                ev.message += arg;
-            }
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 7) { // NetStringEvent
-            const int id = bs.readInt(10);
-            if (bs.readFlag()) {
-                const std::string value = bs.readString();
-                if (!bs.isError() && id >= 0 && id < 1024)
-                    initialBlock.taggedStrings[id] = value;
-            }
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 4) { // GhostingMessageEvent
-            bs.readU32();
-            bs.readInt(3);
-            bs.readInt(11);
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 0) { // CRCChallengeEvent
-            bs.readU32(); bs.readU32(); bs.readU32(); bs.readFlag();
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 1) { // CRCChallengeResponseEvent
-            bs.readU32(); bs.readU32(); bs.readU32();
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 19) { // SimDataBlockEvent
-            int objId  = bs.readInt(T2Demo::SimDBEventObjectIdBits); (void)objId;
-            int clsId  = bs.readInt(T2Demo::SimDBEventClassIdBits); (void)clsId;
-            int idx    = bs.readInt(T2Demo::SimDBEventIndexBits); (void)idx;
-            int total_ = bs.readInt(T2Demo::SimDBEventTotalBits); (void)total_;
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 17 ||
-                   ev.classId == T2Demo::NetEventClassFirst + 18) {
-            ev.audioProfileId = bs.readInt(11);
-            ev.directAudioProfile = true;
-            if (ev.classId == T2Demo::NetEventClassFirst + 18 && bs.readFlag()) {
-                bs.readFloat(8); bs.readFloat(8); bs.readFloat(8);
-                bs.readFlag(); // quaternion W sign
-            }
-            if (ev.classId == T2Demo::NetEventClassFirst + 18) {
-                const Vec3 position = bs.readCompressedPoint(compressionPoint, 0.5f);
-                ev.audioPosition = {position.x, position.y, position.z};
-                ev.hasAudioPosition = true;
-            }
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 20) { // SimTargetAudioEvent
-            ev.targetId = bs.readInt(9);
-            bs.readInt(12); // file tag
-            bs.readRangedU32(3, 1026); // audio description ID
-            if (bs.readFlag()) {
-                const Vec3 position = bs.readCompressedPoint(compressionPoint, 0.5f);
-                ev.audioPosition = {position.x, position.y, position.z};
-                ev.hasAudioPosition = true;
-            }
-            bs.readFlag(); // update sound
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 5) { // GravityEvent
-            bs.readF32();
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 6) { // LightningStrikeEvent
-            bs.readInt(11);
-            bs.readFloat(10);
-            bs.readFloat(10);
-            if (bs.readFlag()) bs.readInt(11);
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 12) { // SensorGroupColorEvent
-            const int sensorGroup = bs.readInt(5);
-            const uint32_t updateMask = bs.readU32();
-            for (int i = 0; i < 32; ++i) {
-                if ((updateMask & (1u << i)) != 0) {
-                    if (bs.readFlag()) {
-                        sensorGroupColors_[{sensorGroup, uint32_t(1) << i}] = bs.readU32();
-                    }
-                }
-            }
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 14) { // SetObjectActiveImageEvent
-            bs.readRangedU32(0, 1023);
-            bs.readRangedU32(0, 8);
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 15) { // SetSensorGroupEvent
-            bs.readInt(5);
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 16) { // SetServerTargetEvent
-            if (bs.readFlag()) bs.readInt(9);
-            bs.readF32(); bs.readF32(); bs.readF32();
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 24) { // TargetInfoEvent
-            ev.hasTargetInfo = true;
-            ev.targetId = bs.readInt(9);
-            auto readTag = [&](std::string& value) {
-                if (bs.readFlag()) {
-                    const int tag = bs.readFlag() ? bs.readInt(10) : 0x400;
-                    if (tag != 0x400) {
-                        auto it = initialBlock.taggedStrings.find(tag);
-                        if (it != initialBlock.taggedStrings.end()) value = it->second;
-                    }
-                }
-            };
-            readTag(ev.targetName);
-            readTag(ev.targetSkin);
-            readTag(ev.targetSkinPreference);
-            readTag(ev.targetVoice);
-            readTag(ev.targetType);
-            if (bs.readFlag()) ev.targetSensorGroup = bs.readInt(5);
-            if (bs.readFlag()) ev.targetDataBlockId = bs.readFlag() ? bs.readInt(11) : -2;
-            if (bs.readFlag()) ev.targetRenderFlags = bs.readInt(9);
-            if (bs.readFlag()) ev.targetVoicePitch = bs.readFloat(7) * 1.5f + 0.5f;
-            if (!ev.targetName.empty()) {
-                auto player = std::find_if(playerInfo_.begin(), playerInfo_.end(),
-                    [&](const DemoPlayerInfo& entry) {
-                        return entry.name == ev.targetName;
-                    });
-                if (player != playerInfo_.end()) {
-                    if (!ev.targetSkin.empty()) player->skin = ev.targetSkin;
-                } else {
-                    DemoPlayerInfo added;
-                    added.name = ev.targetName;
-                    added.skin = ev.targetSkin;
-                    added.teamId = ev.targetSensorGroup;
-                    added.clientId = ev.targetId;
-                    playerInfo_.push_back(std::move(added));
-                }
-            }
-            if (GhostEntry* ghost = ghostTracker.getMutableGhost(ev.targetId)) {
-                if (!ev.targetName.empty()) ghost->playerName = ev.targetName;
-                if (!ev.targetSkin.empty()) ghost->skinName = ev.targetSkin;
-                if (!ev.targetType.empty()) ghost->targetType = ev.targetType;
-                if (ev.targetSensorGroup >= 0) ghost->sensorGroup = ev.targetSensorGroup;
-                ghost->targetRenderFlags = ev.targetRenderFlags;
-                ghost->isFlag = (ev.targetRenderFlags & 0x2) != 0;
-                ghost->flagTeamId = ghost->isFlag ? ev.targetSensorGroup : 0;
-                if (ghost->isFlag) ghost->teamId = ev.targetSensorGroup;
-            }
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 25) { // TargetToEvent
-            if (bs.readFlag()) bs.readInt(9);
-            if (bs.readFlag()) {
-                bs.readF32(); bs.readF32(); bs.readF32();
-            }
-            bs.readFlag();
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 23) { // TargetFreeEvent
-            ev.hasTargetFree = true;
-            ev.targetId = bs.readInt(9);
-            ghostTracker.deleteGhost(ev.targetId);
-            playerInfo_.erase(std::remove_if(playerInfo_.begin(), playerInfo_.end(),
-                [&](const DemoPlayerInfo& player) { return player.clientId == ev.targetId; }),
-                playerInfo_.end());
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 13) { // SetMissionCRCEvent
-            ev.hasMissionCrc = true;
-            ev.missionCrc = bs.readU32();
-            currentMissionCrc_ = ev.missionCrc;
-            if (parsingBlockIndex_ >= 0 &&
-                (missionCrcChanges_.empty() ||
-                 missionCrcChanges_.back().first != parsingBlockIndex_ ||
-                 missionCrcChanges_.back().second != ev.missionCrc))
-                missionCrcChanges_.push_back({parsingBlockIndex_, ev.missionCrc});
-        } else if (ev.classId == T2Demo::NetEventClassFirst + 12) { // SensorGroupColorEvent
-            bs.readInt(4); bs.readU32();
-        } else {
+        if (!readEventPayload(bs, ev, compressionPoint, true)) {
             // Event payloads are not length-delimited. Do not consume a guessed
             // base payload or reinterpret its bits as the next event/ghost.
             Console::instance().printf(LogLevel::Error,
-                "Demo: unsupported event payload class=%d name='%s' at bit=%d; "
-                "packet parsing stopped",
+                "Demo: unsupported event payload class=%d name='%s' at bit=%d "
+                "(previous class=%d bits=%d-%d); packet parsing stopped",
                 ev.classId, ev.eventName.empty() ? "<unknown>" : ev.eventName.c_str(),
-                ev.dataBitsStart);
+                ev.dataBitsStart,
+                outEvents.empty() ? -1 : (int)outEvents.back().classId,
+                outEvents.empty() ? -1 : outEvents.back().dataBitsStart,
+                outEvents.empty() ? -1 : outEvents.back().dataBitsEnd);
             ev.dataBitsEnd = bs.getCurPos();
             outEvents.push_back(ev);
             bs.fail();
@@ -1781,6 +1656,178 @@ void DemoParser::readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents,
         outEvents.push_back(ev);
         more = bs.readFlag();
     }
+}
+
+// Decodes one event payload. applyEffects is false for demo start-block
+// events, which are queued behind every real sequence and never dispatch.
+bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
+                                  const Vec3& compressionPoint, bool applyEffects) {
+    if (ev.classId == T2Demo::NetEventClassFirst + 22) { // SimpleMessageEvent
+        ev.message = bs.readString();
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 9) { // RemoteCommandEvent
+        int argc = bs.readInt(5);
+        for (int i = 0; i < argc; i++) {
+            std::string arg = bs.unpackNetString();
+            if (arg.size() > 2 && arg[0] == '\\' && arg[1] == 'x') {
+                int tag = atoi(arg.c_str() + 2);
+                auto it = initialBlock.taggedStrings.find(tag);
+                if (it != initialBlock.taggedStrings.end()) arg = it->second;
+            }
+            ev.arguments.push_back(arg);
+            if (!ev.message.empty()) ev.message += ' ';
+            ev.message += arg;
+        }
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 7) { // NetStringEvent
+        const int id = bs.readInt(10);
+        if (bs.readFlag()) {
+            const std::string value = bs.readString();
+            if (applyEffects && !bs.isError() && id >= 0 && id < 1024)
+                initialBlock.taggedStrings[id] = value;
+        }
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 4) { // GhostingMessageEvent
+        bs.readU32();
+        bs.readInt(3);
+        bs.readInt(11);
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 0) { // CRCChallengeEvent
+        bs.readU32(); bs.readU32(); bs.readU32(); bs.readFlag();
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 1) { // CRCChallengeResponseEvent
+        bs.readU32(); bs.readU32(); bs.readU32();
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 19) { // SimDataBlockEvent
+        int objId  = bs.readInt(T2Demo::SimDBEventObjectIdBits); (void)objId;
+        int clsId  = bs.readInt(T2Demo::SimDBEventClassIdBits); (void)clsId;
+        int idx    = bs.readInt(T2Demo::SimDBEventIndexBits); (void)idx;
+        int total_ = bs.readInt(T2Demo::SimDBEventTotalBits); (void)total_;
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 17 ||
+               ev.classId == T2Demo::NetEventClassFirst + 18) {
+        ev.audioProfileId = bs.readInt(11);
+        ev.directAudioProfile = true;
+        if (ev.classId == T2Demo::NetEventClassFirst + 18 && bs.readFlag()) {
+            bs.readFloat(8); bs.readFloat(8); bs.readFloat(8);
+            bs.readFlag(); // quaternion W sign
+        }
+        if (ev.classId == T2Demo::NetEventClassFirst + 18) {
+            const Vec3 position = bs.readCompressedPoint(compressionPoint, 0.5f);
+            ev.audioPosition = {position.x, position.y, position.z};
+            ev.hasAudioPosition = true;
+        }
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 20) { // SimTargetAudioEvent
+        ev.targetId = bs.readInt(9);
+        bs.readInt(12); // file tag
+        bs.readRangedU32(3, 1026); // audio description ID
+        if (bs.readFlag()) {
+            const Vec3 position = bs.readCompressedPoint(compressionPoint, 0.5f);
+            ev.audioPosition = {position.x, position.y, position.z};
+            ev.hasAudioPosition = true;
+        }
+        bs.readFlag(); // update sound
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 2) { // FogChallengeEvent
+        // No payload.
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 5) { // GravityEvent
+        bs.readF32();
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 6) { // LightningStrikeEvent
+        if (bs.readFlag()) {
+            bs.readInt(11);   // source ghost
+            bs.readFloat(10); // strike x
+            bs.readFloat(10); // strike y
+            if (bs.readFlag()) bs.readInt(11); // target ghost
+        }
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 12) { // SensorGroupColorEvent
+        const int sensorGroup = bs.readInt(5);
+        const uint32_t updateMask = bs.readU32();
+        for (int i = 0; i < 32; ++i) {
+            if ((updateMask & (1u << i)) != 0) {
+                if (bs.readFlag()) {
+                    const uint32_t color = bs.readU32();
+                    if (applyEffects)
+                        sensorGroupColors_[{sensorGroup, uint32_t(1) << i}] = color;
+                }
+            }
+        }
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 14) { // SetObjectActiveImageEvent
+        bs.readRangedU32(0, 1023);
+        bs.readRangedU32(0, 8);
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 15) { // SetSensorGroupEvent
+        bs.readInt(5);
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 16) { // SetServerTargetEvent
+        if (bs.readFlag()) bs.readInt(9);
+        bs.readF32(); bs.readF32(); bs.readF32();
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 24) { // TargetInfoEvent
+        ev.hasTargetInfo = true;
+        ev.targetId = bs.readInt(9);
+        auto readTag = [&](std::string& value) {
+            if (bs.readFlag()) {
+                const int tag = bs.readFlag() ? bs.readInt(10) : 0x400;
+                if (tag != 0x400) {
+                    auto it = initialBlock.taggedStrings.find(tag);
+                    if (it != initialBlock.taggedStrings.end()) value = it->second;
+                }
+            }
+        };
+        readTag(ev.targetName);
+        readTag(ev.targetSkin);
+        readTag(ev.targetSkinPreference);
+        readTag(ev.targetVoice);
+        readTag(ev.targetType);
+        if (bs.readFlag()) ev.targetSensorGroup = bs.readInt(5);
+        if (bs.readFlag()) ev.targetDataBlockId = bs.readFlag() ? bs.readInt(11) : -2;
+        if (bs.readFlag()) ev.targetRenderFlags = bs.readInt(9);
+        if (bs.readFlag()) ev.targetVoicePitch = bs.readFloat(7) * 1.5f + 0.5f;
+        if (!applyEffects) return true;
+        if (!ev.targetName.empty()) {
+            auto player = std::find_if(playerInfo_.begin(), playerInfo_.end(),
+                [&](const DemoPlayerInfo& entry) {
+                    return entry.name == ev.targetName;
+                });
+            if (player != playerInfo_.end()) {
+                if (!ev.targetSkin.empty()) player->skin = ev.targetSkin;
+            } else {
+                DemoPlayerInfo added;
+                added.name = ev.targetName;
+                added.skin = ev.targetSkin;
+                added.teamId = ev.targetSensorGroup;
+                added.clientId = ev.targetId;
+                playerInfo_.push_back(std::move(added));
+            }
+        }
+        if (GhostEntry* ghost = ghostTracker.getMutableGhost(ev.targetId)) {
+            if (!ev.targetName.empty()) ghost->playerName = ev.targetName;
+            if (!ev.targetSkin.empty()) ghost->skinName = ev.targetSkin;
+            if (!ev.targetType.empty()) ghost->targetType = ev.targetType;
+            if (ev.targetSensorGroup >= 0) ghost->sensorGroup = ev.targetSensorGroup;
+            ghost->targetRenderFlags = ev.targetRenderFlags;
+            ghost->isFlag = (ev.targetRenderFlags & 0x2) != 0;
+            ghost->flagTeamId = ghost->isFlag ? ev.targetSensorGroup : 0;
+            if (ghost->isFlag) ghost->teamId = ev.targetSensorGroup;
+        }
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 25) { // TargetToEvent
+        if (bs.readFlag()) bs.readInt(9);
+        if (bs.readFlag()) {
+            bs.readF32(); bs.readF32(); bs.readF32();
+        }
+        bs.readFlag();
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 23) { // TargetFreeEvent
+        ev.hasTargetFree = true;
+        ev.targetId = bs.readInt(9);
+        if (!applyEffects) return true;
+        // Target ids are not ghost indices; ghosts are removed only by the
+        // ghost section's delete records.
+        playerInfo_.erase(std::remove_if(playerInfo_.begin(), playerInfo_.end(),
+            [&](const DemoPlayerInfo& player) { return player.clientId == ev.targetId; }),
+            playerInfo_.end());
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 13) { // SetMissionCRCEvent
+        ev.hasMissionCrc = true;
+        ev.missionCrc = bs.readU32();
+        if (!applyEffects) return true;
+        currentMissionCrc_ = ev.missionCrc;
+        if (parsingBlockIndex_ >= 0 &&
+            (missionCrcChanges_.empty() ||
+             missionCrcChanges_.back().first != parsingBlockIndex_ ||
+             missionCrcChanges_.back().second != ev.missionCrc))
+            missionCrcChanges_.push_back({parsingBlockIndex_, ev.missionCrc});
+    } else {
+        return false;
+    }
+    return true;
 }
 
 // ─── Ghost update data readers ──────────────────────────────────
@@ -2191,7 +2238,7 @@ static void readDebrisData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
 }
 
 static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
-    readGameBaseData(bs, isInitial);
+    readGameBaseData(bs, isInitial, entry);
     if (bs.readFlag()) { // initial update
         if (entry) entry->position = bs.readPoint3F();
         else bs.readPoint3F();
@@ -2213,7 +2260,6 @@ static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEnt
         bs.readFlag(); // quickSplash
         if (bs.readFlag()) {
             Vec3 expPos = bs.readPoint3F();
-            bs.readPoint3F(); // normal
             Vec3 normal = bs.readPoint3F();
             DemoParser::s_pendingExplosions.push_back({expPos, normal, 0.0f,
                 entry ? entry->datablockId : -1});
@@ -2700,6 +2746,30 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
         if (bs.readFlag()) { bs.readF32(); bs.readF32(); }
         if (bs.readFlag()) bs.readF32();
     }
+    else if (cn == "StationFXPersonal" || cn == "StationFXVehicle") {
+        readGameBaseData(bs, isInitial, entry);
+        // InitialUpdateMask: optional station object reference.
+        if (bs.readFlag() && bs.readFlag()) bs.readRangedU32(0, 1024);
+    }
+    else if (cn == "TargetProjectile") {
+        readGameBaseData(bs, isInitial, entry);
+        auto readSource = [&] {
+            bs.readRangedU32(0, 1024); // source object
+            bs.readRangedU32(0, 7);    // source image slot
+            bs.readFlag();             // client owned
+        };
+        if (bs.readFlag()) { // InitialUpdateMask
+            bs.readPoint3F(); // start
+            bs.readPoint3F(); // end
+            bs.readFlag();    // truncated
+            if (bs.readFlag()) readSource();
+        } else {
+            if (bs.readFlag()) readSource();
+            else bs.readPoint3F();
+            bs.readPoint3F();
+            bs.readFlag();
+        }
+    }
     else if (cn == "TSStatic") readTSStaticData(bs, isInitial, cp, entry);
     else if (cn == "AudioEmitter") readAudioEmitterData(bs);
     else if (cn == "VehicleBlocker") readVehicleBlockerData(bs);
@@ -2790,9 +2860,15 @@ void DemoParser::readGhosts(BitStream& bs, std::vector<GhostUpdate>& outGhosts, 
         if (!known) {
             if (isNew) ghostTracker.deleteGhost(gu.index);
             Console::instance().printf(LogLevel::Error,
-                "Demo: stopped ghost section seq=%d index=%d class=%d at bit=%d; "
-                "unknown payload boundary",
-                seqNumber, gu.index, gu.classId, gu.updateBitsStart);
+                "Demo: stopped ghost section block=%d seq=%d index=%d class=%d at bit=%d "
+                "(previous index=%d class=%d bits=%d-%d); unknown payload boundary",
+                parsingBlockIndex_, seqNumber, gu.index, gu.classId, gu.updateBitsStart,
+                outGhosts.empty() ? -1 : outGhosts.back().index,
+                outGhosts.empty() ? -1 : outGhosts.back().classId,
+                outGhosts.empty() ? -1 : outGhosts.back().updateBitsStart,
+                outGhosts.empty() ? -1 : outGhosts.back().updateBitsEnd);
+            // Ghost payloads are not length-delimited; the stream is desynced.
+            bs.fail();
             break;
         }
         gu.updateBitsEnd = bs.getCurPos();
@@ -2843,6 +2919,13 @@ bool DemoParser::applyProtocolHeader(const DnetHeader& dnet, bool& dispatchData)
     return true;
 }
 
+void DemoParser::recordParseFault(const char* stage, int blockIndex) {
+    if (!parseFault_.empty()) return;
+    parseFault_ = std::string(stage) + " section failed at block " + std::to_string(blockIndex);
+    Console::instance().printf(LogLevel::Error,
+        "Demo: parse fault (%s); later packets are dropped", parseFault_.c_str());
+}
+
 PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIndex) {
     parsingBlockIndex_ = blockIndex;
     PacketData pd{};
@@ -2852,6 +2935,12 @@ PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIn
         Console::instance().printf(LogLevel::Error,
             "Demo: malformed packet header at bit=%d/%d (block=%d)",
             bs.getCurPos(), bs.getMaxPos(), blockIndex);
+        return pd;
+    }
+    if (!parseFault_.empty()) {
+        // The engine has disconnected by now; a desynced stream is never
+        // reinterpreted as later events or ghosts.
+        ++packetsDroppedAfterFault_;
         return pd;
     }
     bool dispatchData = false;
@@ -2872,6 +2961,7 @@ PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIn
             "Demo: malformed packet seq=%d at game state bit=%d/%d (block=%d)",
             pd.dnetHeader.seqNumber, bs.getCurPos(), bs.getMaxPos(), blockIndex);
         bs.setStringBufferEnabled(false);
+        recordParseFault("gameState", blockIndex);
         return pd;
     }
     readEvents(bs, pd.events, pd.gameState.compressionPoint);
@@ -2880,14 +2970,14 @@ PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIn
             "Demo: malformed or unsupported event section seq=%d at bit=%d/%d (block=%d)",
             pd.dnetHeader.seqNumber, bs.getCurPos(), bs.getMaxPos(), blockIndex);
         bs.setStringBufferEnabled(false);
+        recordParseFault("event", blockIndex);
         return pd;
     }
     readGhosts(bs, pd.ghosts, pd.dnetHeader.seqNumber, &pd.gameState.compressionPoint);
     bs.setStringBufferEnabled(false);
+    if (bs.isError()) recordParseFault("ghost", blockIndex);
     if (blockIndex >= 0) {
-        const double duration = header.demoLengthMs / 1000.0;
-        const double blockTime = getBlockCount() > 0
-            ? duration * (double)blockIndex / (double)getBlockCount() : 0.0;
+        const double blockTime = T2Demo::playbackBlockTime(blockIndex, getMoveTicksBefore());
         for (const auto& event : pd.events) {
             if (event.message.empty()) continue;
             DemoTimedEvent timeline;

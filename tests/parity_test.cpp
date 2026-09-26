@@ -1014,15 +1014,15 @@ static void testShapeBaseV12OrderAndReset() {
 }
 
 static void testDemoClockMath() {
-    assert(T2Demo::playbackBlockDuration(10.0f, 100) == 0.1f);
-    assert(T2Demo::playbackBlockDuration(0.0f, 0) == 0.032f);
-    assert(T2Demo::playbackBlockTime(0, 10.0f, 100) == 0.0f);
-    assert(T2Demo::playbackBlockTime(25, 10.0f, 100) == 2.5f);
-    assert(T2Demo::playbackBlockTime(100, 10.0f, 100) == 10.0f);
-    assert(T2Demo::playbackTargetBlock(0.0f, 10.0f, 100) == 0);
-    assert(T2Demo::playbackTargetBlock(0.099f, 10.0f, 100) == 0);
-    assert(T2Demo::playbackTargetBlock(0.1f, 10.0f, 100) == 1);
-    assert(T2Demo::playbackTargetBlock(100.0f, 10.0f, 100) == 100);
+    // Packets between Move blocks share the tick they follow.
+    const std::vector<int> ticks{0, 1, 1, 2};  // M P M
+    assert(T2Demo::playbackBlockTime(0, ticks) == 0.0f);
+    assert(T2Demo::playbackBlockTime(2, ticks) == 0.032f);
+    assert(T2Demo::playbackBlockTime(3, ticks) == 0.064f);
+    assert(T2Demo::playbackTargetBlock(0.0f, ticks) == 0);
+    assert(T2Demo::playbackTargetBlock(0.032f, ticks) == 1);
+    assert(T2Demo::playbackTargetBlock(0.064f, ticks) == 3);
+    assert(T2Demo::playbackTargetTick(0.032f * 1000) == 1000);
 
     DemoTimedEvent event;
     event.time = 2.5;

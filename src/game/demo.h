@@ -3,6 +3,7 @@
 #include <cstring>
 #include <cmath>
 #include <string>
+#include <limits>
 #include <vector>
 #include <map>
 #include <functional>
@@ -140,21 +141,29 @@ namespace T2Demo {
     constexpr int BlockTypeMove = 2;
     constexpr int BlockTypeInfo = 3;
 
-    // Demo blocks are scheduled against the recording clock, not render frames.
-    inline float playbackBlockDuration(float totalTime, int totalBlocks) {
-        return totalBlocks > 0 && std::isfinite(totalTime) && totalTime > 0.0f
-            ? totalTime / totalBlocks : 0.032f;
+    // Each Move block is one fixed 32 ms simulation tick; packets between
+    // Move blocks belong to the tick they follow. ticksBefore[i] is the number
+    // of Move blocks preceding block i (size = block count + 1).
+    constexpr double TickSeconds = 0.032;
+    inline int playbackTargetTick(float time) {
+        if (!std::isfinite(time) || time <= 0.0f) return 0;
+        // Round away float error so 0.032 * n maps back to tick n.
+        const double tick = std::floor((double)time / TickSeconds + 1e-6);
+        return tick >= (double)std::numeric_limits<int>::max()
+            ? std::numeric_limits<int>::max() : (int)tick;
     }
-    inline int playbackTargetBlock(float time, float totalTime, int totalBlocks) {
-        if (!std::isfinite(time) || !std::isfinite(totalTime) ||
-            totalBlocks <= 0 || totalTime <= 0.0f) return 0;
-        return std::clamp((int)std::floor(time / totalTime * totalBlocks), 0, totalBlocks);
+    // Blocks to process to reach `time`: through the Move block that
+    // completes the target tick, as a tick-stepped playback would.
+    inline int playbackTargetBlock(float time, const std::vector<int>& ticksBefore) {
+        if (ticksBefore.size() < 2) return 0;
+        const int tick = playbackTargetTick(time);
+        const auto it = std::lower_bound(ticksBefore.begin(), ticksBefore.end(), tick);
+        return std::min((int)(it - ticksBefore.begin()), (int)ticksBefore.size() - 1);
     }
-    inline float playbackBlockTime(int blockIndex, float totalTime, int totalBlocks) {
-        if (!std::isfinite(totalTime) || totalBlocks <= 0 || totalTime <= 0.0f)
-            return 0.0f;
-        return std::clamp(totalTime * (float)blockIndex / (float)totalBlocks,
-                          0.0f, totalTime);
+    inline float playbackBlockTime(int blockIndex, const std::vector<int>& ticksBefore) {
+        if (ticksBefore.empty()) return 0.0f;
+        const int index = std::clamp(blockIndex, 0, (int)ticksBefore.size() - 1);
+        return (float)(ticksBefore[index] * TickSeconds);
     }
     inline float playbackProgress(float time, float totalTime) {
         if (!std::isfinite(time) || !std::isfinite(totalTime) || totalTime <= 0.0f)
@@ -354,11 +363,12 @@ struct ParsedDataBlock {
     V12::DecodedDataBlock decoded;
 };
 
-struct ScoreEntry {
-    uint32_t clientId{}, teamId{}, score{};
-    uint32_t field0{}, field1{}, field2{};
-    bool isBot{};
-    bool triggerFlags[6]{};
+// Move::unpack layout: the connection's queued client moves at record time.
+struct QueuedMove {
+    uint32_t pyaw{}, ppitch{}, proll{};
+    uint32_t px{}, py{}, pz{};
+    bool freeLook{};
+    bool trigger[6]{};
 };
 
 struct TargetEntry {
@@ -486,7 +496,7 @@ struct InitialBlockData {
     bool firstPerson{};
     std::vector<uint32_t> connectionFields;
     std::vector<uint32_t> stateArray;
-    std::vector<ScoreEntry> scoreEntries;
+    std::vector<QueuedMove> queuedMoves;
     std::vector<std::string> demoValues;
     std::vector<TargetEntry> targetEntries;
     ConnectionProtocolState connectionState;
@@ -715,6 +725,8 @@ struct DemoParserSnapshot {
     bool connectionEstablished{};
     uint32_t nextRecvEventSeq{};
     uint32_t packetsParsed{};
+    std::string parseFault;
+    uint32_t packetsDroppedAfterFault{};
     std::vector<std::pair<int, std::string>> missionChanges;
     std::vector<std::pair<int, uint32_t>> missionCrcChanges;
     std::map<int, std::string> taggedStrings;
@@ -753,7 +765,13 @@ public:
 
     int getBlockCount();
     int getMoveBlockCount() const;
+    // Move ticks preceding each block; size getBlockCount() + 1.
+    const std::vector<int>& getMoveTicksBefore();
     uint32_t getPacketsParsed() const { return packetsParsed; }
+    // First packet parse fault. Once set, later packets are dropped until
+    // reset() or restoring a snapshot taken before the fault.
+    const std::string& getParseFault() const { return parseFault_; }
+    uint32_t getPacketsDroppedAfterFault() const { return packetsDroppedAfterFault_; }
     float getRoundTripTime() const { return initialBlock.roundTripTime; }
     float getPacketLoss() const { return initialBlock.packetLoss; }
     int getBlockCursor() const { return blockCursor_; }
@@ -847,14 +865,17 @@ private:
     uint32_t recvAckMask{}, connectSequence{}, lastRecvAckAck{};
     bool connectionEstablished{};
     uint32_t nextRecvEventSeq{};
+    std::vector<int> moveTicksBefore_;
     uint32_t packetsParsed{};
+    std::string parseFault_;
+    uint32_t packetsDroppedAfterFault_{};
 
     // ─── Internal parsing methods ───
     void readHeader();
     bool readInitialBlock(const uint8_t* data, size_t size, uint32_t protocolVersion);
     void readTaggedStrings(BitStream& bs);
     bool readDataBlocks(BitStream& bs);
-    ScoreEntry readScoreEntry(BitStream& bs);
+    QueuedMove readQueuedMove(BitStream& bs);
     std::vector<std::string> readDemoValues(BitStream& bs);
     void readComplexTargetManager(BitStream& bs);
     void readSimpleTargetManager(BitStream& bs);
@@ -868,6 +889,8 @@ private:
     DnetHeader readDnetHeader(BitStream& bs);
     GameState readGameState(BitStream& bs);
     void readEvents(BitStream& bs, std::vector<NetEventInfo>& outEvents, const Vec3& compressionPoint);
+    bool readEventPayload(BitStream& bs, NetEventInfo& ev, const Vec3& compressionPoint,
+                          bool applyEffects);
     void readGhosts(BitStream& bs, std::vector<GhostUpdate>& outGhosts, int seqNumber, const Vec3* compressionPoint = nullptr);
 
     // Apply protocol header
@@ -881,6 +904,7 @@ private:
 public:
     DemoMove readRawMove(const uint8_t* data, size_t size);
     PacketData parsePacket(const uint8_t* data, size_t size, int blockIndex = -1);
+    void recordParseFault(const char* stage, int blockIndex);
     void onSendPacketTrigger();
 
     // Pending explosion events from projectile parsers

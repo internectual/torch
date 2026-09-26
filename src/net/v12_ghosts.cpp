@@ -168,7 +168,8 @@ static bool readVehicleBlockerPayload(V12BitStream& stream) {
 
 static bool readStationFXPayload(V12BitStream& stream, bool initial) {
     readGameBasePayload(stream);
-    if (initial && stream.readFlag() && stream.readFlag())
+    (void)initial; // InitialUpdateMask flag is written on every update.
+    if (stream.readFlag() && stream.readFlag())
         stream.readRange(0, 1024);
     return !stream.failed();
 }
@@ -641,7 +642,6 @@ static bool readGrenadeProjectilePayload(V12BitStream& stream, bool initial,
         stream.readFlag();
         if (stream.readFlag()) {
             const V12Vec3 position = stream.readPoint3F();
-            stream.readPoint3F();
             const V12Vec3 normal = stream.readPoint3F();
             addProjectileImpact(impacts, position, normal, state);
         }
@@ -719,7 +719,8 @@ static bool readRepairProjectilePayload(V12BitStream& stream) {
 
 static bool readTargetProjectilePayload(V12BitStream& stream, bool initial) {
     readGameBasePayload(stream);
-    if (initial && stream.readFlag()) {
+    (void)initial; // InitialUpdateMask flag is written on every update.
+    if (stream.readFlag()) {
         stream.readPoint3F();
         stream.readPoint3F();
         stream.readFlag();

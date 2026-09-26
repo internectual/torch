@@ -1,7 +1,10 @@
 #include "game/demo.h"
 #include "core/console.h"
 
+#include <algorithm>
+#include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cerrno>
 #include <cmath>
 #include <iostream>
@@ -19,7 +22,16 @@ Console& Console::instance() {
     return console;
 }
 
-void Console::printf(LogLevel, const char*, ...) {}
+// Set TORCH_TEST_VERBOSE to see parser diagnostics.
+void Console::printf(LogLevel, const char* format, ...) {
+    static const bool verbose = std::getenv("TORCH_TEST_VERBOSE") != nullptr;
+    if (!verbose) return;
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(stderr, format, args);
+    std::fputc('\n', stderr);
+    va_end(args);
+}
 
 static bool check(bool value, const char* expression) {
     if (!value) std::cerr << "failed: " << expression << "\n";
@@ -58,14 +70,20 @@ int main(int argc, char** argv) {
     CHECK(!demoMoveOrientationValid(NAN, 0.0f));
     CHECK(!demoMoveOrientationValid(0.0f, INFINITY));
 
-    CHECK(T2Demo::playbackBlockDuration(10.0f, 100) == 0.1f);
-    CHECK(T2Demo::playbackTargetBlock(0.0f, 10.0f, 100) == 0);
-    CHECK(T2Demo::playbackTargetBlock(10.0f, 10.0f, 100) == 100);
-    CHECK(T2Demo::playbackTargetBlock(NAN, 10.0f, 100) == 0);
-    CHECK(T2Demo::playbackTargetBlock(1.0f, INFINITY, 100) == 0);
-    CHECK(T2Demo::playbackBlockDuration(INFINITY, 100) == 0.032f);
-    CHECK(T2Demo::playbackBlockTime(50, NAN, 100) == 0.0f);
-    CHECK(T2Demo::playbackBlockTime(25, 10.0f, 100) == 2.5f);
+    // Blocks P M P P M M P: each Move block is one 32 ms tick.
+    const std::vector<int> ticks{0, 0, 1, 1, 1, 2, 3, 3};
+    CHECK(T2Demo::playbackTargetBlock(0.0f, ticks) == 0);
+    CHECK(T2Demo::playbackTargetBlock(0.031f, ticks) == 0);
+    CHECK(T2Demo::playbackTargetBlock(0.032f, ticks) == 2);
+    CHECK(T2Demo::playbackTargetBlock(0.064f, ticks) == 5);
+    CHECK(T2Demo::playbackTargetBlock(0.096f, ticks) == 6);
+    CHECK(T2Demo::playbackTargetBlock(10.0f, ticks) == 7);
+    CHECK(T2Demo::playbackTargetBlock(NAN, ticks) == 0);
+    CHECK(T2Demo::playbackTargetBlock(1.0f, {}) == 0);
+    CHECK(T2Demo::playbackBlockTime(3, ticks) == 0.032f);
+    CHECK(T2Demo::playbackBlockTime(99, ticks) == 0.096f);
+    CHECK(T2Demo::playbackBlockTime(-1, ticks) == 0.0f);
+    CHECK(T2Demo::playbackBlockTime(5, {}) == 0.0f);
     CHECK(T2Demo::playbackProgress(-1.0f, 10.0f) == 0.0f);
     CHECK(T2Demo::playbackProgress(15.0f, 10.0f) == 1.0f);
     CHECK(T2Demo::playbackProgress(1.0f, 0.0f) == 0.0f);
@@ -94,6 +112,18 @@ int main(int argc, char** argv) {
     // state. This covers packet, ghost, mission, and effect event paths.
     CHECK(parser.seekToBlock(blockCount));
     CHECK(parser.getBlockCursor() == blockCount);
+    // A supported recording parses without faulting, so no packet is dropped.
+    if (!parser.getParseFault().empty())
+        std::cerr << "parse fault: " << parser.getParseFault() << " ("
+                  << parser.getPacketsDroppedAfterFault() << " packets dropped of "
+                  << blockCount << " blocks)\n";
+    CHECK(parser.getParseFault().empty());
+    CHECK(parser.getPacketsDroppedAfterFault() == 0);
+    const std::vector<int>& recordedTicks = parser.getMoveTicksBefore();
+    CHECK((int)recordedTicks.size() == blockCount + 1);
+    CHECK(recordedTicks.back() == parser.getMoveBlockCount());
+    CHECK(std::is_sorted(recordedTicks.begin(), recordedTicks.end()));
+    CHECK(T2Demo::playbackTargetBlock(1.0e9f, recordedTicks) == blockCount);
     CHECK(parser.seekToBlock(0));
     const std::string initialMission = parser.currentMission();
     CHECK(!parser.getInitialBlock().missionName.empty());
