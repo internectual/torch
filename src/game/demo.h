@@ -747,6 +747,7 @@ struct GhostEntry {
     Vec3 ballisticSentPos{}, ballisticSentVel{};
     int ballisticCurrTick = 0;
     bool hasBallistic = false, ballisticFresh = false, ballisticStopped = false;
+    bool ballisticCoast = false; // seekers: no gravity, stop on any contact
     Point3F ballisticPos{}, ballisticVel{};
     float ballisticTime = 0.0f;
     int ballisticAgeTicks = 0;

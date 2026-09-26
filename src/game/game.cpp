@@ -8268,7 +8268,7 @@ void Game::render(float dt) {
                 }
             }
             // GrenadeProjectile::processTick for grenades, mortar shells,
-            // energy bolts and flares: fly the last transmitted state per
+            // energy bolts and flares (seekers coast without gravity): fly the last transmitted state per
             // 32 ms tick with gravity x gravityMod, bouncing off the static
             // world until armed; the first armed contact stops it (the server
             // sends the explosion and bounce corrections).
@@ -8299,9 +8299,10 @@ void Game::render(float dt) {
                     while (!mg->ballisticStopped && now - mg->ballisticTime >= ProjectilePhysics::TickSeconds &&
                            guard++ < 64) {
                         mg->ballisticStopped = !ProjectilePhysics::stepBallistic(
-                            mg->ballisticPos, mg->ballisticVel, getGravity() * data.grenadeGravityMod,
+                            mg->ballisticPos, mg->ballisticVel,
+                            mg->ballisticCoast ? 0.0f : getGravity() * data.grenadeGravityMod,
                             data.grenadeElasticity, data.grenadeFriction,
-                            mg->ballisticAgeTicks > armedTick, cast);
+                            mg->ballisticCoast || mg->ballisticAgeTicks > armedTick, cast);
                         mg->ballisticTime += ProjectilePhysics::TickSeconds;
                         ++mg->ballisticAgeTicks;
                     }

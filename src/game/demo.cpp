@@ -2532,32 +2532,47 @@ static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& 
 
 static void readSeekerProjectileData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
     readGameBaseData(bs, isInitial, entry);
+    // SeekerProjectile::unpackUpdate. The client coasts the missile on the
+    // transmitted velocity between updates.
+    auto setFlight = [&](const Vec3& pos, const Vec3& vel) {
+        if (!entry) return;
+        entry->position = pos;
+        entry->velocity = vel;
+        entry->hasVelocity = true;
+        entry->ballisticSentPos = pos;
+        entry->ballisticSentVel = vel;
+        entry->hasBallistic = entry->ballisticFresh = entry->ballisticCoast = true;
+    };
+    auto readTarget = [&]() {
+        if (bs.readFlag()) {
+            if (!bs.readFlag()) bs.readPoint3F(); // target direction
+            else bs.readInt(11);                  // target ghost
+        }
+    };
     const bool fullState = bs.readFlag();
     if (!fullState) {
-        if (bs.readFlag()) {
-            bs.readPoint3F();
-            bs.readPoint3F();
+        if (bs.readFlag()) { // explode(position, normal)
+            const Vec3 expPos = bs.readPoint3F();
+            const Vec3 normal = bs.readPoint3F();
+            DemoParser::s_pendingExplosions.push_back({expPos, normal, 0.0f,
+                entry ? entry->datablockId : -1});
+            if (entry) entry->exploded = true;
             return;
         }
-        if (entry) entry->position = bs.readPoint3F();
-        else bs.readPoint3F();
-        bs.readPoint3F();
-        if (bs.readFlag()) {
-            if (!bs.readFlag()) bs.readPoint3F();
-            else bs.readInt(11);
-        }
+        const Vec3 pos = bs.readPoint3F();
+        const Vec3 vel = bs.readPoint3F();
+        setFlight(pos, vel);
+        readTarget();
         return;
     }
-    if (entry) entry->position = bs.readPoint3F();
-    else bs.readPoint3F();
-    bs.readPoint3F();
-    bs.readPoint3F();
-    if (bs.readFlag()) { bs.readInt(11); bs.readInt(3); }
-    if (bs.readFlag()) {
-        if (!bs.readFlag()) bs.readPoint3F();
-        else bs.readInt(11);
-    }
-    bs.readFlag();
+    const Vec3 pos = bs.readPoint3F();
+    const Vec3 vel = bs.readPoint3F();
+    bs.readPoint3F(); // orientation
+    setFlight(pos, vel);
+    if (entry) { entry->ballisticTime = 0.0f; entry->ballisticStopped = false; }
+    if (bs.readFlag()) { bs.readInt(11); bs.readInt(3); } // source object, slot
+    readTarget();
+    bs.readFlag(); // timeout reset
 }
 
 static void readSkyData(BitStream& bs, bool, const Vec3&, GhostEntry*) {
