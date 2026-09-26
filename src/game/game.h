@@ -634,6 +634,7 @@ public:
         Point3F pos;
         Point3F vel;
         bool active = false;
+        int cell = 0; // 4x4 atlas cell (Precipitation::setupTexCoords)
     };
     struct PrecipitationState {
         int type = 0;
@@ -646,6 +647,8 @@ public:
         float boxWidth = 200.0f;
         float boxHeight = 100.0f;
         float dropSize = 0.5f;
+        // PrecipitationData sizeX/sizeY; zero uses the square dropSize sprite.
+        float sizeX = 0.0f, sizeY = 0.0f;
         float minSpeed = 1.5f;
         float maxSpeed = 2.0f;
         bool followCam = true;

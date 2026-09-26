@@ -1726,9 +1726,45 @@ bool World::load(const char* mapName) {
                 if (!s.empty()) ps.followCam = (std::atoi(s.c_str()) != 0);
                 s = getProp(obj.props, "useWind");
                 if (!s.empty()) ps.useWind = (std::atoi(s.c_str()) != 0);
+                // PrecipitationData (scripts/weather.cs) owns the drop
+                // material list and quad size.
+                const std::string dataBlockName = missionLower(getProp(obj.props, "dataBlock"));
+                for (const auto& [objectName, object] : ScriptEngine::instance().objects) {
+                    if (!object || dataBlockName.empty() || missionLower(objectName) != dataBlockName ||
+                        missionLower(object->className) != "precipitationdata") continue;
+                    auto field = [&](const char* wanted) -> std::string {
+                        for (const auto& [key, value] : object->fields)
+                            if (missionLower(key) == wanted) return value.toString();
+                        return {};
+                    };
+                    if (std::string v = field("sizex"); !v.empty()) ps.sizeX = (float)std::atof(v.c_str());
+                    if (std::string v = field("sizey"); !v.empty()) ps.sizeY = (float)std::atof(v.c_str());
+                    // PrecipitationData::onAdd clamps sizes to (0, 20].
+                    if (ps.sizeX <= 0.0f || ps.sizeX > 20.0f) ps.sizeX = 1.0f;
+                    if (ps.sizeY <= 0.0f || ps.sizeY > 20.0f) ps.sizeY = 1.0f;
+                    const std::string dml = field("materiallist");
+                    if (!dml.empty()) {
+                        auto& fs = Engine::instance().fs();
+                        std::string content = fs.readText(("textures/" + dml).c_str());
+                        if (content.empty()) content = fs.readText(dml.c_str());
+                        std::stringstream lines(content);
+                        std::string material;
+                        while (std::getline(lines, material)) {
+                            while (!material.empty() && std::isspace((unsigned char)material.back()))
+                                material.pop_back();
+                            if (material.empty()) continue;
+                            std::vector<float> durations;
+                            Engine::instance().renderer().loadTextureFrames(
+                                material.c_str(), ps.textures, durations);
+                            ps.textureDurations = std::move(durations);
+                            break; // drops use the list's first material
+                        }
+                    }
+                    break;
+                }
                 s = getProp(obj.props, "textureName");
                 if (s.empty()) s = getProp(obj.props, "texture");
-                if (!s.empty()) {
+                if (!s.empty() && ps.textures.empty()) {
                     std::vector<float> durations;
                     Engine::instance().renderer().loadTextureFrames(
                         s.c_str(), ps.textures, durations);
@@ -3572,20 +3608,18 @@ void World::render(const Point3F& cameraPos, float dt) {
                  {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
                  {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}
             };
-            const int edges[12][2] = {{0,1},{1,2},{2,3},{3,0},{4,5},{5,6},
-                                      {6,7},{7,4},{0,4},{1,5},{2,6},{3,7}};
             Point3F transformed[8];
             for (int i = 0; i < 8; ++i) transformed[i] = fieldModel.transform(corners[i]);
             const float fieldAlpha = obj.forceFieldFadeMS > 0.0f
                 ? std::clamp(1.0f - obj.forceFieldFadePosition / obj.forceFieldFadeMS, 0.0f, 1.0f)
                 : (obj.forceFieldOpen ? 0.0f : 1.0f);
+            // ForceFieldBare renders every face of its box additively and
+            // double-sided.
             glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            const GLboolean cullWasEnabled = glIsEnabled(GL_CULL_FACE);
+            glDisable(GL_CULL_FACE);
             glDepthMask(GL_FALSE);
-            if (fieldAlpha > 0.0f) {
-                for (const auto& edge : edges)
-                    r.drawLine(transformed[edge[0]], transformed[edge[1]],
-                               {0.25f, 0.85f, 1.0f, 0.65f * fieldAlpha});
-            }
               if (fieldAlpha > 0.0f && !obj.forceFieldFrames.empty()) {
                  const size_t frame = obj.forceFieldFrameDurations.size() == obj.forceFieldFrames.size()
                      ? textureFrameIndex(obj.forceFieldFrameDurations,
@@ -3610,8 +3644,12 @@ void World::render(const Point3F& cameraPos, float dt) {
                 r.drawTexturedQuad(transformed[4], transformed[7], transformed[6], transformed[5], texture, tint, 0, scroll, u, v + scroll);
                 r.drawTexturedQuad(transformed[0], transformed[4], transformed[5], transformed[1], texture, tint, 0, scroll, u, v + scroll);
                 r.drawTexturedQuad(transformed[3], transformed[2], transformed[6], transformed[7], texture, tint, 0, scroll, u, v + scroll);
+                r.drawTexturedQuad(transformed[0], transformed[3], transformed[7], transformed[4], texture, tint, 0, scroll, u, v + scroll);
+                r.drawTexturedQuad(transformed[1], transformed[5], transformed[6], transformed[2], texture, tint, 0, scroll, u, v + scroll);
             }
             glDepthMask(GL_TRUE);
+            if (cullWasEnabled) glEnable(GL_CULL_FACE);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glDisable(GL_BLEND);
         }
 
@@ -5465,6 +5503,7 @@ void World::initPrecipitation(const PrecipitationState& state) {
         float speed = state.minSpeed + nextRandom() * (state.maxSpeed - state.minSpeed);
         const Point3F wind = state.useWind ? getTorchWindVelocity() : Point3F{};
         d.vel = {wind.x, -speed + wind.y, wind.z};
+        d.cell = std::min(15, (int)(nextRandom() * 16.0f));
         d.active = true;
     }
 }
@@ -5578,6 +5617,26 @@ void World::renderPrecipitation() {
                                                precipitation.textures.size(),
                                                precipitation.textureAge);
         texture = precipitation.textures[frame];
+    }
+    if (texture && precipitation.sizeX > 0.0f && precipitation.sizeY > 0.0f) {
+        // Precipitation::renderObject: camera-facing sizeX x sizeY quads, each
+        // drop using one cell of the 4x4 drop atlas, alpha blended.
+        const MatrixF& view = r.viewMatrix();
+        const Point3F right{view.m[0][0], view.m[0][1], view.m[0][2]};
+        const Point3F up{view.m[1][0], view.m[1][1], view.m[1][2]};
+        const float hx = precipitation.sizeX * 0.5f, hy = precipitation.sizeY * 0.5f;
+        for (auto& d : precipitation.drops) {
+            if (!d.active) continue;
+            const Point3F rx{right.x * hx, right.y * hx, right.z * hx};
+            const Point3F uy{up.x * hy, up.y * hy, up.z * hy};
+            const Point3F a{d.pos.x - rx.x - uy.x, d.pos.y - rx.y - uy.y, d.pos.z - rx.z - uy.z};
+            const Point3F b{d.pos.x + rx.x - uy.x, d.pos.y + rx.y - uy.y, d.pos.z + rx.z - uy.z};
+            const Point3F c{d.pos.x + rx.x + uy.x, d.pos.y + rx.y + uy.y, d.pos.z + rx.z + uy.z};
+            const Point3F e{d.pos.x - rx.x + uy.x, d.pos.y - rx.y + uy.y, d.pos.z - rx.z + uy.z};
+            const float u0 = (float)(d.cell % 4) * 0.25f, v0 = (float)(d.cell / 4) * 0.25f;
+            r.drawTexturedQuad(a, b, c, e, texture, dropColor, u0, v0 + 0.25f, u0 + 0.25f, v0, false);
+        }
+        return;
     }
     for (auto& d : precipitation.drops) {
         if (!d.active) continue;
@@ -8004,7 +8063,6 @@ void Game::render(float dt) {
 
                 // Build model matrix
                 bool isPlayer = ObserverParity::isPlayerClass(g->className);
-                 bool isVehicle = isVehicleGhostClass(g->className);
                 MatrixF model;
                 if (g->hasRotation) {
                     QuatF q(mg->renderRotation.x, mg->renderRotation.y, mg->renderRotation.z, mg->renderRotation.w);
@@ -8023,13 +8081,8 @@ void Game::render(float dt) {
                  if (isProjectile && mg->hasProjectileScale)
                      model.setScale({mg->projectileScale.x, mg->projectileScale.y,
                                      mg->projectileScale.z});
-                // Hover bob for stationary vehicles
-                float hoverY = 0.0f;
-                if (isVehicle && !mg->isMoving) {
-                    hoverY = sinf(demoTime * 2.0f + idx * 1.7f) * 0.15f;
-                }
                 Point3F renderPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
-                model.setTranslation({renderPosition.x, renderPosition.y + hoverY, renderPosition.z});
+                model.setTranslation(renderPosition);
                 r.setModel(model * shape->upOrientation());
 
                 // Appearance comes from native material and skin data only.
