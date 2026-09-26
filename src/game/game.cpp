@@ -8371,24 +8371,6 @@ void Game::render(float dt) {
                 }
             }
 
-            // Shield effect: render a pulsing translucent bubble when shielded
-            if (mg->shieldLevel > 0.01f) {
-                float sAlpha = mg->shieldLevel * 0.25f;
-                 bool isPlr = ObserverParity::isPlayerClass(g->className);
-                float sSize = isPlr ? 1.0f : 1.8f;
-                float pulse = sinf(demoTime * 6.0f) * 0.08f + 0.92f;
-                sAlpha *= pulse;
-                // Render layered boxes at different scales for sphere approximation
-                Point3F shieldPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
-                for (int i = 0; i < 3; i++) {
-                    float scale = 1.0f - i * 0.15f;
-                    float a = sAlpha * (1.0f - i * 0.25f);
-                    r.drawBox({{shieldPosition.x - sSize * scale, shieldPosition.y - sSize * scale, shieldPosition.z - sSize * scale},
-                               {shieldPosition.x + sSize * scale, shieldPosition.y + sSize * scale, shieldPosition.z + sSize * scale}},
-                              {0.3f, 0.6f, 1.0f, a});
-                }
-            }
-
             // Ground shadow for all renderable ghosts
             if (isRenderableGhostClass(g->className)) {
                 Point3F shadowPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
@@ -8404,21 +8386,6 @@ void Game::render(float dt) {
                                {shadowPosition.x + shadowSize, shadowY + 0.1f, shadowPosition.z + shadowSize}},
                               {0, 0, 0, shadowAlpha});
                 }
-            }
-
-            // Highlight ring for control object (recording player)
-            if (idx == controlGhostIndex) {
-                float pulse = sinf(demoTime * 4.0f) * 0.3f + 0.7f;
-                Point3F ringPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
-                float ringY = ringPosition.y - 0.5f;
-                float ringR = 1.2f + pulse * 0.3f;
-                int segments = 20;
-                std::vector<Point3F> ring;
-                for (int i = 0; i <= segments; i++) {
-                    float a = (float)i / (float)segments * 6.28318f;
-                    ring.push_back({ringPosition.x + cosf(a) * ringR, ringY, ringPosition.z + sinf(a) * ringR});
-                }
-                r.drawLineStrip(ring, {0.3f, 1.0f, 0.5f, 0.7f + pulse * 0.3f});
             }
 
             // Update projectile trail
@@ -8606,7 +8573,6 @@ void Game::render(float dt) {
                     shapeFrame.setRotationY(Math::PI);
                     model = model * shapeFrame;
               }
-               const bool isVehicle = isVehicleGhostClass(g->className);
               Point3F renderPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
              model.setTranslation(renderPosition);
              r.setModel(model * g->shape->upOrientation());
@@ -8712,17 +8678,6 @@ void Game::render(float dt) {
                        const Point3F muzzle = mountedNodePosition(imageModel, *imageShape, "Mountpoint");
                        r.drawSprite(muzzle, 0.15f, {1.0f, 0.9f, 0.5f, 0.9f});
                    }
-              }
-              if (g->hasShield && g->shieldLevel > 0.01f) {
-                  const float pulse = sinf(demoTime * 6.0f) * 0.08f + 0.92f;
-                  const float alpha = g->shieldLevel * 0.25f * pulse;
-                  const float baseSize = isVehicle ? 1.8f : 1.0f;
-                  for (int layer = 0; layer < 3; ++layer) {
-                      const float size = baseSize * (1.0f - layer * 0.15f);
-                      r.drawBox({{renderPosition.x - size, renderPosition.y - size, renderPosition.z - size},
-                                 {renderPosition.x + size, renderPosition.y + size, renderPosition.z + size}},
-                                {0.3f, 0.6f, 1.0f, alpha * (1.0f - layer * 0.25f)});
-                  }
               }
           }
         }
