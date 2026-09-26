@@ -28,7 +28,13 @@ function run() {
    echo("R4 [" @ addLine(1) @ "]");
 }
 run();
-quit();
+// A body started by the scheduler (native code) survives a nested eval.
+function later() {
+   eval("echo(\"R5 inner\");");
+   echo("R6 after eval");
+   quit();
+}
+schedule(10, 0, later);
 CS
 Xvfb "$display" -screen 0 1024x768x24 -ac >/dev/null 2>&1 &
 xvfb_pid=$!
@@ -36,12 +42,15 @@ for _ in $(seq 1 50); do [[ -e "/tmp/.X11-unix/X${display#:}" ]] && break; sleep
 kill -0 "$xvfb_pid" 2>/dev/null
 timeout --kill-after=3s 15s env DISPLAY="$display" SDL_VIDEODRIVER=x11 SDL_AUDIODRIVER=dummy \
     ALSOFT_DRIVERS=null LIBGL_ALWAYS_SOFTWARE=1 "$torch" -data "$root" -mod base \
-    -output "$root/out" -demo-mode -nologin -exec scripts/objects.cs -quit-after-frames 2 \
+    -output "$root/out" -demo-mode -nologin -exec scripts/objects.cs -quit-after-frames 600 \
     >"$root/client.log" 2>&1
 grep -qF '[INFO] R1 []' "$root/client.log"
 grep -qF '[INFO] R2 0' "$root/client.log"
 grep -qF '[INFO] R3 skipped' "$root/client.log"
 grep -qE "\[INFO\] R4 \[0?\]" "$root/client.log"
+grep -qF '[INFO] R5 inner' "$root/client.log"
+grep -qF '[INFO] R6 after eval' "$root/client.log"
+! grep -qF 'Expected token' "$root/client.log"
 ! grep -qF 'never' "$root/client.log"
 ! grep -qF 'call depth limit' "$root/client.log"
 ! grep -qF 'Unexpected token' "$root/client.log"

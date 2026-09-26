@@ -116,6 +116,7 @@ struct TorqueScript::Impl {
     std::string lastFieldObj;  // for %obj.field = value assignment write-back
     std::string lastFieldName;
     int execDepth = 0;
+    int bodyDepth = 0; // script function bodies in flight (also from native calls)
 
     // GUI parent-child tracking (persists across expressions within a file)
     std::vector<ScriptObject*> guiParentStack;
@@ -2540,7 +2541,7 @@ VMValue TorqueScript::execute(const std::string& source, const std::string& file
     // state-guarded nested executor prevents tokenize()/parseProgram() from
     // clobbering the live token stream — which corrupted native-call args
     // (garbage strlen/getSubStr inputs) and silently truncated evaluation.
-    if (impl->execDepth > 0)
+    if (impl->execDepth > 0 || impl->bodyDepth > 0)
         return executeNested(source, filename.empty() ? "console" : filename);
     // Track depth for THIS execution too, so any reentrant execute() while
     // this parse is in flight is routed through the guarded nested path.
@@ -2910,6 +2911,10 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
     std::string savedFieldName = std::move(impl->lastFieldName);
     int savedSrcLine = impl->srcLine;
 
+    // A body running from native code (schedule, callbacks) is an
+    // execution in flight: a nested execute()/eval() must take the
+    // state-guarded path instead of replacing this body's tokens.
+    impl->bodyDepth++;
     // Set up locals
     impl->locals.push();
     impl->callPackages.push_back(selectedPackage);
@@ -2972,6 +2977,7 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
     }
 
     // Restore outer state, discard inner control flow flags
+    impl->bodyDepth--;
     impl->tokens = std::move(savedTokens);
     impl->tokenPos = savedPos;
     impl->running = savedRunning;
