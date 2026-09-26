@@ -158,12 +158,24 @@ float authoredVolumeFog(vec3 point) {
     return min(result, 1.0);
 }
 
+// Torque SceneState::getHaze: none within fogDistance, then a quadratic
+// ramp to visibleDistance (geometry beyond it is not drawn).
+float torqueHaze(float distance) {
+    if (uFogStart < 0.0 || uFogEnd <= uFogStart || distance <= uFogStart) return 0.0;
+    float f = (distance - uFogStart) / (uFogEnd - uFogStart) - 1.0;
+    return clamp(1.0 - f * f, 0.0, 1.0);
+}
+
+uniform bool uFogAdditive = false;
+
 vec3 applyAuthoredFog(vec3 color, float distance) {
-    float haze = 0.0;
-    if (uFogStart >= 0.0 && uFogEnd > uFogStart)
-        haze = clamp((distance - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
+    if (uFogStart >= 0.0 && uFogEnd > uFogStart && distance >= uFogEnd) discard;
+    float haze = torqueHaze(distance);
     float volume = authoredVolumeFog(vWorldPos);
     float factor = volume + min(haze, 1.0 - volume);
+    // Additive and subtractive materials fade by 1 - fog instead of mixing
+    // toward the fog colour (tsMesh.cc disables their fog stage).
+    if (uFogAdditive) return color * (1.0 - factor);
     return mix(color, uFogColor, factor);
 }
 
@@ -458,9 +470,11 @@ void main() {
             else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z)
                 volumeFog += dist * volume.x * volume.w;
         }
-        float haze = uFogStart >= 0.0 && uFogEnd > uFogStart
-            ? clamp((dist - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0)
-            : clamp(uFogDensity * dist, 0.0, 1.0);
+        if (uFogStart >= 0.0 && uFogEnd > uFogStart && dist >= uFogEnd) discard;
+        float hazeRamp = uFogStart >= 0.0 && uFogEnd > uFogStart && dist > uFogStart
+            ? (dist - uFogStart) / (uFogEnd - uFogStart) - 1.0 : -1.0;
+        float haze = uFogStart >= 0.0 && uFogEnd > uFogStart && dist > uFogStart
+            ? clamp(1.0 - hazeRamp * hazeRamp, 0.0, 1.0) : 0.0;
         float volume = min(volumeFog, 1.0);
         lit = mix(lit, uFogColor, volume + min(haze, 1.0 - volume));
     }
@@ -685,9 +699,11 @@ void main() {
             else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z)
                 volumeFog += dist * volume.x * volume.w;
         }
-        float haze = uFogStart >= 0.0 && uFogEnd > uFogStart
-            ? clamp((dist - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0)
-            : clamp(uFogDensity * dist, 0.0, 1.0);
+        if (uFogStart >= 0.0 && uFogEnd > uFogStart && dist >= uFogEnd) discard;
+        float hazeRamp = uFogStart >= 0.0 && uFogEnd > uFogStart && dist > uFogStart
+            ? (dist - uFogStart) / (uFogEnd - uFogStart) - 1.0 : -1.0;
+        float haze = uFogStart >= 0.0 && uFogEnd > uFogStart && dist > uFogStart
+            ? clamp(1.0 - hazeRamp * hazeRamp, 0.0, 1.0) : 0.0;
         float volume = min(volumeFog, 1.0);
         color = mix(color, uFogColor, volume + min(haze, 1.0 - volume));
     }

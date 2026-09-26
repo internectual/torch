@@ -1924,6 +1924,7 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
         }
 
         if (shader) shader->setUniform("uSelfIlluminated", (int32_t)((flags & MatFlag_SelfIlluminating) ? 1 : 0));
+        if (shader) shader->setUniform("uFogAdditive", (int32_t)((flags & MatFlag_Additive) ? 1 : 0));
 
         float metallic = 0.0f, roughness = 0.5f;
         if (isInterior) roughness = 1.0f;
@@ -2034,6 +2035,7 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     glDisable(GL_BLEND);
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
+    if (auto* fogShader = ShaderManager::getDefaultShader()) fogShader->setUniform("uFogAdditive", (int32_t)0);
     } catch (const std::exception& e) {
         fprintf(stderr, "DBG DTSShape::render EXCEPTION: %s\n", e.what());
     } catch (...) {
@@ -2580,6 +2582,7 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
         }
 
         if (shader) shader->setUniform("uSelfIlluminated", (int32_t)((flags & MatFlag_SelfIlluminating) ? 1 : 0));
+        if (shader) shader->setUniform("uFogAdditive", (int32_t)((flags & MatFlag_Additive) ? 1 : 0));
 
         float metallic = 0.0f, roughness = 0.5f;
         if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialMetallic.size()) {
@@ -2683,4 +2686,5 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
     glDisable(GL_BLEND);
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
+    if (auto* fogShader = ShaderManager::getDefaultShader()) fogShader->setUniform("uFogAdditive", (int32_t)0);
 }

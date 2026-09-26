@@ -3557,18 +3557,10 @@ void World::render(const Point3F& cameraPos, float dt) {
     skyBox.render(r.view, r.projection, cameraPos.y);
     glDepthMask(GL_TRUE);
 
-    // Sky fog volumes are height bands in the stock mission data.  The native
-    // shader already owns the distance ramp, so select the tightest authored
-    // ramp for the band containing the camera rather than ignoring these fields.
-    float effectiveFogStart = fog.distance;
-    float effectiveFogEnd = visibleDistance;
-    for (const auto& volume : fogVolumes) {
-        if (cameraPos.y < volume.minHeight || cameraPos.y > volume.maxHeight)
-            continue;
-        effectiveFogEnd = std::min(effectiveFogEnd, volume.visibleDistance);
-        effectiveFogStart = std::min(effectiveFogStart,
-                                     volume.visibleDistance * 0.5f);
-    }
+    // Haze runs from the Sky's fogDistance to visibleDistance; fog volumes add
+    // their own band fog in the shader.
+    const float effectiveFogStart = fog.distance;
+    const float effectiveFogEnd = visibleDistance;
 
     // Render terrain
     if (terrainBlock.loaded) {
