@@ -1476,6 +1476,20 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
         objectStartMesh = std::move(dtsResult.objectStartMesh);
         objectNumMeshes = std::move(dtsResult.objectNumMeshes);
         meshTVerts = std::move(dtsResult.meshTVerts);
+        iflMaterials.clear();
+        for (const auto& ifl : dtsResult.iflMaterials) {
+            IflMaterial material;
+            material.name = ifl.name;
+            material.materialSlot = ifl.materialSlot;
+            std::vector<float> durations;
+            Engine::instance().renderer().loadTextureFrames(ifl.name.c_str(), material.frames, durations);
+            float total = 0.0f;
+            for (size_t f = 0; f < material.frames.size(); ++f) {
+                total += f < durations.size() ? durations[f] : 1.0f / 30.0f;
+                material.offTimes.push_back(total);
+            }
+            iflMaterials.push_back(std::move(material));
+        }
 
         if (details.empty()) {
             DTSShape::DetailLevel dl;
@@ -2407,6 +2421,41 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
 
     // Pre-setup: determine mesh visibility, apply matFrame UVs, apply skinning
     // Two-pass render: opaque first (depth writes ON), then translucent (blending ON)
+    // TSShapeInstance::animateIfls: the first thread whose sequence drives an
+    // IFL picks its frame from the thread time (plus toolBegin), looping over
+    // the IFL's length; other IFLs show their first frame.
+    std::vector<uint32_t> iflFrameTexture(iflMaterials.size(), 0);
+    {
+        struct IflThread { const Animation* anim; float time; };
+        std::vector<IflThread> iflThreads{{anim, t}};
+        for (int b = 0; b < numBlends && blends; ++b) {
+            const int index = blends[b].animationIndex;
+            if (index < 0 || index >= (int)animations.size()) continue;
+            const Animation& layer = animations[index];
+            iflThreads.push_back({&layer, animationSampleTime(blends[b].time, layer.duration, layer.looping)});
+        }
+        for (size_t i = 0; i < iflMaterials.size(); ++i) {
+            const IflMaterial& ifl = iflMaterials[i];
+            if (ifl.frames.empty()) continue;
+            size_t frame = 0;
+            for (const IflThread& thread : iflThreads) {
+                if (std::find(thread.anim->iflMatters.begin(), thread.anim->iflMatters.end(),
+                              (int32_t)i) == thread.anim->iflMatters.end()) continue;
+                const float duration = ifl.offTimes.back();
+                float iflTime = thread.time + thread.anim->toolBegin;
+                if (iflTime > duration && duration > 0.0f)
+                    iflTime -= duration * (float)(int)(iflTime / duration);
+                while (frame + 1 < ifl.frames.size() && iflTime > ifl.offTimes[frame]) ++frame;
+                break;
+            }
+            iflFrameTexture[i] = ifl.frames[frame];
+        }
+    }
+    auto iflTextureFor = [&](int32_t materialSlot) -> uint32_t {
+        for (size_t i = 0; i < iflMaterials.size(); ++i)
+            if (iflMaterials[i].materialSlot == materialSlot) return iflFrameTexture[i];
+        return 0;
+    };
     auto meshObject = [&](size_t mi) -> int32_t {
         for (size_t oi = 0; oi < objectStartMesh.size(); ++oi)
             if (mi >= (size_t)objectStartMesh[oi] &&
@@ -2449,7 +2498,12 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
             Texture* texOverride = cloakTextureOverride;
             auto& tex = texOverride ? *texOverride : materialTextures[mesh.materialIndex];
             if (tex.loaded) {
-                tex.bind(0);
+                if (const uint32_t ifl = texOverride ? 0u : iflTextureFor(mesh.materialIdx)) {
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, ifl);
+                } else {
+                    tex.bind(0);
+                }
                 if (shader) shader->setUniform("uTexture", (int32_t)0);
                 if (shader) shader->setUniform("uUseTexture", (int32_t)1);
                 if (getenv("TORCH_TEXDIAG") && materialLightmapIndex.size() == 102)

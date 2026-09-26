@@ -222,6 +222,8 @@ struct DTSSequenceHeader {
     int version = 0;
     std::vector<int32_t> rotationMatters, translationMatters, scaleMatters;
     std::vector<int32_t> visMatters, frameMatters, matFrameMatters;
+    std::vector<int32_t> iflMatters;
+    float toolBegin = 0.0f;
 };
 
 // TSShape::Sequence::read. DSQ files store the name separately, so they pass
@@ -256,7 +258,7 @@ static void readDTSSequenceHeader(DTSPlainReader& r, int ver, bool readNameIndex
         capCount(r.s32()); // baseDecalState
     }
     if (ver > 8) { seq.firstTrigger = capCount(r.s32()); seq.numTriggers = capCount(r.s32()); }
-    if (ver > 7) r.f32(); // toolBegin
+    if (ver > 7) seq.toolBegin = r.f32();
     seq.rotationMatters = r.intSet();
     if (ver >= 22) {
         seq.translationMatters = r.intSet();
@@ -266,7 +268,7 @@ static void readDTSSequenceHeader(DTSPlainReader& r, int ver, bool readNameIndex
         seq.translationMatters = seq.rotationMatters;
     }
     if (ver > 10) r.skipIntSet(); // decalMatters
-    if (ver > 5) r.skipIntSet(); // iflMatters
+    if (ver > 5) seq.iflMatters = r.intSet();
     seq.visMatters = r.intSet();
     seq.frameMatters = r.intSet();
     seq.matFrameMatters = r.intSet();
@@ -289,6 +291,8 @@ static void buildDTSNodeAnimation(DTSShape::Animation& anim, const DTSSequenceHe
     const int32_t numKFrames = seq.numKeyframes;
     const float dur = seq.duration;
     anim.duration = dur;
+    anim.iflMatters = seq.iflMatters;
+    anim.toolBegin = seq.toolBegin;
     // TSShape::Sequence flags: Blend=0x08, Cyclic=0x10.
     anim.looping = (seq.flags & 0x10) != 0;
     anim.blend = (seq.flags & 0x8) != 0;
@@ -483,7 +487,8 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     skip(numDecals * 4 * 4); // 4 S32s per decal (not needed)
 
     int32_t numIFLs = readCount(100000);
-    skip(numIFLs * 2 * 4); // 2 S32s per IFL
+    std::vector<std::pair<int32_t, int32_t>> iflNameSlots(numIFLs); // nameIndex, materialSlot
+    for (auto& ifl : iflNameSlots) { ifl.first = rS32(); ifl.second = rS32(); }
 
     int32_t numSubShapes = readCount(100000);
     std::vector<int32_t> subFirstNode(numSubShapes), subFirstObj(numSubShapes), subFirstDecal(numSubShapes);
@@ -790,6 +795,13 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
             pos += sz;
         }
     }
+
+    for (const auto& [nameIndex, slot] : iflNameSlots)
+        if (nameIndex >= 0 && nameIndex < (int)names.size()) {
+            std::string name = names[nameIndex];
+            std::replace(name.begin(), name.end(), '\\', '/'); // readIflMaterials fixes slashes
+            result.iflMaterials.push_back({name, slot});
+        }
 
     // Material list (old format v<19: embedded in S32 stream)
     // T2 format: gotList(S32), then TSMaterialList::read = version(U8) + count(U32) + names + flags(reflectance,bump,detail in separate loops)
@@ -1187,7 +1199,12 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     buf.checkGuard(); // 3
     for (int i = 0; i < numDecals; i++) for (int j = 0; j < 5; j++) capCount(buf.readS32());
     buf.checkGuard(); // 4
-    for (int i = 0; i < numIFLs; i++) for (int j = 0; j < 5; j++) capCount(buf.readS32());
+    // IflMaterial: nameIndex, materialSlot, then runtime-only fields.
+    std::vector<std::pair<int32_t, int32_t>> iflNameSlots(numIFLs);
+    for (int i = 0; i < numIFLs; i++) {
+        iflNameSlots[i] = {capCount(buf.readS32()), capCount(buf.readS32())};
+        for (int j = 0; j < 3; j++) capCount(buf.readS32());
+    }
     buf.checkGuard(); // 5
     for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
     for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
@@ -1787,6 +1804,15 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                 i, result.materialNames[i].c_str(), textureIndex);
         }
     }
+
+    // IFL materials: the file name (a name-table entry) and the material
+    // slot its frames replace.
+    for (const auto& [nameIndex, slot] : iflNameSlots)
+        if (nameIndex >= 0 && nameIndex < (int)names.size()) {
+            std::string name = names[nameIndex];
+            std::replace(name.begin(), name.end(), '\\', '/'); // readIflMaterials fixes slashes
+            result.iflMaterials.push_back({name, slot});
+        }
 
     // ─── Build nodes ─────────────────────────────────────────────────
     result.nodes.resize(numNodes);

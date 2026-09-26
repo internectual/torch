@@ -191,8 +191,19 @@ struct DTSShape {
         bool blend = false;
         std::vector<Keyframe> keyframes;
         std::vector<ObjectKeyframe> objectKeyframes; // vis/frame animation
+        std::vector<int32_t> iflMatters; // IFL materials this sequence drives
+        float toolBegin = 0.0f;
     };
     std::vector<Animation> animations;
+    // IFL materials (TSShape::readIflMaterials): frames replace one material
+    // slot; offTimes are cumulative frame end times in seconds.
+    struct IflMaterial {
+        std::string name;
+        int32_t materialSlot = -1;
+        std::vector<uint32_t> frames;
+        std::vector<float> offTimes;
+    };
+    std::vector<IflMaterial> iflMaterials;
     // PlayerData action index -> animation index (see PlayerAnimation).
     std::vector<int> actionTable;
     // Node world transforms from the most recent render, for mounting.

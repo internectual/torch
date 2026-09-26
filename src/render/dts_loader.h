@@ -9,6 +9,8 @@ struct DTSLoadResult {
     std::vector<SkinInfo> skins;            // parallel to meshes
     std::vector<Texture> textures;
     std::vector<uint32_t> materialFlags;
+    struct IflMaterial { std::string name; int32_t materialSlot = -1; };
+    std::vector<IflMaterial> iflMaterials; // TSShape::IflMaterial
     std::vector<float> materialReflectionAmount;
     std::vector<int16_t> materialLightmapIndex;
     std::vector<Texture> lightmaps;
