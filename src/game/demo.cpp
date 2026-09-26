@@ -2446,45 +2446,53 @@ static void readShockLanceProjectileData(BitStream& bs, bool isInitial, GhostEnt
 }
 
 static void readBombProjectileData(BitStream& bs, bool, const Vec3&, GhostEntry* entry) {
-    // Inlined GameBase update
+    // BombProjectile::unpackUpdate (FUN_00636050, a GrenadeProjectile): the
+    // client flies the bomb from each transmitted state; bombs stay
+    // world-aligned.
     if (bs.readFlag()) bs.readInt(11);
     if (bs.readFlag()) { if (bs.readFlag()) bs.readInt(9); }
+    auto setFlight = [&](const Vec3& pos, const Vec3& vel, bool restart) {
+        if (!entry) return;
+        entry->position = pos;
+        entry->velocity = vel;
+        entry->hasVelocity = true;
+        entry->ballisticSentPos = pos;
+        entry->ballisticSentVel = vel;
+        entry->hasBallistic = entry->ballisticFresh = true;
+        entry->rotation = {0, 0, 0, 1};
+        entry->hasRotation = true;
+        if (restart) { entry->ballisticTime = 0.0f; entry->ballisticStopped = false; }
+    };
+    auto explode = [&](const Vec3& point, const Vec3& normal) {
+        DemoParser::s_pendingExplosions.push_back({point, normal, 0.0f, entry ? entry->datablockId : -1});
+        if (entry) entry->exploded = true;
+    };
     if (!bs.readFlag()) { // non-full
         if (bs.readFlag()) {
-            if (entry) entry->position = bs.readPoint3F();
-            else bs.readPoint3F();
-            Vec3 vel = bs.readPoint3F(); // velocity
-            if (entry && (vel.x != 0 || vel.y != 0 || vel.z != 0)) {
-                float len = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z);
-                if (len > 0.001f) {
-                    Vec3 dir = {vel.x/len, vel.y/len, vel.z/len};
-                    float yaw = atan2f(dir.x, dir.y);
-                    entry->rotation = torqueYawQuaternion(yaw);
-                    entry->hasRotation = true;
-                }
-            }
+            const Vec3 pos = bs.readPoint3F();
+            const Vec3 vel = bs.readPoint3F();
+            setFlight(pos, vel, false);
         }
         if (!bs.readFlag()) return;
-        bs.readPoint3F(); bs.readPoint3F(); return; // endPoint, endNormal
+        const Vec3 point = bs.readPoint3F();
+        const Vec3 normal = bs.readPoint3F();
+        explode(point, normal);
+        return;
     }
     // full state
-    if (entry) entry->position = bs.readPoint3F();
-    else bs.readPoint3F();
-    Vec3 vel2 = bs.readPoint3F(); // velocity
-    if (entry && (vel2.x != 0 || vel2.y != 0 || vel2.z != 0)) {
-        float len = sqrtf(vel2.x*vel2.x + vel2.y*vel2.y + vel2.z*vel2.z);
-        if (len > 0.001f) {
-            Vec3 dir = {vel2.x/len, vel2.y/len, vel2.z/len};
-            float yaw = atan2f(dir.x, dir.y);
-            entry->rotation = torqueYawQuaternion(yaw);
-            entry->hasRotation = true;
-        }
+    const Vec3 pos = bs.readPoint3F();
+    const Vec3 vel = bs.readPoint3F();
+    const int currTick = bs.readInt(12);
+    setFlight(pos, vel, true);
+    if (entry) entry->ballisticCurrTick = currTick;
+    bs.readFlag(); // reset
+    if (bs.readFlag()) {
+        const Vec3 point = bs.readPoint3F();
+        const Vec3 normal = bs.readPoint3F();
+        explode(point, normal);
     }
-    bs.readInt(12); // currTick
-    if (bs.readFlag()) {}
-    if (bs.readFlag()) { bs.readPoint3F(); bs.readPoint3F(); }
-    if (bs.readFlag()) { bs.readInt(11); bs.readInt(3); }
-    if (bs.readFlag()) bs.readInt(11);
+    if (bs.readFlag()) { bs.readInt(11); bs.readInt(3); } // source object, slot
+    if (bs.readFlag()) bs.readInt(11); // vehicle object
 }
 
 static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
