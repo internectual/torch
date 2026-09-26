@@ -441,7 +441,24 @@ void linear(Stream& s) {
         (void)activateDelay; (void)dynamicHits;
     }
 }
-void grenade(Stream& s) { projectile(s); s.readUnsigned(32); f32s(s, 6); s.readUnsigned(32); }
+void grenade(Stream& s) {
+    projectile(s);
+    // armingDelayMS, muzzleVelocity, grenadeElasticity, grenadeFriction,
+    // drag, density, gravityMod, lifetimeMS
+    const int32_t armingDelay = (int32_t)s.readUnsigned(32);
+    s.readF32();
+    const float elasticity = s.readF32(), friction = s.readF32();
+    s.readF32(); s.readF32();
+    const float gravityMod = s.readF32();
+    const int32_t lifetime = (int32_t)s.readUnsigned(32);
+    if (activeDecoded) {
+        activeDecoded->grenadeArmingDelayMS = armingDelay;
+        activeDecoded->grenadeElasticity = elasticity;
+        activeDecoded->grenadeFriction = friction;
+        activeDecoded->grenadeGravityMod = gravityMod;
+        activeDecoded->projectileLifetimeMS = lifetime;
+    }
+}
 void shapeImage(Stream& s) {
     if (s.readFlag()) s.readUnsigned(32);
     const std::string shapeName = s.readString();

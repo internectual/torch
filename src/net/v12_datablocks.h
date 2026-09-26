@@ -203,6 +203,9 @@ struct DecodedDataBlock {
     ProjectileMaterial projectileMaterial = ProjectileMaterial::None;
     std::vector<std::string> projectileMaterialTextures;
     bool projectileIsEnergyBolt = false; // EnergyProjectileData
+    // GrenadeProjectileData flight.
+    int32_t grenadeArmingDelayMS = 0;
+    float grenadeElasticity = 0.999f, grenadeFriction = 0.3f, grenadeGravityMod = 1.0f;
     float projectileBlurLifetime = 0.0f, projectileBlurWidth = 0.0f;
     std::array<float, 3> projectileBlurColor{1.0f, 1.0f, 1.0f};
     std::array<float, 3> projectileMaterialSizes{1.0f, 1.0f, 1.0f};

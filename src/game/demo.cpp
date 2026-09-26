@@ -2349,18 +2349,19 @@ static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEnt
         else bs.readPoint3F();
         Vec3 vel = bs.readPoint3F(); // velocity
         if (entry) { entry->velocity = vel; entry->hasVelocity = true; }
-        if (entry && (vel.x != 0 || vel.y != 0 || vel.z != 0)) {
-            // Orient projectile along velocity vector
-            float len = sqrtf(vel.x*vel.x + vel.y*vel.y + vel.z*vel.z);
-            if (len > 0.001f) {
-                Vec3 dir = {vel.x/len, vel.y/len, vel.z/len};
-                // Build rotation from forward (0,1,0) to direction
-                float yaw = atan2f(dir.x, dir.y);
-                entry->rotation = torqueYawQuaternion(yaw);
-                entry->hasRotation = true;
-            }
+        const uint32_t currTick = bs.readRangedU32(0, 4095);
+        if (entry) {
+            // The client flies the shell from this state; grenades stay
+            // world-aligned (GrenadeProjectile::processTick).
+            entry->ballisticSentPos = entry->position;
+            entry->ballisticSentVel = vel;
+            entry->ballisticCurrTick = (int)currTick;
+            entry->hasBallistic = entry->ballisticFresh = true;
+            entry->ballisticTime = 0.0f; // a new flight (the ghost index may be reused)
+            entry->ballisticStopped = false;
+            entry->rotation = {0, 0, 0, 1};
+            entry->hasRotation = true;
         }
-        bs.readRangedU32(0, 4095); // currTick
         bs.readFlag(); // quickSplash
         if (bs.readFlag()) {
             Vec3 expPos = bs.readPoint3F();
@@ -2372,10 +2373,16 @@ static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEnt
         if (bs.readFlag()) { bs.readRangedU32(0, 1024); bs.readRangedU32(0, 7); } // source
         if (bs.readFlag()) bs.readRangedU32(0, 1024); // vehicleObject
     } else { // non-initial
-        if (bs.readFlag()) { // BounceMask
+        if (bs.readFlag()) { // BounceMask: the server's corrected state
             if (entry) entry->position = bs.readPoint3F();
             else bs.readPoint3F();
-            bs.readPoint3F(); // velocity
+            const Vec3 vel = bs.readPoint3F();
+            if (entry) {
+                entry->velocity = vel;
+                entry->ballisticSentPos = entry->position;
+                entry->ballisticSentVel = vel;
+                entry->ballisticFresh = true;
+            }
         }
         if (bs.readFlag()) {
             Vec3 expPos = bs.readPoint3F();

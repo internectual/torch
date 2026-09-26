@@ -742,6 +742,14 @@ struct GhostEntry {
     bool hasLinearFlight = false, linearSegmentValid = false;
     Vec3 linearVelocity{};
     float linearEndTime = 0.0f;
+    // GrenadeProjectile family: the latest transmitted state (Torque) and the
+    // client flight (Y-up) stepped per 32 ms tick from it.
+    Vec3 ballisticSentPos{}, ballisticSentVel{};
+    int ballisticCurrTick = 0;
+    bool hasBallistic = false, ballisticFresh = false, ballisticStopped = false;
+    Point3F ballisticPos{}, ballisticVel{};
+    float ballisticTime = 0.0f;
+    int ballisticAgeTicks = 0;
     bool vehicleJetting = false;
     int thrustDirection = VehicleJets::ThrustForward;
     VehicleJets::Direction jetBack, jetBottom;

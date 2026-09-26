@@ -15,6 +15,7 @@
 #include "game/hud.h"
 #include "game/item_parity.h"
 #include "game/link_beam.h"
+#include "game/projectile_physics.h"
 #include "game/physics.h"
 #include "game/time_scale.h"
 #include "game/projectile_audio.h"
@@ -296,6 +297,58 @@ static const DTSShape::Animation* findAnimation(const DTSShape& shape,
 // Renders a mounted image with its state machine's threads: the state
 // sequence, the flash visibility sequence, and the always-running "ambient"
 // and "spin" threads (ShapeBaseImageData::preload).
+// Static-world ray (interiors and terrain) from a to b in Y-up space, for
+// client projectile flight. Terrain hits only a downward crossing of a solid
+// square, so rays from inside underground bases and through holes pass.
+static bool castStaticRay(World& world, const Point3F& a, const Point3F& b,
+                          ProjectilePhysics::RayHit& hit) {
+    const Point3F d{b.x - a.x, b.y - a.y, b.z - a.z};
+    const float length = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+    if (length < 1e-6f) return false;
+    const Point3F dir{d.x / length, d.y / length, d.z / length};
+    float best = length;
+    bool found = false;
+    float hitDist; Point3F hitPos, hitNormal;
+    if (world.collision().raycast(a, dir, length, hitDist, hitPos, hitNormal) && hitDist <= best) {
+        best = hitDist; hit.point = hitPos; hit.normal = hitNormal; found = true;
+    }
+    const auto* terrain = world.terrain();
+    if (terrain && terrain->loaded) {
+        auto below = [&](const Point3F& p) {
+            return p.y < world.getHeight(p.x, p.z) && !terrain->isEmptySquare(p.x, p.z);
+        };
+        const float step = 0.5f;
+        bool wasBelow = below(a);
+        float prev = 0.0f;
+        for (float s = std::min(step, best); ; s = std::min(s + step, best)) {
+            const Point3F p{a.x + dir.x * s, a.y + dir.y * s, a.z + dir.z * s};
+            const bool isBelow = below(p);
+            if (isBelow && !wasBelow) {
+                float lo = prev, hi = s;
+                for (int k = 0; k < 12; ++k) {
+                    const float mid = 0.5f * (lo + hi);
+                    const Point3F q{a.x + dir.x * mid, a.y + dir.y * mid, a.z + dir.z * mid};
+                    (below(q) ? hi : lo) = mid;
+                }
+                if (hi <= best) {
+                    best = hi;
+                    hit.point = {a.x + dir.x * hi, a.y + dir.y * hi, a.z + dir.z * hi};
+                    hit.normal = terrainNormalFromHeights(
+                        world.getHeight(hit.point.x - 1.0f, hit.point.z), world.getHeight(hit.point.x + 1.0f, hit.point.z),
+                        world.getHeight(hit.point.x, hit.point.z - 1.0f), world.getHeight(hit.point.x, hit.point.z + 1.0f));
+                    found = true;
+                }
+                break;
+            }
+            wasBelow = isBelow;
+            prev = s;
+            if (s >= best) break;
+        }
+    }
+    if (found) hit.t = best / length;
+    return found;
+}
+
 // ShapeBase::castRay: segment a -> b against each LOS-(i+9) detail (or
 // Collision-(i+1) when absent) as last posed; nearest hit parameter in
 // [0, 1], or -1. Player::castRay tests the PlayerData box instead (pass its
@@ -8194,43 +8247,10 @@ void Game::render(float dt) {
                         const float vlen = std::sqrt(velYUp.x * velYUp.x + velYUp.y * velYUp.y + velYUp.z * velYUp.z);
                         float endTime = lifetime;
                         if (vlen > 1e-4f && w) {
-                            const Point3F dirYUp{velYUp.x / vlen, velYUp.y / vlen, velYUp.z / vlen};
-                            float maxDist = vlen * lifetime;
-                            float hitDist; Point3F hitPos, hitNormal;
-                            if (w->collision().raycast(startYUp, dirYUp, maxDist, hitDist, hitPos, hitNormal))
-                                maxDist = std::min(maxDist, hitDist);
-                            // Terrain height field: march, then bisect the crossing.
-                            if (w->terrain() && w->terrain()->loaded) {
-                                const float step = 0.5f;
-                                float prev = 0.0f;
-                                // Only a crossing of the surface from above hits: a ray
-                                // that starts underneath (underground bases) passes.
-                                auto below = [&](const Point3F& p) {
-                                    return p.y < w->getHeight(p.x, p.z) && !w->terrain()->isEmptySquare(p.x, p.z);
-                                };
-                                bool wasBelow = below(startYUp);
-                                for (float d = step; d <= maxDist + step; d += step) {
-                                    const float dd = std::min(d, maxDist);
-                                    const Point3F p{startYUp.x + dirYUp.x * dd, startYUp.y + dirYUp.y * dd,
-                                                    startYUp.z + dirYUp.z * dd};
-                                    const bool isBelow = below(p);
-                                    if (isBelow && !wasBelow) {
-                                        float lo = prev, hi = dd;
-                                        for (int k = 0; k < 12; ++k) {
-                                            const float mid = 0.5f * (lo + hi);
-                                            const Point3F q{startYUp.x + dirYUp.x * mid, startYUp.y + dirYUp.y * mid,
-                                                            startYUp.z + dirYUp.z * mid};
-                                            (q.y < w->getHeight(q.x, q.z) ? hi : lo) = mid;
-                                        }
-                                        maxDist = std::min(maxDist, hi);
-                                        break;
-                                    }
-                                    wasBelow = isBelow;
-                                    prev = dd;
-                                    if (dd >= maxDist) break;
-                                }
-                            }
-                            endTime = maxDist / vlen;
+                            const Point3F endYUp{startYUp.x + velYUp.x * lifetime, startYUp.y + velYUp.y * lifetime,
+                                                 startYUp.z + velYUp.z * lifetime};
+                            ProjectilePhysics::RayHit hit;
+                            if (castStaticRay(*w, startYUp, endYUp, hit)) endTime = hit.t * lifetime;
                         }
                         mg->linearEndTime = endTime;
                         mg->linearSegmentValid = true;
@@ -8245,6 +8265,51 @@ void Game::render(float dt) {
                           mg->linearStart.z + mg->linearVelocity.z * t};
                     mg->renderPos = rp;
                     mg->velocity = mg->linearVelocity;
+                }
+            }
+            // GrenadeProjectile::processTick for grenades, mortar shells,
+            // energy bolts and flares: fly the last transmitted state per
+            // 32 ms tick with gravity x gravityMod, bouncing off the static
+            // world until armed; the first armed contact stops it (the server
+            // sends the explosion and bounce corrections).
+            if (mg->hasBallistic && g->hasDatablock && !g->exploded && w) {
+                const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+                auto block = blocks.find((uint32_t)g->datablockId);
+                if (block != blocks.end()) {
+                    const auto& data = block->second.decoded;
+                    const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                    if (mg->ballisticFresh) {
+                        if (!mg->ballisticStopped && mg->ballisticTime == 0.0f)
+                            mg->ballisticAgeTicks = mg->ballisticCurrTick;
+                        mg->ballisticPos = Math::torquePointToYUp(
+                            {mg->ballisticSentPos.x, mg->ballisticSentPos.y, mg->ballisticSentPos.z});
+                        mg->ballisticVel = Math::torquePointToYUp(
+                            {mg->ballisticSentVel.x, mg->ballisticSentVel.y, mg->ballisticSentVel.z});
+                        mg->ballisticTime = now;
+                        mg->ballisticStopped = false;
+                        mg->ballisticFresh = false;
+                    }
+                    // The engine floors arming at 250 ms, in whole ticks.
+                    const int armedTick = (int)std::ceil(std::max(250, data.grenadeArmingDelayMS) / 32.0f);
+                    const ProjectilePhysics::CastRay cast = [&](const Point3F& a, const Point3F& b,
+                                                                 ProjectilePhysics::RayHit& hit) {
+                        return castStaticRay(*w, a, b, hit);
+                    };
+                    int guard = 0;
+                    while (!mg->ballisticStopped && now - mg->ballisticTime >= ProjectilePhysics::TickSeconds &&
+                           guard++ < 64) {
+                        mg->ballisticStopped = !ProjectilePhysics::stepBallistic(
+                            mg->ballisticPos, mg->ballisticVel, getGravity() * data.grenadeGravityMod,
+                            data.grenadeElasticity, data.grenadeFriction,
+                            mg->ballisticAgeTicks > armedTick, cast);
+                        mg->ballisticTime += ProjectilePhysics::TickSeconds;
+                        ++mg->ballisticAgeTicks;
+                    }
+                    if (guard >= 64) mg->ballisticTime = now; // long pause: resync the clock
+                    const Point3F torque{mg->ballisticPos.x, -mg->ballisticPos.z, mg->ballisticPos.y};
+                    rp = {torque.x, torque.y, torque.z};
+                    mg->renderPos = rp;
+                    mg->velocity = {mg->ballisticVel.x, -mg->ballisticVel.z, mg->ballisticVel.y};
                 }
             }
 
