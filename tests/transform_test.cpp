@@ -47,8 +47,12 @@ int main() {
     // The native Camera uses local +Y as forward.
     assertPoint(Math::torqueCameraForwardToYUp({0, 0, 1}, 0.0f),
                 {0, 0, -1});
+    // Mission rotations are clockwise: a 90 degree yaw faces Torque +X.
     assertPoint(Math::torqueCameraForwardToYUp({0, 0, 1}, Math::PI * 0.5f),
-                {-1, 0, 0});
+                {1, 0, 0});
+    // Matches the object/mapper-camera convention.
+    assertPoint(Math::torqueRotationToYUp({0, 0, 1}, -Math::PI * 0.5f).transformNormal({0, 0, -1}),
+                {1, 0, 0});
 
     const QuatF source = {0.2f, -0.3f, 0.4f, 0.8f};
     const QuatF roundTrip = QuatF::fromMatrix(source.toMatrix());

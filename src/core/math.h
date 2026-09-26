@@ -140,9 +140,11 @@ namespace Math {
 
     // Torque cameras look down their local +Y axis (Camera::getEyeTransform),
     // not the renderer's conventional -Z axis.
+    // Mission angles rotate clockwise about their axis (as for every other
+    // mission object), so a 90 degree turn about +Z faces +X.
     inline Point3F torqueCameraForwardToYUp(const Point3F& axis, float angle) {
         MatrixF torqueRotation;
-        torqueRotation.setRotationAxis(axis, angle);
+        torqueRotation.setRotationAxis(axis, -angle);
         return czUpToYUp().transformNormal(
             torqueRotation.transformNormal({0, 1, 0}));
     }

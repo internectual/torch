@@ -6090,6 +6090,10 @@ bool Game::init() {
         "resumeDemo - Resume demo playback");
     con.addCommand("toggleDemoPause", [this](int32_t, const char* const*) { toggleDemoPause(); },
         "toggleDemoPause - Toggle demo playback pause");
+    con.addCommand("mapperCamera", [this](int32_t argc, const char* const* argv) {
+        if (argc < 2) return;
+        selectMapperObserverCamera(atoi(argv[1]));
+    }, "mapperCamera <n> - select authored observer camera n (mapper mode)");
     con.addCommand("setFreeCamera", [this](int32_t argc, const char* const* argv) {
         if (argc < 7) {
             Console::instance().printf(LogLevel::Warn,
