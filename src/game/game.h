@@ -4,6 +4,7 @@
 #include "audio/audio_system.h"
 #include "render/renderer.h"
 #include "game/collision.h"
+#include "game/shape_lighting.h"
 #include "game/weapon.h"
 #include "net/protocol.h"
 #include "game/demo.h"
@@ -322,6 +323,7 @@ public:
         float forceFieldScrollSpeed = 0.0f;
         bool forceFieldOpen = false;
         std::string animName; // empty = static render; non-empty = play this animation
+        ShapeLighting::State shapeLight; // getLightingColor probe state
         float animTime = 0;
         int zoneManager = -1;
         int interiorZone = -1;
@@ -436,6 +438,30 @@ private:
     TerrainBlock terrainBlock;
     Sky skyBox;
     CollisionMesh interiorCollision;
+
+    // Interior render triangles for the shape lighting probe: each keeps its
+    // lightmap UVs so the floor colour under a roof can be sampled.
+    struct LightProbeTriangle {
+        Point2F uv[3];
+        uint32_t lightmap = 0; // GL texture id, 0 = no lighting data
+        bool outsideVisible = false;
+    };
+    std::vector<CollisionTri> lightProbeTris;
+    std::vector<LightProbeTriangle> lightProbeInfo;
+    CollisionGrid lightProbeGrid;
+    struct LightmapPixels { int width = 0, height = 0; std::vector<uint8_t> rgba; };
+    std::unordered_map<uint32_t, LightmapPixels> lightmapPixelCache;
+    bool sampleInteriorLight(int triangle, const Point3F& point, ShapeLighting::Color& out);
+public:
+    // SceneObject::getLightingColor for a shape centred at `center` (Y-up
+    // world). Returns false when a roof has no floor beneath it, leaving
+    // the previous result standing.
+    bool probeShapeLighting(const Point3F& center, int& mode, ShapeLighting::Color& color);
+    // Probe if moved, slew, and store the result on the shape for its next
+    // render. `renderModel` places the shape in the world.
+    void applyShapeLighting(DTSShape& shape, ShapeLighting::State& state,
+                            const MatrixF& renderModel, float dtMs);
+private:
     std::vector<WorldObject> worldObjects;
     // SpawnSphere rotation is per team. A respawn by the opposing team must
     // not change which authored start this team receives next.

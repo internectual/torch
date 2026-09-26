@@ -1,4 +1,5 @@
 #pragma once
+#include "game/shape_lighting.h"
 #include <cstdint>
 #include <cstring>
 #include <cmath>
@@ -703,6 +704,8 @@ struct GhostEntry {
     float moveTimeScale = 1.0f;
     float moveStartTime = 0.0f;
     bool moveAnimValid = false;
+    // Render-side shape lighting probe state.
+    ShapeLighting::State shapeLight;
 };
 
 class GhostTracker {

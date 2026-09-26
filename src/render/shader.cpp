@@ -24,11 +24,52 @@ uniform mat4 uView;
 uniform mat4 uModel;
 uniform vec3 uCamPos = vec3(0);
 
+// Tribes 2 shape lighting (SceneObject::installLights), gamma space and
+// per vertex like the engine's fixed-function GL lights.
+uniform int uShapeLightMode = 0;          // 0 sun, 1 under a roof, 2 terrain
+uniform vec3 uShapeLightColor = vec3(1.0); // probed, slewed colour
+uniform float uShapeBoundRadius = 1.0;
+uniform vec3 uLightDir = vec3(0.5, 0.8, 0.6);
+uniform vec3 uSunColor = vec3(1.0);
+uniform vec3 uAmbient = vec3(0.3);
+uniform vec3 uShapeInteriorDir = vec3(0.0, 1.0, 0.0); // toward the indoor light
+uniform int uPointLightCount = 0;
+uniform vec3 uPointLightPos[8];
+uniform vec3 uPointLightColor[8];
+uniform vec3 uPointLightParams[8]; // radius, falloff, unused
+
 out vec3 vNormal;
 out vec2 vUV;
 out vec2 vUV2;
 out vec4 vColor;
 out vec3 vWorldPos;
+out vec3 vShapeLight;
+
+vec3 shapeLighting(vec3 n, vec3 position) {
+    vec3 lighting;
+    if (uShapeLightMode == 1) {
+        lighting = uShapeLightColor * 0.7
+            + uShapeLightColor * 0.3 * max(dot(n, uShapeInteriorDir), 0.0);
+    } else {
+        float brightness = uShapeLightMode == 2
+            ? clamp((uShapeLightColor.r + uShapeLightColor.g + uShapeLightColor.b) / 3.0, 0.0, 1.0)
+            : 1.0;
+        float ambientAverage = (uAmbient.r + uAmbient.g + uAmbient.b) / 3.0;
+        vec3 diffuse = uSunColor * clamp(brightness - ambientAverage, 0.0, 1.0);
+        lighting = uAmbient + diffuse * max(dot(n, normalize(uLightDir)), 0.0);
+    }
+    // Point lights contribute colour x radius / distance.
+    for (int i = 0; i < uPointLightCount; ++i) {
+        float radius = uPointLightParams[i].x;
+        if (radius <= 0.0) continue;
+        vec3 toLight = uPointLightPos[i] - position;
+        float dist = length(toLight);
+        if (dist > radius + uShapeBoundRadius) continue;
+        float d = max(dist, 1e-3);
+        lighting += uPointLightColor[i] * (radius / d) * max(dot(n, toLight / d), 0.0);
+    }
+    return clamp(lighting, 0.0, 1.0);
+}
 
 void main() {
     vec4 worldPos = uModel * vec4(aPos, 1.0);
@@ -38,6 +79,8 @@ void main() {
     vUV2 = aUV2;
     vColor = aColor;
     vWorldPos = worldPos.xyz;
+    vec3 n = length(vNormal) > 1e-6 ? normalize(vNormal) : vec3(0.0, 1.0, 0.0);
+    vShapeLight = shapeLighting(n, worldPos.xyz);
 }
 )";
 
@@ -48,6 +91,7 @@ in vec2 vUV;
 in vec2 vUV2;
 in vec4 vColor;
 in vec3 vWorldPos;
+in vec3 vShapeLight;
 
 uniform sampler2D uTexture;
 uniform sampler2D uLightmap;
@@ -220,54 +264,10 @@ void main() {
         }
         FragColor = vec4(lit, col.a);
     } else {
+        // Tribes 2 shapes: interpolated gamma-space vertex lighting times
+        // the texture, clamped. Shapes are never shadow-mapped.
         vec3 N = normalize(vNormal);
-        vec3 V = normalize(uCamPos - vWorldPos);
-        vec3 L = normalize(uLightDir);
-        vec3 H = normalize(L + V);
-
-        float NdotL = max(dot(N, L), 0.0);
-        float NdotV = max(dot(N, V), 0.001);
-        float NdotH = max(dot(N, H), 0.001);
-        float HdotV = max(dot(H, V), 0.001);
-
-        float shadowFactor = 1.0;
-        if (uShadowStrength > 0.0) {
-            vec4 shadowCoord = uShadowMatrix * vec4(vWorldPos, 1.0);
-            shadowFactor = mix(shadowPCF(shadowCoord), 1.0, 1.0 - uShadowStrength);
-        }
-
-        // PBR: Cook-Torrance BRDF
-        float metallic = uMetallic;
-        float roughness = clamp(uRoughness, 0.04, 1.0);
-        vec3 F0 = mix(vec3(0.04), col.rgb, metallic);
-
-        // Diffuse (Lambertian)
-        vec3 diffuse = col.rgb * (1.0 - metallic) / 3.14159;
-
-        // Specular: D (GGX), G (Smith-Schlick), F (Schlick)
-        float alpha = roughness * roughness;
-        float a2 = alpha * alpha;
-        float NdotH2 = NdotH * NdotH;
-        float D = a2 / (3.14159 * (NdotH2 * (a2 - 1.0) + 1.0) * (NdotH2 * (a2 - 1.0) + 1.0));
-
-        float k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
-        float G = NdotL / (NdotL * (1.0 - k) + k) * NdotV / (NdotV * (1.0 - k) + k);
-
-        vec3 F = F0 + (1.0 - F0) * pow(1.0 - HdotV, 5.0);
-
-        vec3 specular = D * G * F / (4.0 * NdotV * NdotL + 0.0001);
-
-        vec3 dynamic = vec3(0.0);
-        for (int i = 0; i < uPointLightCount; ++i) {
-            vec3 toLight = uPointLightPos[i] - vWorldPos;
-            float distance = length(toLight);
-            vec3 Lp = distance > 0.0001 ? toLight / distance : N;
-            float edge = clamp(1.0 - distance / uPointLightParams[i].x, 0.0, 1.0);
-            float attenuation = pow(edge, max(0.1, uPointLightParams[i].y));
-            dynamic += uPointLightColor[i] * max(dot(N, Lp), 0.0) * attenuation;
-        }
-        vec3 lit = (diffuse + specular) * (1.0 + 1.0 * NdotL * shadowFactor) +
-                   col.rgb * dynamic * (1.0 - metallic);
+        vec3 lit = clamp(vShapeLight * col.rgb, 0.0, 1.0);
         if (uUseEnvMap) {
             vec3 V = normalize(uCamPos - vWorldPos);
             vec3 R = reflect(-V, N);

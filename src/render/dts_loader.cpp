@@ -296,9 +296,14 @@ static void buildDTSNodeAnimation(DTSShape::Animation& anim, const DTSSequenceHe
     auto frameTime = [&](int k) {
         return (numKFrames > 1) ? (float)k / (float)(numKFrames - 1) * dur : 0.0f;
     };
-    auto keyframeFor = [&](int32_t nodeIdx, float t) -> DTSShape::Keyframe& {
-        for (auto& f : anim.keyframes)
-            if (f.nodeIndex == nodeIdx && std::abs(f.time - t) < 0.0001f) return f;
+    // Keyframes are shared by node and frame across the channels.
+    std::unordered_map<int64_t, size_t> keyframeIndex;
+    auto keyframeFor = [&](int32_t nodeIdx, int frame) -> DTSShape::Keyframe& {
+        const int64_t key = ((int64_t)nodeIdx << 32) | (uint32_t)frame;
+        auto found = keyframeIndex.find(key);
+        if (found != keyframeIndex.end()) return anim.keyframes[found->second];
+        keyframeIndex.emplace(key, anim.keyframes.size());
+        const float t = frameTime(frame);
         DTSShape::Keyframe kf;
         kf.time = t;
         kf.nodeIndex = nodeIdx;
@@ -315,7 +320,7 @@ static void buildDTSNodeAnimation(DTSShape::Animation& anim, const DTSSequenceHe
         const int32_t nodeIdx = nodeFor(seq.rotationMatters[j]);
         if (nodeIdx < 0) continue;
         for (int k = 0; k < numKFrames; k++) {
-            DTSShape::Keyframe& kf = keyframeFor(nodeIdx, frameTime(k));
+            DTSShape::Keyframe& kf = keyframeFor(nodeIdx, k);
             kf.hasRotation = true;
             const int32_t idx = seq.baseRotation + (int32_t)j * numKFrames + k;
             if (idx >= 0 && idx < (int)pools.rotations->size())
@@ -326,7 +331,7 @@ static void buildDTSNodeAnimation(DTSShape::Animation& anim, const DTSSequenceHe
         const int32_t nodeIdx = nodeFor(seq.translationMatters[j]);
         if (nodeIdx < 0) continue;
         for (int k = 0; k < numKFrames; k++) {
-            DTSShape::Keyframe& kf = keyframeFor(nodeIdx, frameTime(k));
+            DTSShape::Keyframe& kf = keyframeFor(nodeIdx, k);
             const int32_t idx = seq.baseTranslation + (int32_t)j * numKFrames + k;
             if (idx >= 0 && idx < (int)pools.translations->size()) {
                 kf.hasTranslation = true;
@@ -340,7 +345,7 @@ static void buildDTSNodeAnimation(DTSShape::Animation& anim, const DTSSequenceHe
         const int32_t nodeIdx = nodeFor(seq.scaleMatters[j]);
         if (nodeIdx < 0) continue;
         for (int k = 0; k < numKFrames; k++) {
-            DTSShape::Keyframe& kf = keyframeFor(nodeIdx, frameTime(k));
+            DTSShape::Keyframe& kf = keyframeFor(nodeIdx, k);
             const int32_t idx = seq.baseScale + (int32_t)j * numKFrames + k;
             if (uniformScale && idx >= 0 && idx < (int)pools.uniformScales->size()) {
                 const float value = (*pools.uniformScales)[idx];

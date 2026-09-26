@@ -196,6 +196,18 @@ struct DTSShape {
     std::vector<int> actionTable;
     // Node world transforms from the most recent render, for mounting.
     std::vector<MatrixF> animatedNodeWorld;
+    // Tribes 2 shape lighting for the next render (see game/shape_lighting.h):
+    // mode 0 sun, 1 under a roof, 2 above terrain, with the probed colour.
+    struct Lighting {
+        int mode = 0;
+        ColorF color{1.0f, 1.0f, 1.0f, 1.0f};
+    } lighting;
+    // Bind-pose bounds in shape space (lazily computed).
+    Point3F boundsCenter() const;
+    float boundsRadius() const;
+    mutable bool boundsValid = false;
+    mutable Point3F cachedBoundsCenter{};
+    mutable float cachedBoundsRadius = 1.0f;
     std::vector<SkinInfo> skins; // parallel to meshes
     std::vector<int32_t> objectStartMesh; // per-object: first mesh index
     std::vector<int32_t> objectNumMeshes; // per-object: number of meshes
@@ -295,6 +307,10 @@ struct TerrainBlock {
     Texture splatMap2;  // RGBA: layers 4-5 alpha weights (R,G used)
     Texture gameGrid;   // MissionArea boundary overlay texture
     Texture lightmap;   // baked self-shadowing NdotL lightmap (computed from heightfield)
+    std::vector<uint8_t> lightmapNdotL; // CPU copy of the lightmap, lightmapSize^2
+    int lightmapSize = 0;
+    // NdotL x shadow in [0,1] under a world point, or -1 outside the terrain.
+    float sampleLightmapNdotL(float wx, float wz) const;
     std::vector<std::string> textureNames;
     bool loaded = false;
 

@@ -283,7 +283,23 @@ void TerrainBlock::bakeLightmap() {
     std::vector<uint8_t> rgba(LM * LM * 4);
     for (int i = 0; i < LM * LM; i++) { rgba[i*4+0] = lm[i]; rgba[i*4+1] = lm[i]; rgba[i*4+2] = lm[i]; rgba[i*4+3] = 255; }
     lightmap.loadRaw(rgba.data(), LM, LM, 4);
+    lightmapNdotL = lm;
+    lightmapSize = LM;
     Console::instance().printf(LogLevel::Info, "Terrain: baked %dx%d self-shadowing lightmap", LM, LM);
+}
+
+float TerrainBlock::sampleLightmapNdotL(float wx, float wz) const {
+    if (lightmapSize <= 0 || lightmapNdotL.empty() || size < 2 || squareSize <= 0.0f)
+        return -1.0f;
+    // Lightmap texel c covers terrain squares [c, c+1) * size / lightmapSize,
+    // with the same wrapping as the height field.
+    const float fx = (wx - worldOffset.x) / squareSize;
+    const float fz = (worldOffset.z - wz) / squareSize;
+    int col = (int)std::floor(fx * (float)lightmapSize / (float)size) % lightmapSize;
+    int row = (int)std::floor(fz * (float)lightmapSize / (float)size) % lightmapSize;
+    if (col < 0) col += lightmapSize;
+    if (row < 0) row += lightmapSize;
+    return lightmapNdotL[(size_t)row * lightmapSize + col] / 255.0f;
 }
 
 bool TerrainBlock::load(const uint8_t* data, size_t size) {
@@ -1731,6 +1747,9 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     shader->setUniform("uDebugInterior", (int32_t)(getenv("TORCH_DIF_RED") ? 1 : 0));
     shader->setUniform("uInterior", (int32_t)(isInterior ? 1 : 0));
     shader->setUniform("uInteriorOutsideVisible", (int32_t)0);
+    shader->setUniform("uShapeLightMode", (int32_t)lighting.mode);
+    shader->setUniform("uShapeLightColor", Point3F{lighting.color.r, lighting.color.g, lighting.color.b});
+    shader->setUniform("uShapeBoundRadius", boundsRadius());
     shader->setUniform("uDebugLightmap", (int32_t)(getenv("TORCH_DIF_LMUV") ? 1 : 0));
     // Also check lightmap-only mode for debugging
     shader->setUniform("uDebugTex", (int32_t)(getenv("TORCH_DIF_TEXUV") ? 1 : 0));
@@ -2005,6 +2024,37 @@ int DTSShape::findNode(const std::string& name) const {
         if (candidate == wanted) return i;
     }
     return -1;
+}
+
+Point3F DTSShape::boundsCenter() const {
+    boundsRadius();
+    return cachedBoundsCenter;
+}
+
+float DTSShape::boundsRadius() const {
+    if (boundsValid) return cachedBoundsRadius;
+    boundsValid = true;
+    Point3F lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+    bool any = false;
+    for (size_t mi = 0; mi < meshes.size(); ++mi) {
+        const MeshData& mesh = meshes[mi];
+        const bool skinned = mi < skins.size() && skins[mi].hasSkin;
+        MatrixF xform;
+        xform.identity();
+        if (!skinned && mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)defaultTransforms.size())
+            xform = defaultTransforms[mesh.nodeIndex];
+        for (const auto& vertex : mesh.vertices) {
+            const Point3F p = xform.transform(vertex.pos);
+            lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+            hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+            any = true;
+        }
+    }
+    if (!any) return cachedBoundsRadius;
+    cachedBoundsCenter = {(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+    const Point3F size{hi.x - lo.x, hi.y - lo.y, hi.z - lo.z};
+    cachedBoundsRadius = std::max(0.01f, 0.5f * std::sqrt(size.x * size.x + size.y * size.y + size.z * size.z));
+    return cachedBoundsRadius;
 }
 
 void DTSShape::renderAnimation(const char* animName, float time,
@@ -2310,6 +2360,9 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
     shader->setUniform("uCamPos", r.cameraPos);
     shader->setUniform("uInterior", (int32_t)(isInterior ? 1 : 0));
     if (shader) shader->setUniform("uShadowStrength", r.shadowsActive ? 0.6f : 0.0f);
+    shader->setUniform("uShapeLightMode", (int32_t)lighting.mode);
+    shader->setUniform("uShapeLightColor", Point3F{lighting.color.r, lighting.color.g, lighting.color.b});
+    shader->setUniform("uShapeBoundRadius", boundsRadius());
 
     const MatrixF baseModel = r.modelMatrix();
     glEnable(GL_CULL_FACE);

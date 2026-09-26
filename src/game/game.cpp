@@ -1,5 +1,6 @@
 #include "game/game.h"
 #include "game/player_animation.h"
+#include "game/shape_lighting.h"
 #include "game/collision.h"
 #include "render/dts_loader.h"
 #include "game/precipitation_parity.h"
@@ -1274,6 +1275,10 @@ void World::cleanupMission() {
     missionObjectives.clear();
     navGraph = {};
     interiorCollision = {};
+    lightProbeTris.clear();
+    lightProbeInfo.clear();
+    lightProbeGrid = {};
+    lightmapPixelCache.clear();
     currentSceneState = {};
     cameras.clear();
     shapes.clear();
@@ -1361,6 +1366,10 @@ bool World::load(const char* mapName) {
     missionObjectives.clear();
     navGraph = {};
     interiorCollision = {};
+    lightProbeTris.clear();
+    lightProbeInfo.clear();
+    lightProbeGrid = {};
+    lightmapPixelCache.clear();
     currentSceneState = {};
     cameras.clear();
     fogVolumes.clear();
@@ -2516,6 +2525,39 @@ bool World::load(const char* mapName) {
                     vertBase += (uint32_t)cVerts.size() / 3;
                 };
 
+                // Render triangles carry the lightmap data the shape lighting
+                // probe samples under a roof.
+                for (const auto& mesh : wo.shape->meshes) {
+                    int lightmapIndex = (mesh.materialIdx >= 0 &&
+                        mesh.materialIdx < (int)wo.shape->materialLightmapIndex.size())
+                        ? wo.shape->materialLightmapIndex[mesh.materialIdx] : -1;
+                    uint32_t lightmapId = 0;
+                    if (lightmapIndex >= 0 && lightmapIndex < (int)wo.shape->lightmaps.size() &&
+                        wo.shape->lightmaps[lightmapIndex].loaded)
+                        lightmapId = wo.shape->lightmaps[lightmapIndex].id;
+                    for (size_t k = 0; k + 2 < mesh.indices.size(); k += 3) {
+                        const auto& a = mesh.vertices[mesh.indices[k]];
+                        const auto& b = mesh.vertices[mesh.indices[k + 1]];
+                        const auto& c = mesh.vertices[mesh.indices[k + 2]];
+                        CollisionTri tri;
+                        tri.v0 = fullXform.transform(a.pos);
+                        tri.v1 = fullXform.transform(b.pos);
+                        tri.v2 = fullXform.transform(c.pos);
+                        const Point3F e1{tri.v1.x - tri.v0.x, tri.v1.y - tri.v0.y, tri.v1.z - tri.v0.z};
+                        const Point3F e2{tri.v2.x - tri.v0.x, tri.v2.y - tri.v0.y, tri.v2.z - tri.v0.z};
+                        Point3F n{e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x};
+                        const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+                        if (len < 1e-8f) continue;
+                        tri.normal = {n.x / len, n.y / len, n.z / len};
+                        lightProbeTris.push_back(tri);
+                        LightProbeTriangle info;
+                        info.uv[0] = a.uv2; info.uv[1] = b.uv2; info.uv[2] = c.uv2;
+                        info.lightmap = lightmapId;
+                        info.outsideVisible = mesh.interiorOutsideVisible;
+                        lightProbeInfo.push_back(info);
+                    }
+                }
+
                 if (!wo.shape->collisionVerts.empty() && !wo.shape->collisionIndices.empty()) {
                     addCollisionVerts(wo.shape->collisionVerts, wo.shape->collisionIndices);
                 } else {
@@ -2533,6 +2575,7 @@ bool World::load(const char* mapName) {
                 }
             }
 
+            if (!lightProbeTris.empty()) lightProbeGrid.build(lightProbeTris);
             if (!allIndices.empty()) {
                 interiorCollision.addMesh(allVerts.data(), (int)allVerts.size(), allIndices.data(), (int)allIndices.size());
                 interiorCollision.build();
@@ -3405,6 +3448,14 @@ void World::render(const Point3F& cameraPos, float dt) {
         defShader->setUniform("uAmbient", Point3F{sunAmbient.r, sunAmbient.g, sunAmbient.b});
     }
 
+    // The fixed indoor shape light (installLights), toward the light.
+    {
+        const Point3F towardLight = Math::torquePointToYUp({
+            -ShapeLighting::InteriorDirection[0], -ShapeLighting::InteriorDirection[1],
+            -ShapeLighting::InteriorDirection[2]});
+        defShader->setUniform("uShapeInteriorDir", towardLight);
+    }
+
     // Bind environment map from sky (for reflections on shapes)
     if (skyBox.emap.loaded) {
         skyBox.emap.bind(2);
@@ -3547,6 +3598,9 @@ void World::render(const Point3F& cameraPos, float dt) {
                                                 r.projection * r.view * renderModel,
                                                 obj.shape->activeInteriorZones);
             }
+            if (!obj.shape->isInterior)
+                applyShapeLighting(*obj.shape, obj.shapeLight, model * obj.shape->upOrientation(),
+                                   dt * 1000.0f);
             if (!obj.animName.empty())
                 obj.shape->renderAnimation(obj.animName.c_str(), obj.animTime);
             else
@@ -3562,6 +3616,9 @@ void World::render(const Point3F& cameraPos, float dt) {
             // Torque's mounted-image transform instead of drawing only the
             // turret base.
             if (obj.mountedShape && obj.mountedShape->loaded) {
+                // Mounted images are lit with their owner (ShapeBase renders
+                // them inside its own light set).
+                obj.mountedShape->lighting = obj.shape->lighting;
                 int mountNode = obj.shape->findNode("mount0");
                 int pointNode = obj.mountedShape->findNode("Mountpoint");
                 if (pointNode < 0) pointNode = obj.mountedShape->findNode("mountPoint");
@@ -4379,6 +4436,116 @@ void Game::selectMapperObserverCamera(int index) {
 
 void World::spawnProjectile(const Projectile& p) {
     projList.push_back(p);
+}
+
+
+bool World::sampleInteriorLight(int triangle, const Point3F& point, ShapeLighting::Color& out) {
+    if (triangle < 0 || triangle >= (int)lightProbeInfo.size()) return false;
+    const LightProbeTriangle& info = lightProbeInfo[triangle];
+    const CollisionTri& tri = lightProbeTris[triangle];
+    if (!info.lightmap) return false;
+    auto cached = lightmapPixelCache.find(info.lightmap);
+    if (cached == lightmapPixelCache.end()) {
+        LightmapPixels pixels;
+        glBindTexture(GL_TEXTURE_2D, info.lightmap);
+        GLint w = 0, h = 0;
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+        if (w > 0 && h > 0 && w <= 4096 && h <= 4096) {
+            pixels.width = w;
+            pixels.height = h;
+            pixels.rgba.resize((size_t)w * h * 4);
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.rgba.data());
+        }
+        glBindTexture(GL_TEXTURE_2D, 0);
+        cached = lightmapPixelCache.emplace(info.lightmap, std::move(pixels)).first;
+    }
+    const LightmapPixels& px = cached->second;
+    if (px.width <= 0) return false;
+    // Barycentric lightmap UV at the hit point.
+    const Point3F v0{tri.v1.x - tri.v0.x, tri.v1.y - tri.v0.y, tri.v1.z - tri.v0.z};
+    const Point3F v1{tri.v2.x - tri.v0.x, tri.v2.y - tri.v0.y, tri.v2.z - tri.v0.z};
+    const Point3F v2{point.x - tri.v0.x, point.y - tri.v0.y, point.z - tri.v0.z};
+    auto dot = [](const Point3F& a, const Point3F& b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
+    const float d00 = dot(v0, v0), d01 = dot(v0, v1), d11 = dot(v1, v1);
+    const float d20 = dot(v2, v0), d21 = dot(v2, v1);
+    const float denom = d00 * d11 - d01 * d01;
+    float wb = 0.0f, wc = 0.0f;
+    if (std::fabs(denom) > 1e-12f) {
+        wb = (d11 * d20 - d01 * d21) / denom;
+        wc = (d00 * d21 - d01 * d20) / denom;
+    }
+    const float wa = 1.0f - wb - wc;
+    const float u = info.uv[0].x * wa + info.uv[1].x * wb + info.uv[2].x * wc;
+    const float v = info.uv[0].y * wa + info.uv[1].y * wb + info.uv[2].y * wc;
+    // Bilinear, clamped to the edge, as the lightmap sampler.
+    const float fx = std::clamp(u * px.width - 0.5f, 0.0f, (float)(px.width - 1));
+    const float fy = std::clamp(v * px.height - 0.5f, 0.0f, (float)(px.height - 1));
+    const int x0 = (int)fx, y0 = (int)fy;
+    const int x1 = std::min(x0 + 1, px.width - 1), y1 = std::min(y0 + 1, px.height - 1);
+    const float tx = fx - x0, ty = fy - y0;
+    float channel[3];
+    for (int c = 0; c < 3; ++c) {
+        auto at = [&](int x, int y) { return (float)px.rgba[((size_t)y * px.width + x) * 4 + c]; };
+        channel[c] = ((at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) +
+                      (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty) / 255.0f;
+    }
+    out = {channel[0], channel[1], channel[2]};
+    if (info.outsideVisible) {
+        // Outside-visible surfaces add clamp(sun*NdotL + ambient).
+        const float len = std::sqrt(dot(sunLightDir, sunLightDir));
+        const float nDotL = len > 0.0f ? std::max(dot(tri.normal, sunLightDir) / len, 0.0f) : 0.0f;
+        out.r = std::min(1.0f, out.r + std::min(1.0f, sunColor.r * nDotL + sunAmbient.r));
+        out.g = std::min(1.0f, out.g + std::min(1.0f, sunColor.g * nDotL + sunAmbient.g));
+        out.b = std::min(1.0f, out.b + std::min(1.0f, sunColor.b * nDotL + sunAmbient.b));
+    }
+    return true;
+}
+
+bool World::probeShapeLighting(const Point3F& center, int& mode, ShapeLighting::Color& color) {
+    const float reach = ShapeLighting::ProbeReach;
+    float t = 0.0f;
+    Point3F hit{}, normal{};
+    int triangle = -1;
+    if (!lightProbeTris.empty() &&
+        lightProbeGrid.raycast(lightProbeTris, center, {0, 1, 0}, reach, t, hit, normal, &triangle)) {
+        // Under a roof: the interior lighting at the floor below.
+        triangle = -1;
+        if (!lightProbeGrid.raycast(lightProbeTris, center, {0, -1, 0}, reach, t, hit, normal, &triangle))
+            return false;
+        // Interiors without lighting data light shapes white.
+        if (!sampleInteriorLight(triangle, hit, color)) color = {1.0f, 1.0f, 1.0f};
+        mode = ShapeLighting::Interior;
+        return true;
+    }
+    const float ndotl = terrainBlock.loaded ? terrainBlock.sampleLightmapNdotL(center.x, center.z) : -1.0f;
+    if (ndotl >= 0.0f && terrainBlock.contains(center.x, center.z)) {
+        color = ShapeLighting::terrainTexelLighting(ndotl, {sunColor.r, sunColor.g, sunColor.b},
+                                                    {sunAmbient.r, sunAmbient.g, sunAmbient.b});
+        mode = ShapeLighting::Terrain;
+        return true;
+    }
+    mode = ShapeLighting::Sun;
+    color = {1.0f, 1.0f, 1.0f};
+    return true;
+}
+
+void World::applyShapeLighting(DTSShape& shape, ShapeLighting::State& state,
+                               const MatrixF& renderModel, float dtMs) {
+    const Point3F center = renderModel.transform(shape.boundsCenter());
+    if (ShapeLighting::needsProbe(state, center.x, center.y, center.z)) {
+        int mode = state.mode;
+        ShapeLighting::Color color = state.target;
+        if (probeShapeLighting(center, mode, color))
+            ShapeLighting::recordProbe(state, center.x, center.y, center.z, mode, color);
+        else
+            state.hasProbe = true, state.lastX = center.x, state.lastY = center.y, state.lastZ = center.z;
+    }
+    ShapeLighting::advance(state, dtMs);
+    shape.lighting.mode = state.mode;
+    shape.lighting.color = state.mode == ShapeLighting::Sun
+        ? ColorF{1.0f, 1.0f, 1.0f, 1.0f}
+        : ColorF{state.color.r, state.color.g, state.color.b, 1.0f};
 }
 
 float World::getHeight(float x, float z) const {
@@ -5638,6 +5805,8 @@ void World::renderPrecipitation() {
         }
         return;
     }
+    // Without a drop material the engine has nothing to draw.
+    if (!texture) return;
     for (auto& d : precipitation.drops) {
         if (!d.active) continue;
         r.drawSprite(d.pos, precipitation.dropSize, dropColor, texture);
@@ -5921,6 +6090,18 @@ bool Game::init() {
         "resumeDemo - Resume demo playback");
     con.addCommand("toggleDemoPause", [this](int32_t, const char* const*) { toggleDemoPause(); },
         "toggleDemoPause - Toggle demo playback pause");
+    con.addCommand("setFreeCamera", [this](int32_t argc, const char* const* argv) {
+        if (argc < 7) {
+            Console::instance().printf(LogLevel::Warn,
+                "Usage: setFreeCamera px py pz tx ty tz (Torch world, Y up)");
+            return;
+        }
+        const Point3F pos{(float)atof(argv[1]), (float)atof(argv[2]), (float)atof(argv[3])};
+        const Point3F target{(float)atof(argv[4]), (float)atof(argv[5]), (float)atof(argv[6])};
+        setFreeCamActive(true);
+        setFreeCamPos(pos);
+        setFreeCamTarget(target);
+    }, "setFreeCamera px py pz tx ty tz - place the free camera (Torch world, Y up)");
     con.addCommand("toggleDemoOrbit", [this](int32_t, const char* const*) {
         demoFirstPersonCam = false;
         demoOrbitCam = !demoOrbitCam;
@@ -8257,6 +8438,8 @@ void Game::render(float dt) {
                     addBlend(animationIndex("head"), pitchPosition);
                     addBlend(animationIndex("headside"), yawPosition);
                 }
+                w->applyShapeLighting(*shape, mg->shapeLight, model * shape->upOrientation(),
+                                      dt * 1000.0f);
                 if (animation) {
                     shape->renderAnimationIndex((int)(animation - shape->animations.data()),
                                                 animationPosition * animation->duration,
@@ -8327,6 +8510,7 @@ void Game::render(float dt) {
                          MatrixF imageModel = mountedModel * wShape->upOrientation();
                          r.setModel(imageModel);
                          wShape->cloakTextureOverride = shape->cloakTextureOverride;
+                         wShape->lighting = shape->lighting;
                          const DTSShape::Animation* imageAnimation = nullptr;
                          for (const char* name : {mg->mountedImages[img].isFiring ? "fire" : "idle",
                                                   "ambient", "spin", "stand"}) {
@@ -8623,6 +8807,8 @@ void Game::render(float dt) {
                    if (thread.atEnd) animationPosition = thread.forward ? 1.0f : 0.0f;
                    break;
                }
+              w->applyShapeLighting(*g->shape, g->shapeLight, model * g->shape->upOrientation(),
+                                    dt * 1000.0f);
                if (animation)
                    g->shape->renderAnimation(animation->name.c_str(),
                                              animationPosition * animation->duration,
@@ -8660,6 +8846,7 @@ void Game::render(float dt) {
                              imageShape->defaultTransforms[imageMount].inverse() *
                              imageShape->upOrientation();
                   r.setModel(imageModel);
+                  imageShape->lighting = g->shape->lighting;
                   const DTSShape::Animation* imageAnimation = nullptr;
                   for (const char* name : {mounted.isFiring ? "fire" : "idle",
                                            "ambient", "spin", "stand"}) {
