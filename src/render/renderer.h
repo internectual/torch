@@ -247,13 +247,19 @@ struct DTSShape {
         int nodeIndex;
         MatrixF transform;
     };
+    // A blend sequence layered over the primary sequence at `time` seconds.
+    struct BlendThread {
+        int animationIndex;
+        float time;
+    };
     void render(int32_t detailLevel = 0, const NodeOverride* overrides = nullptr, int numOverrides = 0);
     void renderAnimation(const char* animName, float time,
                          const NodeOverride* overrides = nullptr,
                          int numOverrides = 0);
     void renderAnimationIndex(int animationIndex, float time,
                          const NodeOverride* overrides = nullptr,
-                         int numOverrides = 0);
+                         int numOverrides = 0,
+                         const BlendThread* blends = nullptr, int numBlends = 0);
     bool applySkin(const std::string& skinName);
 
     // Find node index by name (-1 if not found)

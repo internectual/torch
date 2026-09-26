@@ -2024,7 +2024,8 @@ void DTSShape::renderAnimation(const char* animName, float time,
 }
 
 void DTSShape::renderAnimationIndex(int animationIndex, float time,
-                                    const NodeOverride* overrides, int numOverrides) {
+                                    const NodeOverride* overrides, int numOverrides,
+                                    const BlendThread* blends, int numBlends) {
     if (!loaded) return;
 
     // An object can be hidden in one sample and visible in the next. Reset all
@@ -2058,97 +2059,127 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
 
     // Group keyframes by node — keyframes are sorted by (nodeIndex, time) from dts_loader.
     // For each animated node, find bracketing keyframes and interpolate.
-    size_t ki = 0;
-    while (ki < anim->keyframes.size()) {
-        int32_t ni = anim->keyframes[ki].nodeIndex;
-        if (ni < 0 || ni >= numNodes) { ki++; continue; }
+    // Samples one sequence's animated node channels at time st.
+    auto sampleChannels = [&](const Animation& a, float st,
+                              std::vector<QuatF>& nodeRot, std::vector<Point3F>& nodeTrans,
+                              std::vector<Point3F>& nodeScale, std::vector<bool>& rotSet,
+                              std::vector<bool>& transSet, std::vector<bool>& scaleSet) {
+        size_t ki = 0;
+        while (ki < a.keyframes.size()) {
+            int32_t ni = a.keyframes[ki].nodeIndex;
+            if (ni < 0 || ni >= numNodes) { ki++; continue; }
 
-        // Collect all keyframes for this node (contiguous since sorted by nodeIndex)
-        size_t start = ki;
-        while (ki < anim->keyframes.size() && anim->keyframes[ki].nodeIndex == ni) ki++;
-        size_t end = ki;
+            // Collect all keyframes for this node (contiguous since sorted by nodeIndex)
+            size_t start = ki;
+            while (ki < a.keyframes.size() && a.keyframes[ki].nodeIndex == ni) ki++;
+            size_t end = ki;
 
-        // Find bracketing pair for rotation
-        if (!rotSet[ni]) {
-            const Keyframe* kf0 = nullptr;
-            const Keyframe* kf1 = nullptr;
-            for (size_t j = start; j < end; j++) {
-                if (!anim->keyframes[j].hasRotation) continue;
-                if (anim->keyframes[j].time <= t) {
-                    if (!kf0 || anim->keyframes[j].time >= kf0->time) kf0 = &anim->keyframes[j];
+            // Find bracketing pair for rotation
+            if (!rotSet[ni]) {
+                const Keyframe* kf0 = nullptr;
+                const Keyframe* kf1 = nullptr;
+                for (size_t j = start; j < end; j++) {
+                    if (!a.keyframes[j].hasRotation) continue;
+                    if (a.keyframes[j].time <= st) {
+                        if (!kf0 || a.keyframes[j].time >= kf0->time) kf0 = &a.keyframes[j];
+                    }
+                    if (a.keyframes[j].time >= st) {
+                        if (!kf1 || a.keyframes[j].time <= kf1->time) kf1 = &a.keyframes[j];
+                    }
                 }
-                if (anim->keyframes[j].time >= t) {
-                    if (!kf1 || anim->keyframes[j].time <= kf1->time) kf1 = &anim->keyframes[j];
-                }
-            }
-            if (kf0 && kf1) {
-                if (kf0 == kf1 || std::abs(kf1->time - kf0->time) < 0.0001f) {
+                if (kf0 && kf1) {
+                    if (kf0 == kf1 || std::abs(kf1->time - kf0->time) < 0.0001f) {
+                        nodeRot[ni] = kf0->rotation;
+                    } else {
+                        float alpha = (st - kf0->time) / (kf1->time - kf0->time);
+                        nodeRot[ni] = Math::quatSlerp(kf0->rotation, kf1->rotation, alpha);
+                    }
+                } else if (kf0) {
                     nodeRot[ni] = kf0->rotation;
-                } else {
-                    float alpha = (t - kf0->time) / (kf1->time - kf0->time);
-                    nodeRot[ni] = Math::quatSlerp(kf0->rotation, kf1->rotation, alpha);
                 }
-            } else if (kf0) {
-                nodeRot[ni] = kf0->rotation;
+                if (kf0) rotSet[ni] = true;
             }
-            if (kf0) rotSet[ni] = true;
-        }
 
-        // Find bracketing pair for translation
-        if (!transSet[ni]) {
-            const Keyframe* kf0 = nullptr;
-            const Keyframe* kf1 = nullptr;
-            for (size_t j = start; j < end; j++) {
-                if (!anim->keyframes[j].hasTranslation) continue;
-                if (anim->keyframes[j].time <= t) {
-                    if (!kf0 || anim->keyframes[j].time >= kf0->time) kf0 = &anim->keyframes[j];
+            // Find bracketing pair for translation
+            if (!transSet[ni]) {
+                const Keyframe* kf0 = nullptr;
+                const Keyframe* kf1 = nullptr;
+                for (size_t j = start; j < end; j++) {
+                    if (!a.keyframes[j].hasTranslation) continue;
+                    if (a.keyframes[j].time <= st) {
+                        if (!kf0 || a.keyframes[j].time >= kf0->time) kf0 = &a.keyframes[j];
+                    }
+                    if (a.keyframes[j].time >= st) {
+                        if (!kf1 || a.keyframes[j].time <= kf1->time) kf1 = &a.keyframes[j];
+                    }
                 }
-                if (anim->keyframes[j].time >= t) {
-                    if (!kf1 || anim->keyframes[j].time <= kf1->time) kf1 = &anim->keyframes[j];
-                }
-            }
-            if (kf0 && kf1) {
-                if (kf0 == kf1 || std::abs(kf1->time - kf0->time) < 0.0001f) {
+                if (kf0 && kf1) {
+                    if (kf0 == kf1 || std::abs(kf1->time - kf0->time) < 0.0001f) {
+                        nodeTrans[ni] = kf0->translation;
+                    } else {
+                        float alpha = (st - kf0->time) / (kf1->time - kf0->time);
+                        nodeTrans[ni].x = kf0->translation.x + alpha * (kf1->translation.x - kf0->translation.x);
+                        nodeTrans[ni].y = kf0->translation.y + alpha * (kf1->translation.y - kf0->translation.y);
+                        nodeTrans[ni].z = kf0->translation.z + alpha * (kf1->translation.z - kf0->translation.z);
+                    }
+                } else if (kf0) {
                     nodeTrans[ni] = kf0->translation;
-                } else {
-                    float alpha = (t - kf0->time) / (kf1->time - kf0->time);
-                    nodeTrans[ni].x = kf0->translation.x + alpha * (kf1->translation.x - kf0->translation.x);
-                    nodeTrans[ni].y = kf0->translation.y + alpha * (kf1->translation.y - kf0->translation.y);
-                    nodeTrans[ni].z = kf0->translation.z + alpha * (kf1->translation.z - kf0->translation.z);
                 }
-            } else if (kf0) {
-                nodeTrans[ni] = kf0->translation;
+                if (kf0) transSet[ni] = true;
             }
-            if (kf0) transSet[ni] = true;
-        }
 
-        // Find bracketing pair for scale
-        if (!scaleSet[ni]) {
-            const Keyframe* kf0 = nullptr;
-            const Keyframe* kf1 = nullptr;
-            for (size_t j = start; j < end; j++) {
-                if (!anim->keyframes[j].hasScale) continue;
-                if (anim->keyframes[j].time <= t) {
-                    if (!kf0 || anim->keyframes[j].time >= kf0->time) kf0 = &anim->keyframes[j];
+            // Find bracketing pair for scale
+            if (!scaleSet[ni]) {
+                const Keyframe* kf0 = nullptr;
+                const Keyframe* kf1 = nullptr;
+                for (size_t j = start; j < end; j++) {
+                    if (!a.keyframes[j].hasScale) continue;
+                    if (a.keyframes[j].time <= st) {
+                        if (!kf0 || a.keyframes[j].time >= kf0->time) kf0 = &a.keyframes[j];
+                    }
+                    if (a.keyframes[j].time >= st) {
+                        if (!kf1 || a.keyframes[j].time <= kf1->time) kf1 = &a.keyframes[j];
+                    }
                 }
-                if (anim->keyframes[j].time >= t) {
-                    if (!kf1 || anim->keyframes[j].time <= kf1->time) kf1 = &anim->keyframes[j];
-                }
-            }
-            if (kf0 && kf1) {
-                if (kf0 == kf1 || std::abs(kf1->time - kf0->time) < 0.0001f) {
+                if (kf0 && kf1) {
+                    if (kf0 == kf1 || std::abs(kf1->time - kf0->time) < 0.0001f) {
+                        nodeScale[ni] = kf0->scale;
+                    } else {
+                        float alpha = (st - kf0->time) / (kf1->time - kf0->time);
+                        nodeScale[ni].x = kf0->scale.x + alpha * (kf1->scale.x - kf0->scale.x);
+                        nodeScale[ni].y = kf0->scale.y + alpha * (kf1->scale.y - kf0->scale.y);
+                        nodeScale[ni].z = kf0->scale.z + alpha * (kf1->scale.z - kf0->scale.z);
+                    }
+                } else if (kf0) {
                     nodeScale[ni] = kf0->scale;
-                } else {
-                    float alpha = (t - kf0->time) / (kf1->time - kf0->time);
-                    nodeScale[ni].x = kf0->scale.x + alpha * (kf1->scale.x - kf0->scale.x);
-                    nodeScale[ni].y = kf0->scale.y + alpha * (kf1->scale.y - kf0->scale.y);
-                    nodeScale[ni].z = kf0->scale.z + alpha * (kf1->scale.z - kf0->scale.z);
                 }
-            } else if (kf0) {
-                nodeScale[ni] = kf0->scale;
+                if (kf0) scaleSet[ni] = true;
             }
-            if (kf0) scaleSet[ni] = true;
         }
+    };
+    sampleChannels(*anim, t, nodeRot, nodeTrans, nodeScale, rotSet, transSet, scaleSet);
+
+    // Blend threads (e.g. head/look aiming) postmultiply each node's local
+    // pose with the blend sequence's keyframe, as TSThread blending does.
+    struct BlendSample {
+        std::vector<QuatF> rot; std::vector<Point3F> trans, scale;
+        std::vector<bool> rotSet, transSet, scaleSet;
+    };
+    std::vector<BlendSample> blendSamples;
+    for (int b = 0; b < numBlends && blends; ++b) {
+        const int index = blends[b].animationIndex;
+        if (index < 0 || index >= (int)animations.size()) continue;
+        const Animation& blendAnim = animations[index];
+        BlendSample sample{std::vector<QuatF>(numNodes, {0, 0, 0, 1}),
+                           std::vector<Point3F>(numNodes, {0, 0, 0}),
+                           std::vector<Point3F>(numNodes, {1, 1, 1}),
+                           std::vector<bool>(numNodes, false), std::vector<bool>(numNodes, false),
+                           std::vector<bool>(numNodes, false)};
+        sampleChannels(blendAnim,
+                       animationSampleTime(blends[b].time, blendAnim.duration, blendAnim.looping),
+                       sample.rot, sample.trans, sample.scale,
+                       sample.rotSet, sample.transSet, sample.scaleSet);
+        blendSamples.push_back(std::move(sample));
     }
 
     // ── Step 2: Fill in defaults for unanimated components from bind pose ──
@@ -2194,6 +2225,19 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
             local = defaultLocalTransforms[i];
         }
 
+        for (const BlendSample& blend : blendSamples) {
+            if (!blend.rotSet[i] && !blend.transSet[i] && !blend.scaleSet[i]) continue;
+            MatrixF blendLocal = blend.rot[i].toMatrix();
+            MatrixF scaleMat;
+            scaleMat.identity();
+            scaleMat.setScale(blend.scale[i]);
+            blendLocal = blendLocal * scaleMat;
+            blendLocal.m[0][3] = blend.trans[i].x;
+            blendLocal.m[1][3] = blend.trans[i].y;
+            blendLocal.m[2][3] = blend.trans[i].z;
+            blendLocal.m[3][3] = 1.0f;
+            local = local * blendLocal;
+        }
         nodeLocal[i] = local;
 
         // Compose with parent

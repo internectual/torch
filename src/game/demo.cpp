@@ -1986,7 +1986,10 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
             entry->actionTime = DemoParser::s_packetTime;
         }
     }
-    if (bs.readFlag()) bs.readInt(8); // ArmAction
+    if (bs.readFlag()) { // ArmAction
+        const int armAction = bs.readInt(8);
+        if (entry) entry->armAction = armAction;
+    }
     if (bs.readFlag()) return; // control object shortcut
     if (bs.readFlag()) { // MoveMask
         int actionState = bs.readInt(3); // actionState: 0=Stop, 1=Walk, 2=Run, 3=Sprint

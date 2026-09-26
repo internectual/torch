@@ -7577,8 +7577,25 @@ void Game::render(float dt) {
             float animTime = shapeViewerAnimTime;
             if (const char* svTime = getenv("SV_TIME"))
                 animTime = atof(svTime) * anim.duration;
-             shapeViewerShape.renderAnimation(anim.name.c_str(),
-                 animationSampleTime(animTime, anim.duration, anim.looping));
+            // SV_BLEND="name:position,..." layers blend sequences at a
+            // normalized position, e.g. look:0 for an upward aim.
+            std::vector<DTSShape::BlendThread> svBlends;
+            if (const char* svBlend = getenv("SV_BLEND")) {
+                std::stringstream list(svBlend);
+                std::string item;
+                while (std::getline(list, item, ',')) {
+                    const size_t colon = item.find(':');
+                    const std::string name = item.substr(0, colon);
+                    const float position = colon == std::string::npos ? 0.5f
+                        : (float)atof(item.c_str() + colon + 1);
+                    if (const auto* clip = findAnimation(shapeViewerShape, name.c_str()))
+                        svBlends.push_back({(int)(clip - shapeViewerShape.animations.data()),
+                                            std::clamp(position, 0.0f, 1.0f) * clip->duration});
+                }
+            }
+            shapeViewerShape.renderAnimationIndex((int)(&anim - shapeViewerShape.animations.data()),
+                animationSampleTime(animTime, anim.duration, anim.looping), nullptr, 0,
+                svBlends.data(), (int)svBlends.size());
             animated = true;
             shapeViewerAnimTime += dt;
         }
@@ -8039,11 +8056,38 @@ void Game::render(float dt) {
                 if (!w->isPositionVisible({rp.x, rp.y, rp.z}, camPos))
                     continue;
 
+                // Arm and head aim ride on blend threads: the arm action
+                // (default "look") and "head" follow head pitch, "headside"
+                // follows head yaw. Dead players drop them.
+                DTSShape::BlendThread blends[3];
+                int numBlends = 0;
+                if (playerAnimated && g->damageState < 1) {
+                    auto animationIndex = [&](const char* name) -> int {
+                        const DTSShape::Animation* found = findAnimation(*shape, name);
+                        return found ? (int)(found - shape->animations.data()) : -1;
+                    };
+                    auto addBlend = [&](int index, float position) {
+                        if (index < 0 || index >= (int)shape->animations.size()) return;
+                        const auto& clip = shape->animations[index];
+                        if (!clip.blend) return;
+                        blends[numBlends++] = {index,
+                            std::clamp(position, 0.0f, 1.0f) * clip.duration};
+                    };
+                    const float pitchPosition = (mg->headPitch + 1.0f) * 0.5f;
+                    const float yawPosition = (mg->headYaw + 1.0f) * 0.5f;
+                    int arm = -1;
+                    if (g->armAction >= 0 && g->armAction < (int)shape->actionTable.size())
+                        arm = shape->actionTable[g->armAction];
+                    if (arm < 0) arm = animationIndex("look");
+                    addBlend(arm, pitchPosition);
+                    addBlend(animationIndex("head"), pitchPosition);
+                    addBlend(animationIndex("headside"), yawPosition);
+                }
                 if (animation) {
                     shape->renderAnimationIndex((int)(animation - shape->animations.data()),
                                                 animationPosition * animation->duration,
                                                 numOverrides > 0 ? overrides : nullptr,
-                                                numOverrides);
+                                                numOverrides, blends, numBlends);
                 } else {
                     shape->render(0, numOverrides > 0 ? overrides : nullptr, numOverrides);
                 }

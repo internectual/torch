@@ -674,6 +674,7 @@ struct GhostEntry {
     float headYaw = 0.0f;
     // Player ActionMask: the server's action index (deaths, taunts, etc.).
     int actionAnim = -1;
+    int armAction = -1; // arm thread action index; -1 uses "look"
     bool actionHoldAtEnd = false, actionAtEnd = false;
     float actionAnimPos = 0.0f;
     float actionTime = 0.0f; // demo time the action update arrived
