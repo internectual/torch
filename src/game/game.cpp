@@ -8723,39 +8723,150 @@ void Game::render(float dt) {
                     continue;
                 }
 
-                const bool stockBeam = ghostClassIs(g->className, "ShockLanceProjectile") ||
-                    ghostClassIs(g->className, "TracerProjectile") ||
-                    ghostClassIs(g->className, "LinearFlareProjectile");
-               if (stockBeam && g->hasBeam) {
-                  const Point3F start = Math::torquePointToYUp(
-                      {g->beamStart.x, g->beamStart.y, g->beamStart.z});
-                  const Point3F end = Math::torquePointToYUp(
-                      {g->beamEnd.x, g->beamEnd.y, g->beamEnd.z});
-                   const bool shockLance = ghostClassIs(g->className, "ShockLanceProjectile");
-                   const bool tracer = ghostClassIs(g->className, "TracerProjectile");
-                   const ColorF color = shockLance
-                       ? ColorF{0.35f, 0.8f, 1.0f, 0.9f}
-                       : tracer
-                          ? ColorF{1.0f, 0.65f, 0.2f, 0.85f}
-                          : ColorF{1.0f, 0.85f, 0.25f, 0.85f};
-                    if (shockLance) {
-                       r.drawLineStrip(shockLancePoints(start, end, time, 0.1f, 0), color);
-                       r.drawLineStrip(shockLancePoints(start, end, time, 0.1f, 1),
-                                       {0.55f, 0.9f, 1.0f, 0.9f});
-                   } else {
-                       const auto quad = projectileBeamQuad(start, end,
-                           r.cameraPos, 0.08f);
-                       std::vector<Point3F> outline{quad.front()};
-                       if (quad.size() == 4) {
-                           outline.push_back(quad[1]); outline.push_back(quad[2]);
-                           outline.push_back(quad[3]); outline.push_back(quad.front());
-                       } else {
-                           outline.push_back(quad.back());
-                       }
-                       r.drawLineStrip(outline, color);
-                   }
-                   continue;
-               }
+                // ShockLanceProjectile (renderObject / advanceTime, t2-mapper
+                // shockLance.ts), additive, unfogged. A pinned bolt keeps the
+                // ghost's start/end and draws two textured strips widening
+                // startWidth -> endWidth over zapDuration (alpha 0 at the muzzle,
+                // 1 - age/zapDuration at the target, U scrolling boltSpeed x age
+                // with texWrap repeats) and two lightning ribbons regenerated at
+                // lightningFreq; a miss only sparks 0.2 m from the live muzzle.
+                // TODO(parity): the zap overlay (target redrawn 5% larger with
+                // the shockLightning frames) is not drawn yet.
+                if (ghostClassIs(g->className, "ShockLanceProjectile") && g->hasBeam) {
+                    const auto& dataBlocks = demoParser->getInitialBlock().dataBlocks;
+                    auto dataIt = g->hasDatablock ? dataBlocks.find((uint32_t)g->datablockId)
+                                                  : dataBlocks.end();
+                    const auto* lance = dataIt != dataBlocks.end() && dataIt->second.decoded.shockLance.valid &&
+                        !dataIt->second.decoded.shockLance.textures.empty()
+                        ? &dataIt->second.decoded.shockLance : nullptr;
+                    if (!lance) continue;
+                    const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                    if (mg->shockFresh) {
+                        mg->shockFresh = false;
+                        mg->spawnTime = now;
+                        mg->shockRegenTimer = 0.0f;
+                        mg->shockLastTime = -1.0f;
+                        mg->shockBolts[0].clear(); mg->shockBolts[1].clear();
+                    }
+                    const float zapDuration = std::max(1e-3f, lance->zapDuration);
+                    const float age = now - mg->spawnTime;
+                    if (age < 0.0f || age >= zapDuration) continue;
+                    const float fade = 1.0f - age / zapDuration;
+                    Point3F start = Math::torquePointToYUp({g->beamStart.x, g->beamStart.y, g->beamStart.z});
+                    Point3F end = Math::torquePointToYUp({g->beamEnd.x, g->beamEnd.y, g->beamEnd.z});
+                    float density = lance->lightningDensity, amp = lance->lightningAmp;
+                    if (!g->beamHit) {
+                        density = 20.0f; amp = 0.1f;
+                        const GhostEntry* source = demoParser->getGhostTracker().getGhost(g->linkSourceGhost);
+                        if (source) {
+                            const int slot = std::clamp(g->linkSourceSlot, 0, 7);
+                            if (source->hasMuzzle[slot]) start = source->muzzlePos[slot];
+                            Point3F aim;
+                            if (ObserverParity::isPlayerClass(source->className)) {
+                                float maxLookAngle = 0.0f;
+                                auto sourceData = source->hasDatablock
+                                    ? dataBlocks.find((uint32_t)source->datablockId) : dataBlocks.end();
+                                if (sourceData != dataBlocks.end()) maxLookAngle = sourceData->second.decoded.playerMaxLookAngle;
+                                aim = Math::torquePointToYUp(playerAimDirection(
+                                    source->bodyYaw, source->headYaw, source->headPitch, maxLookAngle));
+                            } else {
+                                aim = source->hasMuzzle[slot] ? source->muzzleDir[slot] : Point3F{0, 0, -1};
+                            }
+                            const float al = std::sqrt(aim.x * aim.x + aim.y * aim.y + aim.z * aim.z);
+                            if (al > 1e-6f) aim = {aim.x / al, aim.y / al, aim.z / al};
+                            end = {start.x + aim.x * 0.2f, start.y + aim.y * 0.2f, start.z + aim.z * 0.2f};
+                        }
+                    }
+                    Point3F dir{end.x - start.x, end.y - start.y, end.z - start.z};
+                    const float length = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+                    if (length < 1e-4f) continue;
+                    dir = {dir.x / length, dir.y / length, dir.z / length};
+                    // Bolt frame: +X along the bolt.
+                    Point3F axisY = std::fabs(dir.y) < 0.9f ? Point3F{0, 1, 0} : Point3F{1, 0, 0};
+                    Point3F axisZ{dir.y * axisY.z - dir.z * axisY.y, dir.z * axisY.x - dir.x * axisY.z,
+                                  dir.x * axisY.y - dir.y * axisY.x};
+                    const float zl = std::sqrt(axisZ.x * axisZ.x + axisZ.y * axisZ.y + axisZ.z * axisZ.z);
+                    axisZ = {axisZ.x / zl, axisZ.y / zl, axisZ.z / zl};
+                    axisY = {axisZ.y * dir.z - axisZ.z * dir.y, axisZ.z * dir.x - axisZ.x * dir.z,
+                             axisZ.x * dir.y - axisZ.y * dir.x};
+                    auto toWorld = [&](const Point3F& p) {
+                        return Point3F{start.x + dir.x * p.x + axisY.x * p.y + axisZ.x * p.z,
+                                       start.y + dir.y * p.x + axisY.y * p.y + axisZ.y * p.z,
+                                       start.z + dir.z * p.x + axisY.z * p.y + axisZ.z * p.z};
+                    };
+                    // Regenerate at lightningFreq once each period has elapsed.
+                    float regenDt = mg->shockLastTime < 0.0f ? age : now - mg->shockLastTime;
+                    if (regenDt < 0.0f || regenDt > 1.0f) regenDt = 0.0f;
+                    mg->shockLastTime = now;
+                    mg->shockRegenTimer += regenDt;
+                    const float period = 1.0f / std::max(lance->lightningFreq, 1e-3f);
+                    if (mg->shockRegenTimer >= period) {
+                        mg->shockRegenTimer -= period;
+                        uint32_t state = (uint32_t)(now * 1000.0f) * 2654435761u + (uint32_t)idx * 97u + 1u;
+                        auto random = [&]() {
+                            state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+                            return (float)(state & 0xffffff) / 16777216.0f;
+                        };
+                        for (auto& bolt : mg->shockBolts) bolt = shockLightningPoints(length, density, amp, random);
+                    }
+                    auto textureFor = [&](const std::string& name) -> uint32_t {
+                        std::vector<uint32_t> frames;
+                        std::vector<float> durations;
+                        r.loadTextureFrames(name.c_str(), frames, durations);
+                        return frames.empty() ? 0u : frames.front();
+                    };
+                    const uint32_t beamTexture = textureFor(lance->textures.back());
+                    // Lightning ribbons; the engine sides each local point against
+                    // the world camera position.
+                    const float halfLightning = lance->lightningWidth * 0.5f;
+                    for (const auto& bolt : mg->shockBolts) {
+                        if (bolt.size() < 2) continue;
+                        Point3F prevA{}, prevB{};
+                        for (size_t i = 0; i < bolt.size(); ++i) {
+                            const Point3F& p = bolt[i];
+                            Point3F seg = i + 1 == bolt.size()
+                                ? Point3F{p.x - bolt[i - 1].x, p.y - bolt[i - 1].y, p.z - bolt[i - 1].z}
+                                : Point3F{bolt[i + 1].x - p.x, bolt[i + 1].y - p.y, bolt[i + 1].z - p.z};
+                            const float sl = std::sqrt(seg.x * seg.x + seg.y * seg.y + seg.z * seg.z);
+                            if (sl * sl > 1e-4f) seg = {seg.x / sl, seg.y / sl, seg.z / sl};
+                            const Point3F toCam{p.x - r.cameraPos.x, p.y - r.cameraPos.y, p.z - r.cameraPos.z};
+                            Point3F side{toCam.y * seg.z - toCam.z * seg.y, toCam.z * seg.x - toCam.x * seg.z,
+                                         toCam.x * seg.y - toCam.y * seg.x};
+                            const float sideLength = std::sqrt(side.x * side.x + side.y * side.y + side.z * side.z);
+                            if (sideLength * sideLength > 1e-4f)
+                                side = {side.x / sideLength, side.y / sideLength, side.z / sideLength};
+                            side = {side.x * halfLightning, side.y * halfLightning, side.z * halfLightning};
+                            const Point3F a = toWorld({p.x - side.x, p.y - side.y, p.z - side.z});
+                            const Point3F b = toWorld({p.x + side.x, p.y + side.y, p.z + side.z});
+                            if (i > 0) {
+                                const float u0 = (float)((i - 1) & 1), u1 = (float)(i & 1);
+                                r.drawTexturedQuad(prevB, b, a, prevA, beamTexture, {1, 1, 1, fade},
+                                                   u0, 0.0f, u1, 1.0f, true);
+                            }
+                            prevA = a; prevB = b;
+                        }
+                    }
+                    if (g->beamHit) {
+                        const Point3F fromCam{start.x - r.cameraPos.x, start.y - r.cameraPos.y, start.z - r.cameraPos.z};
+                        Point3F right{fromCam.y * dir.z - fromCam.z * dir.y, fromCam.z * dir.x - fromCam.x * dir.z,
+                                      fromCam.x * dir.y - fromCam.y * dir.x};
+                        const float rl = std::sqrt(right.x * right.x + right.y * right.y + right.z * right.z);
+                        if (rl > 1e-4f) right = {right.x / rl, right.y / rl, right.z / rl};
+                        for (int i = 0; i < 2; ++i) {
+                            const float halfWidth = 0.5f * (lance->startWidth[i] +
+                                (lance->endWidth[i] - lance->startWidth[i]) / zapDuration * age);
+                            const Point3F h{right.x * halfWidth, right.y * halfWidth, right.z * halfWidth};
+                            const float u0 = lance->boltSpeed[i] * age;
+                            const ColorF colors[4] = {{1, 1, 1, 0}, {1, 1, 1, fade}, {1, 1, 1, fade}, {1, 1, 1, 0}};
+                            r.drawTexturedQuadColors({start.x + h.x, start.y + h.y, start.z + h.z},
+                                                     {end.x + h.x, end.y + h.y, end.z + h.z},
+                                                     {end.x - h.x, end.y - h.y, end.z - h.z},
+                                                     {start.x - h.x, start.y - h.y, start.z - h.z},
+                                                     beamTexture, colors, u0, 0.0f, u0 - lance->texWrap[i], 1.0f, true);
+                        }
+                    }
+                    continue;
+                }
 
              // Try to get or load the DTS shape for this ghost class
             DTSShape* shape = const_cast<DTSShape*>(g->shape);

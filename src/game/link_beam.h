@@ -60,6 +60,29 @@ struct RepairEndpoint {
     }
 };
 
+// ShockLanceProjectile lightning (Tribes2.exe point generator): round(
+// density x length) points (at most 50) spaced along +X, each but the pinned
+// ends displaced by a random unit vector x amp. `random` returns [0, 1).
+template <typename Random>
+inline std::vector<Point3F> shockLightningPoints(float length, float density, float amp, Random&& random) {
+    const int requested = (int)std::lround(density * length);
+    const int count = std::min(requested, 50);
+    std::vector<Point3F> points;
+    if (count <= 0) return points;
+    const float step = length / requested;
+    for (int i = 0; i < count; ++i) {
+        Point3F j{0, 0, 0};
+        if (i != 0 && i != requested - 1) {
+            j = {random() * 2.0f - 1.0f, random() * 2.0f - 1.0f, random() * 2.0f - 1.0f};
+            const float l = std::sqrt(j.x * j.x + j.y * j.y + j.z * j.z);
+            if (l * l > 1e-4f) j = {j.x / l, j.y / l, j.z / l};
+            j = {j.x * amp, j.y * amp, j.z * amp};
+        }
+        points.push_back({i * step + j.x, j.y, j.z});
+    }
+    return points;
+}
+
 // Moller-Trumbore: segment parameter in [0, 1] where a -> b crosses the
 // triangle, or a negative value.
 inline float segmentTriangle(const Point3F& a, const Point3F& b, const Point3F& p0,

@@ -700,7 +700,29 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
         break;
     }
      case 34: s.readF32();colors(s,1);f32s(s,2);strings(s,1);f32s(s,6);if(s.readFlag())strings(s,1);break; case 35: projectile(s);f32s(s,10);s.readUnsigned(8);f32s(s,2);s.readUnsigned(32);s.readUnsigned(32);strings(s,2);refs(s,3);break; case 36: break; case 37: shapeBase(s);break; case 38: shapeImage(s);break;
-      case 39: projectile(s);f32s(s,7);refs(s,1);f32s(s,8);strings(s,4);refs(s,1);break; case 40: shockwave(s); break; case 41: break; case 42: { // SniperProjectileData
+      case 39: { // ShockLanceProjectileData
+        projectile(s);
+        float f[7];
+        for (float& v : f) v = s.readF32(); // zapDuration, boltLength, numParts, lightningFreq/Density/Amp/Width
+        refs(s, 1); // shockwave
+        float widths[2][4];
+        for (auto& part : widths) for (float& v : part) v = s.readF32(); // startWidth, endWidth, boltSpeed, texWrap
+        std::vector<std::string> textures = materialStrings(s, 4);
+        refs(s, 1); // emitter
+        if (activeDecoded) {
+            auto& lance = activeDecoded->shockLance;
+            lance.valid = true;
+            lance.zapDuration = f[0];
+            lance.lightningFreq = f[3]; lance.lightningDensity = f[4];
+            lance.lightningAmp = f[5]; lance.lightningWidth = f[6];
+            for (int i = 0; i < 2; ++i) {
+                lance.startWidth[i] = widths[i][0]; lance.endWidth[i] = widths[i][1];
+                lance.boltSpeed[i] = widths[i][2]; lance.texWrap[i] = widths[i][3];
+            }
+            lance.textures = std::move(textures);
+        }
+        break;
+    } case 40: shockwave(s); break; case 41: break; case 42: { // SniperProjectileData
         projectile(s);
         f32s(s, 2); // maxRifleRange, rifleHeadMultiplier
         const uint32_t color[4] = {s.readUnsigned(8), s.readUnsigned(8), s.readUnsigned(8), s.readUnsigned(8)};

@@ -594,6 +594,22 @@ void Renderer::drawTexturedQuad(const Point3F& a, const Point3F& b, const Point3
     spriteBatchAdd(const_cast<float*>(verts), texture, additive);
 }
 
+void Renderer::drawTexturedQuadColors(const Point3F& a, const Point3F& b, const Point3F& c,
+                                      const Point3F& d, uint32_t texture, const ColorF colors[4],
+                                      float u0, float v0, float u1, float v1, bool additive) {
+    const ColorF& ca = colors[0]; const ColorF& cb = colors[1];
+    const ColorF& cc = colors[2]; const ColorF& cd = colors[3];
+    float verts[] = {
+        a.x,a.y,a.z,u0,v0,ca.r,ca.g,ca.b,ca.a,
+        b.x,b.y,b.z,u1,v0,cb.r,cb.g,cb.b,cb.a,
+        d.x,d.y,d.z,u0,v1,cd.r,cd.g,cd.b,cd.a,
+        b.x,b.y,b.z,u1,v0,cb.r,cb.g,cb.b,cb.a,
+        c.x,c.y,c.z,u1,v1,cc.r,cc.g,cc.b,cc.a,
+        d.x,d.y,d.z,u0,v1,cd.r,cd.g,cd.b,cd.a,
+    };
+    spriteBatchAdd(verts, texture, additive);
+}
+
 void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color,
                            uint32_t texture, bool additive) {
     initSpriteVAO();

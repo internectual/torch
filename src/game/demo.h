@@ -748,6 +748,10 @@ struct GhostEntry {
     int ballisticCurrTick = 0;
     bool hasBallistic = false, ballisticFresh = false, ballisticStopped = false;
     bool ballisticCoast = false; // seekers: no gravity, stop on any contact
+    // ShockLanceProjectile: pinned on a hit object; lightning regeneration.
+    bool beamHit = false, shockFresh = false;
+    float shockRegenTimer = 0.0f, shockLastTime = -1.0f;
+    std::vector<Point3F> shockBolts[2]; // bolt-local points along +X
     Point3F ballisticPos{}, ballisticVel{};
     float ballisticTime = 0.0f;
     int ballisticAgeTicks = 0;

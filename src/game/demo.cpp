@@ -2421,18 +2421,27 @@ static void readSniperProjectileData(BitStream& bs, bool isInitial, GhostEntry* 
 
 static void readShockLanceProjectileData(BitStream& bs, bool isInitial, GhostEntry* entry) {
     readGameBaseData(bs, isInitial, entry);
-    if (bs.readFlag()) bs.readRangedU32(0, 1024); // targetObject
+    if (bs.readFlag()) { // targetObject
+        const int target = (int)bs.readRangedU32(0, 1024);
+        if (entry) entry->linkTargetGhost = target;
+    }
     if (bs.readFlag()) { // initial update
         Vec3 start = bs.readPoint3F();
         Vec3 end = bs.readPoint3F(); // end
+        const bool hitObject = bs.readFlag();
         if (entry) {
             entry->position = start;
             entry->beamStart = start;
             entry->beamEnd = end;
             entry->hasBeam = true;
+            entry->beamHit = hitObject;
+            entry->shockFresh = true;
         }
-        bs.readFlag(); // hitObject
-        if (bs.readFlag()) { bs.readRangedU32(0, 1024); bs.readRangedU32(0, 7); }
+        if (bs.readFlag()) {
+            const int source = (int)bs.readRangedU32(0, 1024);
+            const int slot = (int)bs.readRangedU32(0, 7);
+            if (entry) { entry->linkSourceGhost = source; entry->linkSourceSlot = slot; }
+        }
     }
 }
 

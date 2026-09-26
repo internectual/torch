@@ -422,6 +422,10 @@ public:
                           const Point3F& d, uint32_t texture,
                           const ColorF& tint, float u0 = 0.0f, float v0 = 0.0f,
                           float u1 = 1.0f, float v1 = 1.0f, bool additive = true);
+    // As drawTexturedQuad, with a colour per corner (a, b, c, d).
+    void drawTexturedQuadColors(const Point3F& a, const Point3F& b, const Point3F& c,
+                                const Point3F& d, uint32_t texture, const ColorF colors[4],
+                                float u0, float v0, float u1, float v1, bool additive = true);
     void drawShockwaveRing(const Point3F& center, float radius, float width,
                            float height, int segments, uint32_t texture,
                            const ColorF& color, float texWrap = 1.0f,

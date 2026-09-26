@@ -161,6 +161,13 @@ struct DecodedDataBlock {
         float lightningWidth = 0, lightningDist = 0, cutoffAngle = 40;
         std::string texture, lightningTexture, flareTexture;
     } linkBeam;
+    // ShockLanceProjectileData bolt.
+    struct ShockLance {
+        bool valid = false;
+        float zapDuration = 0, lightningFreq = 0, lightningDensity = 0, lightningAmp = 0, lightningWidth = 0;
+        float startWidth[2]{}, endWidth[2]{}, boltSpeed[2]{}, texWrap[2]{};
+        std::vector<std::string> textures;
+    } shockLance;
     // FlyingVehicleData / HoverVehicleData jets (forward, backward, down;
     // flying adds the trail emitter fourth).
     bool isFlyingVehicleData = false, isHoverVehicleData = false;
