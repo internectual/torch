@@ -54,6 +54,17 @@ int main() {
     assertPoint(Math::torqueRotationToYUp({0, 0, 1}, -Math::PI * 0.5f).transformNormal({0, 0, -1}),
                 {1, 0, 0});
 
+    // Player body yaw (MatrixF::set(EulerF(0, 0, yaw))) turns forward +Y
+    // toward +X about Torque +Z; as a quaternion it stays upright in Y-up.
+    {
+        const float yaw = 1.0f;
+        const QuatF bodyYaw{0, 0, -std::sin(yaw * 0.5f), std::cos(yaw * 0.5f)};
+        const MatrixF yUp = Math::torqueQuaternionToYUp(bodyYaw);
+        assertPoint(yUp.transformNormal({0, 1, 0}), {0, 1, 0});
+        assertPoint(yUp.transformNormal(Math::torquePointToYUp({0, 1, 0})),
+                    Math::torquePointToYUp({std::sin(yaw), std::cos(yaw), 0}));
+    }
+
     const QuatF source = {0.2f, -0.3f, 0.4f, 0.8f};
     const QuatF roundTrip = QuatF::fromMatrix(source.toMatrix());
     assert(close(roundTrip.x * roundTrip.x + roundTrip.y * roundTrip.y +

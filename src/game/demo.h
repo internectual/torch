@@ -714,6 +714,8 @@ struct GhostEntry {
     bool moveAnimValid = false;
     // Render-side shape lighting probe state.
     ShapeLighting::State shapeLight;
+    // Jet flare thread position in [0, 1] (Player::processTick).
+    float jetFlarePosition = 0.0f;
 };
 
 class GhostTracker {

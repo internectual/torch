@@ -23,6 +23,14 @@ float DemoParser::s_packetTime = 0.0f;
 DemoParser::SunData DemoParser::s_sunData;
 std::string DemoParser::s_pendingTerrainFile;
 
+// Quaternion for a Torque yaw about +Z (MatrixF::set(EulerF(0, 0, yaw)),
+// which turns forward +Y toward +X), in the Torque frame the renderer
+// converts with torqueQuaternionToYUp.
+static Vec4 torqueYawQuaternion(float yaw) {
+    const float half = yaw * 0.5f;
+    return {0, 0, -sinf(half), cosf(half)};
+}
+
 static std::string stripDemoColorCodes(const std::string& value) {
     std::string result;
     result.reserve(value.size());
@@ -2080,8 +2088,7 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
     float bodyYaw = bs.readFloat(7) * (2.0f * (float)M_PI); // rotationZ (0-1 maps to 0-2PI)
         if (entry) {
             // Always update body yaw rotation from MoveMask
-            float half = bodyYaw * 0.5f;
-            entry->rotation = {0, sinf(half), 0, cosf(half)};
+            entry->rotation = torqueYawQuaternion(bodyYaw);
             entry->hasRotation = true;
             entry->headPitch = headX;
             entry->headYaw = headZ;
@@ -2276,8 +2283,7 @@ static void readProjectileData(BitStream& bs, bool isInitial, const Vec3& cp, Gh
         entry->hasVelocity = true;
         const float length = sqrtf(velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z);
         if (length > 0.001f) {
-            const float half = atan2f(velocity.x, velocity.y) * 0.5f;
-            entry->rotation = {0, sinf(half), 0, cosf(half)};
+            entry->rotation = torqueYawQuaternion(atan2f(velocity.x, velocity.y));
             entry->hasRotation = true;
         }
     }
@@ -2346,8 +2352,7 @@ static void readGrenadeData(BitStream& bs, bool isInitial, const Vec3&, GhostEnt
                 Vec3 dir = {vel.x/len, vel.y/len, vel.z/len};
                 // Build rotation from forward (0,1,0) to direction
                 float yaw = atan2f(dir.x, dir.y);
-                float half = yaw * 0.5f;
-                entry->rotation = {0, sinf(half), 0, cosf(half)};
+                entry->rotation = torqueYawQuaternion(yaw);
                 entry->hasRotation = true;
             }
         }
@@ -2434,8 +2439,7 @@ static void readBombProjectileData(BitStream& bs, bool, const Vec3&, GhostEntry*
                 if (len > 0.001f) {
                     Vec3 dir = {vel.x/len, vel.y/len, vel.z/len};
                     float yaw = atan2f(dir.x, dir.y);
-                    float half = yaw * 0.5f;
-                    entry->rotation = {0, sinf(half), 0, cosf(half)};
+                    entry->rotation = torqueYawQuaternion(yaw);
                     entry->hasRotation = true;
                 }
             }
@@ -2452,8 +2456,7 @@ static void readBombProjectileData(BitStream& bs, bool, const Vec3&, GhostEntry*
         if (len > 0.001f) {
             Vec3 dir = {vel2.x/len, vel2.y/len, vel2.z/len};
             float yaw = atan2f(dir.x, dir.y);
-            float half = yaw * 0.5f;
-            entry->rotation = {0, sinf(half), 0, cosf(half)};
+            entry->rotation = torqueYawQuaternion(yaw);
             entry->hasRotation = true;
         }
     }
@@ -2487,8 +2490,7 @@ static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& 
              }
             if (entry && (dir.x != 0 || dir.y != 0 || dir.z != 0)) {
                 float yaw = atan2f(dir.x, dir.y);
-                float half = yaw * 0.5f;
-                entry->rotation = {0, sinf(half), 0, cosf(half)};
+                entry->rotation = torqueYawQuaternion(yaw);
                 entry->hasRotation = true;
             }
             bs.readRangedU32(0, 511); // currTick

@@ -5143,9 +5143,51 @@ void World::syncProjectileTrail(int ownerId, const Point3F& pos, const Point3F& 
 }
 
 void World::endProjectileTrailSync() {
+    for (auto& e : effectEmitters)
+        if (e.nodeEmitter && e.trailGeneration != trailGeneration) e.stopped = true;
     effectEmitters.erase(std::remove_if(effectEmitters.begin(), effectEmitters.end(),
-        [this](const EffectEmitter& e) { return e.projectileTrail && e.trailGeneration != trailGeneration; }),
+        [this](const EffectEmitter& e) {
+            return (e.projectileTrail && e.trailGeneration != trailGeneration) ||
+                   (e.nodeEmitter && e.stopped && e.particles.empty());
+        }),
         effectEmitters.end());
+}
+
+void World::syncNodeEmitter(int64_t key, uint32_t emitterRef, const Point3F& pos,
+                            const Point3F& velocity, const Point3F& axis,
+                            const std::map<uint32_t, ParsedDataBlock>& dataBlocks) {
+    auto it = std::find_if(effectEmitters.begin(), effectEmitters.end(),
+        [key](const EffectEmitter& e) { return e.nodeEmitter && !e.stopped && e.nodeKey == key; });
+    if (it == effectEmitters.end()) {
+        auto emitterBlock = dataBlocks.find(emitterRef);
+        if (emitterBlock == dataBlocks.end() || !emitterBlock->second.decoded.hasEmitter ||
+            emitterBlock->second.decoded.emitter.particleRefs.empty()) return;
+        auto particleBlock = dataBlocks.find(emitterBlock->second.decoded.emitter.particleRefs.front());
+        if (particleBlock == dataBlocks.end() || !particleBlock->second.decoded.hasParticle) return;
+        EffectEmitter emitter;
+        emitter.nodeEmitter = true;
+        emitter.nodeKey = key;
+        emitter.emitter = emitterBlock->second.decoded.emitter;
+        emitter.particle = particleBlock->second.decoded.particle;
+        emitter.nextEmission = 0.0f;
+        for (const std::string& name : emitter.particle.textures) {
+            std::vector<uint32_t> frames;
+            std::vector<float> durations;
+            Engine::instance().renderer().loadTextureFrames(name.c_str(), frames, durations);
+            if (durations.empty() && !frames.empty()) durations.assign(frames.size(), 1.0f);
+            emitter.textures.insert(emitter.textures.end(), frames.begin(), frames.end());
+            emitter.textureDurations.insert(emitter.textureDurations.end(), durations.begin(), durations.end());
+        }
+        if (!emitter.textures.empty()) emitter.texture = emitter.textures.front();
+        effectEmitters.push_back(std::move(emitter));
+        it = std::prev(effectEmitters.end());
+    }
+    it->pos = pos;
+    it->ownerVelocity = velocity;
+    const float length = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+    it->axis = length > 1e-4f ? Point3F{axis.x / length, axis.y / length, axis.z / length}
+                              : Point3F{0, 1, 0};
+    it->trailGeneration = trailGeneration;
 }
 
 void World::removeProjectileTrail(int ownerId) {
@@ -5291,7 +5333,7 @@ void World::updateParticles(float dt) {
             p.pos.y += dir.y * (float)emitter.emitter.ejectionOffset / 100.0f;
             p.pos.z += dir.z * (float)emitter.emitter.ejectionOffset / 100.0f;
             p.vel = {dir.x * speed, dir.y * speed, dir.z * speed};
-            if (emitter.projectileTrail) {
+            if (emitter.projectileTrail || emitter.nodeEmitter) {
                 p.vel.x += emitter.ownerVelocity.x * emitter.particle.inheritedVelFactor;
                 p.vel.y += emitter.ownerVelocity.y * emitter.particle.inheritedVelFactor;
                 p.vel.z += emitter.ownerVelocity.z * emitter.particle.inheritedVelFactor;
@@ -5328,7 +5370,7 @@ void World::updateParticles(float dt) {
         if (emitter.burst && emitter.nextEmission < 0.0f) {
             for (int i = 0; i < emitter.burstCount; ++i) emitOne(0.0f);
             emitter.nextEmission = 0.0f;
-        } else if (!emitter.burst) {
+        } else if (!emitter.burst && !emitter.stopped) {
             // A long frame can cross more than one ejection period. Torque
             // emits each due particle rather than dropping overdue emissions.
             while (emitter.age >= emitter.nextEmission &&
@@ -6144,7 +6186,7 @@ bool Game::init() {
     con.addCommand("setFreeCamera", [this](int32_t argc, const char* const* argv) {
         if (argc < 7) {
             Console::instance().printf(LogLevel::Warn,
-                "Usage: setFreeCamera px py pz tx ty tz (Torch world, Y up)");
+                "Usage: setFreeCamera px py pz tx ty tz (Torch world, Y up; Torque space during demos)");
             return;
         }
         const Point3F pos{(float)atof(argv[1]), (float)atof(argv[2]), (float)atof(argv[3])};
@@ -6152,7 +6194,13 @@ bool Game::init() {
         setFreeCamActive(true);
         setFreeCamPos(pos);
         setFreeCamTarget(target);
-    }, "setFreeCamera px py pz tx ty tz - place the free camera (Torch world, Y up)");
+    }, "setFreeCamera px py pz tx ty tz - place the free camera (Torch world, Y up; Torque space during demos)");
+    con.addCommand("demoObserve", [this](int32_t argc, const char* const* argv) {
+        demoObserveGhost = argc > 1 ? atoi(argv[1]) : -1;
+        if (argc > 2) demoObserveDistance = (float)atof(argv[2]);
+        if (argc > 3) demoObserveHeight = (float)atof(argv[3]);
+        if (demoObserveGhost >= 0) { freeCamActive = false; demoOrbitCam = false; demoFirstPersonCam = false; }
+    }, "demoObserve ghost [distance] [height] - chase camera behind a demo ghost (-1 turns it off)");
     con.addCommand("toggleDemoOrbit", [this](int32_t, const char* const*) {
         demoFirstPersonCam = false;
         demoOrbitCam = !demoOrbitCam;
@@ -6994,6 +7042,9 @@ void Game::update(float dt) {
                 audio.update(camPos, {0, 0, 0}, forward, {0, 1, 0},
                              w && w->isUnderwater(camPos));
             }
+            // The world's effects (particles, explosions, debris, weather)
+            // run on the demo clock and hold still once the match ends.
+            if (w) w->update(demoMatchEnded ? 0.0f : demoInterpolationDt);
             return; // skip normal game logic during demo playback
         }
 
@@ -7333,8 +7384,8 @@ void Game::update(float dt) {
             setState(Dead);
         }
 
-        // Update world (projectiles, etc.); held still after a demo match ends.
-        w->update(demoPlaying && demoMatchEnded ? 0.0f : simulationDt);
+        // Update world (projectiles, etc.)
+        w->update(simulationDt);
 
         // Update audio listener from camera
         auto& audio = Engine::instance().audio();
@@ -7503,7 +7554,16 @@ void Game::render(float dt) {
 
     Point3F camPos, camTarget;
     bool cameraCoordinatesConverted = false;
-    if (freeCamActive) {
+    const GhostEntry* observed = demoPlaying && demoParser && demoObserveGhost >= 0
+        ? demoParser->getGhostTracker().getGhost(demoObserveGhost) : nullptr;
+    if (observed && ObserverParity::isPositionReady(observed->hasPosition)) {
+        // Torque space, converted below with the other demo cameras.
+        const Vec3& p = observed->renderPos;
+        const float yaw = observed->bodyYaw;
+        camPos = {p.x - sinf(yaw) * demoObserveDistance, p.y - cosf(yaw) * demoObserveDistance,
+                  p.z + demoObserveHeight};
+        camTarget = {p.x, p.y, p.z + 1.2f};
+    } else if (freeCamActive) {
         camPos = freeCamPos;
         camTarget = freeCamTarget;
     } else if (demoPlaying && (demoHasPos || demoFirstPersonCam)) {
@@ -7853,10 +7913,6 @@ void Game::render(float dt) {
         }
     }
 
-    if (hud && !mapperMode && (gameState == Playing ||
-                               (gameState == Dead && !demoPlaying)))
-        hud->render(this);
-
     // Connection status overlay
     if (cfg.online && activeConn && activeConn->isConnected() && liveGhosts.size() == 0) {
         auto* font = r.getFont();
@@ -7973,6 +8029,9 @@ void Game::render(float dt) {
             if (shapeViewerPitch > 1.5f) shapeViewerPitch = 1.5f;
             if (shapeViewerPitch < -1.5f) shapeViewerPitch = -1.5f;
         }
+        // SV_YAW/SV_PITCH (radians) fix the orbit for scripted captures.
+        if (const char* svYaw = getenv("SV_YAW")) shapeViewerYaw = (float)atof(svYaw);
+        if (const char* svPitch = getenv("SV_PITCH")) shapeViewerPitch = (float)atof(svPitch);
         MatrixF ry; ry.setRotationY(shapeViewerYaw);
         MatrixF rx; rx.setRotationX(shapeViewerPitch);
         MatrixF sc; sc.setScale({shapeViewerFitScale, shapeViewerFitScale, shapeViewerFitScale});
@@ -8478,7 +8537,7 @@ void Game::render(float dt) {
                 // Arm and head aim ride on blend threads: the arm action
                 // (default "look") and "head" follow head pitch, "headside"
                 // follows head yaw. Dead players drop them.
-                DTSShape::BlendThread blends[3];
+                DTSShape::BlendThread blends[4];
                 int numBlends = 0;
                 if (playerAnimated && g->damageState < 1) {
                     auto animationIndex = [&](const char* name) -> int {
@@ -8502,6 +8561,22 @@ void Game::render(float dt) {
                     addBlend(animationIndex("head"), pitchPosition);
                     addBlend(animationIndex("headside"), yawPosition);
                 }
+                // Jet flare (Player::processTick): the non-cyclic "jetflare"
+                // sequence runs forward while jetting and back otherwise, so
+                // its visibility fades the flare meshes in and out.
+                if (playerAnimated && numBlends < 4) {
+                    const DTSShape::Animation* flare = findAnimation(*shape, "jetflare");
+                    if (flare && flare->duration > 0.0f) {
+                        const bool jetOn = g->jetting && g->damageState < 1;
+                        if (!demoMatchEnded) {
+                            const float step = demoInterpolationDt / flare->duration;
+                            mg->jetFlarePosition = std::clamp(
+                                mg->jetFlarePosition + (jetOn ? step : -step), 0.0f, 1.0f);
+                        }
+                        blends[numBlends++] = {(int)(flare - shape->animations.data()),
+                                               mg->jetFlarePosition * flare->duration};
+                    }
+                }
                 w->applyShapeLighting(*shape, mg->shapeLight, model * shape->upOrientation(),
                                       dt * 1000.0f);
                 if (animation) {
@@ -8513,6 +8588,35 @@ void Game::render(float dt) {
                     shape->render(0, numOverrides > 0 ? overrides : nullptr, numOverrides);
                 }
                 shape->cloakTextureOverride = nullptr;
+
+                // Player::updateJet: the PlayerData jetEmitter runs at the
+                // jetNozzle nodes while jetting (light armours have only the
+                // first), ejecting along the nozzle axis the jetflare mesh
+                // extends along (node column 2 in the Y-up frame).
+                if (isPlayer && g->jetting && g->damageState < 1 && g->hasDatablock &&
+                    !demoMatchEnded && shape->animatedNodeWorld.size() == shape->nodes.size()) {
+                    const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+                    auto block = blocks.find((uint32_t)g->datablockId);
+                    const uint32_t emitterRef = block != blocks.end()
+                        ? block->second.decoded.playerJetEmitterRef : 0;
+                    if (emitterRef) {
+                        const MatrixF world = model * shape->upOrientation();
+                        const Point3F velocity = Math::torquePointToYUp(
+                            {g->torqueVelocity.x, g->torqueVelocity.y, g->torqueVelocity.z});
+                        int nozzle = 0;
+                        for (const char* name : {"jetnozzle0", "jetnozzle1"}) {
+                            const int node = shape->findNode(name);
+                            if (node >= 0) {
+                                const MatrixF nodeWorld = world * shape->animatedNodeWorld[node];
+                                const Point3F pos{nodeWorld.m[0][3], nodeWorld.m[1][3], nodeWorld.m[2][3]};
+                                const Point3F axis{nodeWorld.m[0][2], nodeWorld.m[1][2], nodeWorld.m[2][2]};
+                                w->syncNodeEmitter((int64_t)idx * 4 + nozzle, emitterRef, pos, velocity,
+                                                   axis, blocks);
+                            }
+                            ++nozzle;
+                        }
+                    }
+                }
 
                 // Render mounted weapons for player ghosts
                 if (isPlayer) {
@@ -8932,6 +9036,12 @@ void Game::render(float dt) {
         // Full path in dim green
         r.drawLineStrip(demoPath, {0.2f, 0.8f, 0.2f, 0.6f});
     }
+
+    // The HUD switches to its 2D projection, so it draws after every 3D
+    // pass (world, demo and live ghosts).
+    if (hud && !mapperMode && (gameState == Playing ||
+                               (gameState == Dead && !demoPlaying)))
+        hud->render(this);
 
     // Mapper uses the normal script bootstrap for asset/datablock definitions,
     // but its output is a world-only inspection frame.

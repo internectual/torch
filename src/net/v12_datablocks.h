@@ -143,6 +143,7 @@ struct DecodedDataBlock {
     float playerMinLookAngle = 0.0f, playerMaxLookAngle = 0.0f;
     float playerRunSurfaceAngle = 0.0f;
     float playerBoxSize[3] = {0.0f, 0.0f, 0.0f}; // Torque x, y, z
+    uint32_t playerJetEmitterRef = 0; // ParticleEmitterData at jetNozzle0/1
     int32_t emitterDelayMS = -1;
     float bubbleEmitTime = 0.5f;
     bool faceViewer{};

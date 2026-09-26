@@ -432,6 +432,10 @@ public:
                              const V12::DecodedDataBlock* projectileData,
                              const std::map<uint32_t, ParsedDataBlock>* dataBlocks);
     void endProjectileTrailSync();
+    // Keep a ParticleEmitterData emitting at a moving node this frame.
+    void syncNodeEmitter(int64_t key, uint32_t emitterRef, const Point3F& pos,
+                         const Point3F& velocity, const Point3F& axis,
+                         const std::map<uint32_t, ParsedDataBlock>& dataBlocks);
     void removeProjectileTrail(int ownerId);
 
 private:
@@ -516,6 +520,11 @@ private:
         Point3F ownerVelocity{};
         Point3F axis{0, 1, 0};
         uint64_t trailGeneration = 0;
+        // Node emitters (jet nozzles) keyed by owner; once no longer synced
+        // they stop emitting and are removed when their particles are gone.
+        bool nodeEmitter = false;
+        int64_t nodeKey = -1;
+        bool stopped = false;
         std::vector<uint32_t> textures;
         std::vector<float> textureDurations;
     };
@@ -1071,6 +1080,9 @@ private:
     bool demoShowEvents = true;
     // Orbit camera for demo spectator mode
     bool demoOrbitCam = false;
+    // demoObserve: a chase camera behind one ghost (-1 = off).
+    int demoObserveGhost = -1;
+    float demoObserveDistance = 4.0f, demoObserveHeight = 1.5f;
     // Match-over interval (MissionEnd / debrief) until the next
     // MsgClientReady: the world is held at its final state.
     bool demoMatchEnded = false;
