@@ -296,6 +296,72 @@ static const DTSShape::Animation* findAnimation(const DTSShape& shape,
 // Renders a mounted image with its state machine's threads: the state
 // sequence, the flash visibility sequence, and the always-running "ambient"
 // and "spin" threads (ShapeBaseImageData::preload).
+// ShapeBase::castRay: segment a -> b against each LOS-(i+9) detail (or
+// Collision-(i+1) when absent) as last posed; nearest hit parameter in
+// [0, 1], or -1. Player::castRay tests the PlayerData box instead (pass its
+// Torque boxSize). Rigid meshes follow their node; skinned meshes are already
+// in shape space.
+static float raycastShape(const DTSShape& shape, const MatrixF& renderModel,
+                          const Point3F& a, const Point3F& b, const float* playerBox = nullptr) {
+    if (playerBox) {
+        // mObjBox: (-x/2, -y/2, 0) .. (x/2, y/2, z) in Torque object space.
+        const MatrixF toShape = renderModel.inverse();
+        const Point3F sa = toShape.transform(a), sb = toShape.transform(b);
+        const Point3F lo = Math::torquePointToYUp({-playerBox[0] * 0.5f, playerBox[1] * 0.5f, 0.0f});
+        const Point3F hi = Math::torquePointToYUp({playerBox[0] * 0.5f, -playerBox[1] * 0.5f, playerBox[2]});
+        const float mins[3] = {std::min(lo.x, hi.x), std::min(lo.y, hi.y), std::min(lo.z, hi.z)};
+        const float maxs[3] = {std::max(lo.x, hi.x), std::max(lo.y, hi.y), std::max(lo.z, hi.z)};
+        const float s0[3] = {sa.x, sa.y, sa.z}, s1[3] = {sb.x, sb.y, sb.z};
+        float first = 0.0f, last = 1.0f;
+        for (int axis = 0; axis < 3; ++axis) {
+            const float d = s1[axis] - s0[axis];
+            if (std::fabs(d) < 1e-9f) {
+                if (s0[axis] < mins[axis] || s0[axis] > maxs[axis]) return -1.0f;
+                continue;
+            }
+            float t0 = (mins[axis] - s0[axis]) / d, t1 = (maxs[axis] - s0[axis]) / d;
+            if (t0 > t1) std::swap(t0, t1);
+            first = std::max(first, t0);
+            last = std::min(last, t1);
+            if (last < first) return -1.0f;
+        }
+        return first;
+    }
+    const auto& nodeWorld = shape.animatedNodeWorld.size() == shape.nodes.size()
+        ? shape.animatedNodeWorld : shape.defaultTransforms;
+    auto detailMeshes = [&](const std::string& wanted) -> const std::vector<int32_t>* {
+        for (const auto& detail : shape.utilityDetails)
+            if (detail.name.size() == wanted.size() &&
+                std::equal(detail.name.begin(), detail.name.end(), wanted.begin(),
+                           [](char x, char y) { return std::tolower((unsigned char)x) == std::tolower((unsigned char)y); }))
+                return &detail.meshIndices;
+        return nullptr;
+    };
+    float best = -1.0f;
+    for (int i = 0; i < 8; ++i) {
+        const std::vector<int32_t>* meshes = detailMeshes("LOS-" + std::to_string(i + 9));
+        if (!meshes) meshes = detailMeshes("Collision-" + std::to_string(i + 1));
+        if (!meshes) continue;
+        for (int32_t mi : *meshes) {
+            if (mi < 0 || mi >= (int)shape.meshes.size()) continue;
+            const MeshData& mesh = shape.meshes[mi];
+            const bool skinned = mi < (int)shape.skins.size() && shape.skins[mi].hasSkin;
+            MatrixF transform = renderModel;
+            if (!skinned && mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)nodeWorld.size())
+                transform = renderModel * nodeWorld[mesh.nodeIndex];
+            std::vector<Point3F> world(mesh.vertices.size());
+            for (size_t v = 0; v < mesh.vertices.size(); ++v) world[v] = transform.transform(mesh.vertices[v].pos);
+            for (size_t k = 0; k + 2 < mesh.indices.size(); k += 3) {
+                const uint32_t i0 = mesh.indices[k], i1 = mesh.indices[k + 1], i2 = mesh.indices[k + 2];
+                if (i0 >= world.size() || i1 >= world.size() || i2 >= world.size()) continue;
+                const float t = segmentTriangle(a, b, world[i0], world[i1], world[i2]);
+                if (t >= 0.0f && (best < 0.0f || t < best)) best = t;
+            }
+        }
+    }
+    return best;
+}
+
 static void renderMountedImage(DTSShape& shape, const WeaponImage::Animation& animation,
                                float now) {
     std::vector<DTSShape::BlendThread> threads;
@@ -330,6 +396,7 @@ static void renderMountedImage(DTSShape& shape, const WeaponImage::Animation& an
         threads.push_back({spin, time < 0.0f ? time + duration(spin) : time});
     }
     if (threads.empty()) {
+        shape.animatedNodeWorld.clear(); // bind pose; the shape is shared
         shape.render(0);
         return;
     }
@@ -8209,35 +8276,169 @@ void Game::render(float dt) {
                                                 texture(layer.textureIndex), additive);
                        }
                    }
-                  if (data.projectileHasLight)
-                      r.drawSprite(Math::torquePointToYUp({rp.x, rp.y, rp.z}),
-                                   std::clamp(data.projectileLightRadius, 0.05f, 64.0f),
-                                   {data.projectileLightColor[0], data.projectileLightColor[1],
-                                    data.projectileLightColor[2], 0.22f}, true);
               }
 
+                // ELF / repair link beams (ELFProjectile, RepairProjectile
+                // renderObject): an additive ribbon bowing from the source's
+                // muzzle through muzzle + aim x length to the end point, its
+                // texture scrolling with age, and an impact flare. ELF adds
+                // three jittered lightning ribbons re-seeded at 15 Hz; the
+                // repair end chases hits on the target along the aim ray.
                 if (demoParser && (ghostClassIs(g->className, "ELFProjectile") ||
                                    ghostClassIs(g->className, "RepairProjectile"))) {
-                 const GhostEntry* source = demoParser->getGhostTracker().getGhost(g->linkSourceGhost);
-                 const GhostEntry* target = demoParser->getGhostTracker().getGhost(g->linkTargetGhost);
-                 if (source && target) {
-                     Point3F start = Math::torquePointToYUp(
-                         {source->renderPos.x, source->renderPos.y, source->renderPos.z});
-                     Point3F end = Math::torquePointToYUp(
-                         {target->renderPos.x, target->renderPos.y, target->renderPos.z});
-                     start.y += 1.4f;
-                     end.y += 1.0f;
-                      const bool elfBeam = ghostClassIs(g->className, "ELFProjectile");
-                      const auto points = linkBeamPoints(start, end, elfBeam);
-                      const ColorF color = elfBeam
-                          ? ColorF{0.25f, 0.75f, 1.0f, 0.9f}
-                          : ColorF{1.0f, 0.2f, 0.2f, 0.75f};
-                      r.drawLineStrip(points, color);
-                      r.drawSprite(end, elfBeam ? 0.5f : 0.6f,
-                                   color, 0, true);
-                 }
-                  continue;
-              }
+                    const auto& dataBlocks = demoParser->getInitialBlock().dataBlocks;
+                    auto dataIt = g->hasDatablock ? dataBlocks.find((uint32_t)g->datablockId)
+                                                  : dataBlocks.end();
+                    const auto* link = dataIt != dataBlocks.end() && dataIt->second.decoded.linkBeam.valid
+                        ? &dataIt->second.decoded.linkBeam : nullptr;
+                    const GhostEntry* source = demoParser->getGhostTracker().getGhost(g->linkSourceGhost);
+                    const GhostEntry* target = demoParser->getGhostTracker().getGhost(g->linkTargetGhost);
+                    if (!link || !source || !target) continue;
+                    const int slot = std::clamp(g->linkSourceSlot, 0, 7);
+                    const Point3F start = source->hasMuzzle[slot] ? source->muzzlePos[slot]
+                        : Math::torquePointToYUp({source->renderPos.x, source->renderPos.y, source->renderPos.z});
+                    Point3F aim;
+                    if (ObserverParity::isPlayerClass(source->className)) {
+                        float maxLookAngle = 0.0f;
+                        auto sourceData = source->hasDatablock
+                            ? dataBlocks.find((uint32_t)source->datablockId) : dataBlocks.end();
+                        if (sourceData != dataBlocks.end()) maxLookAngle = sourceData->second.decoded.playerMaxLookAngle;
+                        aim = Math::torquePointToYUp(playerAimDirection(
+                            source->bodyYaw, source->headYaw, source->headPitch, maxLookAngle));
+                    } else if (source->hasMuzzle[slot]) {
+                        aim = source->muzzleDir[slot];
+                    } else {
+                        const QuatF q(source->rotation.x, source->rotation.y, source->rotation.z, source->rotation.w);
+                        aim = Math::torquePointToYUp(q.toMatrix().transformNormal({0, 1, 0}));
+                    }
+                    {
+                        const float l = std::sqrt(aim.x * aim.x + aim.y * aim.y + aim.z * aim.z);
+                        aim = l > 1e-6f ? Point3F{aim.x / l, aim.y / l, aim.z / l} : Point3F{0, 0, -1};
+                    }
+                    const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                    Point3F end;
+                    if (link->elf) {
+                        end = Math::torquePointToYUp({target->renderPos.x, target->renderPos.y, target->renderPos.z});
+                        end.y += 1.0f;
+                    } else {
+                        // Cast the aim ray against the target's render shape.
+                        const Point3F rayEnd{start.x + aim.x * link->beamRange,
+                                             start.y + aim.y * link->beamRange,
+                                             start.z + aim.z * link->beamRange};
+                        float hitT = -1.0f;
+                        if (target->shape && target->hasRenderModel) {
+                            const float* box = nullptr;
+                            if (ObserverParity::isPlayerClass(target->className) && target->hasDatablock) {
+                                auto targetData = dataBlocks.find((uint32_t)target->datablockId);
+                                if (targetData != dataBlocks.end() && targetData->second.decoded.isPlayerData)
+                                    box = targetData->second.decoded.playerBoxSize;
+                            }
+                            // Player::castRay only hits an enabled (alive) player.
+                            if (!box || target->damageState < 1)
+                                hitT = raycastShape(*target->shape, target->renderModel, start, rayEnd, box);
+                        }
+                        if (mg->repairTarget != g->linkTargetGhost || now < mg->repairLastTime) {
+                            mg->repairTarget = g->linkTargetGhost;
+                            mg->repairHasHit = false;
+                            mg->repairLastTime = -1.0f;
+                        }
+                        RepairEndpoint endpoint{mg->repairCurrent, mg->repairDesired, mg->repairHasHit};
+                        const Point3F hit{start.x + (rayEnd.x - start.x) * hitT,
+                                          start.y + (rayEnd.y - start.y) * hitT,
+                                          start.z + (rayEnd.z - start.z) * hitT};
+                        endpoint.step(hitT >= 0.0f, hit,
+                                      mg->repairLastTime < 0.0f ? 0.0f : now - mg->repairLastTime);
+                        mg->repairCurrent = endpoint.current;
+                        mg->repairDesired = endpoint.desired;
+                        mg->repairHasHit = endpoint.hasHit;
+                        mg->repairLastTime = now;
+                        if (!endpoint.hasHit ||
+                            !repairWithinCutoff(start, endpoint.current, aim, link->cutoffAngle)) continue;
+                        end = endpoint.current;
+                    }
+                    const float dx = end.x - start.x, dy = end.y - start.y, dz = end.z - start.z;
+                    const float length = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (length < 1e-6f) continue;
+                    const Point3F control = linkBeamControl(start, aim, length);
+                    auto textureFor = [&](const std::string& name) -> uint32_t {
+                        if (name.empty()) return 0;
+                        std::vector<uint32_t> frames;
+                        std::vector<float> durations;
+                        r.loadTextureFrames(name.c_str(), frames, durations);
+                        return frames.empty() ? 0u : frames.front();
+                    };
+                    // Camera-facing ribbon through `count` samples.
+                    auto ribbon = [&](auto&& sample, int count, float halfWidth, uint32_t texture,
+                                      const ColorF& tint, float u0, float uLength) {
+                        Point3F prevPos{}, prevCross{};
+                        float prevU = 0.0f;
+                        for (int i = 0; i < count; ++i) {
+                            const float t = count > 1 ? (float)i / (float)(count - 1) : 0.0f;
+                            const Point3F p = sample(t);
+                            const Point3F q = i == count - 1 ? sample(t - 0.5f / count) : sample(t + 0.5f / count);
+                            const Point3F tangent = i == count - 1
+                                ? Point3F{p.x - q.x, p.y - q.y, p.z - q.z} : Point3F{q.x - p.x, q.y - p.y, q.z - p.z};
+                            const Point3F v{p.x - r.cameraPos.x, p.y - r.cameraPos.y, p.z - r.cameraPos.z};
+                            Point3F c{v.y * tangent.z - v.z * tangent.y, v.z * tangent.x - v.x * tangent.z,
+                                      v.x * tangent.y - v.y * tangent.x};
+                            float cl = std::sqrt(c.x * c.x + c.y * c.y + c.z * c.z);
+                            if (cl < 1e-5f) { c = {0, 1, 0}; cl = 1.0f; }
+                            c = {c.x / cl * halfWidth, c.y / cl * halfWidth, c.z / cl * halfWidth};
+                            const float u = u0 + uLength * t;
+                            if (i > 0)
+                                r.drawTexturedQuad({prevPos.x + prevCross.x, prevPos.y + prevCross.y, prevPos.z + prevCross.z},
+                                                   {p.x + c.x, p.y + c.y, p.z + c.z},
+                                                   {p.x - c.x, p.y - c.y, p.z - c.z},
+                                                   {prevPos.x - prevCross.x, prevPos.y - prevCross.y, prevPos.z - prevCross.z},
+                                                   texture, tint, prevU, 0.0f, u, 1.0f, true);
+                            prevPos = p; prevCross = c; prevU = u;
+                        }
+                    };
+                    auto beamSample = [&](float t) { return linkBeamSample(start, control, end, t); };
+                    const float age = std::max(0.0f, now - mg->spawnTime);
+                    if (const uint32_t texture = textureFor(link->texture))
+                        ribbon(beamSample, link->elf ? 16 : 20, link->width * 0.5f, texture,
+                               {1, 1, 1, link->elf ? 1.0f : 0.75f}, -age * link->scrollSpeed,
+                               length * link->texRepeat);
+                    if (link->elf) {
+                        if (const uint32_t lightning = textureFor(link->lightningTexture)) {
+                            constexpr int points = 16;
+                            const uint32_t seed = (uint32_t)(now * 15.0f) * 2654435761u + (uint32_t)idx * 40503u;
+                            for (int strand = 0; strand < 3; ++strand) {
+                                Point3F offsets[points]{};
+                                uint32_t state = seed + (uint32_t)strand * 97u + 1u;
+                                auto random = [&]() {
+                                    state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+                                    return (float)(state & 0xffffff) / 8388608.0f - 1.0f;
+                                };
+                                for (int i = 1; i + 1 < points; ++i) {
+                                    Point3F o{random(), random(), random()};
+                                    const float ol = std::sqrt(o.x * o.x + o.y * o.y + o.z * o.z);
+                                    const float k = ol > 1e-5f ? link->lightningDist / ol : 0.0f;
+                                    offsets[i] = {o.x * k, o.y * k, o.z * k};
+                                }
+                                ribbon([&](float t) {
+                                    Point3F p = beamSample(t);
+                                    const int i = std::clamp((int)std::lround(t * (points - 1)), 0, points - 1);
+                                    return Point3F{p.x + offsets[i].x, p.y + offsets[i].y, p.z + offsets[i].z};
+                                }, points, link->lightningWidth * 0.5f, lightning, {1, 1, 1, 1}, 0.0f, 1.0f);
+                            }
+                        }
+                    }
+                    // Impact flare; the repair flare hides when viewed from behind.
+                    if (const uint32_t flare = textureFor(link->flareTexture)) {
+                        bool flareVisible = true;
+                        if (!link->elf) {
+                            Point3F toEnd{end.x - r.cameraPos.x, end.y - r.cameraPos.y, end.z - r.cameraPos.z};
+                            const float te = std::sqrt(toEnd.x * toEnd.x + toEnd.y * toEnd.y + toEnd.z * toEnd.z);
+                            const float dotBack = te > 1e-5f
+                                ? (dx * toEnd.x + dy * toEnd.y + dz * toEnd.z) / (length * te) : 1.0f;
+                            flareVisible = dotBack >= -0.75f;
+                        }
+                        if (flareVisible) r.drawSprite(end, link->elf ? 0.5f : 0.6f, {1, 1, 1, 1}, flare, true);
+                    }
+                    continue;
+                }
 
                 // SniperProjectile::renderObject: a camera-facing ribbon from
                 // muzzle to impact for fadeTime seconds, alpha 1 - t. The core
@@ -8603,6 +8804,8 @@ void Game::render(float dt) {
                         ? blends[0].time / animation->duration : 0.0f;
                     primaryBlend = 1;
                 }
+                mg->renderModel = model * shape->upOrientation();
+                mg->hasRenderModel = true;
                 w->applyShapeLighting(*shape, mg->shapeLight, model * shape->upOrientation(),
                                       dt * 1000.0f);
                 if (animation) {
@@ -8747,7 +8950,8 @@ void Game::render(float dt) {
                             const auto& ib = demoParser->getInitialBlock();
                             auto wit = ib.datablockWeaponShapes.find(dbId);
                              if (wit != ib.datablockWeaponShapes.end()) {
-                                 dynamicPath = wit->second;
+                                 // ShapeBaseImageData shapeFile is relative to shapes/.
+                                 dynamicPath = normalizeShapePath(wit->second);
                                  wPath = dynamicPath.c_str();
                                  const auto db = ib.dataBlocks.find((uint32_t)dbId);
                                  if (db != ib.dataBlocks.end() && db->second.decoded.hasMountPoint)
@@ -8799,6 +9003,18 @@ void Game::render(float dt) {
                          renderMountedImage(*wShape, mg->mountedImages[img].animation,
                                             demoMatchEnded ? demoMatchEndedAt : demoTime);
                          wShape->cloakTextureOverride = nullptr;
+                         // The animated Muzzlepoint (or the image itself).
+                         {
+                             const int muzzle = wShape->findNode("Muzzlepoint");
+                             MatrixF muzzleWorld = imageModel;
+                             if (muzzle >= 0 && muzzle < (int)wShape->animatedNodeWorld.size())
+                                 muzzleWorld = imageModel * wShape->animatedNodeWorld[muzzle];
+                             else if (muzzle >= 0 && muzzle < (int)wShape->defaultTransforms.size())
+                                 muzzleWorld = imageModel * wShape->defaultTransforms[muzzle];
+                             mg->muzzlePos[img] = {muzzleWorld.m[0][3], muzzleWorld.m[1][3], muzzleWorld.m[2][3]};
+                             mg->muzzleDir[img] = {muzzleWorld.m[0][2], muzzleWorld.m[1][2], muzzleWorld.m[2][2]};
+                             mg->hasMuzzle[img] = true;
+                         }
                     }
                 }
             }

@@ -5,31 +5,80 @@
 #include <cmath>
 #include <vector>
 
-inline std::vector<Point3F> linkBeamPoints(const Point3F& start, const Point3F& end,
-                                           bool curved) {
-    if (!curved) return {start, end};
-    Point3F control = start;
-    Point3F aim{end.x - start.x, end.y - start.y, end.z - start.z};
-    const float length = std::sqrt(aim.x * aim.x + aim.y * aim.y + aim.z * aim.z);
-    if (length > 0.001f) {
-        aim.x /= length; aim.y /= length; aim.z /= length;
-        const float reach = std::min(length * 0.55f, 12.0f);
-        control = {start.x + aim.x * reach, start.y + aim.y * reach,
-                   start.z + aim.z * reach};
-        control.y += std::min(length * 0.18f, 3.0f);
+// ELF / repair link beams (ELFProjectile / RepairProjectile renderObject,
+// shared ribbon builder): the beam bows through the shooter's aim point, a
+// quadratic from the muzzle through muzzle + aim x length to the target.
+inline Point3F linkBeamSample(const Point3F& start, const Point3F& control,
+                              const Point3F& end, float t) {
+    const float a = (1.0f - t) * (1.0f - t), b = 2.0f * (1.0f - t) * t, c = t * t;
+    return {a * start.x + b * control.x + c * end.x,
+            a * start.y + b * control.y + c * end.y,
+            a * start.z + b * control.z + c * end.z};
+}
+
+inline Point3F linkBeamControl(const Point3F& start, const Point3F& aim, float length) {
+    return {start.x + aim.x * length, start.y + aim.y * length, start.z + aim.z * length};
+}
+
+// The player look-direction override of getRenderMuzzleVector in Tribes 2
+// (binary-verified by t2-mapper): body yaw plus head yaw, and head pitch
+// (positive looks down), the networked head angles scaled by
+// PlayerData::maxLookAngle. Torque-space direction.
+inline Point3F playerAimDirection(float bodyYaw, float headYaw, float headPitch,
+                                  float maxLookAngle) {
+    const float yaw = bodyYaw + headYaw * maxLookAngle;
+    const float pitch = std::clamp(headPitch * maxLookAngle, -1.5f, 1.5f);
+    return {std::sin(yaw) * std::cos(pitch), std::cos(yaw) * std::cos(pitch), -std::sin(pitch)};
+}
+
+// RepairProjectile::renderObject: visible while 90 - dot * 90 <= cutoff
+// (deliberately not acos).
+inline bool repairWithinCutoff(const Point3F& start, const Point3F& end,
+                               const Point3F& aim, float cutoffAngle) {
+    Point3F d{end.x - start.x, end.y - start.y, end.z - start.z};
+    const float length = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+    if (!(length > 0.0f)) return false;
+    const float dot = (d.x * aim.x + d.y * aim.y + d.z * aim.z) / length;
+    return 90.0f - dot * 90.0f <= cutoffAngle;
+}
+
+// RepairProjectile::advanceTime: the first hit snaps the endpoint, later
+// frames ease toward the latest hit at 2 * dt, and a miss keeps the last.
+struct RepairEndpoint {
+    Point3F current{}, desired{};
+    bool hasHit = false;
+    void step(bool hit, const Point3F& point, float dt) {
+        if (hit) {
+            desired = point;
+            if (!hasHit) { current = point; hasHit = true; return; }
+        }
+        if (!hasHit) return;
+        const float k = std::clamp(2.0f * dt, 0.0f, 1.0f);
+        current = {current.x + (desired.x - current.x) * k,
+                   current.y + (desired.y - current.y) * k,
+                   current.z + (desired.z - current.z) * k};
     }
-    std::vector<Point3F> points;
-    points.reserve(9);
-    for (int i = 0; i <= 8; ++i) {
-        const float t = i / 8.0f;
-        const float a = (1.0f - t) * (1.0f - t);
-        const float b = 2.0f * (1.0f - t) * t;
-        const float c = t * t;
-        points.push_back({a * start.x + b * control.x + c * end.x,
-                          a * start.y + b * control.y + c * end.y,
-                          a * start.z + b * control.z + c * end.z});
-    }
-    return points;
+};
+
+// Moller-Trumbore: segment parameter in [0, 1] where a -> b crosses the
+// triangle, or a negative value.
+inline float segmentTriangle(const Point3F& a, const Point3F& b, const Point3F& p0,
+                             const Point3F& p1, const Point3F& p2) {
+    const Point3F d{b.x - a.x, b.y - a.y, b.z - a.z};
+    const Point3F e1{p1.x - p0.x, p1.y - p0.y, p1.z - p0.z};
+    const Point3F e2{p2.x - p0.x, p2.y - p0.y, p2.z - p0.z};
+    const Point3F h{d.y * e2.z - d.z * e2.y, d.z * e2.x - d.x * e2.z, d.x * e2.y - d.y * e2.x};
+    const float det = e1.x * h.x + e1.y * h.y + e1.z * h.z;
+    if (std::fabs(det) < 1e-9f) return -1.0f;
+    const float inv = 1.0f / det;
+    const Point3F s{a.x - p0.x, a.y - p0.y, a.z - p0.z};
+    const float u = (s.x * h.x + s.y * h.y + s.z * h.z) * inv;
+    if (u < 0.0f || u > 1.0f) return -1.0f;
+    const Point3F q{s.y * e1.z - s.z * e1.y, s.z * e1.x - s.x * e1.z, s.x * e1.y - s.y * e1.x};
+    const float v = (d.x * q.x + d.y * q.y + d.z * q.z) * inv;
+    if (v < 0.0f || u + v > 1.0f) return -1.0f;
+    const float t = (e2.x * q.x + e2.y * q.y + e2.z * q.z) * inv;
+    return t >= 0.0f && t <= 1.0f ? t : -1.0f;
 }
 
 // Build the camera-facing ribbon used by tracer and beam-style projectiles.

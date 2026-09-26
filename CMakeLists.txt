@@ -466,6 +466,7 @@ set_tests_properties(torch_network_loopback PROPERTIES TIMEOUT 10)
 add_executable(torch_demo_snapshot_test
     tests/demo_snapshot_test.cpp
     src/game/demo.cpp
+    src/core/math.cpp
     src/net/v12_bitstream.cpp
     src/net/v12_protocol.cpp
     src/net/v12_registry.cpp

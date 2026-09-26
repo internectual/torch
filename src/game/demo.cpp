@@ -2298,10 +2298,11 @@ static void readELFProjectileData(BitStream& bs, bool isInitial, const Vec3&, Gh
     readGameBaseData(bs, isInitial, entry);
     if (bs.readFlag() && bs.readFlag()) {
         const int source = bs.readInt(11);
-        bs.readInt(3); // source image slot
+        const int slot = bs.readInt(3); // source image slot
         const int target = bs.readInt(11);
         if (entry) {
             entry->linkSourceGhost = source;
+            entry->linkSourceSlot = slot;
             entry->linkTargetGhost = target;
         }
     }

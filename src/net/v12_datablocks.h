@@ -154,6 +154,13 @@ struct DecodedDataBlock {
         float pulseSpeed = 0, pulseLength = 0;
         std::vector<std::string> textures; // [0] unused by the beam, [1..11]
     } sniperBeam;
+    // ELFProjectileData / RepairProjectileData link beams.
+    struct LinkBeam {
+        bool valid = false, elf = false;
+        float beamRange = 0, width = 0, scrollSpeed = 0, texRepeat = 0;
+        float lightningWidth = 0, lightningDist = 0, cutoffAngle = 40;
+        std::string texture, lightningTexture, flareTexture;
+    } linkBeam;
     // FlyingVehicleData / HoverVehicleData jets (forward, backward, down;
     // flying adds the trail emitter fourth).
     bool isFlyingVehicleData = false, isHoverVehicleData = false;

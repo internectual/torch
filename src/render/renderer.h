@@ -161,6 +161,13 @@ struct DTSShape {
         std::vector<int32_t> meshIndices; // actual mesh indices for this detail level
     };
     std::vector<DetailLevel> details;
+    // Collision-N / LOS-N details (negative size): ray casts only.
+    struct UtilityDetail { std::string name; std::vector<int32_t> meshIndices; };
+    std::vector<UtilityDetail> utilityDetails;
+    // Default object state (TSShape::objectStates[object]) where no thread
+    // animates the object.
+    struct ObjectDefault { float vis = 1.0f; int32_t frame = 0, matFrame = 0; };
+    std::vector<ObjectDefault> objectDefaults;
     struct Node {
         std::string name;
         int32_t parentIndex = -1;

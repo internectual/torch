@@ -720,6 +720,19 @@ struct GhostEntry {
     // Vehicle jets: the networked jetting flag and thrust direction, and the
     // client's back/bottom Activate/Maintain thread state.
     float spawnTime = -1.0f; // demo time this ghost first rendered
+    // getRenderMuzzlePoint/Vector per image slot from the last render (Y-up
+    // world): the image's Muzzlepoint node and its native +Y axis.
+    Point3F muzzlePos[8]{}, muzzleDir[8]{};
+    bool hasMuzzle[8]{};
+    // The last render transform (model x upOrientation), for beam raycasts.
+    MatrixF renderModel;
+    bool hasRenderModel = false;
+    // RepairProjectile::advanceTime endpoint: snaps to the first hit, then
+    // chases later hits at 2*dt, keeping the last one on a miss.
+    Point3F repairCurrent{}, repairDesired{};
+    bool repairHasHit = false;
+    int repairTarget = -1;
+    float repairLastTime = -1.0f;
     bool vehicleJetting = false;
     int thrustDirection = VehicleJets::ThrustForward;
     VehicleJets::Direction jetBack, jetBottom;

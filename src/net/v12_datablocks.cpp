@@ -575,7 +575,21 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
       }
       case 7: strings(s,5); break;
      case 8: f32s(s,2); u32s(s,2); f32s(s,2); bools(s,4); f32s(s,4); f32s(s,2); bools(s,2); f32s(s,3); bools(s,1); strings(s,2); refs(s,3); break;
-     case 9: (classId >= 128 ? legacyDecal : decal)(s); break; case 10: projectile(s); f32s(s,6); strings(s,3); refs(s,1); break;
+     case 9: (classId >= 128 ? legacyDecal : decal)(s); break; case 10: { // ELFProjectileData
+        projectile(s);
+        float f[6];
+        for (float& v : f) v = s.readF32(); // beamRange, mainBeam width/speed/repeat, lightning width/dist
+        std::vector<std::string> textures = materialStrings(s, 3); // beam, lightning, flare
+        refs(s, 1); // emitter
+        if (activeDecoded) {
+            auto& link = activeDecoded->linkBeam;
+            link.valid = true; link.elf = true;
+            link.beamRange = f[0]; link.width = f[1] * 2.0f; link.scrollSpeed = f[2];
+            link.texRepeat = f[3]; link.lightningWidth = f[4]; link.lightningDist = f[5];
+            link.texture = textures[0]; link.lightningTexture = textures[1]; link.flareTexture = textures[2];
+        }
+        break;
+    }
      case 11: f32s(s,3); s.readUnsigned(8); strings(s,1); break; case 12: {
          grenade(s); float values[7]; for (float& value : values) value = s.readF32();
          const auto textures = materialStrings(s, 2);
@@ -645,7 +659,24 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
      }
     case 25: linear(s); break; case 26: shapeBase(s); break; case 27: particle(s); break;
     case 28: s.readF32(); break; case 29: emitter(s); break;
-     case 30: player(s); break; case 31: refs(s,1);s.readUnsigned(32);s.readF32();strings(s,1);f32s(s,13);break; case 32: projectile(s);break; case 33: projectile(s);f32s(s,8);strings(s,2);break;
+     case 30: player(s); break; case 31: refs(s,1);s.readUnsigned(32);s.readF32();strings(s,1);f32s(s,13);break; case 32: projectile(s);break; case 33: { // RepairProjectileData
+        projectile(s);
+        const float beamRange = s.readF32();
+        s.readF32(); // beamWidth
+        s.readUnsigned(32); // numSegments
+        const float beamSpeed = s.readF32(), texRepeat = s.readF32();
+        f32s(s, 2); // blurFreq, blurLifetime
+        const float cutoffAngle = s.readF32();
+        std::vector<std::string> textures = materialStrings(s, 2); // beam, flare
+        if (activeDecoded) {
+            auto& link = activeDecoded->linkBeam;
+            link.valid = true; link.elf = false;
+            link.beamRange = beamRange; link.width = 0.2f; link.scrollSpeed = beamSpeed;
+            link.texRepeat = texRepeat; link.cutoffAngle = cutoffAngle;
+            link.texture = textures[0]; link.flareTexture = textures[1];
+        }
+        break;
+    }
      case 34: s.readF32();colors(s,1);f32s(s,2);strings(s,1);f32s(s,6);if(s.readFlag())strings(s,1);break; case 35: projectile(s);f32s(s,10);s.readUnsigned(8);f32s(s,2);s.readUnsigned(32);s.readUnsigned(32);strings(s,2);refs(s,3);break; case 36: break; case 37: shapeBase(s);break; case 38: shapeImage(s);break;
       case 39: projectile(s);f32s(s,7);refs(s,1);f32s(s,8);strings(s,4);refs(s,1);break; case 40: shockwave(s); break; case 41: break; case 42: { // SniperProjectileData
         projectile(s);

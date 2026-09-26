@@ -1951,11 +1951,35 @@ static void testSparseScreenEffectParity() {
 
 static void testLinkBeamGeometry() {
     const Point3F start{0, 0, 0}, end{10, 0, 0};
-    const auto straight = linkBeamPoints(start, end, false);
-    assert(straight.size() == 2 && straight.front().x == 0 && straight.back().x == 10);
-    const auto elf = linkBeamPoints(start, end, true);
-    assert(elf.size() == 9 && elf.front().x == 0 && elf.back().x == 10);
-    assert(elf[4].y > 0.0f);
+    // The link beam bows through muzzle + aim x length.
+    const Point3F control = linkBeamControl(start, {0, 1, 0}, 10.0f);
+    assert(control.y == 10.0f);
+    const Point3F mid = linkBeamSample(start, control, end, 0.5f);
+    assert(std::fabs(mid.x - 2.5f) < 1e-5f && std::fabs(mid.y - 5.0f) < 1e-5f);
+    assert(linkBeamSample(start, control, end, 1.0f).x == 10.0f);
+    // Player aim: yaw turns +Y toward +X, positive pitch looks down.
+    const Point3F ahead = playerAimDirection(0.0f, 0.0f, 0.0f, 1.5f);
+    assert(std::fabs(ahead.y - 1.0f) < 1e-5f);
+    const Point3F right = playerAimDirection(1.5707963f, 0.0f, 0.0f, 1.5f);
+    assert(std::fabs(right.x - 1.0f) < 1e-5f);
+    const Point3F turned = playerAimDirection(0.0f, 1.0f, 0.0f, 1.5707963f);
+    assert(std::fabs(turned.x - 1.0f) < 1e-5f);
+    assert(playerAimDirection(0.0f, 0.0f, 0.5f, 1.5f).z < 0.0f);
+    // Repair cutoff uses 90 - dot * 90.
+    assert(repairWithinCutoff(start, end, {1, 0, 0}, 40.0f));
+    assert(!repairWithinCutoff(start, end, {0, 1, 0}, 40.0f));
+    // Endpoint snaps on the first hit, eases at 2*dt, holds on a miss.
+    RepairEndpoint endpoint;
+    endpoint.step(false, {1, 0, 0}, 0.1f);
+    assert(!endpoint.hasHit);
+    endpoint.step(true, {4, 0, 0}, 0.1f);
+    assert(endpoint.current.x == 4.0f);
+    endpoint.step(true, {14, 0, 0}, 0.25f);
+    assert(std::fabs(endpoint.current.x - 9.0f) < 1e-5f);
+    endpoint.step(false, {0, 0, 0}, 0.25f);
+    assert(std::fabs(endpoint.current.x - 11.5f) < 1e-5f);
+    assert(std::fabs(segmentTriangle({0, 0, -1}, {0, 0, 1}, {-1, -1, 0}, {1, -1, 0}, {0, 1, 0}) - 0.5f) < 1e-5f);
+    assert(segmentTriangle({5, 5, -1}, {5, 5, 1}, {-1, -1, 0}, {1, -1, 0}, {0, 1, 0}) < 0.0f);
 
     const auto quad = projectileBeamQuad(start, end, {5, 4, 0}, 2.0f);
     assert(quad.size() == 4 && quad[0].z > quad[1].z);

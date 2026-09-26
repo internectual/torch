@@ -522,6 +522,9 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         state.frameIndex = capCount(rS32());
         state.matFrameIndex = capCount(rS32());
     }
+    // The first numObjects states are each object's default state.
+    for (int i = 0; i < numObjects && i < numObjStates; ++i)
+        result.objectDefaults.push_back({objStates[i].vis, objStates[i].frameIndex, objStates[i].matFrameIndex});
 
     // Decal states
     int32_t numDecalStates = capCount(rS32());
@@ -913,6 +916,18 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
 
     // Build detail levels with meshIndices (same as v19+ path)
     for (int i = 0; i < numDetails; i++) {
+        if (details[i].sz < 0.0f) {
+            DTSLoadResult::UtilityDetail utility;
+            if (details[i].nameIdx >= 0 && details[i].nameIdx < (int)names.size())
+                utility.name = names[details[i].nameIdx];
+            const int32_t od = details[i].objDetail;
+            for (int j = 0; j < numObjects; j++)
+                if (od >= 0 && od < objs[j].nm && objs[j].sm + od >= 0 &&
+                    objs[j].sm + od < (int)result.meshes.size() &&
+                    !result.meshes[objs[j].sm + od].vertices.empty())
+                    utility.meshIndices.push_back(objs[j].sm + od);
+            result.utilityDetails.push_back(std::move(utility));
+        }
         DTSShape::DetailLevel dl;
         dl.size = details[i].sz;
         dl.meshIndex = details[i].objDetail;
@@ -1251,6 +1266,9 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         objStates[i].frameIndex = capCount(buf.readS32());
         objStates[i].matFrameIndex = capCount(buf.readS32());
     }
+    // The first numObjects states are each object's default state.
+    for (int i = 0; i < numObjects && i < numObjStates; ++i)
+        result.objectDefaults.push_back({objStates[i].vis, objStates[i].frameIndex, objStates[i].matFrameIndex});
     buf.checkGuard(); // 10
     for (int i = 0; i < numDecalStates; i++) capCount(buf.readS32());
     buf.checkGuard(); // 11
@@ -1841,7 +1859,19 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     // Note: result.meshes[sm + od] maps to original DTS mesh index because
     // Null and Decal meshes push empty entries to preserve index mapping.
     for (auto& dl : dtsDetails) {
-        if (dl.size < 0.0f) continue;
+        if (dl.size < 0.0f) {
+            // Collision-N / LOS-N details: kept for ray casts, never drawn.
+            DTSLoadResult::UtilityDetail utility;
+            if (dl.nameIdx >= 0 && dl.nameIdx < (int)names.size()) utility.name = names[dl.nameIdx];
+            for (int i = 0; i < numObjects; i++) {
+                const int32_t od = dl.objDetail, sm = dtsObjects[i].sm, nm = dtsObjects[i].nm;
+                if (od >= 0 && od < nm && sm + od >= 0 && sm + od < (int)result.meshes.size() &&
+                    !result.meshes[sm + od].vertices.empty())
+                    utility.meshIndices.push_back(sm + od);
+            }
+            result.utilityDetails.push_back(std::move(utility));
+            continue;
+        }
         DTSShape::DetailLevel detail;
         detail.size = dl.size;
         detail.meshIndex = dl.objDetail;

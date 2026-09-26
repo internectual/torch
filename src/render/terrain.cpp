@@ -1476,6 +1476,12 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
         objectStartMesh = std::move(dtsResult.objectStartMesh);
         objectNumMeshes = std::move(dtsResult.objectNumMeshes);
         meshTVerts = std::move(dtsResult.meshTVerts);
+        objectDefaults.clear();
+        for (const auto& state : dtsResult.objectDefaults)
+            objectDefaults.push_back({state.vis, state.frame, state.matFrame});
+        utilityDetails.clear();
+        for (auto& utility : dtsResult.utilityDetails)
+            utilityDetails.push_back({std::move(utility.name), std::move(utility.meshIndices)});
         iflMaterials.clear();
         for (const auto& ifl : dtsResult.iflMaterials) {
             IflMaterial material;
@@ -1974,6 +1980,14 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
         for (size_t mi = 0; mi < meshes.size(); mi++)
             renderList.push_back(mi);
     }
+    // Objects whose default state hides them (muzzle flashes, jet flares)
+    // stay hidden without a thread.
+    renderList.erase(std::remove_if(renderList.begin(), renderList.end(), [&](size_t mi) {
+        for (size_t oi = 0; oi < objectStartMesh.size() && oi < objectDefaults.size(); ++oi)
+            if (mi >= (size_t)objectStartMesh[oi] && mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi]))
+                return objectDefaults[oi].vis <= 0.01f;
+        return false;
+    }), renderList.end());
 
     // Pass 1: Opaque meshes
     glDepthMask(GL_TRUE);
@@ -2356,6 +2370,11 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
     std::vector<float> objectVisible(objectStartMesh.size() > 0 ? objectStartMesh.size() : defaultTransforms.size(), 1.0f);
     std::vector<int32_t> objectFrame(objectVisible.size(), 0);
     std::vector<int32_t> objectMatFrame(objectVisible.size(), 0);
+    for (size_t oi = 0; oi < objectVisible.size() && oi < objectDefaults.size(); ++oi) {
+        objectVisible[oi] = objectDefaults[oi].vis;
+        objectFrame[oi] = objectDefaults[oi].frame;
+        objectMatFrame[oi] = objectDefaults[oi].matFrame;
+    }
     // Each sequence's object keys are grouped per object; the latest key at
     // or before the sample time sets the state. Overlay threads then take
     // over the objects they animate.

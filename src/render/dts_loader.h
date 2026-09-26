@@ -11,6 +11,10 @@ struct DTSLoadResult {
     std::vector<uint32_t> materialFlags;
     struct IflMaterial { std::string name; int32_t materialSlot = -1; };
     std::vector<IflMaterial> iflMaterials; // TSShape::IflMaterial
+    struct UtilityDetail { std::string name; std::vector<int32_t> meshIndices; };
+    std::vector<UtilityDetail> utilityDetails; // negative-size details (Collision-N, LOS-N)
+    struct ObjectDefault { float vis = 1.0f; int32_t frame = 0, matFrame = 0; };
+    std::vector<ObjectDefault> objectDefaults; // TSShape::objectStates[object]
     std::vector<float> materialReflectionAmount;
     std::vector<int16_t> materialLightmapIndex;
     std::vector<Texture> lightmaps;
