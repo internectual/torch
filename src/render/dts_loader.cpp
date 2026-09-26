@@ -1,4 +1,5 @@
 #include "render/dts_loader.h"
+#include "render/texture_frames.h"
 #include "core/console.h"
 #include "core/engine.h"
 #include "core/math.h"
@@ -981,12 +982,8 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
                 auto iflData = fs.read((prefix + lower).c_str());
                 if (iflData.empty()) continue;
                 std::string iflContent(iflData.begin(), iflData.end());
-                size_t lineEnd = iflContent.find('\n');
-                std::string firstLine = (lineEnd != std::string::npos) ? iflContent.substr(0, lineEnd) : iflContent;
-                size_t spacePos = firstLine.find(' ');
-                std::string texName = (spacePos != std::string::npos) ? firstLine.substr(0, spacePos) : firstLine;
-                while (!texName.empty() && texName.back() <= ' ') texName.pop_back();
-                while (!texName.empty() && texName.front() <= ' ') texName.erase(0, 1);
+                const auto iflFrames = parseTextureFrameSources(iflContent);
+                std::string texName = iflFrames.empty() ? std::string() : iflFrames.front().name;
                 if (texName.empty()) continue;
                 std::string texLower = texName;
                 for (auto& c : texLower) c = (char)std::tolower((unsigned char)c);
@@ -1042,12 +1039,8 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
             auto iflData = fs.read((c + ".ifl").c_str());
             if (!iflData.empty()) {
                 std::string iflContent(iflData.begin(), iflData.end());
-                size_t lineEnd = iflContent.find('\n');
-                std::string firstLine = (lineEnd != std::string::npos) ? iflContent.substr(0, lineEnd) : iflContent;
-                size_t spacePos = firstLine.find(' ');
-                std::string texName = (spacePos != std::string::npos) ? firstLine.substr(0, spacePos) : firstLine;
-                while (!texName.empty() && texName.back() <= ' ') texName.pop_back();
-                while (!texName.empty() && texName.front() <= ' ') texName.erase(0, 1);
+                const auto iflFrames = parseTextureFrameSources(iflContent);
+                std::string texName = iflFrames.empty() ? std::string() : iflFrames.front().name;
                 if (!texName.empty()) {
                     std::string texLower = texName;
                     for (auto& ch : texLower) ch = (char)std::tolower((unsigned char)ch);
@@ -1643,12 +1636,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                 auto iflData = fs.read((prefix + lower).c_str());
                 if (iflData.empty()) continue;
                 std::string iflContent(iflData.begin(), iflData.end());
-                size_t lineEnd = iflContent.find('\n');
-                std::string firstLine = (lineEnd != std::string::npos) ? iflContent.substr(0, lineEnd) : iflContent;
-                size_t spacePos = firstLine.find(' ');
-                std::string texName = (spacePos != std::string::npos) ? firstLine.substr(0, spacePos) : firstLine;
-                while (!texName.empty() && texName.back() <= ' ') texName.pop_back();
-                while (!texName.empty() && texName.front() <= ' ') texName.erase(0, 1);
+                const auto iflFrames = parseTextureFrameSources(iflContent);
+                std::string texName = iflFrames.empty() ? std::string() : iflFrames.front().name;
                 if (texName.empty()) continue;
                 std::string texLower = texName;
                 for (auto& c : texLower) c = (char)std::tolower((unsigned char)c);
@@ -1702,12 +1691,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             auto iflData = fs.read((c + ".ifl").c_str());
             if (!iflData.empty()) {
                 std::string iflContent(iflData.begin(), iflData.end());
-                size_t lineEnd = iflContent.find('\n');
-                std::string firstLine = (lineEnd != std::string::npos) ? iflContent.substr(0, lineEnd) : iflContent;
-                size_t spacePos = firstLine.find(' ');
-                std::string texName = (spacePos != std::string::npos) ? firstLine.substr(0, spacePos) : firstLine;
-                while (!texName.empty() && texName.back() <= ' ') texName.pop_back();
-                while (!texName.empty() && texName.front() <= ' ') texName.erase(0, 1);
+                const auto iflFrames = parseTextureFrameSources(iflContent);
+                std::string texName = iflFrames.empty() ? std::string() : iflFrames.front().name;
                 if (!texName.empty()) {
                     std::string texLower = texName;
                     for (auto& ch : texLower) ch = (char)std::tolower((unsigned char)ch);

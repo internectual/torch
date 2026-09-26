@@ -49,9 +49,13 @@ static void testIFLParsingAndTiming() {
         "second.png\t500 # trailing\n"
         "third.png 0 // default\n");
     assert(frames.size() == 3);
-    assert(frames[0].name == "first.png" && std::fabs(frames[0].duration - 0.25f) < 0.0001f);
-    assert(frames[1].name == "second.png" && std::fabs(frames[1].duration - 0.5f) < 0.0001f);
-    assert(frames[2].name == "third.png" && frames[2].duration == 1.0f);
+    // Counts are frames of 1/30 s; zero or missing is one frame.
+    assert(frames[0].name == "first.png" && std::fabs(frames[0].duration - 250.0f / 30.0f) < 0.0001f);
+    assert(frames[1].name == "second.png" && std::fabs(frames[1].duration - 500.0f / 30.0f) < 0.0001f);
+    assert(frames[2].name == "third.png" && std::fabs(frames[2].duration - 1.0f / 30.0f) < 0.0001f);
+    const auto tabbed = parseTextureFrameSources("mort000.png\t1\nmort001.png\n");
+    assert(tabbed.size() == 2 && tabbed[0].name == "mort000.png" && tabbed[1].name == "mort001.png");
+    assert(std::fabs(tabbed[1].duration - 1.0f / 30.0f) < 0.0001f);
     assert(textureFrameIndex({0.25f, 0.5f}, 2, 0.24f) == 0);
     assert(textureFrameIndex({0.25f, 0.5f}, 2, 0.25f) == 1);
     assert(textureFrameIndex({0.25f, 0.5f}, 2, 0.75f) == 0);

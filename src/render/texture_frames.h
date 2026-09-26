@@ -14,9 +14,10 @@ struct TextureFrameSource {
 
 inline constexpr size_t MaxTextureFrames = 1024;
 
-// Parse Torque IFL lines without touching the filesystem. Durations are stored
-// in seconds; malformed or absent durations retain the native one-second
-// fallback. Missing frame files are filtered by the caller after parsing.
+// Parse Torque IFL lines without touching the filesystem (TSShape::
+// readIflMaterials): "name [count]", tabs as spaces, count in frames of
+// 1/30 s, absent or zero meaning one frame. Durations are stored in
+// seconds. Missing frame files are filtered by the caller after parsing.
 inline std::vector<TextureFrameSource> parseTextureFrameSources(const std::string& content) {
     std::vector<TextureFrameSource> result;
     size_t lineStart = 0;
@@ -39,20 +40,16 @@ inline std::vector<TextureFrameSource> parseTextureFrameSources(const std::strin
         TextureFrameSource frame;
         frame.name = line.substr(0, split);
         if (frame.name.empty()) continue;
-        if (split != std::string::npos) {
-            const char* value = line.c_str() + split;
-            char* end = nullptr;
-            const float milliseconds = std::strtof(value, &end);
-            if (end != value && milliseconds > 0.0f)
-                frame.duration = milliseconds / 1000.0f;
-        }
+        int frames = split != std::string::npos ? std::atoi(line.c_str() + split) : 1;
+        if (frames <= 0) frames = 1;
+        frame.duration = (float)frames / 30.0f;
         result.push_back(std::move(frame));
         if (result.size() >= MaxTextureFrames) break;
     }
     return result;
 }
 
-// Torque IFL durations are milliseconds on disk. Callers store them in seconds.
+// IFL durations are in seconds (converted from 1/30 s frames).
 inline size_t textureFrameIndex(const std::vector<float>& durations,
                                  size_t frameCount, float age) {
     if (frameCount == 0) return 0;
