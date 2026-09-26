@@ -6604,7 +6604,7 @@ void Game::update(float dt) {
                     }
                 }
 
-                if (block->type == T2Demo::BlockTypeMove)
+                if (block->type == T2Demo::BlockTypeMove && !demoMatchEnded)
                     updateDemoPlayerAnimation(T2Demo::playbackBlockTime(demoBlocksDone, demoTicks));
 
                 // Parse packet blocks (GameState, ghost updates, events)
@@ -6643,6 +6643,18 @@ void Game::update(float dt) {
                             }
                             continue;
                         }
+                        // MissionEnd or the debrief burst ends the match; the
+                        // next mission's MsgClientReady drops back in.
+                        if (ev.classId == T2Demo::NetEventClassFirst + 9 && !ev.arguments.empty()) {
+                            const std::string& command = ev.arguments[0];
+                            const std::string type = ev.arguments.size() > 1 ? ev.arguments[1] : "";
+                            if (command == "MissionEnd" ||
+                                (command == "ServerMessage" &&
+                                 (type == "MsgClearDebrief" || type == "MsgDebriefResult")))
+                                setDemoMatchEnded(true);
+                            else if (command == "ServerMessage" && type == "MsgClientReady")
+                                setDemoMatchEnded(false);
+                        }
                         if (ev.message.empty()) continue;
                         std::string displayText = ev.message;
                         if (ev.classId == T2Demo::NetEventClassFirst + 9 &&
@@ -6663,10 +6675,10 @@ void Game::update(float dt) {
                             !ev.arguments.empty() && ev.arguments[0] == "ServerMessage") {
                             std::vector<VMValue> callbackArgs;
                             if (ev.arguments.size() >= 2) {
-                                callbackArgs.emplace_back(ev.arguments[1]);
-                                callbackArgs.emplace_back(std::string());
-                                for (size_t i = 2; i < ev.arguments.size(); ++i)
+                                // clientCmdServerMessage(%msgType, %msgString, %a1...)
+                                for (size_t i = 1; i < ev.arguments.size(); ++i)
                                     callbackArgs.emplace_back(ev.arguments[i]);
+                                if (callbackArgs.size() < 2) callbackArgs.emplace_back(std::string());
                                 if (auto* ts = Engine::instance().script().ts())
                                     ts->dispatchMessageCallback(ev.arguments[1], callbackArgs);
                             }
@@ -7321,8 +7333,8 @@ void Game::update(float dt) {
             setState(Dead);
         }
 
-        // Update world (projectiles, etc.)
-        w->update(simulationDt);
+        // Update world (projectiles, etc.); held still after a demo match ends.
+        w->update(demoPlaying && demoMatchEnded ? 0.0f : simulationDt);
 
         // Update audio listener from camera
         auto& audio = Engine::instance().audio();
@@ -8042,7 +8054,7 @@ void Game::render(float dt) {
         auto* defShader = ShaderManager::getDefaultShader();
         if (defShader) defShader->bind();
 
-        const GhostTracker& gt = demoParser->getGhostTracker();
+        const GhostTracker& gt = demoMatchEnded ? demoEndedGhosts : demoParser->getGhostTracker();
         std::vector<int> indices = gt.getAllIndices();
         w->beginProjectileTrailSync();
         for (int idx : indices) {
@@ -8143,10 +8155,10 @@ void Game::render(float dt) {
             } else {
                 mg->animTime = fmodf(mg->animTime, 10.0f) + demoInterpolationDt * 0.3f; // slow idle
             }
-            mg->threadAnimTime += demoInterpolationDt;
+            if (!demoMatchEnded) mg->threadAnimTime += demoInterpolationDt;
              mg->prevPosition = rp;
              mg->hasRendered = true;
-              applyShapeBaseAudio(*mg, idx, p);
+              if (!demoMatchEnded) applyShapeBaseAudio(*mg, idx, p);
 
                if (visualData && visualData->projectileMaterial != V12::DecodedDataBlock::ProjectileMaterial::None) {
                    const auto& data = *visualData;
@@ -8353,6 +8365,7 @@ void Game::render(float dt) {
                 // server's wired action (deaths, taunts) or the client-picked
                 // movement action.
                 const bool playerAnimated = isPlayer && !shape->actionTable.empty();
+                const float animationNow = demoMatchEnded ? demoMatchEndedAt : demoTime;
                 if (playerAnimated) {
                     const auto& table = shape->actionTable;
                     auto tableAnimation = [&](int action) -> int {
@@ -8365,7 +8378,7 @@ void Game::render(float dt) {
                         if (index >= 0 && index < (int)shape->animations.size()) {
                             const auto& clip = shape->animations[index];
                             const float position = PlayerAnimation::sampleActionPosition(
-                                g->actionAnimPos, g->actionAtEnd, g->actionTime, demoTime, clip.duration);
+                                g->actionAnimPos, g->actionAtEnd, g->actionTime, animationNow, clip.duration);
                             actionEnd = g->actionTime + clip.duration *
                                 (1.0f - (g->actionAtEnd ? 1.0f : g->actionAnimPos));
                             const bool holds = g->actionHoldAtEnd || g->mountObject >= 0 ||
@@ -8384,7 +8397,7 @@ void Game::render(float dt) {
                             const auto& clip = shape->animations[index];
                             const float start = std::max(g->moveStartTime, actionEnd);
                             const float cycles = clip.duration > 0.0f
-                                ? std::max(0.0f, demoTime - start) * g->moveTimeScale / clip.duration
+                                ? std::max(0.0f, animationNow - start) * g->moveTimeScale / clip.duration
                                 : 0.0f;
                             animation = &clip;
                             animationPosition = clip.looping
@@ -8562,7 +8575,8 @@ void Game::render(float dt) {
                          r.setModel(imageModel);
                          wShape->cloakTextureOverride = shape->cloakTextureOverride;
                          wShape->lighting = shape->lighting;
-                         renderMountedImage(*wShape, mg->mountedImages[img].animation, demoTime);
+                         renderMountedImage(*wShape, mg->mountedImages[img].animation,
+                                            demoMatchEnded ? demoMatchEndedAt : demoTime);
                          wShape->cloakTextureOverride = nullptr;
                     }
                 }
@@ -9653,10 +9667,10 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
             if (argv[0] != "ServerMessage") return;
             if (argv.size() >= 2) {
                 std::vector<VMValue> callbackArgs;
-                callbackArgs.emplace_back(argv[1]);
-                callbackArgs.emplace_back(std::string());
-                for (size_t i = 2; i < argv.size(); ++i)
+                // clientCmdServerMessage(%msgType, %msgString, %a1...)
+                for (size_t i = 1; i < argv.size(); ++i)
                     callbackArgs.emplace_back(argv[i]);
+                if (callbackArgs.size() < 2) callbackArgs.emplace_back(std::string());
                 if (auto* ts = Engine::instance().script().ts())
                     ts->dispatchMessageCallback(argv[1], callbackArgs);
             }
@@ -10763,7 +10777,26 @@ bool Game::tryLoadDemoMission(const std::string& mission, bool resetParserState)
     return true;
 }
 
+void Game::setDemoMatchEnded(bool ended) {
+    if (ended == demoMatchEnded) return;
+    demoMatchEnded = ended;
+    if (!ended) {
+        demoEndedGhosts.clear();
+        return;
+    }
+    demoMatchEndedAt = demoTime;
+    // Keep the final world while the parser keeps receiving the debrief.
+    if (demoParser) demoEndedGhosts = demoParser->getGhostTracker();
+    // Looping shape sounds and projectile audio stop with the world.
+    auto& audio = Engine::instance().audio();
+    for (auto& [key, source] : shapeBaseSoundSources) audio.releaseSource(source);
+    shapeBaseSoundSources.clear();
+    clearProjectileAudio();
+    Console::instance().printf(LogLevel::Info, "Demo: match ended at %.1f s", demoTime);
+}
+
 void Game::resetDemoPresentation() {
+    setDemoMatchEnded(false);
     resetDemoEvents();
     resetDemoHud();
     resetDemoCamera();

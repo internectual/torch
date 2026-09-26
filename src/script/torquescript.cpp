@@ -80,8 +80,11 @@ struct TorqueScript::Impl {
     std::unordered_map<std::string, std::unordered_map<std::string, TSFunc>> packageFunctions;
     std::vector<std::string> activePackages;
     std::vector<std::string> callPackages;
+    std::vector<std::string> callNames; // executing script functions
     std::string parsingPackage;
     std::unordered_map<std::string, VMValue> globals;
+    // Lowercased name -> key in `globals` (names are case-insensitive).
+    std::unordered_map<std::string, std::string> globalIndex;
     std::unordered_map<std::string, std::vector<std::string>> messageCallbacks;
     ScriptScheduler scheduler;
     TSLocals locals;
@@ -368,6 +371,7 @@ void TorqueScript::shutdown() {
     impl->callPackages.clear();
     impl->parsingPackage.clear();
     impl->globals.clear();
+    impl->globalIndex.clear();
     impl->messageCallbacks.clear();
     impl->locals = TSLocals{};
     impl->guiParentStack.clear();
@@ -412,21 +416,24 @@ static std::string normalizeGlobalKey(const std::string& n) {
 
 void TorqueScript::setGlobal(const std::string& name, const VMValue& val) {
     const std::string key = normalizeGlobalKey(name);
-    for (auto& [stored, value] : impl->globals) {
-        if (sameName(stored, key)) {
-            value = val;
-            Console::instance().setVariable(name.c_str(), val.toString().c_str());
-            return;
-        }
+    const std::string lower = toLower(key);
+    auto indexed = impl->globalIndex.find(lower);
+    if (indexed != impl->globalIndex.end()) {
+        impl->globals[indexed->second] = val;
+    } else {
+        impl->globalIndex.emplace(lower, key);
+        impl->globals[key] = val;
     }
-    impl->globals[key] = val;
     Console::instance().setVariable(name.c_str(), val.toString().c_str());
 }
 
 VMValue TorqueScript::getGlobal(const std::string& name) {
     std::string key = normalizeGlobalKey(name);
-    for (const auto& [stored, value] : impl->globals)
-        if (sameName(stored, key)) return value;
+    auto indexed = impl->globalIndex.find(toLower(key));
+    if (indexed != impl->globalIndex.end()) {
+        auto stored = impl->globals.find(indexed->second);
+        if (stored != impl->globals.end()) return stored->second;
+    }
     auto* item = Console::instance().find(key.c_str());
     if (item && item->type == Console::ConsoleItem::Variable)
         return VMValue(item->value.c_str());
@@ -880,6 +887,34 @@ void TorqueScript::Impl::skipStatement() {
             TSToken t = nextToken();
             if (t.type == TSTokenType::LBrace) braceDepth++;
             if (t.type == TSTokenType::RBrace) braceDepth--;
+        }
+    } else if (peekToken().type == TSTokenType::For || peekToken().type == TSTokenType::While ||
+               peekToken().type == TSTokenType::Switch || peekToken().type == TSTokenType::SwitchStr) {
+        // for/while/switch (...) statement: the header's semicolons belong to
+        // the parenthesised group, not the statement.
+        nextToken();
+        expect(TSTokenType::LParen);
+        int parenDepth = 1;
+        while (parenDepth > 0 && peekToken().type != TSTokenType::Eof) {
+            TSToken t = nextToken();
+            if (t.type == TSTokenType::LParen) parenDepth++;
+            if (t.type == TSTokenType::RParen) parenDepth--;
+        }
+        skipStatement();
+    } else if (peekToken().type == TSTokenType::Do) {
+        // do statement while (...);
+        nextToken();
+        skipStatement();
+        if (peekToken().type == TSTokenType::While) {
+            nextToken();
+            expect(TSTokenType::LParen);
+            int parenDepth = 1;
+            while (parenDepth > 0 && peekToken().type != TSTokenType::Eof) {
+                TSToken t = nextToken();
+                if (t.type == TSTokenType::LParen) parenDepth++;
+                if (t.type == TSTokenType::RParen) parenDepth--;
+            }
+            if (peekToken().type == TSTokenType::Semicolon) nextToken();
         }
     } else if (peekToken().type == TSTokenType::If) {
         // else if (...) ... - skip the whole if/else if/else chain
@@ -1380,8 +1415,9 @@ VMValue TorqueScript::Impl::parseAssignment() {
          else if (op.type == TSTokenType::ShlEq) { val = VMValue(lhs.toInt() << rhs.toInt()); }
          else if (op.type == TSTokenType::ShrEq) { val = VMValue(lhs.toInt() >> rhs.toInt()); }
 
-        // Store back: object field, global, or local
-        if (evaluating && !lastFieldObj.empty() && !lastFieldName.empty()) {
+        // Store back: object field, global, or local. A field of a missing
+        // object is dropped, as in Torque.
+        if (evaluating && !lastFieldName.empty()) {
             auto* obj = ScriptEngine::instance().findObject(lastFieldObj.c_str());
             if (obj) {
                 ScriptEngine::instance().setObjectField(obj, lastFieldName, val);
@@ -1731,8 +1767,9 @@ VMValue TorqueScript::Impl::parsePostfix() {
             if (!savedVar.empty()) {
                 std::string arrayKey = savedVar + "[" + idx.toString() + "]";
                 lastVarName = arrayKey;
-                if (!lastFieldObj.empty() && !lastFieldName.empty()) {
-                    // obj.field[idx] — qualify the field name
+                if (!lastFieldName.empty()) {
+                    // obj.field[idx] — qualify the field name. The object may
+                    // not exist; the access then reads "" and writes nothing.
                     lastFieldName = lastFieldName + "[" + idx.toString() + "]";
                 } else {
                     // Pure indexed variable ($g[idx] / %v[idx]): drop any STALE
@@ -1742,14 +1779,14 @@ VMValue TorqueScript::Impl::parsePostfix() {
                     lastFieldObj.clear();
                     lastFieldName.clear();
                 }
-                if (!lastFieldObj.empty() && !lastFieldName.empty()) {
+                if (!lastFieldName.empty()) {
                     // obj.field[idx] — read from ScriptObject field
                     auto* sobj = ScriptEngine::instance().findObject(lastFieldObj.c_str());
                     if (sobj) {
                         auto* field = findField(sobj, lastFieldName);
                         val = field ? *field : VMValue("");
                     } else {
-                        val = VMValue(0);
+                        val = VMValue("");
                     }
                 } else if (savedVar[0] == '$') {
                     val = outer->getGlobal(arrayKey);
@@ -1822,6 +1859,15 @@ VMValue TorqueScript::Impl::parsePostfix() {
                     std::string nsFull = objName + "::" + methodName;
                     if (outer->hasFunction(nsFull)) { val = outer->callFunction(nsFull, methodArgs); called = true; }
                 }
+                if (!called && sobj && !sobj->name.empty() && !sameName(sobj->name, objName)) {
+                    // An object referenced by id still dispatches through its
+                    // name namespace (e.g. $Hud[%tag] -> ScoreScreen::addLine).
+                    std::string nameFull = sobj->name + "::" + methodName;
+                    if (outer->hasFunction(nameFull)) {
+                        val = outer->callFunction(nameFull, methodArgs);
+                        called = true;
+                    }
+                }
                 if (!called) {
                     std::string nsFull = objName + "::" + methodName;
                     std::string nsLower = nsFull;
@@ -1856,8 +1902,11 @@ VMValue TorqueScript::Impl::parsePostfix() {
                 }
                 if (!called) {
                     // Fall back to a bare script helper only after object and
-                    // class dispatch have failed.
-                    if (outer->hasFunction(fullName)) {
+                    // class dispatch have failed, and never back into the
+                    // function making the call (hud.cs addLine forwards to
+                    // $Hud[%tag].addLine).
+                    const bool reentry = !callNames.empty() && sameName(callNames.back(), fullName);
+                    if (!reentry && outer->hasFunction(fullName)) {
                         val = outer->callFunction(fullName, methodArgs);
                         called = true;
                     }
@@ -2096,8 +2145,9 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 lastVarName = name;
                 VMValue lv = locals.get(name);
                 if (lv.type != VMValue::None) return lv;
-                for (const auto& [stored, value] : globals) {
-                    if (sameName(stored, name)) return value;
+                if (auto indexed = globalIndex.find(toLower(name)); indexed != globalIndex.end()) {
+                    auto stored = globals.find(indexed->second);
+                    if (stored != globals.end()) return stored->second;
                 }
                 // Undefined $ or % variable returns 0; bare name returns itself as string.
                 if (!name.empty() && name[0] != '$' && name[0] != '%')
@@ -2221,6 +2271,7 @@ VMValue TorqueScript::Impl::parsePrimary() {
             if (!obj->name.empty()) {
                 outer->setGlobal("$" + obj->name, VMValue(obj->name));
                 globals[obj->name] = VMValue(obj->name);
+                globalIndex.emplace(toLower(obj->name), obj->name);
             }
             ScriptEngine::instance().objectAdded(obj);
             return VMValue(obj->name);
@@ -2862,6 +2913,7 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
     // Set up locals
     impl->locals.push();
     impl->callPackages.push_back(selectedPackage);
+    impl->callNames.push_back(name);
     // TorqueScript exposes the actual call arguments through %argc and
     // %argv[index].  Missing declared parameters are empty, which still
     // converts to zero in numeric contexts.
@@ -2935,6 +2987,7 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
 
     impl->locals.pop();
     impl->callPackages.pop_back();
+    if (!impl->callNames.empty()) impl->callNames.pop_back();
     return result;
 }
 

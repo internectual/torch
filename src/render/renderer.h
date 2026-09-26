@@ -418,6 +418,8 @@ public:
     // Durations are in seconds and are empty when the asset has no timing.
     bool loadTextureFrames(const char* path, std::vector<uint32_t>& frames,
                            std::vector<float>& durations);
+    bool resolveTextureFrames(const char* path, std::vector<uint32_t>& frames,
+                           std::vector<float>& durations);
     Shader* loadShader(const char* vertPath, const char* fragPath);
     void addShader(Shader* shader);
     void addTexture(Texture* tex);

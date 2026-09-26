@@ -8897,9 +8897,11 @@ void ScriptEngine::registerFunction(const char* name, NativeFunc fn) {
 }
 
 ScriptObject* ScriptEngine::findObject(const char* name) {
+    // An empty reference never names an object (anonymous objects must not
+    // answer to "").
+    if (!name || !*name) return nullptr;
     auto it = objects.find(name);
     if (it != objects.end()) return it->second;
-    if (!name) return nullptr;
     std::string wanted(name);
     for (char& c : wanted) c = (char)std::tolower((unsigned char)c);
     for (auto& [objectName, object] : objects) {

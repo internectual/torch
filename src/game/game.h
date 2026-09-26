@@ -1071,6 +1071,12 @@ private:
     bool demoShowEvents = true;
     // Orbit camera for demo spectator mode
     bool demoOrbitCam = false;
+    // Match-over interval (MissionEnd / debrief) until the next
+    // MsgClientReady: the world is held at its final state.
+    bool demoMatchEnded = false;
+    float demoMatchEndedAt = 0.0f;
+    GhostTracker demoEndedGhosts;
+    void setDemoMatchEnded(bool ended);
     bool demoFirstPersonCam = false;
     float orbitAngle = 0;
     float orbitDistance = 300.0f;

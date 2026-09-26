@@ -26,6 +26,10 @@ struct Renderer::Impl {
     SDL_GLContext glContext{};
     std::unordered_map<std::string, Texture*> textures;
     std::unordered_set<std::string> missingTextures;
+    // loadTextureFrames results by requested path; resolving touches the
+    // filesystem, and effects ask every frame.
+    struct FrameSet { std::vector<uint32_t> frames; std::vector<float> durations; bool found = false; };
+    std::unordered_map<std::string, FrameSet> textureFrameCache;
     std::vector<Shader*> shaders;
     bool glewInit = false;
 
@@ -209,6 +213,7 @@ void Renderer::shutdown() {
         if (v) { v->destroy(); delete v; }
     }
     impl->textures.clear();
+    impl->textureFrameCache.clear();
     impl->missingTextures.clear();
     initialized = false;
     impl->glewInit = false;
@@ -768,6 +773,7 @@ Texture* Renderer::loadTexture(const char* path) {
 
 void Renderer::clearMissingTextureCache() {
     impl->missingTextures.clear();
+    impl->textureFrameCache.clear();
 }
 
 bool Renderer::loadTextureFrames(const char* path, std::vector<uint32_t>& frames,
@@ -775,6 +781,18 @@ bool Renderer::loadTextureFrames(const char* path, std::vector<uint32_t>& frames
     frames.clear();
     durations.clear();
     if (!path || !*path) return false;
+    if (auto cached = impl->textureFrameCache.find(path); cached != impl->textureFrameCache.end()) {
+        frames = cached->second.frames;
+        durations = cached->second.durations;
+        return cached->second.found;
+    }
+    const bool found = resolveTextureFrames(path, frames, durations);
+    impl->textureFrameCache[path] = {frames, durations, found};
+    return found;
+}
+
+bool Renderer::resolveTextureFrames(const char* path, std::vector<uint32_t>& frames,
+                                    std::vector<float>& durations) {
 
     const std::string requested(path);
     // Datablock and material texture names are relative to textures/, so try

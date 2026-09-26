@@ -644,3 +644,7 @@ add_test(NAME torch_script_word_range
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/script_word_range_test.sh
         $<TARGET_FILE:torch>)
 set_tests_properties(torch_script_word_range PROPERTIES TIMEOUT 45)
+add_test(NAME torch_script_object_semantics
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/script_object_semantics_test.sh
+        $<TARGET_FILE:torch>)
+set_tests_properties(torch_script_object_semantics PROPERTIES TIMEOUT 45)

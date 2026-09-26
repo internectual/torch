@@ -340,8 +340,7 @@ std::string BitStream::unpackNetString() {
         case 1: return readString(); // Huffman
         case 2: { // tagged string ref
             int tag = readInt(10);
-            return stringBufferEnabled && tag >= 0 && tag < 1024
-                ? ("\\x01" + std::to_string(tag)) : ("\\x01" + std::to_string(tag));
+            return "\\x01" + std::to_string(tag);
         }
         case 3: { // integer
             bool neg = readFlag();
@@ -1708,8 +1707,9 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
         int argc = bs.readInt(5);
         for (int i = 0; i < argc; i++) {
             std::string arg = bs.unpackNetString();
-            if (arg.size() > 2 && arg[0] == '\\' && arg[1] == 'x') {
-                int tag = atoi(arg.c_str() + 2);
+            // unpackNetString marks tagged strings as "\\x01<id>".
+            if (arg.size() > 4 && arg.compare(0, 4, "\\x01") == 0) {
+                int tag = atoi(arg.c_str() + 4);
                 auto it = initialBlock.taggedStrings.find(tag);
                 if (it != initialBlock.taggedStrings.end()) arg = it->second;
             }
