@@ -2336,50 +2336,41 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
     animatedNodeWorld = nodeWorld;
 
     // ── Step 4: Handle object-level vis/frame/matFrame animation ──
-    std::vector<bool> objectVisible(objectStartMesh.size() > 0 ? objectStartMesh.size() : defaultTransforms.size(), true);
+    // TSShapeInstance::MeshObjectInstance::render: an object draws when its
+    // visibility exceeds 0.01, and below 0.99 it fades (setFade) as a
+    // translucent mesh with that alpha.
+    std::vector<float> objectVisible(objectStartMesh.size() > 0 ? objectStartMesh.size() : defaultTransforms.size(), 1.0f);
     std::vector<int32_t> objectFrame(objectVisible.size(), 0);
     std::vector<int32_t> objectMatFrame(objectVisible.size(), 0);
-    if (!objectAnim->objectKeyframes.empty()) {
-        const float objectTime = std::min(t, objectAnim->duration);
-        for (size_t okfIdx = 0; okfIdx < objectAnim->objectKeyframes.size(); ) {
-            const auto& okf = objectAnim->objectKeyframes[okfIdx];
-            int32_t objIdx = okf.objectIndex;
-            if (objIdx < 0 || objIdx >= (int32_t)objectVisible.size()) { okfIdx++; continue; }
-            float lastVis = 1.0f;
-            int32_t lastFrame = 0;
-            int32_t lastMatFrame = 0;
-            while (okfIdx < objectAnim->objectKeyframes.size() &&
-                   objectAnim->objectKeyframes[okfIdx].objectIndex == objIdx) {
-                if (objectAnim->objectKeyframes[okfIdx].time <= objectTime) {
-                    const auto sample = sampleDTSObject(objectAnim->objectKeyframes, objIdx, objectTime);
-                    lastVis = sample.vis;
-                    lastFrame = sample.frameIndex;
-                    lastMatFrame = sample.matFrameIndex;
-                }
-                okfIdx++;
-            }
-            objectVisible[objIdx] = (lastVis > 0.5f);
-            objectFrame[objIdx] = lastFrame;
-            objectMatFrame[objIdx] = lastMatFrame;
-        }
-    }
-
-    for (const OverlayThread& thread : overlayThreads) {
-        const auto& keys = thread.anim->objectKeyframes;
-        const float objectTime = std::min(thread.time, thread.anim->duration);
+    // Each sequence's object keys are grouped per object; the latest key at
+    // or before the sample time sets the state. Overlay threads then take
+    // over the objects they animate.
+    auto applyObjectKeys = [&](const std::vector<ObjectKeyframe>& keys, float objectTime) {
         for (size_t k = 0; k < keys.size(); ) {
             const int32_t objIdx = keys[k].objectIndex;
             size_t end = k;
             while (end < keys.size() && keys[end].objectIndex == objIdx) ++end;
             if (objIdx >= 0 && objIdx < (int32_t)objectVisible.size()) {
-                const auto sample = sampleDTSObject(keys, objIdx, objectTime);
-                objectVisible[objIdx] = sample.vis > 0.5f;
+                DTSObjectSample sample;
+                float sampledTime = -std::numeric_limits<float>::infinity();
+                for (size_t i = k; i < end; ++i) {
+                    if (keys[i].time > objectTime || keys[i].time < sampledTime) continue;
+                    sampledTime = keys[i].time;
+                    sample.vis = keys[i].vis;
+                    sample.frameIndex = keys[i].frameIndex;
+                    sample.matFrameIndex = keys[i].matFrameIndex;
+                }
+                objectVisible[objIdx] = sample.vis;
                 objectFrame[objIdx] = sample.frameIndex;
                 objectMatFrame[objIdx] = sample.matFrameIndex;
             }
             k = end;
         }
-    }
+    };
+    applyObjectKeys(objectAnim->objectKeyframes, std::min(t, objectAnim->duration));
+    for (const OverlayThread& thread : overlayThreads)
+        applyObjectKeys(thread.anim->objectKeyframes,
+                        std::min(thread.time, thread.anim->duration));
 
     // ── Step 5: Render with animated transforms ──
     auto* shader = ShaderManager::getDefaultShader();
@@ -2416,8 +2407,21 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
 
     // Pre-setup: determine mesh visibility, apply matFrame UVs, apply skinning
     // Two-pass render: opaque first (depth writes ON), then translucent (blending ON)
+    auto meshObject = [&](size_t mi) -> int32_t {
+        for (size_t oi = 0; oi < objectStartMesh.size(); ++oi)
+            if (mi >= (size_t)objectStartMesh[oi] &&
+                mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi]))
+                return (int32_t)oi;
+        return -1;
+    };
+    auto meshVisibility = [&](size_t mi) {
+        const int32_t oi = meshObject(mi);
+        return oi >= 0 && oi < (int32_t)objectVisible.size() ? objectVisible[oi] : 1.0f;
+    };
     auto renderAnimMesh = [&](size_t mi, bool doBlend) {
         MeshData& mesh = meshes[mi];
+        const float fade = meshVisibility(mi);
+        if (shader) shader->setUniform("uTint", ColorF{1, 1, 1, fade > 0.99f ? 1.0f : fade});
         int32_t frame = 0;
         for (size_t oi = 0; oi < objectStartMesh.size(); ++oi)
             if (mi >= (size_t)objectStartMesh[oi] &&
@@ -2470,8 +2474,9 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
             if (shader) shader->setUniform("uUseTexture", (int32_t)0);
         }
 
-        // Alpha test only for materials with Translucent or Additive flags
-        bool alphaTest = (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0;
+        // Alpha test only for Translucent or Additive materials; a faded
+        // object (visibility below 0.99) blends without it.
+        bool alphaTest = (flags & (MatFlag_Translucent | MatFlag_Additive)) != 0 && fade > 0.99f;
         if (shader) shader->setUniform("uAlphaTest", (int32_t)alphaTest);
         if (shader) shader->setUniform("uAlphaTestThreshold", materialAlphaTestThreshold(flags));
 
@@ -2547,17 +2552,7 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
     for (size_t mi : renderList) {
-        // Check object visibility
-        bool meshVisible = true;
-        for (size_t oi = 0; oi < objectStartMesh.size(); oi++) {
-            if (mi >= (size_t)objectStartMesh[oi] &&
-                mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi])) {
-                if (oi < objectVisible.size())
-                    meshVisible = objectVisible[oi];
-                break;
-            }
-        }
-        if (!meshVisible) continue;
+        if (meshVisibility(mi) <= 0.01f) continue;
 
         // Apply material frame animation
         {
@@ -2575,7 +2570,7 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
                 meshes[mi].remapUVs(mf, meshTVerts[mi]);
         }
 
-        if (!needsTranslucent(mi))
+        if (!needsTranslucent(mi) && meshVisibility(mi) > 0.99f)
             renderAnimMesh(mi, false);
     }
 
@@ -2583,16 +2578,7 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
     glDepthMask(GL_FALSE);
     glDepthFunc(GL_LEQUAL);
     for (size_t mi : renderList) {
-        bool meshVisible = true;
-        for (size_t oi = 0; oi < objectStartMesh.size(); oi++) {
-            if (mi >= (size_t)objectStartMesh[oi] &&
-                mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi])) {
-                if (oi < objectVisible.size())
-                    meshVisible = objectVisible[oi];
-                break;
-            }
-        }
-        if (!meshVisible) continue;
+        if (meshVisibility(mi) <= 0.01f) continue;
 
         {
             int32_t objForMesh = -1;
@@ -2609,22 +2595,15 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
                 meshes[mi].remapUVs(mf, meshTVerts[mi]);
         }
 
-        if (needsTranslucent(mi) && !needsAdditive(mi))
+        if ((needsTranslucent(mi) || meshVisibility(mi) <= 0.99f) && !needsAdditive(mi))
             renderAnimMesh(mi, true);
     }
     // Additive effects are the final transparent sub-pass.
     for (size_t mi : renderList) {
-        bool meshVisible = true;
-        for (size_t oi = 0; oi < objectStartMesh.size(); oi++) {
-            if (mi >= (size_t)objectStartMesh[oi] &&
-                mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi])) {
-                if (oi < objectVisible.size()) meshVisible = objectVisible[oi];
-                break;
-            }
-        }
-        if (!meshVisible || !needsAdditive(mi)) continue;
+        if (meshVisibility(mi) <= 0.01f || !needsAdditive(mi)) continue;
         renderAnimMesh(mi, true);
     }
+    if (shader) shader->setUniform("uTint", ColorF{1, 1, 1, 1});
 
     glDepthMask(GL_TRUE);
     glDepthFunc(GL_LESS);

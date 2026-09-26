@@ -993,6 +993,8 @@ void MeshData::setFrame(int32_t frame) {
     const size_t offset = (size_t)frame * count;
     if (offset + count > frameVertices.size()) return;
     for (size_t i = 0; i < count; ++i) vertices[i].pos = frameVertices[offset + i];
+    if (offset + count <= frameNormals.size())
+        for (size_t i = 0; i < count; ++i) vertices[i].normal = frameNormals[offset + i];
     if (uploaded) updateGPU();
 }
 

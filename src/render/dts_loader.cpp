@@ -630,7 +630,8 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         }
 
         // mergeIndices: oldAlloc only, NOT read from stream
-        rS32(); // vertsPerFrame
+        int32_t vertsPerFrame = rS32();
+        if (vertsPerFrame <= 0 || vertsPerFrame > numVerts) vertsPerFrame = numVerts;
         rS32(); // flags
 
         // Skin mesh extension (after base mesh body) — old format readAllocMesh layout
@@ -674,7 +675,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
                 nodeIdx = objs[oi].no; break;
             }
         }
-        for (int vi = 0; vi < numVerts; vi++) {
+        for (int vi = 0; vi < vertsPerFrame; vi++) {
             Vertex v;
             v.pos = (vi < (int)verts.size()) ? verts[vi] : Point3F{0,0,0};
             v.normal = (vi < (int)norms.size()) ? norms[vi] : Point3F{0,1,0};
@@ -725,7 +726,9 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
             md.materialIdx = bestCount > 0 ? bestMat : 0;
         }
         md.nodeIndex = nodeIdx;
-        md.numTVertsPerFrame = numTVerts;
+        md.numTVertsPerFrame = vertsPerFrame;
+        md.numFrames = vertsPerFrame > 0 ? std::max(1, std::min(numFrames, numVerts / vertsPerFrame)) : 1;
+        if (md.numFrames > 1) { md.frameVertices = verts; md.frameNormals = norms; }
         // Fix winding: first check if winding is already correct using vertex normals.
         // Only apply center-based fix when vertex normals reveal systematic winding errors.
         {
@@ -1318,26 +1321,22 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         buf.readPoint3F(); buf.readPoint3F(); buf.readPoint3F(); buf.readF32(); // bounds, center, radius
         int32_t numVerts = capCount(buf.readS32());
         if (numVerts > 10000 || numVerts < 0) { numVerts = 0; }
-        // Cap total vertices per mesh to prevent bad_alloc from garbage data
-        if (numVerts * numFrames > 100000) { numFrames = 1; if (numVerts > 100000) numVerts = 100000; }
+        // TSMesh::assemble: verts, tverts and normals hold every frame
+        // (numFrames x vertsPerFrame, and numMatFrames x vertsPerFrame).
         if (!shareData) {
-            meshVerts[m].resize(numVerts * numFrames);
+            meshVerts[m].resize(numVerts);
             for (int i = 0; i < numVerts; i++) meshVerts[m][i] = buf.readPoint3F();
-            for (int f = 1; f < numFrames; f++)
-                for (int v = 0; v < numVerts; v++)
-                    meshVerts[m][f * numVerts + v] = meshVerts[m][v];
         } else if (parentMesh >= 0 && parentMesh < m) {
-            int cc = std::min(numVerts * numFrames, (int)meshVerts[parentMesh].size());
+            int cc = std::min(numVerts, (int)meshVerts[parentMesh].size());
             meshVerts[m].assign(meshVerts[parentMesh].begin(), meshVerts[parentMesh].begin() + cc);
         }
         int32_t numTVerts = capCount(buf.readS32());
         if (numTVerts > 10000 || numTVerts < 0) { numTVerts = 0; }
         if (!shareData) {
-            meshTVerts[m].resize(numTVerts * numMatFrames);
-            for (int f = 0; f < numMatFrames; f++)
-                for (int t = 0; t < numTVerts; t++) { meshTVerts[m][f * numTVerts + t].x = buf.readF32(); meshTVerts[m][f * numTVerts + t].y = buf.readF32(); }
+            meshTVerts[m].resize(numTVerts);
+            for (int t = 0; t < numTVerts; t++) { meshTVerts[m][t].x = buf.readF32(); meshTVerts[m][t].y = buf.readF32(); }
         } else if (parentMesh >= 0 && parentMesh < m) {
-            int cc = std::min(numTVerts * numMatFrames, (int)meshTVerts[parentMesh].size());
+            int cc = std::min(numTVerts, (int)meshTVerts[parentMesh].size());
             meshTVerts[m].assign(meshTVerts[parentMesh].begin(), meshTVerts[parentMesh].begin() + cc);
         }
         // Normals: T2 reads differently based on version
@@ -1366,7 +1365,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         int32_t numMerge = capCount(buf.readS32());
         if (numMerge > 10000 || numMerge < 0) { numMerge = 0; }
         for (int i = 0; i < numMerge; i++) buf.readS16();
-        int32_t vertsPerFrame = capCount(buf.readS32()); (void)vertsPerFrame;
+        int32_t vertsPerFrame = capCount(buf.readS32());
+        if (vertsPerFrame <= 0 || vertsPerFrame > numVerts) vertsPerFrame = numVerts;
         uint32_t flags = buf.readU32(); (void)flags;
         buf.checkGuard(); // END
         if (buf.corrupted) break;
@@ -1395,7 +1395,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
 
         // Build MeshData
         MeshData md;
-        for (int vi = 0; vi < numVerts; vi++) {
+        for (int vi = 0; vi < vertsPerFrame; vi++) {
             Vertex v;
             v.pos = (vi < (int)meshVerts[m].size()) ? meshVerts[m][vi] : Point3F{0,0,0};
             v.normal = (vi < (int)meshNorms[m].size()) ? meshNorms[m][vi] : Point3F{0,1,0};
@@ -1403,8 +1403,11 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             v.color = {1,1,1,1};
             md.vertices.push_back(v);
         }
-        md.numFrames = numFrames;
-        md.frameVertices = meshVerts[m];
+        md.numFrames = vertsPerFrame > 0 ? std::max(1, std::min(numFrames, numVerts / vertsPerFrame)) : 1;
+        if (md.numFrames > 1) {
+            md.frameVertices = meshVerts[m];
+            md.frameNormals = meshNorms[m];
+        }
         for (auto& p : prims) {
             if (p.numElements < 3 || p.numElements > 10000) continue;
             if (p.start < 0 || p.start >= (int)indices.size()) continue;
@@ -1462,7 +1465,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             md.materialIdx = bestCount > 0 ? bestMat : 0;
         }
         md.nodeIndex = -1;
-        md.numTVertsPerFrame = numTVerts;
+        md.numTVertsPerFrame = vertsPerFrame;
         md.tvertIndices.resize(md.vertices.size());
         for (size_t vi = 0; vi < md.tvertIndices.size(); ++vi)
             md.tvertIndices[vi] = (int32_t)vi;

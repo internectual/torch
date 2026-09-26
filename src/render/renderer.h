@@ -58,6 +58,7 @@ struct Vertex {
 struct MeshData {
     std::vector<Vertex> vertices;
     std::vector<Point3F> frameVertices; // all mesh frames, frame-major
+    std::vector<Point3F> frameNormals;  // normals for every frame, frame-major
     int32_t numFrames = 1;
     std::vector<uint32_t> indices;
     std::vector<int32_t> tvertIndices; // per-vertex: original tvert index (for matFrame remapping)
