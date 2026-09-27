@@ -1124,8 +1124,6 @@ private:
     bool editorHasGhost = false;
 
     // Projectile trail system
-    struct TrailPoint { float x, y, z; float life; ColorF color; };
-    std::map<int, std::vector<TrailPoint>> demoTrails;
 
     // Live network ghost tracking
     GhostTracker liveGhosts;

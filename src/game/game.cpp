@@ -7130,7 +7130,6 @@ void Game::update(float dt) {
                         // The move tick the explosion lands on seeds its cosmetic randomness.
                         w->spawnExplosionEffect(expPos, projectileData, explosionData, &dataBlocks, expNormal,
                                                 (int)std::floor(demoTime / 0.032f));
-                        shakeIntensity = std::max(shakeIntensity, 1.5f);
                     }
 
                     // Apply sun data from demo stream if .mis didn't provide it
@@ -8540,14 +8539,12 @@ void Game::render(float dt) {
               // its ghost is deleted.
               if (isProjectile && g->exploded) continue;
              const V12::DecodedDataBlock* visualData = nullptr;
-              bool hasBaseEmitter = false;
              if (isProjectile && g->hasDatablock) {
                  const auto& dataBlocks = demoParser->getInitialBlock().dataBlocks;
                  auto projectileIt = dataBlocks.find((uint32_t)g->datablockId);
                   if (projectileIt != dataBlocks.end()) {
                       const auto& projectileData = projectileIt->second.decoded;
                       visualData = &projectileData;
-                     hasBaseEmitter = projectileData.projectileBaseEmitterRef != 0;
                      if (projectileData.hasProjectileScale) {
                          mg->projectileScale = {
                              std::isfinite(projectileData.projectileScale.x) && projectileData.projectileScale.x > 0.0f
@@ -9688,30 +9685,6 @@ void Game::render(float dt) {
                 projectedShadows().draw(r);
             }
 
-            // Update projectile trail
-            if (isProjectile) {
-                // Color by projectile type
-                ColorF trailCol = {0.5f, 1.0f, 1.0f, 1.0f}; // default cyan
-                 std::string lowerGhostClass = g->className;
-                 for (char& c : lowerGhostClass)
-                     c = (char)std::tolower((unsigned char)c);
-                 if (lowerGhostClass.find("grenade") != std::string::npos)
-                     trailCol = {0.3f, 1.0f, 0.3f, 1.0f}; // green
-                 else if (lowerGhostClass.find("seeker") != std::string::npos)
-                     trailCol = {1.0f, 0.6f, 0.1f, 1.0f}; // orange
-                 else if (lowerGhostClass.find("linear") != std::string::npos ||
-                          lowerGhostClass.find("sniper") != std::string::npos)
-                     trailCol = {0.2f, 0.8f, 1.0f, 1.0f}; // cyan
-                 else if (lowerGhostClass.find("bomb") != std::string::npos)
-                     trailCol = {1.0f, 0.3f, 0.1f, 1.0f}; // red-orange
-                 else if (lowerGhostClass.find("shock") != std::string::npos)
-                     trailCol = {0.8f, 0.2f, 1.0f, 1.0f}; // purple
-                if (hasBaseEmitter) continue;
-                auto& trail = demoTrails[idx];
-                Point3F trailPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
-                trail.push_back({trailPosition.x, trailPosition.y, trailPosition.z, 1.0f, trailCol});
-                if (trail.size() > 30) trail.erase(trail.begin());
-            }
         }
         r.shadowCapture = nullptr;
         projectedShadows().endFrame(Timer::now() * 1000.0);
@@ -9722,48 +9695,6 @@ void Game::render(float dt) {
             if (gt.hasGhost(it->first)) { ++it; continue; }
             Engine::instance().audio().releaseSource(it->second);
             it = demoJetSoundSources.erase(it);
-        }
-
-        // A deleted projectile can leave a few interpolated points behind;
-        // discard them immediately instead of waiting for their fade timer.
-        for (auto it = demoTrails.begin(); it != demoTrails.end();) {
-            if (!gt.hasGhost(it->first)) it = demoTrails.erase(it);
-            else ++it;
-        }
-
-        // Render projectile trails
-        if (!demoTrails.empty()) {
-            for (auto it = demoTrails.begin(); it != demoTrails.end(); ) {
-                auto& pts = it->second;
-                // Age and cull trail points
-                for (int i = (int)pts.size() - 1; i >= 0; i--) {
-                    pts[i].life -= dt * 2.0f;
-                    if (pts[i].life <= 0) pts.erase(pts.begin() + i);
-                }
-                if (pts.empty()) { it = demoTrails.erase(it); continue; } else { ++it; }
-                // Draw trail as a fading line strip with glow
-                if (pts.size() >= 2) {
-                    // Use the first point's color as trail color
-                    ColorF baseCol = pts[0].color;
-                    float alpha = pts.back().life;
-                    // Outer glow pass (thick, faint)
-                    for (int g = 0; g < 3; g++) {
-                        float expand = (3 - g) * 0.12f;
-                        float ga = alpha * 0.12f * (3 - g);
-                        std::vector<Point3F> glowPts;
-                        for (auto& tp : pts) {
-                            float t = &tp - &pts[0];
-                            float ptAlpha = (t + 1.0f) / pts.size();
-                            glowPts.push_back({tp.x, tp.y + expand * ptAlpha, tp.z});
-                        }
-                        r.drawLineStrip(glowPts, {baseCol.r, baseCol.g, baseCol.b, ga});
-                    }
-                    // Core line (bright, thin)
-                    std::vector<Point3F> corePts;
-                    for (auto& tp : pts) corePts.push_back({tp.x, tp.y, tp.z});
-                    r.drawLineStrip(corePts, {baseCol.r * 0.7f + 0.3f, baseCol.g * 0.7f + 0.3f, baseCol.b * 0.7f + 0.3f, alpha * 0.9f});
-                }
-            }
         }
 
         // Spectator HUD: name tags and health bars above ghosts
@@ -11664,7 +11595,6 @@ bool Game::playDemo(const char* path) {
     // Reset demo path history
     demoPath.clear();
     demoPathCount = 0;
-    demoTrails.clear();
 
     // Reset stats
     demoPacketsParsed = 0;
@@ -11724,7 +11654,6 @@ void Game::stopDemoPlayback() {
     clearMissionAudio();
     demoAudioEventsPlayed.clear();
     demoPath.clear();
-    demoTrails.clear();
     if (w) w->clearEffects();
     targetFinderShown = false;
     if (hud) hud->resetState();
@@ -11797,7 +11726,6 @@ void Game::resetDemoEffects() {
     clearMissionAudio();
     clearProjectileAudio();
     demoAudioEventsPlayed.clear();
-    demoTrails.clear();
     damageFlash = -1.0f;
     whiteOut = -1.0f;
     shakeIntensity = 0.0f;
@@ -11838,7 +11766,6 @@ bool Game::tryLoadDemoMission(const std::string& mission, bool resetParserState)
     clearMissionAudio();
     Engine::instance().audio().stopAll();
     clearProjectileAudio();
-    demoTrails.clear();
     w->clearEffects();
     targetFinderShown = false;
     damageFlash = -1.0f;
@@ -11915,7 +11842,6 @@ void Game::disconnectedCleanup() {
     liveFollowGhostIndex = -1;
     liveFollowCenterInit = false;
     targetFinderShown = false;
-    demoTrails.clear();
     if (w) w->clearEffects();
     if (w) w->resetTriggerTracking();
     if (hud) hud->resetState();
@@ -11971,7 +11897,6 @@ void Game::resetLiveMissionState() {
     whiteOut = -1.0f;
     shakeIntensity = 0.0f;
     shakeOffset = {0, 0, 0};
-    demoTrails.clear();
     if (w) w->clearEffects();
     if (w) w->resetTriggerTracking();
     if (hud) hud->resetState();

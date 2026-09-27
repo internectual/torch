@@ -3399,9 +3399,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     auto colorIt = ctl->fields.find(vehicle ? "vehicleBeaconColor" :
                                                     (friendUnit ? "friendBeaconColor" : "enemyBeaconColor"));
                     if (colorIt != ctl->fields.end()) parseColor(colorIt->second, color);
-                    if (edgeMarker && renderEdges)
-                        r.drawLine({x + ctl->extentX * 0.5f, y + ctl->extentY * 0.5f, 0},
-                                   {markerX, markerY, 0}, {color.r, color.g, color.b, 0.35f});
                     r.drawRectFill({markerX - 3, markerY - 3, 0},
                                    {markerX + 3, markerY + 3, 0}, color);
                     const float health = std::clamp(ghost->health /
