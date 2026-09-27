@@ -3420,10 +3420,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     auto textIt = ctl->fields.find("renderMarkerText");
                     const bool renderText = textIt == ctl->fields.end() ||
                         (textIt->second != "0" && textIt->second != "false");
+                     // Target text only; shape and class names are not engine
+                     // labels (a beacon read "BeaconObject").
                      const std::string label = ghost->isFlag ? "Flag" :
-                         (!ghost->playerName.empty() ? ghost->playerName :
-                          (!ghost->targetType.empty() ? ghost->targetType :
-                           (!ghost->shapeName.empty() ? ghost->shapeName : ghost->className)));
+                         (!ghost->playerName.empty() ? ghost->playerName : ghost->targetType);
                     if (renderText && hf && !label.empty())
                         hf->render(label.c_str(), markerX + 7, markerY - 6, color, 0.8f);
                 };
