@@ -211,6 +211,10 @@ struct DecodedDataBlock {
     int32_t seekerFlechetteDelayMS = 0;
     // ItemData light (Item::registerLights) and ShapeBaseImageData light:
     // type 0 none, 1 constant, 2 pulsing, 3 weapon fire (images only).
+    // ItemData physics (Item::updateVelocity / updatePos).
+    float itemFriction = 0.0f, itemElasticity = 0.0f;
+    bool itemSticky{};
+    float itemGravityMod = 1.0f, itemMaxVelocity = -1.0f;
     int32_t shapeLightType = 0;
     std::array<float, 3> shapeLightColor{1.0f, 1.0f, 1.0f};
     int32_t shapeLightTimeMS = 1000;

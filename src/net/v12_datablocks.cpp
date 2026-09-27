@@ -682,7 +682,19 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
         }
         break;
     }
-    case 21: shapeBase(s); s.readFloat(10);s.readFloat(10);s.readFlag();if(s.readFlag())s.readFloat(10);if(s.readFlag())s.readF32();
+    case 21: { // ItemData
+        shapeBase(s);
+        const float friction = s.readFloat(10), elasticity = s.readFloat(10);
+        const bool sticky = s.readFlag();
+        const float gravityMod = s.readFlag() ? s.readFloat(10) : 1.0f;
+        const float maxVelocity = s.readFlag() ? s.readF32() : -1.0f;
+        if (activeDecoded) {
+            activeDecoded->itemFriction = friction;
+            activeDecoded->itemElasticity = elasticity;
+            activeDecoded->itemSticky = sticky;
+            activeDecoded->itemGravityMod = gravityMod;
+            activeDecoded->itemMaxVelocity = maxVelocity;
+        }
         if (s.readFlag()) { // ItemData light
             const int32_t type = (int32_t)s.readUnsigned(2);
             float color[4];
@@ -699,6 +711,7 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
             }
         }
         break;
+    }
      case 22: effect(s,22); break; case 23: refs(s,8);strings(s,8);refs(s,1);break; case 24: {
          linear(s); const uint32_t count = s.readUnsigned(32); const auto color = s.readUnsigned(32);
          const auto textures = materialStrings(s, 2); float sizes[3]; for (float& size : sizes) size = s.readF32();

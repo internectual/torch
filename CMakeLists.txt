@@ -689,3 +689,8 @@ add_executable(torch_demo_camera_test tests/demo_camera_test.cpp)
 target_include_directories(torch_demo_camera_test PRIVATE src)
 target_compile_options(torch_demo_camera_test PRIVATE -UNDEBUG)
 add_test(NAME torch_demo_camera COMMAND torch_demo_camera_test)
+
+add_executable(torch_item_physics_test tests/item_physics_test.cpp)
+target_include_directories(torch_item_physics_test PRIVATE src)
+target_compile_options(torch_item_physics_test PRIVATE -UNDEBUG)
+add_test(NAME torch_item_physics COMMAND torch_item_physics_test)

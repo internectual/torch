@@ -2275,11 +2275,17 @@ static void readItemData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry*
     if (bs.readFlag()) bs.readInt(10); // ThrowSrcMask
     if (bs.readFlag()) { bs.readFlag(); bs.readF32(); } // RotationMask (zSign, angle)
     if (bs.readFlag()) { // PositionMask
-        if (entry) entry->position = bs.readPoint3F();
-        else bs.readPoint3F();
-        bool atRest = bs.readFlag();
-        if (!atRest) bs.readPoint3F(); // velocity
-        bs.readFlag(); // warp
+        const Vec3 position = bs.readPoint3F();
+        const bool atRest = bs.readFlag();
+        const Vec3 velocity = atRest ? Vec3{} : bs.readPoint3F();
+        const bool warp = bs.readFlag();
+        if (entry) {
+            entry->position = position;
+            entry->itemAtRest = atRest;
+            entry->itemVelocity = velocity;
+            entry->itemWarp = warp;
+            ++entry->itemPositionUpdates;
+        }
     }
 }
 

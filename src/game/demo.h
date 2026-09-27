@@ -690,6 +690,16 @@ struct GhostEntry {
     bool exploded = false;
     // Item InitialUpdateMask mStatic (flags at home, placed items).
     bool itemStatic = false;
+    // Item PositionMask: the server's position, velocity and rest state, and
+    // a count of such updates so the client simulation restarts from each.
+    Vec3 itemVelocity{};
+    bool itemAtRest = true, itemWarp = false;
+    int itemPositionUpdates = 0;
+    // The client's Item::processTick simulation (Torque space).
+    int itemSimUpdate = -1;
+    Vec3 itemSimPos{}, itemSimPrevPos{}, itemSimVel{};
+    bool itemSimAtRest = true;
+    float itemSimTime = 0.0f;
     // SceneObject ghosts (TerrainBlock, InteriorInstance, TSStatic, Sky, Sun,
     // WaterBlock, MissionArea): their fields in mission-file form.
     std::vector<std::pair<std::string, std::string>> sceneProps;

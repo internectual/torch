@@ -19,6 +19,7 @@
 #include "game/item_parity.h"
 #include "game/link_beam.h"
 #include "game/projectile_physics.h"
+#include "game/item_physics.h"
 #include "game/physics.h"
 #include "game/time_scale.h"
 #include "game/projectile_audio.h"
@@ -8533,6 +8534,64 @@ void Game::render(float dt) {
                     rp = {torque.x, torque.y, torque.z};
                     mg->renderPos = rp;
                     mg->velocity = {mg->ballisticVel.x, -mg->ballisticVel.z, mg->ballisticVel.y};
+                }
+            }
+
+            // Item::processTick: a thrown or dropped item falls and bounces
+            // on the client from each position update until it rests;
+            // interpolateTick draws it between its last two ticks.
+            if (ghostClassIs(g->className, "Item") && g->hasDatablock && g->mountObject < 0 && w) {
+                const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+                auto block = blocks.find((uint32_t)g->datablockId);
+                const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                if (mg->itemSimUpdate != g->itemPositionUpdates) {
+                    mg->itemSimUpdate = g->itemPositionUpdates;
+                    mg->itemSimPos = mg->itemSimPrevPos = g->position;
+                    mg->itemSimVel = g->itemVelocity;
+                    mg->itemSimAtRest = g->itemAtRest || g->itemStatic;
+                    mg->itemSimTime = now;
+                }
+                if (block != blocks.end() && g->itemPositionUpdates > 0) {
+                    const auto& data = block->second.decoded;
+                    if (!mg->itemSimAtRest && !g->itemStatic && mg->fadeVal > 0.0f) {
+                        ItemPhysics::Params params;
+                        params.gravityMod = data.itemGravityMod;
+                        params.maxVelocity = data.itemMaxVelocity;
+                        params.friction = data.itemFriction;
+                        params.elasticity = data.itemElasticity;
+                        params.sticky = data.itemSticky;
+                        if (g->shape && g->shape->hasHeaderBounds) {
+                            const Point3F& lo = g->shape->headerBoundsMin;
+                            const Point3F& hi = g->shape->headerBoundsMax;
+                            const float cx = (lo.x + hi.x) * 0.5f, cy = (lo.y + hi.y) * 0.5f;
+                            params.topCentre = Math::torquePointToYUp({cx, cy, hi.z});
+                            params.bottomCentre = Math::torquePointToYUp({cx, cy, lo.z});
+                        }
+                        const ProjectilePhysics::CastRay cast = [&](const Point3F& a, const Point3F& b,
+                                                                     ProjectilePhysics::RayHit& hit) {
+                            return castStaticRay(*w, a, b, hit);
+                        };
+                        Point3F pos = Math::torquePointToYUp(
+                            {mg->itemSimPos.x, mg->itemSimPos.y, mg->itemSimPos.z});
+                        Point3F vel = Math::torquePointToYUp(
+                            {mg->itemSimVel.x, mg->itemSimVel.y, mg->itemSimVel.z});
+                        int guard = 0;
+                        while (!mg->itemSimAtRest && now - mg->itemSimTime >= ItemPhysics::TickSeconds &&
+                               guard++ < 64) {
+                            mg->itemSimPrevPos = mg->itemSimPos;
+                            mg->itemSimAtRest = ItemPhysics::step(pos, vel, params, cast);
+                            mg->itemSimPos = {pos.x, -pos.z, pos.y};
+                            mg->itemSimVel = {vel.x, -vel.z, vel.y};
+                            mg->itemSimTime += ItemPhysics::TickSeconds;
+                        }
+                        if (guard >= 64) mg->itemSimTime = now; // long pause: resync the clock
+                    }
+                    const float t = mg->itemSimAtRest ? 1.0f
+                        : std::clamp((now - mg->itemSimTime) / ItemPhysics::TickSeconds, 0.0f, 1.0f);
+                    rp = {mg->itemSimPrevPos.x + (mg->itemSimPos.x - mg->itemSimPrevPos.x) * t,
+                          mg->itemSimPrevPos.y + (mg->itemSimPos.y - mg->itemSimPrevPos.y) * t,
+                          mg->itemSimPrevPos.z + (mg->itemSimPos.z - mg->itemSimPrevPos.z) * t};
+                    mg->renderPos = rp;
                 }
             }
 
