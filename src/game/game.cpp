@@ -3998,7 +3998,7 @@ void World::render(const Point3F& cameraPos, float dt) {
         // lying in a zone the camera cannot see must not hide all of it.
         const bool isInterior = obj.shape && obj.shape->isInterior;
         if (!Engine::instance().game().isMapperMode() && !isInterior &&
-            !isPositionVisible(obj.pos, cameraPos))
+            !isObjectVisible(obj, cameraPos))
             continue;
         if (obj.shape && obj.shape->loaded) {
              if (!obj.visible) continue;
@@ -5988,6 +5988,45 @@ Point3F World::cameraShakeOffset(const Point3F& cameraPosition) const {
         result.z += std::sin(elapsed * shake.frequency[2] * 6.2831853f + 3.1f) * shake.amplitude[2] * fade;
     }
     return result;
+}
+
+// SceneGraph scopes an object into every zone its world box overlaps: it is
+// drawn when any of them is visible. Test the box's centre and corners
+// (Torque space): a force field's box spans position + rotation x scale, a
+// shape's its bounds sphere around its origin.
+bool World::isObjectVisible(const WorldObject& obj, const Point3F& cameraPosition) const {
+    std::vector<Point3F> points;
+    if (obj.forceField) {
+        MatrixF rotation;
+        if (obj.rotAngleDeg != 0 && (obj.rot.x != 0 || obj.rot.y != 0 || obj.rot.z != 0)) {
+            Point3F axis = obj.rot;
+            const float length = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+            if (length > 0.0001f) {
+                axis = {axis.x / length, axis.y / length, axis.z / length};
+                rotation = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(obj.rotAngleDeg));
+            }
+        }
+        const MatrixF box = rotation * Math::torqueScaleToYUp(obj.scale);
+        const Point3F origin = Math::torquePointToYUp(obj.pos);
+        for (int i = 0; i < 9; ++i) {
+            const Point3F local = i == 8 ? Point3F{0.5f, 0.5f, 0.5f}
+                : Point3F{(float)(i & 1), (float)((i >> 1) & 1), (float)((i >> 2) & 1)};
+            const Point3F yUp = box.transform(local); // as the force-field pass places it
+            points.push_back({origin.x + yUp.x, -(origin.z + yUp.z), origin.y + yUp.y});
+        }
+    } else {
+        points.push_back(obj.pos);
+        const float radius = obj.boundsRadius * std::max({std::fabs(obj.scale.x), std::fabs(obj.scale.y),
+                                                          std::fabs(obj.scale.z), 1.0f});
+        if (radius > 0.0f)
+            for (int i = 0; i < 8; ++i)
+                points.push_back({obj.pos.x + ((i & 1) ? radius : -radius),
+                                  obj.pos.y + ((i & 2) ? radius : -radius),
+                                  obj.pos.z + ((i & 4) ? radius : -radius)});
+    }
+    for (const Point3F& point : points)
+        if (isPositionVisible(point, cameraPosition)) return true;
+    return false;
 }
 
 bool World::isPositionVisible(const Point3F& torquePosition, const Point3F& cameraPosition) const {

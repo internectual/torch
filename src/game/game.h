@@ -412,6 +412,7 @@ public:
     float getHeight(float x, float z) const;
     float getFloorHeight(float x, float y, float z) const;
     bool spawnTransformForTeam(int teamId, Point3F& position, Point3F& rotation) const;
+    bool isObjectVisible(const WorldObject& obj, const Point3F& cameraPosition) const;
     bool isPositionVisible(const Point3F& torquePosition, const Point3F& cameraPosition) const;
     const CollisionMesh& collision() const { return interiorCollision; }
     std::vector<Projectile>& projectiles() { return projList; }
