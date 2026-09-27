@@ -3584,6 +3584,17 @@ void World::render(const Point3F& cameraPos, float dt) {
         }
         defShader->setUniform((std::string("uFogVolume") + std::to_string(i)).c_str(), packed);
     }
+    // Volume fog rows span the terrain height range, each centred half a
+    // step up (SceneGraph::buildFogTexture); no terrain, no rows.
+    float fogRowBase = 0.0f, fogRowStep = 0.0f;
+    if (terrain() && terrain()->loaded) {
+        float lo, hi;
+        terrain()->heightRange(lo, hi);
+        fogRowStep = std::max(0.0f, (hi - lo) / 64.0f);
+        fogRowBase = lo + fogRowStep * 0.5f;
+    }
+    defShader->setUniform("uFogRowBase", fogRowBase);
+    defShader->setUniform("uFogRowStep", fogRowStep);
 
     // Apply fog
     const bool mapperNoFog = Engine::instance().game().isMapperMode();
@@ -6038,6 +6049,17 @@ void World::renderWater() {
                       volume.maxHeight, volume.percentage};
         }
         waterShdr->setUniform((std::string("uFogVolume") + std::to_string(i)).c_str(), packed);
+    }
+    {
+        float rowBase = 0.0f, rowStep = 0.0f;
+        if (terrain() && terrain()->loaded) {
+            float lo, hi;
+            terrain()->heightRange(lo, hi);
+            rowStep = std::max(0.0f, (hi - lo) / 64.0f);
+            rowBase = lo + rowStep * 0.5f;
+        }
+        waterShdr->setUniform("uFogRowBase", rowBase);
+        waterShdr->setUniform("uFogRowStep", rowStep);
     }
     waterShdr->setUniform("uUseSurfaceTexture", (int32_t)0);
     waterShdr->setUniform("uUseShoreTexture", (int32_t)0);

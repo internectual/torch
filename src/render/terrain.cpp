@@ -535,6 +535,13 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
         }
         shader->setUniform((std::string("uFogVolume") + std::to_string(i)).c_str(), packed);
     }
+    {
+        float lo, hi;
+        heightRange(lo, hi);
+        const float rowStep = std::max(0.0f, (hi - lo) / 64.0f);
+        shader->setUniform("uFogRowBase", lo + rowStep * 0.5f);
+        shader->setUniform("uFogRowStep", rowStep);
+    }
 
     // Apply dynamic light direction if provided
     if (lightDir) {

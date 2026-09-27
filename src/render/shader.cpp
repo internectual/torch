@@ -140,22 +140,39 @@ uniform bool uDebugLightmapContent = false;
 
 out vec4 FragColor;
 
-float authoredVolumeFog(vec3 point) {
+uniform float uFogRowBase = 0.0;
+uniform float uFogRowStep = 0.0;
+// Volume fog at one height: the distance travelled through each volume's
+// height band (similar triangles), times percentage / visibleDistance.
+float fogVolumesAt(float height, float dist) {
     float result = 0.0;
     vec4 volumes[3] = vec4[3](uFogVolume0, uFogVolume1, uFogVolume2);
+    float deltaY = abs(height - uCamPos.y);
     for (int i = 0; i < 3; ++i) {
         vec4 volume = volumes[i];
         if (volume.x <= 0.0 || volume.z <= volume.y) continue;
-        float low = max(min(uCamPos.y, point.y), volume.y);
-        float high = min(max(uCamPos.y, point.y), volume.z);
-            float vertical = high - low;
-            float distance = length(point - uCamPos);
-            if (vertical > 0.0 && abs(point.y - uCamPos.y) > 0.0001)
-                result += distance * vertical / abs(point.y - uCamPos.y) * volume.x * volume.w;
-            else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z)
-            result += distance * volume.x * volume.w;
+        if (deltaY > 0.01) {
+            float low = max(min(uCamPos.y, height), volume.y);
+            float high = min(max(uCamPos.y, height), volume.z);
+            if (high > low) result += dist * (high - low) / deltaY * volume.x * volume.w;
+        } else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z) {
+            result += dist * volume.x * volume.w;
+        }
     }
     return min(result, 1.0);
+}
+// SceneGraph::buildFogTexture samples volume fog into 64 rows spanning the
+// terrain's height range and filters bilinearly: blend the two nearest rows.
+float torqueVolumeFog(float height, float dist) {
+    if (uFogRowStep <= 0.0) return fogVolumesAt(height, dist);
+    float rowF = (height - uFogRowBase) / uFogRowStep;
+    float row0 = floor(rowF);
+    float h0 = uFogRowBase + row0 * uFogRowStep;
+    return mix(fogVolumesAt(h0, dist), fogVolumesAt(h0 + uFogRowStep, dist), rowF - row0);
+}
+
+float authoredVolumeFog(vec3 point) {
+    return torqueVolumeFog(point.y, length(point - uCamPos));
 }
 
 // Torque SceneState::getHaze: none within fogDistance, then a quadratic
@@ -399,6 +416,37 @@ float terrainShadowPCF(vec4 shadowCoord) {
     return s / 9.0;
 }
 
+uniform float uFogRowBase = 0.0;
+uniform float uFogRowStep = 0.0;
+// Volume fog at one height: the distance travelled through each volume's
+// height band (similar triangles), times percentage / visibleDistance.
+float fogVolumesAt(float height, float dist) {
+    float result = 0.0;
+    vec4 volumes[3] = vec4[3](uFogVolume0, uFogVolume1, uFogVolume2);
+    float deltaY = abs(height - uCamPos.y);
+    for (int i = 0; i < 3; ++i) {
+        vec4 volume = volumes[i];
+        if (volume.x <= 0.0 || volume.z <= volume.y) continue;
+        if (deltaY > 0.01) {
+            float low = max(min(uCamPos.y, height), volume.y);
+            float high = min(max(uCamPos.y, height), volume.z);
+            if (high > low) result += dist * (high - low) / deltaY * volume.x * volume.w;
+        } else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z) {
+            result += dist * volume.x * volume.w;
+        }
+    }
+    return min(result, 1.0);
+}
+// SceneGraph::buildFogTexture samples volume fog into 64 rows spanning the
+// terrain's height range and filters bilinearly: blend the two nearest rows.
+float torqueVolumeFog(float height, float dist) {
+    if (uFogRowStep <= 0.0) return fogVolumesAt(height, dist);
+    float rowF = (height - uFogRowBase) / uFogRowStep;
+    float row0 = floor(rowF);
+    float h0 = uFogRowBase + row0 * uFogRowStep;
+    return mix(fogVolumesAt(h0, dist), fogVolumesAt(h0 + uFogRowStep, dist), rowF - row0);
+}
+
 void main() {
     vec4 base;
     if (uUseVertexColor) {
@@ -457,19 +505,7 @@ void main() {
     vec3 lit = base.rgb * lighting;
     if (uFogEnabled) {
         float dist = length(vWorldPos - uCamPos);
-        vec4 volumes[3] = vec4[3](uFogVolume0, uFogVolume1, uFogVolume2);
-        float volumeFog = 0.0;
-        for (int i = 0; i < 3; ++i) {
-            vec4 volume = volumes[i];
-            if (volume.x <= 0.0 || volume.z <= volume.y) continue;
-            float low = max(min(uCamPos.y, vWorldPos.y), volume.y);
-            float high = min(max(uCamPos.y, vWorldPos.y), volume.z);
-            float vertical = high - low;
-            if (vertical > 0.0 && abs(vWorldPos.y - uCamPos.y) > 0.0001)
-                volumeFog += dist * vertical / abs(vWorldPos.y - uCamPos.y) * volume.x * volume.w;
-            else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z)
-                volumeFog += dist * volume.x * volume.w;
-        }
+        float volumeFog = torqueVolumeFog(vWorldPos.y, dist);
         if (uFogStart >= 0.0 && uFogEnd > uFogStart && dist >= uFogEnd) discard;
         float hazeRamp = uFogStart >= 0.0 && uFogEnd > uFogStart && dist > uFogStart
             ? (dist - uFogStart) / (uFogEnd - uFogStart) - 1.0 : -1.0;
@@ -655,6 +691,37 @@ uniform vec4 uFogVolume1 = vec4(0.0);
 uniform vec4 uFogVolume2 = vec4(0.0);
 uniform bool uFogEnabled;
 out vec4 FragColor;
+uniform float uFogRowBase = 0.0;
+uniform float uFogRowStep = 0.0;
+// Volume fog at one height: the distance travelled through each volume's
+// height band (similar triangles), times percentage / visibleDistance.
+float fogVolumesAt(float height, float dist) {
+    float result = 0.0;
+    vec4 volumes[3] = vec4[3](uFogVolume0, uFogVolume1, uFogVolume2);
+    float deltaY = abs(height - uCamPos.y);
+    for (int i = 0; i < 3; ++i) {
+        vec4 volume = volumes[i];
+        if (volume.x <= 0.0 || volume.z <= volume.y) continue;
+        if (deltaY > 0.01) {
+            float low = max(min(uCamPos.y, height), volume.y);
+            float high = min(max(uCamPos.y, height), volume.z);
+            if (high > low) result += dist * (high - low) / deltaY * volume.x * volume.w;
+        } else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z) {
+            result += dist * volume.x * volume.w;
+        }
+    }
+    return min(result, 1.0);
+}
+// SceneGraph::buildFogTexture samples volume fog into 64 rows spanning the
+// terrain's height range and filters bilinearly: blend the two nearest rows.
+float torqueVolumeFog(float height, float dist) {
+    if (uFogRowStep <= 0.0) return fogVolumesAt(height, dist);
+    float rowF = (height - uFogRowBase) / uFogRowStep;
+    float row0 = floor(rowF);
+    float h0 = uFogRowBase + row0 * uFogRowStep;
+    return mix(fogVolumesAt(h0, dist), fogVolumesAt(h0 + uFogRowStep, dist), rowF - row0);
+}
+
 void main() {
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uCamPos - vWorldPos);
@@ -686,19 +753,7 @@ void main() {
     // Fog
     if (uFogEnabled) {
         float dist = length(vWorldPos - uCamPos);
-        vec4 volumes[3] = vec4[3](uFogVolume0, uFogVolume1, uFogVolume2);
-        float volumeFog = 0.0;
-        for (int i = 0; i < 3; ++i) {
-            vec4 volume = volumes[i];
-            if (volume.x <= 0.0 || volume.z <= volume.y) continue;
-            float low = max(min(uCamPos.y, vWorldPos.y), volume.y);
-            float high = min(max(uCamPos.y, vWorldPos.y), volume.z);
-            float vertical = high - low;
-            if (vertical > 0.0 && abs(vWorldPos.y - uCamPos.y) > 0.0001)
-                volumeFog += dist * vertical / abs(vWorldPos.y - uCamPos.y) * volume.x * volume.w;
-            else if (uCamPos.y >= volume.y && uCamPos.y <= volume.z)
-                volumeFog += dist * volume.x * volume.w;
-        }
+        float volumeFog = torqueVolumeFog(vWorldPos.y, dist);
         if (uFogStart >= 0.0 && uFogEnd > uFogStart && dist >= uFogEnd) discard;
         float hazeRamp = uFogStart >= 0.0 && uFogEnd > uFogStart && dist > uFogStart
             ? (dist - uFogStart) / (uFogEnd - uFogStart) - 1.0 : -1.0;

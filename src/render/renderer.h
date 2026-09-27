@@ -340,6 +340,13 @@ struct TerrainBlock {
     }
 
     float sampleHeight(float wx, float wz) const;
+    // Heightfield range in world units (SceneGraph::buildFogTexture rows).
+    void heightRange(float& lo, float& hi) const {
+        lo = hi = 0.0f;
+        if (heights.empty()) return;
+        const auto [mn, mx] = std::minmax_element(heights.begin(), heights.end());
+        lo = *mn * heightScale; hi = *mx * heightScale;
+    }
     void setEmptySquareRuns(const std::vector<uint32_t>& runs);
     bool isEmptySquare(float wx, float wz) const;
     bool load(const uint8_t* data, size_t size);
