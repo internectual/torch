@@ -5241,7 +5241,8 @@ void GuiRenderer::handleKeyboard() {
 }
 
 // Create a GuiControl from a ScriptObject (and recursively create children)
-GuiControl* GuiRenderer::soToGui(const std::string& name, GuiControl* parent) {
+GuiControl* GuiRenderer::soToGui(const std::string& handle, GuiControl* parent) {
+    const std::string name = ScriptEngine::instance().canonicalName(handle);
     auto& objs = ScriptEngine::instance().objects;
     auto it = objs.find(name);
     if (it == objs.end() || !(it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className.find("Hud") == 0 || it->second->className == "GameTSCtrl"))
@@ -5663,7 +5664,9 @@ GuiControl* GuiRenderer::activeKeyCapture() const {
     return nullptr;
 }
 
-GuiControl* GuiRenderer::findControl(const std::string& name) {
+GuiControl* GuiRenderer::findControl(const std::string& handle) {
+    // Script handles may be SimObject ids; controls are keyed by name.
+    const std::string name = ScriptEngine::instance().canonicalName(handle);
     {
         auto& reg = createdControls();
         auto it = reg.find(lowerKey(name));

@@ -134,7 +134,10 @@ int main() {
         ScriptMissionObject{0, "Camera", "MissionCamera", "", {}}
     });
     assert(objectiveWorld.getMissionObjectTransform("MissionCamera", transform));
-    assert(objectiveWorld.setMissionObjectPosition("1", {1, 2, 3}));
+    // Mission objects carry dynamic SimObject ids; a numeric handle resolves.
+    const std::string cameraId = std::to_string(providerEngine.missionObjects().front().id);
+    assert(providerEngine.missionObjects().front().id >= 1027);
+    assert(objectiveWorld.setMissionObjectPosition(cameraId, {1, 2, 3}));
     assert(objectiveWorld.setMissionObjectPosition("MissionCamera", {1, 2, 3}));
     assert(objectiveWorld.getMissionObjectPosition("MissionCamera", position));
     assert(position.x == 1.0f && position.y == 2.0f && position.z == 3.0f);
@@ -511,9 +514,10 @@ int main() {
         ScriptMissionObject{0, "MissionTimer", "MissionTimerObject", "", {}}
     });
     script.ts()->execute("function MissionTimer::onTick(%this,%value) { $missionTimer = %this @ ':' @ %value; }");
-    const int missionEvent = script.ts()->scheduleEvent(20.0, 0.0, "1", "onTick", {VMValue("tick")});
+    const std::string timerId = std::to_string(script.missionObjects().front().id);
+    const int missionEvent = script.ts()->scheduleEvent(20.0, 0.0, timerId, "onTick", {VMValue("tick")});
     assert(script.ts()->processScheduledEvents(20.0) == 1);
-    assert(script.ts()->getGlobal("$missionTimer").toString() == "1:tick");
+    assert(script.ts()->getGlobal("$missionTimer").toString() == timerId + ":tick");
     assert(!script.ts()->isEventPending(missionEvent));
     const int globalMissionEvent = script.ts()->scheduleEvent(
         30.0, 0.0, "0", "globalTimer", {VMValue("survives")});
@@ -730,19 +734,25 @@ int main() {
         ScriptMissionObject{0, "StaticShape", "FirstShape", "TeamGroup", {{"shapeFile", VMValue("first.dts")}}},
         ScriptMissionObject{0, "StaticShape", "SecondShape", "TeamGroup", {}}
     });
-    assert(natives.at("isobject")({VMValue(1)}).toInt() == 1);
-    assert(natives.at("getname")({VMValue(3)}).toString() == "FirstShape");
-    assert(natives.at("getid")({VMValue("TeamGroup")}).toInt() == 2);
-    assert(natives.at("getgroup")({VMValue(3)}).toInt() == 2);
-    assert(natives.at("getcount")({VMValue(2)}).toInt() == 2);
-    assert(natives.at("getobject")({VMValue(2), VMValue(0)}).toInt() == 3);
-    assert(natives.at("nextobject")({VMValue(3)}).toInt() == 4);
-    assert(natives.at("prevobject")({VMValue(4)}).toInt() == 3);
-    assert(natives.at("getfieldvalue")({VMValue(3), VMValue("SHAPEFILE")}).toString() == "first.dts");
-    assert(natives.at("delete")({VMValue(2)}).toInt() == 1);
-    assert(!natives.at("isobject")({VMValue(2)}).toInt());
-    assert(!natives.at("isobject")({VMValue(3)}).toInt());
-    assert(natives.at("isobject")({VMValue(1)}).toInt() == 1);
+    // Mission objects take consecutive dynamic SimObject ids.
+    const int missionGroupId = script.missionObjects()[0].id;
+    const int teamGroupId = script.missionObjects()[1].id;
+    const int firstShapeId = script.missionObjects()[2].id;
+    const int secondShapeId = script.missionObjects()[3].id;
+    assert(missionGroupId >= 1027 && teamGroupId == missionGroupId + 1);
+    assert(natives.at("isobject")({VMValue(missionGroupId)}).toInt() == 1);
+    assert(natives.at("getname")({VMValue(firstShapeId)}).toString() == "FirstShape");
+    assert(natives.at("getid")({VMValue("TeamGroup")}).toInt() == teamGroupId);
+    assert(natives.at("getgroup")({VMValue(firstShapeId)}).toInt() == teamGroupId);
+    assert(natives.at("getcount")({VMValue(teamGroupId)}).toInt() == 2);
+    assert(natives.at("getobject")({VMValue(teamGroupId), VMValue(0)}).toInt() == firstShapeId);
+    assert(natives.at("nextobject")({VMValue(firstShapeId)}).toInt() == secondShapeId);
+    assert(natives.at("prevobject")({VMValue(secondShapeId)}).toInt() == firstShapeId);
+    assert(natives.at("getfieldvalue")({VMValue(firstShapeId), VMValue("SHAPEFILE")}).toString() == "first.dts");
+    assert(natives.at("delete")({VMValue(teamGroupId)}).toInt() == 1);
+    assert(!natives.at("isobject")({VMValue(teamGroupId)}).toInt());
+    assert(!natives.at("isobject")({VMValue(firstShapeId)}).toInt());
+    assert(natives.at("isobject")({VMValue(missionGroupId)}).toInt() == 1);
     script.clearMissionObjects();
 
     int changedTeam = -1;

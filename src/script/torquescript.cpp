@@ -820,9 +820,8 @@ VMValue TorqueScript::Impl::parseDatablock() {
     object->className = classToken.text;
     object->name = nameToken.text;
     if (!parentName.empty()) {
-        auto parent = ScriptEngine::instance().objects.find(parentName);
-        if (parent != ScriptEngine::instance().objects.end() && parent->second)
-            object->fields = parent->second->fields;
+        if (auto* parent = ScriptEngine::instance().findObject(parentName.c_str()))
+            object->fields = parent->fields;
     }
 
     if (match(TSTokenType::LBrace)) {
@@ -852,10 +851,13 @@ VMValue TorqueScript::Impl::parseDatablock() {
         match(TSTokenType::RBrace);
     }
 
-    ScriptEngine::instance().objects[object->name] = object;
+    // Datablocks take ids from the datablock range.
+    auto& engine = ScriptEngine::instance();
+    engine.assignDatablockId(object);
+    engine.objects[engine.objectKey(object)] = object;
     outer->setGlobal("$" + object->name, VMValue(object->name));
     outer->setGlobal(object->name, VMValue(object->name));
-    return VMValue(object->name);
+    return VMValue(object->id);
 }
 
 VMValue TorqueScript::Impl::parseBlock() {
@@ -1859,13 +1861,18 @@ VMValue TorqueScript::Impl::parsePostfix() {
                     std::string nsFull = objName + "::" + methodName;
                     if (outer->hasFunction(nsFull)) { val = outer->callFunction(nsFull, methodArgs); called = true; }
                 }
-                if (!called && sobj && !sobj->name.empty() && !sameName(sobj->name, objName)) {
+                if (!called && sobj) {
                     // An object referenced by id still dispatches through its
-                    // name namespace (e.g. $Hud[%tag] -> ScoreScreen::addLine).
-                    std::string nameFull = sobj->name + "::" + methodName;
-                    if (outer->hasFunction(nameFull)) {
-                        val = outer->callFunction(nameFull, methodArgs);
-                        called = true;
+                    // name namespace (e.g. $Hud[%tag] -> ScoreScreen::addLine),
+                    // then its ScriptObject class / superClass.
+                    for (const std::string& space : ScriptEngine::instance().objectNamespaces(sobj)) {
+                        if (sameName(space, objName) || sameName(space, className)) continue;
+                        std::string spaceFull = space + "::" + methodName;
+                        if (outer->hasFunction(spaceFull)) {
+                            val = outer->callFunction(spaceFull, methodArgs);
+                            called = true;
+                            break;
+                        }
                     }
                 }
                 if (!called) {
@@ -2259,22 +2266,24 @@ VMValue TorqueScript::Impl::parsePrimary() {
             }
 
             // Link parent-child for GUI controls
+            auto& engine = ScriptEngine::instance();
             if (!guiParentStack.empty()) {
                 ScriptObject* parent = guiParentStack.back();
                 if (parent != obj) {
-                    obj->internals["parent"] = VMValue(parent->name);
+                    obj->internals["parent"] = VMValue(engine.objectKey(parent));
                 }
             }
 
-            ScriptEngine::instance().objects[obj->name] = obj;
+            engine.objects[engine.objectKey(obj)] = obj;
             // Set globals so script can reference the object by name (both $name and bare name)
             if (!obj->name.empty()) {
                 outer->setGlobal("$" + obj->name, VMValue(obj->name));
                 globals[obj->name] = VMValue(obj->name);
                 globalIndex.emplace(toLower(obj->name), obj->name);
             }
-            ScriptEngine::instance().objectAdded(obj);
-            return VMValue(obj->name);
+            engine.objectAdded(obj);
+            // new returns the SimObject id.
+            return VMValue(engine.objectId(obj));
         }
 
         default:

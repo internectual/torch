@@ -139,6 +139,10 @@ struct VMValue {
 };
 
 struct ScriptObject {
+    // SimObject id: datablocks from 3, dynamic objects from 1027. Assigned
+    // on first use (ScriptEngine::objectId); an id is only ever handed out
+    // after that, so every id lookup can be answered.
+    int id = 0;
     std::string className;
     std::string name;
     std::unordered_map<std::string, VMValue> fields;
@@ -365,10 +369,30 @@ public:
     std::vector<std::string> missionDeletionOrder(const std::string& name) const;
     void removeMissionObjects(const std::vector<std::string>& names);
 
-    // Global object registry
+    // Global object registry, keyed by objectKey (the name, or the id for an
+    // anonymous object).
     std::unordered_map<std::string, ScriptObject*> objects;
+    std::unordered_map<int, ScriptObject*> objectsById;
+    // The object's SimObject id, assigned from the dynamic range on first use.
+    int objectId(ScriptObject* object);
+    // Datablocks take ids from their own range (3..1026).
+    void assignDatablockId(ScriptObject* object);
+    int allocateObjectId(bool datablock = false);
+    // Forget a deleted object's id.
+    void forgetObject(ScriptObject* object);
+    // Registry key: the name, or the id for an anonymous object.
+    std::string objectKey(ScriptObject* object);
+    // A handle (name or numeric id) as the registry key it refers to; other
+    // strings pass through unchanged.
+    std::string canonicalName(const std::string& handle);
+    // The object's script namespaces in dispatch order: its name, the
+    // ScriptObject class / superClass fields, then its C++ class.
+    std::vector<std::string> objectNamespaces(ScriptObject* object);
 
 private:
+    // SimObject id ranges (DataBlockObjectIdFirst, DynamicObjectIdFirst).
+    int nextDatablockObjectId_ = 3;
+    int nextDynamicObjectId_ = 1027;
     static ScriptEngine* instance_;
     VirtualMachine* vmInstance{};
     TorqueScript* tsInstance{};

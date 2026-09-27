@@ -28,6 +28,24 @@ function run() {
    echo("R4 [" @ addLine(1) @ "]");
 }
 run();
+// SimObject ids: new returns the id; anonymous objects are distinct; the
+// class field is a dispatch namespace, onAdd included.
+function IdSpace::onAdd(%this) { $idOnAdd = %this; }
+function IdSpace::who(%this) { return "who" @ %this.getId(); }
+function ids() {
+   %named = new ScriptObject(IdNamed) { v = 1; };
+   %a = new ScriptObject() { v = 2; };
+   %b = new ScriptObject() { v = 3; class = IdSpace; };
+   echo("R7 " @ (%named == IdNamed.getId()) @ " " @ (%named == nameToId(IdNamed)) @ " " @ (%named >= 1027));
+   echo("R8 " @ (%a != %b) @ " " @ %a.v @ %b.v @ " [" @ %a.getName() @ "] " @ IdNamed.getName());
+   echo("R9 " @ ($idOnAdd == %b) @ " " @ (%b.who() $= "who" @ %b));
+   %g = new SimGroup();
+   %g.add(%a);
+   echo("R10 " @ %g.getCount() @ " " @ (%g.getObject(0) == %a));
+   %a.delete();
+   echo("R11 " @ isObject(%a) @ isObject(%b) @ " " @ ("1" + 1));
+}
+ids();
 // A body started by the scheduler (native code) survives a nested eval.
 function later() {
    eval("echo(\"R5 inner\");");
@@ -50,6 +68,11 @@ grep -qF '[INFO] R3 skipped' "$root/client.log"
 grep -qE "\[INFO\] R4 \[0?\]" "$root/client.log"
 grep -qF '[INFO] R5 inner' "$root/client.log"
 grep -qF '[INFO] R6 after eval' "$root/client.log"
+grep -qF '[INFO] R7 1 1 1' "$root/client.log"
+grep -qF '[INFO] R8 1 23 [] IdNamed' "$root/client.log"
+grep -qF '[INFO] R9 1 1' "$root/client.log"
+grep -qF '[INFO] R10 1 1' "$root/client.log"
+grep -qF '[INFO] R11 01 2' "$root/client.log"
 ! grep -qF 'Expected token' "$root/client.log"
 ! grep -qF 'never' "$root/client.log"
 ! grep -qF 'call depth limit' "$root/client.log"

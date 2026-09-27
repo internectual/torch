@@ -866,6 +866,7 @@ void Player::loadModel() {
             "getArmorDatablock", {VMValue(resolverName), VMValue(armorSize)}).toString();
     }
     ScriptEngine::instance().objects.erase(resolverName);
+    ScriptEngine::instance().forgetObject(resolver);
     delete resolver;
 
     auto datablock = findDataBlock(datablockName);

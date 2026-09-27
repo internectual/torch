@@ -1,4 +1,5 @@
 #include "script/script_engine.h"
+#include <limits>
 #include "script/conversion_parity.h"
 #include "script/torquescript.h"
 #include "core/console.h"
@@ -58,6 +59,13 @@ static VMValue* findObjectField(ScriptObject* object, const std::string& name) {
 
 static ScriptObject* namedScriptObject(const std::string& name) {
     return name.empty() ? nullptr : ScriptEngine::instance().findObject(name.c_str());
+}
+
+// SimObject::getName: anonymous objects have none (an anonymous GUI control
+// keeps an internal "_unnamed" registry name).
+static std::string scriptObjectName(const ScriptObject* object) {
+    if (!object || object->name.rfind("_unnamed", 0) == 0) return {};
+    return object->name;
 }
 
 static bool providerObjectId(const std::string& value, int& id) {
@@ -527,13 +535,13 @@ void VirtualMachine::setVariable(const char* name, const VMValue& val) {
 }
 
 ScriptObject* VirtualMachine::getObject(const char* name) {
-    auto& objs = ScriptEngine::instance().objects;
-    auto it = objs.find(name);
-    return it != objs.end() ? it->second : nullptr;
+    return ScriptEngine::instance().findObject(name);
 }
 
 void VirtualMachine::addObject(ScriptObject* obj) {
-    if (obj) ScriptEngine::instance().objects[obj->name] = obj;
+    if (!obj) return;
+    auto& engine = ScriptEngine::instance();
+    engine.objects[engine.objectKey(obj)] = obj;
 }
 
 bool VirtualMachine::loadScript(const uint8_t* data, size_t size, const char* name) {
@@ -1319,7 +1327,8 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp,
 
             case (uint32_t)DSOOpcode::OP_ADD_OBJECT: {
                 if (frame->curObject) {
-                    ScriptEngine::instance().objects[frame->curObject->name] = frame->curObject;
+                    auto& engine = ScriptEngine::instance();
+                    engine.objects[engine.objectKey(frame->curObject)] = frame->curObject;
                 }
                 break;
             }
@@ -1540,12 +1549,25 @@ ScriptEngine::~ScriptEngine() {
 }
 
 void ScriptEngine::objectAdded(ScriptObject* object) {
-    if (!object || object->name.empty() || object->internals["__added"].toBool()) return;
+    if (!object || object->internals["__added"].toBool()) return;
     object->internals["__added"] = VMValue(1);
     if (tsInstance) {
-        const std::string callback = object->className + "::onAdd";
-        if (tsInstance->hasFunction(callback))
-            tsInstance->callFunction(callback, {VMValue(object->name)});
+        // %this is the object's id, named or not; onAdd resolves through the
+        // object's namespace chain. GUI controls get their named onAdd from
+        // the GUI renderer once they sit in their parent (callOnAddOnce), so
+        // only their class callback runs here.
+        const std::string& cls = object->className;
+        const bool guiControl = cls.rfind("Gui", 0) == 0 || cls.rfind("Shell", 0) == 0 ||
+                                cls.rfind("Hud", 0) == 0 || cls == "GameTSCtrl" ||
+                                cls == "VirtualScrollCtrl" || cls == "VirtualScrollContentCtrl";
+        const std::vector<std::string> spaces = guiControl ? std::vector<std::string>{cls}
+                                                           : objectNamespaces(object);
+        for (const std::string& space : spaces) {
+            const std::string callback = space + "::onAdd";
+            if (!tsInstance->hasFunction(callback)) continue;
+            tsInstance->callFunction(callback, {VMValue(objectId(object))});
+            break;
+        }
     }
 }
 
@@ -1588,8 +1610,9 @@ bool ScriptEngine::clearDeleteNotify(ScriptObject* listener, ScriptObject* targe
 
 bool ScriptEngine::deleteScriptObject(const std::string& name) {
     ScriptObject* object = findObject(name.c_str());
-    if (!object || object->name.empty()) return false;
-    const std::string objectName = object->name;
+    if (!object) return false;
+    const std::string objectName = objectKey(object);
+    const std::string objectHandle = std::to_string(objectId(object));
     auto it = objects.find(objectName);
     if (it == objects.end() || it->second != object) return false;
     if (object->internals["__deleting"].toBool()) return false;
@@ -1604,10 +1627,15 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
     for (const auto& child : children) deleteScriptObject(child);
 
     if (tsInstance) {
+        // Events may have been scheduled on the name or on the id.
         tsInstance->cancelEventsForObject(objectName);
-        const std::string callback = object->className + "::onRemove";
-        if (tsInstance->hasFunction(callback))
-            tsInstance->callFunction(callback, {VMValue(objectName)});
+        if (objectHandle != objectName) tsInstance->cancelEventsForObject(objectHandle);
+        for (const std::string& space : objectNamespaces(object)) {
+            const std::string callback = space + "::onRemove";
+            if (!tsInstance->hasFunction(callback)) continue;
+            tsInstance->callFunction(callback, {VMValue(object->id)});
+            break;
+        }
     }
     const auto listeners = object->deleteNotifyListeners;
     for (const auto& listenerName : listeners) {
@@ -1615,7 +1643,7 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
         if (listenerIt != objects.end() && listenerIt->second && tsInstance) {
             const std::string callback = listenerIt->second->className + "::onDeleteNotify";
             if (tsInstance->hasFunction(callback))
-                tsInstance->callFunction(callback, {VMValue(listenerName), VMValue(objectName)});
+                tsInstance->callFunction(callback, {VMValue(listenerName), VMValue(object->id)});
         }
     }
     for (auto& [remainingName, remaining] : objects) {
@@ -1625,6 +1653,7 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
                             notifications.end());
     }
     objects.erase(it);
+    forgetObject(object);
     delete object;
     return true;
 }
@@ -2248,9 +2277,12 @@ bool ScriptEngine::init() {
     };
     auto getGroupCount = [](const std::vector<VMValue>& args) -> VMValue {
         if (args.empty()) return VMValue(0);
-        const std::string group = args[0].toString();
-        if (!namedScriptObject(group)) return VMValue(0);
-        int count = 0;
+        auto& engine = ScriptEngine::instance();
+        const std::string group = engine.canonicalName(args[0].toString());
+        ScriptObject* groupObject = namedScriptObject(group);
+        if (!groupObject) return VMValue(0);
+        // Members added with add() plus objects declared inside the group.
+        int count = groupObject->internals["__childCount"].toInt();
         for (const auto& [name, object] : ScriptEngine::instance().objects) {
             if (!object) continue;
             const auto it = object->internals.find("parent");
@@ -2323,7 +2355,7 @@ bool ScriptEngine::init() {
         ScriptObjectState state;
         if (objectState(args, state)) return VMValue(state.name);
         if (!args.empty()) {
-            if (auto* object = namedScriptObject(args[0].toString())) return VMValue(object->name);
+            if (auto* object = namedScriptObject(args[0].toString())) return VMValue(scriptObjectName(object));
         }
         return VMValue("");
     };
@@ -3927,8 +3959,16 @@ bool ScriptEngine::init() {
         return it == s_taggedStrings.end() ? VMValue(std::string("")) : VMValue(it->second);
     });
 
-    tsInstance->registerNative("nameToId", [](const auto&) -> VMValue {
-        return VMValue(0);
+    // nameToID: the id of a named (or numbered) object, -1 when none.
+    tsInstance->registerNative("nameToId", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(-1);
+        auto& engine = ScriptEngine::instance();
+        const std::string handle = args[0].toString();
+        for (const auto& object : engine.missionObjects())
+            if (!object.name.empty() && strcasecmp(object.name.c_str(), handle.c_str()) == 0)
+                return VMValue(object.id);
+        if (auto* object = engine.findObject(handle.c_str())) return VMValue(engine.objectId(object));
+        return VMValue(-1);
     });
 
     tsInstance->registerNative("getRecord", [](const auto& args) -> VMValue {
@@ -4219,9 +4259,10 @@ bool ScriptEngine::init() {
             auto* childObject = ScriptEngine::instance().findObject(args[1].toString().c_str());
             if (group && childObject && group->className.find("Sim") == 0) {
                 const int count = group->internals["__childCount"].toInt();
-                group->internals["__child" + std::to_string(count)] = VMValue(childObject->name);
+                auto& engine = ScriptEngine::instance();
+                group->internals["__child" + std::to_string(count)] = VMValue(engine.objectKey(childObject));
                 group->internals["__childCount"] = VMValue(count + 1);
-                childObject->internals["__parent"] = VMValue(group->name);
+                childObject->internals["__parent"] = VMValue(engine.objectKey(group));
                 return VMValue(1);
             }
         }
@@ -4255,7 +4296,7 @@ bool ScriptEngine::init() {
         if (args.size() < 2) return VMValue(1);
         auto* group = ScriptEngine::instance().findObject(args[0].toString().c_str());
         if (group && group->className.find("Sim") == 0) {
-            const std::string childName = args[1].toString();
+            const std::string childName = ScriptEngine::instance().canonicalName(args[1].toString());
             const int count = group->internals["__childCount"].toInt();
             for (int i = 0; i < count; ++i) {
                 if (group->internals["__child" + std::to_string(i)].toString() != childName) continue;
@@ -4829,14 +4870,6 @@ bool ScriptEngine::init() {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
         return VMValue(ctl ? (ctl->visible ? 1 : 0) : 0);
     });
-    // getId() — return the object name as a string (used with Canvas.getContent() comparisons)
-    tsInstance->registerNative("getId", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        std::string name = args[0].toString();
-        auto* obj = ScriptEngine::instance().findObject(name.c_str());
-        if (obj) return VMValue(name);
-        return VMValue(0);
-    });
     tsInstance->registerNative("getName", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
         const std::string objectName = args[0].toString();
@@ -4848,7 +4881,7 @@ bool ScriptEngine::init() {
                 return VMValue(state.name);
         }
         if (auto* object = ScriptEngine::instance().findObject(objectName.c_str()))
-            return VMValue(object->name);
+            return VMValue(scriptObjectName(object));
         return VMValue(objectName);
     });
     tsInstance->registerNative("getClassName", [](const auto& args) -> VMValue {
@@ -8701,9 +8734,16 @@ bool ScriptEngine::init() {
             if (object.parentName == parentName) children.push_back(&object);
         return children;
     };
+    // SimObject::getId: mission objects, script objects, then ghosts (whose
+    // handle is their id).
     tsInstance->registerNative("getId", [missionObject](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         if (const auto* object = missionObject(args[0].toString())) return VMValue(object->id);
+        auto& engine = ScriptEngine::instance();
+        if (auto* object = engine.findObject(args[0].toString().c_str())) return VMValue(engine.objectId(object));
+        int id = 0;
+        ScriptObjectState state;
+        if (providerObjectId(args[0].toString(), id) && engine.objectState(id, state)) return VMValue(id);
         return VMValue(0);
     });
     tsInstance->registerNative("getName", [missionObject](const auto& args) -> VMValue {
@@ -8714,7 +8754,7 @@ bool ScriptEngine::init() {
         if (providerObjectId(args[0].toString(), id) && ScriptEngine::instance().objectState(id, state))
             return VMValue(state.name);
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
-            return VMValue(object->name);
+            return VMValue(scriptObjectName(object));
         return VMValue("");
     });
     tsInstance->registerNative("getClassName", [missionObject](const auto& args) -> VMValue {
@@ -8755,8 +8795,11 @@ bool ScriptEngine::init() {
     auto getMissionChild = [missionObject, missionChildren](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
         if (!missionObject(args[0].toString())) {
-            auto* group = ScriptEngine::instance().findObject(args[0].toString().c_str());
-            if (group) return group->internals["__child" + std::to_string(args[1].toInt())];
+            auto& engine = ScriptEngine::instance();
+            auto* group = engine.findObject(args[0].toString().c_str());
+            if (!group) return VMValue(0);
+            const std::string key = group->internals["__child" + std::to_string(args[1].toInt())].toString();
+            if (auto* child = engine.findObject(key.c_str())) return VMValue(engine.objectId(child));
             return VMValue(0);
         }
         const int index = args[1].toInt();
@@ -8810,6 +8853,9 @@ void ScriptEngine::shutdown() {
     std::sort(names.begin(), names.end());
     for (const auto& name : names) deleteScriptObject(name);
     objects.clear();
+    objectsById.clear();
+    nextDatablockObjectId_ = 3;
+    nextDynamicObjectId_ = 1027;
     if (tsInstance) tsInstance->clearScheduledEvents();
     missionObjects_.clear();
     missionObjectsWorldBacked_ = false;
@@ -8823,9 +8869,9 @@ void ScriptEngine::shutdown() {
 void ScriptEngine::setMissionObjects(std::vector<ScriptMissionObject> objects, bool worldBacked) {
     missionObjects_ = std::move(objects);
     missionObjectsWorldBacked_ = worldBacked;
-    int nextId = 1;
+    // Mission objects share the dynamic SimObject id range.
     for (auto& object : missionObjects_)
-        object.id = nextId++;
+        object.id = allocateObjectId(false);
 }
 
 void ScriptEngine::clearMissionObjects() {
@@ -8893,10 +8939,77 @@ void ScriptEngine::registerFunction(const char* name, NativeFunc fn) {
     if (vmInstance) vmInstance->registerNativeFunction(name, std::move(fn));
 }
 
+// A numeric object handle ("1027"); Torque object names never start with
+// a digit.
+static bool parseObjectId(const std::string& handle, int& id) {
+    if (handle.empty() || handle.size() > 10) return false;
+    for (char c : handle)
+        if (c < '0' || c > '9') return false;
+    const long value = std::strtol(handle.c_str(), nullptr, 10);
+    if (value <= 0 || value > std::numeric_limits<int>::max()) return false;
+    id = (int)value;
+    return true;
+}
+
+int ScriptEngine::allocateObjectId(bool datablock) {
+    int& next = datablock ? nextDatablockObjectId_ : nextDynamicObjectId_;
+    while (objectsById.count(next)) ++next;
+    return next++;
+}
+
+int ScriptEngine::objectId(ScriptObject* object) {
+    if (!object) return 0;
+    if (object->id == 0) object->id = allocateObjectId(false);
+    objectsById[object->id] = object;
+    return object->id;
+}
+
+void ScriptEngine::assignDatablockId(ScriptObject* object) {
+    if (!object || object->id != 0) return;
+    object->id = allocateObjectId(true);
+    objectsById[object->id] = object;
+}
+
+void ScriptEngine::forgetObject(ScriptObject* object) {
+    if (!object || object->id == 0) return;
+    auto it = objectsById.find(object->id);
+    if (it != objectsById.end() && it->second == object) objectsById.erase(it);
+}
+
+std::string ScriptEngine::objectKey(ScriptObject* object) {
+    if (!object) return {};
+    return object->name.empty() ? std::to_string(objectId(object)) : object->name;
+}
+
+std::string ScriptEngine::canonicalName(const std::string& handle) {
+    int id = 0;
+    if (!parseObjectId(handle, id)) return handle;
+    auto it = objectsById.find(id);
+    return it != objectsById.end() && it->second ? objectKey(it->second) : handle;
+}
+
+std::vector<std::string> ScriptEngine::objectNamespaces(ScriptObject* object) {
+    std::vector<std::string> spaces;
+    if (!object) return spaces;
+    if (!scriptObjectName(object).empty()) spaces.push_back(object->name);
+    for (const char* field : {"class", "superClass"})
+        if (const auto* value = findObjectField(object, field)) {
+            const std::string space = value->toString();
+            if (!space.empty()) spaces.push_back(space);
+        }
+    if (!object->className.empty()) spaces.push_back(object->className);
+    return spaces;
+}
+
 ScriptObject* ScriptEngine::findObject(const char* name) {
     // An empty reference never names an object (anonymous objects must not
     // answer to "").
     if (!name || !*name) return nullptr;
+    int id = 0;
+    if (parseObjectId(name, id)) {
+        auto byId = objectsById.find(id);
+        if (byId != objectsById.end()) return byId->second;
+    }
     auto it = objects.find(name);
     if (it != objects.end()) return it->second;
     std::string wanted(name);
