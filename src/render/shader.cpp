@@ -334,11 +334,23 @@ layout(location = 4) in vec2 aUV2;
 uniform mat4 uProjection;
 uniform mat4 uView;
 uniform mat4 uModel;
+// TerrainBlock detail texture fade (drawn over the terrain near the eye).
+uniform bool uUseOverlayDetail = false;
+uniform float uSquareSize = 8.0;
+uniform float uViewportHeight = 1080.0;
+uniform vec3 uCamPos;
+uniform bool uFogEnabled = false;
+uniform float uFogStart = -1.0;
+uniform float uFogEnd = -1.0;
+uniform vec4 uFogVolume0 = vec4(0.0);
+uniform vec4 uFogVolume1 = vec4(0.0);
+uniform vec4 uFogVolume2 = vec4(0.0);
 
 out vec3 vNormal;
 out vec2 vUV;
 out vec4 vColor;
 out vec3 vWorldPos;
+out float vDetailFade;
 
 void main() {
     vec4 worldPos = uModel * vec4(aPos, 1.0);
@@ -347,6 +359,37 @@ void main() {
     vUV = aUV;
     vColor = aColor;
     vWorldPos = worldPos.xyz;
+    vDetailFade = 0.0;
+    if (uUseOverlayDetail) {
+        // dglProjectRadius(1, 1) with the viewport and projection scale.
+        float detailDistance = uSquareSize * uViewportHeight * uProjection[1][1] / 128.0
+            - floor(uSquareSize / 2.0);
+        float dist = length(worldPos.xyz - uCamPos);
+        float fade = detailDistance > 0.0 ? clamp(1.0 - dist / detailDistance, 0.0, 1.0) : 0.0;
+        if (uFogEnabled) {
+            float haze = (uFogEnd > uFogStart && dist >= uFogEnd) ? 1.0 : 0.0;
+            if (uFogStart >= 0.0 && uFogEnd > uFogStart && dist > uFogStart && dist < uFogEnd) {
+                float f = (dist - uFogStart) / (uFogEnd - uFogStart) - 1.0;
+                haze = 1.0 - f * f;
+            }
+            vec4 volumes[3] = vec4[3](uFogVolume0, uFogVolume1, uFogVolume2);
+            float height = worldPos.y;
+            float deltaHeight = abs(height - uCamPos.y);
+            for (int i = 0; i < 3; ++i) {
+                vec4 v = volumes[i];
+                if (v.x <= 0.0) continue;
+                if (deltaHeight > 0.01) {
+                    float overlap = max(0.0, min(max(height, uCamPos.y), v.z) - max(min(height, uCamPos.y), v.y));
+                    haze += dist * overlap / deltaHeight * v.x * v.w;
+                } else if (uCamPos.y >= v.y && uCamPos.y <= v.z) {
+                    haze += dist * v.x * v.w;
+                }
+            }
+            fade *= 1.0 - min(haze, 1.0);
+        }
+        // The original detail pass interpolates a byte-valued vertex colour.
+        vDetailFade = floor(fade * 255.0 + 0.5) / 255.0;
+    }
 }
 )";
 
@@ -357,6 +400,10 @@ in vec2 vUV;
 in vec4 vColor;
 in vec3 vWorldPos;
 
+in float vDetailFade;
+uniform bool uUseOverlayDetail = false;
+uniform sampler2D uOverlayDetail;
+uniform vec3 uOverlayDetailTiling = vec3(1.0);
 uniform sampler2D uSplatMap;
 uniform sampler2D uSplatMap2;
 uniform bool uUseSplatMap2 = false;
@@ -513,6 +560,11 @@ void main() {
             ? clamp(1.0 - hazeRamp * hazeRamp, 0.0, 1.0) : 0.0;
         float volume = min(volumeFog, 1.0);
         lit = mix(lit, uFogColor, volume + min(haze, 1.0 - volume));
+    }
+    // The detail pass draws after fog with DST_COLOR, ONE_MINUS_SRC_ALPHA.
+    if (uUseOverlayDetail) {
+        vec4 detail = texture(uOverlayDetail, vUV * uOverlayDetailTiling.xy);
+        lit *= detail.rgb * vDetailFade + vec3(1.0 - detail.a * vDetailFade);
     }
     FragColor = vec4(lit, 1.0);
 }

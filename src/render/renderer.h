@@ -320,6 +320,10 @@ struct TerrainBlock {
     std::vector<uint8_t> emptySquares;
     std::vector<MeshData> meshes;
     std::vector<Texture> detailTextures;
+    // TerrainBlock.detailTexture: one texture drawn over the terrain near the
+    // eye after fog, 62 texels per metre across the block.
+    uint32_t overlayDetailTexture = 0;
+    float overlayDetailTiling[2] = {1.0f, 1.0f};
     std::vector<Texture> normalTextures; // optional normal maps per layer
     float detailTilings[6] = {0, 0, 0, 0, 0, 0}; // 0 = use default
     Texture splatMap;   // RGBA: layers 0-3 alpha weights

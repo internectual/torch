@@ -567,6 +567,16 @@ void TerrainBlock::render(const Point3F& cameraPos, bool fogEnabled, const Color
     shader->setUniform("uDetail3", (int32_t)4);
     shader->setUniform("uDetail4", (int32_t)8);
     shader->setUniform("uDetail5", (int32_t)9);
+    shader->setUniform("uUseOverlayDetail", (int32_t)(overlayDetailTexture ? 1 : 0));
+    if (overlayDetailTexture) {
+        glActiveTexture(GL_TEXTURE11);
+        glBindTexture(GL_TEXTURE_2D, overlayDetailTexture);
+        glActiveTexture(GL_TEXTURE0);
+        shader->setUniform("uOverlayDetail", (int32_t)11);
+        shader->setUniform("uOverlayDetailTiling", Point3F{overlayDetailTiling[0], overlayDetailTiling[1], 0.0f});
+        shader->setUniform("uSquareSize", squareSize);
+        shader->setUniform("uViewportHeight", (float)Engine::instance().renderer().config().height);
+    }
     // Bind normal map if enabled and available
     if (Engine::instance().renderer().config().useNormalMap && normalTextures.size() >= 1 && normalTextures[0].loaded) {
         normalTextures[0].bind(10);

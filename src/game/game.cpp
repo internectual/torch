@@ -1656,53 +1656,28 @@ bool World::load(const char* mapName) {
                 }
             }
 
-            // Override detail textures from .mis if specified
-            for (int i = 0; i < 4; i++) {
-                std::string key = "detailtex" + std::to_string(i + 1);
-                std::string texName = getProp(terrainObj->props, key.c_str());
-                if (!texName.empty() && i < (int)terrainBlock.textureNames.size()) {
-                    terrainBlock.textureNames[i] = texName;
-                    // Reload the texture
-                    std::vector<std::string> exts = {".png", ".jpg", ".bmp", ".bm8", ".gif"};
-                    bool found = false;
-                    for (auto& ext : exts) {
-                        std::string path = "textures/" + texName + ext;
-                        auto td = fs.read(path.c_str());
-                        if (!td.empty()) {
-                            terrainBlock.detailTextures[i].load(td.data(), td.size());
-                            if (terrainBlock.detailTextures[i].loaded) {
-                                Console::instance().printf(LogLevel::Info, "  detail texture %d overridden: %s", i, path.c_str());
-                                found = true;
-                                break;
-                            }
-                        }
+            // TerrainBlock.detailTexture (e.g. "details/lushdet1").
+            terrainBlock.overlayDetailTexture = 0;
+            {
+                const std::string detailName = getProp(terrainObj->props, "detailtexture");
+                std::vector<uint32_t> frames;
+                std::vector<float> durations;
+                if (!detailName.empty() &&
+                    Engine::instance().renderer().loadTextureFrames(detailName.c_str(), frames, durations) &&
+                    !frames.empty()) {
+                    GLint w = 0, h = 0;
+                    glBindTexture(GL_TEXTURE_2D, frames.front());
+                    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+                    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                    if (w > 0 && h > 0) {
+                        const float blockSize = terrainBlock.squareSize * 256.0f;
+                        terrainBlock.overlayDetailTexture = frames.front();
+                        terrainBlock.overlayDetailTiling[0] = blockSize * 62.0f / (float)w;
+                        terrainBlock.overlayDetailTiling[1] = blockSize * 62.0f / (float)h;
+                        Console::instance().printf(LogLevel::Info, "  terrain detail texture: %s (%dx%d)",
+                                                   detailName.c_str(), w, h);
                     }
-                    if (!found) {
-                        for (auto& ext : exts) {
-                            std::string path = texName + ext;
-                            auto td = fs.read(path.c_str());
-                            if (!td.empty()) {
-                                terrainBlock.detailTextures[i].load(td.data(), td.size());
-                                if (terrainBlock.detailTextures[i].loaded) {
-                                    Console::instance().printf(LogLevel::Info, "  detail texture %d overridden: %s", i, path.c_str());
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Read per-layer tiling from .mis
-            for (int i = 0; i < 4; i++) {
-                std::string key = "texscale" + std::to_string(i + 1);
-                std::string val = getProp(terrainObj->props, key.c_str());
-                if (!val.empty()) terrainBlock.detailTilings[i] = (float)std::atof(val.c_str());
-                // Also try "texTiling" variant
-                if (terrainBlock.detailTilings[i] == 0) {
-                    key = "textiling" + std::to_string(i + 1);
-                    val = getProp(terrainObj->props, key.c_str());
-                    if (!val.empty()) terrainBlock.detailTilings[i] = (float)std::atof(val.c_str());
                 }
             }
 
