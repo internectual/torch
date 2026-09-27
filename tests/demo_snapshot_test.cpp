@@ -208,13 +208,16 @@ int main(int argc, char** argv) {
     CHECK(parser.getWeaponsHud().slots.at(30) == 7);
     parser.handleHudRemoteCommand("setWeaponsHudBitmap", {"setWeaponsHudBitmap", "30", "Blaster", "gui/blaster"});
     parser.handleHudRemoteCommand("setWeaponsHudItem", {"setWeaponsHudItem", "30", "0", "0"});
-    CHECK(parser.getWeaponsHud().bitmaps.find(30) == parser.getWeaponsHud().bitmaps.end());
+    // Removing an item keeps its bitmap (sent once, on connect).
+    CHECK(parser.getWeaponsHud().slots.find(30) == parser.getWeaponsHud().slots.end());
+    CHECK(parser.getWeaponsHud().bitmaps.at(30) == "gui/blaster");
     parser.handleHudRemoteCommand("setInventoryHudAmount", {"setInventoryHudAmount", "4", "6"});
     CHECK(parser.getInventoryHud().slots.find(4) == parser.getInventoryHud().slots.end());
     parser.handleHudRemoteCommand("setInventoryHudItem", {"setInventoryHudItem", "4", "3", "1"});
     parser.handleHudRemoteCommand("setInventoryHudBitmap", {"setInventoryHudBitmap", "4", "Pack", "gui/pack"});
     parser.handleHudRemoteCommand("setInventoryHudItem", {"setInventoryHudItem", "4", "0", "0"});
-    CHECK(parser.getInventoryHud().bitmaps.find(4) == parser.getInventoryHud().bitmaps.end());
+    CHECK(parser.getInventoryHud().slots.find(4) == parser.getInventoryHud().slots.end());
+    CHECK(parser.getInventoryHud().bitmaps.at(4) == "gui/pack");
     parser.handleHudRemoteCommand("setBackpackHudItem", {"setBackpackHudItem", "2", "1"});
     parser.handleHudRemoteCommand("updatePackText", {"updatePackText", "5"});
     parser.handleHudRemoteCommand("setInventoryHudClearAll", {"setInventoryHudClearAll"});

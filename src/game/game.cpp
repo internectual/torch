@@ -7946,7 +7946,11 @@ void Game::render(float dt) {
                             const Vec3 view = T2Demo::cameraDirectionFromYawPitch(demoViewYaw, demoViewPitch);
                             aim = {view.x, view.y, view.z};
                         }
+                        // The animated eye node (as last drawn), else the
+                        // default eye height.
                         camPos = {position.x, position.y, position.z + 2.1f};
+                        if (auto eyeIt = demoEyePositions.find(fpIdx); eyeIt != demoEyePositions.end())
+                            camPos = {eyeIt->second.x, -eyeIt->second.z, eyeIt->second.y};
                         camTarget = {camPos.x + aim.x * 10.0f, camPos.y + aim.y * 10.0f, camPos.z + aim.z * 10.0f};
                         cameraGhostUsed = true;
                     }
@@ -9529,6 +9533,15 @@ void Game::render(float dt) {
                         if (node < 0 || node >= (int)nodes.size()) continue;
                         frames.frame[point] = shapeModel * nodes[node];
                         frames.valid |= 1u << point;
+                    }
+                    static std::unordered_map<const DTSShape*, int> eyeNodeCache;
+                    auto eye = eyeNodeCache.find(shape);
+                    if (eye == eyeNodeCache.end()) eye = eyeNodeCache.emplace(shape, shape->findNode("eye")).first;
+                    if (eye->second >= 0 && eye->second < (int)nodes.size()) {
+                        const MatrixF eyeWorld = shapeModel * nodes[eye->second];
+                        demoEyePositions[idx] = {eyeWorld.m[0][3], eyeWorld.m[1][3], eyeWorld.m[2][3]};
+                    } else {
+                        demoEyePositions.erase(idx);
                     }
                 }
 

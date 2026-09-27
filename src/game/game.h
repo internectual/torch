@@ -882,6 +882,9 @@ public:
     // Each demo ghost's mount-node frames as last drawn (world, Y-up).
     struct MountFrames { MatrixF frame[32]; uint32_t valid = 0; };
     std::unordered_map<int, MountFrames> demoMountFrames;
+    // Each demo ghost's animated "eye" node as last drawn (world, Y-up):
+    // Player::getEyeTransform's position.
+    std::unordered_map<int, Point3F> demoEyePositions;
     bool targetFinderOpen() const { return targetFinderShown; }
     void toggleTargetFinder();
     void closeTargetFinder() { targetFinderShown = false; }

@@ -1222,10 +1222,7 @@ void DemoParser::handleHudRemoteCommand(const std::string& funcName,
     if (name == "setweaponshuditem" && has(3)) {
         const int slot = number(0);
         if (number(2) != 0) weaponsHud_.slots[slot] = number(1);
-        else {
-            weaponsHud_.slots.erase(slot);
-            weaponsHud_.bitmaps.erase(slot);
-        }
+        else weaponsHud_.slots.erase(slot); // the item goes; its bitmap stays
     } else if (name == "setweaponshudammo" && has(2)) {
         const int slot = number(0);
         if (weaponsHud_.slots.find(slot) != weaponsHud_.slots.end())
@@ -1243,14 +1240,14 @@ void DemoParser::handleHudRemoteCommand(const std::string& funcName,
     } else if (name == "setammohudcount" && has(1)) {
         ammoHud_.count = number(0);
     } else if (name == "setweaponshudclearall") {
-        weaponsHud_ = {};
+        // HudWeapons::clearAll drops the carried items; the bitmaps were sent
+        // once on connect and stay.
+        weaponsHud_.slots.clear();
+        weaponsHud_.activeIndex = -1;
     } else if (name == "setinventoryhuditem" && has(3)) {
         const int slot = number(0);
         if (number(2) != 0) inventoryHud_.slots[slot] = number(1);
-        else {
-            inventoryHud_.slots.erase(slot);
-            inventoryHud_.bitmaps.erase(slot);
-        }
+        else inventoryHud_.slots.erase(slot);
     } else if (name == "setinventoryhudamount" && has(2)) {
         const int slot = number(0);
         if (inventoryHud_.slots.find(slot) != inventoryHud_.slots.end())
@@ -1260,7 +1257,8 @@ void DemoParser::handleHudRemoteCommand(const std::string& funcName,
     } else if (name == "setinventoryhudbackgroundbmp" && has(1)) {
         inventoryHud_.backgroundBitmap = arg(0);
     } else if (name == "setinventoryhudclearall") {
-        inventoryHud_ = {};
+        // clientCmdSetInventoryHudClearAll: clear the items and the backpack.
+        inventoryHud_.slots.clear();
         backpackHud_ = {};
     } else if (name == "setbackpackhuditem" && has(2)) {
         backpackHud_.packIndex = number(0);
