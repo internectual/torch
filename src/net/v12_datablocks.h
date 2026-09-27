@@ -186,6 +186,10 @@ struct DecodedDataBlock {
     std::string debrisShape;
     std::string cloakTexture;
     bool shapeEmap = false;       // ShapeBaseData::emap
+    // TurretData elevation limits (degrees); t2-mapper clamps and defaults
+    // them to [0, 90] / [90, 180] and 45 / 135.
+    bool hasTurretTheta = false;
+    float turretThetaMin = 45.0f, turretThetaMax = 135.0f;
     uint32_t projectileDelayEmitterRef = 0;
     uint32_t projectileBubbleEmitterRef = 0;
     uint32_t projectileExplosionRef = 0;

@@ -9391,22 +9391,6 @@ void Game::render(float dt) {
                 // Node overrides for turret barrel and player head
                  DTSShape::NodeOverride overrides[8];
                  int numOverrides = 0;
-                if (isTurret && shape && (mg->barrelPitch != 0.0f || mg->barrelYaw != 0.0f)) {
-                    int barrelNode = shape->findNode("barrel");
-                    if (barrelNode < 0) barrelNode = shape->findNode("mount0");
-                    if (barrelNode >= 0) {
-                        overrides[numOverrides].nodeIndex = barrelNode;
-                        if (barrelNode < (int)shape->defaultTransforms.size())
-                            overrides[numOverrides].transform = shape->defaultTransforms[barrelNode];
-                        else
-                            overrides[numOverrides].transform.identity();
-                        MatrixF pitchMat, yawMat;
-                        pitchMat.setRotationAxis({1, 0, 0}, -mg->barrelPitch);
-                        yawMat.setRotationAxis({0, 1, 0}, -mg->barrelYaw);
-                        overrides[numOverrides].transform = overrides[numOverrides].transform * yawMat * pitchMat;
-                        numOverrides++;
-                     }
-                 }
                  appendWheelNodeOverrides(*g, *shape, dt, overrides, numOverrides,
                                           8, mg->wheelRotation);
                  // Player head aim direction
@@ -9518,6 +9502,26 @@ void Game::render(float dt) {
                     };
                     addPositioned("damage", !isPlayer && level >= 1.0f && g->damageState == 2 ? 0.0f : level);
                     addPositioned("visibility", g->damageState == 2 ? 1.0f : 0.0f);
+                    // Turret::processTick: activate while activation is non-zero;
+                    // turn (phi / 360) and elevate (theta / 180) once fully
+                    // active (t2-mapper turretAim.ts).
+                    if (isTurret && g->hasTurretAim) {
+                        float thetaMin = 45.0f, thetaMax = 135.0f;
+                        if (g->hasDatablock) {
+                            const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+                            auto block = blocks.find((uint32_t)g->datablockId);
+                            if (block != blocks.end() && block->second.decoded.hasTurretTheta) {
+                                thetaMin = block->second.decoded.turretThetaMin;
+                                thetaMax = block->second.decoded.turretThetaMax;
+                            }
+                        }
+                        if (g->turretActivation != 0.0f) addPositioned("activate", g->turretActivation);
+                        if (g->turretActivation >= 1.0f) {
+                            const float theta = thetaMin + (thetaMax - thetaMin) * g->turretTheta;
+                            addPositioned("elevate", theta / 180.0f);
+                            addPositioned("turn", g->turretPhi - std::floor(g->turretPhi));
+                        }
+                    }
                 }
                 // A shape with no running sequence of its own renders its
                 // first layered thread as the primary.

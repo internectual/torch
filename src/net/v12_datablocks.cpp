@@ -778,7 +778,18 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
            }
            break;
        } case 50:s.readUnsigned(32);break;
-       case 51:shapeBase(s);s.readFlag();s.readUnsigned(32);f32s(s,3);s.readFlag();ranged(s,3,1);f32s(s,2);break;
+       case 51: { // TurretData: StaticShapeData, thetaMin/Max/Null, ...
+           shapeBase(s); s.readFlag(); s.readUnsigned(32);
+           const float thetaMin = s.readF32(), thetaMax = s.readF32();
+           s.readF32(); // thetaNull
+           s.readFlag(); ranged(s,3,1); f32s(s,2);
+           if (activeDecoded) {
+               activeDecoded->hasTurretTheta = true;
+               activeDecoded->turretThetaMin = std::clamp(thetaMin, 0.0f, 90.0f);
+               activeDecoded->turretThetaMax = std::clamp(thetaMax, 90.0f, 180.0f);
+           }
+           break;
+       }
       case 52:shapeImage(s);s.readUnsigned(8);s.readUnsigned(8);ranged(s,1080,2);s.readFlag();s.readF32();s.readFlag();break; case 53:vehicle(s);f32s(s,9);refs(s,5);f32s(s,11);break;
     }
     const bool ok = !s.failed();

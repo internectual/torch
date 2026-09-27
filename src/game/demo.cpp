@@ -2904,12 +2904,17 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
         if (bs.readFlag()) bs.readFloat(8); // CapacitorEnergy
         if (bs.readFlag()) return true; // control shortcut
         if (bs.readFlag()) {
-            float barrelPitch = bs.readFloat(10) * 3.14159265358979323846f;
-            float barrelYaw = bs.readFloat(10) * 6.28318530717958647692f;
-            bs.readFloat(8);
+            // phi (around the primary axis), then theta, then activation.
+            const float phi = bs.readFloat(10);
+            const float theta = bs.readFloat(10);
+            const float activation = bs.readFloat(8);
             if (entry) {
-                entry->barrelPitch = barrelPitch;
-                entry->barrelYaw = barrelYaw;
+                entry->turretPhi = phi;
+                entry->turretTheta = theta;
+                entry->turretActivation = activation;
+                entry->hasTurretAim = true;
+                entry->barrelYaw = phi * 6.28318530717958647692f;
+                entry->barrelPitch = theta * 3.14159265358979323846f;
             }
         }
     }

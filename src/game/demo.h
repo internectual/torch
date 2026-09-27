@@ -699,6 +699,8 @@ struct GhostEntry {
     float barrelPitch = 0.0f;
     float barrelYaw = 0.0f;
     bool hasTurretAim = false;
+    // Turret::unpackUpdate: phi and theta normalized to [0, 1], activation.
+    float turretPhi = 0.0f, turretTheta = 0.0f, turretActivation = 0.0f;
 
     // Cloak state
     bool cloaked = false;
