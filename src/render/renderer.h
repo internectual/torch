@@ -211,6 +211,12 @@ struct DTSShape {
         std::vector<float> offTimes;
     };
     std::vector<IflMaterial> iflMaterials;
+    // Whole-shape alpha (cloak) for the next render; below 0.99 every mesh
+    // draws translucent.
+    float alphaScale = 1.0f;
+    // ShapeBase's cloak texture scroll, stepped once per frame.
+    static void advanceCloakShift();
+    static float cloakShiftU, cloakShiftV;
     // PlayerData action index -> animation index (see PlayerAnimation).
     std::vector<int> actionTable;
     // Node world transforms from the most recent render, for mounting.

@@ -7593,6 +7593,7 @@ void Game::render(float dt) {
         }
     };
     r.beginFrame({0.3f, 0.5f, 0.8f, 1.0f});
+    DTSShape::advanceCloakShift();
 
     Point3F camPos, camTarget;
     bool cameraCoordinatesConverted = false;
@@ -8926,7 +8927,11 @@ void Game::render(float dt) {
 
                 // ShapeBase replaces the normal material map with cloakTexture.
                 Texture* cloakTexture = nullptr;
-                if (g->cloaked && g->hasDatablock && demoParser) {
+                // ShapeBase::updateCloak: mCloakLevel ramps 0 -> 1 over 0.5 s.
+                if (!demoMatchEnded)
+                    mg->cloakLevel = std::clamp(mg->cloakLevel + (g->cloaked ? 1.0f : -1.0f) *
+                                                demoInterpolationDt / 0.5f, 0.0f, 1.0f);
+                if (mg->cloakLevel > 0.0f && g->hasDatablock && demoParser) {
                     const auto& blocks = demoParser->getInitialBlock().dataBlocks;
                     auto block = blocks.find((uint32_t)g->datablockId);
                     if (block != blocks.end() && !block->second.decoded.cloakTexture.empty()) {
@@ -8940,13 +8945,8 @@ void Game::render(float dt) {
                 }
                 shape->cloakTextureOverride = cloakTexture && cloakTexture->loaded ? cloakTexture : nullptr;
 
-                // Apply cloak transparency
-                if (g->cloaked) {
-                    // Screen-door transparency: alternate pixels are discarded
-                    if (defShader) defShader->setUniform("uScreenDoor", 0.5f);
-                } else {
-                    if (defShader) defShader->setUniform("uScreenDoor", 0.0f);
-                }
+                // ShapeBase::renderObject: vertex alpha 0.125 + (1 - level) x 0.875.
+                shape->alphaScale = mg->cloakLevel > 0.0f ? 0.125f + (1.0f - mg->cloakLevel) * 0.875f : 1.0f;
 
                 // Select the sequence by the index transmitted in the
                 // ShapeBase thread state. The DTS owns its sequence names.
@@ -9159,6 +9159,7 @@ void Game::render(float dt) {
                     shape->render(0, numOverrides > 0 ? overrides : nullptr, numOverrides);
                 }
                 shape->cloakTextureOverride = nullptr;
+                shape->alphaScale = 1.0f;
 
                 // Player::updateJet loops PlayerData jetSound while jetting.
                 if (isPlayer) {
@@ -9339,11 +9340,22 @@ void Game::render(float dt) {
                             mountedModel = mountedModel * wShape->defaultTransforms[imageMount].inverse();
                          MatrixF imageModel = mountedModel * wShape->upOrientation();
                          r.setModel(imageModel);
-                         wShape->cloakTextureOverride = shape->cloakTextureOverride;
+                         // Mounted images keep their textures; cloakable ones fade to
+                         // 0.15 + (1 - level) x 0.85 (ShapeBase::renderMountedImage).
+                         wShape->cloakTextureOverride = nullptr;
+                         {
+                             const auto& imageBlocks = demoParser->getInitialBlock().dataBlocks;
+                             auto imageData = imageBlocks.find((uint32_t)dbId);
+                             const bool cloakable = imageData != imageBlocks.end() &&
+                                                    imageData->second.decoded.imageCloakable;
+                             wShape->alphaScale = mg->cloakLevel > 0.0f && cloakable
+                                 ? 0.15f + (1.0f - mg->cloakLevel) * 0.85f : 1.0f;
+                         }
                          wShape->lighting = shape->lighting;
                          renderMountedImage(*wShape, mg->mountedImages[img].animation,
                                             demoMatchEnded ? demoMatchEndedAt : demoTime);
                          wShape->cloakTextureOverride = nullptr;
+                         wShape->alphaScale = 1.0f;
                          // The animated Muzzlepoint (or the image itself).
                          {
                              const int muzzle = wShape->findNode("Muzzlepoint");
@@ -9571,7 +9583,7 @@ void Game::render(float dt) {
              model.setTranslation(renderPosition);
              r.setModel(model * g->shape->upOrientation());
              Texture* cloakTexture = nullptr;
-             if (g->cloaked && g->hasDatablock) {
+             if ((g->cloaked || g->cloakLevel > 0.0f) && g->hasDatablock) {
                  auto block = nativeDatablocks.find((uint32_t)g->datablockId);
                  if (block != nativeDatablocks.end() &&
                      !block->second.decoded.cloakTexture.empty()) {
@@ -9584,7 +9596,8 @@ void Game::render(float dt) {
                  if (!cloakTexture) cloakTexture = r.loadTexture("textures/special/cloakTexture.png");
              }
              g->shape->cloakTextureOverride = cloakTexture && cloakTexture->loaded ? cloakTexture : nullptr;
-             if (defShader) defShader->setUniform("uScreenDoor", g->cloaked ? 0.5f : 0.0f);
+             g->cloakLevel = std::clamp(g->cloakLevel + (g->cloaked ? 1.0f : -1.0f) * dt / 0.5f, 0.0f, 1.0f);
+             g->shape->alphaScale = g->cloakLevel > 0.0f ? 0.125f + (1.0f - g->cloakLevel) * 0.875f : 1.0f;
               DTSShape::NodeOverride overrides[8]{};
               int overrideCount = 0;
               if (isTurretGhostClass(g->className) && g->hasTurretAim) {
@@ -9626,6 +9639,7 @@ void Game::render(float dt) {
                else
                    g->shape->render(0, overrideCount ? overrides : nullptr, overrideCount);
                g->shape->cloakTextureOverride = nullptr;
+               g->shape->alphaScale = 1.0f;
 
              // ShapeBase images are mounted on every owning shape, not only players.
              static std::unordered_map<std::string, DTSShape> liveImageCache;

@@ -107,6 +107,7 @@ uniform vec3 uSunColor = vec3(1.0);
 uniform vec3 uAmbient = vec3(0.3);
 uniform vec3 uCamPos = vec3(0);
 uniform vec4 uTint = vec4(1.0);
+uniform vec3 uUVShift = vec3(0.0); // cloak texture scroll
 uniform int uPointLightCount = 0;
 uniform vec3 uPointLightPos[8];
 uniform vec3 uPointLightColor[8];
@@ -210,7 +211,7 @@ float shadowPCF(vec4 shadowCoord) {
 }
 
 void main() {
-    vec4 texColor = uUseTexture ? texture(uTexture, vUV) : vec4(1.0);
+    vec4 texColor = uUseTexture ? texture(uTexture, vUV + uUVShift.xy) : vec4(1.0);
     vec4 col = vColor * texColor * uTint;
     if (uDebugInterior) {
         FragColor = vec4(1.0, 0.0, 0.0, 1.0);

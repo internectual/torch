@@ -477,7 +477,8 @@ void shapeImage(Stream& s) {
     }
     s.readFlag(); s.readF32(); s.readFlag(); s.readF32(); s.readFlag(); refs(s, 2);
     if (s.readFlag()) { f32s(s, 4); s.readFlag(); s.readF32(); }
-    s.readFlag();
+    const bool cloakable = s.readFlag();
+    if (activeDecoded) activeDecoded->imageCloakable = cloakable;
     const uint32_t lightType = s.readRange(0, 3);
     if (lightType != 0) { s.readF32(); s.readSigned(32); for (int i=0;i<4;++i)s.readFloat(7); }
     f32s(s, 3); s.readF32(); s.readF32(); refs(s, 1); s.readFlag();

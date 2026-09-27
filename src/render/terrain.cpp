@@ -1881,7 +1881,13 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
         }
         uint32_t flags = 0;
         if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialTextures.size()) {
-            Texture* texOverride = cloakTextureOverride;
+            // Originally translucent materials keep their own texture.
+            const uint32_t materialFlagsHere = mesh.materialIndex < (int)materialFlags.size()
+                ? materialFlags[mesh.materialIndex] : 0u;
+            Texture* texOverride = (materialFlagsHere & (MatFlag_Translucent | MatFlag_Additive))
+                ? nullptr : cloakTextureOverride;
+            if (shader) shader->setUniform("uUVShift", texOverride
+                ? Point3F{cloakShiftU, cloakShiftV, 0.0f} : Point3F{0.0f, 0.0f, 0.0f});
             auto& tex = texOverride ? *texOverride : materialTextures[mesh.materialIndex];
             if (tex.loaded) {
                 tex.bind(0);
@@ -2052,12 +2058,22 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     glDisable(GL_BLEND);
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
-    if (auto* fogShader = ShaderManager::getDefaultShader()) fogShader->setUniform("uFogAdditive", (int32_t)0);
+    if (auto* fogShader = ShaderManager::getDefaultShader()) { fogShader->setUniform("uFogAdditive", (int32_t)0); fogShader->setUniform("uUVShift", Point3F{0, 0, 0}); }
     } catch (const std::exception& e) {
         fprintf(stderr, "DBG DTSShape::render EXCEPTION: %s\n", e.what());
     } catch (...) {
         fprintf(stderr, "DBG DTSShape::render EXCEPTION: unknown\n");
     }
+}
+
+float DTSShape::cloakShiftU = 0.0f, DTSShape::cloakShiftV = 0.0f;
+void DTSShape::advanceCloakShift() {
+    // Different moduli keep the shimmer from repeating.
+    static int shiftX = 0, shiftY = 0;
+    shiftX = (shiftX + 1) % 128;
+    shiftY = (shiftY + 1) % 127;
+    cloakShiftU = shiftX / 127.0f;
+    cloakShiftV = shiftY / 126.0f;
 }
 
 int DTSShape::findNode(const std::string& name) const {
@@ -2503,7 +2519,7 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
     };
     auto meshVisibility = [&](size_t mi) {
         const int32_t oi = meshObject(mi);
-        return oi >= 0 && oi < (int32_t)objectVisible.size() ? objectVisible[oi] : 1.0f;
+        return (oi >= 0 && oi < (int32_t)objectVisible.size() ? objectVisible[oi] : 1.0f) * alphaScale;
     };
     auto renderAnimMesh = [&](size_t mi, bool doBlend) {
         MeshData& mesh = meshes[mi];
@@ -2533,7 +2549,13 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
         // Bind texture and set material properties
         uint32_t flags = 0;
         if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialTextures.size()) {
-            Texture* texOverride = cloakTextureOverride;
+            // Originally translucent materials keep their own texture.
+            const uint32_t materialFlagsHere = mesh.materialIndex < (int)materialFlags.size()
+                ? materialFlags[mesh.materialIndex] : 0u;
+            Texture* texOverride = (materialFlagsHere & (MatFlag_Translucent | MatFlag_Additive))
+                ? nullptr : cloakTextureOverride;
+            if (shader) shader->setUniform("uUVShift", texOverride
+                ? Point3F{cloakShiftU, cloakShiftV, 0.0f} : Point3F{0.0f, 0.0f, 0.0f});
             auto& tex = texOverride ? *texOverride : materialTextures[mesh.materialIndex];
             if (tex.loaded) {
                 if (const uint32_t ifl = texOverride ? 0u : iflTextureFor(mesh.materialIdx)) {
@@ -2703,5 +2725,5 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
     glDisable(GL_BLEND);
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
-    if (auto* fogShader = ShaderManager::getDefaultShader()) fogShader->setUniform("uFogAdditive", (int32_t)0);
+    if (auto* fogShader = ShaderManager::getDefaultShader()) { fogShader->setUniform("uFogAdditive", (int32_t)0); fogShader->setUniform("uUVShift", Point3F{0, 0, 0}); }
 }

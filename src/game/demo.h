@@ -720,6 +720,7 @@ struct GhostEntry {
     // Vehicle jets: the networked jetting flag and thrust direction, and the
     // client's back/bottom Activate/Maintain thread state.
     float spawnTime = -1.0f; // demo time this ghost first rendered
+    float cloakLevel = 0.0f;  // ShapeBase mCloakLevel, 0 -> 1 over 0.5 s
     // getRenderMuzzlePoint/Vector per image slot from the last render (Y-up
     // world): the image's Muzzlepoint node and its native +Y axis.
     Point3F muzzlePos[8]{}, muzzleDir[8]{};
