@@ -12124,10 +12124,44 @@ static void appendMissionFileEffects(const std::string& mission, std::vector<Mis
     for (auto& object : parseMisFile(misData)) {
         if (missionClassEquals(object.className, "Precipitation") ||
             missionClassEquals(object.className, "Lightning") ||
-            missionClassEquals(object.className, "AudioEmitter") ||
             missionClassEquals(object.className, "ParticleEmissionDummy") ||
             missionClassEquals(object.className, "ForceFieldBare"))
             objects.push_back(std::move(object));
+    }
+}
+
+// AudioEmitter::update: a profile supplies the file; its description (with
+// useProfileDescription) or the emitter's own description datablock
+// replaces the emitter's volume, looping and 3D distance fields.
+static void resolveDemoAudioEmitter(MisObject& object, const std::map<uint32_t, ParsedDataBlock>& blocks) {
+    auto prop = [&](const char* name) { return getProp(object.props, name); };
+    auto set = [&](const char* name, const std::string& value) {
+        for (auto& p : object.props) if (p.name == name) { p.value = value; return; }
+        object.props.push_back({name, value});
+    };
+    auto block = [&](const std::string& id) -> const V12::DecodedDataBlock* {
+        if (id.empty() || std::atoi(id.c_str()) <= 0) return nullptr;
+        auto it = blocks.find((uint32_t)std::atoi(id.c_str()));
+        return it == blocks.end() ? nullptr : &it->second.decoded;
+    };
+    // AudioEmitter::packUpdate sends only fields that differ from
+    // smDefaultDescription (volume 1, looping, 3D, distances 1..100).
+    const std::pair<const char*, const char*> defaults[] = {
+        {"volume", "1"}, {"islooping", "1"}, {"is3d", "1"}, {"mindistance", "1"}, {"maxdistance", "100"}};
+    for (const auto& [name, value] : defaults)
+        if (prop(name).empty()) set(name, value);
+    const V12::DecodedDataBlock* profile = block(prop("audioprofileid"));
+    if (profile && !profile->audioFilename.empty()) set("filename", profile->audioFilename);
+    const V12::DecodedDataBlock* description = block(prop("audiodescriptionid"));
+    if (profile && std::atoi(prop("useprofiledescription").c_str()) != 0)
+        description = block(std::to_string(profile->audioDescriptionRef));
+    if (description) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%g", description->audioVolume); set("volume", buf);
+        set("islooping", description->audioLooping ? "1" : "0");
+        set("is3d", description->audioIs3D ? "1" : "0");
+        snprintf(buf, sizeof(buf), "%g", description->audioMinDistance); set("mindistance", buf);
+        snprintf(buf, sizeof(buf), "%g", description->audioMaxDistance); set("maxdistance", buf);
     }
 }
 
@@ -12147,6 +12181,8 @@ std::vector<MisObject> Game::demoSceneObjects() const {
             object.props.push_back({lower, value});
         }
         terrain = terrain || missionClassEquals(object.className, "TerrainBlock");
+        if (missionClassEquals(object.className, "AudioEmitter"))
+            resolveDemoAudioEmitter(object, demoParser->getInitialBlock().dataBlocks);
         objects.push_back(std::move(object));
     }
     if (!terrain) objects.clear();

@@ -2879,31 +2879,33 @@ static void readTSStaticData(BitStream& bs, bool, const Vec3&, GhostEntry* entry
     setSceneProp(entry, "shapeName", shapeName);
 }
 
-static void readAudioEmitterData(BitStream& bs) {
-    bs.readFlag();
+static void readAudioEmitterData(BitStream& bs, GhostEntry* entry) {
+    // AudioEmitter::unpackUpdate; the mission-file field names.
+    bs.readFlag(); // initial update
     if (bs.readFlag()) {
-        bs.readPoint3F();
-        bs.readF32(); bs.readF32(); bs.readF32();
-        bs.readFlag();
+        const Vec3 position = bs.readPoint3F();
+        bs.readF32(); bs.readF32(); bs.readF32(); bs.readFlag(); // rotation
+        setSceneProp(entry, "position", sceneFloats({position.x, position.y, position.z}));
+        if (entry) entry->position = position;
     }
-    if (bs.readFlag() && bs.readFlag()) bs.readInt(11);
-    if (bs.readFlag() && bs.readFlag()) bs.readInt(11);
-    if (bs.readFlag()) bs.readString();
-    if (bs.readFlag()) bs.readFlag();
-    if (bs.readFlag()) bs.readF32();
-    if (bs.readFlag()) bs.readFlag();
-    if (bs.readFlag()) bs.readFlag();
-    if (bs.readFlag()) bs.readF32();
-    if (bs.readFlag()) bs.readF32();
-    if (bs.readFlag()) bs.readS32();
-    if (bs.readFlag()) bs.readS32();
-    if (bs.readFlag()) bs.readF32();
-    if (bs.readFlag()) bs.readPoint3F();
-    if (bs.readFlag()) bs.readS32();
-    if (bs.readFlag()) bs.readS32();
-    if (bs.readFlag()) bs.readS32();
-    if (bs.readFlag()) bs.readS32();
-    if (bs.readFlag()) bs.readFlag();
+    if (bs.readFlag()) setSceneProp(entry, "audioProfileId", bs.readFlag() ? std::to_string(bs.readInt(11)) : "0");
+    if (bs.readFlag()) setSceneProp(entry, "audioDescriptionId", bs.readFlag() ? std::to_string(bs.readInt(11)) : "0");
+    if (bs.readFlag()) setSceneProp(entry, "fileName", bs.readString());
+    if (bs.readFlag()) setSceneProp(entry, "useProfileDescription", bs.readFlag() ? "1" : "0");
+    if (bs.readFlag()) setSceneProp(entry, "volume", sceneFloats({bs.readF32()}));
+    if (bs.readFlag()) setSceneProp(entry, "isLooping", bs.readFlag() ? "1" : "0");
+    if (bs.readFlag()) setSceneProp(entry, "is3D", bs.readFlag() ? "1" : "0");
+    if (bs.readFlag()) setSceneProp(entry, "minDistance", sceneFloats({bs.readF32()}));
+    if (bs.readFlag()) setSceneProp(entry, "maxDistance", sceneFloats({bs.readF32()}));
+    if (bs.readFlag()) bs.readS32(); // cone inside angle
+    if (bs.readFlag()) bs.readS32(); // cone outside angle
+    if (bs.readFlag()) bs.readF32(); // cone outside volume
+    if (bs.readFlag()) bs.readPoint3F(); // cone vector
+    if (bs.readFlag()) setSceneProp(entry, "loopCount", std::to_string(bs.readS32()));
+    if (bs.readFlag()) setSceneProp(entry, "minLoopGap", std::to_string(bs.readS32()));
+    if (bs.readFlag()) setSceneProp(entry, "maxLoopGap", std::to_string(bs.readS32()));
+    if (bs.readFlag()) bs.readS32(); // audio type
+    if (bs.readFlag()) bs.readFlag(); // outside ambient
 }
 
 static void readTerrainBlockData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
@@ -3141,7 +3143,7 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
         }
     }
     else if (cn == "TSStatic") readTSStaticData(bs, isInitial, cp, entry);
-    else if (cn == "AudioEmitter") readAudioEmitterData(bs);
+    else if (cn == "AudioEmitter") readAudioEmitterData(bs, entry);
     else if (cn == "VehicleBlocker") readVehicleBlockerData(bs);
     else if (cn == "AIObjective") {
         readShapeBaseData(bs, isInitial, entry);
