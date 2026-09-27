@@ -9371,15 +9371,6 @@ void Game::render(float dt) {
                     if (thread.atEnd) animationPosition = thread.forward ? 1.0f : 0.0f;
                     break;
                 }
-                if (g->damageState >= 2) {
-                    for (const char* name : {"hulk", "destroyed", "wreck", "dead"}) {
-                        if (const auto* damageAnimation = findAnimation(*shape, name)) {
-                            animation = damageAnimation;
-                            animationPosition = 1.0f;
-                            break;
-                        }
-                    }
-                }
 
                 // Node overrides for turret barrel and player head
                  DTSShape::NodeOverride overrides[8];
@@ -9430,7 +9421,7 @@ void Game::render(float dt) {
                 // Arm and head aim ride on blend threads: the arm action
                 // (default "look") and "head" follow head pitch, "headside"
                 // follows head yaw. Dead players drop them.
-                DTSShape::BlendThread blends[4];
+                DTSShape::BlendThread blends[8];
                 int numBlends = 0;
                 if (playerAnimated && g->damageState < 1) {
                     auto animationIndex = [&](const char* name) -> int {
@@ -9495,6 +9486,22 @@ void Game::render(float dt) {
                     driveDirection(mg->jetBottom,
                                    VehicleJets::bottomActive(g->thrustDirection, g->vehicleJetting),
                                    "activatebot", "maintainbot");
+                }
+                // ShapeBase's position-controlled Damage and Visibility (hulk)
+                // threads (t2-mapper dtsDamage.ts): damage at the damage level
+                // 1 - health, which ShapeBase clears on destruction and Player
+                // keeps on corpses; visibility at 1 once destroyed.
+                {
+                    const float level = std::clamp(1.0f - HudParity::resourceFraction(g->health, g->maxHealth),
+                                                   0.0f, 1.0f);
+                    auto addPositioned = [&](const char* name, float position) {
+                        const DTSShape::Animation* clip = findAnimation(*shape, name);
+                        if (!clip || numBlends >= 8) return;
+                        blends[numBlends++] = {(int)(clip - shape->animations.data()),
+                                               std::clamp(position, 0.0f, 1.0f) * clip->duration};
+                    };
+                    addPositioned("damage", !isPlayer && level >= 1.0f && g->damageState == 2 ? 0.0f : level);
+                    addPositioned("visibility", g->damageState == 2 ? 1.0f : 0.0f);
                 }
                 // A shape with no running sequence of its own renders its
                 // first layered thread as the primary.
