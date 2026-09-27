@@ -929,6 +929,12 @@ public:
     std::unordered_map<int, Point3F> demoEyePositions;
     // Each demo ghost's camera node ("cam", else "eye") as last drawn.
     std::unordered_map<int, Point3F> demoCamPositions;
+    // Each demo ghost's shape frame (model x upOrientation) as last drawn:
+    // Player::getRenderEyeTransform's rotation when mounted.
+    std::unordered_map<int, MatrixF> demoShapeFrames;
+    // The recorder's mHead.z (freelook yaw) and whether it pilots a vehicle.
+    float demoHeadZ = 0.0f;
+    bool demoPiloting = false;
     // The recording's $firstPerson (initial block, then info blocks).
     bool demoRecordedFirstPerson = true;
     void applyDemoInfoBlock(const DemoBlock& block);
@@ -1109,6 +1115,8 @@ private:
         float cameraFov = -1.0f;
         int cameraMode = -1, orbitGhost = -1;
         bool recordedFirstPerson = true;
+        float headZ = 0.0f;
+        bool piloting = false;
         float orbitMinDist = 0.0f, orbitMaxDist = 0.0f;
         Point3F orbitPoint{};
     };

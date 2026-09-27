@@ -4190,13 +4190,23 @@ void World::render(const Point3F& cameraPos, float dt) {
                          (obj.forceFieldColor.b - obj.forceFieldPowerOffColor.b) * fieldAlpha,
                      obj.forceFieldPowerOffTranslucency +
                          (obj.forceFieldBaseTranslucency - obj.forceFieldPowerOffTranslucency) * fieldAlpha};
+                // ForceFieldBare::renderObject: the colour fades to the fog
+                // colour (alpha 0) by the fog at the field's distance.
+                ColorF fieldTint = tint;
+                if (!Engine::instance().game().isMapperMode()) {
+                    const Point3F centre = fieldModel.transform({0.5f, 0.5f, 0.5f});
+                    const float dx = centre.x - cameraPos.x, dy = centre.y - cameraPos.y, dz = centre.z - cameraPos.z;
+                    const float fogAmount = hazeAt(*this, std::sqrt(dx * dx + dy * dy + dz * dz));
+                    fieldTint = {tint.r + (fog.color.r - tint.r) * fogAmount, tint.g + (fog.color.g - tint.g) * fogAmount,
+                                 tint.b + (fog.color.b - tint.b) * fogAmount, tint.a * (1.0f - fogAmount)};
+                }
                 const uint32_t texture = obj.forceFieldFrames[frame];
-                r.drawTexturedQuad(transformed[0], transformed[1], transformed[2], transformed[3], texture, tint, 0, scroll, u, v + scroll);
-                r.drawTexturedQuad(transformed[4], transformed[7], transformed[6], transformed[5], texture, tint, 0, scroll, u, v + scroll);
-                r.drawTexturedQuad(transformed[0], transformed[4], transformed[5], transformed[1], texture, tint, 0, scroll, u, v + scroll);
-                r.drawTexturedQuad(transformed[3], transformed[2], transformed[6], transformed[7], texture, tint, 0, scroll, u, v + scroll);
-                r.drawTexturedQuad(transformed[0], transformed[3], transformed[7], transformed[4], texture, tint, 0, scroll, u, v + scroll);
-                r.drawTexturedQuad(transformed[1], transformed[5], transformed[6], transformed[2], texture, tint, 0, scroll, u, v + scroll);
+                r.drawTexturedQuad(transformed[0], transformed[1], transformed[2], transformed[3], texture, fieldTint, 0, scroll, u, v + scroll);
+                r.drawTexturedQuad(transformed[4], transformed[7], transformed[6], transformed[5], texture, fieldTint, 0, scroll, u, v + scroll);
+                r.drawTexturedQuad(transformed[0], transformed[4], transformed[5], transformed[1], texture, fieldTint, 0, scroll, u, v + scroll);
+                r.drawTexturedQuad(transformed[3], transformed[2], transformed[6], transformed[7], texture, fieldTint, 0, scroll, u, v + scroll);
+                r.drawTexturedQuad(transformed[0], transformed[3], transformed[7], transformed[4], texture, fieldTint, 0, scroll, u, v + scroll);
+                r.drawTexturedQuad(transformed[1], transformed[5], transformed[6], transformed[2], texture, fieldTint, 0, scroll, u, v + scroll);
             }
             glDepthMask(GL_TRUE);
             if (cullWasEnabled) glEnable(GL_CULL_FACE);
@@ -8008,8 +8018,21 @@ void Game::render(float dt) {
                         Point3F aim = playerAimDirection(g->bodyYaw, g->headYaw, g->headPitch, maxLookAngle);
                         // The recorder's own view comes from its moves, not ghost updates.
                         if (fpIdx == controlGhostIndex && spectateGhostIndex < 0 && demoHasOrientation) {
-                            const Vec3 view = T2Demo::cameraDirectionFromYawPitch(demoViewYaw, demoViewPitch);
-                            aim = {view.x, view.y, view.z};
+                            // Player::getRenderEyeTransform: the render
+                            // transform (the seat's mount frame when mounted)
+                            // turned by mHead.z then mHead.x.
+                            const auto frame = demoShapeFrames.find(fpIdx);
+                            if (g->mountObject >= 0 && frame != demoShapeFrames.end()) {
+                                const Vec3 local = T2Demo::cameraDirectionFromYawPitch(demoHeadZ, demoViewPitch);
+                                // The DTS loader's local frame is Torque's with y and z swapped.
+                                const Point3F world = frame->second.transformNormal({local.x, local.z, local.y});
+                                const float len = std::sqrt(world.x * world.x + world.y * world.y + world.z * world.z);
+                                if (len > 1e-6f) aim = {world.x / len, -world.z / len, world.y / len};
+                            } else {
+                                const Vec3 view = T2Demo::cameraDirectionFromYawPitch(demoViewYaw + demoHeadZ,
+                                                                                      demoViewPitch);
+                                aim = {view.x, view.y, view.z};
+                            }
                         }
                         // The animated eye node (as last drawn), else the
                         // default eye height.
@@ -9809,6 +9832,7 @@ void Game::render(float dt) {
                     if (eye->second >= 0 && eye->second < (int)nodes.size()) {
                         const MatrixF eyeWorld = shapeModel * nodes[eye->second];
                         demoEyePositions[idx] = {eyeWorld.m[0][3], eyeWorld.m[1][3], eyeWorld.m[2][3]};
+                        demoShapeFrames[idx] = shapeModel;
                     } else {
                         demoEyePositions.erase(idx);
                     }
@@ -12093,6 +12117,8 @@ Game::DemoViewSnapshot Game::captureDemoView() const {
     view.orbitMaxDist = demoOrbitMaxDist;
     view.orbitPoint = demoOrbitPoint;
     view.recordedFirstPerson = demoRecordedFirstPerson;
+    view.headZ = demoHeadZ;
+    view.piloting = demoPiloting;
     return view;
 }
 
@@ -12112,6 +12138,8 @@ void Game::restoreDemoView(const DemoViewSnapshot& view) {
     demoOrbitMaxDist = view.orbitMaxDist;
     demoOrbitPoint = view.orbitPoint;
     demoRecordedFirstPerson = view.recordedFirstPerson;
+    demoHeadZ = view.headZ;
+    demoPiloting = view.piloting;
 }
 
 // GameConnection::handleRecordedBlock info block: $firstPerson (byte 0) and
@@ -12130,8 +12158,33 @@ void Game::applyDemoMoveView(const DemoBlock& block) {
     if (block.type != T2Demo::BlockTypeMove || block.size < 64) return;
     DemoMove move = demoParser->readRawMove(block.data.data(), block.data.size());
     if (!demoMoveOrientationValid(move.yaw, move.pitch)) return;
-    T2Demo::accumulateViewMove(demoViewYaw, demoViewPitch, move.yaw, move.pitch,
-        demoAuthoredCamera ? T2Demo::CameraMaxViewPitch : T2Demo::PlayerMaxViewPitch);
+    if (demoAuthoredCamera) {
+        T2Demo::accumulateViewMove(demoViewYaw, demoViewPitch, move.yaw, move.pitch,
+                                   T2Demo::CameraMaxViewPitch);
+    } else {
+        // Player::updateMove: pitch always turns the head; yaw turns the
+        // head (within maxFreelookAngle) under freelook when seated at mount
+        // node 0 or in third person, else the body, while the head's yaw (and
+        // its pitch when controlling a vehicle) halves back.
+        const GhostEntry* control = demoParser->getGhostTracker().getGhost(controlGhostIndex);
+        float maxFreelook = 0.0f;
+        if (control && control->hasDatablock) {
+            const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+            auto data = blocks.find((uint32_t)control->datablockId);
+            if (data != blocks.end()) maxFreelook = data->second.decoded.playerMaxFreelookAngle;
+        }
+        const bool seated = control && control->mountObject >= 0 && control->mountNode == 0;
+        float yaw = move.yaw;
+        if (yaw > Math::PI) yaw -= 2.0f * Math::PI;
+        if (move.freeLook && (seated || !demoRecordedFirstPerson)) {
+            T2Demo::accumulateViewMove(demoViewYaw, demoViewPitch, 0.0f, move.pitch);
+            demoHeadZ = std::clamp(demoHeadZ + yaw, -maxFreelook, maxFreelook);
+        } else {
+            T2Demo::accumulateViewMove(demoViewYaw, demoViewPitch, move.yaw, move.pitch);
+            demoHeadZ *= 0.5f;
+            if (demoPiloting) demoViewPitch *= 0.5f;
+        }
+    }
     demoHasOrientation = true;
     // Camera::processTick FlyMode: the move's x/y/z along the camera's
     // right/forward/up at Camera::movementSpeed (40), doubled by a trigger.
@@ -12191,6 +12244,8 @@ void Game::applyDemoPacketView(const PacketData& pd) {
     if (pd.gameState.hasControlRotation) {
         demoViewYaw = pd.gameState.controlRotZ;
         demoViewPitch = pd.gameState.controlHeadX;
+        demoHeadZ = pd.gameState.controlHeadZ;
+        demoPiloting = pd.gameState.controlPilotedGhostIndex >= 0;
         demoHasOrientation = true;
         // Control passed to a Player: the view follows it, not a
         // Camera transform from earlier in the recording.

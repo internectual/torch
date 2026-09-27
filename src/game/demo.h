@@ -468,6 +468,8 @@ struct GameState {
     // Player::readPacketData view: mHead.x (pitch), mHead.z, mRot.z (yaw).
     bool hasControlRotation{};
     float controlHeadX{}, controlHeadZ{}, controlRotZ{};
+    // The vehicle the control player pilots (Player::readPacketData), or -1.
+    int controlPilotedGhostIndex{ -1 };
 };
 
 struct GhostUpdate {

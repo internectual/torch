@@ -1641,6 +1641,7 @@ GameState DemoParser::readGameState(BitStream& bs) {
                 gs.hasControlRotation = true;
                 if (bs.readFlag()) {
                     const int pilotedIndex = bs.readInt(T2Demo::GhostIdBitSize);
+                    gs.controlPilotedGhostIndex = pilotedIndex;
                     const GhostEntry* piloted = ghostTracker.getGhost(pilotedIndex);
                     if (piloted && (piloted->classId == 4)) {
                         bs.readF32(); bs.readF32();

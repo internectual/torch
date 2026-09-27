@@ -140,7 +140,7 @@ struct DecodedDataBlock {
     std::vector<std::string> constructorSequences;
     // PlayerData fields used by client-side animation.
     bool isPlayerData = false;
-    float playerMinLookAngle = 0.0f, playerMaxLookAngle = 0.0f;
+    float playerMinLookAngle = 0.0f, playerMaxLookAngle = 0.0f, playerMaxFreelookAngle = 0.0f;
     float playerRunSurfaceAngle = 0.0f;
     float playerBoxSize[3] = {0.0f, 0.0f, 0.0f}; // Torque x, y, z
     uint32_t playerJetEmitterRef = 0; // ParticleEmitterData at jetNozzle0/1

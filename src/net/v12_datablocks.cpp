@@ -545,7 +545,9 @@ void shapeImage(Stream& s) {
 void player(Stream& s) {
     shapeBase(s); s.readFlag();
     const float minLookAngle = s.readF32(), maxLookAngle = s.readF32();
-    f32s(s, 11);
+    const float maxFreelookAngle = s.readF32();
+    f32s(s, 10);
+    if (activeDecoded) activeDecoded->playerMaxFreelookAngle = maxFreelookAngle;
     const uint32_t jetEmitter = optionalRef(s);
     refs(s, 1); // jetEffect
     f32s(s, 9);
