@@ -1583,10 +1583,9 @@ VMValue TorqueScript::Impl::parseAdditive() {
         if (peekToken().type == TSTokenType::Plus) {
             nextToken();
             VMValue rhs = parseMultiplicative();
-            if (lhs.type == VMValue::String || rhs.type == VMValue::String)
-                lhs = VMValue(lhs.toString() + rhs.toString());
-            else
-                lhs = VMValue(lhs.toDouble() + rhs.toDouble());
+            // '+' is always numeric in TorqueScript ("1" + 1 is 2); '@'
+            // concatenates.
+            lhs = VMValue(lhs.toDouble() + rhs.toDouble());
             continue;
         }
         if (peekToken().type == TSTokenType::Minus) {

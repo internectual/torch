@@ -990,11 +990,8 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp,
                 if (stack.size() >= 2) {
                     VMValue b = stack.top(); stack.pop();
                     VMValue a = stack.top(); stack.pop();
-                    // String concatenation if either is string
-                    if (a.type == VMValue::String || b.type == VMValue::String)
-                        stack.push(VMValue(b.toString() + a.toString()));
-                    else
-                        stack.push(VMValue(a.toDouble() + b.toDouble()));
+                    // OP_ADD is a float add; OP_ADVANCE_STR concatenates.
+                    stack.push(VMValue(a.toDouble() + b.toDouble()));
                 }
                 break;
             }
