@@ -568,6 +568,7 @@ private:
     };
     std::vector<EffectDebris> effectDebris;
     std::vector<DTSShape> debrisShapes;
+    std::unordered_map<std::string, int> debrisShapeIndex; // path -> debrisShapes index (-1: failed)
 
     // ExplosionData dtsFileName: the explosion's own animated shape.
     struct EffectExplosionShape {

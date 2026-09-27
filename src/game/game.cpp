@@ -1513,6 +1513,7 @@ void World::cleanupMission() {
     cameras.clear();
     shapes.clear();
     debrisShapes.clear();
+    debrisShapeIndex.clear();
     projList.clear();
     fogVolumes.clear();
     skyMaterialList.clear();
@@ -1592,6 +1593,7 @@ bool World::load(const char* mapName) {
     }
     shapes.clear();
     debrisShapes.clear();
+    debrisShapeIndex.clear();
     worldObjects.clear();
     missionObjectives.clear();
     navGraph = {};
@@ -5146,15 +5148,19 @@ void World::spawnExplosionEffect(const Point3F& pos,
                 debris.rotation = data.minSpin + random01 * (data.maxSpin - data.minSpin);
                 std::string path = normalizeShapePath(data.shape.empty() ? debrisBlock->debrisShape : data.shape);
                 if (!path.empty()) {
-                    auto shapeData = Engine::instance().fs().read(path.c_str());
-                    if (!shapeData.empty()) {
+                    auto cached = debrisShapeIndex.find(path);
+                    if (cached == debrisShapeIndex.end()) {
+                        int index = -1;
+                        auto shapeData = Engine::instance().fs().read(path.c_str());
                         DTSShape shape;
                         shape.name = path;
-                        if (shape.load(shapeData.data(), shapeData.size())) {
-                            debris.shapeIndex = (int)debrisShapes.size();
+                        if (!shapeData.empty() && shape.load(shapeData.data(), shapeData.size())) {
+                            index = (int)debrisShapes.size();
                             debrisShapes.push_back(std::move(shape));
                         }
+                        cached = debrisShapeIndex.emplace(path, index).first;
                     }
+                    debris.shapeIndex = cached->second;
                 }
                 effectDebris.push_back(std::move(debris));
             }
