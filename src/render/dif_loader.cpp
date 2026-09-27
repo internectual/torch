@@ -976,7 +976,23 @@ static bool interiorToMeshes(DIFInterior& interior,
                         collVerts.push_back(vi);
                     }
                 }
+                const size_t firstIndex = outCollIndices->size();
                 stripToTriangles(collVerts, *outCollIndices, 0);
+                // Collision faces point toward free space: the surface plane
+                // (its flip bit applied), whatever the strip's parity.
+                const Point3F planeNormal = getPlaneNormal(surf.planeIndex);
+                auto& idx = *outCollIndices;
+                const auto& v = *outCollVerts;
+                for (size_t t = firstIndex; t + 2 < idx.size(); t += 3) {
+                    const float* a = &v[(size_t)idx[t] * 3];
+                    const float* b = &v[(size_t)idx[t + 1] * 3];
+                    const float* c = &v[(size_t)idx[t + 2] * 3];
+                    const float ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+                    const float wx = c[0] - a[0], wy = c[1] - a[1], wz = c[2] - a[2];
+                    const float nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+                    if (nx * planeNormal.x + ny * planeNormal.y + nz * planeNormal.z < 0.0f)
+                        std::swap(idx[t + 1], idx[t + 2]);
+                }
             }
         }
         Console::instance().printf(LogLevel::Info, "  DIF: %zu hull surfaces processed, %zu collision verts, %zu indices",
