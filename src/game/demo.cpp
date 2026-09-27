@@ -1,3 +1,4 @@
+#include <set>
 #include "game/demo.h"
 #include "net/v12_datablocks.h"
 #include "net/v12_registry.h"
@@ -1145,7 +1146,7 @@ void DemoParser::handleHudRemoteCommand(const std::string& funcName,
                                         const std::vector<std::string>& args) {
     std::string name = funcName;
     for (char& c : name) c = (char)std::tolower((unsigned char)c);
-    if (name.rfind("clientcmd", 0) == 0) name.erase(0, 8);
+    if (name.rfind("clientcmd", 0) == 0) name.erase(0, 9);
     const bool includesFunction = !args.empty() && args[0] == funcName;
     auto arg = [&](size_t index) -> std::string {
         const size_t actual = index + (includesFunction ? 1 : 0);

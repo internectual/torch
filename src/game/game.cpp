@@ -7033,6 +7033,13 @@ void Game::update(float dt) {
                                 setDemoMatchEnded(true);
                             else if (command == "ServerMessage" && type == "MsgClientReady")
                                 setDemoMatchEnded(false);
+                            // HUD remote commands (clientCmdSetWeaponsHudItem, ...)
+                            // change HUD state; apply them before the chat filter
+                            // below skips them.
+                            if (command != "ServerMessage") {
+                                demoParser->handleHudRemoteCommand(command, ev.arguments);
+                                dispatchHudClientCommand(ev.arguments);
+                            }
                         }
                         if (ev.message.empty()) continue;
                         std::string displayText = ev.message;
@@ -7061,9 +7068,6 @@ void Game::update(float dt) {
                                 if (auto* ts = Engine::instance().script().ts())
                                     ts->dispatchMessageCallback(ev.arguments[1], callbackArgs);
                             }
-                        } else if (ev.classId == T2Demo::NetEventClassFirst + 9) {
-                            demoParser->handleHudRemoteCommand(ev.arguments[0], ev.arguments);
-                            dispatchHudClientCommand(ev.arguments);
                         }
                         DemoTimedEvent te;
                         te.time = blockTime;

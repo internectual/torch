@@ -93,10 +93,6 @@ void HUD::render(Game* game) {
     int32_t w = Engine::instance().platform().width();
     int32_t h = Engine::instance().platform().height();
 
-    // Save perspective projection for 3D name tag projection
-    MatrixF perspProj = r.projectionMatrix();
-    MatrixF perspView = r.viewMatrix();
-
     // Push 2D ortho projection for HUD
     MatrixF ortho;
     ortho.identity();
@@ -298,73 +294,6 @@ void HUD::render(Game* game) {
                 }
                 font->render(line, 20.0f, cy, chatCol, 2.0f);
                 cy += 20.0f;
-            }
-        }
-
-        // Player name tags
-        if (auto* dp = game->getDemoParser()) {
-            const GhostTracker& gt = dp->getGhostTracker();
-            auto indices = gt.getAllIndices();
-            int w = Engine::instance().renderer().config().width;
-            int h = Engine::instance().renderer().config().height;
-            // Restore perspective projection for 3D-to-2D projection
-            r.setProjection(perspProj);
-            r.setView(perspView);
-            for (int gi : indices) {
-                const GhostEntry* g = gt.getGhost(gi);
-                if (!g || g->playerName.empty()) continue;
-                // AIPlayer is a Player subclass in Tribes 2. Keep bot name
-                // tags consistent with observer targeting and live triggers.
-                if (!ObserverParity::isPlayerClass(g->className)) continue;
-                 // Demo ghosts retain their native Torque Z-up coordinates;
-                 // project the same Y-up position used by shape rendering.
-                 const Point3F renderPosition = Math::torquePointToYUp(
-                     {g->position.x, g->position.y, g->position.z});
-                 float dx = renderPosition.x - r.cameraPos.x;
-                 float dy = renderPosition.y - r.cameraPos.y;
-                 float dz = renderPosition.z - r.cameraPos.z;
-                 float dist = sqrtf(dx*dx + dy*dy + dz*dz);
-                 if (dist > 500.0f) continue;
-                 // Project world position to screen (above head)
-                 Point3F wp = {renderPosition.x, renderPosition.y + 2.5f,
-                               renderPosition.z};
-                const MatrixF& view = r.viewMatrix();
-                const MatrixF& proj = r.projectionMatrix();
-                 const float* v = &view.m[0][0];
-                 // MatrixF is row-major in its transform/operator* methods.
-                 // Using column-major indexing here displaced name tags and
-                 // rejected the near half of the visible depth range.
-                 float cx = wp.x*v[0]+wp.y*v[1]+wp.z*v[2]+v[3];
-                 float cy = wp.x*v[4]+wp.y*v[5]+wp.z*v[6]+v[7];
-                 float cz = wp.x*v[8]+wp.y*v[9]+wp.z*v[10]+v[11];
-                 float cw = wp.x*v[12]+wp.y*v[13]+wp.z*v[14]+v[15];
-                 const float* p = &proj.m[0][0];
-                 float nx = cx*p[0]+cy*p[1]+cz*p[2]+cw*p[3];
-                 float ny = cx*p[4]+cy*p[5]+cz*p[6]+cw*p[7];
-                 float nz = cx*p[8]+cy*p[9]+cz*p[10]+cw*p[11];
-                 float nw = cx*p[12]+cy*p[13]+cz*p[14]+cw*p[15];
-                 if (nw <= 0 || nz < -nw || nz > nw) continue;
-                float invW = 1.0f / nw;
-                float sx = (nx*invW*0.5f+0.5f)*w;
-                float sy = (-ny*invW*0.5f+0.5f)*h;
-                // Background box for name
-                float tw = (float)g->playerName.size() * 10.0f;
-                r.drawBox({{sx - tw/2 - 4, sy - 2, 0}, {sx + tw/2 + 4, sy + 16, 0}}, {0,0,0,0.5f});
-                 // Tribes 2 colors name tags from the replicated sensor group,
-                 // not from the selected skin filename. Custom skins must not
-                 // make a player's team appear to change.
-                 ColorF nameCol = HudParity::teamColor(g->teamId);
-                 font->render(g->playerName.c_str(), sx - tw/2, sy, nameCol, 2.0f);
-                // Health bar below name
-                 // Ghosts replicate their datablock maximum health.  Heavy
-                 // armor and custom PlayerData otherwise show an incorrectly
-                 // full/empty observer health bar when using a hard-coded 100.
-                 float hp = HudParity::resourceFraction(g->health, g->maxHealth);
-                float barW = 60.0f, barH = 6.0f;
-                float bx = sx - barW/2, by = sy + 18;
-                ColorF fgCol = hp > 0.5f ? ColorF{0,1,0,0.9f} : (hp > 0.25f ? ColorF{1,1,0,0.9f} : ColorF{1,0,0,0.9f});
-                r.drawBox({{bx - 1, by - 1, 0}, {bx + barW + 1, by + barH + 1, 0}}, {0,0,0,0.5f});
-                r.drawBox({{bx, by, 0}, {bx + barW * hp, by + barH, 0}}, fgCol);
             }
         }
 
