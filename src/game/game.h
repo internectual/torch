@@ -1082,8 +1082,6 @@ private:
     float whiteOut = -1.0f;     // white screen flash during demo playback
     float demoCameraFov = -1.0f; // FOV from demo stream
     bool demoAuthoredCamera = false;
-    float shakeIntensity = 0.0f; // camera shake for explosions
-    Point3F shakeOffset{0,0,0};
     std::vector<DemoTimedEvent> demoEventLog;
     bool demoShowEvents = true;
     // Orbit camera for demo spectator mode

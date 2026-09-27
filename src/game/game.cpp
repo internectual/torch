@@ -6922,17 +6922,6 @@ void Game::update(float dt) {
                 : dt * playbackRate;
             demoInterpolationDt = playbackDt;
             demoTime = std::min(demoTime + playbackDt, demoTotalTime);
-            // Decay camera shake
-            if (shakeIntensity > 0) {
-                shakeIntensity = std::max(0.0f, shakeIntensity - dt * 8.0f);
-                const Vec3 unit = T2Demo::cameraShakeOffset(
-                    demoTime, {1.0f, 1.0f, 1.0f}, {1.7f, 2.3f, 1.1f},
-                    {0.0f, 0.37f, 0.71f});
-                shakeOffset = {unit.x * shakeIntensity, unit.y * shakeIntensity,
-                               unit.z * shakeIntensity};
-            } else {
-                shakeOffset = {0,0,0};
-            }
             int blocksThisFrame;
             if (demoStepRequest) {
                 blocksThisFrame = std::min(stepBlocks, 500);
@@ -7154,9 +7143,6 @@ void Game::update(float dt) {
                     if (pd.gameState.hasWhiteOut)
                         whiteOut = pd.gameState.whiteOut;
                      if (pd.gameState.cameraFov > 0) demoCameraFov = pd.gameState.cameraFov;
-                    // Camera shake on damage
-                    if (pd.gameState.damageFlash > 0.5f)
-                        shakeIntensity = std::max(shakeIntensity, pd.gameState.damageFlash * 3.0f);
                     // Store control object ghost index for highlight
                      if (pd.gameState.controlObjectGhostIndex >= 0)
                          controlGhostIndex = pd.gameState.controlObjectGhostIndex;
@@ -8072,9 +8058,9 @@ void Game::render(float dt) {
     }
     // Apply camera shake
     const Point3F nativeShake = w ? w->cameraShakeOffset(camPos) : Point3F{};
-    Point3F finalCam = {camPos.x + shakeOffset.x + nativeShake.x,
-                        camPos.y + shakeOffset.y + nativeShake.y,
-                        camPos.z + shakeOffset.z + nativeShake.z};
+    Point3F finalCam = {camPos.x + nativeShake.x,
+                        camPos.y + nativeShake.y,
+                        camPos.z + nativeShake.z};
     bool cameraOverride = false;
     // Diagnostic camera override for mapper analysis (TORCH_CAM=px,py,pz,tx,ty,tz)
     if (const char* camOv = getenv("TORCH_CAM")) {
@@ -11716,8 +11702,6 @@ void Game::resetDemoEffects() {
     demoAudioEventsPlayed.clear();
     damageFlash = -1.0f;
     whiteOut = -1.0f;
-    shakeIntensity = 0.0f;
-    shakeOffset = {0, 0, 0};
     if (w) w->clearEffects();
 }
 
@@ -11758,7 +11742,6 @@ bool Game::tryLoadDemoMission(const std::string& mission, bool resetParserState)
     targetFinderShown = false;
     damageFlash = -1.0f;
     whiteOut = -1.0f;
-    shakeIntensity = 0.0f;
     auto& missionGui = Engine::instance().guiRenderer();
     missionGui.clearDialogs();
     missionGui.setContent("PlayGui");
@@ -11883,8 +11866,6 @@ void Game::resetLiveMissionState() {
     serverPlayerGhostSynced = false;
     damageFlash = -1.0f;
     whiteOut = -1.0f;
-    shakeIntensity = 0.0f;
-    shakeOffset = {0, 0, 0};
     if (w) w->clearEffects();
     if (w) w->resetTriggerTracking();
     if (hud) hud->resetState();
