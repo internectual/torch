@@ -2079,9 +2079,34 @@ void Engine::run() {
     int frameCount = 0;
 
     while (running && plat->isRunning()) {
+        // Every frame path (gameplay and demos included) honours
+        // -quit-after-frames, not only the shell path at the loop's end.
+        if (maxFrames > 0 && plat->frameCount() >= (uint64_t)maxFrames) {
+            quit();
+            break;
+        }
         double now = Timer::now();
         float dt = (float)(now - lastTime);
         lastTime = now;
+
+        // FPS counter, kept at the loop head so the gameplay, demo and mapper paths,
+        // which swap and continue early, update $FPS::Real too.
+        frameCount++;
+        fpsTimer += dt;
+        if (fpsTimer >= 1.0f) {
+            Console::instance().setVariable("$FPS::Real", std::to_string(frameCount).c_str());
+            Console::instance().setVariable("$OpenGL::triCount3",
+                                             std::to_string(ren->stats.triangles).c_str());
+            char title[128];
+            if (mapperMode)
+                snprintf(title, sizeof(title), "Torch Mapper Mode - %s - %d FPS", mapperMap.c_str(), frameCount);
+            else
+                snprintf(title, sizeof(title), "Torch - %d FPS tab=%d", frameCount, g_debugTab);
+            plat->setTitle(title);
+            //Console::instance().printf(LogLevel::Debug, "Heartbeat: %d FPS, dialogs=%zu", frameCount, gui ? gui->dialogCount() : 0);
+            frameCount = 0;
+            fpsTimer = 0;
+        }
 
         // Cap dt
         if (dt > 0.1f) dt = 0.1f;
@@ -3603,26 +3628,6 @@ void Engine::run() {
         if (showMinimap && g->isDemoPlaying()) renderMinimap();
 
         plat->swapBuffers();
-
-        // FPS counter
-        frameCount++;
-        if (maxFrames > 0 && plat->frameCount() >= (uint64_t)maxFrames)
-            quit();
-        fpsTimer += dt;
-        if (fpsTimer >= 1.0f) {
-            Console::instance().setVariable("$FPS::Real", std::to_string(frameCount).c_str());
-            Console::instance().setVariable("$OpenGL::triCount3",
-                                             std::to_string(ren->stats.triangles).c_str());
-            char title[128];
-            if (mapperMode)
-                snprintf(title, sizeof(title), "Torch Mapper Mode - %s - %d FPS", mapperMap.c_str(), frameCount);
-            else
-                snprintf(title, sizeof(title), "Torch - %d FPS tab=%d", frameCount, g_debugTab);
-            plat->setTitle(title);
-            //Console::instance().printf(LogLevel::Debug, "Heartbeat: %d FPS, dialogs=%zu", frameCount, gui ? gui->dialogCount() : 0);
-            frameCount = 0;
-            fpsTimer = 0;
-        }
     }
 }
 
