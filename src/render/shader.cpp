@@ -580,6 +580,33 @@ uniform vec4 uFogBands = vec4(0.0, 60.0, 0.0, 0.0);
 uniform float uSkyRadius = 1.0;
 out vec4 FragColor;
 
+// Sky::calcBans / renderBans: the view ray against the 16-sided strip
+// (rings h0 at alpha 1, h1 at alpha0) and the fan to the apex (alpha1),
+// alphas quantised to 8 bits as the vertex colours were. GL interpolated
+// colour across the planar faces, not by sphere height.
+float skyFogAlpha(vec3 direction) {
+    float h0 = uFogBands.x;
+    float h1 = uFogBands.y;
+    float a0 = floor(uFogBands.z * 255.0) / 255.0;
+    float a1 = floor(uFogBands.w * 255.0) / 255.0;
+    if (direction.y <= 0.0) return 1.0;
+    float horizontal = length(direction.xz);
+    if (horizontal < 0.000001) return a1;
+    float halfSector = 3.141592653589793 / 16.0;
+    float angle = mod(atan(direction.z, direction.x), 2.0 * halfSector) - halfSector;
+    float polygon = cos(halfSector) / cos(angle);
+    float r0 = sqrt(max(uSkyRadius * uSkyRadius - h0 * h0, 0.0)) * polygon;
+    float r1 = sqrt(max(uSkyRadius * uSkyRadius - h1 * h1, 0.0)) * polygon;
+    float slope = direction.y / horizontal;
+    if (slope * r0 <= h0) return 1.0;
+    if (h1 > h0 && slope * r1 <= h1) {
+        float t = (slope * r0 - h0) / ((h1 - h0) - slope * (r1 - r0));
+        return mix(1.0, a0, clamp(t, 0.0, 1.0));
+    }
+    float t = (slope * r1 - h1) / (uSkyRadius - h1 + slope * r1);
+    return mix(a0, a1, clamp(t, 0.0, 1.0));
+}
+
 void main() {
     vec3 dir = normalize(vWorldDir);
     if (uUseGradient) {
@@ -588,13 +615,7 @@ void main() {
     } else {
         FragColor = texture(uSkybox, dir);
     }
-    float s = dir.y * uSkyRadius;
-    float fogAlpha = s <= uFogBands.x ? 1.0 :
-        (s <= uFogBands.y ? mix(1.0, uFogBands.z,
-            (s - uFogBands.x) / max(uFogBands.y - uFogBands.x, 0.001)) :
-         mix(uFogBands.z, uFogBands.w,
-            clamp((s - uFogBands.y) / max(uSkyRadius - uFogBands.y, 0.001), 0.0, 1.0)));
-    FragColor.rgb = mix(FragColor.rgb, uFogColor, fogAlpha);
+    FragColor.rgb = mix(FragColor.rgb, uFogColor, skyFogAlpha(dir));
 }
 )";
 
@@ -651,26 +672,66 @@ static const char* cloudVert = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec2 aUV;
+layout(location = 2) in float aAlpha;
 uniform mat4 uMVP;
+uniform vec3 uUVOffset;
 out vec2 vUV;
+out float vAlpha;
+out vec3 vEyeRay;
 void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    vUV = aUV;
+    vUV = aUV + uUVOffset.xy;
+    vAlpha = aAlpha;
+    // Camera-centred: the local position is the eye ray.
+    vEyeRay = aPos;
+    vec4 pos = uMVP * vec4(aPos, 1.0);
+    gl_Position = pos.xyww;
 }
 )";
 
 static const char* cloudFrag = R"(
 #version 330 core
 in vec2 vUV;
+in float vAlpha;
+in vec3 vEyeRay;
 uniform sampler2D uTexture;
-uniform float uOpacity;
-uniform float uScrollU;
+uniform vec3 uFogColor;
+uniform vec4 uFogBands = vec4(0.0, 60.0, 0.0, 0.0);
+uniform float uSkyRadius = 1.0;
 out vec4 FragColor;
+// Sky::calcBans / renderBans: the view ray against the 16-sided strip
+// (rings h0 at alpha 1, h1 at alpha0) and the fan to the apex (alpha1),
+// alphas quantised to 8 bits as the vertex colours were. GL interpolated
+// colour across the planar faces, not by sphere height.
+float skyFogAlpha(vec3 direction) {
+    float h0 = uFogBands.x;
+    float h1 = uFogBands.y;
+    float a0 = floor(uFogBands.z * 255.0) / 255.0;
+    float a1 = floor(uFogBands.w * 255.0) / 255.0;
+    if (direction.y <= 0.0) return 1.0;
+    float horizontal = length(direction.xz);
+    if (horizontal < 0.000001) return a1;
+    float halfSector = 3.141592653589793 / 16.0;
+    float angle = mod(atan(direction.z, direction.x), 2.0 * halfSector) - halfSector;
+    float polygon = cos(halfSector) / cos(angle);
+    float r0 = sqrt(max(uSkyRadius * uSkyRadius - h0 * h0, 0.0)) * polygon;
+    float r1 = sqrt(max(uSkyRadius * uSkyRadius - h1 * h1, 0.0)) * polygon;
+    float slope = direction.y / horizontal;
+    if (slope * r0 <= h0) return 1.0;
+    if (h1 > h0 && slope * r1 <= h1) {
+        float t = (slope * r0 - h0) / ((h1 - h0) - slope * (r1 - r0));
+        return mix(1.0, a0, clamp(t, 0.0, 1.0));
+    }
+    float t = (slope * r1 - h1) / (uSkyRadius - h1 + slope * r1);
+    return mix(a0, a1, clamp(t, 0.0, 1.0));
+}
+
 void main() {
-    vec2 uv = vec2(vUV.x + uScrollU, vUV.y);
-    vec4 tex = texture(uTexture, uv);
-    FragColor = vec4(tex.rgb, tex.a * uOpacity);
-    if (FragColor.a < 0.01) discard;
+    // GL_MODULATE with white vertex colour: texture x vertex alpha.
+    vec4 tex = texture(uTexture, vUV);
+    // The fog bands draw over the clouds (walls -> clouds -> strip/fan);
+    // blending toward the fog colour by the band alpha reproduces that.
+    vec3 color = mix(tex.rgb, uFogColor, skyFogAlpha(normalize(vEyeRay)));
+    FragColor = vec4(color, tex.a * vAlpha);
 }
 )";
 

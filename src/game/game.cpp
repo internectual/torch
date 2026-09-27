@@ -1732,8 +1732,9 @@ bool World::load(const char* mapName) {
     loaded = false;
 
     // Cloud layer properties (populated from Sky object if .mis available)
-    float cloudHeights[3] = {0.7f, 0.5f, 0.3f};
-    float cloudSpeeds[3] = {0.3f, 0.15f, 0.08f};
+    // Sky constructor defaults (cloudHeightPer, cloudSpeed1..3).
+    float cloudHeights[3] = {0.35f, 0.25f, 0.2f};
+    float cloudSpeeds[3] = {0.0001f, 0.0002f, 0.0003f};
     bool missionHasTerrainBlock = false;
 
     if (!misData.empty()) {
@@ -1883,8 +1884,11 @@ bool World::load(const char* mapName) {
             std::string windStr = getProp(skyObj->props, "windVelocity");
             if (!windStr.empty()) {
                 float wx, wy, wz;
-                if (sscanf(windStr.c_str(), "%f %f %f", &wx, &wy, &wz) == 3)
+                if (sscanf(windStr.c_str(), "%f %f %f", &wx, &wy, &wz) == 3) {
                     setTorchWindVelocity(Math::torquePointToYUp({wx, wy, wz}));
+                    skyBox.windX = wx;
+                    skyBox.windY = wy;
+                }
             }
             std::string fogDist = getProp(skyObj->props, "fogdistance");
             if (!fogDist.empty()) {
@@ -1939,7 +1943,7 @@ bool World::load(const char* mapName) {
                 if (!hStr.empty()) cloudHeights[ci] = (float)std::atof(hStr.c_str());
                 std::string sKey = "cloudspeed" + std::to_string(ci + 1);
                 std::string sStr = getProp(skyObj->props, sKey.c_str());
-                if (!sStr.empty()) cloudSpeeds[ci] = (float)std::atof(sStr.c_str()) * 1000.0f;
+                if (!sStr.empty()) cloudSpeeds[ci] = (float)std::atof(sStr.c_str());
             }
         }
 
@@ -3059,8 +3063,7 @@ bool World::load(const char* mapName) {
         // Stock DML files commonly omit the emap while still defining clouds.
         for (size_t ci = 0; ci < cloudPaths.size() && ci < 3; ci++) {
             Sky::CloudLayer layer;
-            layer.scrollSpeed = cloudSpeeds[ci];
-            layer.opacity = (ci == 0) ? 0.6f : (ci == 1) ? 0.4f : 0.3f;
+            layer.speed = cloudSpeeds[ci];
             layer.height = cloudHeights[ci];
 
             bool found = false;

@@ -412,14 +412,20 @@ struct Sky {
     void render(const MatrixF& view, const MatrixF& proj, float cameraHeight = 0.0f);
 
     // Cloud layers (from DML lines 7-9)
+    // Sky cloud layers (Cloud::setPoints / calcAlpha): a 5x5 dome of
+    // radius 0.95 visibleDistance around the eye, heights cloudHeightPer
+    // (centre), -0.05 (inner ring) and 0.05 (edge), UVs 0..4, alpha
+    // 1.3 - d / radius (0 below 0.4, 1 above 0.8).
     struct CloudLayer {
         Texture texture;
-        float scrollSpeed = 0.0f;   // horizontal scroll speed
-        float opacity = 1.0f;
-        float height = 0.5f;        // 0-1, position on sky dome
+        float speed = 0.0f;         // cloudSpeedN
+        float height = 0.35f;       // cloudHeightPer[N]
+        uint32_t vao = 0, vbo = 0, ebo = 0;
+        float builtRadius = -1.0f;
     };
     std::vector<CloudLayer> cloudLayers;
-    uint32_t cloudVAO = 0, cloudVBO = 0;
+    // Sky::windVelocity (Torque x, y): the cloud scroll direction.
+    float windX = 0.0f, windY = 0.0f;
 };
 
 class Renderer {

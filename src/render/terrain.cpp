@@ -1034,14 +1034,18 @@ void Sky::reset() {
         if (cubemap) glDeleteTextures(1, &cubemap);
         if (vao) glDeleteVertexArrays(1, &vao);
         if (vbo) glDeleteBuffers(1, &vbo);
-        if (cloudVAO) glDeleteVertexArrays(1, &cloudVAO);
-        if (cloudVBO) glDeleteBuffers(1, &cloudVBO);
+        for (auto& layer : cloudLayers) {
+            if (layer.vao) glDeleteVertexArrays(1, &layer.vao);
+            if (layer.vbo) glDeleteBuffers(1, &layer.vbo);
+            if (layer.ebo) glDeleteBuffers(1, &layer.ebo);
+        }
         emap.destroy();
         for (auto& layer : cloudLayers) layer.texture.destroy();
     }
-    cubemap = vao = vbo = cloudVAO = cloudVBO = 0;
+    cubemap = vao = vbo = 0;
     emap = {};
     cloudLayers.clear();
+    windX = windY = 0.0f;
     fogVolumes.clear();
     loaded = false;
 }
@@ -1214,20 +1218,22 @@ void Sky::render(const MatrixF& view, const MatrixF& proj, float cameraHeight) {
         }
     }
     if (lastVolume >= 0) {
-        fogVisibility = fogVolumes[lastVolume].visibleDistance;
+        // Sky::calcPoints: the last volume's visibility, reduced by every
+        // denser volume before it (each against the last volume's own
+        // visibility, not the running value).
+        const float lastVisibility = fogVolumes[lastVolume].visibleDistance;
+        fogVisibility = lastVisibility;
         fogPercentage = fogVolumes[firstVolume].percentage;
-        // V12 attenuates the final volume's visibility through denser slabs
-        // below it instead of selecting only the camera's current slab.
         for (int i = 0; i < lastVolume; ++i) {
             const auto& volume = fogVolumes[i];
             if (!fogVolumeIsUsable({volume.visibleDistance, volume.minHeight,
                                     volume.maxHeight, volume.percentage}) ||
-                volume.visibleDistance >= fogVisibility) continue;
+                volume.visibleDistance >= lastVisibility) continue;
             const float depthInVolume = cameraHeight < volume.minHeight
                 ? volume.maxHeight - volume.minHeight
                 : volume.maxHeight - cameraHeight;
             if (depthInVolume > 0.0f)
-                fogVisibility -= fogVisibility * depthInVolume / volume.visibleDistance;
+                fogVisibility -= lastVisibility * depthInVolume / volume.visibleDistance;
         }
     }
     const float radius = 0.95f * visibleDistance / std::sqrt(3.0f);
@@ -1288,66 +1294,102 @@ void Sky::render(const MatrixF& view, const MatrixF& proj, float cameraHeight) {
 
     if (skyCullWasOn) glEnable(GL_CULL_FACE);
 
-    // Render cloud layers (scrolling textured quads at sky distance)
+    // Cloud layers, drawn after the sky box in index order, camera-centred.
     if (!cloudLayers.empty()) {
         auto* cloudShader = ShaderManager::getCloudShader();
         if (cloudShader) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
+            glDepthMask(GL_FALSE);
+            glDisable(GL_CULL_FACE);
             cloudShader->bind();
-            cloudShader->setUniform("uProjection", proj);
-            cloudShader->setUniform("uView", view);
+            const Point3F cameraPosition = view.inverse().transform({0, 0, 0});
+            MatrixF model;
+            model.setTranslation(cameraPosition);
+            cloudShader->setUniform("uMVP", proj * view * model);
+            cloudShader->setUniform("uFogColor", Point3F{fogColor.r, fogColor.g, fogColor.b});
+            cloudShader->setUniform("uFogBands", ColorF{h0, h1, a0, a1});
+            cloudShader->setUniform("uSkyRadius", radius);
+            // Cloud::updateCoord: offset += wind x speed x (elapsed ms / 32),
+            // wrapped to [0, 1).
+            const float ticks = Engine::instance().game().gameTime() * 1000.0f / 32.0f;
+            float windU = windY, windV = -windX;
+            const float windLength = std::sqrt(windU * windU + windV * windV);
+            if (windLength > 0.0f) { windU /= windLength; windV /= windLength; }
+            else { windU = 1.0f; windV = 0.0f; }
+            const float domeRadius = 0.95f * (visibleDistance > 0.0f ? visibleDistance : 500.0f);
 
-            float time = Engine::instance().game().gameTime();
-
-            for (size_t ci = 0; ci < cloudLayers.size(); ci++) {
-                auto& cloud = cloudLayers[ci];
+            for (auto& cloud : cloudLayers) {
                 if (!cloud.texture.loaded) continue;
-
-                // Create cloud VAO/VBO if needed
-                if (!cloudVAO) {
-                    float verts[] = {
-                        // pos (x,y,z) + uv (u,v)
-                        -1, 0, -1,  0, 0,
-                         1, 0, -1,  1, 0,
-                         1, 0,  1,  1, 1,
-                        -1, 0, -1,  0, 0,
-                         1, 0,  1,  1, 1,
-                        -1, 0,  1,  0, 1,
+                if (!cloud.vao || cloud.builtRadius != domeRadius) {
+                    // Torque layout: column along +Y, row along -X; Y-up here.
+                    constexpr int Grid = 5;
+                    const float step = domeRadius * 2.0f / (Grid - 1);
+                    const float c = cloud.height, in = cloud.height - 0.05f, e = 0.05f;
+                    const float heights[Grid * Grid] = {e, e, e, e, e,  e, in, in, in, e,  e, in, c, in, e,
+                                                        e, in, in, in, e,  e, e, e, e, e};
+                    Point3F pos[Grid * Grid];
+                    for (int row = 0; row < Grid; ++row)
+                        for (int col = 0; col < Grid; ++col) {
+                            const int k = row * Grid + col;
+                            pos[k] = Math::torquePointToYUp({domeRadius - row * step, -domeRadius + col * step,
+                                                             domeRadius * heights[k]});
+                        }
+                    // Corners lie on the plane of their neighbours.
+                    auto corner = [&](int at, int a, int b, int inner) {
+                        const Point3F mid{pos[a].x + (pos[b].x - pos[a].x) * 0.5f,
+                                          pos[a].y + (pos[b].y - pos[a].y) * 0.5f,
+                                          pos[a].z + (pos[b].z - pos[a].z) * 0.5f};
+                        pos[at] = {pos[inner].x + (mid.x - pos[inner].x) * 2.0f,
+                                   pos[inner].y + (mid.y - pos[inner].y) * 2.0f,
+                                   pos[inner].z + (mid.z - pos[inner].z) * 2.0f};
                     };
-                    glGenVertexArrays(1, &cloudVAO);
-                    glGenBuffers(1, &cloudVBO);
-                    glBindVertexArray(cloudVAO);
-                    glBindBuffer(GL_ARRAY_BUFFER, cloudVBO);
-                    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-                    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+                    corner(0, 5, 1, 6); corner(4, 9, 3, 8); corner(20, 21, 15, 16); corner(24, 23, 19, 18);
+                    std::vector<float> verts;
+                    for (int row = 0; row < Grid; ++row)
+                        for (int col = 0; col < Grid; ++col) {
+                            const Point3F& p = pos[row * Grid + col];
+                            float alpha = 1.3f - std::sqrt(p.x * p.x + p.z * p.z) / domeRadius;
+                            if (alpha < 0.4f) alpha = 0.0f;
+                            else if (alpha > 0.8f) alpha = 1.0f;
+                            verts.insert(verts.end(), {p.x, p.y, p.z, (float)col, (float)row, alpha});
+                        }
+                    std::vector<uint32_t> indices;
+                    for (int row = 0; row + 1 < Grid; ++row)
+                        for (int col = 0; col + 1 < Grid; ++col) {
+                            const uint32_t tl = row * Grid + col, tr = tl + 1, bl = tl + Grid, br = bl + 1;
+                            indices.insert(indices.end(), {tl, bl, br, tl, br, tr});
+                        }
+                    if (!cloud.vao) {
+                        glGenVertexArrays(1, &cloud.vao);
+                        glGenBuffers(1, &cloud.vbo);
+                        glGenBuffers(1, &cloud.ebo);
+                    }
+                    glBindVertexArray(cloud.vao);
+                    glBindBuffer(GL_ARRAY_BUFFER, cloud.vbo);
+                    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+                    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, cloud.ebo);
+                    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint32_t), indices.data(), GL_STATIC_DRAW);
+                    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
                     glEnableVertexAttribArray(0);
-                    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+                    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
                     glEnableVertexAttribArray(1);
+                    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(5 * sizeof(float)));
+                    glEnableVertexAttribArray(2);
+                    cloud.builtRadius = domeRadius;
                 }
-
-                // Scroll UVs over time
-                float scrollU = time * cloud.scrollSpeed * 0.001f;
-
-             // Position the cloud dome above the camera
-             MatrixF model;
-             float height = 50.0f + cloud.height * 150.0f;
-             const Point3F cameraPosition = view.inverse().transform({0, 0, 0});
-             model.setTranslation({cameraPosition.x, height, cameraPosition.z});
-
-                MatrixF mvp = proj * view * model;
-                cloudShader->setUniform("uMVP", mvp);
-                cloudShader->setUniform("uOpacity", cloud.opacity);
-                cloudShader->setUniform("uScrollU", scrollU);
-
+                float offsetU = windU * cloud.speed * ticks, offsetV = windV * cloud.speed * ticks;
+                offsetU -= std::floor(offsetU);
+                offsetV -= std::floor(offsetV);
+                cloudShader->setUniform("uUVOffset", Point3F{offsetU, offsetV, 0.0f});
                 cloud.texture.bind(0);
                 cloudShader->setUniform("uTexture", (int32_t)0);
-
-                glBindVertexArray(cloudVAO);
-                glDrawArrays(GL_TRIANGLES, 0, 6);
+                glBindVertexArray(cloud.vao);
+                glDrawElements(GL_TRIANGLES, 96, GL_UNSIGNED_INT, nullptr);
             }
-
+            glBindVertexArray(0);
+            glDepthMask(GL_TRUE);
+            if (skyCullWasOn) glEnable(GL_CULL_FACE);
             if (blendWasOn) glEnable(GL_BLEND); else glDisable(GL_BLEND);
             glBlendFuncSeparate((GLenum)blendSrcRGB, (GLenum)blendDstRGB,
                                 (GLenum)blendSrcAlpha, (GLenum)blendDstAlpha);
