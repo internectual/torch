@@ -12,6 +12,7 @@
 #include <map>
 #include <functional>
 #include <algorithm>
+#include "game/shape_threads.h"
 #include <cstdio>
 #include <cctype>
 
@@ -699,6 +700,8 @@ struct GhostEntry {
     float barrelPitch = 0.0f;
     float barrelYaw = 0.0f;
     bool hasTurretAim = false;
+    // Client-side timing of the four shape threads (ShapeThreads::timeAt).
+    ShapeThreads::Clock threadClocks[4];
     // Turret::unpackUpdate: phi and theta normalized to [0, 1], activation.
     float turretPhi = 0.0f, turretTheta = 0.0f, turretActivation = 0.0f;
 

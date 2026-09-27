@@ -679,3 +679,8 @@ add_executable(torch_timeline_random_test tests/timeline_random_test.cpp)
 target_include_directories(torch_timeline_random_test PRIVATE src)
 target_compile_options(torch_timeline_random_test PRIVATE -UNDEBUG)
 add_test(NAME torch_timeline_random COMMAND torch_timeline_random_test)
+
+add_executable(torch_shape_threads_test tests/shape_threads_test.cpp)
+target_include_directories(torch_shape_threads_test PRIVATE src)
+target_compile_options(torch_shape_threads_test PRIVATE -UNDEBUG)
+add_test(NAME torch_shape_threads COMMAND torch_shape_threads_test)

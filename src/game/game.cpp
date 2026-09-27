@@ -9374,18 +9374,26 @@ void Game::render(float dt) {
                         }
                     }
                 }
-                for (const auto& thread : g->threads) {
-                    if (playerAnimated) break;
+                // Every live shape thread plays, each on its own clock: the
+                // first as the primary sequence, the others as layers.
+                DTSShape::BlendThread threadLayers[4];
+                int numThreadLayers = 0;
+                for (int ti = 0; ti < 4 && !playerAnimated; ++ti) {
+                    const auto& thread = g->threads[ti];
                     if (!thread.valid || thread.sequence < 0 ||
                         thread.sequence >= (int)shape->animations.size()) continue;
-                    if (thread.state == 1 || thread.state == 3) continue;
-                    animation = &shape->animations[thread.sequence];
-                    const float threadTime = dtsThreadTime(thread.position, animation->duration,
-                        mg->threadAnimTime, thread.timescale, thread.atEnd, thread.forward);
-                    animationPosition = animation->duration > 0.0f
-                        ? threadTime / animation->duration : 0.0f;
-                    if (thread.atEnd) animationPosition = thread.forward ? 1.0f : 0.0f;
-                    break;
+                    if (thread.state == ShapeThreads::Destroy) continue;
+                    const auto& clip = shape->animations[thread.sequence];
+                    const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                    const float time = ShapeThreads::timeAt(mg->threadClocks[ti],
+                        {thread.sequence, thread.state, thread.forward, thread.atEnd},
+                        now, clip.duration, clip.looping);
+                    if (!animation) {
+                        animation = &clip;
+                        animationPosition = clip.duration > 0.0f ? time / clip.duration : 0.0f;
+                    } else {
+                        threadLayers[numThreadLayers++] = {thread.sequence, time};
+                    }
                 }
 
                 // Node overrides for turret barrel and player head
@@ -9421,7 +9429,7 @@ void Game::render(float dt) {
                 // Arm and head aim ride on blend threads: the arm action
                 // (default "look") and "head" follow head pitch, "headside"
                 // follows head yaw. Dead players drop them.
-                DTSShape::BlendThread blends[8];
+                DTSShape::BlendThread blends[12];
                 int numBlends = 0;
                 if (playerAnimated && g->damageState < 1) {
                     auto animationIndex = [&](const char* name) -> int {
@@ -9496,7 +9504,7 @@ void Game::render(float dt) {
                                                    0.0f, 1.0f);
                     auto addPositioned = [&](const char* name, float position) {
                         const DTSShape::Animation* clip = findAnimation(*shape, name);
-                        if (!clip || numBlends >= 8) return;
+                        if (!clip || numBlends >= 12) return;
                         blends[numBlends++] = {(int)(clip - shape->animations.data()),
                                                std::clamp(position, 0.0f, 1.0f) * clip->duration};
                     };
@@ -9523,6 +9531,8 @@ void Game::render(float dt) {
                         }
                     }
                 }
+                for (int i = 0; i < numThreadLayers && numBlends < 12; ++i)
+                    blends[numBlends++] = threadLayers[i];
                 // A shape with no running sequence of its own renders its
                 // first layered thread as the primary.
                 int primaryBlend = 0;
