@@ -1084,6 +1084,7 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
     packetsParsed = 0;
     compressionPoint = initialBlock.initialCompressionPoint;
     blockStreamOffset = 0; blockCursor_ = 0; blockCount_ = -1;
+    ghostResets_ = 0;
 
     scanMissionChanges();
 
@@ -1152,6 +1153,7 @@ DemoBlock* DemoParser::nextBlock() {
 
 void DemoParser::reset() {
     blockStreamOffset = 0; blockCursor_ = 0; blockCount_ = -1;
+    ghostResets_ = 0;
     compressionPoint = initialBlock.initialCompressionPoint;
     missionCrcChanges_.clear();
     initialBlock.taggedStrings = initialTaggedStrings_;
@@ -1299,6 +1301,7 @@ DemoParserSnapshot DemoParser::captureSnapshot() const {
     snapshot.blockStreamOffset = (size_t)std::max(0, blockStreamOffset);
     snapshot.blockCount = blockCount_;
     snapshot.blockCursor = blockCursor_;
+    snapshot.ghostResets = ghostResets_;
     snapshot.ghostTracker = ghostTracker;
     snapshot.compressionPoint = compressionPoint;
     std::copy(std::begin(lastSeqRecvdAtSend), std::end(lastSeqRecvdAtSend),
@@ -1342,6 +1345,7 @@ bool DemoParser::restoreSnapshot(const DemoParserSnapshot& snapshot) {
     blockStreamOffset = (int)snapshot.blockStreamOffset;
     blockCount_ = snapshot.blockCount;
     blockCursor_ = snapshot.blockCursor;
+    ghostResets_ = snapshot.ghostResets;
     ghostTracker = snapshot.ghostTracker;
     compressionPoint = snapshot.compressionPoint;
     std::copy(std::begin(snapshot.lastSeqRecvdAtSend), std::end(snapshot.lastSeqRecvdAtSend),
@@ -1787,7 +1791,10 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
         // ghosts (datablocks are connection state and stay). Events are read
         // before the packet's ghost section, as the engine applies them.
         constexpr int GhostMsgEndGhosting = 2;
-        if (applyEffects && message == GhostMsgEndGhosting) ghostTracker.clear();
+        if (applyEffects && message == GhostMsgEndGhosting) {
+            ghostTracker.clear();
+            ++ghostResets_;
+        }
     } else if (ev.classId == T2Demo::NetEventClassFirst + 0) { // CRCChallengeEvent
         bs.readU32(); bs.readU32(); bs.readU32(); bs.readFlag();
     } else if (ev.classId == T2Demo::NetEventClassFirst + 1) { // CRCChallengeResponseEvent

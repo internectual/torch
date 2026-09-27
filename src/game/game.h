@@ -792,7 +792,14 @@ public:
     void update(float dt);
     void render(float dt);
 
-    void startLocalGame(const char* map = nullptr);
+    // With sceneObjects, the world is built from them (a demo's scene
+    // ghosts) rather than from the mission file.
+    void startLocalGame(const char* map = nullptr, std::vector<MisObject>* sceneObjects = nullptr);
+    // The world a demo's SceneObject ghosts describe, in mission-file form;
+    // empty until its TerrainBlock ghost is in.
+    std::vector<MisObject> demoSceneObjects() const;
+    // demoParser->getGhostResets() the demo world was built at.
+    int demoWorldGhostResets = -1;
     void connectToServer(const char* host, uint16_t port, bool observer = false,
                          const char* password = nullptr);
     bool playDemo(const char* path);

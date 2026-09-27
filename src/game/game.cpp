@@ -118,6 +118,8 @@ static void scanDatablockShapesFromCS(World& world) {
 }
 
 // Check if a .mis mission object class should be rendered as a shape
+static void appendMissionFileEffects(const std::string& mission, std::vector<MisObject>& objects);
+
 static bool isRenderableMissionShape(const std::string& className) {
     // Mission class names are case-insensitive at the console/script layer.
     // Keeping this lookup case-sensitive made custom missions silently omit
@@ -10198,7 +10200,7 @@ void Game::render(float dt) {
     r.endFrame();
 }
 
-void Game::startLocalGame(const char* map) {
+void Game::startLocalGame(const char* map, std::vector<MisObject>* sceneObjects) {
     Console::instance().printf(LogLevel::Info, "Starting local game");
     if (demoPlaying) stopDemoPlayback();
     setState(Loading);
@@ -10264,7 +10266,10 @@ void Game::startLocalGame(const char* map) {
     // Classify weather by mission name for ambient audio selection
     weatherType = missionWeatherType(missionPath);
 
-    if (w->load(missionPath.c_str())) {
+    const bool worldLoaded = sceneObjects
+        ? w->loadObjects(missionPath.c_str(), "demo scene ghosts", std::move(*sceneObjects))
+        : w->load(missionPath.c_str());
+    if (worldLoaded) {
         // Training missions end on death; stock multiplayer missions respawn.
         // Update this only after a successful load so a rejected replacement
         // cannot change the active mission's lifecycle rules.
@@ -11782,25 +11787,28 @@ bool Game::playDemo(const char* path) {
         failDemoLoad();
         return false;
     }
-    auto& demoFs = Engine::instance().fs();
-    std::string missionPath;
-    std::string missionData;
-    if (!resolveMissionFile(demoFs, loadMap, missionPath, missionData)) {
+    // The client's world is what the server ghosts: the initial block's
+    // SceneObject ghosts.
+    std::vector<MisObject> scene = demoSceneObjects();
+    if (scene.empty()) {
         Console::instance().printf(LogLevel::Error,
-            "Demo: native mission '%s' is not mounted", loadMap.c_str());
+            "Demo: the recording has no TerrainBlock scene ghost for '%s'", loadMap.c_str());
         failDemoLoad();
         return false;
     }
-    Console::instance().printf(LogLevel::Info, "Loading mission map: %s", loadMap.c_str());
+    appendMissionFileEffects(loadMap, scene);
+    Console::instance().printf(LogLevel::Info, "Loading mission map from scene ghosts: %s (%zu objects)",
+                               loadMap.c_str(), scene.size());
     State prevState = gameState;
-    startLocalGame(loadMap.c_str());
+    startLocalGame(loadMap.c_str(), &scene);
     if (gameState != Playing) {
         gameState = prevState;
         Console::instance().printf(LogLevel::Error,
-            "Demo: native mission '%s' failed to load", missionPath.c_str());
+            "Demo: the scene of '%s' failed to load", loadMap.c_str());
         failDemoLoad();
         return false;
     }
+    demoWorldGhostResets = demoParser->getGhostResets();
     Engine::instance().guiRenderer().popDialog("ConsoleDlg");
     if (auto* console = Engine::instance().guiRenderer().findControl("ConsoleDlg"))
         console->visible = false;
@@ -12108,6 +12116,43 @@ void Game::resetDemoEffects() {
     if (w) w->clearEffects();
 }
 
+// Mission objects the demo world keeps taking from the local mission file
+// until their ghosts are ported (they name script datablocks).
+static void appendMissionFileEffects(const std::string& mission, std::vector<MisObject>& objects) {
+    std::string misPath, misData;
+    if (!resolveMissionFile(Engine::instance().fs(), missionLoadPath(mission), misPath, misData)) return;
+    for (auto& object : parseMisFile(misData)) {
+        if (missionClassEquals(object.className, "Precipitation") ||
+            missionClassEquals(object.className, "Lightning") ||
+            missionClassEquals(object.className, "AudioEmitter") ||
+            missionClassEquals(object.className, "ParticleEmissionDummy") ||
+            missionClassEquals(object.className, "ForceFieldBare"))
+            objects.push_back(std::move(object));
+    }
+}
+
+std::vector<MisObject> Game::demoSceneObjects() const {
+    std::vector<MisObject> objects;
+    if (!demoParser) return objects;
+    bool terrain = false;
+    const auto& tracker = demoParser->getGhostTracker();
+    for (int index : tracker.getAllIndices()) {
+        const GhostEntry* g = tracker.getGhost(index);
+        if (!g || g->sceneProps.empty()) continue;
+        MisObject object;
+        object.className = g->className;
+        for (const auto& [name, value] : g->sceneProps) {
+            std::string lower = name;
+            for (char& c : lower) c = (char)std::tolower((unsigned char)c);
+            object.props.push_back({lower, value});
+        }
+        terrain = terrain || missionClassEquals(object.className, "TerrainBlock");
+        objects.push_back(std::move(object));
+    }
+    if (!terrain) objects.clear();
+    return objects;
+}
+
 bool Game::tryLoadDemoMission(const std::string& mission, bool resetParserState) {
     if (mission.empty() || mission == demoMissionState.loadedMission) {
         if (mission == demoMissionState.loadedMission)
@@ -12121,10 +12166,15 @@ bool Game::tryLoadDemoMission(const std::string& mission, bool resetParserState)
         return false;
     }
 
-    // World::load validates and reads the replacement before tearing down the
-    // current scene. On failure this leaves camera, ghosts, HUD, audio, and
-    // effects intact for the next retry.
-    if (!w->load(mission.c_str())) {
+    // The new mission's world is its scene ghosts, once EndGhosting has
+    // cleared the old ones and its TerrainBlock is in. Until then the current
+    // scene, camera, ghosts, HUD, audio and effects stay for the next retry.
+    std::vector<MisObject> scene;
+    if (demoParser && demoParser->getGhostResets() != demoWorldGhostResets)
+        scene = demoSceneObjects();
+    if (!scene.empty()) appendMissionFileEffects(mission, scene);
+    if (scene.empty() || !w->loadObjects(missionLoadPath(mission).c_str(), "demo scene ghosts",
+                                         std::move(scene))) {
         if (demoMissionState.pendingMission != mission)
             Console::instance().printf(LogLevel::Warn,
                 "Demo mission unavailable; deferring replacement: %s", mission.c_str());
@@ -12136,6 +12186,7 @@ bool Game::tryLoadDemoMission(const std::string& mission, bool resetParserState)
     // has not been deferred yet.
     demoMissionState.defer(mission);
     demoMissionState.commit(mission);
+    demoWorldGhostResets = demoParser ? demoParser->getGhostResets() : -1;
     // A seek has already rebuilt parser state for the new mission.
     if (resetParserState) demoParser->resetMissionState();
     clearMissionAudio();

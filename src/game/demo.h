@@ -882,6 +882,7 @@ struct DemoParserSnapshot {
     size_t blockStreamOffset{};
     int blockCount{-1};
     int blockCursor{};
+    int ghostResets{};
     GhostTracker ghostTracker;
     Vec3 compressionPoint{};
     uint32_t lastSeqRecvdAtSend[32]{};
@@ -937,6 +938,8 @@ public:
     float getRoundTripTime() const { return initialBlock.roundTripTime; }
     float getPacketLoss() const { return initialBlock.packetLoss; }
     int getBlockCursor() const { return blockCursor_; }
+    // EndGhosting messages seen: each starts a new mission's ghost set.
+    int getGhostResets() const { return ghostResets_; }
 
     DemoBlock* nextBlock();
     void reset();
@@ -994,6 +997,7 @@ private:
     int blockStreamOffset{};
     int blockCount_{ -1 };
     int blockCursor_{};
+    int ghostResets_{};
 
     // Mission change tracking
     std::vector<std::pair<int, std::string>> missionChanges_;
