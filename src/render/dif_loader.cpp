@@ -612,9 +612,10 @@ static bool interiorToMeshes(DIFInterior& interior,
                 matSlots[i].texIdx = (int)outTextures.size();
                 const bool hasAlpha = tex.hasAlpha;
                 outTextures.push_back(std::move(tex));
-                 // DIF has no MaterialList flag payload. Preserve alpha-test
-                 // behavior from the decoded texture instead.
-                 outMatFlags.push_back(hasAlpha ? MatFlag_Translucent : MatFlag_None);
+                 // Interior surfaces render opaque; the texture's alpha channel
+                 // is not a translucency flag (t2-mapper DIFMaterial).
+                 (void)hasAlpha;
+                 outMatFlags.push_back(MatFlag_None);
                 outMatNames.push_back(interior.matNames[i]);
             } else if (!isDIFMarkerMaterial(interior.matNames[i])) {
                 Console::instance().printf(LogLevel::Error,

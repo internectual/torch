@@ -1912,15 +1912,8 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     // triangle winding; keep culling the true back faces.
     const MirroredFrontFace frontFace(baseModel);
 
-    if (isInterior) {
-        // DIF interior surfaces have inconsistent per-surface winding and may be
-        // viewed from outside (mapper). Render both faces so no surface fragment
-        // disappears due to culling.
-        glDisable(GL_CULL_FACE);
-    } else {
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
-    }
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
 
     // Diagnostic: print world-space AABB of interiors for camera framing
     if (isInterior && getenv("TORCH_AABB")) {
