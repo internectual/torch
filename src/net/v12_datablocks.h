@@ -1,4 +1,5 @@
 #pragma once
+#include "game/player_prediction.h"
 #include "game/weapon_image_state.h"
 
 #include "net/v12_bitstream.h"
@@ -141,6 +142,10 @@ struct DecodedDataBlock {
     // PlayerData fields used by client-side animation.
     bool isPlayerData = false;
     float playerMinLookAngle = 0.0f, playerMaxLookAngle = 0.0f, playerMaxFreelookAngle = 0.0f;
+    // PlayerData fields the client Player simulation uses.
+    PlayerPrediction::Data playerPhysics;
+    // ShapeBaseData drag/density/maxEnergy (flag-gated; engine defaults).
+    float shapeDrag = 0.0f, shapeDensity = 1.0f, shapeMaxEnergy = 0.0f;
     float playerRunSurfaceAngle = 0.0f;
     float playerBoxSize[3] = {0.0f, 0.0f, 0.0f}; // Torque x, y, z
     uint32_t playerJetEmitterRef = 0; // ParticleEmitterData at jetNozzle0/1

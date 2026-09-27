@@ -699,3 +699,8 @@ add_executable(torch_fluid_test tests/fluid_test.cpp)
 target_include_directories(torch_fluid_test PRIVATE src)
 target_compile_options(torch_fluid_test PRIVATE -UNDEBUG)
 add_test(NAME torch_fluid COMMAND torch_fluid_test)
+
+add_executable(torch_player_prediction_test tests/player_prediction_test.cpp)
+target_include_directories(torch_player_prediction_test PRIVATE src)
+target_compile_options(torch_player_prediction_test PRIVATE -UNDEBUG)
+add_test(NAME torch_player_prediction COMMAND torch_player_prediction_test)

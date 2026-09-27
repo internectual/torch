@@ -374,13 +374,19 @@ int* BitStream::readMatrixF(Vec3* outPos) {
 }
 
 // ─── Read/discard a T2 Move from the bitstream ─────────────────
-static void readMove(BitStream& bs) {
-    if (bs.readFlag()) bs.readInt(16); // pyaw
-    if (bs.readFlag()) bs.readInt(16); // ppitch
-    if (bs.readFlag()) bs.readInt(16); // proll
-    bs.readInt(6); bs.readInt(6); bs.readInt(6); // px, py, pz
-    bs.readFlag(); // freeLook
-    for (int i = 0; i < T2Demo::MaxTriggerKeys; i++) bs.readFlag(); // triggers
+static PlayerPrediction::Move readMove(BitStream& bs) {
+    // Move::unpack, then Move::unclamp.
+    const uint32_t pyaw = bs.readFlag() ? (uint32_t)bs.readInt(16) : 0;
+    const uint32_t ppitch = bs.readFlag() ? (uint32_t)bs.readInt(16) : 0;
+    const uint32_t proll = bs.readFlag() ? (uint32_t)bs.readInt(16) : 0;
+    const int px = bs.readInt(6), py = bs.readInt(6), pz = bs.readInt(6);
+    const bool freeLook = bs.readFlag();
+    bool triggers[6]{};
+    for (int i = 0; i < T2Demo::MaxTriggerKeys; i++) {
+        const bool trigger = bs.readFlag();
+        if (i < 6) triggers[i] = trigger;
+    }
+    return PlayerPrediction::unclampMove(px, py, pz, pyaw, ppitch, proll, freeLook, triggers);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1626,18 +1632,26 @@ GameState DemoParser::readGameState(BitStream& bs) {
             } else if (control && control->classId == 25) {
                 // Player::readPacketData: ShapeBase state, movement, view,
                 // optional piloted object, and final movement flags.
-                bs.readInt(3); // action state
-                if (bs.readFlag()) bs.readInt(7); // recover ticks
-                if (bs.readFlag()) bs.readInt(7); // jump delay
+                auto& cu = gs.controlPlayer;
+                cu.actionState = bs.readInt(3);
+                cu.recoverTicks = bs.readFlag() ? bs.readInt(7) : 0;
+                gs.controlJumpDelay = bs.readFlag() ? bs.readInt(7) : 0;
                 if (bs.readFlag()) {
                     gs.compressionPoint = {bs.readF32(), bs.readF32(), bs.readF32()};
                     gs.compressionPointUpdated = true;
-                    bs.readF32(); bs.readF32(); bs.readF32(); // velocity
-                    bs.readInt(4); // jump surface contact
+                    cu.hasPosition = true;
+                    cu.position = {gs.compressionPoint.x, gs.compressionPoint.y, gs.compressionPoint.z};
+                    cu.velocity = {bs.readF32(), bs.readF32(), bs.readF32()};
+                    gs.controlJumpSurfaceLastContact = bs.readInt(4);
                 }
                 gs.controlHeadX = bs.readF32();
                 gs.controlHeadZ = bs.readF32();
                 gs.controlRotZ = bs.readF32();
+                cu.headX = gs.controlHeadX;
+                cu.headZ = gs.controlHeadZ;
+                cu.rotZ = gs.controlRotZ;
+                cu.headInRadians = true;
+                cu.allowWarp = false; // readPacketData places the player exactly
                 gs.hasControlRotation = true;
                 if (bs.readFlag()) {
                     const int pilotedIndex = bs.readInt(T2Demo::GhostIdBitSize);
@@ -1680,7 +1694,7 @@ GameState DemoParser::readGameState(BitStream& bs) {
                         }
                     }
                 }
-                bs.readFlag(); // disable move
+                gs.controlDisableMove = bs.readFlag();
                 bs.readFlag(); // pilot
             }
         } else {
@@ -2144,9 +2158,9 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
     }
     if (bs.readFlag()) return; // control object shortcut
     if (bs.readFlag()) { // MoveMask
-        int actionState = bs.readInt(3); // actionState: 0=Stop, 1=Walk, 2=Run, 3=Sprint
+        const int actionState = bs.readInt(3);
         if (entry) entry->isMoving = (actionState > 0);
-        if (bs.readFlag()) bs.readInt(7); // recoverState
+        const int recoverTicks = bs.readFlag() ? bs.readInt(7) : 0;
         const bool falling = bs.readFlag();
         const bool jetting = bs.readFlag();
         if (entry) entry->position = bs.readCompressedPoint(cp);
@@ -2173,8 +2187,26 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
             entry->headYaw = headZ;
             entry->bodyYaw = bodyYaw;
         }
-        readMove(bs);
-        bs.readFlag(); // allowWarp
+        const PlayerPrediction::Move move = readMove(bs);
+        const bool allowWarp = bs.readFlag();
+        if (entry) {
+            auto& u = entry->playerUpdate;
+            u.hasPosition = true;
+            u.position = {entry->position.x, entry->position.y, entry->position.z};
+            u.velocity = {velocity.x, velocity.y, velocity.z};
+            u.hasMove = true;
+            u.move = move;
+            u.actionState = actionState;
+            u.recoverTicks = recoverTicks;
+            u.headX = headX;
+            u.headZ = headZ;
+            u.rotZ = bodyYaw;
+            u.falling = falling;
+            u.jetting = jetting;
+            u.allowWarp = allowWarp;
+            u.headInRadians = false;
+            ++entry->playerUpdates;
+        }
     }
     float en = bs.readFloat(5); // energy
     if (entry) entry->energy = en * 100.0f;

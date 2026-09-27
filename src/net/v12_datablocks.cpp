@@ -350,6 +350,9 @@ void shapeBase(Stream& s) {
     for (int i = 0; i < 8; ++i) {
         if (!s.readFlag()) continue;
         const float value = s.readF32();
+        if (activeDecoded && i == 0) activeDecoded->shapeDrag = value;
+        if (activeDecoded && i == 1) activeDecoded->shapeDensity = value;
+        if (activeDecoded && i == 2) activeDecoded->shapeMaxEnergy = value;
         if (activeDecoded && i == 3) activeDecoded->cameraMaxDist = value;
         if (activeDecoded && i == 4) activeDecoded->cameraMinDist = value;
     }
@@ -543,35 +546,75 @@ void shapeImage(Stream& s) {
 }
 
 void player(Stream& s) {
-    shapeBase(s); s.readFlag();
-    const float minLookAngle = s.readF32(), maxLookAngle = s.readF32();
-    const float maxFreelookAngle = s.readF32();
-    f32s(s, 10);
-    if (activeDecoded) activeDecoded->playerMaxFreelookAngle = maxFreelookAngle;
+    // PlayerData::unpackData (retail layout, as the reference parser decodes it).
+    shapeBase(s);
+    PlayerPrediction::Data d;
+    d.renderFirstPerson = s.readFlag();
+    d.minLookAngle = s.readF32();
+    d.maxLookAngle = s.readF32();
+    d.maxFreelookAngle = s.readF32();
+    s.readF32(); // maxTimeScale
+    d.maxStepHeight = s.readF32();
+    d.jetForce = s.readF32();
+    d.underwaterJetForce = s.readF32();
+    d.underwaterVertJetFactor = s.readF32();
+    d.jetEnergyDrain = s.readF32();
+    d.underwaterJetEnergyDrain = s.readF32();
+    d.minJetEnergy = s.readF32();
+    d.maxJetForwardSpeed = s.readF32();
+    d.maxJetHorizontalPercentage = s.readF32();
     const uint32_t jetEmitter = optionalRef(s);
     refs(s, 1); // jetEffect
-    f32s(s, 9);
-    const float runSurfaceAngle = s.readF32();
-    if (activeDecoded) activeDecoded->playerJetEmitterRef = jetEmitter;
-    if (activeDecoded) {
-        activeDecoded->playerMinLookAngle = minLookAngle;
-        activeDecoded->playerMaxLookAngle = maxLookAngle;
-        activeDecoded->playerRunSurfaceAngle = runSurfaceAngle;
-        activeDecoded->isPlayerData = true;
-    }
-    f32s(s, 8);
-    s.readUnsigned(7); f32s(s, 6); f32s(s, 9); s.readF32();
+    d.runForce = s.readF32();
+    d.runEnergyDrain = s.readF32();
+    d.minRunEnergy = s.readF32();
+    d.maxForwardSpeed = s.readF32();
+    d.maxBackwardSpeed = s.readF32();
+    d.maxSideSpeed = s.readF32();
+    d.maxUnderwaterForwardSpeed = s.readF32();
+    d.maxUnderwaterBackwardSpeed = s.readF32();
+    d.maxUnderwaterSideSpeed = s.readF32();
+    d.runSurfaceAngle = s.readF32();
+    d.recoverDelay = s.readF32();
+    d.recoverRunForceScale = s.readF32();
+    d.jumpForce = s.readF32();
+    d.jumpEnergyDrain = s.readF32();
+    d.minJumpEnergy = s.readF32();
+    d.minJumpSpeed = s.readF32();
+    d.maxJumpSpeed = s.readF32();
+    d.jumpSurfaceAngle = s.readF32();
+    d.jumpDelay = (int)s.readUnsigned(7);
+    d.horizMaxSpeed = s.readF32();
+    d.horizResistSpeed = s.readF32();
+    d.horizResistFactor = s.readF32();
+    d.upMaxSpeed = s.readF32();
+    d.upResistSpeed = s.readF32();
+    d.upResistFactor = s.readF32();
+    f32s(s, 9); // splash and bubble tuning
+    d.minImpactSpeed = s.readF32();
     // PlayerData::Sounds (MaxSounds 32); jetSound is first, wetJetSound second.
     std::vector<uint32_t> playerSounds(32);
     for (auto& sound : playerSounds) sound = optionalRef(s);
-    if (activeDecoded) activeDecoded->playerSounds = std::move(playerSounds);
     const float boxX = s.readF32(), boxY = s.readF32(), boxZ = s.readF32();
+    d.boxSize = {boxX, boxY, boxZ};
+    refs(s, 1); f32s(s, 2); refs(s, 1); s.readF32(); refs(s, 2); refs(s, 3); f32s(s, 11);
     if (activeDecoded) {
+        d.mass = activeDecoded->shapeMass;
+        d.drag = activeDecoded->shapeDrag;
+        d.density = activeDecoded->shapeDensity;
+        d.maxEnergy = activeDecoded->shapeMaxEnergy;
+        activeDecoded->playerPhysics = d;
+        activeDecoded->playerMinLookAngle = d.minLookAngle;
+        activeDecoded->playerMaxLookAngle = d.maxLookAngle;
+        activeDecoded->playerMaxFreelookAngle = d.maxFreelookAngle;
+        activeDecoded->playerRunSurfaceAngle = d.runSurfaceAngle;
+        activeDecoded->playerJetEmitterRef = jetEmitter;
+        activeDecoded->isPlayerData = true;
+        activeDecoded->playerSounds = std::move(playerSounds);
         activeDecoded->playerBoxSize[0] = boxX;
         activeDecoded->playerBoxSize[1] = boxY;
         activeDecoded->playerBoxSize[2] = boxZ;
     }
-    refs(s, 1); f32s(s, 2); refs(s, 1); s.readF32(); refs(s, 2); refs(s, 3); f32s(s, 11);
 }
 
 void vehicle(Stream& s) { shapeBase(s); f32s(s,2); refs(s,2); f32s(s,19); refs(s,5); refs(s,1); refs(s,3); refs(s,2); f32s(s,12); }

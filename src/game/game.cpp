@@ -3804,6 +3804,96 @@ void World::syncForceFieldGhost(int ghostIndex, int state, uint32_t position, in
     }
 }
 
+void World::playerTrianglesInBox(const Point3F& min, const Point3F& max,
+                                 std::vector<PlayerPrediction::Triangle>& out) const {
+    auto toTorque = [](const Point3F& p) { return Point3F{p.x, -p.z, p.y}; };
+    auto push = [&](const Point3F& a, const Point3F& b, const Point3F& c, Point3F n) {
+        const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        if (len < 1e-12f) return;
+        out.push_back({a, b, c, {n.x / len, n.y / len, n.z / len}});
+    };
+    // Torque box to Y-up extents.
+    const float minX = min.x, maxX = max.x, minZ = -max.y, maxZ = -min.y;
+    // Terrain: a heightfield's collision face points up.
+    if (terrainBlock.loaded) {
+        std::vector<Point3F> tris;
+        terrainBlock.appendTrianglesInRect(minX, minZ, maxX, maxZ, tris);
+        for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+            const Point3F a = toTorque(tris[i]), b = toTorque(tris[i + 1]), c = toTorque(tris[i + 2]);
+            if (std::max({a.z, b.z, c.z}) < min.z || std::min({a.z, b.z, c.z}) > max.z) continue;
+            Point3F n = PlayerPrediction::cross(PlayerPrediction::sub(b, a), PlayerPrediction::sub(c, a));
+            if (n.z < 0) n = PlayerPrediction::mul(n, -1.0f);
+            push(a, b, c, n);
+        }
+    }
+    // Interiors: the collision hulls' faces point toward free space.
+    const auto& mesh = interiorCollision;
+    const auto& grid = mesh.grid;
+    if (mesh.loaded && grid.resX > 0 && grid.resZ > 0) {
+        auto cell = [&](float v, float lo, float w, int res) {
+            return std::clamp((int)std::floor((v - lo) / w), 0, res - 1);
+        };
+        const int ix0 = cell(minX, grid.minX, grid.cellW, grid.resX), ix1 = cell(maxX, grid.minX, grid.cellW, grid.resX);
+        const int iz0 = cell(minZ, grid.minZ, grid.cellH, grid.resZ), iz1 = cell(maxZ, grid.minZ, grid.cellH, grid.resZ);
+        std::vector<int> seen;
+        for (int iz = iz0; iz <= iz1; ++iz)
+            for (int ix = ix0; ix <= ix1; ++ix)
+                for (int ti : grid.cells[(size_t)iz * grid.resX + ix]) {
+                    if (std::find(seen.begin(), seen.end(), ti) != seen.end()) continue;
+                    seen.push_back(ti);
+                    const auto& t = mesh.triangles[ti];
+                    const Point3F a = toTorque(t.v0), b = toTorque(t.v1), c = toTorque(t.v2);
+                    if (std::max({a.x, b.x, c.x}) < min.x || std::min({a.x, b.x, c.x}) > max.x ||
+                        std::max({a.y, b.y, c.y}) < min.y || std::min({a.y, b.y, c.y}) > max.y ||
+                        std::max({a.z, b.z, c.z}) < min.z || std::min({a.z, b.z, c.z}) > max.z) continue;
+                    push(a, b, c, toTorque(t.normal));
+                }
+    }
+    // Closed force fields: their box, faces outward.
+    for (const auto& object : worldObjects) {
+        if (!object.forceField || object.forceFieldOpen) continue;
+        MatrixF rotation;
+        if (object.rotAngleDeg != 0 && (object.rot.x != 0 || object.rot.y != 0 || object.rot.z != 0)) {
+            Point3F axis = object.rot;
+            const float length = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+            if (length > 0.0001f) {
+                axis = {axis.x / length, axis.y / length, axis.z / length};
+                rotation = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(object.rotAngleDeg));
+            }
+        }
+        const MatrixF box = rotation * Math::torqueScaleToYUp(object.scale);
+        const Point3F origin = Math::torquePointToYUp(object.pos);
+        Point3F corner[8];
+        Point3F lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+        for (int i = 0; i < 8; ++i) {
+            const Point3F y = box.transform({(float)(i & 1), (float)((i >> 1) & 1), (float)((i >> 2) & 1)});
+            corner[i] = toTorque({origin.x + y.x, origin.y + y.y, origin.z + y.z});
+            lo = {std::min(lo.x, corner[i].x), std::min(lo.y, corner[i].y), std::min(lo.z, corner[i].z)};
+            hi = {std::max(hi.x, corner[i].x), std::max(hi.y, corner[i].y), std::max(hi.z, corner[i].z)};
+        }
+        if (hi.x < min.x || lo.x > max.x || hi.y < min.y || lo.y > max.y || hi.z < min.z || lo.z > max.z) continue;
+        const Point3F centre = PlayerPrediction::mul(PlayerPrediction::add(lo, hi), 0.5f);
+        static const int faces[12][3] = {{0, 4, 6}, {0, 6, 2}, {1, 3, 7}, {1, 7, 5}, {0, 1, 5}, {0, 5, 4},
+                                         {2, 6, 7}, {2, 7, 3}, {0, 2, 3}, {0, 3, 1}, {4, 5, 7}, {4, 7, 6}};
+        for (const auto& f : faces) {
+            const Point3F a = corner[f[0]], b = corner[f[1]], c = corner[f[2]];
+            Point3F n = PlayerPrediction::cross(PlayerPrediction::sub(b, a), PlayerPrediction::sub(c, a));
+            if (PlayerPrediction::dot(n, PlayerPrediction::sub(a, centre)) < 0) n = PlayerPrediction::mul(n, -1.0f);
+            push(a, b, c, n);
+        }
+    }
+}
+
+float World::waterSurfaceAt(float x, float y) const {
+    float best = std::numeric_limits<float>::quiet_NaN();
+    for (const auto& body : waterBodies) {
+        if (!waterBodyCanAffectSurface(body.active, body.liquidType)) continue;
+        if (!waterBodyContainsHorizontal(x, -y, body.originX, body.originZ, body.sizeX, body.sizeY)) continue;
+        if (!(body.level <= best)) best = body.level;
+    }
+    return best;
+}
+
 void World::addSceneLightning(const std::function<std::string(const char*)>& get) {
     EffectLightning lightning;
     lightning.pos = Math::torquePointToYUp(parsePos(get("position")));
@@ -7117,6 +7207,7 @@ void Game::update(float dt) {
 
                 if (block->type == T2Demo::BlockTypeMove && !demoMatchEnded)
                     updateDemoPlayerAnimation(T2Demo::playbackBlockTime(demoBlocksDone, demoTicks));
+                if (block->type == T2Demo::BlockTypeMove) tickDemoPlayers(*block);
 
                 // Parse packet blocks (GameState, ghost updates, events)
                 if (block->type == T2Demo::BlockTypeSendPacket) {
@@ -8630,6 +8721,21 @@ void Game::render(float dt) {
                 }
             }
             rp = mg->renderPos;
+            // Player::interpolateTick: a predicted player is drawn between its
+            // last two simulation ticks (backDelta of a tick behind).
+            if (ObserverParity::isPlayerClass(g->className) && mg->prediction.initialized &&
+                g->mountObject < 0) {
+                const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                const float backDelta = std::clamp(1.0f - (now - demoLastPlayerTick) / 0.032f, 0.0f, 1.0f);
+                const Point3F p = PlayerPrediction::renderPosition(mg->prediction, backDelta);
+                rp = {p.x, p.y, p.z};
+                mg->renderPos = rp;
+                mg->velocity = {mg->prediction.velocity.x, mg->prediction.velocity.y, mg->prediction.velocity.z};
+                if (idx != controlGhostIndex) {
+                    const float half = PlayerPrediction::renderYaw(mg->prediction, backDelta) * 0.5f;
+                    mg->renderRotation = {0.0f, 0.0f, -std::sin(half), std::cos(half)};
+                }
+            }
             // LinearProjectile::createSegments / interpolateTick: the ghost
             // carries its initial position and direction; the client flies it
             // at the dry (or, fired underwater, wet) muzzle speed plus the
@@ -12142,6 +12248,48 @@ void Game::restoreDemoView(const DemoViewSnapshot& view) {
     demoPiloting = view.piloting;
 }
 
+void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
+    if (!demoParser || !w || demoMatchEnded) return;
+    PlayerPrediction::Move recorderMove;
+    bool haveRecorderMove = false;
+    if (moveBlock.size >= 64) {
+        const DemoMove move = demoParser->readRawMove(moveBlock.data.data(), moveBlock.data.size());
+        recorderMove.x = move.x; recorderMove.y = move.y; recorderMove.z = move.z;
+        recorderMove.yaw = move.yaw; recorderMove.pitch = move.pitch; recorderMove.roll = move.roll;
+        recorderMove.freeLook = move.freeLook;
+        for (int i = 0; i < 6; ++i) recorderMove.trigger[i] = move.trigger[i];
+        haveRecorderMove = true;
+    }
+    const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+    const PlayerPrediction::GatherTriangles gather = [&](const Point3F& lo, const Point3F& hi,
+                                                         std::vector<PlayerPrediction::Triangle>& out) {
+        w->playerTrianglesInBox(lo, hi, out);
+    };
+    const PlayerPrediction::WaterLevel water = [&](float x, float y) { return w->waterSurfaceAt(x, y); };
+    auto& tracker = demoParser->getGhostTracker();
+    for (int index : tracker.getAllIndices()) {
+        GhostEntry* g = const_cast<GhostEntry*>(tracker.getGhost(index));
+        if (!g || !ObserverParity::isPlayerClass(g->className) || !g->hasDatablock) continue;
+        auto block = blocks.find((uint32_t)g->datablockId);
+        if (block == blocks.end() || !block->second.decoded.isPlayerData) continue;
+        const auto& data = block->second.decoded.playerPhysics;
+        auto& state = g->prediction;
+        if (g->predictionUpdate != g->playerUpdates) {
+            PlayerPrediction::unpackUpdate(state, data, g->playerUpdate, g->predictionUpdate < 0,
+                                           g->playerUpdate.headInRadians);
+            if (g->predictionUpdate < 0) state.energy = data.maxEnergy;
+            g->predictionUpdate = g->playerUpdates;
+        }
+        state.mounted = g->mountObject >= 0;
+        state.damageState = g->damageState;
+        const bool recorder = index == controlGhostIndex;
+        state.allowFreelook = recorder && ((state.mounted && g->mountNode == 0) || !demoRecordedFirstPerson);
+        PlayerPrediction::processTick(state, data, getGravity(), recorder && haveRecorderMove ? &recorderMove : nullptr,
+                                      0.0f, demoPlayerCollision, gather, water);
+    }
+    demoLastPlayerTick = T2Demo::playbackBlockTime(demoParser->getBlockCursor(), demoParser->getMoveTicksBefore());
+}
+
 // GameConnection::handleRecordedBlock info block: $firstPerson (byte 0) and
 // the camera FOV (F32 at +4).
 void Game::applyDemoInfoBlock(const DemoBlock& block) {
@@ -12241,6 +12389,18 @@ void Game::applyDemoPacketView(const PacketData& pd) {
     }
     // The control player's own view re-anchors the move-
     // accumulated angles (t2-mapper getAbsoluteRotation).
+    if (pd.gameState.hasControlRotation && pd.gameState.controlObjectGhostIndex >= 0 && demoParser) {
+        // Player::readPacketData drives the recorder's own simulation.
+        GhostEntry* control = const_cast<GhostEntry*>(
+            demoParser->getGhostTracker().getGhost(pd.gameState.controlObjectGhostIndex));
+        if (control && pd.gameState.controlPlayer.hasPosition) {
+            control->playerUpdate = pd.gameState.controlPlayer;
+            ++control->playerUpdates;
+            control->prediction.jumpDelay = pd.gameState.controlJumpDelay;
+            control->prediction.jumpSurfaceLastContact = pd.gameState.controlJumpSurfaceLastContact;
+            control->prediction.disableMove = pd.gameState.controlDisableMove;
+        }
+    }
     if (pd.gameState.hasControlRotation) {
         demoViewYaw = pd.gameState.controlRotZ;
         demoViewPitch = pd.gameState.controlHeadX;

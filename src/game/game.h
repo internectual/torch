@@ -449,6 +449,12 @@ public:
     // A Lightning object from mission-file fields (get returns "" if unset).
     void addSceneLightning(const std::function<std::string(const char*)>& get);
     void syncForceFieldGhost(int ghostIndex, int state, uint32_t position, int updates);
+    // Player::updateWorkingCollisionSet's world polygons in a Torque-space
+    // box: terrain, interiors and closed force fields, facing free space.
+    void playerTrianglesInBox(const Point3F& min, const Point3F& max,
+                              std::vector<PlayerPrediction::Triangle>& out) const;
+    // The highest liquid surface (Torque z) over a Torque XY, or NaN.
+    float waterSurfaceAt(float x, float y) const;
     void setScenePrecipitation(const std::function<std::string(const char*)>& get,
                                const std::function<std::string(const char*)>& data);
     void beginProjectileTrailSync();
@@ -938,6 +944,11 @@ public:
     // The recording's $firstPerson (initial block, then info blocks).
     bool demoRecordedFirstPerson = true;
     void applyDemoInfoBlock(const DemoBlock& block);
+    // One 32 ms client tick of every demo Player ghost's simulation (the
+    // recorder's with this Move block's move).
+    void tickDemoPlayers(const DemoBlock& moveBlock);
+    PlayerPrediction::Collision demoPlayerCollision;
+    float demoLastPlayerTick = 0.0f;
     bool targetFinderOpen() const { return targetFinderShown; }
     void toggleTargetFinder();
     void closeTargetFinder() { targetFinderShown = false; }

@@ -1,4 +1,5 @@
 #pragma once
+#include "game/player_prediction.h"
 #include "game/shape_lighting.h"
 #include "game/weapon_image_state.h"
 #include "game/vehicle_jets.h"
@@ -470,6 +471,10 @@ struct GameState {
     float controlHeadX{}, controlHeadZ{}, controlRotZ{};
     // The vehicle the control player pilots (Player::readPacketData), or -1.
     int controlPilotedGhostIndex{ -1 };
+    // The rest of Player::readPacketData, for the recorder's simulation.
+    PlayerPrediction::Update controlPlayer;
+    int controlJumpDelay{}, controlJumpSurfaceLastContact{};
+    bool controlDisableMove{};
 };
 
 struct GhostUpdate {
@@ -692,6 +697,13 @@ struct GhostEntry {
     bool exploded = false;
     // Item InitialUpdateMask mStatic (flags at home, placed items).
     bool itemStatic = false;
+    // Player MoveMask (or, for the control player, Player::readPacketData):
+    // the latest authoritative state and a count of such updates; and the
+    // client's Player::processTick simulation from it.
+    PlayerPrediction::Update playerUpdate;
+    int playerUpdates = 0;
+    int predictionUpdate = -1;
+    PlayerPrediction::State prediction;
     // Item PositionMask: the server's position, velocity and rest state, and
     // a count of such updates so the client simulation restarts from each.
     Vec3 itemVelocity{};
