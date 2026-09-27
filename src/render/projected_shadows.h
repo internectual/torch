@@ -57,13 +57,21 @@ private:
         float receiverRadius = -1, receiverReach = -1;
         uint32_t vao = 0, vbo = 0;
         size_t vertexCount = 0, capacity = 0;
+        bool hasDepth = false;
     };
     bool init();
     void renderSilhouette(Renderer& r, State& state, const std::vector<ShadowCaptureDraw>& draws);
-    bool writeReceivers(State& state, const GatherReceivers& gather);
+    // True when there are receivers; `changed` when they were re-gathered
+    // (their depth then needs re-rendering).
+    bool writeReceivers(State& state, const GatherReceivers& gather, bool& changed);
+    void renderReceiverDepth(State& state);
 
     bool initialized = false, failed = false;
     uint32_t atlasTex = 0, atlasFbo = 0;
+    // Receiver depth from the light, one tile per caster (same layout): the
+    // engine's DepthSortList carves the footprint nearest-first, so only the
+    // receiver nearest the light along each ray takes the shadow.
+    uint32_t depthTex = 0, depthFbo = 0;
     Shader silhouetteShader, decalShader;
     std::unordered_map<int, State> states;
     std::vector<int> freeTiles;

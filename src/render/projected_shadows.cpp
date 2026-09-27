@@ -56,6 +56,9 @@ uniform float uFadeScale;
 uniform float uObjectAlpha;
 uniform int uBlur;
 uniform int uGeneric;
+// Receiver depth from the light (y / reach), rendered in this basis.
+uniform sampler2D uReceiverDepth;
+uniform int uHasDepth;
 
 float tap(vec2 uv, vec2 offset) {
     float inset = 0.5 * uTile.w;
@@ -67,9 +70,23 @@ float tap(vec2 uv, vec2 offset) {
 void main() {
     vec3 d = vWorld - uCenter;
     vec3 l = vec3(dot(d, uAxisX), dot(d, uDir), dot(d, uAxisZ));
+    // Receiver slope along the light, for the depth bias (before any discard).
+    vec3 n = normalize(cross(dFdx(l), dFdy(l)));
     if (l.y < 0.0 || l.y > uReach) discard;
     vec2 uv = l.xz / (2.0 * uRadius) + 0.5;
     if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) discard;
+    // Nearest-receiver test: fragments farther along the light than the
+    // receiver depth here are covered by a nearer receiver. The bias covers
+    // one tile texel of receiver slope plus a little constant.
+    if (uHasDepth != 0) {
+        float inset = 0.5 * uTile.w;
+        vec2 depthUv = clamp(uTile.xy + uv * uTile.z, uTile.xy + inset, uTile.xy + uTile.z - inset);
+        float nearest = texture(uReceiverDepth, depthUv).r;
+        float slope = sqrt(max(0.0, 1.0 - n.y * n.y)) / max(abs(n.y), 0.05);
+        float texel = 2.0 * uRadius / 64.0;
+        float bias = (texel * slope + 0.02 * uRadius) / uReach;
+        if (l.y / uReach > nearest + bias) discard;
+    }
     float a;
     if (uGeneric != 0) {
         vec2 c = uv * 2.0 - 1.0;
@@ -131,6 +148,28 @@ bool ProjectedShadows::init() {
         failed = true;
         return false;
     }
+    glGenTextures(1, &depthTex);
+    glBindTexture(GL_TEXTURE_2D, depthTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, AtlasSize, AtlasSize, 0, GL_DEPTH_COMPONENT,
+                 GL_UNSIGNED_INT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+    glGenFramebuffers(1, &depthFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, depthFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTex, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    const bool depthComplete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previous);
+    if (!depthComplete) {
+        Console::instance().printf(LogLevel::Error, "Projected shadows: depth framebuffer incomplete");
+        destroy();
+        failed = true;
+        return false;
+    }
     freeTiles.clear();
     for (int i = MaxCasters - 1; i >= 0; --i) freeTiles.push_back(i);
     initialized = true;
@@ -184,10 +223,12 @@ void ProjectedShadows::renderSilhouette(Renderer& r, State& state,
     (void)r;
 }
 
-bool ProjectedShadows::writeReceivers(State& state, const GatherReceivers& gather) {
+bool ProjectedShadows::writeReceivers(State& state, const GatherReceivers& gather, bool& changed) {
+    changed = false;
     if (state.receiverRadius == state.radius && state.receiverReach == state.reach &&
         sameBasis(state.receiverBasis, state.basis))
         return state.vertexCount > 0;
+    changed = true;
     state.receiverBasis = state.basis;
     state.receiverRadius = state.radius;
     state.receiverReach = state.reach;
@@ -226,6 +267,58 @@ bool ProjectedShadows::writeReceivers(State& state, const GatherReceivers& gathe
     return true;
 }
 
+// Depth of the receivers from the light: an ortho camera at the caster
+// centre looking along the light, near 0 and far = reach, so the stored
+// depth is y / reach, in the same basis the decal projects with.
+void ProjectedShadows::renderReceiverDepth(State& state) {
+    const Point3F& c = state.basis.center;
+    const Point3F& dir = state.basis.dir;
+    MatrixF view, proj;
+    view.lookAt(c, {c.x + dir.x, c.y + dir.y, c.z + dir.z}, state.basis.z);
+    proj.orthographic(-state.radius, state.radius, -state.radius, state.radius, 0.0f, state.reach);
+
+    GLint previousFbo = 0, viewport[4], depthFunc = GL_LESS;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFbo);
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
+    GLboolean depthMask = GL_TRUE;
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
+    GLfloat clearDepth = 1.0f;
+    glGetFloatv(GL_DEPTH_CLEAR_VALUE, &clearDepth);
+    const GLboolean depthTest = glIsEnabled(GL_DEPTH_TEST), cull = glIsEnabled(GL_CULL_FACE),
+                    scissor = glIsEnabled(GL_SCISSOR_TEST), offset = glIsEnabled(GL_POLYGON_OFFSET_FILL);
+
+    int x, y;
+    tileOrigin(state.tile, x, y);
+    glBindFramebuffer(GL_FRAMEBUFFER, depthFbo);
+    glViewport(x, y, TileSize, TileSize);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(x, y, TileSize, TileSize);
+    glDepthMask(GL_TRUE);
+    glClearDepth(1.0);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    silhouetteShader.bind();
+    silhouetteShader.setUniform("uMVP", proj * view);
+    glBindVertexArray(state.vao);
+    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)state.vertexCount);
+    glBindVertexArray(0);
+    state.hasDepth = true;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previousFbo);
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    glClearDepth(clearDepth);
+    glDepthMask(depthMask);
+    glDepthFunc(depthFunc);
+    if (!scissor) glDisable(GL_SCISSOR_TEST);
+    if (!depthTest) glDisable(GL_DEPTH_TEST);
+    if (cull) glEnable(GL_CULL_FACE);
+    if (offset) glEnable(GL_POLYGON_OFFSET_FILL);
+}
+
 void ProjectedShadows::submit(Renderer& r, const Caster& caster, double nowMs, float haze,
                               const GatherReceivers& gather) {
     if (!(caster.radius > 0.0f) || caster.alpha <= 0.0f || !init()) return;
@@ -260,7 +353,9 @@ void ProjectedShadows::submit(Renderer& r, const Caster& caster, double nowMs, f
     state.basis = ShadowProjection::lightBasis(ShadowProjection::lightDir(dist), caster.center);
     state.fadeScale = 1.0f - fade;
     state.objectAlpha = std::min(1.0f, caster.alpha);
-    if (!writeReceivers(state, gather)) { state.drawThisFrame = false; return; }
+    bool receiversChanged = false;
+    if (!writeReceivers(state, gather, receiversChanged)) { state.drawThisFrame = false; return; }
+    if (receiversChanged) renderReceiverDepth(state);
     state.drawThisFrame = true;
     if (!state.generic && caster.draws &&
         (state.lastRenderMs < -1e29 || nowMs - state.lastRenderMs >= spec.intervalMs)) {
@@ -297,6 +392,10 @@ void ProjectedShadows::draw(Renderer& r) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, atlasTex);
     decalShader.setUniform("uAtlas", (int32_t)0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, depthTex);
+    decalShader.setUniform("uReceiverDepth", (int32_t)1);
+    glActiveTexture(GL_TEXTURE0);
     for (auto& [key, state] : states) {
         if (!state.drawThisFrame || !state.vertexCount) continue;
         int x, y;
@@ -313,6 +412,7 @@ void ProjectedShadows::draw(Renderer& r) {
         decalShader.setUniform("uObjectAlpha", state.objectAlpha);
         decalShader.setUniform("uBlur", (int32_t)(state.blur ? 1 : 0));
         decalShader.setUniform("uGeneric", (int32_t)(state.generic ? 1 : 0));
+        decalShader.setUniform("uHasDepth", (int32_t)(state.hasDepth ? 1 : 0));
         glBindVertexArray(state.vao);
         glDrawArrays(GL_TRIANGLES, 0, (GLsizei)state.vertexCount);
         state.drawThisFrame = false;
@@ -349,7 +449,9 @@ void ProjectedShadows::destroy() {
     states.clear();
     if (atlasFbo) glDeleteFramebuffers(1, &atlasFbo);
     if (atlasTex) glDeleteTextures(1, &atlasTex);
-    atlasFbo = atlasTex = 0;
+    if (depthFbo) glDeleteFramebuffers(1, &depthFbo);
+    if (depthTex) glDeleteTextures(1, &depthTex);
+    atlasFbo = atlasTex = depthFbo = depthTex = 0;
     silhouetteShader.destroy();
     decalShader.destroy();
     initialized = false;
