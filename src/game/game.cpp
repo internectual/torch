@@ -7033,9 +7033,11 @@ void Game::update(float dt) {
                         if (ev.classId == T2Demo::NetEventClassFirst + 9 &&
                             !ev.arguments.empty()) {
                             const std::string& command = ev.arguments[0];
+                            // clientCmdServerMessage(%type, %msg, ...) and
+                            // clientCmdChatMessage(%sender, %voice, %pitch, %msg, ...).
                             if ((command == "ServerMessage" || command == "ChatMessage") &&
-                                ev.arguments.size() >= (command == "ServerMessage" ? 3u : 4u)) {
-                                const size_t templateIndex = command == "ServerMessage" ? 2 : 3;
+                                ev.arguments.size() >= (command == "ServerMessage" ? 3u : 5u)) {
+                                const size_t templateIndex = command == "ServerMessage" ? 2 : 4;
                                 std::vector<std::string> values(
                                     ev.arguments.begin() + templateIndex + 1, ev.arguments.end());
                                 displayText = formatDemoRemoteText(ev.arguments[templateIndex], values);
@@ -7056,6 +7058,8 @@ void Game::update(float dt) {
                                     ts->dispatchMessageCallback(ev.arguments[1], callbackArgs);
                             }
                         }
+                        // Score and state messages carry no text.
+                        if (displayText.empty()) continue;
                         DemoTimedEvent te;
                         te.time = blockTime;
                         te.text = displayText;

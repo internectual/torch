@@ -28,6 +28,9 @@ inline std::string formatDemoRemoteText(const std::string& templ,
         if (index > 0 && index <= values.size()) text += values[index - 1];
         i = end;
     }
+    // The stock chat/message scripts play a trailing "~w<sound>" and show
+    // only the text before it.
+    if (const size_t sound = text.find("~w"); sound != std::string::npos) text.erase(sound);
     text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char c) {
         return c < 0x20;
     }), text.end());
