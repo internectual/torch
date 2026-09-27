@@ -240,9 +240,6 @@ int main(int argc, char** argv) {
     CHECK(parser.processBlocks(3) == 3);
     const size_t capturedExplosions = DemoParser::s_pendingExplosions.size() + 1;
     DemoParser::s_pendingExplosions.push_back({{}, {}, 0.0f, 1});
-    DemoParser::s_pendingTerrainFile = "captured.ter";
-    DemoParser::s_sunData.azimuth = 0.5f;
-    DemoParser::s_sunData.valid = true;
     const DemoParserSnapshot snapshot = parser.captureSnapshot();
     CHECK(snapshot.pendingExplosions.size() == capturedExplosions);
     const auto expected = readBlocks(parser, 4);
@@ -254,19 +251,8 @@ int main(int argc, char** argv) {
     const auto restored = readBlocks(parser, 4);
     CHECK(sameBlocks(expected, restored));
 
-    DemoParser::s_pendingTerrainFile = "stale.ter";
-    DemoParser::s_sunData.direction = {1.0f, 2.0f, 3.0f};
-    DemoParser::s_sunData.azimuth = 0.5f;
-    DemoParser::s_sunData.elevation = 0.25f;
-    DemoParser::s_sunData.r = 10;
-    DemoParser::s_sunData.g = 20;
-    DemoParser::s_sunData.b = 30;
-    DemoParser::s_sunData.valid = true;
     CHECK(parser.restoreSnapshot(snapshot));
     CHECK(parser.consumeExplosions().size() == capturedExplosions);
-    CHECK(DemoParser::s_pendingTerrainFile == "captured.ter");
-    CHECK(DemoParser::s_sunData.valid == snapshot.sunValid);
-    CHECK(DemoParser::s_sunData.azimuth == snapshot.sunAzimuth);
 
     CHECK(parser.seekToBlock(3));
     CHECK(parser.getBlockCursor() == 3);

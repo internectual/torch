@@ -690,6 +690,9 @@ struct GhostEntry {
     bool exploded = false;
     // Item InitialUpdateMask mStatic (flags at home, placed items).
     bool itemStatic = false;
+    // SceneObject ghosts (TerrainBlock, InteriorInstance, TSStatic, Sky, Sun,
+    // WaterBlock, MissionArea): their fields in mission-file form.
+    std::vector<std::pair<std::string, std::string>> sceneProps;
     std::string shapeName; // from datablock
     int linkSourceGhost = -1;
     int linkTargetGhost = -1;
@@ -895,11 +898,6 @@ struct DemoParserSnapshot {
     VehicleHudState vehicleHud;
     AmmoHudState ammoHud;
     std::vector<DemoPendingExplosion> pendingExplosions;
-    std::string pendingTerrainFile;
-    Vec3 sunDirection{};
-    float sunAzimuth{}, sunElevation{};
-    int sunR{}, sunG{}, sunB{};
-    bool sunValid{};
 };
 
 // ─── DemoParser ─────────────────────────────────────────────────
@@ -1077,14 +1075,6 @@ public:
     std::vector<PendingExplosion> consumeExplosions() { auto r = std::move(s_pendingExplosions); s_pendingExplosions.clear(); return r; }
 
     // Terrain file from ghost data (for when .mis doesn't have it)
-    static std::string s_pendingTerrainFile;
 
     // Sun data extracted from demo stream (for when .mis is unavailable)
-    struct SunData {
-        Vec3 direction{};
-        float azimuth{}, elevation{};
-        int r{}, g{}, b{};
-        bool valid = false;
-    };
-    static SunData s_sunData;
 };

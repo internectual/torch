@@ -184,6 +184,8 @@ public:
     ~World();
 
     bool load(const char* mapName);
+    // The world from mission objects (a parsed .mis or demo scene ghosts).
+    bool loadObjects(const char* mapName, const std::string& misPath, std::vector<MisObject> objects);
     bool isLoaded() const { return loaded; }
     // Terrain-only load (no shapes/materials) — safe for headless dedicated servers
     // that only need authoritative ground heights for collision.

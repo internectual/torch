@@ -21,8 +21,6 @@
 // Pending explosion events from projectile ghost parsers
 std::vector<DemoParser::PendingExplosion> DemoParser::s_pendingExplosions;
 float DemoParser::s_packetTime = 0.0f;
-DemoParser::SunData DemoParser::s_sunData;
-std::string DemoParser::s_pendingTerrainFile;
 
 // Quaternion for a Torque yaw about +Z (MatrixF::set(EulerF(0, 0, yaw)),
 // which turns forward +Y toward +X), in the Torque frame the renderer
@@ -369,7 +367,8 @@ std::string BitStream::unpackNetString() {
 int* BitStream::readMatrixF(Vec3* outPos) {
     static float elements[16];
     for (int i = 0; i < 16; i++) elements[i] = readF32();
-    if (outPos) { outPos->x = elements[12]; outPos->y = elements[13]; outPos->z = elements[14]; }
+    // Torque MatrixF is row-major: the translation is column 3.
+    if (outPos) { outPos->x = elements[3]; outPos->y = elements[7]; outPos->z = elements[11]; }
     return (int*)elements;
 }
 
@@ -877,8 +876,6 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
     parseFault_.clear();
     packetsDroppedAfterFault_ = 0;
     s_pendingExplosions.clear();
-    s_pendingTerrainFile.clear();
-    s_sunData = {};
     buf = buffer; bufSize = size; offset = 0; ownsBuffer = false;
     decompressed = nullptr; decompressedSize = 0;
 
@@ -1166,8 +1163,6 @@ void DemoParser::reset() {
     eventLog_.clear();
     resetHudState();
     s_pendingExplosions.clear();
-    s_pendingTerrainFile.clear();
-    s_sunData = {};
     ghostTracker.clear();
     for (int index : ibGhostTracker.getAllIndices()) {
         const GhostEntry* source = ibGhostTracker.getGhost(index);
@@ -1193,18 +1188,11 @@ void DemoParser::reset() {
 }
 
 void DemoParser::resetMissionState() {
-    ghostTracker.clear();
-    for (int index : ibGhostTracker.getAllIndices()) {
-        const GhostEntry* source = ibGhostTracker.getGhost(index);
-        if (!source) continue;
-        ghostTracker.createGhost(index, source->classId, source->className);
-        if (GhostEntry* target = ghostTracker.getMutableGhost(index)) *target = *source;
-    }
+    // The new mission's ghosts are the connection's (EndGhosting cleared the
+    // old ones); only presentation state resets here.
     playerInfo_ = initialPlayerInfo_;
     resetHudState();
     s_pendingExplosions.clear();
-    s_pendingTerrainFile.clear();
-    s_sunData = {};
 }
 
 void DemoParser::handleHudRemoteCommand(const std::string& funcName,
@@ -1342,14 +1330,6 @@ DemoParserSnapshot DemoParser::captureSnapshot() const {
     snapshot.vehicleHud = vehicleHud_;
     snapshot.ammoHud = ammoHud_;
     snapshot.pendingExplosions = s_pendingExplosions;
-    snapshot.pendingTerrainFile = s_pendingTerrainFile;
-    snapshot.sunDirection = s_sunData.direction;
-    snapshot.sunAzimuth = s_sunData.azimuth;
-    snapshot.sunElevation = s_sunData.elevation;
-    snapshot.sunR = s_sunData.r;
-    snapshot.sunG = s_sunData.g;
-    snapshot.sunB = s_sunData.b;
-    snapshot.sunValid = s_sunData.valid;
     return snapshot;
 }
 
@@ -1393,14 +1373,6 @@ bool DemoParser::restoreSnapshot(const DemoParserSnapshot& snapshot) {
     vehicleHud_ = snapshot.vehicleHud;
     ammoHud_ = snapshot.ammoHud;
     s_pendingExplosions = snapshot.pendingExplosions;
-    s_pendingTerrainFile = snapshot.pendingTerrainFile;
-    s_sunData.direction = snapshot.sunDirection;
-    s_sunData.azimuth = snapshot.sunAzimuth;
-    s_sunData.elevation = snapshot.sunElevation;
-    s_sunData.r = snapshot.sunR;
-    s_sunData.g = snapshot.sunG;
-    s_sunData.b = snapshot.sunB;
-    s_sunData.valid = snapshot.sunValid;
     return true;
 }
 
@@ -1809,8 +1781,13 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
         }
     } else if (ev.classId == T2Demo::NetEventClassFirst + 4) { // GhostingMessageEvent
         bs.readU32();
-        bs.readInt(3);
+        const int message = bs.readInt(3);
         bs.readInt(11);
+        // NetConnection::handleGhostMessage EndGhosting deletes the client's
+        // ghosts (datablocks are connection state and stay). Events are read
+        // before the packet's ghost section, as the engine applies them.
+        constexpr int GhostMsgEndGhosting = 2;
+        if (applyEffects && message == GhostMsgEndGhosting) ghostTracker.clear();
     } else if (ev.classId == T2Demo::NetEventClassFirst + 0) { // CRCChallengeEvent
         bs.readU32(); bs.readU32(); bs.readU32(); bs.readFlag();
     } else if (ev.classId == T2Demo::NetEventClassFirst + 1) { // CRCChallengeResponseEvent
@@ -2688,41 +2665,127 @@ static void readSeekerProjectileData(BitStream& bs, bool isInitial, const Vec3&,
     bs.readFlag(); // timeout reset
 }
 
-static void readSkyData(BitStream& bs, bool, const Vec3&, GhostEntry*) {
+// ─── Scene ghosts ────────────────────────────────────────────
+// SceneObject ghosts (terrain, interiors, statics, sky, sun, water, mission
+// area) carry what the client builds its world from. Their initial update is
+// kept in mission-file form so the world loader reads it like a .mis object.
+static std::string sceneFloats(std::initializer_list<float> values) {
+    std::string out;
+    char buf[32];
+    for (float value : values) {
+        snprintf(buf, sizeof(buf), "%.9g", value);
+        if (!out.empty()) out += ' ';
+        out += buf;
+    }
+    return out;
+}
+
+static void setSceneProp(GhostEntry* entry, const char* name, std::string value) {
+    if (!entry) return;
+    for (auto& prop : entry->sceneProps)
+        if (prop.first == name) { prop.second = std::move(value); return; }
+    entry->sceneProps.emplace_back(name, std::move(value));
+}
+
+// A row-major MatrixF as the mission's position and rotation (AngAxisF of
+// QuatF::set(MatrixF), degrees) plus scale.
+static void setSceneTransform(GhostEntry* entry, const float* m, const Vec3& scale) {
+    if (!entry) return;
+    auto at = [&](int r, int c) { return m[r * 4 + c]; };
+    float q[4]; // x y z w
+    const float trace = at(0, 0) + at(1, 1) + at(2, 2);
+    if (trace > 0.0f) {
+        float t = std::sqrt(trace + 1.0f);
+        q[3] = t * 0.5f;
+        t = 0.5f / t;
+        q[0] = (at(1, 2) - at(2, 1)) * t;
+        q[1] = (at(2, 0) - at(0, 2)) * t;
+        q[2] = (at(0, 1) - at(1, 0)) * t;
+    } else {
+        int i = 0;
+        if (at(1, 1) > at(0, 0)) i = 1;
+        if (at(2, 2) > at(i, i)) i = 2;
+        const int j = (i + 1) % 3, k = (j + 1) % 3;
+        float t = std::sqrt((at(i, i) - (at(j, j) + at(k, k))) + 1.0f);
+        q[i] = t * 0.5f;
+        t = 0.5f / t;
+        q[j] = (at(i, j) + at(j, i)) * t;
+        q[k] = (at(i, k) + at(k, i)) * t;
+        q[3] = (at(j, k) - at(k, j)) * t;
+    }
+    const float w = std::clamp(q[3], -1.0f, 1.0f);
+    const float angle = std::acos(w) * 2.0f;
+    const float sinHalf = std::sqrt(std::max(0.0f, 1.0f - w * w));
+    Vec3 axis{1.0f, 0.0f, 0.0f};
+    if (sinHalf != 0.0f) axis = {q[0] / sinHalf, q[1] / sinHalf, q[2] / sinHalf};
+    setSceneProp(entry, "position", sceneFloats({at(0, 3), at(1, 3), at(2, 3)}));
+    setSceneProp(entry, "rotation", sceneFloats({axis.x, axis.y, axis.z, angle * 180.0f / 3.14159265358979f}));
+    setSceneProp(entry, "scale", sceneFloats({scale.x, scale.y, scale.z}));
+}
+
+static void readSkyData(BitStream& bs, bool, const Vec3&, GhostEntry* entry) {
+    // Sky::unpackUpdate (retail layout, as the reference parser decodes it).
     if (bs.readFlag()) {
-        bs.readString();
-        bs.readF32(); bs.readF32(); bs.readF32();
+        setSceneProp(entry, "materialList", bs.readString());
+        const float fr = bs.readF32(), fg = bs.readF32(), fb = bs.readF32();
+        setSceneProp(entry, "fogColor", sceneFloats({fr, fg, fb, 1.0f}));
         const uint32_t fogCount = bs.readU32();
         if (fogCount > 64) { bs.skipBits(bs.getRemainingBits()); return; }
-        bs.readBool(); bs.readBool();
-        bs.readF32(); bs.readF32(); bs.readF32();
-        bs.readBool();
+        setSceneProp(entry, "useSkyTextures", bs.readBool() ? "1" : "0");
+        setSceneProp(entry, "renderBottomTexture", bs.readBool() ? "1" : "0");
+        const float sr = bs.readF32(), sg = bs.readF32(), sb = bs.readF32();
+        setSceneProp(entry, "SkySolidColor", sceneFloats({sr, sg, sb, 1.0f}));
+        setSceneProp(entry, "windEffectPrecipitation", bs.readBool() ? "1" : "0");
         for (uint32_t i = 0; i < fogCount; ++i) {
-            for (int j = 0; j < 6; ++j) bs.readF32();
+            float v[6];
+            for (float& value : v) value = bs.readF32();
+            if (i < 3) {
+                const std::string n = std::to_string(i + 1);
+                setSceneProp(entry, ("fogVolume" + n).c_str(), sceneFloats({v[0], v[1], v[2]}));
+                setSceneProp(entry, ("fogVolumeColor" + n).c_str(), sceneFloats({v[3], v[4], v[5], 1.0f}));
+            }
         }
         for (int i = 0; i < 3; ++i) {
-            bs.readString(); bs.readF32(); bs.readF32();
+            const std::string texture = bs.readString();
+            const float height = bs.readF32(), speed = bs.readF32();
+            setSceneProp(entry, ("cloudText" + std::to_string(i + 1)).c_str(), texture);
+            setSceneProp(entry, ("cloudHeightPer[" + std::to_string(i) + "]").c_str(), sceneFloats({height}));
+            setSceneProp(entry, ("cloudSpeed" + std::to_string(i + 1)).c_str(), sceneFloats({speed}));
         }
-        bs.readPoint3F(); bs.readF32();
+        const Vec3 wind = bs.readPoint3F();
+        setSceneProp(entry, "windVelocity", sceneFloats({wind.x, wind.y, wind.z}));
+        bs.readF32(); // current storm
         if (bs.readFlag()) for (int j = 0; j < 5; ++j) bs.readF32();
     }
     if (bs.readFlag()) bs.readBool();
     if (bs.readFlag()) bs.readBool();
-    if (bs.readFlag()) { bs.readF32(); bs.readF32(); }
+    if (bs.readFlag()) {
+        const float visible = bs.readF32(), fog = bs.readF32();
+        setSceneProp(entry, "visibleDistance", sceneFloats({visible}));
+        setSceneProp(entry, "fogDistance", sceneFloats({fog}));
+    }
     if (bs.readFlag()) { bs.readF32(); bs.readF32(); }
     if (bs.readFlag()) for (int j = 0; j < 3; ++j) bs.readF32();
     if (bs.readFlag()) for (int j = 0; j < 4; ++j) bs.readF32();
-    if (bs.readFlag()) bs.readPoint3F();
+    if (bs.readFlag()) {
+        const Vec3 wind = bs.readPoint3F();
+        setSceneProp(entry, "windVelocity", sceneFloats({wind.x, wind.y, wind.z}));
+    }
 }
 
-static void readSunData(BitStream& bs, bool, const Vec3&, GhostEntry*) {
-    if (bs.readFlag()) for (int i = 0; i < 5; ++i) bs.readString();
+static void readSunData(BitStream& bs, bool, const Vec3&, GhostEntry* entry) {
     if (bs.readFlag()) {
-        auto& sd = DemoParser::s_sunData;
-        sd.direction = {bs.readF32(), bs.readF32(), bs.readF32()};
-        sd.r = (int)bs.readF32(); sd.g = (int)bs.readF32(); sd.b = (int)bs.readF32();
-        for (int i = 0; i < 13; ++i) bs.readF32();
-        sd.valid = true;
+        for (int i = 0; i < 5; ++i) {
+            const std::string texture = bs.readString();
+            setSceneProp(entry, ("texture[" + std::to_string(i) + "]").c_str(), texture);
+        }
+    }
+    if (bs.readFlag()) {
+        float v[19];
+        for (float& value : v) value = bs.readF32();
+        setSceneProp(entry, "direction", sceneFloats({v[0], v[1], v[2]}));
+        setSceneProp(entry, "color", sceneFloats({v[3], v[4], v[5], v[6]}));
+        setSceneProp(entry, "ambient", sceneFloats({v[7], v[8], v[9], v[10]}));
     }
 }
 
@@ -2743,10 +2806,13 @@ static void readLightningData(BitStream& bs, bool isInitial, const Vec3&, GhostE
     }
 }
 
-static void readMissionAreaData(BitStream& bs) {
+static void readMissionAreaData(BitStream& bs, GhostEntry* entry) {
     if (bs.readFlag()) {
-        bs.readS32(); bs.readS32(); bs.readS32(); bs.readS32();
-        bs.readF32(); bs.readF32();
+        const int32_t x = bs.readS32(), y = bs.readS32(), w = bs.readS32(), h = bs.readS32();
+        setSceneProp(entry, "area", std::to_string(x) + " " + std::to_string(y) + " " +
+                                    std::to_string(w) + " " + std::to_string(h));
+        setSceneProp(entry, "flightCeiling", sceneFloats({bs.readF32()}));
+        setSceneProp(entry, "flightCeilingRange", sceneFloats({bs.readF32()}));
     }
 }
 
@@ -2789,8 +2855,15 @@ static void readForceFieldBareData(BitStream& bs, bool, const Vec3&, GhostEntry*
         bs.readInt(std::min(remaining, 32));
 }
 
-static void readTSStaticData(BitStream& bs, bool, const Vec3&, GhostEntry*) {
-    bs.readMatrixF(); bs.readPoint3F(); bs.readString();
+static void readTSStaticData(BitStream& bs, bool, const Vec3&, GhostEntry* entry) {
+    // TSStatic::unpackUpdate: transform, scale and shape name, always.
+    float m[16];
+    const float* read = (const float*)bs.readMatrixF();
+    std::copy(read, read + 16, m);
+    const Vec3 scale = bs.readPoint3F();
+    const std::string shapeName = bs.readString();
+    setSceneTransform(entry, m, scale);
+    setSceneProp(entry, "shapeName", shapeName);
 }
 
 static void readAudioEmitterData(BitStream& bs) {
@@ -2820,45 +2893,71 @@ static void readAudioEmitterData(BitStream& bs) {
     if (bs.readFlag()) bs.readFlag();
 }
 
-static void readTerrainBlockData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry*) {
-    if (bs.readFlag()) { // init
-        bs.readU32(); // CRC
-        std::string terrFile = bs.readString(); // terrain file name
-        std::string detailTex = bs.readString(); // detail texture name
-        bs.readU32(); // squareSize
-        // Read empty square RLE
-        uint32_t emptySize = bs.readU32();
-        for (uint32_t i = 0; i < emptySize; i++) bs.readU32();
-        // Store terrain file name for later loading
-        if (!terrFile.empty()) {
-            DemoParser::s_pendingTerrainFile = terrFile;
+static void readTerrainBlockData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
+    auto readRuns = [&]() {
+        const uint32_t count = bs.readU32();
+        if (count > (uint32_t)(bs.getRemainingBits() / 32)) { bs.skipBits(bs.getRemainingBits()); return std::string(); }
+        std::string runs;
+        for (uint32_t i = 0; i < count; ++i) {
+            if (!runs.empty()) runs += ' ';
+            runs += std::to_string(bs.readU32());
         }
-    } else {
-        // Normal update: empty square RLE
-        uint32_t emptySize = bs.readU32();
-        for (uint32_t i = 0; i < emptySize; i++) bs.readU32();
+        return runs;
+    };
+    if (bs.readFlag()) { // InitMask
+        bs.readU32(); // CRC
+        setSceneProp(entry, "terrainFile", bs.readString());
+        setSceneProp(entry, "detailTexture", bs.readString());
+        const uint32_t squareSize = bs.readU32();
+        setSceneProp(entry, "squareSize", std::to_string(squareSize));
+        setSceneProp(entry, "emptySquares", readRuns());
+        // TerrainBlock::onAdd centres the block: -squareSize * BlockSize / 2.
+        const float corner = -(float)squareSize * 128.0f;
+        setSceneProp(entry, "position", sceneFloats({corner, corner, 0.0f}));
+    } else if (bs.readFlag()) { // EmptyMask
+        setSceneProp(entry, "emptySquares", readRuns());
     }
 }
 
 static void readWaterBlockData(BitStream& bs, bool, const Vec3&, GhostEntry* entry) {
+    // WaterBlock::unpackUpdate: everything, always.
+    const Vec3 position = bs.readPoint3F();
+    const float qx = bs.readF32(), qy = bs.readF32(), qz = bs.readF32();
+    float qw = sqrtf(fmaxf(0, 1.0f - (qx * qx + qy * qy + qz * qz)));
+    if (bs.readFlag()) qw = -qw;
+    const Vec3 scale = bs.readPoint3F();
+    const std::string surface = bs.readString(), envMap = bs.readString();
+    const std::string submerge0 = bs.readString(), submerge1 = bs.readString();
+    const int32_t liquidType = bs.readS32();
+    const float density = bs.readF32(), viscosity = bs.readF32();
+    const float waveMagnitude = bs.readF32(), surfaceOpacity = bs.readF32();
+    const float envMapIntensity = bs.readF32();
+    const bool removeWetEdges = bs.readU8() != 0;
+    if (bs.readFlag()) bs.readInt(11); // audio environment
     if (entry) {
-        entry->position = bs.readPoint3F();
-        const float qx = bs.readF32();
-        const float qy = bs.readF32();
-        const float qz = bs.readF32();
-        float qw = sqrtf(fmaxf(0, 1.0f - (qx*qx + qy*qy + qz*qz)));
-        if (bs.readFlag()) qw = -qw;
+        entry->position = position;
         entry->rotation = {qx, qy, qz, qw};
         entry->hasRotation = true;
-    } else {
-        bs.readPoint3F(); bs.readF32(); bs.readF32(); bs.readF32(); bs.readFlag();
+        // The quaternion as a MatrixF (m_quatF_set_matF, row-major).
+        const float xx = qx * qx, yy = qy * qy, zz = qz * qz, xy = qx * qy, xz = qx * qz,
+                    yz = qy * qz, wx = qw * qx, wy = qw * qy, wz = qw * qz;
+        const float m[16] = {1 - 2 * (yy + zz), 2 * (xy + wz), 2 * (xz - wy), position.x,
+                             2 * (xy - wz), 1 - 2 * (xx + zz), 2 * (yz + wx), position.y,
+                             2 * (xz + wy), 2 * (yz - wx), 1 - 2 * (xx + yy), position.z,
+                             0, 0, 0, 1};
+        setSceneTransform(entry, m, scale);
+        setSceneProp(entry, "surfaceTexture", surface);
+        setSceneProp(entry, "envMapTexture", envMap);
+        setSceneProp(entry, "submergeTexture[0]", submerge0);
+        setSceneProp(entry, "submergeTexture[1]", submerge1);
+        setSceneProp(entry, "liquidType", std::to_string(liquidType));
+        setSceneProp(entry, "density", sceneFloats({density}));
+        setSceneProp(entry, "viscosity", sceneFloats({viscosity}));
+        setSceneProp(entry, "waveMagnitude", sceneFloats({waveMagnitude}));
+        setSceneProp(entry, "surfaceOpacity", sceneFloats({surfaceOpacity}));
+        setSceneProp(entry, "envMapIntensity", sceneFloats({envMapIntensity}));
+        setSceneProp(entry, "removeWetEdges", removeWetEdges ? "1" : "0");
     }
-    bs.readPoint3F();
-    bs.readString(); bs.readString(); bs.readString(); bs.readString();
-    bs.readS32();
-    bs.readF32(); bs.readF32(); bs.readF32(); bs.readF32(); bs.readF32();
-    bs.readU8();
-    if (bs.readFlag()) bs.readInt(11);
 }
 
 static void readVehicleBlockerData(BitStream& bs) {
@@ -2868,24 +2967,28 @@ static void readVehicleBlockerData(BitStream& bs) {
 }
 
 static void readInteriorData(BitStream& bs, bool, const Vec3&, GhostEntry* entry) {
+    auto readTransform = [&]() {
+        float m[16];
+        Vec3 position;
+        const float* read = (const float*)bs.readMatrixF(&position);
+        std::copy(read, read + 16, m);
+        const Vec3 scale = bs.readPoint3F();
+        if (entry) entry->position = position;
+        setSceneTransform(entry, m, scale);
+    };
     if (bs.readFlag()) { // InitMask - full initial state
-        bs.readU32(); bs.readString(); bs.readFlag();
-        Vec3 matPos;
-        bs.readMatrixF(&matPos);
-        if (entry) { entry->position = matPos; }
-        bs.readPoint3F();
-        bs.readFlag(); bs.readString();
+        bs.readU32(); // CRC
+        setSceneProp(entry, "interiorFile", bs.readString());
+        setSceneProp(entry, "showTerrainInside", bs.readFlag() ? "1" : "0");
+        readTransform();
+        bs.readFlag(); // alarm state
+        setSceneProp(entry, "skinBase", bs.readString());
         if (bs.readFlag()) bs.readInt(11);
         if (bs.readFlag()) bs.readInt(11);
     } else { // normal update
-        if (bs.readFlag()) {
-            Vec3 matPos;
-            bs.readMatrixF(&matPos);
-            if (entry) { entry->position = matPos; }
-            bs.readPoint3F();
-        }
+        if (bs.readFlag()) readTransform();
         bs.readFlag();
-        if (bs.readFlag()) bs.readString();
+        if (bs.readFlag()) setSceneProp(entry, "skinBase", bs.readString());
         if (bs.readFlag()) {
             if (bs.readFlag()) bs.readInt(11);
             if (bs.readFlag()) bs.readInt(11);
@@ -2934,7 +3037,7 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
     else if (cn == "Camera") readCameraData(bs, isInitial, cp, entry);
     else if (cn == "Marker") readMarkerData(bs, false, cp, entry);
     else if (cn == "MissionMarker") readMissionMarkerData(bs, isInitial, cp, entry);
-    else if (cn == "MissionArea") readMissionAreaData(bs);
+    else if (cn == "MissionArea") readMissionAreaData(bs, entry);
     else if (cn == "Splash") {
         readGameBaseData(bs, isInitial, entry);
         if (bs.readFlag()) {

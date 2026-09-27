@@ -1694,6 +1694,15 @@ bool World::load(const char* mapName) {
             "Mission contains no objects: %s", misPath.c_str());
         return false;
     }
+    return loadObjects(mapName, misPath, std::move(parsedObjects));
+}
+
+// Builds the world from mission objects: a parsed .mis, or the scene a demo's
+// SceneObject ghosts describe.
+bool World::loadObjects(const char* mapName, const std::string& misPath,
+                        std::vector<MisObject> parsedObjects) {
+    if (parsedObjects.empty()) return false;
+    auto& fs = Engine::instance().fs();
 
     cleanupMission();
 
@@ -1763,9 +1772,9 @@ bool World::load(const char* mapName) {
     float cloudSpeeds[3] = {0.0001f, 0.0002f, 0.0003f};
     bool missionHasTerrainBlock = false;
 
-    if (!misData.empty()) {
-        Console::instance().printf(LogLevel::Info, "Found mission: %s (%zu bytes, first 30: '%s')", misPath.c_str(), misData.size(),
-            misData.substr(0, 30).c_str());
+    if (!parsedObjects.empty()) {
+        Console::instance().printf(LogLevel::Info, "Found mission: %s (%zu objects)", misPath.c_str(),
+            parsedObjects.size());
 
         auto objects = std::move(parsedObjects);
 
@@ -7102,21 +7111,7 @@ void Game::update(float dt) {
                                                 (int)std::floor(demoTime / 0.032f));
                     }
 
-                    // Apply sun data from demo stream if .mis didn't provide it
-                     if (!w->sunLightDirUsed) {
-                        auto& sd = DemoParser::s_sunData;
-                        if (sd.valid) {
-                            w->sunLightDir.x = cosf(sd.elevation) * sinf(sd.azimuth);
-                            w->sunLightDir.y = sinf(sd.elevation);
-                            w->sunLightDir.z = cosf(sd.elevation) * cosf(sd.azimuth);
-                            w->sunLightDirUsed = true;
-                            w->sunColor = {(float)sd.r / 255.0f, (float)sd.g / 255.0f, (float)sd.b / 255.0f};
-                            w->sunColorUsed = true;
-                            Console::instance().printf(LogLevel::Info, "Applied sun from demo stream: az=%.0f el=%.0f color=(%d %d %d)",
-                                sd.azimuth * 180.0f / 3.14159f, sd.elevation * 180.0f / 3.14159f, sd.r, sd.g, sd.b);
-                                }
-                             }
-                         }
+                }
                 // Parse and apply this block's events before replacing the
                 // world. A missing mission must not drop its CRC, chat, or
                 // ghost updates; a successful replacement then clears the
@@ -7128,23 +7123,6 @@ void Game::update(float dt) {
                     demoSnapshots[demoBlocksDone] = demoParser->captureSnapshot();
                     demoViewSnapshots[demoBlocksDone] = captureDemoView();
                 }
-            }
-
-            // Try to load terrain from ghost data if not yet loaded
-            if (demoPlaying && w && !w->terrain()->loaded && !DemoParser::s_pendingTerrainFile.empty()) {
-                Console::instance().printf(LogLevel::Info, "Loading terrain from ghost data: %s", DemoParser::s_pendingTerrainFile.c_str());
-                auto& fs = Engine::instance().fs();
-                std::string tf = DemoParser::s_pendingTerrainFile;
-                std::vector<std::string> terPaths = {tf, "terrains/" + tf, tf + ".ter", "terrains/" + tf + ".ter"};
-                for (auto& tp : terPaths) {
-                    auto terData = fs.read(tp.c_str());
-                    if (!terData.empty()) {
-                        Console::instance().printf(LogLevel::Info, "  loaded terrain: %s", tp.c_str());
-                        w->terrain()->load(terData.data(), terData.size());
-                        break;
-                    }
-                }
-                DemoParser::s_pendingTerrainFile.clear(); // only try once
             }
 
             if (demoPlaying && demoParser) {
