@@ -1063,6 +1063,9 @@ private:
         bool hasOrientation = false, hasPos = false, authoredCamera = false;
         Point3F cameraPos{}, cameraTarget{};
         float cameraFov = -1.0f;
+        int cameraMode = -1, orbitGhost = -1;
+        float orbitMinDist = 0.0f, orbitMaxDist = 0.0f;
+        Point3F orbitPoint{};
     };
     std::map<int, DemoViewSnapshot> demoViewSnapshots;
     DemoViewSnapshot captureDemoView() const;
@@ -1104,6 +1107,14 @@ private:
     float whiteOut = -1.0f;     // white screen flash during demo playback
     float demoCameraFov = -1.0f; // FOV from demo stream
     bool demoAuthoredCamera = false;
+    // The recorded Camera control object's mode and orbit (Torque space).
+    int demoCameraMode = -1;
+    int demoOrbitGhost = -1;
+    float demoOrbitMinDist = 0.0f, demoOrbitMaxDist = 0.0f;
+    Point3F demoOrbitPoint{};
+    // Each demo ghost's world-box centre as last drawn (Y-up): the orbit
+    // centre of Camera::interpolateTick (getRenderWorldBox().getCenter()).
+    std::unordered_map<int, Point3F> demoBoxCenters;
     std::vector<DemoTimedEvent> demoEventLog;
     bool demoShowEvents = true;
     // Orbit camera for demo spectator mode

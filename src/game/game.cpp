@@ -7837,6 +7837,43 @@ void Game::render(float dt) {
             if (demoHasPos && demoAuthoredCamera) {
                 camPos = demoCameraPos;
                 camTarget = demoCameraTarget;
+                // Camera::interpolateTick: orbit modes centre on the orbit
+                // object's render world box (or the orbit point), turn by
+                // mRot and pull back per validateEyePoint.
+                const Vec3 forwardT = T2Demo::cameraDirectionFromYawPitch(demoViewYaw, demoViewPitch);
+                const Point3F forward = Math::torquePointToYUp({forwardT.x, forwardT.y, forwardT.z});
+                const Point3F* center = nullptr;
+                Point3F orbitCenter;
+                if (demoCameraMode == T2Demo::CameraOrbitObject) {
+                    auto box = demoBoxCenters.find(demoOrbitGhost);
+                    if (box != demoBoxCenters.end()) center = &box->second;
+                } else if (demoCameraMode == T2Demo::CameraOrbitPoint) {
+                    orbitCenter = Math::torquePointToYUp(demoOrbitPoint);
+                    center = &orbitCenter;
+                }
+                if (center && w) {
+                    const float distance = demoOrbitMaxDist - demoOrbitMinDist;
+                    const Point3F rayEnd{center->x - forward.x * 2.5f * distance,
+                                         center->y - forward.y * 2.5f * distance,
+                                         center->z - forward.z * 2.5f * distance};
+                    ProjectilePhysics::RayHit hit;
+                    const bool blocked = distance > 0.0f && castStaticRay(*w, *center, rayEnd, hit);
+                    float along = 0.0f, dot = 0.0f;
+                    if (blocked) {
+                        along = (center->x - hit.point.x) * forward.x + (center->y - hit.point.y) * forward.y +
+                                (center->z - hit.point.z) * forward.z;
+                        dot = forward.x * hit.normal.x + forward.y * hit.normal.y + forward.z * hit.normal.z;
+                    }
+                    const float eyeDistance = T2Demo::orbitEyeDistance(
+                        demoOrbitMinDist, demoOrbitMaxDist, blocked, along, dot);
+                    camPos = {center->x - forward.x * eyeDistance, center->y - forward.y * eyeDistance,
+                              center->z - forward.z * eyeDistance};
+                } else {
+                    camPos = Math::torquePointToYUp(demoCameraPos);
+                }
+                camTarget = {camPos.x + forward.x * 10.0f, camPos.y + forward.y * 10.0f,
+                             camPos.z + forward.z * 10.0f};
+                cameraCoordinatesConverted = true;
             } else {
                 camPos = pl ? pl->cameraPos() : Point3F{0, 6, 0};
                 camTarget = pl ? pl->cameraTarget() : Point3F{0, 6, 1};
@@ -9185,6 +9222,16 @@ void Game::render(float dt) {
                     const auto& blocks = demoParser->getInitialBlock().dataBlocks;
                     auto block = g->hasDatablock ? blocks.find((uint32_t)g->datablockId) : blocks.end();
                     shape->emapEnabled = block != blocks.end() && block->second.decoded.shapeEmap;
+                }
+                {
+                    // The world box centre (the shape bounds' centre, placed).
+                    Point3F localCenter = shape->boundsCenter();
+                    if (shape->hasHeaderBounds) {
+                        const Point3F& lo = shape->headerBoundsMin;
+                        const Point3F& hi = shape->headerBoundsMax;
+                        localCenter = {(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+                    }
+                    demoBoxCenters[idx] = (model * shape->upOrientation()).transform(localCenter);
                 }
                 shadowCaster = (isPlayer || ObserverParity::isVehicleClass(g->className)) &&
                                g->mountObject < 0;
@@ -11811,6 +11858,11 @@ Game::DemoViewSnapshot Game::captureDemoView() const {
     view.cameraPos = demoCameraPos;
     view.cameraTarget = demoCameraTarget;
     view.cameraFov = demoCameraFov;
+    view.cameraMode = demoCameraMode;
+    view.orbitGhost = demoOrbitGhost;
+    view.orbitMinDist = demoOrbitMinDist;
+    view.orbitMaxDist = demoOrbitMaxDist;
+    view.orbitPoint = demoOrbitPoint;
     return view;
 }
 
@@ -11824,6 +11876,11 @@ void Game::restoreDemoView(const DemoViewSnapshot& view) {
     demoCameraPos = demoPrevCameraPos = view.cameraPos;
     demoCameraTarget = demoPrevCameraTarget = view.cameraTarget;
     demoCameraFov = view.cameraFov;
+    demoCameraMode = view.cameraMode;
+    demoOrbitGhost = view.orbitGhost;
+    demoOrbitMinDist = view.orbitMinDist;
+    demoOrbitMaxDist = view.orbitMaxDist;
+    demoOrbitPoint = view.orbitPoint;
 }
 
 // The recorder's view from a Move block: moves carry view deltas
@@ -11832,8 +11889,22 @@ void Game::applyDemoMoveView(const DemoBlock& block) {
     if (block.type != T2Demo::BlockTypeMove || block.size < 64) return;
     DemoMove move = demoParser->readRawMove(block.data.data(), block.data.size());
     if (!demoMoveOrientationValid(move.yaw, move.pitch)) return;
-    T2Demo::accumulateViewMove(demoViewYaw, demoViewPitch, move.yaw, move.pitch);
+    T2Demo::accumulateViewMove(demoViewYaw, demoViewPitch, move.yaw, move.pitch,
+        demoAuthoredCamera ? T2Demo::CameraMaxViewPitch : T2Demo::PlayerMaxViewPitch);
     demoHasOrientation = true;
+    // Camera::processTick FlyMode: the move's x/y/z along the camera's
+    // right/forward/up at Camera::movementSpeed (40), doubled by a trigger.
+    if (demoAuthoredCamera && demoCameraMode == T2Demo::CameraFly &&
+        std::isfinite(move.x) && std::isfinite(move.y) && std::isfinite(move.z)) {
+        const float scale = 40.0f * ((move.trigger[0] || move.trigger[1]) ? 2.0f : 1.0f) * 0.032f;
+        const float sy = std::sin(demoViewYaw), cy = std::cos(demoViewYaw);
+        const float sp = std::sin(demoViewPitch), cp = std::cos(demoViewPitch);
+        const Point3F right{cy, -sy, 0.0f}, forward{sy * cp, cy * cp, -sp}, up{sy * sp, cy * sp, cp};
+        demoPrevCameraPos = demoCameraPos;
+        demoCameraPos.x += (right.x * move.x + forward.x * move.y + up.x * move.z) * scale;
+        demoCameraPos.y += (right.y * move.x + forward.y * move.y + up.y * move.z) * scale;
+        demoCameraPos.z += (right.z * move.x + forward.z * move.y + up.z * move.z) * scale;
+    }
     if (demoHasPos) {
         demoPrevCameraTarget = demoCameraTarget;
         const Vec3 direction = T2Demo::cameraDirectionFromYawPitch(demoViewYaw, demoViewPitch);
@@ -11862,6 +11933,17 @@ void Game::applyDemoPacketView(const PacketData& pd) {
          demoMoveBlend = 0.0f;
          demoHasPos = true;
          demoAuthoredCamera = true;
+        // Camera::readPacketData sets mRot and the mode; moves then turn
+        // it from there (Camera::processTick).
+        demoViewYaw = pd.gameState.cameraYaw;
+        demoViewPitch = pd.gameState.cameraPitch;
+        demoHasOrientation = true;
+        demoCameraMode = pd.gameState.cameraMode;
+        demoOrbitGhost = pd.gameState.orbitObjectGhostIndex;
+        demoOrbitMinDist = pd.gameState.orbitMinDistance;
+        demoOrbitMaxDist = pd.gameState.orbitMaxDistance;
+        demoOrbitPoint = {pd.gameState.orbitPoint.x, pd.gameState.orbitPoint.y,
+                          pd.gameState.orbitPoint.z};
     }
     // The control player's own view re-anchors the move-
     // accumulated angles (t2-mapper getAbsoluteRotation).
@@ -11878,9 +11960,7 @@ void Game::applyDemoPacketView(const PacketData& pd) {
     if (pd.gameState.controlObjectDirty) {
         // Full control object update with new ghost index
         // (position comes from move blocks, not GameState)
-    } else if (pd.gameState.compressionPoint.x != 0 ||
-               pd.gameState.compressionPoint.y != 0 ||
-               pd.gameState.compressionPoint.z != 0) {
+    } else if (pd.gameState.compressionPointUpdated && !pd.gameState.hasCameraTransform) {
           // Update compression point from partial control update
           Vec3 cp = pd.gameState.compressionPoint;
           const int controlIndex = pd.gameState.controlObjectGhostIndex >= 0

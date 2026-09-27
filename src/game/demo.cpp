@@ -651,7 +651,7 @@ bool DemoParser::readGhostStartBlock(BitStream& bs, bool useIBTracker) {
 }
 
 static bool readInitialControlPacket(BitStream& bs, const GhostEntry& ghost,
-                                     float& viewYaw, float& viewPitch) {
+                                     float& viewYaw, float& viewPitch, Vec3& compressionPoint) {
     if (ghost.classId != 4 && ghost.classId != 25) {
         Console::instance().printf(LogLevel::Error,
             "Demo: initial control packet parser missing for class %d (%s)",
@@ -662,7 +662,7 @@ static bool readInitialControlPacket(BitStream& bs, const GhostEntry& ghost,
     bs.readF32(); // energy level
     bs.readF32(); // recharge rate
     if (ghost.classId == 4) {
-        bs.readPoint3F();
+        const Vec3 position = bs.readPoint3F();
         viewPitch = bs.readF32(); // rotation X
         viewYaw = bs.readF32(); // rotation Z
         const int mode = bs.readInt(3);
@@ -674,18 +674,17 @@ static bool readInitialControlPacket(BitStream& bs, const GhostEntry& ghost,
                 bs.readFlag();
                 bs.readInt(T2Demo::GhostIdBitSize);
             } else {
-                bs.readCompressedPoint({});
+                bs.readCompressedPoint(compressionPoint);
             }
-        } else if (mode == 5) {
-            bs.readInt(T2Demo::GhostIdBitSize);
         }
+        compressionPoint = position;
     } else {
         // Player::readPacketData after ShapeBase::readPacketData.
         bs.readInt(3); // action state
         if (bs.readFlag()) bs.readInt(7); // recover ticks
         if (bs.readFlag()) bs.readInt(7); // jump delay
         if (bs.readFlag()) {
-            bs.readPoint3F(); // compression point
+            compressionPoint = bs.readPoint3F();
             bs.readPoint3F(); // velocity
             bs.readInt(4); // jump surface last contact
         }
@@ -702,12 +701,13 @@ static bool readInitialControlPacket(BitStream& bs, const GhostEntry& ghost,
                 bs.readF32(); // vehicle recharge rate
                 bs.readF32(); // steering X
                 bs.readF32(); // steering Y
-                bs.readPoint3F(); // vehicle position
+                const Vec3 vehiclePosition = bs.readPoint3F();
                 bs.readF32(); bs.readF32(); bs.readF32(); bs.readF32(); // orientation
                 bs.readPoint3F(); // linear momentum
                 bs.readPoint3F(); // angular momentum
                 bs.readFlag(); // disable move
                 bs.readFlag(); // frozen
+                compressionPoint = vehiclePosition;
             }
         }
         bs.readFlag(); // disable move
@@ -840,7 +840,8 @@ bool DemoParser::readInitialBlock(const uint8_t* data, size_t size, uint32_t pro
         const GhostEntry* control = ibGhostTracker.getGhost(
             initialBlock.controlObjectGhostIndex);
         if (!control || !readInitialControlPacket(bs, *control, initialBlock.controlYaw,
-                                                  initialBlock.controlPitch))
+                                                  initialBlock.controlPitch,
+                                                  initialBlock.initialCompressionPoint))
             return fail("control object");
         initialBlock.hasControlRotation = true;
     }
@@ -1084,7 +1085,7 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
     connectionEstablished = initialBlock.connectionState.connectionEstablished;
     nextRecvEventSeq = initialBlock.nextRecvEventSeq;
     packetsParsed = 0;
-    compressionPoint = {0,0,0};
+    compressionPoint = initialBlock.initialCompressionPoint;
     blockStreamOffset = 0; blockCursor_ = 0; blockCount_ = -1;
 
     scanMissionChanges();
@@ -1154,7 +1155,7 @@ DemoBlock* DemoParser::nextBlock() {
 
 void DemoParser::reset() {
     blockStreamOffset = 0; blockCursor_ = 0; blockCount_ = -1;
-    compressionPoint = {0,0,0};
+    compressionPoint = initialBlock.initialCompressionPoint;
     missionCrcChanges_.clear();
     initialBlock.taggedStrings = initialTaggedStrings_;
     playerInfo_ = initialPlayerInfo_;
@@ -1568,6 +1569,7 @@ DnetHeader DemoParser::readDnetHeader(BitStream& bs) {
 
 GameState DemoParser::readGameState(BitStream& bs) {
     GameState gs{};
+    gs.compressionPoint = compressionPoint;
     gs.lastMoveAck = bs.readU32();
 
     // damageFlash and whiteOut (optional 7-bit floats)
@@ -1625,7 +1627,6 @@ GameState DemoParser::readGameState(BitStream& bs) {
             const GhostEntry* control = ghostTracker.getGhost(gs.controlObjectGhostIndex);
             if (control && ghostClassIs(control->className, "Camera")) {
                 gs.cameraPosition = {bs.readF32(), bs.readF32(), bs.readF32()};
-                gs.compressionPoint = gs.cameraPosition;
                 gs.cameraPitch = bs.readF32();
                 gs.cameraYaw = bs.readF32();
                 gs.hasCameraTransform = true;
@@ -1639,9 +1640,12 @@ GameState DemoParser::readGameState(BitStream& bs) {
                         bs.readFlag();
                         gs.orbitObjectGhostIndex = bs.readInt(T2Demo::GhostIdBitSize);
                     } else {
-                        bs.readCompressedPoint(gs.compressionPoint);
+                        // Relative to the previous compression point.
+                        gs.orbitPoint = bs.readCompressedPoint(gs.compressionPoint);
                     }
                 }
+                gs.compressionPoint = gs.cameraPosition;
+                gs.compressionPointUpdated = true;
             } else if (control && control->classId == 25) {
                 // Player::readPacketData: ShapeBase state, movement, view,
                 // optional piloted object, and final movement flags.
@@ -1650,6 +1654,7 @@ GameState DemoParser::readGameState(BitStream& bs) {
                 if (bs.readFlag()) bs.readInt(7); // jump delay
                 if (bs.readFlag()) {
                     gs.compressionPoint = {bs.readF32(), bs.readF32(), bs.readF32()};
+                    gs.compressionPointUpdated = true;
                     bs.readF32(); bs.readF32(); bs.readF32(); // velocity
                     bs.readInt(4); // jump surface contact
                 }
@@ -1663,7 +1668,6 @@ GameState DemoParser::readGameState(BitStream& bs) {
                     if (piloted && (piloted->classId == 4)) {
                         bs.readF32(); bs.readF32();
                         const Vec3 pos{bs.readF32(), bs.readF32(), bs.readF32()};
-                        gs.compressionPoint = pos;
                         bs.readF32(); bs.readF32();
                         const int mode = bs.readInt(3);
                         if (mode == 3 || mode == 4) {
@@ -1674,6 +1678,8 @@ GameState DemoParser::readGameState(BitStream& bs) {
                                 bs.readCompressedPoint(gs.compressionPoint);
                             }
                         }
+                        gs.compressionPoint = pos;
+                        gs.compressionPointUpdated = true;
                     } else if (piloted && (piloted->classId == 10 ||
                                              piloted->classId == 14 ||
                                              piloted->classId == 52)) {
@@ -1684,6 +1690,7 @@ GameState DemoParser::readGameState(BitStream& bs) {
                         bs.readF32(); bs.readF32(); // steering
                         const Vec3 vehiclePosition{bs.readF32(), bs.readF32(), bs.readF32()};
                         gs.compressionPoint = vehiclePosition;
+                        gs.compressionPointUpdated = true;
                         bs.readF32(); bs.readF32(); bs.readF32(); bs.readF32(); // orientation
                         bs.readPoint3F(); // linear momentum
                         bs.readPoint3F(); // angular momentum
@@ -1703,6 +1710,7 @@ GameState DemoParser::readGameState(BitStream& bs) {
             gs.compressionPoint.x = bs.readF32();
             gs.compressionPoint.y = bs.readF32();
             gs.compressionPoint.z = bs.readF32();
+            gs.compressionPointUpdated = true;
         }
     }
 
@@ -3204,6 +3212,7 @@ PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIn
     if (bs.readFlag()) { bs.readInt(10); bs.readInt(10); }
     bs.setStringBufferEnabled(true);
     pd.gameState = readGameState(bs);
+    compressionPoint = pd.gameState.compressionPoint;
     if (bs.isError()) {
         Console::instance().printf(LogLevel::Error,
             "Demo: malformed packet seq=%d at game state bit=%d/%d (block=%d)",

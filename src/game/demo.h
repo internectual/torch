@@ -239,12 +239,30 @@ namespace T2Demo {
     }
     // Player::updateMove: yaw wraps to [0, 2pi); pitch clamps to the
     // client view limit (t2-mapper MAX_PITCH = 0.494 pi).
-    inline void accumulateViewMove(float& yaw, float& pitch, float moveYaw, float movePitch) {
-        constexpr float TwoPi = 6.28318530718f, MaxPitch = 3.14159265359f * 0.494f;
+    constexpr float PlayerMaxViewPitch = 3.14159265359f * 0.494f;
+    // Camera::processTick clamps mRot.x to MaxPitch (1.3962).
+    constexpr float CameraMaxViewPitch = 1.3962f;
+    inline void accumulateViewMove(float& yaw, float& pitch, float moveYaw, float movePitch,
+                                   float maxPitch = PlayerMaxViewPitch) {
+        constexpr float TwoPi = 6.28318530718f;
         yaw = std::fmod(yaw + moveYaw, TwoPi);
         if (yaw < 0.0f) yaw += TwoPi;
-        pitch = std::clamp(pitch + movePitch, -MaxPitch, MaxPitch);
+        pitch = std::clamp(pitch + movePitch, -maxPitch, maxPitch);
     }
+
+    // Camera::validateEyePoint: an orbit camera sits (max - min) behind the
+    // orbit centre along -forward. A ray out to 2.5x that distance that hits
+    // something facing the camera (dot > 0.01) pulls it in to the hit less
+    // CameraRadius / dot, clamped to [0, distance]. Returns the distance.
+    inline float orbitEyeDistance(float minDist, float maxDist, bool hit, float hitAlong, float dot) {
+        constexpr float CameraRadius = 0.05f;
+        const float distance = maxDist - minDist;
+        if (!hit || !(dot > 0.01f)) return distance;
+        return std::clamp(hitAlong - CameraRadius / dot, 0.0f, distance);
+    }
+    // Camera modes (Camera::readPacketData).
+    enum CameraMode { CameraStationary = 0, CameraFreeRotate = 1, CameraFly = 2,
+                      CameraOrbitObject = 3, CameraOrbitPoint = 4 };
 
     // Stable replacement for the V12 CameraShake sine channels. The seed is
     // part of the effect state, so replay and seek produce identical frames.
@@ -433,7 +451,10 @@ struct GameState {
     int controlObjectGhostIndex{ -1 };
     bool controlObjectDirty{};
     float energy{}, rechargeRate{};
+    // The connection's compression point after this packet's control
+    // section (persists across packets); Updated when the section set it.
     Vec3 compressionPoint;
+    bool compressionPointUpdated{};
     std::vector<std::pair<int, int>> targetVisibility;
     float cameraFov{ -1 };
     Vec3 cameraPosition{};
@@ -443,6 +464,7 @@ struct GameState {
     int cameraMode{ -1 };
     int orbitObjectGhostIndex{ -1 };
     float orbitMinDistance{}, orbitMaxDistance{}, orbitDistance{};
+    Vec3 orbitPoint{}; // OrbitPointMode centre
     // Player::readPacketData view: mHead.x (pitch), mHead.z, mRot.z (yaw).
     bool hasControlRotation{};
     float controlHeadX{}, controlHeadZ{}, controlRotZ{};
@@ -535,6 +557,8 @@ struct InitialBlockData {
     std::vector<GhostUpdate> initialGhosts;
     std::vector<NetEventInfo> initialEvents;
     int controlObjectGhostIndex{ -1 };
+    // The control object's readPacketData sets the first compression point.
+    Vec3 initialCompressionPoint{};
     std::string missionName;
     uint32_t missionCRC{};
     bool phase2Valid{};
