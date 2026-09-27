@@ -152,7 +152,7 @@ void TerrainBlock::generateMesh() {
     meshes.push_back(std::move(mesh));
 }
 
-void TerrainBlock::bakeLightmap() {
+void TerrainBlock::bakeLightmap(const std::function<bool(const Point3F&)>& occludedByInterior) {
     // Generate a 512x512 terrain lightmap (2 px per terrain square) with smooth
     // bilinearly-sampled normals and ray-marched self-shadowing, matching the
     // approach used in t2-mapper / Torque's relight(). The result is NdotL*shadow
@@ -209,6 +209,13 @@ void TerrainBlock::bakeLightmap() {
         }
         return 1.0f;
     };
+    // Lit (1) or shadowed (0): terrain first, then buildings.
+    auto sampleShadow = [&](float sc, float sr, float sh) -> float {
+        if (rayShadow(sc, sr, sh) == 0.0f) return 0.0f;
+        if (!occludedByInterior) return 1.0f;
+        const Point3F p{worldOffset.x + sc * squareSize, sh, worldOffset.z - sr * squareSize};
+        return occludedByInterior(p) ? 0.0f : 1.0f;
+    };
     const float eps = 0.5f;
     for (int lr = 0; lr < LM; lr++) {
         for (int lc = 0; lc < LM; lc++) {
@@ -239,7 +246,7 @@ void TerrainBlock::bakeLightmap() {
             if (unshadowed[index] == 0) continue;
             const float col = (lc + 0.5f) * (float)size / (float)LM;
             const float row = (lr + 0.5f) * (float)size / (float)LM;
-            visible[index] = rayShadow(col, row, hAt(col, row)) > 0.0f ? 1 : 0;
+            visible[index] = sampleShadow(col, row, hAt(col, row)) > 0.0f ? 1 : 0;
             if (!visible[index]) lm[index] = 0;
         }
     }
@@ -272,7 +279,7 @@ void TerrainBlock::bakeLightmap() {
                                       (float)size / (float)LM;
                     const float row = (lr + (sr + 0.5f) / edgeSamples) *
                                       (float)size / (float)LM;
-                    litSamples += rayShadow(col, row, hAt(col, row)) > 0.0f ? 1 : 0;
+                    litSamples += sampleShadow(col, row, hAt(col, row)) > 0.0f ? 1 : 0;
                 }
             }
             lm[index] = (uint8_t)((unshadowed[index] * litSamples) /
@@ -285,7 +292,8 @@ void TerrainBlock::bakeLightmap() {
     lightmap.loadRaw(rgba.data(), LM, LM, 4);
     lightmapNdotL = lm;
     lightmapSize = LM;
-    Console::instance().printf(LogLevel::Info, "Terrain: baked %dx%d self-shadowing lightmap", LM, LM);
+    Console::instance().printf(LogLevel::Info, "Terrain: baked %dx%d self-shadowing lightmap (%s)", LM, LM,
+                               occludedByInterior ? "with buildings" : "terrain only");
 }
 
 float TerrainBlock::sampleLightmapNdotL(float wx, float wz) const {

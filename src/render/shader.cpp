@@ -264,8 +264,15 @@ void main() {
         vec3 L = normalize(uLightDir);
         float NdotL = max(dot(N, L), 0.0);
 
+        // The sun shadow map (terrain and interiors cast) darkens only the
+        // direct sun term.
+        float shadowFactor = 1.0;
+        if (uShadowStrength > 0.0) {
+            vec4 shadowCoord = uShadowMatrix * vec4(vWorldPos, 1.0);
+            shadowFactor = mix(shadowPCF(shadowCoord), 1.0, 1.0 - uShadowStrength);
+        }
         // Scene lighting, clamped to [0,1] BEFORE adding the lightmap
-        vec3 sceneLighting = clamp(uSunColor * NdotL + uAmbient, 0.0, 1.0);
+        vec3 sceneLighting = clamp(uSunColor * NdotL * shadowFactor + uAmbient, 0.0, 1.0);
         for (int i = 0; i < uPointLightCount; ++i) {
             vec3 toLight = uPointLightPos[i] - vWorldPos;
             float distance = length(toLight);
@@ -276,12 +283,6 @@ void main() {
         }
         sceneLighting = clamp(sceneLighting, 0.0, 1.0);
 
-        float shadowFactor = 1.0;
-        if (uShadowStrength > 0.0) {
-            vec4 shadowCoord = uShadowMatrix * vec4(vWorldPos, 1.0);
-            shadowFactor = mix(shadowPCF(shadowCoord), 1.0, 1.0 - uShadowStrength);
-        }
-        sceneLighting *= shadowFactor;
 
         vec3 lighting = uInteriorOutsideVisible ? sceneLighting : vec3(0.0);
         if (uUseLightmap)
@@ -442,27 +443,10 @@ uniform vec3 uPointLightPos[8];
 uniform vec3 uPointLightColor[8];
 uniform vec3 uPointLightParams[8];
 
-uniform sampler2DShadow uShadowMap;
-uniform mat4 uShadowMatrix;
-uniform float uShadowStrength = 0.5;
-
 uniform bool uUseNormalMap = false;
 uniform sampler2D uNormal0;
 
 out vec4 FragColor;
-
-float terrainShadowPCF(vec4 shadowCoord) {
-    vec3 sc = shadowCoord.xyz / shadowCoord.w;
-    if (sc.x < 0 || sc.x > 1 || sc.y < 0 || sc.y > 1 || sc.z < 0 || sc.z > 1) return 1.0;
-    float s = 0.0;
-    vec2 texelSize = 1.0 / textureSize(uShadowMap, 0);
-    for (int x = -1; x <= 1; x++) {
-        for (int y = -1; y <= 1; y++) {
-            s += texture(uShadowMap, vec3(sc.xy + vec2(x, y) * texelSize, sc.z - 0.003));
-        }
-    }
-    return s / 9.0;
-}
 
 uniform float uFogRowBase = 0.0;
 uniform float uFogRowStep = 0.0;
@@ -524,23 +508,16 @@ void main() {
         N = normalize(N + nMap * 0.5);
     }
     float ndotl = max(dot(N, normalize(uLightDir)), 0.0);
-    float shadowFactor = 1.0;
-    if (uShadowStrength > 0.0) {
-        vec4 shadowCoord = uShadowMatrix * vec4(vWorldPos, 1.0);
-        shadowFactor = mix(terrainShadowPCF(shadowCoord), 1.0, 1.0 - uShadowStrength);
-    }
-    // Dynamic sun (live NdotL + shadow map) combined with the baked self-shadowing
-    // lightmap. The baked lightmap (2px/square) provides soft, ray-marched self
-    // shadowing and a smooth normal light; the live term keeps the sun reacting
-    // to time-of-day and object shadows.
+    // The terrain is never shadow-mapped: the baked lightmap (2 px/square)
+    // holds NdotL with terrain self-shadowing and building shadows.
     vec3 lighting;
     if (uUseLightmap) {
         vec4 lm = texture(uLightmap, vUV + vec2(0.5 / 512.0));
         // The baked value already contains NdotL and self-shadowing. V12 adds
         // its sun contribution to ambient rather than darkening ambient too.
-        lighting = uAmbient + lm.r * uSunColor * shadowFactor;
+        lighting = uAmbient + lm.r * uSunColor;
     } else {
-        lighting = uAmbient + uSunColor * ndotl * shadowFactor;
+        lighting = uAmbient + uSunColor * ndotl;
     }
     for (int i = 0; i < uPointLightCount; ++i) {
         vec3 toLight = uPointLightPos[i] - vWorldPos;

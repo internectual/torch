@@ -1,6 +1,7 @@
 #pragma once
 #include "core/math.h"
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -370,7 +371,10 @@ struct TerrainBlock {
     bool load(const uint8_t* data, size_t size);
     void reset();
     void generateMesh();
-    void bakeLightmap();
+    // `occludedByInterior(world point)`: true when a building stands between
+    // the point and the sun (SceneLighting's TerrainProxy::light bakes
+    // interior shadows into the terrain lightmap at mission load).
+    void bakeLightmap(const std::function<bool(const Point3F&)>& occludedByInterior = {});
     void render(const Point3F& cameraPos, bool fogEnabled = false, const ColorF& fogColor = {0.5f, 0.6f, 0.7f, 1.0f}, float fogDensity = 0.005f, const Point3F* lightDir = nullptr,
                 const ColorF* sunColor = nullptr, const ColorF* ambient = nullptr, float fogStart = -1.0f, float fogEnd = -1.0f);
 

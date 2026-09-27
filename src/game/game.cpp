@@ -1784,7 +1784,15 @@ bool World::load(const char* mapName) {
             std::string azStr = getProp(sunObj->props, "azimuth");
             std::string elStr = getProp(sunObj->props, "elevation");
             std::string colStr = getProp(sunObj->props, "color");
-            if (!azStr.empty() && !elStr.empty()) {
+            std::string dirStr = getProp(sunObj->props, "direction");
+            float tdx, tdy, tdz;
+            if (!dirStr.empty() && sscanf(dirStr.c_str(), "%f %f %f", &tdx, &tdy, &tdz) == 3) {
+                // Sun::direction is the Torque-space direction light travels;
+                // sunLightDir points from the scene toward the sun.
+                const Point3F travel = Math::torquePointToYUp({tdx, tdy, tdz});
+                if (setSunDirection({-travel.x, -travel.y, -travel.z}))
+                    Console::instance().printf(LogLevel::Debug, "  sun: direction=(%.3f %.3f %.3f)", tdx, tdy, tdz);
+            } else if (!azStr.empty() && !elStr.empty()) {
                 float azimuth = (float)std::atof(azStr.c_str()) * (3.14159f / 180.0f);
                 float elevation = (float)std::atof(elStr.c_str()) * (3.14159f / 180.0f);
                 sunLightDir.x = cosf(elevation) * sinf(azimuth);
@@ -1812,10 +1820,9 @@ bool World::load(const char* mapName) {
             }
 
             // Terrain baked lightmap uses the mission sun direction
-            if (sunLightDirUsed && terrainBlock.loaded) {
+            // (baked once the interiors are in place, below)
+            if (sunLightDirUsed && terrainBlock.loaded)
                 terrainBlock.lightDir = sunLightDir;
-                terrainBlock.bakeLightmap();
-            }
         }
 
         // Parse MissionArea from mission (for boundary visualization)
@@ -2718,6 +2725,43 @@ bool World::load(const char* mapName) {
             }
 
             if (!lightProbeTris.empty()) lightProbeGrid.build(lightProbeTris);
+            // Mission lighting: the sun swept over the heightfield, with the
+            // interiors as occluders (TerrainProxy::light).
+            if (sunLightDirUsed && terrainBlock.loaded) {
+                std::function<bool(const Point3F&)> occluder;
+                Point3F lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+                for (const auto& tri : lightProbeTris)
+                    for (const Point3F* v : {&tri.v0, &tri.v1, &tri.v2}) {
+                        lo = {std::min(lo.x, v->x), std::min(lo.y, v->y), std::min(lo.z, v->z)};
+                        hi = {std::max(hi.x, v->x), std::max(hi.y, v->y), std::max(hi.z, v->z)};
+                    }
+                Point3F L = sunLightDir;
+                const float len = std::sqrt(L.x * L.x + L.y * L.y + L.z * L.z);
+                if (!lightProbeTris.empty() && len > 0.0f && L.y > 0.0f) {
+                    L = {L.x / len, L.y / len, L.z / len};
+                    occluder = [this, lo, hi, L](const Point3F& p) {
+                        // Above every roof nothing can shade the point.
+                        if (p.y > hi.y) return false;
+                        // Only rays that meet the interiors' union box are cast.
+                        float t0 = 0.0f, t1 = (hi.y - p.y) / L.y + 1.0f;
+                        const float o[3] = {p.x, p.y, p.z}, d[3] = {L.x, L.y, L.z};
+                        const float bmin[3] = {lo.x, lo.y, lo.z}, bmax[3] = {hi.x, hi.y, hi.z};
+                        for (int a = 0; a < 3; ++a) {
+                            if (std::fabs(d[a]) < 1e-8f) {
+                                if (o[a] < bmin[a] || o[a] > bmax[a]) return false;
+                                continue;
+                            }
+                            float n = (bmin[a] - o[a]) / d[a], f = (bmax[a] - o[a]) / d[a];
+                            if (n > f) std::swap(n, f);
+                            t0 = std::max(t0, n); t1 = std::min(t1, f);
+                            if (t0 > t1) return false;
+                        }
+                        float t; Point3F pos, normal;
+                        return lightProbeGrid.raycast(lightProbeTris, p, L, (hi.y - p.y) / L.y + 1.0f, t, pos, normal);
+                    };
+                }
+                terrainBlock.bakeLightmap(occluder);
+            }
             if (!allIndices.empty()) {
                 interiorCollision.addMesh(allVerts.data(), (int)allVerts.size(), allIndices.data(), (int)allIndices.size());
                 interiorCollision.build();
@@ -7826,9 +7870,11 @@ void Game::render(float dt) {
                 }
             }
 
-            // Render placed world objects as shadow casters (same transform as World::render)
+            // Interiors cast (same transform as World::render). DTS shapes
+            // never enter the sun shadow map: players and vehicles cast
+            // projected shadows instead.
             for (auto& obj : w->objects()) {
-                if (!obj.shape || !obj.shape->loaded) continue;
+                if (!obj.shape || !obj.shape->loaded || !obj.shape->isInterior) continue;
                 MatrixF model;
                 if (obj.rotAngleDeg != 0 && (obj.rot.x != 0 || obj.rot.y != 0 || obj.rot.z != 0)) {
                     Point3F axis = obj.rot;
@@ -7842,39 +7888,17 @@ void Game::render(float dt) {
                 if (obj.scale.x != 1.0f || obj.scale.y != 1.0f || obj.scale.z != 1.0f) {
                     model = model * Math::torqueScaleToYUp(obj.scale);
                 }
-                if (obj.shape->nativeDTS) {
-                    // Keep shadow placement identical to the visible shape.
-                    MatrixF shapeFrame;
-                    shapeFrame.setRotationY(Math::PI);
-                    model = model * shapeFrame;
-                }
                 MatrixF mvp = r.lightViewProj() * model * obj.shape->upOrientation();
                 shadowShader->setUniform("uLightMVP", mvp);
                 for (auto& mesh : obj.shape->meshes)
                     mesh.render();
-            }
-
-            // Render bots
-            for (auto& b : w->bots) {
-                if (!b.alive || b.respawnTimer > 0) continue;
-                if (b.shape && b.shape->loaded) {
-                    MatrixF model;
-                    model.setTranslation(b.pos);
-                    MatrixF mvp = r.lightViewProj() * model * b.shape->upOrientation();
-                    shadowShader->setUniform("uLightMVP", mvp);
-                    // DTSShape::render binds the lit shader and would therefore
-                    // submit bot geometry with stale main-pass uniforms. Shadow
-                    // casters must stay on the depth shader.
-                    for (auto& mesh : b.shape->meshes)
-                        mesh.render();
-                }
             }
         }
 
         r.endShadowPass();
 
         // Bind shadow map to texture unit 5 and set uniforms for main pass
-        float shadowStrength = 0.6f;
+        float shadowStrength = 1.0f;
         {
             auto* defShader = ShaderManager::getDefaultShader();
             defShader->bind();
@@ -7884,13 +7908,6 @@ void Game::render(float dt) {
             defShader->setUniform("uShadowStrength", shadowStrength);
             defShader->setUniform("uShadowMatrix", r.shadowMatrix());
 
-            auto* terrShader = ShaderManager::getTerrainShader();
-            terrShader->bind();
-            glActiveTexture(GL_TEXTURE5);
-            glBindTexture(GL_TEXTURE_2D, r.shadowDepthTex);
-            terrShader->setUniform("uShadowMap", (int32_t)5);
-            terrShader->setUniform("uShadowStrength", shadowStrength);
-            terrShader->setUniform("uShadowMatrix", r.shadowMatrix());
         }
         r.shadowsActive = true;
     }

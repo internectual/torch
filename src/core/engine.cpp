@@ -2078,13 +2078,17 @@ void Engine::run() {
     double fpsTimer = 0;
     int frameCount = 0;
 
+    bool loopFrameRan = false;
     while (running && plat->isRunning()) {
         // Every frame path (gameplay and demos included) honours
         // -quit-after-frames, not only the shell path at the loop's end.
-        if (maxFrames > 0 && plat->frameCount() >= (uint64_t)maxFrames) {
+        // The count includes loading-screen swaps, so at least one loop
+        // frame (the mapper's auto-screenshot) always runs.
+        if (loopFrameRan && maxFrames > 0 && plat->frameCount() >= (uint64_t)maxFrames) {
             quit();
             break;
         }
+        loopFrameRan = true;
         double now = Timer::now();
         float dt = (float)(now - lastTime);
         lastTime = now;
