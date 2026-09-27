@@ -485,7 +485,18 @@ void shapeImage(Stream& s) {
     const bool cloakable = s.readFlag();
     if (activeDecoded) activeDecoded->imageCloakable = cloakable;
     const uint32_t lightType = s.readRange(0, 3);
-    if (lightType != 0) { s.readF32(); s.readSigned(32); for (int i=0;i<4;++i)s.readFloat(7); }
+    if (lightType != 0) {
+        const float radius = s.readF32();
+        const int32_t time = s.readSigned(32);
+        float color[4];
+        for (float& value : color) value = s.readFloat(7);
+        if (activeDecoded) {
+            activeDecoded->shapeLightType = (int32_t)lightType;
+            activeDecoded->shapeLightRadius = radius;
+            activeDecoded->shapeLightTimeMS = time;
+            activeDecoded->shapeLightColor = {color[0], color[1], color[2]};
+        }
+    }
     f32s(s, 3); s.readF32(); s.readF32(); refs(s, 1); s.readFlag();
     std::vector<WeaponImage::StateData> states(31);
     bool anyState = false;
@@ -671,7 +682,23 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
         }
         break;
     }
-    case 21: shapeBase(s); s.readFloat(10);s.readFloat(10);s.readFlag();if(s.readFlag())s.readFloat(10);if(s.readFlag())s.readF32();if(s.readFlag()){s.readUnsigned(2);for(int j=0;j<4;++j)s.readFloat(7);s.readSigned(32);s.readF32();s.readFlag();}break;
+    case 21: shapeBase(s); s.readFloat(10);s.readFloat(10);s.readFlag();if(s.readFlag())s.readFloat(10);if(s.readFlag())s.readF32();
+        if (s.readFlag()) { // ItemData light
+            const int32_t type = (int32_t)s.readUnsigned(2);
+            float color[4];
+            for (float& value : color) value = s.readFloat(7);
+            const int32_t time = s.readSigned(32);
+            const float radius = s.readF32();
+            const bool onlyStatic = s.readFlag();
+            if (activeDecoded) {
+                activeDecoded->shapeLightType = type;
+                activeDecoded->shapeLightColor = {color[0], color[1], color[2]};
+                activeDecoded->shapeLightTimeMS = time;
+                activeDecoded->shapeLightRadius = radius;
+                activeDecoded->shapeLightOnlyStatic = onlyStatic;
+            }
+        }
+        break;
      case 22: effect(s,22); break; case 23: refs(s,8);strings(s,8);refs(s,1);break; case 24: {
          linear(s); const uint32_t count = s.readUnsigned(32); const auto color = s.readUnsigned(32);
          const auto textures = materialStrings(s, 2); float sizes[3]; for (float& size : sizes) size = s.readF32();
@@ -705,7 +732,18 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
         }
         break;
     }
-     case 34: s.readF32();colors(s,1);f32s(s,2);strings(s,1);f32s(s,6);if(s.readFlag())strings(s,1);break; case 35: projectile(s);f32s(s,10);s.readUnsigned(8);f32s(s,2);s.readUnsigned(32);s.readUnsigned(32);strings(s,2);refs(s,3);break; case 36: break; case 37: shapeBase(s);break; case 38: shapeImage(s);break;
+     case 34: s.readF32();colors(s,1);f32s(s,2);strings(s,1);f32s(s,6);if(s.readFlag())strings(s,1);break; case 35: { // SeekerProjectileData
+        projectile(s); f32s(s,10);
+        const bool useFlechette = s.readUnsigned(8) != 0;
+        f32s(s,2);
+        const int32_t flechetteDelay = (int32_t)s.readUnsigned(32);
+        s.readUnsigned(32); strings(s,2); refs(s,3);
+        if (activeDecoded) {
+            activeDecoded->seekerUseFlechette = useFlechette;
+            activeDecoded->seekerFlechetteDelayMS = flechetteDelay;
+        }
+        break;
+    } case 36: break; case 37: shapeBase(s);break; case 38: shapeImage(s);break;
       case 39: { // ShockLanceProjectileData
         projectile(s);
         float f[7];
@@ -735,7 +773,8 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
         const float fadeTime = s.readF32(), startWidth = s.readF32(), endWidth = s.readF32();
         f32s(s, 4); // pulseBeamWidth, beamFlareAngle, min/maxFlareSize
         const float pulseSpeed = s.readF32(), pulseLength = s.readF32();
-        colors(s, 1); f32s(s, 1); // lightColor, lightRadius
+        const uint32_t lightColor = s.readUnsigned(32);
+        const float lightRadius = s.readF32();
         std::vector<std::string> textures = materialStrings(s, 12);
         if (activeDecoded) {
             auto& beam = activeDecoded->sniperBeam;
@@ -747,6 +786,12 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
             beam.pulseSpeed = pulseSpeed;
             beam.pulseLength = pulseLength;
             beam.textures = std::move(textures);
+            // The sniper's own lightColor/lightRadius replace the base
+            // ProjectileData light.
+            activeDecoded->projectileHasLight = lightRadius > 0.0f;
+            activeDecoded->projectileLightRadius = lightRadius;
+            activeDecoded->projectileLightColor = {(lightColor & 0xff) / 255.0f,
+                ((lightColor >> 8) & 0xff) / 255.0f, ((lightColor >> 16) & 0xff) / 255.0f};
         }
         break;
     } case 43: splash(s); break;

@@ -289,37 +289,66 @@ void Renderer::setCamera(const Point3F& pos, const Point3F& target, const Point3
 
 void Renderer::setDynamicLights(const std::vector<DynamicPointLight>& lights) {
     dynamicLights.clear();
-    dynamicLights.reserve(MAX_DYNAMIC_LIGHTS);
     for (const auto& input : lights) {
-        if ((int)dynamicLights.size() >= std::min(MAX_DYNAMIC_LIGHTS, std::max(0, cfg.maxLights))) break;
         DynamicPointLight light = input;
         if (!std::isfinite(light.x) || !std::isfinite(light.y) || !std::isfinite(light.z) ||
             !std::isfinite(light.r) || !std::isfinite(light.g) || !std::isfinite(light.b) ||
-            !std::isfinite(light.radius) || !std::isfinite(light.falloff) || light.radius <= 0.0f)
+            !std::isfinite(light.radius) || light.radius <= 0.0f)
             continue;
         light.r = std::clamp(light.r, 0.0f, 16.0f);
         light.g = std::clamp(light.g, 0.0f, 16.0f);
         light.b = std::clamp(light.b, 0.0f, 16.0f);
         light.radius = std::clamp(light.radius, 0.05f, 256.0f);
-        light.falloff = std::clamp(light.falloff, 0.1f, 8.0f);
         dynamicLights.push_back(light);
     }
+    // The nearest lights to the camera take the slots.
+    const int slots = std::min(MAX_DYNAMIC_LIGHTS, std::max(0, cfg.maxLights));
+    auto distance2 = [&](const DynamicPointLight& light) {
+        const float dx = light.x - cameraPos.x, dy = light.y - cameraPos.y, dz = light.z - cameraPos.z;
+        return dx * dx + dy * dy + dz * dz;
+    };
+    if ((int)dynamicLights.size() > slots) {
+        std::stable_sort(dynamicLights.begin(), dynamicLights.end(),
+            [&](const DynamicPointLight& a, const DynamicPointLight& b) { return distance2(a) < distance2(b); });
+        dynamicLights.resize(slots);
+    }
+    // Projected radius in pixels: radius / distance x height / (2 tan(fov/2)).
+    const float pixelsPerUnit = (float)cfg.height * 0.5f * projection.m[1][1];
     auto apply = [&](Shader* shader) {
         if (!shader) return;
         shader->bind();
         shader->setUniform("uPointLightCount", (int32_t)dynamicLights.size());
         for (int i = 0; i < MAX_DYNAMIC_LIGHTS; ++i) {
             const auto* light = i < (int)dynamicLights.size() ? &dynamicLights[i] : nullptr;
+            const float screenFade = light
+                ? dynamicLightScreenFade(light->radius / std::max(std::sqrt(distance2(*light)), 1e-3f) * pixelsPerUnit)
+                : 0.0f;
             shader->setUniform(("uPointLightPos[" + std::to_string(i) + "]").c_str(),
                 light ? Point3F{light->x, light->y, light->z} : Point3F{});
             shader->setUniform(("uPointLightColor[" + std::to_string(i) + "]").c_str(),
                 light ? Point3F{light->r, light->g, light->b} : Point3F{});
             shader->setUniform(("uPointLightParams[" + std::to_string(i) + "]").c_str(),
-                light ? Point3F{light->radius, light->falloff, 0.0f} : Point3F{});
+                light ? Point3F{light->radius, screenFade, 0.0f} : Point3F{});
         }
     };
     apply(ShaderManager::getDefaultShader());
     apply(ShaderManager::getTerrainShader());
+    if (dynamicLights.empty()) return;
+    // special/lightFalloffMono: the radial ramp the engine's light pass
+    // textures its projected discs with.
+    if (!lightFalloffTexture) lightFalloffTexture = loadTexture("textures/special/lightFalloffMono");
+    if (lightFalloffTexture) {
+        glActiveTexture(GL_TEXTURE13);
+        glBindTexture(GL_TEXTURE_2D, lightFalloffTexture->id);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glActiveTexture(GL_TEXTURE0);
+        for (Shader* shader : {ShaderManager::getDefaultShader(), ShaderManager::getTerrainShader()}) {
+            if (!shader) continue;
+            shader->bind();
+            shader->setUniform("uLightFalloff", (int32_t)13);
+        }
+    }
 }
 
 void Renderer::clearDynamicLights() { setDynamicLights({}); }

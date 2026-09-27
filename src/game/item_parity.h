@@ -47,12 +47,6 @@ inline bool itemWithinPickupRange(float distance, float radius = 2.0f) {
            radius >= 0.0f && distance <= radius;
 }
 
-// The fallback pickup proxy follows both runtime activation and the authored
-// mission visibility flag. A hidden Item must not remain as a floating box.
-inline bool itemProxyVisible(bool renderProxy, bool active, bool missionVisible) {
-    return renderProxy && active && missionVisible;
-}
-
 // Hidden mission Items are not part of the native pickup trigger either.
 inline bool itemCanBeCollected(bool enabled, bool active, bool missionVisible) {
     return enabled && active && missionVisible;

@@ -560,6 +560,7 @@ public:
     Point3F sunDir{0.5f, 0.8f, 0.6f};
     std::string gpuInfo;
     std::vector<DynamicPointLight> dynamicLights;
+    Texture* lightFalloffTexture = nullptr;
 
     // Stats
     struct Stats {

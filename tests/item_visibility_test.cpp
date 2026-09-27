@@ -12,10 +12,6 @@ int main() {
     assert(defaultItemRespawnDelay() == 20.0f);
     assert(itemRespawnDelay(7.5f) == 7.5f);
     assert(itemRespawnDelay(-1.0f) == 20.0f);
-    assert(itemProxyVisible(true, true, true));
-    assert(!itemProxyVisible(true, true, false));
-    assert(!itemProxyVisible(true, false, true));
-    assert(!itemProxyVisible(false, true, true));
     assert(itemCanBeCollected(true, true, true));
     assert(!itemCanBeCollected(true, true, false));
     assert(!itemCanBeCollected(false, true, true));

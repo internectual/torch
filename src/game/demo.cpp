@@ -2281,7 +2281,10 @@ static void readBeaconObjectData(BitStream& bs, bool isInitial, const Vec3& cp, 
 static void readItemData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
     readShapeBaseData(bs, isInitial, entry);
     if (bs.readFlag()) { // InitialUpdateMask
-        bs.readFlag(); bs.readFlag(); bs.readFlag(); // rotate, isStatic, collideable
+        bs.readFlag(); // rotate
+        const bool isStatic = bs.readFlag();
+        if (entry) entry->itemStatic = isStatic;
+        bs.readFlag(); // collideable
         if (bs.readFlag()) bs.readPoint3F(); // scale
     }
     if (bs.readFlag()) bs.readInt(10); // ThrowSrcMask

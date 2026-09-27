@@ -2742,18 +2742,7 @@ bool World::load(const char* mapName) {
             std::string db = getProp(obj.props, "datablock");
             std::string posStr = getProp(obj.props, "position");
 
-             // Check if this item was already placed as a WorldObject with a shape
-             bool hasShape = false;
              Point3F itemPos = parsePos(posStr);
-            for (auto& wo : worldObjects) {
-                if (wo.shape && wo.shape->loaded &&
-                    std::abs(wo.pos.x - itemPos.x) < 0.01f &&
-                    std::abs(wo.pos.y - itemPos.y) < 0.01f &&
-                    std::abs(wo.pos.z - itemPos.z) < 0.01f) {
-                    hasShape = true;
-                    break;
-                }
-            }
              const ItemKind kind = classifyItemKind(db);
              if (kind == ItemKind::None)
                  continue;
@@ -2790,7 +2779,6 @@ bool World::load(const char* mapName) {
                   item.respawnDelay = itemRespawnDelay(
                       number("respawnTime", number("respawn", item.respawnDelay)));
              }
-             item.renderProxy = !hasShape;
              for (size_t i = 0; i < worldObjects.size(); ++i) {
                  auto& wo = worldObjects[i];
                   if (wo.itemPickup && std::abs(wo.pos.x - itemPos.x) < 0.01f &&
@@ -3747,7 +3735,7 @@ void World::updateRendererLights(Renderer& renderer) const {
         if (fade <= 0.0f) continue;
         lights.push_back({source.pos.x, source.pos.y, source.pos.z,
                           source.color.r * fade, source.color.g * fade,
-                          source.color.b * fade, source.radius, source.falloff});
+                          source.color.b * fade, source.radius});
     }
     renderer.setDynamicLights(lights);
 }
@@ -4280,25 +4268,6 @@ void World::render(const Point3F& cameraPos, float dt) {
     }
 skip_grid:
 
-    // Render item pickups
-    float time = Engine::instance().game().gameTime();
-    for (auto& item : items) {
-        bool missionVisible = true;
-        if (item.worldObjectIndex >= 0 &&
-            item.worldObjectIndex < (int)worldObjects.size())
-            missionVisible = worldObjects[item.worldObjectIndex].visible;
-        if (!itemProxyVisible(item.renderProxy, item.active, missionVisible)) continue;
-        float bob = sinf(time * 2.0f + item.pos.x * 0.1f) * 0.3f;
-        ColorF col;
-        switch (item.type) {
-            case ItemPickup::Health: col = {0.2f, 1.0f, 0.2f, 1.0f}; break;
-            case ItemPickup::Energy: col = {0.2f, 0.8f, 1.0f, 1.0f}; break;
-            case ItemPickup::Ammo:   col = {1.0f, 0.8f, 0.2f, 1.0f}; break;
-        }
-        Box3F box = {{item.pos.x - 0.4f, item.pos.y - 0.4f + bob, item.pos.z - 0.4f},
-                     {item.pos.x + 0.4f, item.pos.y + 0.4f + bob, item.pos.z + 0.4f}};
-        r.drawBox(box, col);
-    }
 
     if (!waterRendered) {
         r.flushSpriteBatch();
@@ -6649,14 +6618,34 @@ bool Game::init() {
                 Console::instance().printf(LogLevel::Warn, "seekDemoBlock: snapshot restore failed");
                 return;
             }
+            auto view = demoViewSnapshots.find(snapshot->first);
+            if (view != demoViewSnapshots.end()) restoreDemoView(view->second);
         } else {
             demoParser->reset();
         }
-        if (!demoParser->seekToBlock(target)) {
-            Console::instance().printf(LogLevel::Warn,
-                "seekDemoBlock: unable to seek to block %d", target);
-            return;
+        // Replay to the target the way playback reads blocks, so the
+        // recorder's control object, view and camera are those of the
+        // target block rather than of the snapshot.
+        if (target < demoParser->getBlockCursor()) {
+            demoParser->reset();
+            resetDemoCamera();
         }
+        while (demoParser->getBlockCursor() < target) {
+            std::unique_ptr<DemoBlock> block(demoParser->nextBlock());
+            if (!block) {
+                Console::instance().printf(LogLevel::Warn,
+                    "seekDemoBlock: unable to seek to block %d", target);
+                return;
+            }
+            applyDemoMoveView(*block);
+            if (block->type == T2Demo::BlockTypeSendPacket) {
+                demoParser->onSendPacketTrigger();
+            } else if (block->type == T2Demo::BlockTypePacket) {
+                applyDemoPacketView(demoParser->parsePacket(block->data.data(), block->data.size(), block->index));
+            }
+        }
+        demoParser->setCurrentBlock(target);
+        demoParser->consumeExplosions();
         demoBlocksDone = target;
         demoTime = T2Demo::playbackBlockTime(target, demoParser->getMoveTicksBefore());
         // A seek may cross a mission change in either direction.
@@ -6980,25 +6969,7 @@ void Game::update(float dt) {
                 const std::string requestedMission = demoParser->currentMission();
 
                 // Extract position data from move blocks
-                if (block->type == T2Demo::BlockTypeMove && block->size >= 64) {
-                    DemoMove move = demoParser->readRawMove(block->data.data(), block->data.size());
-                    if (demoMoveOrientationValid(move.yaw, move.pitch)) {
-                        // Moves carry view deltas (Player::updateMove).
-                        T2Demo::accumulateViewMove(demoViewYaw, demoViewPitch, move.yaw, move.pitch);
-                        demoHasOrientation = true;
-                        if (demoHasPos) {
-                            demoPrevCameraTarget = demoCameraTarget;
-                            const Vec3 direction = T2Demo::cameraDirectionFromYawPitch(
-                                demoViewYaw, demoViewPitch);
-                            demoCameraTarget = {
-                                demoCameraPos.x + direction.x,
-                                demoCameraPos.y + direction.y,
-                                demoCameraPos.z + direction.z
-                            };
-                            demoMoveBlend = 0.0f;
-                        }
-                    }
-                }
+                applyDemoMoveView(*block);
 
                 if (block->type == T2Demo::BlockTypeMove && !demoMatchEnded)
                     updateDemoPlayerAnimation(T2Demo::playbackBlockTime(demoBlocksDone, demoTicks));
@@ -7099,73 +7070,13 @@ void Game::update(float dt) {
                             demoEventLog.erase(demoEventLog.begin(), demoEventLog.begin() +
                                                (demoEventLog.size() - 200));
                     }
-                    // Update compression point from GameState
-                     if (pd.gameState.hasCameraTransform) {
-                        demoPrevCameraPos = demoCameraPos;
-                        demoPrevCameraTarget = demoCameraTarget;
-                        demoCameraPos = {pd.gameState.cameraPosition.x,
-                                          pd.gameState.cameraPosition.y,
-                                          pd.gameState.cameraPosition.z};
-                        const Vec3 direction = T2Demo::cameraDirectionFromYawPitch(
-                            pd.gameState.cameraYaw, pd.gameState.cameraPitch);
-                        demoCameraTarget = {
-                            demoCameraPos.x + direction.x,
-                            demoCameraPos.y + direction.y,
-                            demoCameraPos.z + direction.z};
-                         demoMoveBlend = 0.0f;
-                         demoHasPos = true;
-                         demoAuthoredCamera = true;
-                    }
-                    // The control player's own view re-anchors the move-
-                    // accumulated angles (t2-mapper getAbsoluteRotation).
-                    if (pd.gameState.hasControlRotation) {
-                        demoViewYaw = pd.gameState.controlRotZ;
-                        demoViewPitch = pd.gameState.controlHeadX;
-                        demoHasOrientation = true;
-                        // Control passed to a Player: the view follows it, not a
-                        // Camera transform from earlier in the recording.
-                        demoAuthoredCamera = false;
-                        if (pd.gameState.controlObjectGhostIndex >= 0)
-                            controlGhostIndex = pd.gameState.controlObjectGhostIndex;
-                    }
-                    if (pd.gameState.controlObjectDirty) {
-                        // Full control object update with new ghost index
-                        // (position comes from move blocks, not GameState)
-                    } else if (pd.gameState.compressionPoint.x != 0 ||
-                               pd.gameState.compressionPoint.y != 0 ||
-                               pd.gameState.compressionPoint.z != 0) {
-                          // Update compression point from partial control update
-                          Vec3 cp = pd.gameState.compressionPoint;
-                          const int controlIndex = pd.gameState.controlObjectGhostIndex >= 0
-                              ? pd.gameState.controlObjectGhostIndex : controlGhostIndex;
-                          if (demoParser) {
-                              const auto* control = demoParser->getGhostTracker().getGhost(controlIndex);
-                              if (control && ObserverParity::isPlayerClass(control->className)) cp.z += 1.5f;
-                          }
-                          demoPrevCameraPos = demoCameraPos;
-                          demoPrevCameraTarget = demoCameraTarget;
-                           demoCameraPos = {cp.x, cp.y, cp.z};
-                           if (demoHasOrientation) {
-                               const Vec3 direction = T2Demo::cameraDirectionFromYawPitch(
-                                   demoViewYaw, demoViewPitch);
-                               demoCameraTarget = {cp.x + direction.x, cp.y + direction.y,
-                                                   cp.z + direction.z};
-                           } else {
-                               demoCameraTarget = {cp.x, cp.y + 2.0f, cp.z};
-                           }
-                          demoMoveBlend = 0.0f;
-                          demoHasPos = true;
-                     }
+                    applyDemoPacketView(pd);
                     // GameState is sparse; an omitted effect must not erase the
                     // previous effect before its normal client-side decay.
                     if (pd.gameState.hasDamageFlash)
                         damageFlash = pd.gameState.damageFlash;
                     if (pd.gameState.hasWhiteOut)
                         whiteOut = pd.gameState.whiteOut;
-                     if (pd.gameState.cameraFov > 0) demoCameraFov = pd.gameState.cameraFov;
-                    // Store control object ghost index for highlight
-                     if (pd.gameState.controlObjectGhostIndex >= 0)
-                         controlGhostIndex = pd.gameState.controlObjectGhostIndex;
 
                     // Consume pending explosions from projectile parsers
                     auto explosions = demoParser->consumeExplosions();
@@ -7209,8 +7120,10 @@ void Game::update(float dt) {
                 if (missionChanged)
                     tryLoadDemoMission(requestedMission);
                 delete block;
-                if (demoPlaying && demoParser && (demoBlocksDone % 500) == 0)
+                if (demoPlaying && demoParser && (demoBlocksDone % 500) == 0) {
                     demoSnapshots[demoBlocksDone] = demoParser->captureSnapshot();
+                    demoViewSnapshots[demoBlocksDone] = captureDemoView();
+                }
             }
 
             // Try to load terrain from ghost data if not yet loaded
@@ -7932,16 +7845,6 @@ void Game::render(float dt) {
             int fpIdx = (spectateGhostIndex >= 0) ? spectateGhostIndex : controlGhostIndex;
             if (fpIdx >= 0 && demoParser) {
                 const GhostEntry* g = demoParser->getGhostTracker().getGhost(fpIdx);
-                if (!g || !ObserverParity::isPositionReady(g->hasPosition)) {
-                    for (const int index : demoParser->getGhostTracker().getAllIndices()) {
-                        const auto* candidate = demoParser->getGhostTracker().getGhost(index);
-                        if (candidate && ObserverParity::isPlayerClass(candidate->className) &&
-                            ObserverParity::isPositionReady(candidate->hasPosition)) {
-                            g = candidate;
-                            break;
-                        }
-                    }
-                }
                 if (g && ObserverParity::isPositionReady(g->hasPosition)) {
                     const Vec3& position = g->hasRendered ? g->renderPos : g->position;
                     if (ghostClassIs(g->className, "Camera") && g->hasCameraEuler) {
@@ -8201,6 +8104,12 @@ void Game::render(float dt) {
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
     w->updateRendererLights(r);
+    // Demo ghost lights, as gathered by the last ghost pass.
+    if (demoPlaying && !demoLights.empty()) {
+        auto lights = r.dynamicLights;
+        lights.insert(lights.end(), demoLights.begin(), demoLights.end());
+        r.setDynamicLights(lights);
+    }
     if (!demoPlaying && activeConn && activeConn->isConnected()) {
         auto lights = r.dynamicLights;
         for (int idx : liveGhosts.getAllIndices()) {
@@ -8218,7 +8127,7 @@ void Game::render(float dt) {
             const Point3F projectilePos = Math::torquePointToYUp(
                 {ghost->renderPos.x, ghost->renderPos.y, ghost->renderPos.z});
             lights.push_back({projectilePos.x, projectilePos.y, projectilePos.z,
-                              color[0], color[1], color[2], data.projectileLightRadius, 2.0f});
+                              color[0], color[1], color[2], data.projectileLightRadius});
         }
         r.setDynamicLights(lights);
     }
@@ -8460,6 +8369,7 @@ void Game::render(float dt) {
         const GhostTracker& gt = demoMatchEnded ? demoEndedGhosts : demoParser->getGhostTracker();
         std::vector<int> indices = gt.getAllIndices();
         w->beginProjectileTrailSync();
+        demoLights.clear();
         for (int idx : indices) {
             const GhostEntry* g = gt.getGhost(idx);
             r.shadowCapture = nullptr;
@@ -8635,6 +8545,22 @@ void Game::render(float dt) {
                      w->syncProjectileTrail(idx, Math::torquePointToYUp({rp.x, rp.y, rp.z}),
                         Math::torquePointToYUp({g->velocity.x, g->velocity.y, g->velocity.z}),
                         &projectileData, &dataBlocks);
+                     // Projectile::registerLights: a hasLight datablock lights
+                     // lightRadius around the projectile. SeekerProjectile
+                     // withholds it for flechetteDelayMs >> 5 ticks.
+                     if (projectileData.projectileHasLight && projectileData.projectileLightRadius > 0.0f) {
+                         const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                         const bool flechette = ghostClassIs(g->className, "SeekerProjectile") &&
+                             projectileData.seekerUseFlechette &&
+                             (now - mg->spawnTime) * 1000.0f <
+                                 (float)((projectileData.seekerFlechetteDelayMS >> 5) * 32);
+                         if (!flechette) {
+                             const Point3F at = Math::torquePointToYUp({rp.x, rp.y, rp.z});
+                             const auto& c = projectileData.projectileLightColor;
+                             demoLights.push_back({at.x, at.y, at.z, c[0], c[1], c[2],
+                                                   projectileData.projectileLightRadius});
+                         }
+                     }
                 }
             }
 
@@ -9322,6 +9248,34 @@ void Game::render(float dt) {
                         }
                     }
                     if (!mg->cloaked) shape->alphaScale *= mg->fadeVal;
+                    // Item::registerLights: the ItemData light at the world
+                    // box centre, skipped for a lightOnlyStatic item that is
+                    // not static; pulsing lights follow sin(pi t / lightTime).
+                    const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+                    auto block = g->hasDatablock ? blocks.find((uint32_t)g->datablockId) : blocks.end();
+                    if (block != blocks.end() && ghostClassIs(g->className, "Item")) {
+                        const auto& data = block->second.decoded;
+                        if (data.shapeLightType > 0 && data.shapeLightRadius > 0.0f &&
+                            !(data.shapeLightOnlyStatic && !g->itemStatic)) {
+                            float intensity = mg->fadeVal;
+                            if (data.shapeLightType == 2 && data.shapeLightTimeMS > 0) {
+                                const float pulse = 0.5f + 0.5f * std::sin(Math::PI * now * 1000.0f /
+                                                                           (float)data.shapeLightTimeMS);
+                                intensity *= 0.15f + pulse * 0.85f;
+                            }
+                            Point3F localCenter = shape->boundsCenter();
+                            if (shape->hasHeaderBounds) {
+                                const Point3F& lo = shape->headerBoundsMin;
+                                const Point3F& hi = shape->headerBoundsMax;
+                                localCenter = {(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+                            }
+                            const Point3F at = (model * shape->upOrientation()).transform(localCenter);
+                            const auto& c = data.shapeLightColor;
+                            if (intensity > 0.0f)
+                                demoLights.push_back({at.x, at.y, at.z, c[0] * intensity, c[1] * intensity,
+                                                      c[2] * intensity, data.shapeLightRadius});
+                        }
+                    }
                 }
 
                 // Select the sequence by the index transmitted in the
@@ -9805,6 +9759,45 @@ void Game::render(float dt) {
                                             demoMatchEnded ? demoMatchEndedAt : demoTime);
                          wShape->cloakTextureOverride = nullptr;
                          wShape->alphaScale = 1.0f;
+                         // The image datablock's light at the image's mount:
+                         // 1 constant, 2 pulsing, 3 WeaponFireLight (full on
+                         // a shot, fading out over lightTime).
+                         {
+                             const auto& imageBlocks = demoParser->getInitialBlock().dataBlocks;
+                             auto imageData = imageBlocks.find((uint32_t)dbId);
+                             const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                             if (mg->imageLightDatablock[img] != dbId) {
+                                 mg->imageLightDatablock[img] = dbId;
+                                 mg->imageLightMountAt[img] = now;
+                                 mg->imageLightFireCount[img] = -1;
+                                 mg->imageLightFireAt[img] = -1.0f;
+                             }
+                             const int fireCount = g->mountedImages[img].fireCount;
+                             if (mg->imageLightFireCount[img] >= 0 && fireCount != mg->imageLightFireCount[img])
+                                 mg->imageLightFireAt[img] = now;
+                             mg->imageLightFireCount[img] = fireCount;
+                             if (imageData != imageBlocks.end()) {
+                                 const auto& data = imageData->second.decoded;
+                                 const float timeMS = (float)std::max(1, data.shapeLightTimeMS);
+                                 float intensity = 0.0f;
+                                 if (data.shapeLightType == 1) {
+                                     intensity = 1.0f;
+                                 } else if (data.shapeLightType == 2) {
+                                     const float elapsedMS = (now - mg->imageLightMountAt[img]) * 1000.0f;
+                                     intensity = 0.15f + 0.85f * (0.5f + 0.5f * std::sin(Math::PI * elapsedMS / timeMS));
+                                 } else if (data.shapeLightType == 3 && mg->imageLightFireAt[img] >= 0.0f) {
+                                     const float elapsedMS = (now - mg->imageLightFireAt[img]) * 1000.0f;
+                                     intensity = elapsedMS >= 0.0f && elapsedMS <= timeMS ? 1.0f - elapsedMS / timeMS : 0.0f;
+                                 }
+                                 intensity = std::clamp(intensity, 0.0f, 1.0f);
+                                 if (intensity > 0.0f && data.shapeLightRadius > 0.0f) {
+                                     const auto& c = data.shapeLightColor;
+                                     demoLights.push_back({mountedModel.m[0][3], mountedModel.m[1][3], mountedModel.m[2][3],
+                                                           c[0] * intensity, c[1] * intensity, c[2] * intensity,
+                                                           data.shapeLightRadius});
+                                 }
+                             }
+                         }
                          // The animated Muzzlepoint (or the image itself).
                          {
                              const int muzzle = wShape->findNode("Muzzlepoint");
@@ -11698,6 +11691,7 @@ bool Game::playDemo(const char* path) {
     demoBlocksTotal = totalBlocks;
     demoBlocksDone = 0;
     demoSnapshots.clear();
+    demoViewSnapshots.clear();
     demoSnapshots[0] = demoParser->captureSnapshot();
     demoMissionState = {loadMap, {}};
     demoFastForward = false; // real-time when invoked from console
@@ -11804,6 +11798,115 @@ void Game::resetDemoCamera() {
     demoPath.clear();
     demoPathCount = 0;
     orbitCenterInit = false;
+}
+
+Game::DemoViewSnapshot Game::captureDemoView() const {
+    DemoViewSnapshot view;
+    view.controlGhostIndex = controlGhostIndex;
+    view.viewYaw = demoViewYaw;
+    view.viewPitch = demoViewPitch;
+    view.hasOrientation = demoHasOrientation;
+    view.hasPos = demoHasPos;
+    view.authoredCamera = demoAuthoredCamera;
+    view.cameraPos = demoCameraPos;
+    view.cameraTarget = demoCameraTarget;
+    view.cameraFov = demoCameraFov;
+    return view;
+}
+
+void Game::restoreDemoView(const DemoViewSnapshot& view) {
+    controlGhostIndex = view.controlGhostIndex;
+    demoViewYaw = view.viewYaw;
+    demoViewPitch = view.viewPitch;
+    demoHasOrientation = view.hasOrientation;
+    demoHasPos = view.hasPos;
+    demoAuthoredCamera = view.authoredCamera;
+    demoCameraPos = demoPrevCameraPos = view.cameraPos;
+    demoCameraTarget = demoPrevCameraTarget = view.cameraTarget;
+    demoCameraFov = view.cameraFov;
+}
+
+// The recorder's view from a Move block: moves carry view deltas
+// (Player::updateMove).
+void Game::applyDemoMoveView(const DemoBlock& block) {
+    if (block.type != T2Demo::BlockTypeMove || block.size < 64) return;
+    DemoMove move = demoParser->readRawMove(block.data.data(), block.data.size());
+    if (!demoMoveOrientationValid(move.yaw, move.pitch)) return;
+    T2Demo::accumulateViewMove(demoViewYaw, demoViewPitch, move.yaw, move.pitch);
+    demoHasOrientation = true;
+    if (demoHasPos) {
+        demoPrevCameraTarget = demoCameraTarget;
+        const Vec3 direction = T2Demo::cameraDirectionFromYawPitch(demoViewYaw, demoViewPitch);
+        demoCameraTarget = {demoCameraPos.x + direction.x,
+                            demoCameraPos.y + direction.y,
+                            demoCameraPos.z + direction.z};
+        demoMoveBlend = 0.0f;
+    }
+}
+
+// The recorder's control object, view and camera from a packet's GameState.
+void Game::applyDemoPacketView(const PacketData& pd) {
+    // Update compression point from GameState
+     if (pd.gameState.hasCameraTransform) {
+        demoPrevCameraPos = demoCameraPos;
+        demoPrevCameraTarget = demoCameraTarget;
+        demoCameraPos = {pd.gameState.cameraPosition.x,
+                          pd.gameState.cameraPosition.y,
+                          pd.gameState.cameraPosition.z};
+        const Vec3 direction = T2Demo::cameraDirectionFromYawPitch(
+            pd.gameState.cameraYaw, pd.gameState.cameraPitch);
+        demoCameraTarget = {
+            demoCameraPos.x + direction.x,
+            demoCameraPos.y + direction.y,
+            demoCameraPos.z + direction.z};
+         demoMoveBlend = 0.0f;
+         demoHasPos = true;
+         demoAuthoredCamera = true;
+    }
+    // The control player's own view re-anchors the move-
+    // accumulated angles (t2-mapper getAbsoluteRotation).
+    if (pd.gameState.hasControlRotation) {
+        demoViewYaw = pd.gameState.controlRotZ;
+        demoViewPitch = pd.gameState.controlHeadX;
+        demoHasOrientation = true;
+        // Control passed to a Player: the view follows it, not a
+        // Camera transform from earlier in the recording.
+        demoAuthoredCamera = false;
+        if (pd.gameState.controlObjectGhostIndex >= 0)
+            controlGhostIndex = pd.gameState.controlObjectGhostIndex;
+    }
+    if (pd.gameState.controlObjectDirty) {
+        // Full control object update with new ghost index
+        // (position comes from move blocks, not GameState)
+    } else if (pd.gameState.compressionPoint.x != 0 ||
+               pd.gameState.compressionPoint.y != 0 ||
+               pd.gameState.compressionPoint.z != 0) {
+          // Update compression point from partial control update
+          Vec3 cp = pd.gameState.compressionPoint;
+          const int controlIndex = pd.gameState.controlObjectGhostIndex >= 0
+              ? pd.gameState.controlObjectGhostIndex : controlGhostIndex;
+          if (demoParser) {
+              const auto* control = demoParser->getGhostTracker().getGhost(controlIndex);
+              if (control && ObserverParity::isPlayerClass(control->className)) cp.z += 1.5f;
+          }
+          demoPrevCameraPos = demoCameraPos;
+          demoPrevCameraTarget = demoCameraTarget;
+           demoCameraPos = {cp.x, cp.y, cp.z};
+           if (demoHasOrientation) {
+               const Vec3 direction = T2Demo::cameraDirectionFromYawPitch(
+                   demoViewYaw, demoViewPitch);
+               demoCameraTarget = {cp.x + direction.x, cp.y + direction.y,
+                                   cp.z + direction.z};
+           } else {
+               demoCameraTarget = {cp.x, cp.y + 2.0f, cp.z};
+           }
+          demoMoveBlend = 0.0f;
+          demoHasPos = true;
+     }
+     if (pd.gameState.cameraFov > 0) demoCameraFov = pd.gameState.cameraFov;
+    // Store control object ghost index for highlight
+     if (pd.gameState.controlObjectGhostIndex >= 0)
+         controlGhostIndex = pd.gameState.controlObjectGhostIndex;
 }
 
 void Game::resetDemoEffects() {

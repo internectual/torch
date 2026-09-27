@@ -664,6 +664,8 @@ struct GhostEntry {
     int targetId = -1;
     // Projectile has exploded; it stays hidden until the ghost is deleted.
     bool exploded = false;
+    // Item InitialUpdateMask mStatic (flags at home, placed items).
+    bool itemStatic = false;
     std::string shapeName; // from datablock
     int linkSourceGhost = -1;
     int linkTargetGhost = -1;
@@ -757,6 +759,12 @@ struct GhostEntry {
     // world): the image's Muzzlepoint node and its native +Y axis.
     Point3F muzzlePos[8]{}, muzzleDir[8]{};
     bool hasMuzzle[8]{};
+    // Image lights per slot: the datablock the slot's clock belongs to, when
+    // it was mounted, the last seen fire count and the last shot's time.
+    int16_t imageLightDatablock[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+    float imageLightMountAt[8]{};
+    int imageLightFireCount[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+    float imageLightFireAt[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
     // The last render transform (model x upOrientation), for beam raycasts.
     MatrixF renderModel;
     bool hasRenderModel = false;

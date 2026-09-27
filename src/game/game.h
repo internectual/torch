@@ -620,7 +620,6 @@ private:
         float delay = 0.0f;
         float lifetime = 0.0f;
         float radius = 0.0f;
-        float falloff = 2.0f;
     };
     std::vector<EffectLight> effectLights;
 
@@ -665,7 +664,6 @@ private:
          int worldObjectIndex = -1;
          bool enabled = true;
          bool active = true;
-        bool renderProxy = true;
     };
     std::vector<ItemPickup> items;
 
@@ -884,6 +882,9 @@ public:
     // Each demo ghost's mount-node frames as last drawn (world, Y-up).
     struct MountFrames { MatrixF frame[32]; uint32_t valid = 0; };
     std::unordered_map<int, MountFrames> demoMountFrames;
+    // Point lights registered by demo ghosts (projectiles, items, images)
+    // during the last ghost pass.
+    std::vector<DynamicPointLight> demoLights;
     // Each demo ghost's animated "eye" node as last drawn (world, Y-up):
     // Player::getEyeTransform's position.
     std::unordered_map<int, Point3F> demoEyePositions;
@@ -1055,6 +1056,19 @@ private:
     // Demo playback
     DemoParser* demoParser{};
     std::map<int, DemoParserSnapshot> demoSnapshots;
+    // The recorder's view at each snapshot, so a seek resumes it.
+    struct DemoViewSnapshot {
+        int controlGhostIndex = -1;
+        float viewYaw = 0.0f, viewPitch = 0.0f;
+        bool hasOrientation = false, hasPos = false, authoredCamera = false;
+        Point3F cameraPos{}, cameraTarget{};
+        float cameraFov = -1.0f;
+    };
+    std::map<int, DemoViewSnapshot> demoViewSnapshots;
+    DemoViewSnapshot captureDemoView() const;
+    void restoreDemoView(const DemoViewSnapshot& view);
+    void applyDemoMoveView(const DemoBlock& block);
+    void applyDemoPacketView(const PacketData& pd);
     T2Demo::MissionReplacementState demoMissionState;
     bool demoPlaying = false;
     bool gamePaused = false;

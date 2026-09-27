@@ -205,6 +205,17 @@ struct DecodedDataBlock {
     std::array<float, 3> projectileLightColor{1.0f, 1.0f, 1.0f};
     bool projectileHasUnderwaterLightColor{};
     std::array<float, 3> projectileUnderwaterLightColor{1.0f, 1.0f, 1.0f};
+    // SeekerProjectile::registerLights withholds the light for
+    // flechetteDelayMs >> 5 ticks when useFlechette is set.
+    bool seekerUseFlechette{};
+    int32_t seekerFlechetteDelayMS = 0;
+    // ItemData light (Item::registerLights) and ShapeBaseImageData light:
+    // type 0 none, 1 constant, 2 pulsing, 3 weapon fire (images only).
+    int32_t shapeLightType = 0;
+    std::array<float, 3> shapeLightColor{1.0f, 1.0f, 1.0f};
+    int32_t shapeLightTimeMS = 1000;
+    float shapeLightRadius = 10.0f;
+    bool shapeLightOnlyStatic{};
     bool projectileExplodeOnWaterImpact{};
     float projectileDepthTolerance = 5.0f;
     float projectileDryVelocity = 5.0f;

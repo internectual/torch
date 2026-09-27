@@ -36,7 +36,7 @@ uniform vec3 uShapeInteriorDir = vec3(0.0, 1.0, 0.0); // toward the indoor light
 uniform int uPointLightCount = 0;
 uniform vec3 uPointLightPos[8];
 uniform vec3 uPointLightColor[8];
-uniform vec3 uPointLightParams[8]; // radius, falloff, unused
+uniform vec3 uPointLightParams[8]; // radius, screen fade, unused
 
 out vec3 vNormal;
 out vec2 vUV;
@@ -111,7 +111,32 @@ uniform vec3 uUVShift = vec3(0.0); // cloak texture scroll
 uniform int uPointLightCount = 0;
 uniform vec3 uPointLightPos[8];
 uniform vec3 uPointLightColor[8];
-uniform vec3 uPointLightParams[8]; // radius, falloff, unused
+uniform vec3 uPointLightParams[8]; // radius, screen fade, unused
+uniform sampler2D uLightFalloff;
+// The engine's terrain/interior light pass (TerrainRender::buildLightArray,
+// InteriorInstance::renderObject): each light within R of a triangle's plane
+// adds a disc of radius sqrt(R^2 - d^2) textured with lightFalloffMono,
+// coloured by the light, alpha (R - d) / R, blended ONE onto the fogged
+// frame in gamma space, with no N.L term.
+vec3 projectedLightDiscs(vec3 position) {
+    vec3 planeNormal = normalize(cross(dFdx(position), dFdy(position)));
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < uPointLightCount; ++i) {
+        float radius = uPointLightParams[i].x;
+        float screenFade = uPointLightParams[i].y;
+        if (radius <= 0.0 || screenFade <= 0.0) continue;
+        vec3 toFragment = position - uPointLightPos[i];
+        float alongNormal = dot(planeNormal, toFragment);
+        float planeDistance = abs(alongNormal);
+        if (planeDistance >= radius) continue;
+        float discRadius = sqrt(radius * radius - planeDistance * planeDistance);
+        float t = length(toFragment - planeNormal * alongNormal) / discRadius;
+        if (t >= 1.0) continue;
+        float falloff = texture(uLightFalloff, vec2(0.5 + 0.5 * t, 0.5)).r;
+        sum += falloff * uPointLightColor[i] * screenFade * ((radius - planeDistance) / radius);
+    }
+    return sum;
+}
 
 uniform bool uFogEnabled = false;
 uniform vec3 uFogColor = vec3(0.75, 0.8, 0.85);
@@ -273,16 +298,6 @@ void main() {
         }
         // Scene lighting, clamped to [0,1] BEFORE adding the lightmap
         vec3 sceneLighting = clamp(uSunColor * NdotL * shadowFactor + uAmbient, 0.0, 1.0);
-        for (int i = 0; i < uPointLightCount; ++i) {
-            vec3 toLight = uPointLightPos[i] - vWorldPos;
-            float distance = length(toLight);
-            vec3 Lp = distance > 0.0001 ? toLight / distance : N;
-            float edge = clamp(1.0 - distance / uPointLightParams[i].x, 0.0, 1.0);
-            float attenuation = pow(edge, max(0.1, uPointLightParams[i].y));
-            sceneLighting += uPointLightColor[i] * max(dot(N, Lp), 0.0) * attenuation;
-        }
-        sceneLighting = clamp(sceneLighting, 0.0, 1.0);
-
 
         vec3 lighting = uInteriorOutsideVisible ? sceneLighting : vec3(0.0);
         if (uUseLightmap)
@@ -293,6 +308,7 @@ void main() {
             float dist = length(vWorldPos - uCamPos);
             lit = applyAuthoredFog(lit, dist);
         }
+        lit = min(lit + projectedLightDiscs(vWorldPos), 1.0);
         FragColor = vec4(lit, col.a);
     } else {
         // Tribes 2 shapes: interpolated gamma-space vertex lighting times
@@ -442,6 +458,31 @@ uniform int uPointLightCount = 0;
 uniform vec3 uPointLightPos[8];
 uniform vec3 uPointLightColor[8];
 uniform vec3 uPointLightParams[8];
+uniform sampler2D uLightFalloff;
+// The engine's terrain/interior light pass (TerrainRender::buildLightArray,
+// InteriorInstance::renderObject): each light within R of a triangle's plane
+// adds a disc of radius sqrt(R^2 - d^2) textured with lightFalloffMono,
+// coloured by the light, alpha (R - d) / R, blended ONE onto the fogged
+// frame in gamma space, with no N.L term.
+vec3 projectedLightDiscs(vec3 position) {
+    vec3 planeNormal = normalize(cross(dFdx(position), dFdy(position)));
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < uPointLightCount; ++i) {
+        float radius = uPointLightParams[i].x;
+        float screenFade = uPointLightParams[i].y;
+        if (radius <= 0.0 || screenFade <= 0.0) continue;
+        vec3 toFragment = position - uPointLightPos[i];
+        float alongNormal = dot(planeNormal, toFragment);
+        float planeDistance = abs(alongNormal);
+        if (planeDistance >= radius) continue;
+        float discRadius = sqrt(radius * radius - planeDistance * planeDistance);
+        float t = length(toFragment - planeNormal * alongNormal) / discRadius;
+        if (t >= 1.0) continue;
+        float falloff = texture(uLightFalloff, vec2(0.5 + 0.5 * t, 0.5)).r;
+        sum += falloff * uPointLightColor[i] * screenFade * ((radius - planeDistance) / radius);
+    }
+    return sum;
+}
 
 uniform bool uUseNormalMap = false;
 uniform sampler2D uNormal0;
@@ -519,14 +560,6 @@ void main() {
     } else {
         lighting = uAmbient + uSunColor * ndotl;
     }
-    for (int i = 0; i < uPointLightCount; ++i) {
-        vec3 toLight = uPointLightPos[i] - vWorldPos;
-        float distance = length(toLight);
-        vec3 Lp = distance > 0.0001 ? toLight / distance : N;
-        float edge = clamp(1.0 - distance / uPointLightParams[i].x, 0.0, 1.0);
-        lighting += uPointLightColor[i] * max(dot(N, Lp), 0.0) *
-                    pow(edge, max(0.1, uPointLightParams[i].y));
-    }
     vec3 lit = base.rgb * lighting;
     if (uFogEnabled) {
         float dist = length(vWorldPos - uCamPos);
@@ -544,6 +577,8 @@ void main() {
         vec4 detail = texture(uOverlayDetail, vUV * uOverlayDetailTiling.xy);
         lit *= detail.rgb * vDetailFade + vec3(1.0 - detail.a * vDetailFade);
     }
+    // The light pass draws last, onto the fogged, detailed ground.
+    lit = min(lit + projectedLightDiscs(vWorldPos), 1.0);
     FragColor = vec4(lit, 1.0);
 }
 )";
