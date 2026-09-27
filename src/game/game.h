@@ -879,6 +879,9 @@ public:
         return serverPlayerGhostSynced ? (int)serverPlayerGhostIndex : -1;
     }
     int getSpectateGhostIndex() const { return spectateGhostIndex; }
+    // Each demo ghost's mount-node frames as last drawn (world, Y-up).
+    struct MountFrames { MatrixF frame[32]; uint32_t valid = 0; };
+    std::unordered_map<int, MountFrames> demoMountFrames;
     bool targetFinderOpen() const { return targetFinderShown; }
     void toggleTargetFinder();
     void closeTargetFinder() { targetFinderShown = false; }

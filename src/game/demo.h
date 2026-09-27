@@ -723,6 +723,7 @@ struct GhostEntry {
     float bodyYaw = 0.0f;
     // ShapeBase MountedMask: object this ghost is mounted on, or -1.
     int mountObject = -1;
+    int mountNode = 0;        // parent mount point (ShapeBase::mountObject)
     // Client-derived movement animation, updated on simulation ticks.
     int contactTimer = 0;
     int moveAction = 0;

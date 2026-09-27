@@ -2038,8 +2038,12 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
     if (bs.readFlag()) { // MountedMask
         if (bs.readFlag()) {
             const int mount = bs.readInt(10);
-            bs.readInt(5); // mount node
-            if (entry) entry->mountObject = mount;
+            const int node = bs.readInt(5);
+            if (entry) {
+                entry->mountObject = mount;
+                // ShapeBase::mountObject clamps an invalid slot to zero.
+                entry->mountNode = node >= 0 && node < 32 ? node : 0;
+            }
         } else if (entry) {
             entry->mountObject = -1;
         }

@@ -9221,6 +9221,15 @@ void Game::render(float dt) {
                                      mg->projectileScale.z});
                 Point3F renderPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
                 model.setTranslation(renderPosition);
+                // ShapeBase::getMountTransform: a mounted object sits in its
+                // parent's mountN node frame (the parent's last drawn pose).
+                if (g->mountObject >= 0) {
+                    auto parent = demoMountFrames.find(g->mountObject);
+                    if (parent != demoMountFrames.end() && (parent->second.valid >> g->mountNode) & 1u) {
+                        model = parent->second.frame[g->mountNode];
+                        renderPosition = {model.m[0][3], model.m[1][3], model.m[2][3]};
+                    }
+                }
                 r.setModel(model * shape->upOrientation());
                 shadowCaster = (isPlayer || ObserverParity::isVehicleClass(g->className)) &&
                                g->mountObject < 0;
@@ -9502,6 +9511,28 @@ void Game::render(float dt) {
                 shape->cloakTextureOverride = nullptr;
                 shape->alphaScale = 1.0f;
                 zapDrawCount = shadowDraws.size();
+                // This pose's mount nodes, for objects mounted on this ghost.
+                {
+                    MountFrames& frames = demoMountFrames[idx];
+                    frames.valid = 0;
+                    const MatrixF shapeModel = model * shape->upOrientation();
+                    const auto& nodes = shape->animatedNodeWorld.size() == shape->defaultTransforms.size()
+                        ? shape->animatedNodeWorld : shape->defaultTransforms;
+                    static std::unordered_map<const DTSShape*, std::array<int, 32>> mountNodeCache;
+                    auto cached = mountNodeCache.find(shape);
+                    if (cached == mountNodeCache.end()) {
+                        std::array<int, 32> found{};
+                        for (int point = 0; point < 32; ++point)
+                            found[point] = shape->findNode(("mount" + std::to_string(point)).c_str());
+                        cached = mountNodeCache.emplace(shape, found).first;
+                    }
+                    for (int point = 0; point < 32; ++point) {
+                        const int node = cached->second[point];
+                        if (node < 0 || node >= (int)nodes.size()) continue;
+                        frames.frame[point] = shapeModel * nodes[node];
+                        frames.valid |= 1u << point;
+                    }
+                }
 
                 // Player::updateJet loops PlayerData jetSound while jetting.
                 if (isPlayer) {
