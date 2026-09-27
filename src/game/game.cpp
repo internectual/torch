@@ -9307,6 +9307,22 @@ void Game::render(float dt) {
 
                 // ShapeBase::renderObject: vertex alpha 0.125 + (1 - level) x 0.875.
                 shape->alphaScale = mg->cloakLevel > 0.0f ? 0.125f + (1.0f - mg->cloakLevel) * 0.875f : 1.0f;
+                // mFadeVal: a timed fade runs from its receipt; the shape's
+                // alpha scales by it (0 draws nothing).
+                {
+                    const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                    if (mg->fading) {
+                        if (mg->fadeFresh) { mg->fadeStart = now; mg->fadeFresh = false; }
+                        const float t = mg->fadeTime > 0.0f ? (now - mg->fadeStart) / mg->fadeTime : 1.0f;
+                        if (t >= 1.0f || t < 0.0f) {
+                            mg->fadeVal = mg->fadeOut ? 0.0f : 1.0f;
+                            mg->fading = false;
+                        } else {
+                            mg->fadeVal = mg->fadeOut ? 1.0f - t : t;
+                        }
+                    }
+                    if (!mg->cloaked) shape->alphaScale *= mg->fadeVal;
+                }
 
                 // Select the sequence by the index transmitted in the
                 // ShapeBase thread state. The DTS owns its sequence names.
@@ -9811,6 +9827,7 @@ void Game::render(float dt) {
                 caster.draws = &shadowDraws;
                 caster.center = shadowCenter;
                 caster.radius = shadowRadius;
+                caster.alpha = mg->fadeVal;
                 projectedShadows().submit(r, caster, Timer::now() * 1000.0,
                     Engine::instance().game().isMapperMode() ? 0.0f : hazeAt(*w, dist),
                     [&](const Point3F& lo, const Point3F& hi, const Point3F& dir, std::vector<Point3F>& out) {

@@ -724,6 +724,10 @@ struct GhostEntry {
     // ShapeBase MountedMask: object this ghost is mounted on, or -1.
     int mountObject = -1;
     int mountNode = 0;        // parent mount point (ShapeBase::mountObject)
+    // CloakMask fade (ShapeBase mFadeVal): a timed fade in or out, or a
+    // fixed visible/invisible value.
+    bool fading = false, fadeOut = false, fadeFresh = false;
+    float fadeTime = 0.0f, fadeVal = 1.0f, fadeStart = 0.0f;
     // Client-derived movement animation, updated on simulation ticks.
     int contactTimer = 0;
     int moveAction = 0;

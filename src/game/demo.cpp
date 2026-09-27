@@ -2077,8 +2077,22 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
                 entry->cloaked = cloaked;
                 entry->hasCloak = true;
             }
-            if (bs.readFlag()) { bs.readFlag(); bs.readF32(); }
-            else bs.readFlag();
+            if (bs.readFlag()) {
+                const bool fadeOut = bs.readFlag();
+                const float fadeTime = bs.readF32();
+                if (entry) {
+                    entry->fading = true;
+                    entry->fadeOut = fadeOut;
+                    entry->fadeTime = fadeTime;
+                    entry->fadeFresh = true;
+                }
+            } else {
+                const bool visible = bs.readFlag();
+                if (entry) {
+                    entry->fading = false;
+                    entry->fadeVal = visible ? 1.0f : 0.0f;
+                }
+            }
         }
         if (bs.readFlag()) {
             if (bs.readFlag()) {
