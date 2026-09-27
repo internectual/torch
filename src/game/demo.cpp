@@ -649,7 +649,8 @@ bool DemoParser::readGhostStartBlock(BitStream& bs, bool useIBTracker) {
     return true;
 }
 
-static bool readInitialControlPacket(BitStream& bs, const GhostEntry& ghost) {
+static bool readInitialControlPacket(BitStream& bs, const GhostEntry& ghost,
+                                     float& viewYaw, float& viewPitch) {
     if (ghost.classId != 4 && ghost.classId != 25) {
         Console::instance().printf(LogLevel::Error,
             "Demo: initial control packet parser missing for class %d (%s)",
@@ -661,8 +662,8 @@ static bool readInitialControlPacket(BitStream& bs, const GhostEntry& ghost) {
     bs.readF32(); // recharge rate
     if (ghost.classId == 4) {
         bs.readPoint3F();
-        bs.readF32(); // rotation X
-        bs.readF32(); // rotation Z
+        viewPitch = bs.readF32(); // rotation X
+        viewYaw = bs.readF32(); // rotation Z
         const int mode = bs.readInt(3);
         if (mode == 3 || mode == 4) {
             bs.readF32();
@@ -687,9 +688,9 @@ static bool readInitialControlPacket(BitStream& bs, const GhostEntry& ghost) {
             bs.readPoint3F(); // velocity
             bs.readInt(4); // jump surface last contact
         }
-        bs.readF32(); // head X
+        viewPitch = bs.readF32(); // head X
         bs.readF32(); // head Z
-        bs.readF32(); // rotation Z
+        viewYaw = bs.readF32(); // rotation Z
 
         if (bs.readFlag()) {
             const int pilotedIndex = bs.readInt(T2Demo::GhostIdBitSize);
@@ -837,8 +838,10 @@ bool DemoParser::readInitialBlock(const uint8_t* data, size_t size, uint32_t pro
     if (initialBlock.controlObjectGhostIndex >= 0) {
         const GhostEntry* control = ibGhostTracker.getGhost(
             initialBlock.controlObjectGhostIndex);
-        if (!control || !readInitialControlPacket(bs, *control))
+        if (!control || !readInitialControlPacket(bs, *control, initialBlock.controlYaw,
+                                                  initialBlock.controlPitch))
             return fail("control object");
+        initialBlock.hasControlRotation = true;
     }
     initialBlock.missionName = bs.readString();
     initialBlock.missionCRC = bs.readU32();
@@ -1587,9 +1590,10 @@ GameState DemoParser::readGameState(BitStream& bs) {
                     bs.readF32(); bs.readF32(); bs.readF32(); // velocity
                     bs.readInt(4); // jump surface contact
                 }
-                bs.readF32(); // head X
-                bs.readF32(); // head Z
-                bs.readF32(); // rotation Z
+                gs.controlHeadX = bs.readF32();
+                gs.controlHeadZ = bs.readF32();
+                gs.controlRotZ = bs.readF32();
+                gs.hasControlRotation = true;
                 if (bs.readFlag()) {
                     const int pilotedIndex = bs.readInt(T2Demo::GhostIdBitSize);
                     const GhostEntry* piloted = ghostTracker.getGhost(pilotedIndex);

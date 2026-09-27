@@ -1130,10 +1130,7 @@ bool Engine::init(int argc, char* argv[]) {
             return;
         }
         std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-        if (ren->screenshot(path.c_str()))
-            Console::instance().printf(LogLevel::Info, "Screenshot saved: %s", path.c_str());
-        else
-            Console::instance().printf(LogLevel::Error, "Screenshot failed: %s", path.c_str());
+        ren->queueScreenshot(path);
     }, "screenshot [path] - save a screenshot to path (default: screenshot.png)");
 
     // DEBUG: inject a GUI mouse click through the real input path; cycles
@@ -1928,7 +1925,7 @@ bool Engine::init(int argc, char* argv[]) {
             ren->beginFrame({0.15f, 0.15f, 0.2f, 1.0f});
             if (gui) gui->render();
             ren->endFrame();
-            plat->swapBuffers();
+            ren->flushQueuedScreenshots(); plat->swapBuffers();
         }
     }
 
@@ -2790,7 +2787,7 @@ void Engine::run() {
                 }
                 prevF12 = f12Down;
             }
-            plat->swapBuffers();
+            ren->flushQueuedScreenshots(); plat->swapBuffers();
             continue;
         }
 
@@ -2799,7 +2796,7 @@ void Engine::run() {
         if (isPlaying) {
             g->menu().setActive(false);
             if (gui) gui->render();
-            plat->swapBuffers();
+            ren->flushQueuedScreenshots(); plat->swapBuffers();
             continue;
         }
 
@@ -3631,7 +3628,7 @@ void Engine::run() {
         if (showOverlay) renderOverlay();
         if (showMinimap && g->isDemoPlaying()) renderMinimap();
 
-        plat->swapBuffers();
+        ren->flushQueuedScreenshots(); plat->swapBuffers();
     }
 }
 

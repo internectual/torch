@@ -461,7 +461,11 @@ public:
     void drawFilledQuad(float width, float depth);
     void drawRectFill(const Point3F& a, const Point3F& b, const ColorF& color);
     void drawSprite(const Point3F& pos, float size, const ColorF& color,
-                    uint32_t texture = 0, bool additive = false);
+                    uint32_t texture = 0, bool additive = false, float angle = 0.0f);
+    // V12 oriented particle: U along `direction`, V along
+    // cross(camera -> pos, direction); nothing for a zero direction.
+    void drawVelocitySprite(const Point3F& pos, float size, const ColorF& color,
+                            const Point3F& direction, uint32_t texture = 0, bool additive = false);
     void drawOrientedSprite(const Point3F& pos, float size, const ColorF& color,
                             const Point3F& direction, float angle = 0.0f,
                             uint32_t texture = 0, bool additive = false);
@@ -512,6 +516,11 @@ public:
     RenderConfig& config() { return cfg; }
     void onResize(int32_t w, int32_t h);
     bool screenshot(const char* path);
+    // Console screenshots are taken just before the next buffer swap, when
+    // the back buffer holds the finished frame.
+    void queueScreenshot(const std::string& path) { pendingScreenshots.push_back(path); }
+    void flushQueuedScreenshots();
+    std::vector<std::string> pendingScreenshots;
     bool screenshot(const char* path, const char* metaData);
     // Shadow mapping
     bool initShadowMap(int32_t size = 2048);
@@ -530,6 +539,10 @@ public:
     /// While set, DTS shapes append their mesh draws here (the object
     /// being drawn: its shadow silhouette and shocklance zap).
     std::vector<ShadowCaptureDraw>* shadowCapture = nullptr;
+    /// The 3D scene camera's view-projection (setCamera), for HUD controls
+    /// that project world points after the 2D pass has replaced the matrices.
+    MatrixF sceneViewProjection;
+    bool hasSceneCamera = false;
     uint32_t shadowDepthTex = 0;
 
     Font* defaultFont{};

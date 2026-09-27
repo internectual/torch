@@ -277,6 +277,8 @@ void Renderer::setCamera(const Point3F& pos, const Point3F& target, const Point3
     p.perspective(Math::DEG2RAD(Math::horizontalFovToVertical(cfg.fov, aspect)),
                   aspect, cfg.nearPlane, cfg.farPlane);
     setProjection(p);
+    sceneViewProjection = p * v;
+    hasSceneCamera = true;
 }
 
 void Renderer::setDynamicLights(const std::vector<DynamicPointLight>& lights) {
@@ -624,13 +626,20 @@ void Renderer::drawTexturedQuadColors(const Point3F& a, const Point3F& b, const 
 }
 
 void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color,
-                           uint32_t texture, bool additive) {
+                           uint32_t texture, bool additive, float angle) {
     initSpriteVAO();
 
     // Billboarding: extract right/up from view matrix
     const float* v = view.data();
     Point3F right = {v[0], v[4], v[8]};  // first column (transpose for row-major in memory)
     Point3F up = {v[1], v[5], v[9]};     // second column
+    if (angle != 0.0f) {
+        // Spin the corners in the view plane.
+        const float c = std::cos(angle), sn = std::sin(angle);
+        const Point3F r2{right.x * c + up.x * sn, right.y * c + up.y * sn, right.z * c + up.z * sn};
+        const Point3F u2{up.x * c - right.x * sn, up.y * c - right.y * sn, up.z * c - right.z * sn};
+        right = r2; up = u2;
+    }
     float s = size * 0.5f;
 
     float f[] = {
@@ -641,6 +650,37 @@ void Renderer::drawSprite(const Point3F& pos, float size, const ColorF& color,
         pos.x + (-right.x - up.x) * s, pos.y + (-right.y - up.y) * s, pos.z + (-right.z - up.z) * s,  0,1, color.r,color.g,color.b,color.a,
         pos.x + (-right.x + up.x) * s, pos.y + (-right.y + up.y) * s, pos.z + (-right.z + up.z) * s,  0,0, color.r,color.g,color.b,color.a,
     };
+    GLboolean depthWrite = GL_TRUE;
+    const GLboolean blendWasOn = glIsEnabled(GL_BLEND);
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWrite);
+    glEnable(GL_BLEND);
+    glDepthMask(GL_FALSE);
+    spriteBatchAdd(f, texture, additive);
+    glDepthMask(depthWrite);
+    if (!blendWasOn) glDisable(GL_BLEND);
+}
+
+void Renderer::drawVelocitySprite(const Point3F& pos, float size, const ColorF& color,
+                                  const Point3F& direction, uint32_t texture, bool additive) {
+    const float dl = std::sqrt(direction.x * direction.x + direction.y * direction.y + direction.z * direction.z);
+    if (dl < 0.0001f) return;
+    const Point3F dir{direction.x / dl, direction.y / dl, direction.z / dl};
+    const Point3F fromCam{pos.x - cameraPos.x, pos.y - cameraPos.y, pos.z - cameraPos.z};
+    Point3F across{fromCam.y * dir.z - fromCam.z * dir.y, fromCam.z * dir.x - fromCam.x * dir.z,
+                   fromCam.x * dir.y - fromCam.y * dir.x};
+    const float al = std::sqrt(across.x * across.x + across.y * across.y + across.z * across.z);
+    if (al < 0.0001f) return;
+    across = {across.x / al, across.y / al, across.z / al};
+    initSpriteVAO();
+    const float h = size * 0.5f;
+    auto corner = [&](float u, float w) {
+        return Point3F{pos.x + (dir.x * u + across.x * w) * h, pos.y + (dir.y * u + across.y * w) * h,
+                       pos.z + (dir.z * u + across.z * w) * h};
+    };
+    const Point3F a = corner(-1, 1), b = corner(1, 1), c = corner(1, -1), d = corner(-1, -1);
+    float f[] = {a.x,a.y,a.z,0,0,color.r,color.g,color.b,color.a, b.x,b.y,b.z,1,0,color.r,color.g,color.b,color.a,
+                 c.x,c.y,c.z,1,1,color.r,color.g,color.b,color.a, c.x,c.y,c.z,1,1,color.r,color.g,color.b,color.a,
+                 d.x,d.y,d.z,0,1,color.r,color.g,color.b,color.a, a.x,a.y,a.z,0,0,color.r,color.g,color.b,color.a};
     GLboolean depthWrite = GL_TRUE;
     const GLboolean blendWasOn = glIsEnabled(GL_BLEND);
     glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWrite);
@@ -1319,6 +1359,16 @@ void Renderer::setFontScale(float scale) {
         if (ft) ft->defaultScale = scale;
     }
     if (defaultFont) defaultFont->defaultScale = scale;
+}
+
+void Renderer::flushQueuedScreenshots() {
+    for (const std::string& path : pendingScreenshots) {
+        if (screenshot(path.c_str()))
+            Console::instance().printf(LogLevel::Info, "Screenshot saved: %s", path.c_str());
+        else
+            Console::instance().printf(LogLevel::Error, "Screenshot failed: %s", path.c_str());
+    }
+    pendingScreenshots.clear();
 }
 
 bool Renderer::screenshot(const char* path) {

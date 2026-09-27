@@ -1080,9 +1080,15 @@ static void testDemoCameraMath() {
     assert(first.x > 1.4f && first.x < 1.5f);
 
     const Vec3 forward = T2Demo::cameraDirectionFromYawPitch(0.5f, 0.25f);
-    assert(std::fabs(forward.x + std::sin(0.5f) * std::cos(0.25f)) < 0.0001f);
+    // Torque forward: +x for positive yaw, down for positive pitch.
+    assert(std::fabs(forward.x - std::sin(0.5f) * std::cos(0.25f)) < 0.0001f);
     assert(std::fabs(forward.y - std::cos(0.5f) * std::cos(0.25f)) < 0.0001f);
-    assert(std::fabs(forward.z - std::sin(0.25f)) < 0.0001f);
+    assert(std::fabs(forward.z + std::sin(0.25f)) < 0.0001f);
+    // Move deltas accumulate: yaw wraps, pitch clamps at 0.494 pi.
+    float yaw = 6.2f, pitch = 1.5f;
+    T2Demo::accumulateViewMove(yaw, pitch, 0.2f, 0.5f);
+    assert(std::fabs(yaw - (6.4f - 6.28318530718f)) < 0.0001f);
+    assert(std::fabs(pitch - 3.14159265359f * 0.494f) < 0.0001f);
 }
 
 static void testDemoGhostHudCoordinateParity() {

@@ -708,6 +708,32 @@ static void playChatBeep() {
 #include <set>
 
 // ─── 3D to screen projection ─────────────────────────────────
+// Screen-space drawing inside the 3D pass: labels projected with
+// worldToScreen are pixel coordinates, and Font/drawBox use whatever
+// projection is active, so switch to the HUD's pixel ortho for the scope.
+struct ScreenSpace2D {
+    Renderer& r;
+    MatrixF savedProjection, savedView;
+    explicit ScreenSpace2D(Renderer& renderer)
+        : r(renderer), savedProjection(renderer.projectionMatrix()), savedView(renderer.viewMatrix()) {
+        MatrixF ortho;
+        ortho.identity();
+        ortho.m[0][0] = 2.0f / (float)std::max(1, r.config().width);
+        ortho.m[1][1] = -2.0f / (float)std::max(1, r.config().height);
+        ortho.m[0][3] = -1.0f;
+        ortho.m[1][3] = 1.0f;
+        r.setProjection(ortho);
+        MatrixF id;
+        id.identity();
+        r.setView(id);
+    }
+    ~ScreenSpace2D() {
+        r.flushSpriteBatch();
+        r.setProjection(savedProjection);
+        r.setView(savedView);
+    }
+};
+
 static Point3F worldToScreen(const Point3F& worldPos, const MatrixF& view, const MatrixF& proj, int screenW, int screenH) {
     const float* v = &view.m[0][0];
     float cx = worldPos.x*v[0]+worldPos.y*v[1]+worldPos.z*v[2]+v[3];
@@ -4342,6 +4368,7 @@ skip_grid:
                 Point3F screen = worldToScreen(above, ren.viewMatrix(),
                     ren.projectionMatrix(), ren.config().width, ren.config().height);
                 if (screen.z > 0 && screen.x >= 0 && screen.x <= ren.config().width && screen.y >= 0 && screen.y <= ren.config().height) {
+                    ScreenSpace2D screenSpace(ren);
                     float barW = 40, barH = 5;
                     float by = screen.y - 15;
                     Engine::instance().renderer().drawBox({{screen.x - barW/2 - 1, by - 1, 0},
@@ -6029,10 +6056,12 @@ void World::renderParticles() {
     for (const auto& emitter : effectEmitters) {
         for (const auto& p : emitter.particles) {
             if (p.active) {
+                // Oriented particles lie along their direction; billboards
+                // spin (spinSpeed is degrees per second).
                 if (emitter.emitter.orientParticles)
-                    r.drawOrientedSprite(p.pos, p.size, p.color, p.orientDir, p.spin, p.texture, p.additive);
+                    r.drawVelocitySprite(p.pos, p.size, p.color, p.orientDir, p.texture, p.additive);
                 else
-                    r.drawSprite(p.pos, p.size, p.color, p.texture, p.additive);
+                    r.drawSprite(p.pos, p.size, p.color, p.texture, p.additive, p.spin * Math::PI / 180.0f);
             }
         }
     }
@@ -6560,6 +6589,9 @@ bool Game::init() {
         if (argc > 3) demoObserveHeight = (float)atof(argv[3]);
         if (demoObserveGhost >= 0) { freeCamActive = false; demoOrbitCam = false; demoFirstPersonCam = false; }
     }, "demoObserve ghost [distance] [height] - chase camera behind a demo ghost (-1 turns it off)");
+    con.addCommand("demoSpectate", [this](int32_t argc, const char* const* argv) {
+        if (argc > 1) selectSpectateTarget(atoi(argv[1]));
+    }, "demoSpectate ghost - first-person view from a demo ghost");
     con.addCommand("toggleDemoOrbit", [this](int32_t, const char* const*) {
         demoFirstPersonCam = false;
         demoOrbitCam = !demoOrbitCam;
@@ -6946,8 +6978,8 @@ void Game::update(float dt) {
                 if (block->type == T2Demo::BlockTypeMove && block->size >= 64) {
                     DemoMove move = demoParser->readRawMove(block->data.data(), block->data.size());
                     if (demoMoveOrientationValid(move.yaw, move.pitch)) {
-                        demoViewYaw = move.yaw;
-                        demoViewPitch = move.pitch;
+                        // Moves carry view deltas (Player::updateMove).
+                        T2Demo::accumulateViewMove(demoViewYaw, demoViewPitch, move.yaw, move.pitch);
                         demoHasOrientation = true;
                         if (demoHasPos) {
                             demoPrevCameraTarget = demoCameraTarget;
@@ -7070,6 +7102,18 @@ void Game::update(float dt) {
                          demoMoveBlend = 0.0f;
                          demoHasPos = true;
                          demoAuthoredCamera = true;
+                    }
+                    // The control player's own view re-anchors the move-
+                    // accumulated angles (t2-mapper getAbsoluteRotation).
+                    if (pd.gameState.hasControlRotation) {
+                        demoViewYaw = pd.gameState.controlRotZ;
+                        demoViewPitch = pd.gameState.controlHeadX;
+                        demoHasOrientation = true;
+                        // Control passed to a Player: the view follows it, not a
+                        // Camera transform from earlier in the recording.
+                        demoAuthoredCamera = false;
+                        if (pd.gameState.controlObjectGhostIndex >= 0)
+                            controlGhostIndex = pd.gameState.controlObjectGhostIndex;
                     }
                     if (pd.gameState.controlObjectDirty) {
                         // Full control object update with new ghost index
@@ -7893,17 +7937,29 @@ void Game::render(float dt) {
                     if (ghostClassIs(g->className, "Camera") && g->hasCameraEuler) {
                         const float pitch = g->cameraEuler.x;
                         const float yaw = g->cameraEuler.z;
+                        // Torque space (z up): forward from yaw about z, pitch down.
                         camPos = {position.x, position.y, position.z};
                         camTarget = {position.x + std::sin(yaw) * std::cos(pitch) * 10.0f,
-                                     position.y + std::sin(pitch) * 10.0f,
-                                     position.z + std::cos(yaw) * std::cos(pitch) * 10.0f};
+                                     position.y + std::cos(yaw) * std::cos(pitch) * 10.0f,
+                                     position.z - std::sin(pitch) * 10.0f};
                         cameraGhostUsed = true;
                     } else {
-                        camPos = {position.x, position.y, position.z};
-                        camPos.y += 1.8f;
-                        const float yaw = atan2f(g->renderRotation.x, g->renderRotation.w) * 2.0f;
-                        camTarget = {camPos.x + sinf(yaw) * 10.0f,
-                                     camPos.y, camPos.z + cosf(yaw) * 10.0f};
+                        // The player's eye (t2-mapper DEFAULT_EYE_HEIGHT) looking along
+                        // body yaw + head yaw and head pitch.
+                        float maxLookAngle = 0.0f;
+                        if (g->hasDatablock) {
+                            const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+                            auto data = blocks.find((uint32_t)g->datablockId);
+                            if (data != blocks.end()) maxLookAngle = data->second.decoded.playerMaxLookAngle;
+                        }
+                        Point3F aim = playerAimDirection(g->bodyYaw, g->headYaw, g->headPitch, maxLookAngle);
+                        // The recorder's own view comes from its moves, not ghost updates.
+                        if (fpIdx == controlGhostIndex && spectateGhostIndex < 0 && demoHasOrientation) {
+                            const Vec3 view = T2Demo::cameraDirectionFromYawPitch(demoViewYaw, demoViewPitch);
+                            aim = {view.x, view.y, view.z};
+                        }
+                        camPos = {position.x, position.y, position.z + 2.1f};
+                        camTarget = {camPos.x + aim.x * 10.0f, camPos.y + aim.y * 10.0f, camPos.z + aim.z * 10.0f};
                         cameraGhostUsed = true;
                     }
                 }
@@ -8178,6 +8234,7 @@ void Game::render(float dt) {
                  ColorF labelColor{1, 1, 1, 1};
                   if (obj.missionObjective)
                       labelColor = objectiveMarkerColor(obj.teamId, pl ? pl->team() : 0, mapperMode);
+                 ScreenSpace2D screenSpace(r);
                  font->render(obj.label.c_str(), screen.x - 35, screen.y - 12,
                      labelColor, 1.0f);
             }
@@ -9145,8 +9202,17 @@ void Game::render(float dt) {
 
                 // Build model matrix
                 bool isPlayer = ObserverParity::isPlayerClass(g->className);
+                // The recorder's own player turns with its moves (the server
+                // sends its view in the control packet, not ghost updates).
+                const bool recorderView = isPlayer && idx == controlGhostIndex && demoHasOrientation &&
+                                          g->mountObject < 0;
+                if (recorderView) {
+                    const float half = demoViewYaw * 0.5f;
+                    mg->renderRotation = {0.0f, 0.0f, -std::sin(half), std::cos(half)};
+                    mg->headPitch = std::clamp(demoViewPitch / (Math::PI * 0.494f), -1.0f, 1.0f);
+                }
                 MatrixF model;
-                if (g->hasRotation) {
+                if (g->hasRotation || recorderView) {
                     QuatF q(mg->renderRotation.x, mg->renderRotation.y, mg->renderRotation.z, mg->renderRotation.w);
                     model = Math::torqueQuaternionToYUp(q);
                 } else if (mg->isMoving || isPlayer) {
@@ -9698,47 +9764,6 @@ void Game::render(float dt) {
             it = demoJetSoundSources.erase(it);
         }
 
-        // Spectator HUD: name tags and health bars above ghosts
-        if (demoPlaying && demoParser) {
-            auto* font = r.getFont();
-            if (font) {
-                int screenW = r.config().width, screenH = r.config().height;
-                for (int idx : indices) {
-                    const GhostEntry* g = gt.getGhost(idx);
-                    if (!g) continue;
-                    if (!ObserverParity::isPositionReady(g->hasPosition)) continue;
-                    if (!isRenderableGhostClass(g->className)) continue;
-                    Point3F above = Math::torquePointToYUp({g->renderPos.x, g->renderPos.y, g->renderPos.z});
-                    above.y += 2.5f;
-                    Point3F screen = worldToScreen(above, r.viewMatrix(), r.projectionMatrix(), screenW, screenH);
-                    if (screen.x < 0 || screen.x > screenW || screen.y < 0 || screen.y > screenH) continue;
-                    ColorF col{1, 1, 1, 1};
-                    std::string sn = g->skinName;
-                    for (auto& c : sn) c = (char)tolower(c);
-                    if (sn.find("red") != std::string::npos) col = {1, 0.2f, 0.2f, 1};
-                    else if (sn.find("blue") != std::string::npos) col = {0.2f, 0.3f, 1, 1};
-                    else if (sn.find("green") != std::string::npos) col = {0.2f, 0.8f, 0.2f, 1};
-                    std::string label = g->className;
-                    if (!g->playerName.empty()) label = g->playerName;
-                    font->render(label.c_str(), screen.x - 30, screen.y - 20, col, 1.2f);
-                    float barW = 50, barH = 6;
-                    float bx = screen.x - barW/2;
-                    float by = screen.y + 2;
-                    r.drawBox({{bx-1, by-1, 0}, {bx+barW+1, by+barH+1, 0}}, {0, 0, 0, 0.6f});
-                    // A destroyed ghost has zero health; treating missing/zero
-                    // health as full made dead players show a green full bar.
-                    const float healthFrac = HudParity::resourceFraction(
-                        g->health, g->maxHealth);
-                    ColorF healthCol = healthFrac > 0.5f ? ColorF{0, 1, 0, 0.8f} :
-                                      healthFrac > 0.25f ? ColorF{1, 1, 0, 0.8f} : ColorF{1, 0, 0, 0.8f};
-                    r.drawBox({{bx, by, 0}, {bx + barW * healthFrac, by + barH, 0}}, healthCol);
-                    float ey2 = by + barH + 1;
-                    const float energyFrac = HudParity::resourceFraction(g->energy);
-                    r.drawBox({{bx-1, ey2-1, 0}, {bx+barW+1, ey2+barH+1, 0}}, {0, 0, 0, 0.6f});
-                    r.drawBox({{bx, ey2, 0}, {bx + barW * energyFrac, ey2 + barH, 0}}, {0.3f, 0.5f, 1, 0.8f});
-                }
-            }
-        }
     }
 
     // Render live network ghosts (multiplayer)
@@ -9911,52 +9936,6 @@ void Game::render(float dt) {
           }
         }
 
-        // Spectator HUD for live ghosts
-        if (!demoPlaying && activeConn && activeConn->isConnected() && liveGhosts.size() > 0) {
-            auto* font = r.getFont();
-            if (font) {
-                std::vector<int> hudIndices = liveGhosts.getAllIndices();
-                int screenW = r.config().width, screenH = r.config().height;
-                for (int idx : hudIndices) {
-                    if (serverPlayerGhostSynced && (uint32_t)idx == serverPlayerGhostIndex) continue;
-                    const GhostEntry* g = liveGhosts.getGhost(idx);
-                    if (!g) continue;
-                    if (!ObserverParity::isPositionReady(g->hasPosition)) continue;
-                    if (!isRenderableGhostClass(g->className)) continue;
-                    Point3F above = Math::torquePointToYUp({g->renderPos.x, g->renderPos.y, g->renderPos.z});
-                    above.y += 2.5f;
-                    Point3F screen = worldToScreen(above, r.viewMatrix(), r.projectionMatrix(), screenW, screenH);
-                    if (screen.x < 0 || screen.x > screenW || screen.y < 0 || screen.y > screenH) continue;
-                     ColorF col{1, 1, 1, 1};
-                     std::string label = g->isFlag ? "Flag" : g->className;
-                     if (g->isFlag) {
-                         const auto team = liveTeamScores.find(g->flagTeamId);
-                         if (team != liveTeamScores.end() && !team->second.name.empty())
-                             label = team->second.name + " Flag";
-                     }
-                      // Flag labels use the same Storm/Inferno mapping as the
-                      // scoreboard. Team 1 is Storm (blue), team 2 is Inferno
-                      // (red); reversing these colors makes live flag markers
-                      // identify the wrong objective.
-                      if (g->isFlag) col = HudParity::teamColor(g->flagTeamId);
-                     font->render(label.c_str(), screen.x - 30, screen.y - 20, col, 1.2f);
-                     if (g->isFlag) continue;
-                     float barW = 50, barH = 6;
-                    float bx = screen.x - barW/2;
-                    float by = screen.y + 2;
-                    r.drawBox({{bx-1, by-1, 0}, {bx+barW+1, by+barH+1, 0}}, {0, 0, 0, 0.6f});
-                     const float healthFrac = HudParity::resourceFraction(
-                         g->health, g->maxHealth);
-                    ColorF healthCol = healthFrac > 0.5f ? ColorF{0, 1, 0, 0.8f} :
-                                      healthFrac > 0.25f ? ColorF{1, 1, 0, 0.8f} : ColorF{1, 0, 0, 0.8f};
-                    r.drawBox({{bx, by, 0}, {bx + barW * healthFrac, by + barH, 0}}, healthCol);
-                    float ey2 = by + barH + 1;
-                     float energyFrac = HudParity::resourceFraction(g->energy);
-                    r.drawBox({{bx-1, ey2-1, 0}, {bx+barW+1, ey2+barH+1, 0}}, {0, 0, 0, 0.6f});
-                    r.drawBox({{bx, ey2, 0}, {bx + barW * energyFrac, ey2 + barH, 0}}, {0.3f, 0.5f, 1, 0.8f});
-                }
-            }
-        }
     }
 
     // 3D demo path trail
@@ -11626,9 +11605,9 @@ bool Game::playDemo(const char* path) {
     demoAuthoredCamera = false;
     demoCameraFov = -1.0f;
     demoOrbitCam = false;
-    demoHasOrientation = false;
-    demoViewYaw = 0.0f;
-    demoViewPitch = 0.0f;
+    demoHasOrientation = demoParser->getInitialBlock().hasControlRotation;
+    demoViewYaw = demoParser->getInitialBlock().controlYaw;
+    demoViewPitch = demoParser->getInitialBlock().controlPitch;
 
     Console::instance().printf(LogLevel::Info,
         "  Total blocks: %d, move ticks: %d (%.1f seconds)",
@@ -11711,7 +11690,11 @@ void Game::resetDemoHud() {
 void Game::resetDemoCamera() {
     demoAuthoredCamera = false;
     demoHasPos = false;
-    demoHasOrientation = false;
+    demoHasOrientation = demoParser && demoParser->getInitialBlock().hasControlRotation;
+    if (demoHasOrientation) {
+        demoViewYaw = demoParser->getInitialBlock().controlYaw;
+        demoViewPitch = demoParser->getInitialBlock().controlPitch;
+    }
     demoOrbitCam = false;
     demoFirstPersonCam = demoParser ? demoParser->getInitialBlock().firstPerson : false;
     spectateGhostIndex = -1;

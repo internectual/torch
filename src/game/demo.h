@@ -230,9 +230,19 @@ namespace T2Demo {
 
     // Camera::setPosition builds zRot(yaw) * xRot(pitch); its view direction
     // is the transform's local +Y column.
+    // Torque view forward (column 1 of rotZ(yaw) * rotX(pitch)); positive
+    // pitch looks down.
     inline Vec3 cameraDirectionFromYawPitch(float yaw, float pitch) {
         const float cp = std::cos(pitch);
-        return {-std::sin(yaw) * cp, std::cos(yaw) * cp, std::sin(pitch)};
+        return {std::sin(yaw) * cp, std::cos(yaw) * cp, -std::sin(pitch)};
+    }
+    // Player::updateMove: yaw wraps to [0, 2pi); pitch clamps to the
+    // client view limit (t2-mapper MAX_PITCH = 0.494 pi).
+    inline void accumulateViewMove(float& yaw, float& pitch, float moveYaw, float movePitch) {
+        constexpr float TwoPi = 6.28318530718f, MaxPitch = 3.14159265359f * 0.494f;
+        yaw = std::fmod(yaw + moveYaw, TwoPi);
+        if (yaw < 0.0f) yaw += TwoPi;
+        pitch = std::clamp(pitch + movePitch, -MaxPitch, MaxPitch);
     }
 
     // Stable replacement for the V12 CameraShake sine channels. The seed is
@@ -432,6 +442,9 @@ struct GameState {
     int cameraMode{ -1 };
     int orbitObjectGhostIndex{ -1 };
     float orbitMinDistance{}, orbitMaxDistance{}, orbitDistance{};
+    // Player::readPacketData view: mHead.x (pitch), mHead.z, mRot.z (yaw).
+    bool hasControlRotation{};
+    float controlHeadX{}, controlHeadZ{}, controlRotZ{};
 };
 
 struct GhostUpdate {
@@ -507,6 +520,9 @@ struct InitialBlockData {
     int dataBlockCount{};
     std::map<uint32_t, ParsedDataBlock> dataBlocks;
     bool firstPerson{};
+    // The control object's view from the initial control packet.
+    bool hasControlRotation{};
+    float controlYaw{}, controlPitch{};
     std::vector<uint32_t> connectionFields;
     std::vector<uint32_t> stateArray;
     std::vector<QueuedMove> queuedMoves;

@@ -1,4 +1,5 @@
 #include "render/gui_renderer.h"
+#include "game/observer_parity.h"
 #include "render/shader.h"
 #include "core/console.h"
 #include "core/engine.h"
@@ -3321,11 +3322,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                         up.x /= upLen; up.y /= upLen; up.z /= upLen;
                     }
                 }
-                const float tanHalfFov = std::tan(1.2f * 0.5f);
-                const float aspect = std::max(0.1f, ctl->extentX / std::max(1.0f, ctl->extentY));
                 auto isMarkerClass = [](const std::string& className) {
+                    // Vehicle classes end in "Vehicle"; VehicleBlocker is not one.
                     return className.find("Player") != std::string::npos ||
-                           className.find("Vehicle") != std::string::npos ||
+                           ObserverParity::isVehicleClass(className) ||
                            className.find("Beacon") != std::string::npos ||
                            className.find("Flag") != std::string::npos ||
                            className.find("Objective") != std::string::npos ||
@@ -3344,15 +3344,14 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                                              ghost->hasRendered) ? ghost->renderPos : ghost->position;
                     Point3F world = Math::torquePointToYUp({markerPos.x, markerPos.y, markerPos.z});
                     world.y += 1.0f;
-                    const Point3F rel{world.x - cameraPos.x,
-                                      world.y - cameraPos.y,
-                                      world.z - cameraPos.z};
-                    const float depth = rel.x * forward.x + rel.y * forward.y + rel.z * forward.z;
-                    if (depth <= 0.1f) return;
-                    const float sx = (rel.x * right.x + rel.y * right.y + rel.z * right.z) /
-                                     (depth * tanHalfFov * aspect);
-                    const float sy = (rel.x * up.x + rel.y * up.y + rel.z * up.z) /
-                                     (depth * tanHalfFov);
+                    // Project through the scene camera the frame was drawn with.
+                    const auto& m = r.sceneViewProjection.m;
+                    const float cx = m[0][0] * world.x + m[0][1] * world.y + m[0][2] * world.z + m[0][3];
+                    const float cy = m[1][0] * world.x + m[1][1] * world.y + m[1][2] * world.z + m[1][3];
+                    const float cw = m[3][0] * world.x + m[3][1] * world.y + m[3][2] * world.z + m[3][3];
+                    if (!r.hasSceneCamera || cw <= 0.1f) return;
+                    const float sx = cx / cw;
+                    const float sy = cy / cw;
                     const float mx = x + ctl->extentX * (0.5f + sx * 0.5f);
                     const float my = y + ctl->extentY * (0.5f - sy * 0.5f);
                     const bool edgeMarker = mx < x || mx > x + ctl->extentX ||
@@ -3420,16 +3419,19 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 };
                 if (Engine::instance().game().isDemoPlaying()) {
                     if (auto* parser = Engine::instance().game().getDemoParser()) {
+                        // The control object never marks itself.
+                        const int control = Engine::instance().game().getControlGhostIndex();
                         for (int index : parser->getGhostTracker().getAllIndices()) {
                             const auto* ghost = parser->getGhostTracker().getGhost(index);
-                            if (ghost && isMarkerClass(ghost->className))
+                            if (ghost && index != control && isMarkerClass(ghost->className))
                                 drawMarker(ghost);
                         }
                     }
                 } else {
+                    const int control = Engine::instance().game().getControlGhostIndex();
                     for (int index : Engine::instance().game().getLiveGhostIndices()) {
                         const auto* ghost = Engine::instance().game().getLiveGhost(index);
-                        if (ghost && isMarkerClass(ghost->className))
+                        if (ghost && index != control && isMarkerClass(ghost->className))
                             drawMarker(ghost);
                     }
                 }
