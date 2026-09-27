@@ -152,6 +152,29 @@ void TerrainBlock::generateMesh() {
     meshes.push_back(std::move(mesh));
 }
 
+void TerrainBlock::appendTrianglesInRect(float minX, float minZ, float maxX, float maxZ,
+                                         std::vector<Point3F>& out) const {
+    if (heights.empty() || size < 1 || squareSize <= 0.0f) return;
+    // Grid column x runs along world +X, row z along world -Z.
+    const int x0 = std::max(0, (int)std::floor((minX - worldOffset.x) / squareSize));
+    const int x1 = std::min(size - 1, (int)std::floor((maxX - worldOffset.x) / squareSize));
+    const int z0 = std::max(0, (int)std::floor((worldOffset.z - maxZ) / squareSize));
+    const int z1 = std::min(size - 1, (int)std::floor((worldOffset.z - minZ) / squareSize));
+    auto vertex = [&](int x, int z) {
+        const float wx = (float)x * squareSize + worldOffset.x;
+        const float wz = worldOffset.z - (float)z * squareSize;
+        return Point3F{wx, sampleHeight(wx, wz), wz};
+    };
+    for (int z = z0; z <= z1; ++z) {
+        for (int x = x0; x <= x1; ++x) {
+            if (!emptySquares.empty() && emptySquares[(size_t)z * size + x]) continue;
+            const Point3F a = vertex(x, z), b = vertex(x + 1, z), c = vertex(x, z + 1), d = vertex(x + 1, z + 1);
+            if (((x ^ z) & 1) == 0) out.insert(out.end(), {a, c, d, a, d, b});
+            else out.insert(out.end(), {a, c, b, b, c, d});
+        }
+    }
+}
+
 void TerrainBlock::bakeLightmap(const std::function<bool(const Point3F&)>& occludedByInterior) {
     // Generate a 512x512 terrain lightmap (2 px per terrain square) with smooth
     // bilinearly-sampled normals and ray-marched self-shadowing, matching the
@@ -1504,6 +1527,9 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
         objectDefaults.clear();
         for (const auto& state : dtsResult.objectDefaults)
             objectDefaults.push_back({state.vis, state.frame, state.matFrame});
+        headerBoundsMin = dtsResult.boundsMin;
+        headerBoundsMax = dtsResult.boundsMax;
+        hasHeaderBounds = dtsResult.hasBounds;
         utilityDetails.clear();
         for (auto& utility : dtsResult.utilityDetails)
             utilityDetails.push_back({std::move(utility.name), std::move(utility.meshIndices)});
@@ -1886,6 +1912,13 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
             if (mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)nodeWorld.size())
                 fm = baseModel * nodeWorld[mesh.nodeIndex];
             r.setModel(fm);
+        }
+        // A projected-shadow caster keeps its opaque draws for the silhouette
+        // (TSMesh::renderShadow skips translucent materials).
+        if (r.shadowCapture) {
+            const uint32_t captureFlags = mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialFlags.size()
+                ? materialFlags[mesh.materialIndex] : 0u;
+            if (!(captureFlags & MatFlag_Translucent)) r.shadowCapture->push_back({&mesh, r.modelMatrix()});
         }
         uint32_t flags = 0;
         if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialTextures.size()) {
@@ -2578,6 +2611,13 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
             if (mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)nodeWorld.size())
                 fm = baseModel * nodeWorld[mesh.nodeIndex];
             r.setModel(fm);
+        }
+        // A projected-shadow caster keeps its opaque draws for the silhouette
+        // (TSMesh::renderShadow skips translucent materials).
+        if (r.shadowCapture) {
+            const uint32_t captureFlags = mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialFlags.size()
+                ? materialFlags[mesh.materialIndex] : 0u;
+            if (!(captureFlags & MatFlag_Translucent)) r.shadowCapture->push_back({&mesh, r.modelMatrix()});
         }
 
         // Bind texture and set material properties

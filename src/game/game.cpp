@@ -8,6 +8,8 @@
 #include "game/damage_parity.h"
 #include "render/material_parity.h"
 #include "render/environment_commands.h"
+#include "render/projected_shadows.h"
+#include "core/timer.h"
 #include "game/decal_runtime.h"
 #include <GL/glew.h>
 #include "game/demo.h"
@@ -297,6 +299,21 @@ static const DTSShape::Animation* findAnimation(const DTSShape& shape,
 // Renders a mounted image with its state machine's threads: the state
 // sequence, the flash visibility sequence, and the always-running "ambient"
 // and "spin" threads (ShapeBaseImageData::preload).
+// Players' and vehicles' projected shadows (one pool for the session).
+static ProjectedShadows& projectedShadows() {
+    static ProjectedShadows pool;
+    return pool;
+}
+
+// Torque haze at `dist`: quadratic from fogDistance to visibleDistance.
+static float hazeAt(const World& world, float dist) {
+    const float start = world.fog.distance, end = world.visibleDistance;
+    if (!world.fog.enabled || !(end > start) || dist <= start) return 0.0f;
+    if (dist >= end) return 1.0f;
+    const float ramp = (dist - start) / (end - start) - 1.0f;
+    return std::clamp(1.0f - ramp * ramp, 0.0f, 1.0f);
+}
+
 // Static-world ray (interiors and terrain) from a to b in Y-up space, for
 // client projectile flight. Terrain hits only a downward crossing of a solid
 // square, so rays from inside underground bases and through holes pass.
@@ -1348,6 +1365,51 @@ bool World::setSkyMaterialList(const std::string& materialList) {
         return false;
     skyMaterialList = materialList;
     return true;
+}
+
+void World::shadowReceiversInBox(const Point3F& lo, const Point3F& hi, const Point3F& lightDir,
+                                 std::vector<Point3F>& out) const {
+    auto facing = [&](const Point3F& n) {
+        return n.x * lightDir.x + n.y * lightDir.y + n.z * lightDir.z < ShadowProjection::ReceiverFacing;
+    };
+    auto inBox = [&](const Point3F& a, const Point3F& b, const Point3F& c) {
+        return std::max({a.x, b.x, c.x}) >= lo.x && std::min({a.x, b.x, c.x}) <= hi.x &&
+               std::max({a.y, b.y, c.y}) >= lo.y && std::min({a.y, b.y, c.y}) <= hi.y &&
+               std::max({a.z, b.z, c.z}) >= lo.z && std::min({a.z, b.z, c.z}) <= hi.z;
+    };
+    if (terrainBlock.loaded) {
+        std::vector<Point3F> tris;
+        terrainBlock.appendTrianglesInRect(lo.x, lo.z, hi.x, hi.z, tris);
+        for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+            const Point3F &a = tris[i], &b = tris[i + 1], &c = tris[i + 2];
+            if (!inBox(a, b, c)) continue;
+            // Terrain winding faces up; its normal is (c - a) x (b - a).
+            const Point3F e1{c.x - a.x, c.y - a.y, c.z - a.z}, e2{b.x - a.x, b.y - a.y, b.z - a.z};
+            Point3F n{e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x};
+            if (n.y < 0.0f) n = {-n.x, -n.y, -n.z};
+            const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+            if (len < 1e-8f || !facing({n.x / len, n.y / len, n.z / len})) continue;
+            out.insert(out.end(), {a, b, c});
+        }
+    }
+    const CollisionGrid& grid = lightProbeGrid;
+    if (grid.resX > 0 && grid.resZ > 0 && !lightProbeTris.empty()) {
+        const int cx0 = std::max(0, (int)std::floor((lo.x - grid.minX) / grid.cellW));
+        const int cx1 = std::min(grid.resX - 1, (int)std::floor((hi.x - grid.minX) / grid.cellW));
+        const int cz0 = std::max(0, (int)std::floor((lo.z - grid.minZ) / grid.cellH));
+        const int cz1 = std::min(grid.resZ - 1, (int)std::floor((hi.z - grid.minZ) / grid.cellH));
+        std::vector<int> seen;
+        for (int cz = cz0; cz <= cz1; ++cz)
+            for (int cx = cx0; cx <= cx1; ++cx)
+                for (int ti : grid.cells[(size_t)cz * grid.resX + cx]) seen.push_back(ti);
+        std::sort(seen.begin(), seen.end());
+        seen.erase(std::unique(seen.begin(), seen.end()), seen.end());
+        for (int ti : seen) {
+            const CollisionTri& tri = lightProbeTris[ti];
+            if (!facing(tri.normal) || !inBox(tri.v0, tri.v1, tri.v2)) continue;
+            out.insert(out.end(), {tri.v0, tri.v1, tri.v2});
+        }
+    }
 }
 
 bool World::setSunDirection(const Point3F& direction) {
@@ -8178,6 +8240,7 @@ void Game::render(float dt) {
         w->beginProjectileTrailSync();
         for (int idx : indices) {
             const GhostEntry* g = gt.getGhost(idx);
+            r.shadowCapture = nullptr;
             if (!g) continue;
 
             // Resolve player name from skin name if not already set
@@ -8904,6 +8967,13 @@ void Game::render(float dt) {
                 shape = mutableG->shape;
             }
 
+            // Players and vehicles cast projected shadows; a mounted object's
+            // shadow belongs to its vehicle.
+            static std::vector<ShadowCaptureDraw> shadowDraws;
+            shadowDraws.clear();
+            bool shadowCaster = false;
+            Point3F shadowCenter{};
+            float shadowRadius = 0.0f;
             if (shape && shape->loaded) {
                 // Apply skin textures on first render (player ghosts only)
                 if (!mg->skinApplied && !g->skinName.empty() &&
@@ -8938,6 +9008,24 @@ void Game::render(float dt) {
                 Point3F renderPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
                 model.setTranslation(renderPosition);
                 r.setModel(model * shape->upOrientation());
+                shadowCaster = (isPlayer || ObserverParity::isVehicleClass(g->className)) &&
+                               g->mountObject < 0;
+                if (shadowCaster) {
+                    // TSShape::bounds: centre and half diagonal.
+                    const MatrixF shapeModel = model * shape->upOrientation();
+                    Point3F localCenter = shape->boundsCenter();
+                    shadowRadius = shape->boundsRadius();
+                    if (shape->hasHeaderBounds) {
+                        const Point3F& lo = shape->headerBoundsMin;
+                        const Point3F& hi = shape->headerBoundsMax;
+                        localCenter = {(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+                        shadowRadius = 0.5f * std::sqrt((hi.x - lo.x) * (hi.x - lo.x) +
+                                                        (hi.y - lo.y) * (hi.y - lo.y) +
+                                                        (hi.z - lo.z) * (hi.z - lo.z));
+                    }
+                    shadowCenter = shapeModel.transform(localCenter);
+                    r.shadowCapture = &shadowDraws;
+                }
 
                 // Appearance comes from native material and skin data only.
                 if (defShader) defShader->setUniform("uTint", ColorF{1, 1, 1, 1});
@@ -9408,21 +9496,23 @@ void Game::render(float dt) {
                 }
             }
 
-            // Ground shadow for all renderable ghosts
-            if (isRenderableGhostClass(g->className)) {
-                Point3F shadowPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
-                float groundH = 0.0f;
-                if (w->terrain() && w->terrain()->loaded)
-                    groundH = w->getHeight(shadowPosition.x, shadowPosition.z);
-                float shadowY = std::max(groundH, 0.0f);
-                 float shadowSize = ObserverParity::isPlayerClass(g->className) ? 0.8f : 1.5f;
-                float distAboveGround = shadowPosition.y - shadowY;
-                if (distAboveGround > 0 && distAboveGround < 50.0f) {
-                    float shadowAlpha = std::max(0.05f, 0.4f - distAboveGround * 0.008f);
-                    r.drawBox({{shadowPosition.x - shadowSize, shadowY + 0.1f, shadowPosition.z - shadowSize},
-                               {shadowPosition.x + shadowSize, shadowY + 0.1f, shadowPosition.z + shadowSize}},
-                              {0, 0, 0, shadowAlpha});
-                }
+            // Shadow::render: cloaked objects cast none.
+            r.shadowCapture = nullptr;
+            if (shadowCaster && !(mg->cloakLevel > 0.0f)) {
+                const float dist = std::sqrt((r.cameraPos.x - shadowCenter.x) * (r.cameraPos.x - shadowCenter.x) +
+                                             (r.cameraPos.y - shadowCenter.y) * (r.cameraPos.y - shadowCenter.y) +
+                                             (r.cameraPos.z - shadowCenter.z) * (r.cameraPos.z - shadowCenter.z));
+                ProjectedShadows::Caster caster;
+                caster.key = idx;
+                caster.draws = &shadowDraws;
+                caster.center = shadowCenter;
+                caster.radius = shadowRadius;
+                projectedShadows().submit(r, caster, Timer::now() * 1000.0,
+                    Engine::instance().game().isMapperMode() ? 0.0f : hazeAt(*w, dist),
+                    [&](const Point3F& lo, const Point3F& hi, const Point3F& dir, std::vector<Point3F>& out) {
+                        w->shadowReceiversInBox(lo, hi, dir, out);
+                    });
+                projectedShadows().draw(r);
             }
 
             // Update projectile trail
@@ -9450,6 +9540,8 @@ void Game::render(float dt) {
                 if (trail.size() > 30) trail.erase(trail.begin());
             }
         }
+        r.shadowCapture = nullptr;
+        projectedShadows().endFrame(Timer::now() * 1000.0);
         w->endProjectileTrailSync();
         for (auto it = demoJetSoundSources.begin(); it != demoJetSoundSources.end();) {
             if (gt.hasGhost(it->first)) { ++it; continue; }

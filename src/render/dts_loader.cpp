@@ -463,6 +463,9 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     float cx = rF32(), cy = rF32(), cz = rF32();
     float bminx = rF32(), bminy = rF32(), bminz = rF32();
     float bmaxx = rF32(), bmaxy = rF32(), bmaxz = rF32();
+    result.boundsMin = {bminx, bminy, bminz};
+    result.boundsMax = {bmaxx, bmaxy, bmaxz};
+    result.hasBounds = bmaxx >= bminx && bmaxy >= bminy && bmaxz >= bminz;
 
     // Header counts (read sequentially from stream, stored at output positions [0]-[14])
     int32_t numNodes = readCount(100000);
@@ -1196,7 +1199,13 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     Console::instance().printf(LogLevel::Debug, "DTS: nodes=%d objects=%d meshes=%d details=%d",
         numNodes, numObjects, numMeshes, numDetails);
     buf.checkGuard(); // 0
-    buf.readF32(); buf.readF32(); buf.readPoint3F(); buf.readPoint3F(); buf.readPoint3F();
+    // radius, tubeRadius, center, bounds
+    buf.readF32(); buf.readF32(); buf.readPoint3F();
+    result.boundsMin = buf.readPoint3F();
+    result.boundsMax = buf.readPoint3F();
+    result.hasBounds = result.boundsMax.x >= result.boundsMin.x &&
+                       result.boundsMax.y >= result.boundsMin.y &&
+                       result.boundsMax.z >= result.boundsMin.z;
     buf.checkGuard(); // 1
     struct DNode { int32_t ni,pi,fo,fc,ns; };
     std::vector<DNode> dtsNodes(numNodes);

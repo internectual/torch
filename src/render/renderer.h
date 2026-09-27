@@ -228,6 +228,9 @@ struct DTSShape {
         int mode = 0;
         ColorF color{1.0f, 1.0f, 1.0f, 1.0f};
     } lighting;
+    // TSShape::bounds from the file header (shape space).
+    Point3F headerBoundsMin{}, headerBoundsMax{};
+    bool hasHeaderBounds = false;
     // Bind-pose bounds in shape space (lazily computed).
     Point3F boundsCenter() const;
     float boundsRadius() const;
@@ -325,6 +328,13 @@ inline bool interiorPortalAllowsTraversal(uint16_t planeIndex, uint16_t zoneFron
     return (side > 0.0f ? 1.0f : -1.0f) == zoneSide;
 }
 
+// One opaque mesh draw of a shadow caster, replayed into its projected
+// shadow silhouette while the mesh still holds the caster's pose.
+struct ShadowCaptureDraw {
+    MeshData* mesh = nullptr;
+    MatrixF model;
+};
+
 struct TerrainBlock {
     int32_t size{256};
     float heightScale{1.0f};
@@ -366,6 +376,10 @@ struct TerrainBlock {
         const auto [mn, mx] = std::minmax_element(heights.begin(), heights.end());
         lo = *mn * heightScale; hi = *mx * heightScale;
     }
+    // Rendered terrain triangles (generateMesh's splits, holes skipped)
+    // over the squares touching [minX, maxX] x [minZ, maxZ].
+    void appendTrianglesInRect(float minX, float minZ, float maxX, float maxZ,
+                               std::vector<Point3F>& out) const;
     void setEmptySquareRuns(const std::vector<uint32_t>& runs);
     bool isEmptySquare(float wx, float wz) const;
     bool load(const uint8_t* data, size_t size);
@@ -506,6 +520,9 @@ public:
     /// before the world render, cleared outside gameplay). DTSShape::render uses
     /// this to decide whether shapes should sample the shadow map.
     bool shadowsActive = false;
+    /// While set, DTS shapes append their opaque mesh draws here (the
+    /// projected-shadow silhouette of the caster being drawn).
+    std::vector<ShadowCaptureDraw>* shadowCapture = nullptr;
     uint32_t shadowDepthTex = 0;
 
     Font* defaultFont{};

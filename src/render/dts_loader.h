@@ -15,6 +15,9 @@ struct DTSLoadResult {
     std::vector<UtilityDetail> utilityDetails; // negative-size details (Collision-N, LOS-N)
     struct ObjectDefault { float vis = 1.0f; int32_t frame = 0, matFrame = 0; };
     std::vector<ObjectDefault> objectDefaults; // TSShape::objectStates[object]
+    // TSShape::bounds (shape space, as stored in the file).
+    Point3F boundsMin{}, boundsMax{};
+    bool hasBounds = false;
     std::vector<float> materialReflectionAmount;
     std::vector<int16_t> materialLightmapIndex;
     std::vector<Texture> lightmaps;

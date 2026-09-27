@@ -216,6 +216,10 @@ public:
     bool setSkyColor(const ColorF& color);
     bool setSkyMaterialList(const std::string& materialList);
     bool setSunDirection(const Point3F& direction);
+    // Projected-shadow receivers: terrain and interior triangles inside
+    // [lo, hi] that face `lightDir` (normal . lightDir < -0.05).
+    void shadowReceiversInBox(const Point3F& lo, const Point3F& hi, const Point3F& lightDir,
+                              std::vector<Point3F>& out) const;
     bool setSunColor(const ColorF& color);
     bool setSunAmbient(const ColorF& color);
     bool setFogTransition(float duration, float distance, const ColorF* color = nullptr);

@@ -63,10 +63,12 @@ add_executable(torch
     src/net/connection.cpp
     src/game/world.cpp
     src/game/game.cpp
+    src/render/projected_shadows.cpp
     src/game/physics.cpp
     src/game/collision.cpp
     src/game/weapon.cpp
     src/game/game.cpp
+    src/render/projected_shadows.cpp
     src/game/hud.cpp
     src/game/menu.cpp
     src/game/demo.cpp
@@ -142,6 +144,7 @@ add_executable(torch_server
     src/game/collision.cpp
     src/game/weapon.cpp
     src/game/game.cpp
+    src/render/projected_shadows.cpp
     src/game/hud.cpp
     src/game/menu.cpp
     src/game/demo.cpp
@@ -375,6 +378,7 @@ add_executable(torch_parity_test
     src/audio/audio_system.cpp
     src/game/demo.cpp
     src/game/game.cpp
+    src/render/projected_shadows.cpp
     src/game/world.cpp
     src/game/player.cpp
     src/game/physics.cpp
@@ -450,6 +454,7 @@ add_executable(torch_network_loopback_test
     src/game/collision.cpp
     src/game/weapon.cpp
     src/game/game.cpp
+    src/render/projected_shadows.cpp
     src/game/hud.cpp
     src/game/menu.cpp
     src/game/demo.cpp
@@ -664,3 +669,8 @@ add_test(NAME torch_script_object_semantics
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/script_object_semantics_test.sh
         $<TARGET_FILE:torch>)
 set_tests_properties(torch_script_object_semantics PROPERTIES TIMEOUT 45)
+
+add_executable(torch_shadow_projection_test tests/shadow_projection_test.cpp src/core/math.cpp)
+target_include_directories(torch_shadow_projection_test PRIVATE src)
+target_compile_options(torch_shadow_projection_test PRIVATE -UNDEBUG)
+add_test(NAME torch_shadow_projection COMMAND torch_shadow_projection_test)
