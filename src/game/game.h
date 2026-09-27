@@ -295,6 +295,8 @@ public:
     // Object management
     struct WorldObject {
         std::string className;
+        bool rotate = false; // Item/ItemData rotate: one turn every 3 s
+        bool emap = false;   // its datablock's ShapeBaseData::emap
         int teamId = 0;
         Point3F pos;
         Point3F rot; // raw axis-angle: (axisX, axisY, axisZ, angle) but angle stored in angleDeg

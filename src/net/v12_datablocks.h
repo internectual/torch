@@ -185,6 +185,7 @@ struct DecodedDataBlock {
     bool hasMountPoint{};
     std::string debrisShape;
     std::string cloakTexture;
+    bool shapeEmap = false;       // ShapeBaseData::emap
     uint32_t projectileDelayEmitterRef = 0;
     uint32_t projectileBubbleEmitterRef = 0;
     uint32_t projectileExplosionRef = 0;

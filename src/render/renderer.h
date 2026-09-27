@@ -229,6 +229,9 @@ struct DTSShape {
         ColorF color{1.0f, 1.0f, 1.0f, 1.0f};
     } lighting;
     // TSShape::bounds from the file header (shape space).
+    // ShapeBaseData::emap of the object being drawn: environment mapping is
+    // off unless the datablock enables it (set by the caller per draw).
+    bool emapEnabled = false;
     Point3F headerBoundsMin{}, headerBoundsMax{};
     bool hasHeaderBounds = false;
     // Bind-pose bounds in shape space (lazily computed).

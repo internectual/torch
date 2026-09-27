@@ -175,6 +175,11 @@ int main(int argc, char** argv) {
         CHECK(beam.fadeTime > 0.0f && beam.startWidth > 0.0f);
         CHECK(!beam.textures[11].empty());
     }
+    // ShapeBaseData::emap: the stock armours enable it.
+    bool anyEmap = false;
+    for (const auto& [id, block] : dataBlocks)
+        if (block.decoded.isPlayerData && block.decoded.shapeEmap) anyEmap = true;
+    CHECK(anyEmap);
     // PlayerData::Sounds: jetSound (index 0) is an AudioProfile.
     for (const auto& [id, block] : dataBlocks) {
         if (!block.decoded.isPlayerData) continue;

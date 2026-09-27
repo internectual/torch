@@ -2463,6 +2463,16 @@ bool World::load(const char* mapName) {
              wo.shapeName = resolveShapePath(obj, datablockShapes);
               wo.shapeName = normalizeShapePath(wo.shapeName);
              wo.animName = authoredSequence(obj);
+             if (const auto* emap = scriptField(findScriptObject(getProp(obj.props, "datablock")), "emap"))
+                 wo.emap = emap->toBool();
+             if (missionClassIs(obj.className, "Item")) {
+                 // The object's own rotate field, else its ItemData's.
+                 std::string rotate = getProp(obj.props, "rotate");
+                 if (rotate.empty())
+                     if (const auto* field = scriptField(findScriptObject(getProp(obj.props, "datablock")), "rotate"))
+                         rotate = field->toString();
+                 wo.rotate = rotate == "1" || rotate == "true";
+             }
              if (missionClassIs(obj.className, "WayPoint")) {
                 wo.label = getProp(obj.props, "name");
                 wo.collidable = false;
@@ -3921,6 +3931,13 @@ void World::render(const Point3F& cameraPos, float dt) {
                     model = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(obj.rotAngleDeg));
                 }
             }
+            if (obj.rotate) {
+                // A rotating Item turns once every 3 s about its up axis.
+                MatrixF spin;
+                spin.setRotationAxis({0, 1, 0},
+                    std::fmod(Engine::instance().game().gameTime() / 3.0f, 1.0f) * 2.0f * Math::PI);
+                model = spin * model;
+            }
             // Convert position from T2 Z-up to Y-up: (x,y,z) -> (x, z, -y)
             Point3F pos = {obj.pos.x, obj.pos.z, -obj.pos.y};
             model.setTranslation(pos);
@@ -3969,6 +3986,7 @@ void World::render(const Point3F& cameraPos, float dt) {
                 obj.labelAnchorValid = mn.x < mx.x || mn.y < mx.y || mn.z < mx.z;
             }
             r.setModel(model * obj.shape->upOrientation());
+            obj.shape->emapEnabled = obj.emap;
             obj.shape->activeInteriorZones.clear();
             if (obj.shape->isInterior && !Engine::instance().game().isMapperMode() &&
                 !obj.shape->interiorBSP.empty()) {
@@ -9237,6 +9255,11 @@ void Game::render(float dt) {
                     }
                 }
                 r.setModel(model * shape->upOrientation());
+                {
+                    const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+                    auto block = g->hasDatablock ? blocks.find((uint32_t)g->datablockId) : blocks.end();
+                    shape->emapEnabled = block != blocks.end() && block->second.decoded.shapeEmap;
+                }
                 shadowCaster = (isPlayer || ObserverParity::isVehicleClass(g->className)) &&
                                g->mountObject < 0;
                 zapTarget = shockZapRequests().count(idx) != 0;
@@ -9740,6 +9763,7 @@ void Game::render(float dt) {
                                  ? 0.15f + (1.0f - mg->cloakLevel) * 0.85f : 1.0f;
                          }
                          wShape->lighting = shape->lighting;
+                         wShape->emapEnabled = false; // image datablocks carry no emap
                          renderMountedImage(*wShape, mg->mountedImages[img].animation,
                                             demoMatchEnded ? demoMatchEndedAt : demoTime);
                          wShape->cloakTextureOverride = nullptr;
@@ -9876,6 +9900,11 @@ void Game::render(float dt) {
               Point3F renderPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
              model.setTranslation(renderPosition);
              r.setModel(model * g->shape->upOrientation());
+             {
+                 auto block = g->hasDatablock ? nativeDatablocks.find((uint32_t)g->datablockId)
+                                              : nativeDatablocks.end();
+                 g->shape->emapEnabled = block != nativeDatablocks.end() && block->second.decoded.shapeEmap;
+             }
              Texture* cloakTexture = nullptr;
              if ((g->cloaked || g->cloakLevel > 0.0f) && g->hasDatablock) {
                  auto block = nativeDatablocks.find((uint32_t)g->datablockId);

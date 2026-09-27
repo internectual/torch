@@ -353,7 +353,12 @@ void shapeBase(Stream& s) {
     if (activeDecoded) activeDecoded->cloakTexture = s.readString();
     else s.readString();
     s.readString();
-    for (int i = 0; i < 6; ++i) s.readFlag();
+    // canControl, canObserve, observeThroughObject, emap, isInvincible,
+    // renderWhenDestroyed.
+    for (int i = 0; i < 6; ++i) {
+        const bool flag = s.readFlag();
+        if (i == 3 && activeDecoded) activeDecoded->shapeEmap = flag;
+    }
     refs(s, 4);
     for (int i = 0; i < 3; ++i) s.readFlag();
     s.readUnsigned(32);

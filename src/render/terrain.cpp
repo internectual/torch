@@ -2065,7 +2065,8 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
         auto& ren = Engine::instance().renderer();
         // Native DTS materials use the sky sphere map independently of the
         // PBR metallic placeholder; the asset-side opt-out is NeverEnvMap.
-        if (!isInterior && ren.sky && ren.sky->emap.loaded && reflectionAmount > 0.0f &&
+        // ShapeBaseData::emap gates the environment map (off by default).
+        if (!isInterior && emapEnabled && ren.sky && ren.sky->emap.loaded && reflectionAmount > 0.0f &&
             !(flags & MatFlag_NeverEnvMap))
             useEnvMap = true;
         if (shader) shader->setUniform("uUseEnvMap", (int32_t)(useEnvMap ? 1 : 0));
@@ -2771,7 +2772,8 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
 
         bool useEnvMap = false;
         auto& ren = Engine::instance().renderer();
-        if (ren.sky && ren.sky->emap.loaded && reflectionAmount > 0.0f && !(flags & MatFlag_NeverEnvMap))
+        if (!isInterior && emapEnabled && ren.sky && ren.sky->emap.loaded && reflectionAmount > 0.0f &&
+            !(flags & MatFlag_NeverEnvMap))
             useEnvMap = true;
         if (shader) shader->setUniform("uUseEnvMap", (int32_t)(useEnvMap ? 1 : 0));
 
