@@ -694,3 +694,8 @@ add_executable(torch_item_physics_test tests/item_physics_test.cpp)
 target_include_directories(torch_item_physics_test PRIVATE src)
 target_compile_options(torch_item_physics_test PRIVATE -UNDEBUG)
 add_test(NAME torch_item_physics COMMAND torch_item_physics_test)
+
+add_executable(torch_fluid_test tests/fluid_test.cpp)
+target_include_directories(torch_fluid_test PRIVATE src)
+target_compile_options(torch_fluid_test PRIVATE -UNDEBUG)
+add_test(NAME torch_fluid COMMAND torch_fluid_test)

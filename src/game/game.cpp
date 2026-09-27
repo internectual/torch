@@ -1656,6 +1656,11 @@ void World::cleanupMission() {
     lightningEnabled = true;
     setTorchWindVelocity({});
     water = {};
+    if (SDL_GL_GetCurrentContext())
+        for (auto& body : waterBodies) {
+            if (body.fluidVbo) glDeleteBuffers(1, &body.fluidVbo);
+            if (body.fluidVao) glDeleteVertexArrays(1, &body.fluidVao);
+        }
     waterBodies.clear();
     loaded = false;
     auto& config = Engine::instance().renderer().config();
@@ -1763,6 +1768,11 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
     precipitation = {};
     lightningEnabled = true;
     water = {};
+    if (SDL_GL_GetCurrentContext())
+        for (auto& body : waterBodies) {
+            if (body.fluidVbo) glDeleteBuffers(1, &body.fluidVbo);
+            if (body.fluidVao) glDeleteVertexArrays(1, &body.fluidVao);
+        }
     waterBodies.clear();
     playerSpawn = {0, 5, 0};
     loaded = false;
@@ -2171,6 +2181,9 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                          body.sizeX > 0.0f && body.sizeY > 0.0f) {
                         body.originX = px;
                         body.originZ = waterOriginZ(py, body.sizeY);
+                        // WaterBlock::UpdateFluidRegion: fluid space is +1024.
+                        body.fluidX0 = px + 1024.0f;
+                        body.fluidY0 = py + 1024.0f;
                         body.level = pz + scaleZ;
                         body.active = true;
                     }
@@ -2232,6 +2245,8 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                 }
                 const std::string envIntensity = getProp(obj.props, "envMapIntensity");
                 if (!envIntensity.empty()) body.envIntensity = std::max(0.0f, (float)std::atof(envIntensity.c_str()));
+                const std::string removeWetEdges = getProp(obj.props, "removeWetEdges");
+                if (!removeWetEdges.empty()) body.removeWetEdges = std::atoi(removeWetEdges.c_str()) != 0;
                 const std::string shoreDepth = getProp(obj.props, "shoreDepth");
                 if (!shoreDepth.empty()) body.shoreDepth = std::max(0.0f, (float)std::atof(shoreDepth.c_str()));
                 if (body.active) {
@@ -6282,8 +6297,11 @@ void World::renderWater() {
     if (waterBodies.empty()) return;
 
     auto& r = Engine::instance().renderer();
-    float time = Engine::instance().game().gameTime();
-    Point3F cam = r.cameraPos;
+    // fluid::m_Seconds runs on the platform's virtual clock.
+    const float seconds = Engine::instance().game().gameTime();
+    const Point3F cam = r.cameraPos;
+    // The eye in fluid space: Torque XY + 1024.
+    const Point3F eye{cam.x + 1024.0f, -cam.z + 1024.0f, cam.y};
 
     auto* waterShdr = ShaderManager::getWaterShader();
     if (!waterShdr) return;
@@ -6291,6 +6309,8 @@ void World::renderWater() {
     waterShdr->setUniform("uProjection", r.projection);
     waterShdr->setUniform("uView", r.view);
     waterShdr->setUniform("uCamPos", cam);
+    waterShdr->setUniform("uSeconds", seconds);
+    waterShdr->setUniform("uEye", eye);
     for (int i = 0; i < 3; ++i) {
         ColorF packed{};
         if (i < (int)fogVolumes.size() && fogVolumes[i].visibleDistance > 0.0f) {
@@ -6311,23 +6331,12 @@ void World::renderWater() {
         waterShdr->setUniform("uFogRowBase", rowBase);
         waterShdr->setUniform("uFogRowStep", rowStep);
     }
-    waterShdr->setUniform("uUseSurfaceTexture", (int32_t)0);
-    waterShdr->setUniform("uUseShoreTexture", (int32_t)0);
-    waterShdr->setUniform("uUseEnvMap", (int32_t)0);
-
-    // Sun lighting
-    Point3F sunDir = sunLightDirUsed ? sunLightDir : Point3F{0.5f, 0.8f, 0.6f};
-    waterShdr->setUniform("uSunDir", sunDir);
-    waterShdr->setUniform("uSunColor", Point3F{sunColor.r, sunColor.g, sunColor.b});
-
-    // Fog
     const bool renderFog = fog.enabled && !Engine::instance().game().isMapperMode();
     waterShdr->setUniform("uFogEnabled", (int32_t)(renderFog ? 1 : 0));
     if (renderFog) {
         waterShdr->setUniform("uFogColor", Point3F{fog.color.r, fog.color.g, fog.color.b});
-        waterShdr->setUniform("uFogDensity", fog.density);
         waterShdr->setUniform("uFogStart", fog.distance);
-        waterShdr->setUniform("uFogEnd", Engine::instance().renderer().config().farPlane);
+        waterShdr->setUniform("uFogEnd", visibleDistance);
     }
 
     GLboolean cullWasOn = glIsEnabled(GL_CULL_FACE);
@@ -6343,100 +6352,90 @@ void World::renderWater() {
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);
+    // The shader composites the four fluid passes: out = color + dst * keep.
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE); // fluidRender.cc
 
-    for (const auto& body : waterBodies) {
+    for (auto& body : waterBodies) {
         // WaterBlock also represents non-liquid volumes (for example fog or
         // damage regions).  They affect neither the native water surface nor
         // its rendered material.
         if (!waterBodyCanAffectSurface(body.active, body.liquidType)) continue;
-        // Do not cull by camera altitude.  WaterBlock surfaces remain visible
-        // from hills and aircraft; the horizontal distance cull below already
-        // bounds the work and matches the renderer's far-plane behavior.
-        waterShdr->setUniform("uUseSurfaceTexture", (int32_t)0);
-        waterShdr->setUniform("uUseShoreTexture", (int32_t)0);
-        waterShdr->setUniform("uUseEnvMap", (int32_t)0);
-        ColorF waterCol = body.surfaceColor;
-        waterShdr->setUniform("uWaterColor", Point3F{waterCol.r, waterCol.g, waterCol.b});
-         waterShdr->setUniform("uWaterOpacity", waterSurfaceOpacity(waterCol.a));
-         uint32_t surfaceTexture = 0;
-         if (!body.surfaceFrames.empty()) {
-             const size_t frame = textureFrameIndex(body.surfaceFrameDurations,
-                                                    body.surfaceFrames.size(), time);
-             surfaceTexture = body.surfaceFrames[frame];
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, surfaceTexture);
-            waterShdr->setUniform("uSurfaceTexture", (int32_t)0);
-            waterShdr->setUniform("uUseSurfaceTexture", (int32_t)1);
+        if (body.surfaceFrames.empty()) continue;
+        const FluidInfo info = fluidSetInfo(body.fluidX0, body.fluidY0, body.sizeX, body.sizeY);
+        if (!body.fluidBuilt) {
+            // The accepted blocks' 5x5 vertices, in fluid space (one rep).
+            const float* heights = terrainBlock.loaded && terrainBlock.heights.size() >= 256 * 256
+                ? terrainBlock.heights.data() : nullptr;
+            const auto accept = fluidAcceptMask(info, body.level, body.waveMagnitude,
+                                                body.removeWetEdges, heights);
+            std::vector<float> vertices;
+            const float step = info.step4 / 4.0f;
+            for (int by = 0; by < info.blocksY; ++by)
+                for (int bx = 0; bx < info.blocksX; ++bx) {
+                    if (!accept[(size_t)by * info.blocksX + bx]) continue;
+                    const float x0 = info.squareX0 * 8.0f + bx * info.step4;
+                    const float y0 = info.squareY0 * 8.0f + by * info.step4;
+                    for (int y = 0; y < 4; ++y)
+                        for (int x = 0; x < 4; ++x) {
+                            const float ax = x0 + x * step, ay = y0 + y * step;
+                            const float quad[6][2] = {{ax, ay}, {ax + step, ay}, {ax + step, ay + step},
+                                                      {ax, ay}, {ax + step, ay + step}, {ax, ay + step}};
+                            for (const auto& v : quad) { vertices.push_back(v[0]); vertices.push_back(v[1]); }
+                        }
+                }
+            body.fluidVertexCount = (int)(vertices.size() / 2);
+            if (body.fluidVertexCount > 0) {
+                glGenVertexArrays(1, &body.fluidVao);
+                glGenBuffers(1, &body.fluidVbo);
+                glBindVertexArray(body.fluidVao);
+                glBindBuffer(GL_ARRAY_BUFFER, body.fluidVbo);
+                glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
+                glEnableVertexAttribArray(0);
+                glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
+                glBindVertexArray(0);
+            }
+            body.fluidBuilt = true;
+            body.fluidHighRes = info.highRes;
+            body.fluidStep4 = info.step4;
         }
-         if (!body.envFrames.empty()) {
-             const size_t envFrame = textureFrameIndex(body.envFrameDurations,
-                                                       body.envFrames.size(), time);
+        if (body.fluidVertexCount <= 0) continue;
+
+        // fluid::SetInfo clamps opacity and environment intensity to [0, 1].
+        const float opacity = std::clamp(body.opacity, 0.0f, 1.0f);
+        const float waveFactor = body.waveMagnitude * 0.25f;
+        const float surfaceAtEye = body.level +
+            (std::sin(eye.x * 0.05f + seconds) + std::sin(eye.y * 0.05f + seconds)) * waveFactor;
+        waterShdr->setUniform("uSurfaceZ", body.level);
+        waterShdr->setUniform("uWaveFactor", waveFactor);
+        waterShdr->setUniform("uOpacity", opacity);
+        waterShdr->setUniform("uSurfaceAtEye", surfaceAtEye);
+        waterShdr->setUniform("uStep1", body.fluidStep4 / 4.0f);
+        waterShdr->setUniform("uStep2", body.fluidStep4 / 2.0f);
+        const size_t frame = textureFrameIndex(body.surfaceFrameDurations, body.surfaceFrames.size(), seconds);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, body.surfaceFrames[frame]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        waterShdr->setUniform("uBaseTexture", (int32_t)0);
+        waterShdr->setUniform("uUseEnvMap", (int32_t)(body.envFrames.empty() ? 0 : 1));
+        if (!body.envFrames.empty()) {
+            const size_t envFrame = textureFrameIndex(body.envFrameDurations, body.envFrames.size(), seconds);
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, body.envFrames[envFrame]);
             waterShdr->setUniform("uEnvMap", (int32_t)1);
-            waterShdr->setUniform("uEnvIntensity", body.envIntensity);
-            waterShdr->setUniform("uUseEnvMap", (int32_t)1);
+            waterShdr->setUniform("uEnvIntensity", std::clamp(body.envIntensity, 0.0f, 1.0f));
+            glActiveTexture(GL_TEXTURE0);
         }
-        waterShdr->setUniform("uTexOffset", std::fmod(time * body.waveSpeed * 0.01f, 1.0f));
-        const int gridRes = 24;
-        float renderOriginX = 0.0f, renderOriginZ = 0.0f;
-        float renderSizeX = 0.0f, renderSizeZ = 0.0f;
-        waterBodyRenderBounds(body.originX, body.originZ, body.sizeX, body.sizeY,
-                              renderOriginX, renderOriginZ,
-                              renderSizeX, renderSizeZ);
-        const float stepX = renderSizeX / gridRes;
-        const float stepZ = renderSizeZ / gridRes;
-        for (int z = 0; z < gridRes; z++) {
-            for (int x = 0; x < gridRes; x++) {
-            float wx = renderOriginX + x * stepX;
-            float wz = renderOriginZ + z * stepZ;
-
-            // Skip quads far from camera
-            float dx = wx + stepX * 0.5f - cam.x;
-            float dz = wz + stepZ * 0.5f - cam.z;
-            float dist = sqrtf(dx * dx + dz * dz);
-             if (!waterQuadWithinRenderDistance(
-                     dist, Engine::instance().renderer().config().farPlane))
-                 continue;
-
-            // Wave animation
-            float wy = body.level;
-            wy += (sinf(wx * 0.05f + time) + sinf(wz * 0.05f + time)) *
-                  body.waveMagnitude * 0.25f;
-
-            // Build model matrix for this quad
-            MatrixF model;
-            model.identity();
-            model.setTranslation({wx, wy, wz});
-            MatrixF scale;
-            scale.setScale({stepX, 1.0f, stepZ});
-            model = model * scale;
-             float shoreFactor = 1.0f;
-             const bool useShoreTexture = waterShoreTextureActive(
-                 terrainBlock.loaded, !body.shoreFrames.empty(), body.shoreDepth);
-             // This is per quad. Leaving it enabled after a shoreline quad
-             // makes later quads sample the previous water body's shore map.
-             waterShdr->setUniform("uUseShoreTexture", (int32_t)(useShoreTexture ? 1 : 0));
-             if (useShoreTexture) {
-                 const float terrainHeight = terrainBlock.sampleHeight(wx + stepX * 0.5f, wz + stepZ * 0.5f);
-                 shoreFactor = std::clamp((body.level - terrainHeight) / body.shoreDepth, 0.0f, 1.0f);
-                 glActiveTexture(GL_TEXTURE2);
-                 const size_t shoreFrame = textureFrameIndex(body.shoreFrameDurations,
-                                                              body.shoreFrames.size(), time);
-                 glBindTexture(GL_TEXTURE_2D, body.shoreFrames[shoreFrame]);
-                 waterShdr->setUniform("uShoreTexture", (int32_t)2);
-             }
-            waterShdr->setUniform("uShoreFactor", shoreFactor);
-            waterShdr->setUniform("uModel", model);
-
-             // The quad vertices already span unit UVs and unit model-space
-             // dimensions are supplied by the model scale above. Passing the
-             // world dimensions here as well squares every water tile.
-             r.drawFilledQuad(1.0f, 1.0f);
+        // fluid::RunQuadTree: the nine reps around the eye's rep.
+        const int repI = fluidRepIndex(eye.x), repJ = fluidRepIndex(eye.y);
+        glBindVertexArray(body.fluidVao);
+        for (int j = repJ - 1; j <= repJ + 1; ++j)
+            for (int i = repI - 1; i <= repI + 1; ++i) {
+                waterShdr->setUniform("uRepOffset", Point2F{i * 2048.0f, j * 2048.0f});
+                glDrawArrays(GL_TRIANGLES, 0, body.fluidVertexCount);
             }
-        }
+        glBindVertexArray(0);
     }
 
     if (cullWasOn) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);

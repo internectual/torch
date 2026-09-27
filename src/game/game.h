@@ -741,6 +741,16 @@ public:
         std::vector<float> envFrameDurations;
         float envIntensity = 0.0f;
         float shoreDepth = 0.0f;
+        // The engine fluid (fluid::SetInfo): the block's min corner in fluid
+        // space (Torque XY + 1024) and extent, removeWetEdges, and the mesh
+        // of the accepted 5x5-vertex blocks, built once the terrain is in.
+        float fluidX0 = 0.0f, fluidY0 = 0.0f;
+        bool removeWetEdges = true;
+        bool fluidBuilt = false;
+        bool fluidHighRes = false;
+        float fluidStep4 = 64.0f;
+        uint32_t fluidVao = 0, fluidVbo = 0;
+        int fluidVertexCount = 0;
     };
     WaterState water;
     std::vector<WaterState> waterBodies;

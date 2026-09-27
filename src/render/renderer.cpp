@@ -1343,6 +1343,10 @@ void Shader::setUniform(const char* name, const Point3F& v) {
     glUniform3f(getUniformLoc(name), v.x, v.y, v.z);
 }
 
+void Shader::setUniform(const char* name, const Point2F& v) {
+    glUniform2f(getUniformLoc(name), v.x, v.y);
+}
+
 void Shader::setUniform(const char* name, const MatrixF& m) {
     glUniformMatrix4fv(getUniformLoc(name), 1, GL_TRUE, m.data());
 }

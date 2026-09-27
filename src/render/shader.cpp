@@ -770,57 +770,92 @@ void main() {
 }
 )";
 
+// Tribes 2 fluid (fluidQuadTree.cc SetupVert, fluidRender.cc). Vertices are
+// in fluid space: Torque XY plus 1024 (terrain space); the surface height,
+// waves, texture coordinates, cross-fade alphas and reflection coordinates
+// are the engine's per-vertex values. The passes (two base layers, the
+// additive environment map and fog) are composited in one draw.
 static const char* waterVert = R"(
 #version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aUV;
+layout(location = 0) in vec2 aFluidXY;
 uniform mat4 uProjection;
 uniform mat4 uView;
-uniform mat4 uModel;
-out vec3 vWorldPos;
-out vec3 vNormal;
-out vec2 vUV;
+uniform vec2 uRepOffset;
+uniform float uSeconds;
+uniform float uSurfaceZ;
+uniform float uWaveFactor;
+uniform float uOpacity;
+uniform vec3 uEye;          // fluid space
+uniform float uSurfaceAtEye;
+uniform float uStep1;
+uniform float uStep2;
+out vec2 vBaseUV;
+out float vAlpha1a;
+out float vAlpha1b;
+out vec2 vEnvUV;
+out vec3 vWorldPos;         // Y-up
 void main() {
-    vec4 worldPos = uModel * vec4(aPos, 1.0);
-    vWorldPos = worldPos.xyz;
-    vNormal = vec3(0.0, 1.0, 0.0);
-    vUV = aUV;
-    gl_Position = uProjection * uView * worldPos;
+    vec2 xy = aFluidXY + uRepOffset;
+    float X = xy.x, Y = xy.y;
+    float distance = length(vec3(X, Y, uSurfaceZ) - uEye);
+    float Z = uSurfaceZ + (sin(X * 0.05 + uSeconds) + sin(Y * 0.05 + uSeconds)) * uWaveFactor;
+    // Warp the surface away from the camera glass near the eye.
+    if (distance < uStep2) {
+        float warpZ = uEye.z > uSurfaceAtEye ? uEye.z - 0.25 : uEye.z + 0.25;
+        bool warp = uEye.z > uSurfaceAtEye ? Z > warpZ : Z < warpZ;
+        if (warp) {
+            if (distance < uStep1) Z = warpZ;
+            else {
+                float f = (uStep2 - distance) / uStep1;
+                Z = warpZ * f + Z * (1.0 - f);
+            }
+        }
+    }
+    // Environment map: the eye-to-point vector with positive Z.
+    vec3 v = vec3(X, Y, Z) - uEye;
+    v.z = max(abs(v.z), 0.001);
+    vec2 uv3 = vec2(0.0);
+    if (distance >= 0.001) {
+        float value = (distance - v.z) / (distance * distance);
+        uv3 = v.xy * value;
+    }
+    uv3 = uv3 * 0.5 + 0.5;
+    float A1 = cos(((X / 150.0) + (uSeconds / 2.0)) * 6.00);
+    float A2 = sin(((Y / 150.0) + (uSeconds / 2.0)) * 6.28);
+    vEnvUV = uv3 + vec2(A1, A2) * 0.01;
+    float swing = (A1 + A2) * 0.15 + 0.5;
+    vAlpha1a = ((1.0 - swing) * uOpacity) / (1.0 - swing * uOpacity);
+    vAlpha1b = swing * uOpacity;
+    vBaseUV = vec2(X, Y) / 48.0;
+    // Fluid space to world: L2W is (-1024, -1024, 0); Torque to Y-up.
+    vWorldPos = vec3(X - 1024.0, Z, -(Y - 1024.0));
+    gl_Position = uProjection * uView * vec4(vWorldPos, 1.0);
 }
 )";
 
 static const char* waterFrag = R"(
 #version 330 core
+in vec2 vBaseUV;
+in float vAlpha1a;
+in float vAlpha1b;
+in vec2 vEnvUV;
 in vec3 vWorldPos;
-in vec3 vNormal;
-in vec2 vUV;
-uniform vec3 uCamPos;
-uniform vec3 uSunDir;
-uniform vec3 uSunColor;
-uniform vec3 uWaterColor;
-uniform float uWaterOpacity;
-uniform sampler2D uSurfaceTexture;
-uniform bool uUseSurfaceTexture;
-uniform sampler2D uShoreTexture;
-uniform bool uUseShoreTexture;
+uniform float uSeconds;
+uniform sampler2D uBaseTexture;
 uniform sampler2D uEnvMap;
 uniform bool uUseEnvMap;
 uniform float uEnvIntensity;
-uniform float uTexOffset;
-uniform float uShoreFactor;
+uniform vec3 uCamPos;
 uniform vec3 uFogColor;
-uniform float uFogDensity;
 uniform float uFogStart;
 uniform float uFogEnd;
 uniform vec4 uFogVolume0 = vec4(0.0);
 uniform vec4 uFogVolume1 = vec4(0.0);
 uniform vec4 uFogVolume2 = vec4(0.0);
 uniform bool uFogEnabled;
-out vec4 FragColor;
 uniform float uFogRowBase = 0.0;
 uniform float uFogRowStep = 0.0;
-// Volume fog at one height: the distance travelled through each volume's
-// height band (similar triangles), times percentage / visibleDistance.
+out vec4 FragColor;
 float fogVolumesAt(float height, float dist) {
     float result = 0.0;
     vec4 volumes[3] = vec4[3](uFogVolume0, uFogVolume1, uFogVolume2);
@@ -838,8 +873,6 @@ float fogVolumesAt(float height, float dist) {
     }
     return min(result, 1.0);
 }
-// SceneGraph::buildFogTexture samples volume fog into 64 rows spanning the
-// terrain's height range and filters bilinearly: blend the two nearest rows.
 float torqueVolumeFog(float height, float dist) {
     if (uFogRowStep <= 0.0) return fogVolumesAt(height, dist);
     float rowF = (height - uFogRowBase) / uFogRowStep;
@@ -847,48 +880,43 @@ float torqueVolumeFog(float height, float dist) {
     float h0 = uFogRowBase + row0 * uFogRowStep;
     return mix(fogVolumesAt(h0, dist), fogVolumesAt(h0 + uFogRowStep, dist), rowF - row0);
 }
-
+vec2 rotate(vec2 p, float degrees) {
+    float a = radians(degrees), c = cos(a), s = sin(a);
+    return vec2(c * p.x - s * p.y, s * p.x + c * p.y);
+}
 void main() {
-    vec3 N = normalize(vNormal);
-    vec3 V = normalize(uCamPos - vWorldPos);
-    vec3 L = normalize(uSunDir);
-    // Fresnel effect: more reflective at grazing angles
-    float cosTheta = max(dot(N, V), 0.0);
-    float fresnel = pow(1.0 - cosTheta, 3.0) * 0.95 + 0.05;
-    // Sky reflection color (approximation)
-    vec3 skyReflect = mix(vec3(0.4, 0.6, 0.8), vec3(0.7, 0.8, 0.9), cosTheta);
-    // Specular highlight
-    vec3 H = normalize(L + V);
-    float spec = pow(max(dot(N, H), 0.0), 128.0);
-    vec3 specular = uSunColor * spec * 1.5;
-    // Combine: reflection + water base + specular
-    vec4 surface = uUseSurfaceTexture
-        ? texture(uSurfaceTexture, fract(vUV + vec2(uTexOffset, 0.0)))
-        : vec4(1.0);
-    if (uUseShoreTexture && uShoreFactor < 1.0)
-        surface = mix(texture(uShoreTexture, fract(vUV + vec2(uTexOffset, 0.0))), surface,
-                      clamp(uShoreFactor, 0.0, 1.0));
-    vec3 waterBase = uWaterColor * surface.rgb * (1.0 - fresnel);
-    vec3 reflColor = skyReflect * fresnel;
+    // Texture matrix: rotate 30; then another 30 and translate by the drift.
+    const float TwoPi = 6.28318530718;
+    float phase = mod(uSeconds * (TwoPi / 8.0), TwoPi);
+    vec2 drift = vec2(uSeconds * 0.02, cos(phase) * 0.03);
+    vec4 t1a = texture(uBaseTexture, rotate(vBaseUV, 30.0));
+    vec4 t1b = texture(uBaseTexture, rotate(vBaseUV + drift, 60.0));
+    // Pass 1a and 1b: SRC_ALPHA, ONE_MINUS_SRC_ALPHA; GL_MODULATE alphas.
+    float a1 = clamp(t1a.a * vAlpha1a, 0.0, 1.0);
+    float a2 = clamp(t1b.a * vAlpha1b, 0.0, 1.0);
+    vec3 color = t1a.rgb * a1 * (1.0 - a2) + t1b.rgb * a2;
+    float keep = (1.0 - a1) * (1.0 - a2);   // of the scene behind
+    // Pass 3: SRC_ALPHA, ONE with alpha = envMapIntensity.
     if (uUseEnvMap) {
-        vec3 R = reflect(-V, N);
-        vec2 envUV = vec2(0.5 + 0.5 * R.x, 0.5 - 0.5 * R.y);
-        reflColor = mix(reflColor, texture(uEnvMap, envUV).rgb, clamp(uEnvIntensity, 0.0, 1.0));
+        vec4 env = texture(uEnvMap, vEnvUV);
+        color += env.rgb * env.a * uEnvIntensity;
     }
-    vec3 color = waterBase + reflColor + specular;
-    // Fog
+    // Pass 4: fog colour at the fog alpha, SRC_ALPHA, ONE_MINUS_SRC_ALPHA.
     if (uFogEnabled) {
         float dist = length(vWorldPos - uCamPos);
         float volumeFog = torqueVolumeFog(vWorldPos.y, dist);
-        if (uFogStart >= 0.0 && uFogEnd > uFogStart && dist >= uFogEnd) discard;
         float hazeRamp = uFogStart >= 0.0 && uFogEnd > uFogStart && dist > uFogStart
             ? (dist - uFogStart) / (uFogEnd - uFogStart) - 1.0 : -1.0;
         float haze = uFogStart >= 0.0 && uFogEnd > uFogStart && dist > uFogStart
             ? clamp(1.0 - hazeRamp * hazeRamp, 0.0, 1.0) : 0.0;
+        if (uFogStart >= 0.0 && uFogEnd > uFogStart && dist >= uFogEnd) haze = 1.0;
         float volume = min(volumeFog, 1.0);
-        color = mix(color, uFogColor, volume + min(haze, 1.0 - volume));
+        float f = clamp(volume + min(haze, 1.0 - volume), 0.0, 1.0);
+        color = color * (1.0 - f) + uFogColor * f;
+        keep *= 1.0 - f;
     }
-    FragColor = vec4(color, uWaterOpacity * surface.a);
+    // Blend ONE, ONE_MINUS_SRC_ALPHA: out = color + scene * keep.
+    FragColor = vec4(color, 1.0 - keep);
 }
 )";
 

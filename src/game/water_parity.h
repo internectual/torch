@@ -113,3 +113,99 @@ inline bool waterBodyNameMatches(const std::string& authoredName,
 inline bool waterBodyOrdinalMatches(bool active, int ordinal, int requested) {
     return active && ordinal == requested;
 }
+
+// ─── Engine fluid (terrain/fluidSupport.cc) ─────────────────────────────────
+#include <cstdint>
+#include <vector>
+
+struct FluidInfo {
+    int squareX0 = 0, squareY0 = 0;   // min corner, terrain squares
+    int squaresX = 8, squaresY = 8;
+    int blocksX = 1, blocksY = 1;
+    bool highRes = false;             // blocks of 4 squares, verts every 8
+    float step4 = 64.0f;              // block size (m_Step[4])
+};
+
+// fluid::SetInfo: snap the min corner to terrain squares within the rep, and
+// size the block grid. Fluids covering at most 128 x 128 squares use high
+// resolution (4-square blocks), others 8-square blocks of at most 256.
+inline FluidInfo fluidSetInfo(float x0, float y0, float sizeX, float sizeY) {
+    FluidInfo info;
+    info.squareX0 = std::clamp((int)((x0 / 8.0f) + 0.5f), 0, 2040);
+    info.squareY0 = std::clamp((int)((y0 / 8.0f) + 0.5f), 0, 2040);
+    info.squaresX = (int)((sizeX / 8.0f) + 0.5f);
+    info.squaresY = (int)((sizeY / 8.0f) + 0.5f);
+    if (info.squaresX <= 128 && info.squaresY <= 128) {
+        info.highRes = true;
+        info.squaresX = (info.squaresX + 3) & ~0x03;
+        info.squaresY = (info.squaresY + 3) & ~0x03;
+        if (info.squaresX <= 0) info.squaresX = 4;
+        if (info.squaresY <= 0) info.squaresY = 4;
+        info.blocksX = info.squaresX >> 2;
+        info.blocksY = info.squaresY >> 2;
+        info.step4 = 32.0f;
+    } else {
+        info.squaresX = std::clamp((info.squaresX + 7) & ~0x07, 8, 256);
+        info.squaresY = std::clamp((info.squaresY + 7) & ~0x07, 8, 256);
+        info.blocksX = info.squaresX >> 3;
+        info.blocksY = info.squaresY >> 3;
+        info.step4 = 64.0f;
+    }
+    return info;
+}
+
+// fluid::RebuildMasks: a block is drawn when any terrain point in it lies
+// below the fluid level (surface + half the wave amplitude, in the height
+// field's 1/32 units). With removeWetEdges, wet points connected to the
+// fluid's border are dried first (FloodFill). `heights` is the 256 x 256
+// height field in world units, indexed [y * 256 + x]; null accepts all.
+inline std::vector<uint8_t> fluidAcceptMask(const FluidInfo& info, float surfaceZ,
+                                            float waveAmplitude, bool removeWetEdges,
+                                            const float* heights) {
+    const int gw = info.squaresX + 1, gh = info.squaresY + 1;
+    std::vector<uint8_t> grid((size_t)gw * gh, 1);
+    if (heights) {
+        const uint16_t level = (uint16_t)((surfaceZ + waveAmplitude / 2.0f) * 32.0f);
+        for (int y = 0; y < gh; ++y)
+            for (int x = 0; x < gw; ++x) {
+                const int i = (((info.squareY0 + y) & 255) << 8) + ((info.squareX0 + x) & 255);
+                const uint16_t terrain = (uint16_t)std::lround(heights[i] * 32.0f);
+                grid[(size_t)y * gw + x] = level > terrain;
+            }
+        if (removeWetEdges) {
+            std::vector<int> stack;
+            auto seed = [&](int x, int y) {
+                if (grid[(size_t)y * gw + x]) { grid[(size_t)y * gw + x] = 0; stack.push_back(y * gw + x); }
+            };
+            for (int x = 0; x < gw; ++x) { seed(x, 0); seed(x, gh - 1); }
+            for (int y = 0; y < gh; ++y) { seed(0, y); seed(gw - 1, y); }
+            while (!stack.empty()) {
+                const int at = stack.back();
+                stack.pop_back();
+                const int x = at % gw, y = at / gw;
+                if (x > 0) seed(x - 1, y);
+                if (x + 1 < gw) seed(x + 1, y);
+                if (y > 0) seed(x, y - 1);
+                if (y + 1 < gh) seed(x, y + 1);
+            }
+        }
+    }
+    const int per = info.highRes ? 4 : 8;
+    std::vector<uint8_t> accept((size_t)info.blocksX * info.blocksY, 0);
+    for (int by = 0; by < info.blocksY; ++by)
+        for (int bx = 0; bx < info.blocksX; ++bx) {
+            bool any = false;
+            for (int y = 0; y <= per && !any; ++y)
+                for (int x = 0; x <= per && !any; ++x)
+                    any = grid[(size_t)(by * per + y) * gw + (bx * per + x)] != 0;
+            accept[(size_t)by * info.blocksX + bx] = any;
+        }
+    return accept;
+}
+
+// The fluid's terrain rep holding the eye (fluid::RunQuadTree).
+inline int fluidRepIndex(float fluidCoord) {
+    int i = (int)(fluidCoord / 2048.0f);
+    if (fluidCoord < 0.0f) i--;
+    return i;
+}

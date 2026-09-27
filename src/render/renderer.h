@@ -109,6 +109,7 @@ struct Shader {
     bool loadFromFiles(const char* vertPath, const char* fragPath);
     void bind();
     void setUniform(const char* name, float v);
+    void setUniform(const char* name, const Point2F& v);
     void setUniform(const char* name, const Point3F& v);
     void setUniform(const char* name, const MatrixF& m);
     void setUniform(const char* name, int32_t v);
