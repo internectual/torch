@@ -890,6 +890,11 @@ public:
     // Each demo ghost's animated "eye" node as last drawn (world, Y-up):
     // Player::getEyeTransform's position.
     std::unordered_map<int, Point3F> demoEyePositions;
+    // Each demo ghost's camera node ("cam", else "eye") as last drawn.
+    std::unordered_map<int, Point3F> demoCamPositions;
+    // The recording's $firstPerson (initial block, then info blocks).
+    bool demoRecordedFirstPerson = true;
+    void applyDemoInfoBlock(const DemoBlock& block);
     bool targetFinderOpen() const { return targetFinderShown; }
     void toggleTargetFinder();
     void closeTargetFinder() { targetFinderShown = false; }
@@ -1066,6 +1071,7 @@ private:
         Point3F cameraPos{}, cameraTarget{};
         float cameraFov = -1.0f;
         int cameraMode = -1, orbitGhost = -1;
+        bool recordedFirstPerson = true;
         float orbitMinDist = 0.0f, orbitMaxDist = 0.0f;
         Point3F orbitPoint{};
     };

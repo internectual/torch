@@ -6652,6 +6652,7 @@ bool Game::init() {
                 return;
             }
             applyDemoMoveView(*block);
+            applyDemoInfoBlock(*block);
             if (block->type == T2Demo::BlockTypeSendPacket) {
                 demoParser->onSendPacketTrigger();
             } else if (block->type == T2Demo::BlockTypePacket) {
@@ -6984,6 +6985,7 @@ void Game::update(float dt) {
 
                 // Extract position data from move blocks
                 applyDemoMoveView(*block);
+                applyDemoInfoBlock(*block);
 
                 if (block->type == T2Demo::BlockTypeMove && !demoMatchEnded)
                     updateDemoPlayerAnimation(T2Demo::playbackBlockTime(demoBlocksDone, demoTicks));
@@ -7898,6 +7900,44 @@ void Game::render(float dt) {
                             camPos = {eyeIt->second.x, -eyeIt->second.z, eyeIt->second.y};
                         camTarget = {camPos.x + aim.x * 10.0f, camPos.y + aim.y * 10.0f, camPos.z + aim.z * 10.0f};
                         cameraGhostUsed = true;
+                        // ShapeBase::getCameraTransform at camera position 1
+                        // (third person): (cameraMaxDist - cameraMinDist)
+                        // behind the camera node along the eye's forward, cut
+                        // short by a ray (collision.t less a tenth of the
+                        // approach), all the way back to the eye at zero.
+                        const auto camNode = demoCamPositions.find(fpIdx);
+                        if (!demoRecordedFirstPerson && fpIdx == controlGhostIndex && spectateGhostIndex < 0 &&
+                            g->mountObject < 0 && camNode != demoCamPositions.end() && w) {
+                            float minDist = 0.2f, maxDist = 0.0f;
+                            if (g->hasDatablock) {
+                                const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+                                auto data = blocks.find((uint32_t)g->datablockId);
+                                if (data != blocks.end()) {
+                                    minDist = data->second.decoded.cameraMinDist;
+                                    maxDist = data->second.decoded.cameraMaxDist;
+                                }
+                            }
+                            // ShapeBaseData::preload: at least half the shape's y extent.
+                            if (g->shape && g->shape->hasHeaderBounds)
+                                maxDist = std::max(maxDist, (g->shape->headerBoundsMax.y - g->shape->headerBoundsMin.y) * 0.5f);
+                            const Point3F eyeYUp = Math::torquePointToYUp(camPos);
+                            const Point3F forward = Math::torquePointToYUp(aim);
+                            const float back = maxDist - minDist;
+                            const Point3F vec{-forward.x * back, -forward.y * back, -forward.z * back};
+                            const Point3F sp = camNode->second;
+                            Point3F ep{sp.x + vec.x, sp.y + vec.y, sp.z + vec.z};
+                            ProjectilePhysics::RayHit hit;
+                            if (back > 0.0f && castStaticRay(*w, sp, ep, hit)) {
+                                const float adj = (-(vec.x * hit.normal.x + vec.y * hit.normal.y + vec.z * hit.normal.z) /
+                                                   back) * 0.1f;
+                                const float newPos = std::max(0.0f, hit.t - adj);
+                                ep = newPos == 0.0f ? eyeYUp
+                                     : Point3F{sp.x + vec.x * newPos, sp.y + vec.y * newPos, sp.z + vec.z * newPos};
+                            }
+                            camPos = ep;
+                            camTarget = {ep.x + forward.x * 10.0f, ep.y + forward.y * 10.0f, ep.z + forward.z * 10.0f};
+                            cameraCoordinatesConverted = true;
+                        }
                     }
                 }
             }
@@ -9648,6 +9688,20 @@ void Game::render(float dt) {
                         demoEyePositions[idx] = {eyeWorld.m[0][3], eyeWorld.m[1][3], eyeWorld.m[2][3]};
                     } else {
                         demoEyePositions.erase(idx);
+                    }
+                    // ShapeBaseData::preload: cameraNode is "cam", else the eye.
+                    static std::unordered_map<const DTSShape*, int> camNodeCache;
+                    auto cam = camNodeCache.find(shape);
+                    if (cam == camNodeCache.end()) {
+                        int node = shape->findNode("cam");
+                        if (node < 0) node = eye->second;
+                        cam = camNodeCache.emplace(shape, node).first;
+                    }
+                    if (cam->second >= 0 && cam->second < (int)nodes.size()) {
+                        const MatrixF camWorld = shapeModel * nodes[cam->second];
+                        demoCamPositions[idx] = {camWorld.m[0][3], camWorld.m[1][3], camWorld.m[2][3]};
+                    } else {
+                        demoCamPositions.erase(idx);
                     }
                 }
 
@@ -11783,7 +11837,9 @@ bool Game::playDemo(const char* path) {
     demoSnapshots[0] = demoParser->captureSnapshot();
     demoMissionState = {loadMap, {}};
     demoFastForward = false; // real-time when invoked from console
-    demoFirstPersonCam = demoParser->getInitialBlock().firstPerson;
+    // Follow the recorder's view; its $firstPerson picks eye or third person.
+    demoFirstPersonCam = true;
+    demoRecordedFirstPerson = demoParser->getInitialBlock().firstPerson;
     controlGhostIndex = demoParser->getInitialBlock().controlObjectGhostIndex;
     demoAuthoredCamera = false;
     demoCameraFov = -1.0f;
@@ -11879,7 +11935,8 @@ void Game::resetDemoCamera() {
         demoViewPitch = demoParser->getInitialBlock().controlPitch;
     }
     demoOrbitCam = false;
-    demoFirstPersonCam = demoParser ? demoParser->getInitialBlock().firstPerson : false;
+    demoFirstPersonCam = demoParser != nullptr;
+    demoRecordedFirstPerson = demoParser ? demoParser->getInitialBlock().firstPerson : true;
     spectateGhostIndex = -1;
     controlGhostIndex = demoParser ? demoParser->getInitialBlock().controlObjectGhostIndex : -1;
     demoCameraFov = -1.0f;
@@ -11904,6 +11961,7 @@ Game::DemoViewSnapshot Game::captureDemoView() const {
     view.orbitMinDist = demoOrbitMinDist;
     view.orbitMaxDist = demoOrbitMaxDist;
     view.orbitPoint = demoOrbitPoint;
+    view.recordedFirstPerson = demoRecordedFirstPerson;
     return view;
 }
 
@@ -11922,6 +11980,17 @@ void Game::restoreDemoView(const DemoViewSnapshot& view) {
     demoOrbitMinDist = view.orbitMinDist;
     demoOrbitMaxDist = view.orbitMaxDist;
     demoOrbitPoint = view.orbitPoint;
+    demoRecordedFirstPerson = view.recordedFirstPerson;
+}
+
+// GameConnection::handleRecordedBlock info block: $firstPerson (byte 0) and
+// the camera FOV (F32 at +4).
+void Game::applyDemoInfoBlock(const DemoBlock& block) {
+    if (block.type != T2Demo::BlockTypeInfo || block.data.size() < 8) return;
+    demoRecordedFirstPerson = block.data[0] != 0;
+    float fov;
+    std::memcpy(&fov, block.data.data() + 4, sizeof(fov));
+    if (std::isfinite(fov) && fov > 0.0f) demoCameraFov = fov;
 }
 
 // The recorder's view from a Move block: moves carry view deltas

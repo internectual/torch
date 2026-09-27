@@ -345,7 +345,14 @@ void shapeBase(Stream& s) {
     // mass (default 1), drag, density, maxEnergy, camera distances, ...
     const float mass = s.readFlag() ? s.readF32() : 1.0f;
     if (activeDecoded) activeDecoded->shapeMass = mass;
-    for (int i = 0; i < 8; ++i) if (s.readFlag()) s.readF32();
+    // drag, density, maxEnergy, cameraMaxDist, cameraMinDist,
+    // cameraDefaultFov, cameraMinFov, cameraMaxFov.
+    for (int i = 0; i < 8; ++i) {
+        if (!s.readFlag()) continue;
+        const float value = s.readF32();
+        if (activeDecoded && i == 3) activeDecoded->cameraMaxDist = value;
+        if (activeDecoded && i == 4) activeDecoded->cameraMinDist = value;
+    }
     const std::string debrisShape = s.readHuffmanString();
     if (activeDecoded) activeDecoded->debrisShape = debrisShape;
     if (s.readFlag()) { s.readUnsigned(10); u32s(s, 1); }
