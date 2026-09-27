@@ -721,6 +721,12 @@ struct GhostEntry {
     // client's back/bottom Activate/Maintain thread state.
     float spawnTime = -1.0f; // demo time this ghost first rendered
     float cloakLevel = 0.0f;  // ShapeBase mCloakLevel, 0 -> 1 over 0.5 s
+    // Player action transitions (Player::setActionThread, 0.25 s): the last
+    // rendered sequence and time, and the frozen outgoing pose.
+    int animLastIndex = -1;
+    float animLastTime = 0.0f;
+    int animPrevIndex = -1;
+    float animPrevTime = 0.0f, animChangedAt = -1.0f;
     // getRenderMuzzlePoint/Vector per image slot from the last render (Y-up
     // world): the image's Muzzlepoint node and its native +Y axis.
     Point3F muzzlePos[8]{}, muzzleDir[8]{};

@@ -9150,11 +9150,30 @@ void Game::render(float dt) {
                 w->applyShapeLighting(*shape, mg->shapeLight, model * shape->upOrientation(),
                                       dt * 1000.0f);
                 if (animation) {
-                    shape->renderAnimationIndex((int)(animation - shape->animations.data()),
-                                                animationPosition * animation->duration,
+                    const int animationIndexNow = (int)(animation - shape->animations.data());
+                    const float animationTimeNow = animationPosition * animation->duration;
+                    // Player::setActionThread transitions to a new action over 0.25 s
+                    // from the frozen outgoing pose.
+                    if (isPlayer) {
+                        const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                        if (mg->animLastIndex >= 0 && mg->animLastIndex != animationIndexNow &&
+                            now >= mg->animChangedAt) {
+                            mg->animPrevIndex = mg->animLastIndex;
+                            mg->animPrevTime = mg->animLastTime;
+                            mg->animChangedAt = now;
+                        }
+                        if (now < mg->animChangedAt) mg->animPrevIndex = -1; // seek backwards
+                        mg->animLastIndex = animationIndexNow;
+                        mg->animLastTime = animationTimeNow;
+                        const float weight = std::clamp((now - mg->animChangedAt) / 0.25f, 0.0f, 1.0f);
+                        if (mg->animPrevIndex >= 0 && weight < 1.0f)
+                            shape->transition = {mg->animPrevIndex, mg->animPrevTime, weight};
+                    }
+                    shape->renderAnimationIndex(animationIndexNow, animationTimeNow,
                                                 numOverrides > 0 ? overrides : nullptr,
                                                 numOverrides, blends + primaryBlend,
                                                 numBlends - primaryBlend);
+                    shape->transition = {};
                 } else {
                     shape->render(0, numOverrides > 0 ? overrides : nullptr, numOverrides);
                 }

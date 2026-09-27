@@ -289,6 +289,14 @@ struct DTSShape {
         int animationIndex;
         float time;
     };
+    // TSShapeInstance::transitionToSequence: the next animated render blends
+    // from this frozen pose of a previous sequence, `weight` being the new
+    // sequence's share (0 -> 1 over the transition).
+    struct Transition {
+        int animationIndex = -1;
+        float time = 0.0f;
+        float weight = 1.0f;
+    } transition;
     void render(int32_t detailLevel = 0, const NodeOverride* overrides = nullptr, int numOverrides = 0);
     void renderAnimation(const char* animName, float time,
                          const NodeOverride* overrides = nullptr,

@@ -2328,6 +2328,32 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
         }
     }
 
+    // Transition: blend from the previous sequence's pose on every node
+    // either sequence animates.
+    if (transition.animationIndex >= 0 && transition.animationIndex < (int)animations.size() &&
+        transition.weight < 1.0f && !objectAnim->blend) {
+        const Animation& prev = animations[transition.animationIndex];
+        std::vector<QuatF> prevRot(numNodes, {0, 0, 0, 1});
+        std::vector<Point3F> prevTrans(numNodes, {0, 0, 0}), prevScale(numNodes, {1, 1, 1});
+        std::vector<bool> prevRotSet(numNodes, false), prevTransSet(numNodes, false), prevScaleSet(numNodes, false);
+        sampleChannels(prev, animationSampleTime(transition.time, prev.duration, prev.looping),
+                       prevRot, prevTrans, prevScale, prevRotSet, prevTransSet, prevScaleSet);
+        const float w = std::clamp(transition.weight, 0.0f, 1.0f);
+        for (int32_t i = 0; i < numNodes; ++i) {
+            if (!prevRotSet[i] && !rotSet[i] && !prevTransSet[i] && !transSet[i]) continue;
+            const QuatF pr = prevRotSet[i] ? prevRot[i] : QuatF::fromMatrix(defaultLocalTransforms[i]);
+            const Point3F pt = prevTransSet[i] ? prevTrans[i]
+                : Point3F{defaultLocalTransforms[i].m[0][3], defaultLocalTransforms[i].m[1][3],
+                          defaultLocalTransforms[i].m[2][3]};
+            const Point3F ps = prevScaleSet[i] ? prevScale[i] : Point3F{1, 1, 1};
+            nodeRot[i] = Math::quatSlerp(pr, nodeRot[i], w);
+            nodeTrans[i] = {pt.x + (nodeTrans[i].x - pt.x) * w, pt.y + (nodeTrans[i].y - pt.y) * w,
+                            pt.z + (nodeTrans[i].z - pt.z) * w};
+            nodeScale[i] = {ps.x + (nodeScale[i].x - ps.x) * w, ps.y + (nodeScale[i].y - ps.y) * w,
+                            ps.z + (nodeScale[i].z - ps.z) * w};
+        }
+    }
+
     // ── Step 3: Build local matrices and compose world transforms ──
     // T2: setMatrix(rot, trans, &local) then world[i] = world[parent] * local
     std::vector<MatrixF> nodeLocal(numNodes);
