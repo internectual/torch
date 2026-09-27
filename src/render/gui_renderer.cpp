@@ -3212,24 +3212,32 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             const bool inventory = cn == "HudInventory";
             r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0},
                            {0.02f, 0.03f, 0.04f, 0.45f});
+            // HUD bitmap names are relative to textures/ ("gui/hud_disc").
+            auto hudTexture = [&](const std::string& name) -> Texture* {
+                if (name.empty()) return nullptr;
+                for (const std::string& candidate : {name, "textures/" + name, "textures/gui/" + name}) {
+                    Texture* texture = r.loadTexture(candidate.c_str());
+                    if (texture && texture->loaded) return texture;
+                }
+                return nullptr;
+            };
             auto loadHudBitmap = [&](const char* field) -> Texture* {
                 auto it = ctl->fields.find(field);
-                if (it == ctl->fields.end() || it->second.empty()) return nullptr;
-                Texture* texture = r.loadTexture(it->second.c_str());
-                if (!texture || !texture->loaded)
-                    texture = r.loadTexture(("textures/gui/" + it->second).c_str());
-                return texture && texture->loaded ? texture : nullptr;
+                return it == ctl->fields.end() ? nullptr : hudTexture(it->second);
             };
             if (Texture* background = loadHudBitmap("backgroundBitmap"))
                 r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, background->id);
             Texture* highlight = loadHudBitmap("highlightBitmap");
             Texture* infiniteAmmo = loadHudBitmap("infiniteAmmoBitmap");
             if (!ctl->hudSlots.empty()) {
+                // Carried items stack in slot order without gaps.
+                int shown = 0;
                 for (size_t i = 0; i < ctl->hudSlots.size(); ++i) {
                     const auto& slot = ctl->hudSlots[i];
                     if (!slot.visible) continue;
-                    const float sx = x + (inventory ? (float)i * 30.0f : 2.0f);
-                    const float sy = y + (inventory ? 2.0f : (float)i * 30.0f);
+                    const int row = shown++;
+                    const float sx = x + (inventory ? (float)row * 30.0f : 2.0f);
+                    const float sy = y + (inventory ? 2.0f : (float)row * 30.0f);
                     const float sw = inventory ? 28.0f : ctl->extentX - 4.0f;
                     const float sh = inventory ? ctl->extentY - 4.0f : 28.0f;
                     if (slot.active && highlight)
@@ -3237,13 +3245,15 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     else if (slot.active)
                         r.drawRectFill({sx, sy, 0}, {sx + sw, sy + sh, 0},
                                        {0.3f, 0.7f, 0.8f, 0.45f});
-                    Texture* tex = slot.bitmap.empty() ? nullptr : r.loadTexture(slot.bitmap.c_str());
-                    if (!tex || !tex->loaded)
-                        tex = slot.bitmap.empty() ? nullptr : r.loadTexture(("textures/gui/" + slot.bitmap).c_str());
-                    if (tex && tex->loaded)
+                    Texture* tex = hudTexture(slot.bitmap);
+                    if (tex)
                         r.drawTexturedRect({sx + 2, sy + 2, 0}, {sx + sw - 2, sy + sh - 2, 0}, tex->id);
-                    if (slot.amount < 0 && infiniteAmmo)
-                        r.drawTexturedRect({sx + 2, sy + 2, 0}, {sx + sw - 2, sy + sh - 2, 0}, infiniteAmmo->id);
+                    // Infinite ammo shows its bitmap where the count would be.
+                    if (slot.amount < 0 && infiniteAmmo) {
+                        const float iw = (float)infiniteAmmo->width, ih = (float)infiniteAmmo->height;
+                        r.drawTexturedRect({sx + 3, sy + sh - 3 - ih, 0}, {sx + 3 + iw, sy + sh - 3, 0},
+                                           infiniteAmmo->id);
+                    }
                     if (hf && slot.amount >= 0)
                         hf->render(std::to_string(slot.amount).c_str(), sx + 3, sy + sh - 13,
                                    {1.0f, 1.0f, 0.6f, 0.95f}, 0.8f);

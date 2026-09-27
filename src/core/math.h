@@ -111,6 +111,17 @@ namespace Math {
         return c;
     }
 
+    // Native DTS data is loaded with y and z swapped, (x, y, z) -> (x, z, y),
+    // a mirror. Flipping z afterwards gives the proper Torque -> Y-up basis
+    // (x, z, -y) that mission placement uses; a half turn about Y instead
+    // left every shape mirrored in x (left-handed players).
+    inline MatrixF nativeDtsFrame() {
+        MatrixF f;
+        f.identity();
+        f.m[2][2] = -1.0f;
+        return f;
+    }
+
     inline Point3F torquePointToYUp(const Point3F& point) {
         return czUpToYUp().transform(point);
     }

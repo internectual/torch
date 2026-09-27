@@ -1039,6 +1039,7 @@ void Player::render() {
         MatrixF model;
         Point3F ax = {0, 1, 0};
         model.setRotationAxis(ax, -rot.z);
+        if (modelShape.nativeDTS) model = model * Math::nativeDtsFrame();
         model.setTranslation(pos);
 
         if (!firstPerson) {
@@ -1080,9 +1081,7 @@ void Player::render() {
                                      camera.y + forward.y * 0.55f + right.y * 0.35f - 0.18f,
                                      camera.z + forward.z * 0.55f + right.z * 0.35f};
                 weaponModel.setTranslation(weaponPos);
-                MatrixF weaponFrame;
-                weaponFrame.setRotationY(Math::PI);
-                weaponModel = weaponModel * weaponFrame;
+                weaponModel = weaponModel * Math::nativeDtsFrame();
             } else {
                 int playerMount = modelShape.findNode("Mount0");
                 if (playerMount < 0) playerMount = modelShape.findNode("Mount1");
@@ -3932,9 +3931,7 @@ void World::render(const Point3F& cameraPos, float dt) {
             if (obj.shape->nativeDTS) {
                 // Native DTS vertices use (x,z,y), while mission coordinates
                 // use the proper Z-up-to-Y-up basis (x,z,-y).
-                MatrixF shapeFrame;
-                shapeFrame.setRotationY(Math::PI);
-                model = model * shapeFrame;
+                model = model * Math::nativeDtsFrame();
             }
             if (!obj.label.empty()) {
                 Point3F mn{1e30f, 1e30f, 1e30f};
@@ -6017,8 +6014,9 @@ void World::renderParticles() {
         translate.setTranslation(instance.pos);
         scale.identity();
         scale.setScale({size[0], size[1], size[2]});
-        // Explosion::prepModelView faces the shape opposite to projectiles.
-        flip.setRotationY(Math::PI);
+        // Explosion::prepModelView faces the shape opposite to projectiles;
+        // the native frame keeps that facing without mirroring the shape.
+        flip = Math::nativeDtsFrame();
         r.setModel(translate * orient * scale * flip * shape.upOrientation());
         if (debrisShader) {
             debrisShader->setUniform("uUseTexture", (int32_t)1);
@@ -8285,7 +8283,8 @@ void Game::render(float dt) {
         MatrixF rx; rx.setRotationX(viewPitch);
         MatrixF sc; sc.setScale({fitScale, fitScale, fitScale});
         MatrixF tr; tr.setTranslation({-center.x, -center.y, -center.z});
-        MatrixF model = ry * rx * testShape.upOrientation() * sc * tr;
+        MatrixF model = ry * rx * (testShape.nativeDTS ? Math::nativeDtsFrame() : MatrixF{}) *
+                        testShape.upOrientation() * sc * tr;
         r.setModel(model);
 
         // Framing camera looking at the (now origin-centered, unit-radius) model
@@ -8355,7 +8354,8 @@ void Game::render(float dt) {
         MatrixF sc; sc.setScale({shapeViewerFitScale, shapeViewerFitScale, shapeViewerFitScale});
         MatrixF tr; tr.setTranslation({-shapeViewerCenter.x, -shapeViewerCenter.y, -shapeViewerCenter.z});
         // Orbit in Y-up: ry*rx rotate in Y-up, then C converts Z-up->Y-up (if needed), then sc*tr center/scale in Z-up
-        MatrixF model = ry * rx * shapeViewerShape.upOrientation() * sc * tr;
+        MatrixF model = ry * rx * (shapeViewerShape.nativeDTS ? Math::nativeDtsFrame() : MatrixF{}) *
+                        shapeViewerShape.upOrientation() * sc * tr;
         r.setModel(model);
 
         r.setCamera({0, 0, 2.6f}, {0, 0, 0}, {0, 1, 0});
@@ -9212,9 +9212,7 @@ void Game::render(float dt) {
                     model.identity();
                 }
                  if (shape->nativeDTS) {
-                    MatrixF shapeFrame;
-                    shapeFrame.setRotationY(Math::PI);
-                     model = model * shapeFrame;
+                     model = model * Math::nativeDtsFrame();
                  }
                  if (isProjectile && mg->hasProjectileScale)
                      model.setScale({mg->projectileScale.x, mg->projectileScale.y,
@@ -9856,9 +9854,7 @@ void Game::render(float dt) {
                     model = Math::torqueQuaternionToYUp(q);
                 }
               if (g->shape->nativeDTS) {
-                    MatrixF shapeFrame;
-                    shapeFrame.setRotationY(Math::PI);
-                    model = model * shapeFrame;
+                    model = model * Math::nativeDtsFrame();
               }
               Point3F renderPosition = Math::torquePointToYUp({rp.x, rp.y, rp.z});
              model.setTranslation(renderPosition);

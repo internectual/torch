@@ -953,9 +953,73 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
                 player->packetLoss = atoi(fields[7].c_str());
             }
         }
+        // recordings.cs getState order after PLAYERLIST: RETICLE, BACKPACK,
+        // WEAPON, INVENTORY (then SCORE, CLOCK, CHAT, GRAVITY).
+        const auto& values = initialBlock.demoValues;
+        auto next = [&]() -> std::vector<std::string> {
+            std::vector<std::string> fields;
+            if (valueIndex >= values.size()) return fields;
+            std::string field;
+            std::stringstream row(values[valueIndex++]);
+            while (std::getline(row, field, '\t')) fields.push_back(field);
+            return fields;
+        };
+        auto field = [](const std::vector<std::string>& fields, size_t i) {
+            return i < fields.size() ? fields[i] : std::string();
+        };
+        initialWeaponsHud_ = {};
+        initialBackpackHud_ = {};
+        initialInventoryHud_ = {};
+        initialAmmoHud_ = {};
+        // RETICLE: bitmap, visible, centre, ammo visible, ammo value, ...
+        const auto reticle = next();
+        if (!field(reticle, 4).empty()) initialAmmoHud_.count = atoi(field(reticle, 4).c_str());
+        // BACKPACK: icon bitmap, frame visible, text, text visible, pack.
+        const auto backpack = next();
+        initialBackpackHud_.bitmap = field(backpack, 0);
+        initialBackpackHud_.active = atoi(field(backpack, 1).c_str()) != 0;
+        initialBackpackHud_.text = field(backpack, 2);
+        if (!field(backpack, 4).empty()) initialBackpackHud_.packIndex = atoi(field(backpack, 4).c_str());
+        // WEAPON: visible, background, highlight, infinite, count, slots,
+        // active; count rows of (name, bitmap); slot rows of (id, count).
+        const auto weapons = next();
+        if (weapons.size() >= 7) {
+            initialWeaponsHud_.backgroundBitmap = weapons[1];
+            initialWeaponsHud_.highlightBitmap = weapons[2];
+            initialWeaponsHud_.infiniteAmmoBitmap = weapons[3];
+            const int count = std::clamp(atoi(weapons[4].c_str()), 0, 64);
+            const int slotCount = std::clamp(atoi(weapons[5].c_str()), 0, 64);
+            initialWeaponsHud_.activeIndex = atoi(weapons[6].c_str());
+            for (int i = 0; i < count; ++i) {
+                const auto item = next();
+                if (!field(item, 1).empty()) initialWeaponsHud_.bitmaps[i] = field(item, 1);
+            }
+            for (int i = 0; i < slotCount; ++i) {
+                const auto slot = next();
+                if (!field(slot, 0).empty())
+                    initialWeaponsHud_.slots[atoi(slot[0].c_str())] = atoi(field(slot, 1).c_str());
+            }
+        }
+        // INVENTORY: the same header; count rows of (bitmap); slot rows.
+        const auto inventory = next();
+        if (inventory.size() >= 7) {
+            initialInventoryHud_.backgroundBitmap = inventory[1];
+            const int count = std::clamp(atoi(inventory[4].c_str()), 0, 64);
+            const int slotCount = std::clamp(atoi(inventory[5].c_str()), 0, 64);
+            for (int i = 0; i < count; ++i) {
+                const auto item = next();
+                if (!field(item, 0).empty()) initialInventoryHud_.bitmaps[i] = field(item, 0);
+            }
+            for (int i = 0; i < slotCount; ++i) {
+                const auto slot = next();
+                if (!field(slot, 0).empty())
+                    initialInventoryHud_.slots[atoi(slot[0].c_str())] = atoi(field(slot, 1).c_str());
+            }
+        }
     }
     initialTaggedStrings_ = initialBlock.taggedStrings;
     initialPlayerInfo_ = playerInfo_;
+    resetHudState();
     // Start-block ghosts carry target ids; resolve them against the initial
     // TargetManager state.
     targets_ = initialTargets_;
@@ -1236,11 +1300,11 @@ void DemoParser::handleHudRemoteCommand(const std::string& funcName,
 }
 
 void DemoParser::resetHudState() {
-    weaponsHud_ = {};
-    backpackHud_ = {};
-    inventoryHud_ = {};
+    weaponsHud_ = initialWeaponsHud_;
+    backpackHud_ = initialBackpackHud_;
+    inventoryHud_ = initialInventoryHud_;
     vehicleHud_ = {};
-    ammoHud_ = {};
+    ammoHud_ = initialAmmoHud_;
 }
 
 DemoParserSnapshot DemoParser::captureSnapshot() const {

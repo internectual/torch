@@ -198,14 +198,17 @@ int main(int argc, char** argv) {
 
     parser.handleHudRemoteCommand("setAmmoHudCount", {"setAmmoHudCount", "42"});
     CHECK(parser.getAmmoHud().count == 42);
-    parser.handleHudRemoteCommand("setWeaponsHudAmmo", {"setWeaponsHudAmmo", "3", "7"});
-    CHECK(parser.getWeaponsHud().slots.find(3) == parser.getWeaponsHud().slots.end());
-    parser.handleHudRemoteCommand("setWeaponsHudItem", {"setWeaponsHudItem", "3", "9", "1"});
-    parser.handleHudRemoteCommand("setWeaponsHudAmmo", {"setWeaponsHudAmmo", "3", "7"});
-    CHECK(parser.getWeaponsHud().slots.at(3) == 7);
-    parser.handleHudRemoteCommand("setWeaponsHudBitmap", {"setWeaponsHudBitmap", "3", "Blaster", "gui/blaster"});
-    parser.handleHudRemoteCommand("setWeaponsHudItem", {"setWeaponsHudItem", "3", "0", "0"});
-    CHECK(parser.getWeaponsHud().bitmaps.find(3) == parser.getWeaponsHud().bitmaps.end());
+    // recordings.cs saveDemoSettings: the HUD starts from the recorded state.
+    CHECK(!parser.getWeaponsHud().bitmaps.empty());
+    CHECK(!parser.getWeaponsHud().slots.empty());
+    parser.handleHudRemoteCommand("setWeaponsHudAmmo", {"setWeaponsHudAmmo", "30", "7"});
+    CHECK(parser.getWeaponsHud().slots.find(30) == parser.getWeaponsHud().slots.end());
+    parser.handleHudRemoteCommand("setWeaponsHudItem", {"setWeaponsHudItem", "30", "9", "1"});
+    parser.handleHudRemoteCommand("setWeaponsHudAmmo", {"setWeaponsHudAmmo", "30", "7"});
+    CHECK(parser.getWeaponsHud().slots.at(30) == 7);
+    parser.handleHudRemoteCommand("setWeaponsHudBitmap", {"setWeaponsHudBitmap", "30", "Blaster", "gui/blaster"});
+    parser.handleHudRemoteCommand("setWeaponsHudItem", {"setWeaponsHudItem", "30", "0", "0"});
+    CHECK(parser.getWeaponsHud().bitmaps.find(30) == parser.getWeaponsHud().bitmaps.end());
     parser.handleHudRemoteCommand("setInventoryHudAmount", {"setInventoryHudAmount", "4", "6"});
     CHECK(parser.getInventoryHud().slots.find(4) == parser.getInventoryHud().slots.end());
     parser.handleHudRemoteCommand("setInventoryHudItem", {"setInventoryHudItem", "4", "3", "1"});

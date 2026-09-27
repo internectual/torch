@@ -1841,6 +1841,18 @@ bool DTSShape::applySkin(const std::string& skinName) {
     return anyReplaced;
 }
 
+namespace {
+struct MirroredFrontFace {
+    explicit MirroredFrontFace(const MatrixF& m) {
+        const float det = m.m[0][0] * (m.m[1][1] * m.m[2][2] - m.m[1][2] * m.m[2][1]) -
+                          m.m[0][1] * (m.m[1][0] * m.m[2][2] - m.m[1][2] * m.m[2][0]) +
+                          m.m[0][2] * (m.m[1][0] * m.m[2][1] - m.m[1][1] * m.m[2][0]);
+        glFrontFace(det < 0.0f ? GL_CW : GL_CCW);
+    }
+    ~MirroredFrontFace() { glFrontFace(GL_CCW); }
+};
+} // namespace
+
 void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int numOverrides) {
     try {
     // renderAnimation mutates mesh frame/UV buffers; static draws must restore
@@ -1896,6 +1908,9 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     }
     animatedNodeWorld = nodeWorld;
     const MatrixF baseModel = r.modelMatrix();
+    // A mirrored placement (the native DTS frame flips z) reverses the
+    // triangle winding; keep culling the true back faces.
+    const MirroredFrontFace frontFace(baseModel);
 
     if (isInterior) {
         // DIF interior surfaces have inconsistent per-surface winding and may be
@@ -2563,6 +2578,9 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
     shader->setUniform("uShapeBoundRadius", boundsRadius());
 
     const MatrixF baseModel = r.modelMatrix();
+    // A mirrored placement (the native DTS frame flips z) reverses the
+    // triangle winding; keep culling the true back faces.
+    const MirroredFrontFace frontFace(baseModel);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
 

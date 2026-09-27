@@ -969,6 +969,12 @@ private:
     InventoryHudState inventoryHud_;
     VehicleHudState vehicleHud_;
     AmmoHudState ammoHud_;
+    // HUD state saved in the demo values at record start (recordings.cs
+    // saveDemoSettings); every HUD reset starts from it.
+    WeaponsHudState initialWeaponsHud_;
+    BackpackHudState initialBackpackHud_;
+    InventoryHudState initialInventoryHud_;
+    AmmoHudState initialAmmoHud_;
     std::map<std::pair<int, uint32_t>, uint32_t> sensorGroupColors_;
 
     // Packet parser state
