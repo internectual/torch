@@ -58,6 +58,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <cctype>
 #include <sstream>
 #include <fstream>
@@ -118,8 +119,6 @@ static void scanDatablockShapesFromCS(World& world) {
 }
 
 // Check if a .mis mission object class should be rendered as a shape
-static void appendMissionFileEffects(const std::string& mission, std::vector<MisObject>& objects);
-
 static bool isRenderableMissionShape(const std::string& className) {
     // Mission class names are case-insensitive at the console/script layer.
     // Keeping this lookup case-sensitive made custom missions silently omit
@@ -2434,9 +2433,42 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
              if (missionClassIs(obj.className, "ForceFieldBare")) {
                 wo.forceField = true;
                 wo.translucent = true;
-                const ScriptObject* datablockObject = findScriptObject(getProp(obj.props, "datablock"));
+                if (const std::string ghost = getProp(obj.props, "ghostindex"); !ghost.empty())
+                    wo.ghostIndex = std::atoi(ghost.c_str());
+                // A demo's ForceFieldBareData comes from the recording.
+                const V12::DecodedDataBlock* recorded = nullptr;
+                if (sceneDataBlocks) {
+                    auto it = sceneDataBlocks->find((uint32_t)std::atoi(getProp(obj.props, "datablockid").c_str()));
+                    if (it != sceneDataBlocks->end() && it->second.decoded.hasForceField)
+                        recorded = &it->second.decoded;
+                }
+                std::deque<VMValue> recordedValues;
+                const ScriptObject* datablockObject = recorded ? nullptr
+                    : findScriptObject(getProp(obj.props, "datablock"));
                 auto datablockField = [&](const char* name) -> const VMValue* {
-                    return scriptField(datablockObject, name);
+                    if (!recorded) return scriptField(datablockObject, name);
+                    const std::string field = name;
+                    auto value = [&](const std::string& v) {
+                        recordedValues.push_back(VMValue(v));
+                        return &recordedValues.back();
+                    };
+                    auto number = [&](double v) { char b[32]; snprintf(b, sizeof(b), "%g", v); return value(b); };
+                    auto color = [&](const std::array<float, 4>& c) {
+                        char b[96]; snprintf(b, sizeof(b), "%g %g %g %g", c[0], c[1], c[2], c[3]); return value(b); };
+                    if (field == "color") return color(recorded->forceFieldColor);
+                    if (field == "powerOffColor") return color(recorded->forceFieldPowerOffColor);
+                    if (field == "baseTranslucency") return number(recorded->forceFieldBaseTranslucency);
+                    if (field == "powerOffTranslucency") return number(recorded->forceFieldPowerOffTranslucency);
+                    if (field == "fadeMS") return number(recorded->forceFieldFadeMS);
+                    if (field == "umapping") return number(recorded->forceFieldUMapping);
+                    if (field == "vmapping") return number(recorded->forceFieldVMapping);
+                    if (field == "framesPerSec") return number(recorded->forceFieldFramesPerSec);
+                    if (field == "scrollSpeed") return number(recorded->forceFieldScrollSpeed);
+                    if (field == "numFrames") return number(recorded->forceFieldNumFrames);
+                    for (size_t i = 0; i < recorded->forceFieldTextures.size(); ++i)
+                        if (field == "texture[" + std::to_string(i) + "]")
+                            return recorded->forceFieldTextures[i].empty() ? nullptr : value(recorded->forceFieldTextures[i]);
+                    return nullptr;
                 };
                 const std::string color = datablockField("color")
                     ? datablockField("color")->toString() : "";
@@ -3754,6 +3786,21 @@ void World::setScenePrecipitation(const std::function<std::string(const char*)>&
         Console::instance().printf(LogLevel::Info, "  Precipitation: %d drops, box=%.0fx%.0f, speed=%.1f-%.1f",
             precipitation.numDrops, precipitation.boxWidth, precipitation.boxHeight,
             precipitation.minSpeed, precipitation.maxSpeed);
+    }
+}
+
+// ForceFieldBare::setClientState from a demo ghost's StateChangeMask:
+// Open and Opening head to fadeMS, Closing and Closed to 0; an Opening or
+// Closing update also carries the current position.
+void World::syncForceFieldGhost(int ghostIndex, int state, uint32_t position, int updates) {
+    for (auto& object : worldObjects) {
+        if (!object.forceField || object.ghostIndex != ghostIndex ||
+            object.forceFieldStateUpdates == updates) continue;
+        object.forceFieldStateUpdates = updates;
+        object.forceFieldOpen = state == 0 || state == 1;
+        if (state == 0) object.forceFieldFadePosition = object.forceFieldFadeMS;
+        else if (state == 3) object.forceFieldFadePosition = 0.0f;
+        else object.forceFieldFadePosition = std::clamp((float)position, 0.0f, object.forceFieldFadeMS);
     }
 }
 
@@ -8466,6 +8513,11 @@ void Game::render(float dt) {
             const GhostEntry* g = gt.getGhost(idx);
             r.shadowCapture = nullptr;
             if (!g) continue;
+            if (ghostClassIs(g->className, "ForceFieldBare")) {
+                w->syncForceFieldGhost(idx, g->forceFieldState, g->forceFieldPosition,
+                                       g->forceFieldStateUpdates);
+                continue;
+            }
 
             // Resolve player name from skin name if not already set
             if (g->playerName.empty() && !g->skinName.empty()) {
@@ -10297,9 +10349,11 @@ void Game::startLocalGame(const char* map, std::vector<MisObject>* sceneObjects)
     // Classify weather by mission name for ambient audio selection
     weatherType = missionWeatherType(missionPath);
 
+    if (sceneObjects && demoParser) w->sceneDataBlocks = &demoParser->getInitialBlock().dataBlocks;
     const bool worldLoaded = sceneObjects
         ? w->loadObjects(missionPath.c_str(), "demo scene ghosts", std::move(*sceneObjects))
         : w->load(missionPath.c_str());
+    w->sceneDataBlocks = nullptr;
     if (worldLoaded) {
         // Training missions end on death; stock multiplayer missions respawn.
         // Update this only after a successful load so a rejected replacement
@@ -11827,7 +11881,6 @@ bool Game::playDemo(const char* path) {
         failDemoLoad();
         return false;
     }
-    appendMissionFileEffects(loadMap, scene);
     Console::instance().printf(LogLevel::Info, "Loading mission map from scene ghosts: %s (%zu objects)",
                                loadMap.c_str(), scene.size());
     State prevState = gameState;
@@ -12148,16 +12201,6 @@ void Game::resetDemoEffects() {
     if (w) w->clearEffects();
 }
 
-// Mission objects the demo world keeps taking from the local mission file
-// until their ghosts are ported (they name script datablocks).
-static void appendMissionFileEffects(const std::string& mission, std::vector<MisObject>& objects) {
-    std::string misPath, misData;
-    if (!resolveMissionFile(Engine::instance().fs(), missionLoadPath(mission), misPath, misData)) return;
-    for (auto& object : parseMisFile(misData)) {
-        if (missionClassEquals(object.className, "ForceFieldBare"))
-            objects.push_back(std::move(object));
-    }
-}
 
 // AudioEmitter::update: a profile supplies the file; its description (with
 // useProfileDescription) or the emitter's own description datablock
@@ -12204,7 +12247,7 @@ std::vector<MisObject> Game::demoSceneObjects() const {
         if (!g || g->sceneProps.empty()) continue;
         // Effects with recorded datablocks are added by applyDemoSceneEffects.
         if (ghostClassIs(g->className, "Lightning") || ghostClassIs(g->className, "ParticleEmissionDummy") ||
-            ghostClassIs(g->className, "Precipitation") || ghostClassIs(g->className, "ForceFieldBare"))
+            ghostClassIs(g->className, "Precipitation"))
             continue;
         MisObject object;
         object.className = g->className;
@@ -12212,6 +12255,10 @@ std::vector<MisObject> Game::demoSceneObjects() const {
             std::string lower = name;
             for (char& c : lower) c = (char)std::tolower((unsigned char)c);
             object.props.push_back({lower, value});
+        }
+        if (missionClassEquals(object.className, "ForceFieldBare")) {
+            object.props.push_back({"ghostindex", std::to_string(index)});
+            if (g->hasDatablock) object.props.push_back({"datablockid", std::to_string(g->datablockId)});
         }
         terrain = terrain || missionClassEquals(object.className, "TerrainBlock");
         if (missionClassEquals(object.className, "AudioEmitter"))
@@ -12293,9 +12340,11 @@ bool Game::tryLoadDemoMission(const std::string& mission, bool resetParserState)
     std::vector<MisObject> scene;
     if (demoParser && demoParser->getGhostResets() != demoWorldGhostResets)
         scene = demoSceneObjects();
-    if (!scene.empty()) appendMissionFileEffects(mission, scene);
-    if (scene.empty() || !w->loadObjects(missionLoadPath(mission).c_str(), "demo scene ghosts",
-                                         std::move(scene))) {
+    w->sceneDataBlocks = demoParser ? &demoParser->getInitialBlock().dataBlocks : nullptr;
+    const bool sceneLoaded = !scene.empty() &&
+        w->loadObjects(missionLoadPath(mission).c_str(), "demo scene ghosts", std::move(scene));
+    w->sceneDataBlocks = nullptr;
+    if (!sceneLoaded) {
         if (demoMissionState.pendingMission != mission)
             Console::instance().printf(LogLevel::Warn,
                 "Demo mission unavailable; deferring replacement: %s", mission.c_str());

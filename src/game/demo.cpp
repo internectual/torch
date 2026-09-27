@@ -307,9 +307,10 @@ Vec3 BitStream::readCompressedPoint(const Vec3& cp, float scale) {
     return v;
 }
 
-BitStream::AffineTransform BitStream::readAffineTransform(const Vec3& cp) {
+BitStream::AffineTransform BitStream::readAffineTransform(const Vec3&) {
+    // BitStream::writeAffineTransform: mathWrite(Point3F), then the quaternion.
     AffineTransform at;
-    at.position = readCompressedPoint(cp);
+    at.position = readPoint3F();
     float qx=readF32(), qy=readF32(), qz=readF32();
     float qw = sqrtf(fmaxf(0, 1.0f - (qx*qx + qy*qy + qz*qz)));
     if (readFlag()) qw = -qw;
@@ -2858,19 +2859,38 @@ static void readPhysicalZoneData(BitStream& bs, bool, const Vec3&, GhostEntry*) 
     bs.readFlag(); // active
 }
 
-static void readForceFieldBareData(BitStream& bs, bool, const Vec3&, GhostEntry* entry) {
-    const int payloadStart = bs.getCurPos();
-    if (bs.readFlag()) {
-        auto at = bs.readAffineTransform();
-        if (entry) { entry->position = at.position; entry->rotation = at.rotation; entry->hasRotation = true; }
+static void readForceFieldBareData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
+    // ForceFieldBare::unpackUpdate.
+    readGameBaseData(bs, isInitial, entry);
+    auto readTransform = [&]() {
+        const auto at = bs.readAffineTransform();
+        const Vec3 scale = bs.readPoint3F();
+        if (!entry) return;
+        entry->position = at.position;
+        entry->rotation = at.rotation;
+        entry->hasRotation = true;
+        // QuatF::setMatrix (m_quatF_set_matF, row-major).
+        const float qx = at.rotation.x, qy = at.rotation.y, qz = at.rotation.z, qw = at.rotation.w;
+        const float xx = qx * qx, yy = qy * qy, zz = qz * qz, xy = qx * qy, xz = qx * qz,
+                    yz = qy * qz, wx = qw * qx, wy = qw * qy, wz = qw * qz;
+        const float m[16] = {1 - 2 * (yy + zz), 2 * (xy + wz), 2 * (xz - wy), at.position.x,
+                             2 * (xy - wz), 1 - 2 * (xx + zz), 2 * (yz + wx), at.position.y,
+                             2 * (xz + wy), 2 * (yz - wx), 1 - 2 * (xx + yy), at.position.z,
+                             0, 0, 0, 1};
+        setSceneTransform(entry, m, scale);
+    };
+    if (bs.readFlag()) readTransform();          // InitialUpdateMask
+    else if (bs.readFlag()) readTransform();     // TransformMask
+    if (bs.readFlag()) {                         // StateChangeMask
+        const int state = bs.readInt(2);
+        uint32_t position = 0;
+        if (state == 1 || state == 2) position = bs.readU32();
+        if (entry) {
+            entry->forceFieldState = state;
+            entry->forceFieldPosition = position;
+            ++entry->forceFieldStateUpdates;
+        }
     }
-    bs.readPoint3F();
-    // The build-25034 recordings carry a fixed 316-bit ForceFieldBare
-    // envelope despite variable-width affine position encodings. Consume the
-    // remaining class-owned bits after decoding the common fields.
-    const int consumed = bs.getCurPos() - payloadStart;
-    for (int remaining = 316 - consumed; remaining > 0; remaining -= std::min(remaining, 32))
-        bs.readInt(std::min(remaining, 32));
 }
 
 static void readTSStaticData(BitStream& bs, bool, const Vec3&, GhostEntry* entry) {

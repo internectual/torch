@@ -675,7 +675,36 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
             activeDecoded->vehicleMinTrailSpeed = minTrailSpeed;
         }
         break;
-    } case 17: f32s(s,3); s.readFlag();s.readFlag();colors(s,2);s.readUnsigned(32);s.readUnsigned(32);f32s(s,3);strings(s,5);break;
+    } case 17: { // ForceFieldBareData::packData
+        const int32_t fadeMS = s.readSigned(32);
+        const float baseTranslucency = s.readF32(), powerOffTranslucency = s.readF32();
+        s.readFlag(); s.readFlag(); // team / other permeable
+        auto color = [&]() { // Stream::write(ColorF) sends a ColorI
+            const uint32_t c = s.readUnsigned(32);
+            return std::array<float, 4>{(c & 0xff) / 255.0f, ((c >> 8) & 0xff) / 255.0f,
+                                        ((c >> 16) & 0xff) / 255.0f, ((c >> 24) & 0xff) / 255.0f};
+        };
+        const auto fieldColor = color(), powerOffColor = color();
+        const uint32_t framesPerSec = s.readUnsigned(32), numFrames = s.readUnsigned(32);
+        const float scrollSpeed = s.readF32(), umapping = s.readF32(), vmapping = s.readF32();
+        std::vector<std::string> textures;
+        for (int i = 0; i < 5; ++i) textures.push_back(s.readString());
+        if (activeDecoded) {
+            activeDecoded->hasForceField = true;
+            activeDecoded->forceFieldFadeMS = fadeMS;
+            activeDecoded->forceFieldBaseTranslucency = baseTranslucency;
+            activeDecoded->forceFieldPowerOffTranslucency = powerOffTranslucency;
+            activeDecoded->forceFieldColor = fieldColor;
+            activeDecoded->forceFieldPowerOffColor = powerOffColor;
+            activeDecoded->forceFieldFramesPerSec = framesPerSec;
+            activeDecoded->forceFieldNumFrames = numFrames;
+            activeDecoded->forceFieldScrollSpeed = scrollSpeed;
+            activeDecoded->forceFieldUMapping = umapping;
+            activeDecoded->forceFieldVMapping = vmapping;
+            activeDecoded->forceFieldTextures = std::move(textures);
+        }
+        break;
+    }
     case 18: break; case 19: grenade(s); break; case 20: { // HoverVehicleData
         vehicle(s); f32s(s,17); f32s(s,3); f32s(s,2);
         refs(s, 3); // floatSound, thrustSound, turboSound

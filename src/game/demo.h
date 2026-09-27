@@ -703,6 +703,11 @@ struct GhostEntry {
     // SceneObject ghosts (TerrainBlock, InteriorInstance, TSStatic, Sky, Sun,
     // WaterBlock, MissionArea): their fields in mission-file form.
     std::vector<std::pair<std::string, std::string>> sceneProps;
+    // ForceFieldBare StateChangeMask: 0 Open, 1 Opening, 2 Closing, 3 Closed,
+    // the fade position (ms) and a count of such updates.
+    int forceFieldState = 3;
+    uint32_t forceFieldPosition = 0;
+    int forceFieldStateUpdates = 0;
     std::string shapeName; // from datablock
     int linkSourceGhost = -1;
     int linkTargetGhost = -1;

@@ -211,6 +211,14 @@ struct DecodedDataBlock {
     int32_t seekerFlechetteDelayMS = 0;
     // ItemData light (Item::registerLights) and ShapeBaseImageData light:
     // type 0 none, 1 constant, 2 pulsing, 3 weapon fire (images only).
+    // ForceFieldBareData.
+    bool hasForceField{};
+    int32_t forceFieldFadeMS = 1000;
+    float forceFieldBaseTranslucency = 1.0f, forceFieldPowerOffTranslucency = 0.0f;
+    std::array<float, 4> forceFieldColor{1, 1, 1, 1}, forceFieldPowerOffColor{0, 0, 0, 1};
+    uint32_t forceFieldFramesPerSec = 1, forceFieldNumFrames = 1;
+    float forceFieldScrollSpeed = 0.0f, forceFieldUMapping = 1.0f, forceFieldVMapping = 1.0f;
+    std::vector<std::string> forceFieldTextures;
     // PrecipitationData.
     bool hasPrecipitation{};
     int32_t precipitationType = 0;

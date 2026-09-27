@@ -186,6 +186,9 @@ public:
     bool load(const char* mapName);
     // The world from mission objects (a parsed .mis or demo scene ghosts).
     bool loadObjects(const char* mapName, const std::string& misPath, std::vector<MisObject> objects);
+    // While a demo world loads: the recording's datablocks, which objects
+    // carrying a "datablockid" resolve against instead of script datablocks.
+    const std::map<uint32_t, ParsedDataBlock>* sceneDataBlocks = nullptr;
     bool isLoaded() const { return loaded; }
     // Terrain-only load (no shapes/materials) — safe for headless dedicated servers
     // that only need authoritative ground heights for collision.
@@ -330,6 +333,9 @@ public:
         float forceFieldFramesPerSec = 1.0f;
         float forceFieldScrollSpeed = 0.0f;
         bool forceFieldOpen = false;
+        // The demo ghost this object stands for, or -1.
+        int ghostIndex = -1;
+        int forceFieldStateUpdates = -1;
         std::string animName; // empty = static render; non-empty = play this animation
         ShapeLighting::State shapeLight; // getLightingColor probe state
         float animTime = 0;
@@ -441,6 +447,7 @@ public:
                          const V12::DecodedDataBlock::ParticleData& particle);
     // A Lightning object from mission-file fields (get returns "" if unset).
     void addSceneLightning(const std::function<std::string(const char*)>& get);
+    void syncForceFieldGhost(int ghostIndex, int state, uint32_t position, int updates);
     void setScenePrecipitation(const std::function<std::string(const char*)>& get,
                                const std::function<std::string(const char*)>& data);
     void beginProjectileTrailSync();
