@@ -674,3 +674,8 @@ add_executable(torch_shadow_projection_test tests/shadow_projection_test.cpp src
 target_include_directories(torch_shadow_projection_test PRIVATE src)
 target_compile_options(torch_shadow_projection_test PRIVATE -UNDEBUG)
 add_test(NAME torch_shadow_projection COMMAND torch_shadow_projection_test)
+
+add_executable(torch_timeline_random_test tests/timeline_random_test.cpp)
+target_include_directories(torch_timeline_random_test PRIVATE src)
+target_compile_options(torch_timeline_random_test PRIVATE -UNDEBUG)
+add_test(NAME torch_timeline_random COMMAND torch_timeline_random_test)

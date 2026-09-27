@@ -9,6 +9,7 @@
 #include "render/material_parity.h"
 #include "render/environment_commands.h"
 #include "render/projected_shadows.h"
+#include "game/timeline_random.h"
 #include "core/timer.h"
 #include "game/decal_runtime.h"
 #include <GL/glew.h>
@@ -4914,12 +4915,9 @@ void World::spawnExplosionEffect(const Point3F& pos,
                                  const V12::DecodedDataBlock* projectileData,
                                  const V12::DecodedDataBlock* explosionData,
                                  const std::map<uint32_t, ParsedDataBlock>* dataBlocks,
-                                 const Point3F& impactNormal) {
+                                 const Point3F& impactNormal, int tick) {
     static constexpr size_t maxEffectInstances = 4096;
-    if (!projectileData || !dataBlocks) {
-        spawnExplosion(pos, {1.0f, 0.7f, 0.3f, 1.0f}, 2.0f, 15);
-        return;
-    }
+    if (!projectileData || !dataBlocks) return;
     const auto find = [&](uint32_t id) -> const V12::DecodedDataBlock* {
         auto it = dataBlocks->find(id);
         return it == dataBlocks->end() ? nullptr : &it->second.decoded;
@@ -4957,6 +4955,7 @@ void World::spawnExplosionEffect(const Point3F& pos,
         break;
     }
     const V12::DecodedDataBlock* selectedExplosion = explosionData;
+    uint32_t selectedExplosionId = projectileData->projectileExplosionRef;
     if (projectileData->projectileUnderwaterExplosionRef != 0) {
         float highestWaterLevel = -std::numeric_limits<float>::infinity();
         for (const auto& body : waterBodies) {
@@ -4967,16 +4966,15 @@ void World::spawnExplosionEffect(const Point3F& pos,
             if (body.level > highestWaterLevel &&
                 body.level - pos.y >= projectileData->projectileDepthTolerance) {
                 selectedExplosion = find(projectileData->projectileUnderwaterExplosionRef);
+                selectedExplosionId = projectileData->projectileUnderwaterExplosionRef;
                 highestWaterLevel = body.level;
             }
         }
     }
-    if (!selectedExplosion || !selectedExplosion->hasExplosion) {
-        spawnExplosion(pos, {1.0f, 0.7f, 0.3f, 1.0f}, 2.0f, 15);
-        return;
-    }
+    if (!selectedExplosion || !selectedExplosion->hasExplosion) return;
     const auto addEmitter = [&](uint32_t emitterId, bool burst, int burstCount,
-                                float effectLifetime, float effectDelay, const Point3F& origin) {
+                                float effectLifetime, float effectDelay, const Point3F& origin,
+                                TimelineRandom& random) {
         const auto* emitterBlock = find(emitterId);
         if (!emitterBlock || !emitterBlock->hasEmitter || emitterBlock->emitter.particleRefs.empty()) return;
         const auto* particleBlock = find(emitterBlock->emitter.particleRefs.front());
@@ -5002,8 +5000,7 @@ void World::spawnExplosionEffect(const Point3F& pos,
             emitter.lifetime = effectLifetime;
         } else {
             const float emitterLifetimeMS = (float)emitter.emitter.lifetimeMS +
-                ((float)std::rand() / RAND_MAX * 2.0f - 1.0f) *
-                    emitter.emitter.lifetimeVarianceMS;
+                (float)random.intInclusive(emitter.emitter.lifetimeVarianceMS);
             emitter.lifetime = std::max(0.0f, emitterLifetimeMS / 1000.0f);
         }
         emitter.nextEmission = burst ? -1.0f : 0.0f;
@@ -5012,24 +5009,22 @@ void World::spawnExplosionEffect(const Point3F& pos,
             effectEmitters.push_back(std::move(emitter));
     };
     std::vector<const V12::DecodedDataBlock*> explosionStack;
-    std::function<void(const V12::DecodedDataBlock*, int, const Point3F&)> spawnGraph;
-    spawnGraph = [&](const V12::DecodedDataBlock* block, int depth, const Point3F& origin) {
+    // Explosion::onAdd at `addTick`, `startDelay` seconds after this call
+    // (a sub-explosion's onAdd runs when its parent explodes).
+    std::function<void(const V12::DecodedDataBlock*, uint32_t, int, const Point3F&, int, float)> spawnGraph;
+    spawnGraph = [&](const V12::DecodedDataBlock* block, uint32_t blockId, int depth, const Point3F& origin,
+                     int addTick, float startDelay) {
         if (!block || !block->hasExplosion || depth > 4) return;
         if (std::find(explosionStack.begin(), explosionStack.end(), block) != explosionStack.end()) return;
         explosionStack.push_back(block);
         const auto& effect = block->explosion;
-        const Point3F effectOrigin{origin.x, origin.y + effect.offset, origin.z};
+        const Point3F effectOrigin = origin;
+        const Point3F torqueOrigin{origin.x, -origin.z, origin.y};
         const int density = std::clamp(effect.particleDensity, 0, 512);
-        const float lifetimeMS = (float)effect.lifetimeMS +
-            ((float)std::rand() / RAND_MAX * 2.0f - 1.0f) * effect.lifetimeVarianceMS;
-        const float effectLifetime = std::max(0.0f, lifetimeMS / 1000.0f);
-        const float effectDelay = std::max(0.0f, (float)effect.delayMS / 1000.0f);
-        // Retail ExplosionData sends only a hasLight flag; its light colors
-        // and radii are not networked and default to a zero radius, so a
-        // client explosion casts no light.
-        if (!effect.shape.empty() && effectExplosionShapes.size() < maxEffectInstances) {
+        // The explosion's own shape and its "ambient" sequence.
+        int shapeIndex = -1;
+        if (!effect.shape.empty()) {
             const std::string path = normalizeShapePath(effect.shape);
-            int shapeIndex = -1;
             if (auto cached = explosionShapeIndex.find(path); cached != explosionShapeIndex.end()) {
                 shapeIndex = cached->second;
             } else {
@@ -5042,38 +5037,58 @@ void World::spawnExplosionEffect(const Point3F& pos,
                 }
                 explosionShapeIndex[path] = shapeIndex;
             }
-            if (shapeIndex >= 0) {
-                EffectExplosionShape instance;
-                instance.pos = effectOrigin;
-                instance.shapeIndex = shapeIndex;
-                instance.delay = effectDelay;
-                instance.playSpeed = effect.playSpeed;
-                instance.faceViewer = effect.faceViewer;
-                instance.times = effect.times;
-                instance.sizes = effect.sizes;
-                // Explosion::explode: an "ambient" sequence replaces the
-                // datablock lifetime with its duration / |playSpeed|. The
-                // lifetime counts from onAdd, so the delay is included.
-                instance.lifetime = effectLifetime;
-                const auto& anims = explosionShapes[shapeIndex].animations;
-                for (size_t i = 0; i < anims.size(); ++i) {
-                    if (missionLower(anims[i].name) != "ambient") continue;
-                    instance.ambientIndex = (int)i;
-                    if (anims[i].duration > 0.0f && effect.playSpeed != 0.0f)
-                        instance.lifetime = anims[i].duration / std::fabs(effect.playSpeed);
-                    break;
-                }
-                // Deterministic roll so replays and seeks look the same.
-                uint32_t seed = 2166136261u;
-                auto mix = [&](float value) {
-                    uint32_t bits; std::memcpy(&bits, &value, sizeof bits);
-                    seed = (seed ^ bits) * 16777619u;
-                };
-                mix(effectOrigin.x); mix(effectOrigin.y); mix(effectOrigin.z);
-                mix((float)depth); mix((float)effect.shape.size());
-                instance.roll = (float)(seed % 65536u) / 65536.0f * 2.0f * Math::PI;
-                effectExplosionShapes.push_back(std::move(instance));
+        }
+        int ambientIndex = -1;
+        float ambientDuration = 0.0f;
+        if (shapeIndex >= 0) {
+            const auto& anims = explosionShapes[shapeIndex].animations;
+            for (size_t i = 0; i < anims.size(); ++i) {
+                if (missionLower(anims[i].name) != "ambient") continue;
+                ambientIndex = (int)i;
+                ambientDuration = anims[i].duration;
+                break;
             }
+        }
+        // Explosion::onAdd: delay and lifetime +- randI() % (2v + 1) - v;
+        // explode() replaces the lifetime with the ambient duration /
+        // |playSpeed|. Both count from onAdd; processTick explodes once the
+        // delay has passed and deletes at the lifetime, so an explosion whose
+        // lifetime ends while it is still waiting is never seen.
+        TimelineRandom random = timelineRandom({(double)blockId, (double)addTick, torqueOrigin.x,
+                                                torqueOrigin.y, torqueOrigin.z});
+        const int delayMS = std::max(0, effect.delayMS + random.intInclusive(effect.delayVarianceMS));
+        const int armedLifetimeMS = effect.lifetimeMS + random.intInclusive(effect.lifetimeVarianceMS);
+        const int lifetimeMS = ambientDuration > 0.0f && effect.playSpeed != 0.0f
+            ? (int)std::lround(ambientDuration / std::fabs(effect.playSpeed) * 1000.0f) : armedLifetimeMS;
+        const int explodeTicks = delayMS > 0 ? delayMS / 32 + 1 : 0;
+        const int armedLifetimeTicks = std::max(1, (armedLifetimeMS + 31) / 32);
+        if (explodeTicks > 0 && explodeTicks >= armedLifetimeTicks) {
+            explosionStack.pop_back();
+            return;
+        }
+        const float explodeAt = (float)explodeTicks * 0.032f;       // after onAdd
+        const float lifetime = std::max(0.0f, (float)lifetimeMS / 1000.0f);  // from onAdd
+        const float effectDelay = startDelay + explodeAt;
+        // Emitters are fed for as long as the explosion lives after exploding.
+        const float effectLifetime = std::max(0.0f, lifetime - explodeAt);
+        // Retail ExplosionData sends only a hasLight flag; its light colors
+        // and radii are not networked and default to a zero radius, so a
+        // client explosion casts no light.
+        if (shapeIndex >= 0 && effectExplosionShapes.size() < maxEffectInstances) {
+            EffectExplosionShape instance;
+            instance.pos = effectOrigin;
+            instance.shapeIndex = shapeIndex;
+            // The instance clock runs from its own onAdd.
+            instance.age = -startDelay;
+            instance.delay = explodeAt;
+            instance.playSpeed = effect.playSpeed;
+            instance.faceViewer = effect.faceViewer;
+            instance.times = effect.times;
+            instance.sizes = effect.sizes;
+            instance.lifetime = lifetime;
+            instance.ambientIndex = ambientIndex;
+            instance.roll = random() * 2.0f * Math::PI;
+            effectExplosionShapes.push_back(std::move(instance));
         }
         if (effect.shakeCamera && effectCameraShakes.size() < maxEffectInstances) {
             EffectCameraShake shake;
@@ -5089,12 +5104,11 @@ void World::spawnExplosionEffect(const Point3F& pos,
         if (effect.debrisRef) {
             const auto* debrisBlock = find(effect.debrisRef);
             const int debrisCount = effect.debrisNum > 0 ? std::clamp(effect.debrisNum +
-                (int)((float)std::rand() / RAND_MAX * 2.0f - 1.0f) * effect.debrisNumVariance,
-                0, 128) : 1;
+                random.intInclusive(effect.debrisNumVariance), 0, 128) : 1;
             for (int debrisIndex = 0; debrisBlock && debrisIndex < debrisCount &&
                  effectDebris.size() < maxEffectInstances; ++debrisIndex) {
                 const auto& data = debrisBlock->debris;
-                const float random01 = (float)std::rand() / (float)RAND_MAX;
+                const float random01 = random();
                 const float theta = random01 * Math::PI * 2.0f;
                 Point3F normal = impactNormal;
                 const float normalLength = std::sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
@@ -5146,9 +5160,9 @@ void World::spawnExplosionEffect(const Point3F& pos,
             }
         }
         if (effect.particleEmitterRef)
-            addEmitter(effect.particleEmitterRef, true, density, effectLifetime, effectDelay, effectOrigin);
+            addEmitter(effect.particleEmitterRef, true, density, effectLifetime, effectDelay, effectOrigin, random);
         for (uint32_t ref : effect.emitterRefs)
-            if (ref) addEmitter(ref, false, 0, effectLifetime, effectDelay, effectOrigin);
+            if (ref) addEmitter(ref, false, 0, effectLifetime, effectDelay, effectOrigin, random);
         if (effect.shockwaveRef) {
             const auto* shockwaveBlock = find(effect.shockwaveRef);
             if (shockwaveBlock && shockwaveBlock->hasShockwave) {
@@ -5156,12 +5170,12 @@ void World::spawnExplosionEffect(const Point3F& pos,
                 shockwave.pos = effectOrigin;
                 shockwave.data = shockwaveBlock->shockwave;
                 const float delay = (float)shockwave.data.delayMS +
-                    ((float)std::rand() / RAND_MAX * 2.0f - 1.0f) * shockwave.data.delayVariance;
-                shockwave.age = -std::max(0.0f, delay / 1000.0f);
+                    (float)random.intInclusive(shockwave.data.delayVariance);
+                shockwave.age = -(effectDelay + std::max(0.0f, delay / 1000.0f));
                 shockwave.velocity = shockwave.data.velocity;
-                const float lifetime = (float)shockwave.data.lifetimeMS +
-                    ((float)std::rand() / RAND_MAX * 2.0f - 1.0f) * shockwave.data.lifetimeVariance;
-                shockwave.lifetime = std::max(0.001f, lifetime / 1000.0f);
+                const float shockLifetime = (float)shockwave.data.lifetimeMS +
+                    (float)random.intInclusive(shockwave.data.lifetimeVariance);
+                shockwave.lifetime = std::max(0.001f, shockLifetime / 1000.0f);
                 if (!shockwave.data.textures.empty()) {
                     std::vector<uint32_t> frames;
                     std::vector<float> durations;
@@ -5180,14 +5194,31 @@ void World::spawnExplosionEffect(const Point3F& pos,
                     effectShockwaves.push_back(std::move(shockwave));
             }
         }
+        // Explosion::explode adds the sub-explosions; each one's onAdd
+        // scatters it by its `offset` along a random direction in the
+        // hemisphere above the impact (the normal taken as up).
+        const int explodeTick = addTick + explodeTicks;
+        TimelineRandom subRandom = timelineRandom({(double)blockId, (double)explodeTick, torqueOrigin.x,
+                                                   torqueOrigin.y, torqueOrigin.z});
         for (uint32_t ref : effect.subExplosionRefs) {
             if (effectEmitters.size() >= maxEffectInstances &&
                 effectShockwaves.size() >= maxEffectInstances) break;
-            if (const auto* sub = find(ref)) spawnGraph(sub, depth + 1, effectOrigin);
+            const auto* sub = find(ref);
+            if (!sub || !sub->hasExplosion) continue;
+            Point3F subOrigin = effectOrigin;
+            const float offset = sub->explosion.offset;
+            if (std::fabs(offset) > 1e-4f) {
+                const float dx = subRandom() * 2.0f - 1.0f, dy = subRandom() * 2.0f - 1.0f, dz = subRandom();
+                float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (len <= 0.0f) len = 1.0f;
+                const Point3F shift = Math::torquePointToYUp({dx / len * offset, dy / len * offset, dz / len * offset});
+                subOrigin = {subOrigin.x + shift.x, subOrigin.y + shift.y, subOrigin.z + shift.z};
+            }
+            spawnGraph(sub, ref, depth + 1, subOrigin, explodeTick, effectDelay);
         }
         explosionStack.pop_back();
     };
-    spawnGraph(selectedExplosion, 0, pos);
+    spawnGraph(selectedExplosion, selectedExplosionId, 0, pos, tick, 0.0f);
 }
 
 void World::spawnSplashEffect(const Point3F& inputPos,
@@ -6980,7 +7011,9 @@ void Game::update(float dt) {
                             if (explosionIt != dataBlocks.end())
                                 explosionData = &explosionIt->second.decoded;
                         }
-                        w->spawnExplosionEffect(expPos, projectileData, explosionData, &dataBlocks, expNormal);
+                        // The move tick the explosion lands on seeds its cosmetic randomness.
+                        w->spawnExplosionEffect(expPos, projectileData, explosionData, &dataBlocks, expNormal,
+                                                (int)std::floor(demoTime / 0.032f));
                         shakeIntensity = std::max(shakeIntensity, 1.5f);
                     }
 
