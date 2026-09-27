@@ -1620,7 +1620,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         for (int i = 0; i < numMats; i++) result.materialNames[i] = prStr();
         // T2 reads flags, reflectance, bump, detail in SEPARATE loops (not interleaved)
         std::vector<uint32_t> rawFlagsVec(numMats);
-        for (int i = 0; i < numMats; i++) rawFlagsVec[i] = capCount(prS32()); // ALL flags
+        // Flags are a bit set (IflMaterial is bit 27), not a count.
+        for (int i = 0; i < numMats; i++) rawFlagsVec[i] = (uint32_t)prS32(); // ALL flags
         for (int i = 0; i < numMats; i++) capCount(prS32()); // ALL reflectance
         for (int i = 0; i < numMats; i++) capCount(prS32()); // ALL bump
         for (int i = 0; i < numMats; i++) capCount(prS32()); // ALL detail
