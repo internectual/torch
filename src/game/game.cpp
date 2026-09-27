@@ -3890,7 +3890,11 @@ void World::render(const Point3F& cameraPos, float dt) {
             waterRendered = true;
         }
         if (obj.itemPickup && !obj.itemActive) continue;
-        if (!Engine::instance().game().isMapperMode() &&
+        // Objects inside an interior are scoped by its visible zones. An
+        // interior culls its own zones (activeInteriorZones below); its origin
+        // lying in a zone the camera cannot see must not hide all of it.
+        const bool isInterior = obj.shape && obj.shape->isInterior;
+        if (!Engine::instance().game().isMapperMode() && !isInterior &&
             !isPositionVisible(obj.pos, cameraPos))
             continue;
         if (obj.shape && obj.shape->loaded) {
