@@ -222,6 +222,12 @@ void Renderer::shutdown() {
 void Renderer::beginFrame(const ColorF& clearColor) {
     stats.drawCalls = 0;
     stats.triangles = 0;
+    // The clear obeys the write masks and scissor; a pass that left them
+    // changed would otherwise keep the old depth (every later draw fails)
+    // or clear only part of the frame.
+    glDepthMask(GL_TRUE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDisable(GL_SCISSOR_TEST);
     glClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 }

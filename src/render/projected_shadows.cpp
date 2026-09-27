@@ -187,9 +187,10 @@ void ProjectedShadows::renderSilhouette(Renderer& r, State& state,
     proj.orthographic(-radius, radius, -radius, radius, 0.01f, 4.0f * radius);
     const MatrixF viewProj = proj * view;
 
-    GLint previousFbo = 0, viewport[4];
+    GLint previousFbo = 0, viewport[4], scissorBox[4];
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFbo);
     glGetIntegerv(GL_VIEWPORT, viewport);
+    glGetIntegerv(GL_SCISSOR_BOX, scissorBox);
     const GLboolean depthTest = glIsEnabled(GL_DEPTH_TEST), cull = glIsEnabled(GL_CULL_FACE),
                     blend = glIsEnabled(GL_BLEND), scissor = glIsEnabled(GL_SCISSOR_TEST);
     GLfloat clear[4];
@@ -217,6 +218,7 @@ void ProjectedShadows::renderSilhouette(Renderer& r, State& state,
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previousFbo);
     glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
     glClearColor(clear[0], clear[1], clear[2], clear[3]);
+    glScissor(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]);
     if (!scissor) glDisable(GL_SCISSOR_TEST);
     if (depthTest) glEnable(GL_DEPTH_TEST);
     if (cull) glEnable(GL_CULL_FACE);
@@ -278,9 +280,10 @@ void ProjectedShadows::renderReceiverDepth(State& state) {
     view.lookAt(c, {c.x + dir.x, c.y + dir.y, c.z + dir.z}, state.basis.z);
     proj.orthographic(-state.radius, state.radius, -state.radius, state.radius, 0.0f, state.reach);
 
-    GLint previousFbo = 0, viewport[4], depthFunc = GL_LESS;
+    GLint previousFbo = 0, viewport[4], depthFunc = GL_LESS, scissorBox[4];
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFbo);
     glGetIntegerv(GL_VIEWPORT, viewport);
+    glGetIntegerv(GL_SCISSOR_BOX, scissorBox);
     glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
     GLboolean depthMask = GL_TRUE;
     glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
@@ -314,6 +317,7 @@ void ProjectedShadows::renderReceiverDepth(State& state) {
     glClearDepth(clearDepth);
     glDepthMask(depthMask);
     glDepthFunc(depthFunc);
+    glScissor(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]);
     if (!scissor) glDisable(GL_SCISSOR_TEST);
     if (!depthTest) glDisable(GL_DEPTH_TEST);
     if (cull) glEnable(GL_CULL_FACE);
