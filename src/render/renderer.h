@@ -328,11 +328,12 @@ inline bool interiorPortalAllowsTraversal(uint16_t planeIndex, uint16_t zoneFron
     return (side > 0.0f ? 1.0f : -1.0f) == zoneSide;
 }
 
-// One opaque mesh draw of a shadow caster, replayed into its projected
-// shadow silhouette while the mesh still holds the caster's pose.
+// One mesh draw of the object being drawn, replayed (projected-shadow
+// silhouette, shocklance zap) while the mesh still holds its pose.
 struct ShadowCaptureDraw {
     MeshData* mesh = nullptr;
     MatrixF model;
+    bool translucent = false;
 };
 
 struct TerrainBlock {
@@ -520,8 +521,8 @@ public:
     /// before the world render, cleared outside gameplay). DTSShape::render uses
     /// this to decide whether shapes should sample the shadow map.
     bool shadowsActive = false;
-    /// While set, DTS shapes append their opaque mesh draws here (the
-    /// projected-shadow silhouette of the caster being drawn).
+    /// While set, DTS shapes append their mesh draws here (the object
+    /// being drawn: its shadow silhouette and shocklance zap).
     std::vector<ShadowCaptureDraw>* shadowCapture = nullptr;
     uint32_t shadowDepthTex = 0;
 

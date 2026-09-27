@@ -1913,12 +1913,11 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
                 fm = baseModel * nodeWorld[mesh.nodeIndex];
             r.setModel(fm);
         }
-        // A projected-shadow caster keeps its opaque draws for the silhouette
-        // (TSMesh::renderShadow skips translucent materials).
+        // Keep the draw for replay (shadow silhouette, shocklance zap).
         if (r.shadowCapture) {
             const uint32_t captureFlags = mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialFlags.size()
                 ? materialFlags[mesh.materialIndex] : 0u;
-            if (!(captureFlags & MatFlag_Translucent)) r.shadowCapture->push_back({&mesh, r.modelMatrix()});
+            r.shadowCapture->push_back({&mesh, r.modelMatrix(), (captureFlags & MatFlag_Translucent) != 0});
         }
         uint32_t flags = 0;
         if (mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialTextures.size()) {
@@ -2612,12 +2611,11 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
                 fm = baseModel * nodeWorld[mesh.nodeIndex];
             r.setModel(fm);
         }
-        // A projected-shadow caster keeps its opaque draws for the silhouette
-        // (TSMesh::renderShadow skips translucent materials).
+        // Keep the draw for replay (shadow silhouette, shocklance zap).
         if (r.shadowCapture) {
             const uint32_t captureFlags = mesh.materialIndex >= 0 && mesh.materialIndex < (int)materialFlags.size()
                 ? materialFlags[mesh.materialIndex] : 0u;
-            if (!(captureFlags & MatFlag_Translucent)) r.shadowCapture->push_back({&mesh, r.modelMatrix()});
+            r.shadowCapture->push_back({&mesh, r.modelMatrix(), (captureFlags & MatFlag_Translucent) != 0});
         }
 
         // Bind texture and set material properties

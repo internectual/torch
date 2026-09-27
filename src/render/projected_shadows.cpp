@@ -208,7 +208,8 @@ void ProjectedShadows::renderSilhouette(Renderer& r, State& state,
     glDisable(GL_BLEND);
     silhouetteShader.bind();
     for (const ShadowCaptureDraw& d : draws) {
-        if (!d.mesh) continue;
+        // TSMesh::renderShadow skips translucent materials.
+        if (!d.mesh || d.translucent) continue;
         silhouetteShader.setUniform("uMVP", viewProj * d.model);
         d.mesh->render();
     }

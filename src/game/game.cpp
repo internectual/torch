@@ -306,6 +306,106 @@ static ProjectedShadows& projectedShadows() {
     return pool;
 }
 
+// The shocklance zap (Tribes2.exe client zap object FUN_006518a0, as ported
+// by t2-mapper shockLance.ts): the struck object's own meshes redrawn 5%
+// larger about its origin, additive, no depth write, no fog, with the
+// lance's textures cycling ten times a second, projected object-linear at
+// 0.25 repeats/m along its longest axis and scrolling (2 age, age), fading
+// 1 - age / zapDuration.
+struct ShockZapRequest {
+    float spawnTime = 0.0f;
+    float zapDuration = 0.0f;
+    std::vector<uint32_t> textures;
+};
+static std::unordered_map<int, ShockZapRequest>& shockZapRequests() {
+    static std::unordered_map<int, ShockZapRequest> requests;
+    return requests;
+}
+
+// Frame = round(fmod(age, 1/10) x 10 x 2.9999): texture[0..3] ten times a
+// second (the fourth is past the three lightning frames).
+static int zapFrameIndex(float age) {
+    const float phase = std::fmod(age, 0.1f) * 10.0f;
+    return std::clamp((int)std::lround(phase * 2.9999f), 0, 3);
+}
+
+static void drawShockZap(Renderer& r, const std::vector<ShadowCaptureDraw>& draws, size_t count,
+                         const Point3F& origin, float age, const ShockZapRequest& zap) {
+    if (count == 0 || zap.textures.empty() || zap.zapDuration <= 0.0f) return;
+    static Shader shader;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        shader.load(R"(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uMVP;
+uniform vec3 uPlaneS;
+uniform vec3 uPlaneT;
+uniform vec3 uScroll;
+out vec2 vUV;
+void main() {
+    vUV = vec2(dot(uPlaneS, aPos), dot(uPlaneT, aPos)) + uScroll.xy;
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)", R"(
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uTexture;
+uniform float uAlpha;
+void main() { FragColor = vec4(texture(uTexture, vUV).rgb, uAlpha); }
+)");
+    }
+    if (!shader.loaded) return;
+    // Texgen planes along the longest Torque axis of the bind-pose meshes:
+    // X unless Y is strictly the longest (Z, the height, also selects X).
+    Point3F lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+    for (size_t i = 0; i < count; ++i)
+        for (const auto& v : draws[i].mesh->vertices) {
+            lo = {std::min(lo.x, v.pos.x), std::min(lo.y, v.pos.y), std::min(lo.z, v.pos.z)};
+            hi = {std::max(hi.x, v.pos.x), std::max(hi.y, v.pos.y), std::max(hi.z, v.pos.z)};
+        }
+    const float ex = hi.x - lo.x, ey = hi.y - lo.y, ez = hi.z - lo.z;
+    const bool alongY = ey > ez && ey > ex;
+    constexpr float texgen = 0.25f;
+    const Point3F planeS = alongY ? Point3F{0, texgen, 0} : Point3F{texgen, 0, 0};
+    const Point3F planeT{0, 0, texgen};
+    // 5% larger about the struck object's origin.
+    MatrixF toOrigin, scale, back;
+    toOrigin.identity(); scale.identity(); back.identity();
+    toOrigin.setTranslation(origin);
+    scale.m[0][0] = scale.m[1][1] = scale.m[2][2] = 1.05f;
+    back.setTranslation({-origin.x, -origin.y, -origin.z});
+    const MatrixF zapScale = toOrigin * scale * back;
+    const MatrixF viewProj = r.projection * r.view;
+
+    GLboolean depthMask = GL_TRUE;
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
+    const GLboolean blend = glIsEnabled(GL_BLEND), cull = glIsEnabled(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+    shader.bind();
+    const uint32_t texture = zap.textures[std::min(zap.textures.size() - 1, (size_t)zapFrameIndex(age))];
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    shader.setUniform("uTexture", (int32_t)0);
+    shader.setUniform("uAlpha", 1.0f - age / zap.zapDuration);
+    shader.setUniform("uPlaneS", planeS);
+    shader.setUniform("uPlaneT", planeT);
+    shader.setUniform("uScroll", Point3F{2.0f * age, age, 0.0f});
+    for (size_t i = 0; i < count; ++i) {
+        shader.setUniform("uMVP", viewProj * zapScale * draws[i].model);
+        draws[i].mesh->render();
+    }
+    glDepthMask(depthMask);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (!blend) glDisable(GL_BLEND);
+    if (cull) glEnable(GL_CULL_FACE);
+}
+
 // Torque haze at `dist`: quadratic from fogDistance to visibleDistance.
 static float hazeAt(const World& world, float dist) {
     const float start = world.fog.distance, end = world.visibleDistance;
@@ -6517,6 +6617,13 @@ bool Game::init() {
         Console::instance().printf(LogLevel::Info,
             "Demo seeked to block %d", target);
     }, "seekDemoBlock <index> - seek parser state to a demo block");
+    con.addCommand("seekDemoTime", [this](int32_t argc, const char* const* argv) {
+        if (!demoParser || argc < 2) return;
+        // The block that completes the target 32 ms move tick.
+        const int block = T2Demo::playbackTargetBlock((float)std::max(0.0, atof(argv[1])),
+                                                      demoParser->getMoveTicksBefore());
+        Console::instance().execute(("seekDemoBlock(" + std::to_string(block) + ")").c_str());
+    }, "seekDemoTime <seconds> - seek to a demo time");
 
     con.addCommand("listdemos", [this](int32_t argc, const char* const* argv) {
         auto& fs = Engine::instance().fs();
@@ -8854,8 +8961,6 @@ void Game::render(float dt) {
                 // 1 - age/zapDuration at the target, U scrolling boltSpeed x age
                 // with texWrap repeats) and two lightning ribbons regenerated at
                 // lightningFreq; a miss only sparks 0.2 m from the live muzzle.
-                // TODO(parity): the zap overlay (target redrawn 5% larger with
-                // the shockLightning frames) is not drawn yet.
                 if (ghostClassIs(g->className, "ShockLanceProjectile") && g->hasBeam) {
                     const auto& dataBlocks = demoParser->getInitialBlock().dataBlocks;
                     auto dataIt = g->hasDatablock ? dataBlocks.find((uint32_t)g->datablockId)
@@ -8940,6 +9045,14 @@ void Game::render(float dt) {
                         return frames.empty() ? 0u : frames.front();
                     };
                     const uint32_t beamTexture = textureFor(lance->textures.back());
+                    // A pinned bolt zaps the struck object (drawn with it).
+                    if (g->beamHit && g->linkTargetGhost >= 0) {
+                        ShockZapRequest& zap = shockZapRequests()[g->linkTargetGhost];
+                        zap.spawnTime = mg->spawnTime;
+                        zap.zapDuration = zapDuration;
+                        if (zap.textures.empty())
+                            for (const std::string& name : lance->textures) zap.textures.push_back(textureFor(name));
+                    }
                     // Lightning ribbons; the engine sides each local point against
                     // the world camera position.
                     const float halfLightning = lance->lightningWidth * 0.5f;
@@ -9013,6 +9126,11 @@ void Game::render(float dt) {
             bool shadowCaster = false;
             Point3F shadowCenter{};
             float shadowRadius = 0.0f;
+            // A shocklance zap redraws the struck object's own meshes (not its
+            // mounted images): the draws captured before the images.
+            bool zapTarget = false;
+            Point3F zapOrigin{};
+            size_t zapDrawCount = 0;
             if (shape && shape->loaded) {
                 // Apply skin textures on first render (player ghosts only)
                 if (!mg->skinApplied && !g->skinName.empty() &&
@@ -9049,6 +9167,9 @@ void Game::render(float dt) {
                 r.setModel(model * shape->upOrientation());
                 shadowCaster = (isPlayer || ObserverParity::isVehicleClass(g->className)) &&
                                g->mountObject < 0;
+                zapTarget = shockZapRequests().count(idx) != 0;
+                zapOrigin = renderPosition;
+                if (zapTarget) r.shadowCapture = &shadowDraws;
                 if (shadowCaster) {
                     // TSShape::bounds: centre and half diagonal.
                     const MatrixF shapeModel = model * shape->upOrientation();
@@ -9323,6 +9444,7 @@ void Game::render(float dt) {
                 }
                 shape->cloakTextureOverride = nullptr;
                 shape->alphaScale = 1.0f;
+                zapDrawCount = shadowDraws.size();
 
                 // Player::updateJet loops PlayerData jetSound while jetting.
                 if (isPlayer) {
@@ -9535,8 +9657,17 @@ void Game::render(float dt) {
                 }
             }
 
-            // Shadow::render: cloaked objects cast none.
             r.shadowCapture = nullptr;
+            if (zapTarget) {
+                auto zapIt = shockZapRequests().find(idx);
+                const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                const float age = now - zapIt->second.spawnTime;
+                if (age < 0.0f || age >= zapIt->second.zapDuration)
+                    shockZapRequests().erase(zapIt);
+                else
+                    drawShockZap(r, shadowDraws, zapDrawCount, zapOrigin, age, zapIt->second);
+            }
+            // Shadow::render: cloaked objects cast none.
             if (shadowCaster && !(mg->cloakLevel > 0.0f)) {
                 const float dist = std::sqrt((r.cameraPos.x - shadowCenter.x) * (r.cameraPos.x - shadowCenter.x) +
                                              (r.cameraPos.y - shadowCenter.y) * (r.cameraPos.y - shadowCenter.y) +
@@ -9581,6 +9712,8 @@ void Game::render(float dt) {
         }
         r.shadowCapture = nullptr;
         projectedShadows().endFrame(Timer::now() * 1000.0);
+        for (auto it = shockZapRequests().begin(); it != shockZapRequests().end();)
+            it = gt.hasGhost(it->first) ? std::next(it) : shockZapRequests().erase(it);
         w->endProjectileTrailSync();
         for (auto it = demoJetSoundSources.begin(); it != demoJetSoundSources.end();) {
             if (gt.hasGhost(it->first)) { ++it; continue; }
