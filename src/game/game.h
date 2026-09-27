@@ -435,6 +435,10 @@ public:
     void renderParticles();
     Point3F cameraShakeOffset(const Point3F& cameraPosition) const;
     void clearEffects();
+    // A mission emitter (ParticleEmissionDummy) at `pos` along `axis` (Y-up).
+    void addSceneEmitter(const Point3F& pos, const Point3F& axis,
+                         const V12::DecodedDataBlock::ParticleEmitterData& emitter,
+                         const V12::DecodedDataBlock::ParticleData& particle);
     void beginProjectileTrailSync();
     void syncProjectileTrail(int ownerId, const Point3F& pos, const Point3F& velocity,
                              const V12::DecodedDataBlock* projectileData,
@@ -798,6 +802,10 @@ public:
     // The world a demo's SceneObject ghosts describe, in mission-file form;
     // empty until its TerrainBlock ghost is in.
     std::vector<MisObject> demoSceneObjects() const;
+    // Scene effects a demo's ghosts carry with recorded datablocks (mission
+    // emitters, lightning, precipitation, force fields), added once the
+    // world is loaded.
+    void applyDemoSceneEffects();
     // demoParser->getGhostResets() the demo world was built at.
     int demoWorldGhostResets = -1;
     void connectToServer(const char* host, uint16_t port, bool observer = false,

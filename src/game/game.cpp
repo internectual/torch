@@ -3767,6 +3767,24 @@ void World::updateRendererLights(Renderer& renderer) const {
     renderer.setDynamicLights(lights);
 }
 
+void World::addSceneEmitter(const Point3F& pos, const Point3F& axis,
+                            const V12::DecodedDataBlock::ParticleEmitterData& emitterData,
+                            const V12::DecodedDataBlock::ParticleData& particle) {
+    EffectEmitter emitter;
+    emitter.pos = pos;
+    emitter.axis = axis;
+    emitter.emitter = emitterData;
+    emitter.particle = particle;
+    for (const auto& textureName : emitter.particle.textures) {
+        std::vector<uint32_t> frames; std::vector<float> durations;
+        Engine::instance().renderer().loadTextureFrames(textureName.c_str(), frames, durations);
+        emitter.textures.insert(emitter.textures.end(), frames.begin(), frames.end());
+        emitter.textureDurations.insert(emitter.textureDurations.end(), durations.begin(), durations.end());
+    }
+    if (!emitter.textures.empty()) emitter.texture = emitter.textures.front();
+    effectEmitters.push_back(std::move(emitter));
+}
+
 void World::render(const Point3F& cameraPos, float dt) {
     static float forceFieldTime = 0.0f;
     // ForceField animation is simulation-time driven in Torque. Using a fixed
@@ -6662,6 +6680,8 @@ bool Game::init() {
         }
         demoParser->setCurrentBlock(target);
         demoParser->consumeExplosions();
+        // resetDemoPresentation cleared the effects: re-add the scene's.
+        applyDemoSceneEffects();
         demoBlocksDone = target;
         demoTime = T2Demo::playbackBlockTime(target, demoParser->getMoveTicksBefore());
         // A seek may cross a mission change in either direction.
@@ -11809,6 +11829,7 @@ bool Game::playDemo(const char* path) {
         return false;
     }
     demoWorldGhostResets = demoParser->getGhostResets();
+    applyDemoSceneEffects();
     Engine::instance().guiRenderer().popDialog("ConsoleDlg");
     if (auto* console = Engine::instance().guiRenderer().findControl("ConsoleDlg"))
         console->visible = false;
@@ -12124,7 +12145,6 @@ static void appendMissionFileEffects(const std::string& mission, std::vector<Mis
     for (auto& object : parseMisFile(misData)) {
         if (missionClassEquals(object.className, "Precipitation") ||
             missionClassEquals(object.className, "Lightning") ||
-            missionClassEquals(object.className, "ParticleEmissionDummy") ||
             missionClassEquals(object.className, "ForceFieldBare"))
             objects.push_back(std::move(object));
     }
@@ -12189,6 +12209,40 @@ std::vector<MisObject> Game::demoSceneObjects() const {
     return objects;
 }
 
+void Game::applyDemoSceneEffects() {
+    if (!demoParser || !w) return;
+    const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+    auto find = [&](const std::string& id) -> const V12::DecodedDataBlock* {
+        if (id.empty() || std::atoi(id.c_str()) <= 0) return nullptr;
+        auto it = blocks.find((uint32_t)std::atoi(id.c_str()));
+        return it == blocks.end() ? nullptr : &it->second.decoded;
+    };
+    const auto& tracker = demoParser->getGhostTracker();
+    for (int index : tracker.getAllIndices()) {
+        const GhostEntry* g = tracker.getGhost(index);
+        if (!g || g->sceneProps.empty()) continue;
+        auto prop = [&](const char* name) -> std::string {
+            for (const auto& [key, value] : g->sceneProps) if (key == name) return value;
+            return {};
+        };
+        if (ghostClassIs(g->className, "ParticleEmissionDummy")) {
+            // ParticleEmissionDummy: its emitter datablock, emitting along
+            // the dummy's z axis.
+            const auto* emitter = find(prop("emitterId"));
+            if (!emitter || !emitter->hasEmitter || emitter->emitter.particleRefs.empty()) continue;
+            const auto* particle = find(std::to_string(emitter->emitter.particleRefs.front()));
+            if (!particle || !particle->hasParticle) continue;
+            Point3F axis{0, 0, 1};
+            sscanf(prop("emitterAxis").c_str(), "%f %f %f", &axis.x, &axis.y, &axis.z);
+            Point3F up = Math::torquePointToYUp(axis);
+            const float length = std::sqrt(up.x * up.x + up.y * up.y + up.z * up.z);
+            if (length > 0.0001f) up = {up.x / length, up.y / length, up.z / length};
+            w->addSceneEmitter(Math::torquePointToYUp({g->position.x, g->position.y, g->position.z}), up,
+                               emitter->emitter, particle->particle);
+        }
+    }
+}
+
 bool Game::tryLoadDemoMission(const std::string& mission, bool resetParserState) {
     if (mission.empty() || mission == demoMissionState.loadedMission) {
         if (mission == demoMissionState.loadedMission)
@@ -12237,6 +12291,7 @@ bool Game::tryLoadDemoMission(const std::string& mission, bool resetParserState)
     missionGui.setContent("PlayGui");
     resetGameplayGui(missionGui);
     if (hud) hud->resetState();
+    applyDemoSceneEffects();
     Console::instance().printf(LogLevel::Info,
         "Demo mission replacement loaded: %s", mission.c_str());
     return true;

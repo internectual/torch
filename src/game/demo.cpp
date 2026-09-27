@@ -3070,9 +3070,16 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
     }
     else if (cn == "ParticleEmissionDummy") {
         readGameBaseData(bs, isInitial, entry);
-        bs.readMatrixF();
-        bs.readPoint3F();
-        if (bs.readFlag()) bs.readInt(11);
+        float m[16];
+        Vec3 position;
+        const float* read = (const float*)bs.readMatrixF(&position);
+        std::copy(read, read + 16, m);
+        const Vec3 scale = bs.readPoint3F();
+        if (entry) entry->position = position;
+        setSceneTransform(entry, m, scale);
+        // The emitter's up axis (the transform's z column).
+        setSceneProp(entry, "emitterAxis", sceneFloats({m[2], m[6], m[10]}));
+        if (bs.readFlag()) setSceneProp(entry, "emitterId", std::to_string(bs.readInt(11)));
     }
     else if (cn == "Trigger") {
         bs.readU32();
