@@ -734,7 +734,23 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
      }
     case 25: linear(s); break; case 26: shapeBase(s); break; case 27: particle(s); break;
     case 28: s.readF32(); break; case 29: emitter(s); break;
-     case 30: player(s); break; case 31: refs(s,1);s.readUnsigned(32);s.readF32();strings(s,1);f32s(s,13);break; case 32: projectile(s);break; case 33: { // RepairProjectileData
+     case 30: player(s); break; case 31: { // PrecipitationData
+        refs(s,1); // sound profile
+        const int32_t type = (int32_t)s.readUnsigned(32);
+        const float maxSize = s.readF32();
+        const std::string materialList = s.readString();
+        const float sizeX = s.readF32(), sizeY = s.readF32();
+        f32s(s,11); // box tuning
+        if (activeDecoded) {
+            activeDecoded->hasPrecipitation = true;
+            activeDecoded->precipitationType = type;
+            activeDecoded->precipitationMaxSize = maxSize;
+            activeDecoded->precipitationMaterialList = materialList;
+            activeDecoded->precipitationSizeX = sizeX;
+            activeDecoded->precipitationSizeY = sizeY;
+        }
+        break;
+    } case 32: projectile(s);break; case 33: { // RepairProjectileData
         projectile(s);
         const float beamRange = s.readF32();
         s.readF32(); // beamWidth

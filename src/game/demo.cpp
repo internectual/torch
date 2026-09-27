@@ -3110,9 +3110,10 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
     else if (cn == "Sun") readSunData(bs, isInitial, cp, entry);
     else if (cn == "Lightning") readLightningData(bs, isInitial, cp, entry);
     else if (cn == "Precipitation") {
+        // Precipitation::unpackUpdate.
         readGameBaseData(bs, isInitial, entry);
-        if (bs.readFlag()) {
-            bs.readF32();
+        if (bs.readFlag()) { // InitMask
+            setSceneProp(entry, "percentage", sceneFloats({bs.readF32()}));
             const int colorCount = bs.readS32();
             if (colorCount < 0 || colorCount > 3) {
                 Console::instance().printf(LogLevel::Error,
@@ -3120,15 +3121,22 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
                 return false;
             }
             for (int i = 0; i < colorCount; ++i) {
-                bs.readU8(); bs.readU8(); bs.readU8(); bs.readU8();
+                // Stream::write(ColorF) sends a ColorI.
+                const float r = bs.readU8() / 255.0f, g = bs.readU8() / 255.0f;
+                const float b = bs.readU8() / 255.0f, a = bs.readU8() / 255.0f;
+                setSceneProp(entry, ("color" + std::to_string(i + 1)).c_str(), sceneFloats({r, g, b, a}));
             }
-            bs.readF32(); bs.readF32(); bs.readF32();
-            bs.readS32(); bs.readF32();
+            setSceneProp(entry, "offsetSpeed", sceneFloats({bs.readF32()}));
+            setSceneProp(entry, "minVelocity", sceneFloats({bs.readF32()}));
+            setSceneProp(entry, "maxVelocity", sceneFloats({bs.readF32()}));
+            setSceneProp(entry, "maxNumDrops", std::to_string(bs.readS32()));
+            // mRadius is an S32 (maxRadius, TypeS32).
+            setSceneProp(entry, "maxRadius", std::to_string(bs.readS32()));
             if (bs.readFlag()) { bs.readF32(); bs.readF32(); bs.readF32(); }
         }
         if (bs.readFlag()) bs.readBool();
         if (bs.readFlag()) { bs.readF32(); bs.readF32(); }
-        if (bs.readFlag()) bs.readF32();
+        if (bs.readFlag()) setSceneProp(entry, "percentage", sceneFloats({bs.readF32()}));
     }
     else if (cn == "StationFXPersonal" || cn == "StationFXVehicle") {
         readGameBaseData(bs, isInitial, entry);

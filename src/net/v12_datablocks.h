@@ -211,6 +211,11 @@ struct DecodedDataBlock {
     int32_t seekerFlechetteDelayMS = 0;
     // ItemData light (Item::registerLights) and ShapeBaseImageData light:
     // type 0 none, 1 constant, 2 pulsing, 3 weapon fire (images only).
+    // PrecipitationData.
+    bool hasPrecipitation{};
+    int32_t precipitationType = 0;
+    float precipitationMaxSize = 0.0f, precipitationSizeX = 1.0f, precipitationSizeY = 1.0f;
+    std::string precipitationMaterialList;
     // ShapeBaseData third-person camera distances.
     float cameraMaxDist = 0.0f, cameraMinDist = 0.2f;
     // ItemData physics (Item::updateVelocity / updatePos).

@@ -2069,91 +2069,18 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
         // Parse Precipitation from mission
         for (auto& obj : objects) {
             if (missionClassEquals(obj.className, "Precipitation")) {
-                PrecipitationState ps;
-                std::string s;
-                // Native V12 names; retain the newer names as aliases.
-                s = getProp(obj.props, "maxNumDrops");
-                if (s.empty()) s = getProp(obj.props, "numDrops");
-                 if (!s.empty()) ps.numDrops = parsePrecipitationDropCount(s);
-                 ps.configuredDrops = ps.numDrops;
-                 s = getProp(obj.props, "type"); if (!s.empty()) ps.type = std::atoi(s.c_str());
-                 s = getProp(obj.props, "percentage"); if (!s.empty()) ps.percentage = (float)std::atof(s.c_str());
-                s = getProp(obj.props, "maxRadius");
-                if (!s.empty()) ps.boxWidth = std::max(1.0f, (float)std::atof(s.c_str()) * 2.0f);
-                s = getProp(obj.props, "boxWidth"); if (!s.empty()) ps.boxWidth = (float)std::atof(s.c_str());
-                s = getProp(obj.props, "boxHeight"); if (!s.empty()) ps.boxHeight = (float)std::atof(s.c_str());
-                s = getProp(obj.props, "dropSize"); if (!s.empty()) ps.dropSize = (float)std::atof(s.c_str());
-                s = getProp(obj.props, "minVelocity");
-                if (s.empty()) s = getProp(obj.props, "minSpeed");
-                if (!s.empty()) ps.minSpeed = (float)std::atof(s.c_str());
-                s = getProp(obj.props, "maxVelocity");
-                if (s.empty()) s = getProp(obj.props, "maxSpeed");
-                if (!s.empty()) ps.maxSpeed = (float)std::atof(s.c_str());
-                s = getProp(obj.props, "position");
-                if (!s.empty()) ps.origin = Math::torquePointToYUp(parsePos(s));
-                s = getProp(obj.props, "color1");
-                if (!s.empty()) {
-                    float r, g, b, a = ps.color.a;
-                    if (sscanf(s.c_str(), "%f %f %f %f", &r, &g, &b, &a) >= 3)
-                        ps.color = {r, g, b, a};
-                }
-                s = getProp(obj.props, "followCam");
-                if (!s.empty()) ps.followCam = (std::atoi(s.c_str()) != 0);
-                s = getProp(obj.props, "useWind");
-                if (!s.empty()) ps.useWind = (std::atoi(s.c_str()) != 0);
-                // PrecipitationData (scripts/weather.cs) owns the drop
-                // material list and quad size.
                 const std::string dataBlockName = missionLower(getProp(obj.props, "dataBlock"));
-                for (const auto& [objectName, object] : ScriptEngine::instance().objects) {
-                    if (!object || dataBlockName.empty() || missionLower(objectName) != dataBlockName ||
-                        missionLower(object->className) != "precipitationdata") continue;
-                    auto field = [&](const char* wanted) -> std::string {
-                        for (const auto& [key, value] : object->fields)
-                            if (missionLower(key) == wanted) return value.toString();
+                const ScriptObject* dataBlock = nullptr;
+                for (const auto& [objectName, object] : ScriptEngine::instance().objects)
+                    if (object && !dataBlockName.empty() && missionLower(objectName) == dataBlockName &&
+                        missionLower(object->className) == "precipitationdata") { dataBlock = object; break; }
+                setScenePrecipitation([&](const char* field) { return getProp(obj.props, field); },
+                    [&](const char* wanted) -> std::string {
+                        if (dataBlock)
+                            for (const auto& [key, value] : dataBlock->fields)
+                                if (missionLower(key) == wanted) return value.toString();
                         return {};
-                    };
-                    if (std::string v = field("sizex"); !v.empty()) ps.sizeX = (float)std::atof(v.c_str());
-                    if (std::string v = field("sizey"); !v.empty()) ps.sizeY = (float)std::atof(v.c_str());
-                    // PrecipitationData::onAdd clamps sizes to (0, 20].
-                    if (ps.sizeX <= 0.0f || ps.sizeX > 20.0f) ps.sizeX = 1.0f;
-                    if (ps.sizeY <= 0.0f || ps.sizeY > 20.0f) ps.sizeY = 1.0f;
-                    const std::string dml = field("materiallist");
-                    if (!dml.empty()) {
-                        auto& fs = Engine::instance().fs();
-                        std::string content = fs.readText(("textures/" + dml).c_str());
-                        if (content.empty()) content = fs.readText(dml.c_str());
-                        std::stringstream lines(content);
-                        std::string material;
-                        while (std::getline(lines, material)) {
-                            while (!material.empty() && std::isspace((unsigned char)material.back()))
-                                material.pop_back();
-                            if (material.empty()) continue;
-                            std::vector<float> durations;
-                            Engine::instance().renderer().loadTextureFrames(
-                                material.c_str(), ps.textures, durations);
-                            ps.textureDurations = std::move(durations);
-                            break; // drops use the list's first material
-                        }
-                    }
-                    break;
-                }
-                s = getProp(obj.props, "textureName");
-                if (s.empty()) s = getProp(obj.props, "texture");
-                if (!s.empty() && ps.textures.empty()) {
-                    std::vector<float> durations;
-                    Engine::instance().renderer().loadTextureFrames(
-                        s.c_str(), ps.textures, durations);
-                    ps.textureDurations = std::move(durations);
-                }
-                if (ps.numDrops > 0 && ps.maxSpeed > 0) {
-                    ps.active = true;
-                    precipitation = ps;
-                    precipitation.configuredDrops = ps.numDrops;
-                    if (!setPrecipitation(ps.type, ps.percentage)) precipitation = {};
-                    Console::instance().printf(LogLevel::Info, "  Precipitation: %d drops, box=%.0fx%.0f, speed=%.1f-%.1f",
-                        precipitation.numDrops, precipitation.boxWidth, precipitation.boxHeight,
-                        precipitation.minSpeed, precipitation.maxSpeed);
-                }
+                    });
                 break;
             }
         }
@@ -3748,6 +3675,86 @@ void World::updateRendererLights(Renderer& renderer) const {
                           source.color.b * fade, source.radius});
     }
     renderer.setDynamicLights(lights);
+}
+
+// Precipitation from its object fields (`get`) and its PrecipitationData
+// fields (`data`, lower-case names).
+void World::setScenePrecipitation(const std::function<std::string(const char*)>& get,
+                                  const std::function<std::string(const char*)>& data) {
+    PrecipitationState ps;
+    std::string s;
+    // Native V12 names; retain the newer names as aliases.
+    s = get("maxNumDrops");
+    if (s.empty()) s = get("numDrops");
+     if (!s.empty()) ps.numDrops = parsePrecipitationDropCount(s);
+     ps.configuredDrops = ps.numDrops;
+     s = get("type"); if (!s.empty()) ps.type = std::atoi(s.c_str());
+     s = get("percentage"); if (!s.empty()) ps.percentage = (float)std::atof(s.c_str());
+    s = get("maxRadius");
+    if (!s.empty()) ps.boxWidth = std::max(1.0f, (float)std::atof(s.c_str()) * 2.0f);
+    s = get("boxWidth"); if (!s.empty()) ps.boxWidth = (float)std::atof(s.c_str());
+    s = get("boxHeight"); if (!s.empty()) ps.boxHeight = (float)std::atof(s.c_str());
+    s = get("dropSize"); if (!s.empty()) ps.dropSize = (float)std::atof(s.c_str());
+    s = get("minVelocity");
+    if (s.empty()) s = get("minSpeed");
+    if (!s.empty()) ps.minSpeed = (float)std::atof(s.c_str());
+    s = get("maxVelocity");
+    if (s.empty()) s = get("maxSpeed");
+    if (!s.empty()) ps.maxSpeed = (float)std::atof(s.c_str());
+    s = get("position");
+    if (!s.empty()) ps.origin = Math::torquePointToYUp(parsePos(s));
+    s = get("color1");
+    if (!s.empty()) {
+        float r, g, b, a = ps.color.a;
+        if (sscanf(s.c_str(), "%f %f %f %f", &r, &g, &b, &a) >= 3)
+            ps.color = {r, g, b, a};
+    }
+    s = get("followCam");
+    if (!s.empty()) ps.followCam = (std::atoi(s.c_str()) != 0);
+    s = get("useWind");
+    if (!s.empty()) ps.useWind = (std::atoi(s.c_str()) != 0);
+    // PrecipitationData (scripts/weather.cs) owns the drop
+    // material list and quad size.
+    if (std::string v = data("sizex"); !v.empty()) ps.sizeX = (float)std::atof(v.c_str());
+    if (std::string v = data("sizey"); !v.empty()) ps.sizeY = (float)std::atof(v.c_str());
+    if (std::string v = data("type"); !v.empty() && get("type").empty()) ps.type = std::atoi(v.c_str());
+    // PrecipitationData::onAdd clamps sizes to (0, 20].
+    if (ps.sizeX <= 0.0f || ps.sizeX > 20.0f) ps.sizeX = 1.0f;
+    if (ps.sizeY <= 0.0f || ps.sizeY > 20.0f) ps.sizeY = 1.0f;
+    if (const std::string dml = data("materiallist"); !dml.empty()) {
+        auto& fs = Engine::instance().fs();
+        std::string content = fs.readText(("textures/" + dml).c_str());
+        if (content.empty()) content = fs.readText(dml.c_str());
+        std::stringstream lines(content);
+        std::string material;
+        while (std::getline(lines, material)) {
+            while (!material.empty() && std::isspace((unsigned char)material.back()))
+                material.pop_back();
+            if (material.empty()) continue;
+            std::vector<float> durations;
+            Engine::instance().renderer().loadTextureFrames(
+                material.c_str(), ps.textures, durations);
+            ps.textureDurations = std::move(durations);
+            break; // drops use the list's first material
+        }
+    }
+    s = get("textureName");
+    if (s.empty()) s = get("texture");
+    if (!s.empty() && ps.textures.empty()) {
+        std::vector<float> durations;
+        Engine::instance().renderer().loadTextureFrames(
+            s.c_str(), ps.textures, durations);
+        ps.textureDurations = std::move(durations);
+    }
+    if (ps.numDrops > 0 && ps.maxSpeed > 0) {
+        ps.active = true;
+        precipitation = ps;
+        precipitation.configuredDrops = ps.numDrops;
+        if (!setPrecipitation(ps.type, ps.percentage)) precipitation = {};
+        Console::instance().printf(LogLevel::Info, "  Precipitation: %d drops, box=%.0fx%.0f, speed=%.1f-%.1f",
+            precipitation.numDrops, precipitation.boxWidth, precipitation.boxHeight,
+            precipitation.minSpeed, precipitation.maxSpeed);
+    }
 }
 
 void World::addSceneLightning(const std::function<std::string(const char*)>& get) {
@@ -12147,8 +12154,7 @@ static void appendMissionFileEffects(const std::string& mission, std::vector<Mis
     std::string misPath, misData;
     if (!resolveMissionFile(Engine::instance().fs(), missionLoadPath(mission), misPath, misData)) return;
     for (auto& object : parseMisFile(misData)) {
-        if (missionClassEquals(object.className, "Precipitation") ||
-            missionClassEquals(object.className, "ForceFieldBare"))
+        if (missionClassEquals(object.className, "ForceFieldBare"))
             objects.push_back(std::move(object));
     }
 }
@@ -12234,6 +12240,20 @@ void Game::applyDemoSceneEffects() {
         };
         if (ghostClassIs(g->className, "Lightning")) {
             w->addSceneLightning([&](const char* field) { return prop(field); });
+            continue;
+        }
+        if (ghostClassIs(g->className, "Precipitation")) {
+            const auto* data = g->hasDatablock ? find(std::to_string(g->datablockId)) : nullptr;
+            w->setScenePrecipitation([&](const char* field) { return prop(field); },
+                [&](const char* field) -> std::string {
+                    if (!data || !data->hasPrecipitation) return {};
+                    const std::string name = field;
+                    if (name == "sizex") return std::to_string(data->precipitationSizeX);
+                    if (name == "sizey") return std::to_string(data->precipitationSizeY);
+                    if (name == "type") return std::to_string(data->precipitationType);
+                    if (name == "materiallist") return data->precipitationMaterialList;
+                    return {};
+                });
             continue;
         }
         if (ghostClassIs(g->className, "ParticleEmissionDummy")) {
