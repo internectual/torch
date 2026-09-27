@@ -2707,24 +2707,7 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                 if (!emitter.textures.empty()) emitter.texture = emitter.textures.front();
                 effectEmitters.push_back(std::move(emitter));
              } else if (missionClassIs(obj.className, "Lightning")) {
-                EffectLightning lightning;
-                lightning.pos = Math::torquePointToYUp(parsePos(getProp(obj.props, "position")));
-                lightning.scale = parsePos(getProp(obj.props, "scale"));
-                if (getProp(obj.props, "scale").empty()) lightning.scale = {1, 1, 1};
-                Point3F axis{0, 0, 1}; float angle = 0.0f;
-                sscanf(getProp(obj.props, "rotation").c_str(), "%f %f %f %f", &axis.x, &axis.y, &axis.z, &angle);
-                lightning.rotation = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(angle));
-                auto value = [&](const char* field, float fallback) { const auto s = getProp(obj.props, field); return s.empty() ? fallback : (float)std::atof(s.c_str()); };
-                lightning.strikeWidth = value("strikeWidth", 1.0f);
-                lightning.strikesPerMinute = value("strikesPerMinute", 0.0f);
-                 lightning.strikeRadius = value("strikeRadius", 0.0f);
-                 lightning.boltStartRadius = value("boltStartRadius", 0.0f);
-                 lightning.chanceToHitTarget = value("chanceToHitTarget", 0.0f);
-                auto color = [&](const char* field, ColorF fallback) { float r, g, b, a; const auto s = getProp(obj.props, field); return sscanf(s.c_str(), "%f %f %f %f", &r, &g, &b, &a) >= 3 ? ColorF{r, g, b, a} : fallback; };
-                lightning.color = color("color", lightning.color);
-                lightning.fadeColor = color("fadeColor", lightning.fadeColor);
-                lightning.nextStrike = lightning.strikesPerMinute > 0.0f ? 60.0f / lightning.strikesPerMinute : 0.0f;
-                effectLightnings.push_back(std::move(lightning));
+                addSceneLightning([&](const char* field) { return getProp(obj.props, field); });
             }
         }
         if (!effectEmitters.empty() || !effectLightnings.empty())
@@ -3765,6 +3748,27 @@ void World::updateRendererLights(Renderer& renderer) const {
                           source.color.b * fade, source.radius});
     }
     renderer.setDynamicLights(lights);
+}
+
+void World::addSceneLightning(const std::function<std::string(const char*)>& get) {
+    EffectLightning lightning;
+    lightning.pos = Math::torquePointToYUp(parsePos(get("position")));
+    lightning.scale = parsePos(get("scale"));
+    if (get("scale").empty()) lightning.scale = {1, 1, 1};
+    Point3F axis{0, 0, 1}; float angle = 0.0f;
+    sscanf(get("rotation").c_str(), "%f %f %f %f", &axis.x, &axis.y, &axis.z, &angle);
+    lightning.rotation = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(angle));
+    auto value = [&](const char* field, float fallback) { const auto s = get(field); return s.empty() ? fallback : (float)std::atof(s.c_str()); };
+    lightning.strikeWidth = value("strikeWidth", 1.0f);
+    lightning.strikesPerMinute = value("strikesPerMinute", 0.0f);
+    lightning.strikeRadius = value("strikeRadius", 0.0f);
+    lightning.boltStartRadius = value("boltStartRadius", 0.0f);
+    lightning.chanceToHitTarget = value("chanceToHitTarget", 0.0f);
+    auto color = [&](const char* field, ColorF fallback) { float r, g, b, a; const auto s = get(field); return sscanf(s.c_str(), "%f %f %f %f", &r, &g, &b, &a) >= 3 ? ColorF{r, g, b, a} : fallback; };
+    lightning.color = color("color", lightning.color);
+    lightning.fadeColor = color("fadeColor", lightning.fadeColor);
+    lightning.nextStrike = lightning.strikesPerMinute > 0.0f ? 60.0f / lightning.strikesPerMinute : 0.0f;
+    effectLightnings.push_back(std::move(lightning));
 }
 
 void World::addSceneEmitter(const Point3F& pos, const Point3F& axis,
@@ -12144,7 +12148,6 @@ static void appendMissionFileEffects(const std::string& mission, std::vector<Mis
     if (!resolveMissionFile(Engine::instance().fs(), missionLoadPath(mission), misPath, misData)) return;
     for (auto& object : parseMisFile(misData)) {
         if (missionClassEquals(object.className, "Precipitation") ||
-            missionClassEquals(object.className, "Lightning") ||
             missionClassEquals(object.className, "ForceFieldBare"))
             objects.push_back(std::move(object));
     }
@@ -12193,6 +12196,10 @@ std::vector<MisObject> Game::demoSceneObjects() const {
     for (int index : tracker.getAllIndices()) {
         const GhostEntry* g = tracker.getGhost(index);
         if (!g || g->sceneProps.empty()) continue;
+        // Effects with recorded datablocks are added by applyDemoSceneEffects.
+        if (ghostClassIs(g->className, "Lightning") || ghostClassIs(g->className, "ParticleEmissionDummy") ||
+            ghostClassIs(g->className, "Precipitation") || ghostClassIs(g->className, "ForceFieldBare"))
+            continue;
         MisObject object;
         object.className = g->className;
         for (const auto& [name, value] : g->sceneProps) {
@@ -12225,6 +12232,10 @@ void Game::applyDemoSceneEffects() {
             for (const auto& [key, value] : g->sceneProps) if (key == name) return value;
             return {};
         };
+        if (ghostClassIs(g->className, "Lightning")) {
+            w->addSceneLightning([&](const char* field) { return prop(field); });
+            continue;
+        }
         if (ghostClassIs(g->className, "ParticleEmissionDummy")) {
             // ParticleEmissionDummy: its emitter datablock, emitting along
             // the dummy's z axis.

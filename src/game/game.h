@@ -439,6 +439,8 @@ public:
     void addSceneEmitter(const Point3F& pos, const Point3F& axis,
                          const V12::DecodedDataBlock::ParticleEmitterData& emitter,
                          const V12::DecodedDataBlock::ParticleData& particle);
+    // A Lightning object from mission-file fields (get returns "" if unset).
+    void addSceneLightning(const std::function<std::string(const char*)>& get);
     void beginProjectileTrailSync();
     void syncProjectileTrail(int ownerId, const Point3F& pos, const Point3F& velocity,
                              const V12::DecodedDataBlock* projectileData,

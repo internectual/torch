@@ -2804,18 +2804,23 @@ static void readSunData(BitStream& bs, bool, const Vec3&, GhostEntry* entry) {
 
 static void readLightningData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {
     readGameBaseData(bs, isInitial, entry);
-    if (bs.readFlag()) {
-        if (entry) entry->position = bs.readPoint3F();
-        else bs.readPoint3F();
-        bs.readPoint3F(); // scale
-        bs.readF32(); // strike width
-        bs.readF32(); // chance to hit target
-        bs.readF32(); // strike radius
-        bs.readF32(); // bolt start radius
-        bs.readF32(); bs.readF32(); bs.readF32(); // color
-        bs.readF32(); bs.readF32(); bs.readF32(); // fade color
-        bs.readInt(8); // use fog (serialized as a byte)
-        bs.readF32(); // strikes per minute
+    if (bs.readFlag()) { // InitialUpdateMask
+        const Vec3 position = bs.readPoint3F();
+        const Vec3 scale = bs.readPoint3F();
+        if (entry) entry->position = position;
+        setSceneProp(entry, "position", sceneFloats({position.x, position.y, position.z}));
+        setSceneProp(entry, "scale", sceneFloats({scale.x, scale.y, scale.z}));
+        setSceneProp(entry, "strikeWidth", sceneFloats({bs.readF32()}));
+        setSceneProp(entry, "chanceToHitTarget", sceneFloats({bs.readF32()}));
+        setSceneProp(entry, "strikeRadius", sceneFloats({bs.readF32()}));
+        setSceneProp(entry, "boltStartRadius", sceneFloats({bs.readF32()}));
+        const float r = bs.readF32(), g = bs.readF32(), b = bs.readF32();
+        setSceneProp(entry, "color", sceneFloats({r, g, b, 1.0f}));
+        const float fr = bs.readF32(), fg = bs.readF32(), fb = bs.readF32();
+        setSceneProp(entry, "fadeColor", sceneFloats({fr, fg, fb, 1.0f}));
+        setSceneProp(entry, "useFog", bs.readInt(8) != 0 ? "1" : "0");
+        // Lightning::strikesPerMinute is a U32 on the wire.
+        setSceneProp(entry, "strikesPerMinute", std::to_string(bs.readU32()));
     }
 }
 
