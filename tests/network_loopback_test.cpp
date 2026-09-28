@@ -1,5 +1,7 @@
 #include "sim/game_connection.h"
 #include "sim/net_string_table.h"
+#include "sim/camera.h"
+#include "sim/sim_state.h"
 #include "game/demo.h"
 #include "net/network.h"
 #include "net/protocol.h"
@@ -1116,6 +1118,78 @@ int main() {
         // in the caller's frame.
         script.ts()->execute("for (%i = 0; %i < 3; %i++) eval(\"$frameProbe\" @ %i @ \" = %i + 10;\");", "frame_probe.cs");
         assert(script.ts()->getGlobal("$frameProbe2").toInt() == 12);
+    }
+    {
+        // A client's Camera: scoped to it and made its control object, it is
+        // ghosted, its packet data carries position and mode, and the
+        // client's moves fly it (ProcessList: one tick per move).
+        script.ts()->execute("new GameConnection(CamLinkClient);"
+                             "new Camera(CamLinkCamera) { position = \"10 20 30\"; };");
+        auto* server = EngineObjects::get<GameConnection>("CamLinkClient");
+        assert(server);
+        GameConnection client;
+        client.isServer = false;
+        DemoParser parser;
+        int packets = 0;
+        GameState lastCamera{};
+        bool sawCamera = false;
+        server->deliver = [&](const std::vector<uint8_t>& p) { client.receivePacket(p.data(), p.size()); };
+        client.onServerPacket = [&](const std::vector<uint8_t>& p) {
+            PacketData pd = parser.parsePacket(p.data(), p.size(), packets++);
+            for (const auto& ev : pd.events)
+                if (ev.ghostMessage >= 0) client.clientGhostMessage(ev.ghostMessage, ev.ghostSequence, (uint32_t)ev.ghostCount);
+            if (pd.gameState.hasCameraTransform) { lastCamera = pd.gameState; sawCamera = true; }
+        };
+        client.deliver = [&](const std::vector<uint8_t>& p) {
+            parser.onSendPacketTrigger();
+            server->receivePacket(p.data(), p.size());
+        };
+        server->activateGhosting();
+        double now = 300.0;
+        for (int i = 0; i < 20 && !server->isGhosting(); ++i, now += 1.0) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.5);
+        }
+        assert(server->isGhosting());
+        script.ts()->execute("CamLinkCamera.scopeToClient(CamLinkClient); CamLinkClient.setControlObject(CamLinkCamera);");
+        assert(script.ts()->getGlobal("$dummy").toString().empty());
+        ClientMoveIn forward;
+        forward.y = 32; // full forward
+        for (int tick = 0; tick < 10; ++tick) {
+            client.pushMove(forward);
+            client.checkPacketSend(now);
+            SimState::advanceServer(now);
+            server->checkPacketSend(now + 0.01);
+            now += 0.032;
+        }
+        for (int i = 0; i < 20; ++i, now += 0.1) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.05);
+        }
+        assert(parser.getParseFault().empty());
+        const int ghostIndex = server->ghostIndex(ScriptEngine::instance().objectKey(
+            ScriptEngine::instance().findObject("CamLinkCamera")));
+        assert(ghostIndex >= 0);
+        const GhostEntry* ghost = parser.getGhostTracker().getGhost(ghostIndex);
+        assert(ghost && ghost->className == "Camera");
+        assert(sawCamera && lastCamera.cameraMode == Camera::FlyMode);
+        // Ten forward moves at 40 m/s, 32 ms each, from y = 20.
+        auto* camera = EngineObjects::get<Camera>("CamLinkCamera");
+        assert(std::abs(camera->transform[7] - (20.0f + 10 * 40.0f * 0.032f)) < 1e-3f);
+        assert(std::abs(lastCamera.cameraPosition.x - 10.0f) < 1e-3f);
+        assert(std::abs(lastCamera.cameraPosition.y - camera->transform[7]) < 1e-3f);
+        assert(std::abs(lastCamera.cameraPosition.z - 30.0f) < 1e-3f);
+    }
+    {
+        // math/mathTypes.cc: AngAxisF matrices as the engine builds them.
+        script.ts()->execute("$mulV = MatrixMulVector(\"0 0 0 0 0 1 1.5707963\", \"1 0 0\");"
+                             "$mulP = MatrixMulPoint(\"1 2 3 0 0 1 0\", \"1 1 1\");"
+                             "$create = MatrixCreate(\"1 2 3\", \"0 0 1 180\");");
+        float x = 9, y = 9, z = 9;
+        std::sscanf(script.ts()->getGlobal("$mulV").toString().c_str(), "%f %f %f", &x, &y, &z);
+        assert(std::abs(x) < 1e-5f && std::abs(y + 1.0f) < 1e-5f && std::abs(z) < 1e-5f);
+        assert(script.ts()->getGlobal("$mulP").toString() == "2 3 4");
+        assert(script.ts()->getGlobal("$create").toString() == "1 2 3 0 0 1 3.14159");
     }
     return 0;
 }

@@ -1,4 +1,6 @@
 #include "sim/engine_object.h"
+#include "sim/game_base.h"
+#include "sim/game_connection.h"
 #include "sim/engine_classes.h"
 #include "sim/net_object.h"
 #include "script/script_engine.h"
@@ -55,7 +57,23 @@ void advanceServer(double now) {
     if (lastTick < 0.0 || now < lastTick) lastTick = now;
     int ticks = 0;
     while (now - lastTick >= TickSeconds && ticks < 8) {
-        EngineObjects::forEachTicking([](EngineObject& object) { object.processTick(); });
+        EngineObjects::forEachTicking([](EngineObject& object) {
+            // ProcessList::advanceObjects: an object its client controls
+            // ticks once for each pending move.
+            auto* base = dynamic_cast<GameBase*>(&object);
+            auto* connection = base && !base->controllingClient.empty()
+                ? EngineObjects::get<GameConnection>(base->controllingClient) : nullptr;
+            if (connection && object.script &&
+                connection->controlObject() == ScriptEngine::instance().objectKey(object.script)) {
+                while (!connection->moves.empty() && !base->controllingClient.empty()) {
+                    const ClientMoveIn move = connection->moves.front();
+                    connection->moves.pop_front();
+                    base->processMove(&move);
+                }
+                return;
+            }
+            object.processTick();
+        });
         lastTick += TickSeconds;
         ++ticks;
     }

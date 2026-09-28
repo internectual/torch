@@ -5,6 +5,21 @@
 class ShapeBase : public GameBase {
 public:
     enum DamageState { Enabled, Disabled, Destroyed };
+    enum ShapeBaseMasks : uint32_t {
+        DamageMask = GameBase::NextFreeMask,
+        NoWarpMask = GameBase::NextFreeMask << 1,
+        MountedMask = GameBase::NextFreeMask << 2,
+        CloakMask = GameBase::NextFreeMask << 3,
+        ShieldMask = GameBase::NextFreeMask << 4,
+        InvincibleMask = GameBase::NextFreeMask << 5,
+        SoundMaskN = GameBase::NextFreeMask << 6,
+        ThreadMaskN = SoundMaskN << 4,
+        ImageMaskN = ThreadMaskN << 4,
+        NextFreeMask = ImageMaskN << 8,
+        SoundMask = (SoundMaskN << 4) - SoundMaskN,
+        ThreadMask = (ThreadMaskN << 4) - ThreadMaskN,
+        ImageMask = (ImageMaskN << 8) - ImageMaskN,
+    };
 
     float damage = 0.0f;
     float repairRate = 0.0f;
@@ -36,7 +51,9 @@ public:
     bool setDamageState(const std::string& name);
     const char* damageStateName() const;
 
-    void processTick() override;
+    void processMove(const ClientMoveIn* move) override;
+    uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
+    bool writePacketData(GameConnection& connection, TorqueBitWriter& w) override;
 };
 
 void registerShapeBaseNatives(class TorqueScript& ts);

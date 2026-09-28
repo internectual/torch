@@ -2,6 +2,7 @@
 #include "sim/net_string_table.h"
 #include "sim/net_object.h"
 #include "sim/datablock_pack.h"
+#include "sim/shape_base.h"
 #include "net/remote_command.h"
 #include "net/v12_bitstream.h"
 #include "script/script_engine.h"
@@ -222,17 +223,69 @@ void GameConnection::writePacket(TorqueBitWriter& w, std::vector<std::shared_ptr
     w.writeFlag(false);
     w.setStringBuffer(true);
     w.clearCompression();
-    // GameConnection::writePacket, server half.
-    w.writeU32(lastMoveAck);
-    w.writeFlag(false); // damage flash / white out
-    w.writeFlag(false); // lock / homing counts
-    w.writeFlag(false); // seeker tracking
-    w.writeFlag(false); // pinged
-    w.writeFlag(false); // jammed
-    w.writeFlag(false); // no control object
+    // GameConnection::writePacket, server half: the moves processed so far.
+    w.writeU32(lastMoveAck - (uint32_t)moves.size());
+    uint32_t noteKey = 0;
+    writeControlObject(w, noteKey);
+    if (noteKey) controlKeyInFlight[protocol.lastSent()] = noteKey;
     w.writeFlag(false); // visible target masks unchanged
     w.writeFlag(false); // camera fov
     writeEvents(w, sent);
+}
+
+// The control object's flash, lock and tracking state, then its packet data
+// when it changed (or every ControlStateSkipAmount packets), otherwise its
+// position as the compression point.
+void GameConnection::writeControlObject(TorqueBitWriter& w, uint32_t& noteKey) {
+    auto* control = controlObject_.empty() ? nullptr : EngineObjects::get<ShapeBase>(controlObject_);
+    const int ghost = control ? ghostIndex(controlObject_) : -1;
+    if (control) {
+        const float flash = control->damageFlash, whiteOut = control->whiteOut;
+        if (w.writeFlag(flash != 0 || whiteOut != 0)) {
+            if (w.writeFlag(flash != 0)) w.writeFloat(flash, 7);
+            if (w.writeFlag(whiteOut != 0)) w.writeFloat(whiteOut / 1.5f, 7);
+        }
+        w.writeFlag(false); // lock / homing counts
+        w.writeFlag(false); // tracking / lock mode
+    } else {
+        w.writeFlag(false);
+        w.writeFlag(false);
+        w.writeFlag(false);
+    }
+    w.writeFlag(false); // pinged
+    w.writeFlag(false); // jammed
+    if (!w.writeFlag(ghost != -1)) return;
+    if (w.writeFlag(controlObjectModifyKey != ackedControlObjectModifyKey ||
+                    controlStateSkipCount >= ControlStateSkipAmount)) {
+        w.writeInt(ghost, 10);
+        if (control->writePacketData(*this, w)) {
+            noteKey = controlObjectModifyKey;
+            controlStateSkipCount = 0;
+        }
+    } else {
+        ++controlStateSkipCount;
+        w.writeF32(control->transform[3]);
+        w.writeF32(control->transform[7]);
+        w.writeF32(control->transform[11]);
+        w.setCompressionPoint({control->transform[3], control->transform[7], control->transform[11]});
+    }
+}
+
+void GameConnection::setControlObject(const std::string& object) {
+    if (object == controlObject_) return;
+    if (isServer) ++controlObjectModifyKey;
+    const std::string self = ScriptEngine::instance().objectKey(script);
+    if (auto* old = controlObject_.empty() ? nullptr : EngineObjects::get<GameBase>(controlObject_))
+        old->controllingClient.clear();
+    if (auto* next = object.empty() ? nullptr : EngineObjects::get<GameBase>(object)) {
+        if (!next->controllingClient.empty() && next->controllingClient != self)
+            if (auto* other = EngineObjects::get<GameConnection>(next->controllingClient))
+                other->setControlObject({});
+        next->controllingClient = self;
+    }
+    controlObject_ = object;
+    // setScopeObject: the scope object is always in scope.
+    if (!object.empty()) objectInScope(object);
 }
 
 // GameConnection::writePacket, client half (Tribes 2: first-person flag and
@@ -331,6 +384,10 @@ void GameConnection::receivePacket(const uint8_t* data, size_t size) {
             if (ack.acknowledged) packetReceived(it->second);
             else packetDropped(it->second);
             inFlight.erase(it);
+        }
+        if (auto it = controlKeyInFlight.find(ack.sequence); it != controlKeyInFlight.end()) {
+            if (ack.acknowledged) ackedControlObjectModifyKey = it->second;
+            controlKeyInFlight.erase(it);
         }
         if (auto it = ghostsInFlight.find(ack.sequence); it != ghostsInFlight.end()) {
             if (ack.acknowledged) ghostPacketReceived(it->second);
@@ -506,9 +563,13 @@ void GameConnection::handleGhostMessage(int message, uint32_t sequence) {
     }
 }
 
+// NetConnection::getGhostIndex: only a ghost the client has (its creation
+// acknowledged, not being killed).
 int GameConnection::ghostIndex(const std::string& object) const {
+    constexpr uint32_t pending = GhostInfo::NotYetGhosted | GhostInfo::Ghosting |
+                                 GhostInfo::KillGhost | GhostInfo::KillingGhost;
     for (const auto& ghost : ghosts)
-        if (ghost.index >= 0 && ghost.object == object) return ghost.index;
+        if (ghost.index >= 0 && ghost.object == object && !(ghost.flags & pending)) return ghost.index;
     return -1;
 }
 
@@ -516,10 +577,11 @@ void GameConnection::objectInScope(const std::string& object) {
     if (!scoping) return;
     for (auto& ghost : ghosts)
         if (ghost.index >= 0 && ghost.object == object) { ghost.flags |= GhostInfo::InScope; return; }
+    NetObject* net = netObjectFor(object);
+    if (!net || !net->ghostable || net->netClassId() < 0) return;
     for (int index = 0; index < 1024; ++index) {
         GhostInfo& ghost = ghosts[index];
         if (ghost.index >= 0) continue;
-        NetObject* net = netObjectFor(object);
         ghost.object = object;
         ghost.index = index;
         ghost.updateMask = 0xFFFFFFFFu;
@@ -528,6 +590,12 @@ void GameConnection::objectInScope(const std::string& object) {
         ghost.updateSkipCount = 0;
         return;
     }
+}
+
+void GameConnection::objectLocalScopeAlways(const std::string& object) {
+    objectInScope(object);
+    for (auto& ghost : ghosts)
+        if (ghost.index >= 0 && ghost.object == object) { ghost.flags |= GhostInfo::ScopeLocalAlways; return; }
 }
 
 void GameConnection::writeGhosts(TorqueBitWriter& w, std::vector<GhostRef>& refs) {
@@ -660,6 +728,20 @@ void registerGameConnectionNatives(TorqueScript& ts) {
         script->callFunction("LocalConnectionAccepted", {});
         return VMValue("");
     });
+    // SceneLighting::lightScene: the client's world is lit as it loads,
+    // so lighting completes at once (completed(true) runs the callback)
+    // and nothing is left to light.
+    ts.registerNative("lightScene", [](const Args& args) -> VMValue {
+        auto* connection = EngineObjects::get<GameConnection>("ServerConnection");
+        if (!connection || connection->isServer) {
+            Console::instance().printf(LogLevel::Error, "SceneLighting:: no game connection");
+            return VMValue(0);
+        }
+        const std::string callback = args.empty() ? std::string() : args[0].toString();
+        if (auto* script = ScriptEngine::instance().ts(); script && !callback.empty())
+            script->callFunction(callback, {});
+        return VMValue(0);
+    });
     ts.registerNative("GameConnection::setMissionCRC", [](const Args& args) -> VMValue {
         if (auto* connection = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString()))
             if (args.size() > 1) connection->setMissionCRC((uint32_t)args[1].toDouble());
@@ -668,6 +750,32 @@ void registerGameConnectionNatives(TorqueScript& ts) {
     ts.registerNative("GameConnection::transmitDataBlocks", [](const Args& args) -> VMValue {
         if (auto* c = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString()))
             if (args.size() > 1) c->transmitDataBlocks((uint32_t)args[1].toDouble());
+        return VMValue("");
+    });
+    ts.registerNative("GameConnection::setControlObject", [](const Args& args) -> VMValue {
+        auto* c = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString());
+        if (!c || args.size() < 2) return VMValue(0);
+        ScriptObject* object = ScriptEngine::instance().findObject(args[1].toString().c_str());
+        if (!object || !EngineObjects::get<ShapeBase>(args[1].toString())) return VMValue(0);
+        c->setControlObject(ScriptEngine::instance().objectKey(object));
+        return VMValue(1);
+    });
+    ts.registerNative("GameConnection::getControlObject", [](const Args& args) -> VMValue {
+        auto* c = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString());
+        ScriptObject* object = c && !c->controlObject().empty()
+            ? ScriptEngine::instance().findObject(c->controlObject().c_str()) : nullptr;
+        return VMValue(object ? ScriptEngine::instance().objectId(object) : 0);
+    });
+    ts.registerNative("NetObject::scopeToClient", [](const Args& args) -> VMValue {
+        if (args.size() < 2) return VMValue("");
+        auto* c = EngineObjects::get<GameConnection>(args[1].toString());
+        ScriptObject* object = ScriptEngine::instance().findObject(args[0].toString().c_str());
+        if (!c) {
+            Console::instance().printf(LogLevel::Error,
+                "NetObject::scopeToClient: Couldn't find connection %s", args[1].toString().c_str());
+            return VMValue("");
+        }
+        if (object) c->objectLocalScopeAlways(ScriptEngine::instance().objectKey(object));
         return VMValue("");
     });
     ts.registerNative("NetConnection::getAddress", [](const Args& args) -> VMValue {

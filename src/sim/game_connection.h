@@ -29,7 +29,7 @@ struct NetEventOut {
 // NetConnection::GhostInfo.
 struct GhostInfo {
     enum Flags { InScope = 1, ScopeAlways = 2, NotYetGhosted = 4, Ghosting = 8, KillGhost = 16,
-                 KillingGhost = 32, ScopedEvent = 64 };
+                 KillingGhost = 32, ScopedEvent = 64, ScopeLocalAlways = 128 };
     std::string object; // script object key; empty once detached
     int index = -1;
     uint32_t flags = 0;
@@ -67,7 +67,7 @@ public:
     // GameConnection::transmitDataBlocks(seq): DataBlockQueueCount
     // SimDataBlockEvents in flight, each delivery posting the next; the
     // last one calls %conn.dataBlocksDone(seq).
-    enum { DataBlockQueueCount = 16 };
+    enum { DataBlockQueueCount = 16, ControlStateSkipAmount = 16 };
     void transmitDataBlocks(uint32_t sequence);
     uint32_t dataBlockSequence = 0;
     int dataBlockModifiedKey = 0;
@@ -79,6 +79,14 @@ public:
     void resetGhosting();
     // An object came into scope (ScopeAlways objects added while scoping).
     void objectInScope(const std::string& object);
+    // NetObject::scopeToClient: in scope, and kept there.
+    void objectLocalScopeAlways(const std::string& object);
+
+    // GameConnection::setControlObject: the object this client's moves
+    // drive, and its scope object.
+    void setControlObject(const std::string& object);
+    const std::string& controlObject() const { return controlObject_; }
+    void setControlObjectDirty() { ++controlObjectModifyKey; }
     int ghostIndex(const std::string& object) const;
     bool isGhosting() const { return ghosting; }
 
@@ -119,6 +127,11 @@ private:
     V12::ProtocolState protocol;
     std::deque<std::shared_ptr<NetEventOut>> orderedQueue, unorderedQueue;
     std::map<uint32_t, std::vector<std::shared_ptr<NetEventOut>>> inFlight;
+    std::string controlObject_;
+    uint32_t controlObjectModifyKey = 0, ackedControlObjectModifyKey = 0;
+    int controlStateSkipCount = 0;
+    std::map<uint32_t, uint32_t> controlKeyInFlight; // packet -> modify key written
+    void writeControlObject(TorqueBitWriter& w, uint32_t& noteKey);
     std::vector<std::shared_ptr<NetEventOut>> notifyList;
     int nextSendEventSeq = 0;
     int lastAckedEventSeq = -1;

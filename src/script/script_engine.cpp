@@ -1725,6 +1725,9 @@ bool ScriptEngine::addToSet(ScriptObject* set, ScriptObject* object) {
             if (auto* old = findObject(it->second.toString().c_str())) removeSimGroupChild(old, key);
         }
         object->internals["__parent"] = VMValue(setKey);
+        // A GuiControl's parent is its group: the declared link moves too.
+        if (auto link = object->internals.find("parent"); link != object->internals.end())
+            link->second = VMValue(setKey);
     } else {
         if (setHasMember(set, key)) return true;
         auto sets = memberSets(object);
@@ -1744,6 +1747,8 @@ bool ScriptEngine::removeFromSet(ScriptObject* set, ScriptObject* object) {
     if (!removeSimGroupChild(set, key)) return false;
     if (auto it = object->internals.find("__parent"); it != object->internals.end() && it->second.toString() == setKey)
         object->internals.erase(it);
+    if (auto link = object->internals.find("parent"); link != object->internals.end() && link->second.toString() == setKey)
+        object->internals.erase(link);
     auto sets = memberSets(object);
     sets.erase(std::remove(sets.begin(), sets.end(), setKey), sets.end());
     storeMemberSets(object, sets);
@@ -9230,6 +9235,31 @@ ScriptObject* ScriptEngine::findObject(const char* name) {
     // An empty reference never names an object (anonymous objects must not
     // answer to "").
     if (!name || !*name) return nullptr;
+    // Sim::findObject paths: "Name/child/...", "<id>/child", "/Root/..."; each
+    // segment names a member of the set before it.
+    if (std::strchr(name, '/')) {
+        const std::string path(name);
+        size_t pos = path[0] == '/' ? 1 : 0;
+        size_t slash = path.find('/', pos);
+        ScriptObject* current = findObject(path.substr(pos, slash - pos).c_str());
+        while (current && slash != std::string::npos) {
+            pos = slash + 1;
+            slash = path.find('/', pos);
+            const std::string segment = path.substr(pos, slash - pos);
+            ScriptObject* next = nullptr;
+            auto countIt = current->internals.find("__childCount");
+            const int count = countIt == current->internals.end() ? 0 : countIt->second.toInt();
+            for (int i = 0; i < count && !next; ++i) {
+                auto child = current->internals.find("__child" + std::to_string(i));
+                if (child == current->internals.end()) continue;
+                ScriptObject* member = findObject(child->second.toString().c_str());
+                if (member && !member->name.empty() && strcasecmp(member->name.c_str(), segment.c_str()) == 0)
+                    next = member;
+            }
+            current = next;
+        }
+        return current;
+    }
     int id = 0;
     if (parseObjectId(name, id)) {
         auto byId = objectsById.find(id);

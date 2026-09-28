@@ -40,3 +40,13 @@ void GameBase::callDataBlock(const char* callback, const std::vector<std::string
     for (const auto& value : extra) args.emplace_back(value);
     ts->callObjectMethod(block, callback, args);
 }
+
+// Retail GameBase::packUpdate: the datablock, then the target id.
+uint32_t GameBase::packUpdate(GameConnection&, uint32_t mask, TorqueBitWriter& w) {
+    const std::string block = dataBlock();
+    const int id = block.empty() ? 0 : std::atoi(block.c_str());
+    if (w.writeFlag((mask & DataBlockMask) && id >= 3 && id <= 2050)) w.writeRangedU32((uint32_t)id, 3, 2050);
+    if (w.writeFlag(mask & ExtendedInfoMask))
+        if (w.writeFlag(targetId != -1)) w.writeInt(targetId, 9);
+    return 0;
+}

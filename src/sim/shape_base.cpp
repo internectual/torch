@@ -66,7 +66,7 @@ bool ShapeBase::setDamageState(const std::string& name) {
     return false;
 }
 
-void ShapeBase::processTick() {
+void ShapeBase::processMove(const ClientMoveIn*) {
     // Energy management
     if (damageState == Enabled && !dataBool("inheritEnergyFromMount", false))
         energy = std::clamp(energy + rechargeRate, 0.0f, std::max(0.0f, maxEnergy()));
@@ -82,6 +82,57 @@ void ShapeBase::processTick() {
         }
         if (store != damage) callDataBlock("onDamage");
     }
+}
+
+// Retail ShapeBase::packUpdate, in the order the client reads it: damage,
+// sounds, threads, images, cloak/shield/invincibility, mount.
+uint32_t ShapeBase::packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) {
+    const uint32_t ret = GameBase::packUpdate(connection, mask, w);
+    // No sound plays, no script thread runs and no image is mounted yet.
+    if (mask & InitialUpdateMask) mask &= ~(SoundMask | ThreadMask | ImageMask);
+    if (!w.writeFlag(mask & (DamageMask | SoundMask | ThreadMask | ImageMask | CloakMask | MountedMask |
+                             InvincibleMask | ShieldMask)))
+        return ret;
+    if (w.writeFlag(mask & DamageMask)) {
+        const float max = maxDamage();
+        w.writeFloat(std::clamp(max > 0.0f ? damage / max : 0.0f, 0.0f, 1.0f), 6);
+        w.writeInt((int32_t)damageState, 2);
+        w.writeFlag(false); // blowApart
+        w.writeNormalVector({0, 0, 1}, 8); // damageDir
+    }
+    if (w.writeFlag(mask & SoundMask))
+        for (int i = 0; i < 4; ++i) w.writeFlag(false);
+    if (w.writeFlag(mask & ThreadMask))
+        for (int i = 0; i < 4; ++i) w.writeFlag(false);
+    if (w.writeFlag(mask & ImageMask))
+        for (int i = 0; i < 8; ++i) w.writeFlag(false);
+    if (w.writeFlag(mask & (ShieldMask | CloakMask | InvincibleMask))) {
+        if (w.writeFlag(mask & CloakMask)) {
+            w.writeFlag(cloaked);
+            w.writeFlag(!controllingClient.empty());
+            w.writeFlag(false); // not fading
+            w.writeFlag(true);  // mFadeVal == 1
+        }
+        if (w.writeFlag(mask & ShieldMask)) {
+            w.writeFlag(false);
+            w.writeNormalVector({0, 0, 1}, 8);
+            w.writeFloat(getEnergyValue(), 5);
+        }
+        if (w.writeFlag(mask & InvincibleMask)) {
+            w.writeF32(invincibleTime);
+            w.writeF32(invincibleSpeed);
+        }
+    }
+    // Not mounted: an unmount unless this is the initial update.
+    if (w.writeFlag((mask & MountedMask) && !(mask & InitialUpdateMask))) w.writeFlag(false);
+    return ret;
+}
+
+bool ShapeBase::writePacketData(GameConnection& connection, TorqueBitWriter& w) {
+    const bool ret = GameBase::writePacketData(connection, w);
+    w.writeF32(getEnergyLevel());
+    w.writeF32(rechargeRate);
+    return ret;
 }
 
 void registerShapeBaseNatives(TorqueScript& ts) {

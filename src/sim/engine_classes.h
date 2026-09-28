@@ -1,7 +1,8 @@
 #pragma once
 // Engine console classes and their console parent class, from the
 // IMPLEMENT_CONOBJECT/IMPLEMENT_CO_* declarations of the Tribes 2 engine
-// source (first base that is itself a console class). A method call on an
+// source (first base that is itself a console class), and the retail-only
+// classes from the retail binary. A method call on an
 // object resolves along this chain (Namespace linking in consoleObject.cc).
 #include <string>
 #include <strings.h>
@@ -130,7 +131,7 @@ inline const std::unordered_map<std::string, std::string, CaseHash, CaseEqual>& 
         {"HTTPObject", "TCPObject"},
         {"HoverVehicle", "Vehicle"},
         {"HoverVehicleData", "VehicleData"},
-        {"HudBarBaseCtrl", "HudCtrl"},
+        {"HudBarBaseCtrl", "HudBitmapFrameCtrl"}, // retail (RTTI); V12: HudCtrl
         {"HudBitmapCtrl", "HudCtrl"},
         {"HudBitmapFrameCtrl", "HudBitmapCtrl"},
         {"HudClockCtrl", "HudBitmapFrameCtrl"},
@@ -236,6 +237,52 @@ inline const std::unordered_map<std::string, std::string, CaseHash, CaseEqual>& 
         {"WheeledVehicle", "Vehicle"},
         {"WheeledVehicleData", "VehicleData"},
         {"WorldEditor", "EditTSCtrl"},
+        // Retail-only console classes: their first console ancestor from the
+        // retail binary's RTTI (egcs __tf<Class> -> __rtti_si(node, name, base)).
+        {"AIStepEngage", "SimObject"},
+        {"AIStepIdlePatrol", "SimObject"},
+        {"AIStepJet", "SimObject"},
+        {"CannedChatItem", "SimDataBlock"},
+        {"EffectProfile", "SimDataBlock"},
+        {"GuiBorderButtonCtrl", "GuiButtonBaseCtrl"},
+        {"GuiButtonBaseCtrl", "GuiControl"},
+        {"GuiCommanderMapButton", "GuiButtonCtrl"},
+        {"GuiCommanderMapCheckbox", "GuiCheckBoxCtrl"},
+        {"GuiCommanderMapPopupMenu", "GuiPopUpMenuCtrl"},
+        {"GuiCommanderTV", "GameTSCtrl"},
+        {"GuiDTSView", "GuiTSCtrl"},
+        {"GuiDashBoardCtrl", "GuiControl"},
+        {"GuiEmailBrowser", "ShellFancyArray"},
+        {"GuiFadeinBitmapCtrl", "GuiBitmapCtrl"},
+        {"GuiLoginPasswordCtrl", "ShellTextEditCtrl"},
+        {"GuiMenuBar", "GuiControl"},
+        {"HudBombSight", "HudCtrl"},
+        {"HudCapacitor", "HudBarBaseCtrl"},
+        {"HudChat", "HudBitmapFrameCtrl"},
+        {"HudClock", "HudBitmapFrameCtrl"},
+        {"HudCommandMsg", "HudBitmapFrameCtrl"},
+        {"HudCompass", "HudCtrl"},
+        {"HudCrosshair", "HudBitmapCtrl"},
+        {"HudDamage", "HudBarBaseCtrl"},
+        {"HudEnergy", "HudBarBaseCtrl"},
+        {"HudFancyCtrl", "GuiControl"},
+        {"HudHorzCtrl", "GuiControl"},
+        {"HudInventory", "HudWeaponInvBase"},
+        {"HudNavDisplay", "HudBitmapCtrl"},
+        {"HudPulsingBitmap", "HudBitmapCtrl"},
+        {"HudScoreCtrl", "HudCtrl"},
+        {"HudVehicleWeapon", "HudWeaponInvBase"},
+        {"HudWeaponInvBase", "HudCtrl"},
+        {"HudWeapons", "HudWeaponInvBase"},
+        {"SecureHTTPObject", "HTTPObject"},
+        {"ShellAdCtrl", "GuiControl"},
+        {"ShellChatMemberList", "GuiTextListCtrl"},
+        {"ShellDlgFrame", "GuiTextCtrl"},
+        {"ShellFieldCtrl", "GuiControl"},
+        {"ShellPaneCtrl", "GuiTextCtrl"},
+        {"ShellTabFrame", "GuiControl"},
+        {"ShellTabGroupCtrl", "GuiControl"},
+        {"ShellWindowCtrl", "GuiTextCtrl"},
     };
     return table;
 }

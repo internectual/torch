@@ -1,12 +1,16 @@
 // Engine console functions the retail server scripts call that belong to
 // the simulation/server layer rather than the client.
 #include "sim/sim_natives.h"
+#include "sim/camera.h"
+#include "sim/torque_math.h"
 #include "sim/engine_crc.h"
 #include "sim/sim_state.h"
 #include "core/engine.h"
 #include "script/torquescript.h"
 #include "script/script_engine.h"
 #include <map>
+#include <cstdio>
+#include <cmath>
 #include "sim/shape_base.h"
 #include "sim/game_connection.h"
 #include "sim/net_object.h"
@@ -14,8 +18,86 @@
 
 void registerSimNatives(TorqueScript& ts) {
     registerShapeBaseNatives(ts);
+    registerCameraNatives(ts);
     registerGameConnectionNatives(ts);
     registerSceneObjectClasses();
+
+    // math/mathTypes.cc console functions.
+    {
+        using namespace TorqueMath;
+        auto text = [](const std::vector<VMValue>& args, size_t i) {
+            return i < args.size() ? args[i].toString() : std::string();
+        };
+        // "x y z ax ay az angle" as dSscanf leaves it: missing values are 0.
+        auto transform = [](const std::string& t, float pos[3], AngAxis& aa) {
+            pos[0] = pos[1] = pos[2] = 0;
+            aa = {0, 0, 0, 0};
+            std::sscanf(t.c_str(), "%g %g %g %g %g %g %g", &pos[0], &pos[1], &pos[2], &aa.x, &aa.y, &aa.z, &aa.angle);
+        };
+        auto format = [](std::initializer_list<float> values) {
+            std::string out;
+            char buffer[32];
+            for (float v : values) {
+                std::snprintf(buffer, sizeof(buffer), "%g", v);
+                if (!out.empty()) out += ' ';
+                out += buffer;
+            }
+            return VMValue(out);
+        };
+        ts.registerNative("VectorLen", [text, format](const std::vector<VMValue>& args) -> VMValue {
+            float v[3] = {0, 0, 0};
+            std::sscanf(text(args, 0).c_str(), "%f %f %f", &v[0], &v[1], &v[2]);
+            return format({std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])});
+        });
+        ts.registerNative("VectorOrthoBasis", [text, format](const std::vector<VMValue>& args) -> VMValue {
+            AngAxis aa{0, 0, 0, 0};
+            std::sscanf(text(args, 0).c_str(), "%f %f %f %f", &aa.x, &aa.y, &aa.z, &aa.angle);
+            const Matrix m = matrix(quat(aa));
+            return format({m[0], m[4], m[8], m[1], m[5], m[9], m[2], m[6], m[10]});
+        });
+        ts.registerNative("MatrixCreate", [text, format](const std::vector<VMValue>& args) -> VMValue {
+            float pos[3] = {0, 0, 0};
+            AngAxis aa{0, 0, 0, 0};
+            std::sscanf(text(args, 0).c_str(), "%g %g %g", &pos[0], &pos[1], &pos[2]);
+            std::sscanf(text(args, 1).c_str(), "%g %g %g %g", &aa.x, &aa.y, &aa.z, &aa.angle);
+            return format({pos[0], pos[1], pos[2], aa.x, aa.y, aa.z, aa.angle * 3.14159265358979323846f / 180.0f});
+        });
+        ts.registerNative("MatrixCreateFromEuler", [text](const std::vector<VMValue>& args) -> VMValue {
+            float e[3] = {0, 0, 0};
+            std::sscanf(text(args, 0).c_str(), "%g %g %g", &e[0], &e[1], &e[2]);
+            const AngAxis aa = angAxis(quat(e[0], e[1], e[2]));
+            char buffer[160];
+            std::snprintf(buffer, sizeof(buffer), "0 0 0 %g %g %g %g", aa.x, aa.y, aa.z, aa.angle);
+            return VMValue(buffer);
+        });
+        ts.registerNative("MatrixMultiply", [text, transform, format](const std::vector<VMValue>& args) -> VMValue {
+            float p1[3], p2[3];
+            AngAxis a1, a2;
+            transform(text(args, 0), p1, a1);
+            transform(text(args, 1), p2, a2);
+            const Matrix m = mul(matrix(p1, a1), matrix(p2, a2));
+            AngAxis aa = angAxis(quat(m));
+            const float len = std::sqrt(aa.x * aa.x + aa.y * aa.y + aa.z * aa.z);
+            if (len > 0) { aa.x /= len; aa.y /= len; aa.z /= len; }
+            return format({m[3], m[7], m[11], aa.x, aa.y, aa.z, aa.angle});
+        });
+        ts.registerNative("MatrixMulVector", [text, transform, format](const std::vector<VMValue>& args) -> VMValue {
+            float p[3], v[3] = {0, 0, 0}, out[3];
+            AngAxis a;
+            transform(text(args, 0), p, a);
+            std::sscanf(text(args, 1).c_str(), "%g %g %g", &v[0], &v[1], &v[2]);
+            mulV(matrix(p, a), v, out);
+            return format({out[0], out[1], out[2]});
+        });
+        ts.registerNative("MatrixMulPoint", [text, transform, format](const std::vector<VMValue>& args) -> VMValue {
+            float p[3], v[3] = {0, 0, 0}, out[3];
+            AngAxis a;
+            transform(text(args, 0), p, a);
+            std::sscanf(text(args, 1).c_str(), "%g %g %g", &v[0], &v[1], &v[2]);
+            mulP(matrix(p, a), v, out);
+            return format({out[0], out[1], out[2]});
+        });
+    }
 
     // game/net.cc and consoleFunctions.cc tagged strings.
     ts.registerNative("addTaggedString", [](const std::vector<VMValue>& args) -> VMValue {
