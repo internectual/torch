@@ -985,5 +985,67 @@ int main() {
         PacketData again = parser.parsePacket(packets[1].data(), packets[1].size(), -1);
         assert(again.events.empty());
     }
+    {
+        // activateGhosting sends the ScopeAlways scene as GhostAlwaysObject
+        // events the demo reader turns into ghosts with their scene fields.
+        script.ts()->execute(
+            "new TerrainBlock(GhostTerrain) { terrainFile = \"Minotaur.ter\"; detailTexture = \"details/baddet1\"; "
+            "  squareSize = \"8\"; emptySquares = \"150887 151143\"; position = \"-1024 -1024 0\"; };"
+            "new Sky(GhostSky) { materialList = \"sky_badlands_cloudy.dml\"; fogColor = \"0.5 0.4 0.3 1\"; "
+            "  visibleDistance = \"1200\"; fogDistance = \"600\"; fogVolume1 = \"300 0 200\"; "
+            "  fogVolumeColor1 = \"0.1 0.2 0.3 1\"; cloudText1 = \"skies/cloud1\"; windVelocity = \"1 2 0\"; };"
+            "new Sun(GhostSun) { direction = \"0.57735 0.57735 -0.57735\"; color = \"0.6 0.6 0.6 1\"; ambient = \"0.2 0.2 0.2 1\"; };"
+            "new InteriorInstance(GhostInterior) { interiorFile = \"xbunk1.dif\"; position = \"10 20 30\"; "
+            "  rotation = \"0 0 1 90\"; scale = \"1 1 1\"; showTerrainInside = \"0\"; };"
+            "new TSStatic(GhostStatic) { shapeName = \"xorg20.dts\"; position = \"1 2 3\"; };"
+            "new MissionArea(GhostArea) { area = \"-536 -648 880 592\"; flightCeiling = \"300\"; flightCeilingRange = \"20\"; };"
+            "new WaterBlock(GhostWater) { position = \"0 0 50\"; scale = \"128 128 20\"; liquidType = \"Lava\"; "
+            "  surfaceTexture = \"liquidTiles/lava\"; density = \"2\"; };");
+        GameConnection connection;
+        std::vector<std::vector<uint8_t>> packets;
+        connection.deliver = [&](const std::vector<uint8_t>& packet) { packets.push_back(packet); };
+        connection.activateGhosting();
+        connection.checkPacketSend(10.0);
+        assert(packets.size() == 1);
+        DemoParser parser;
+        PacketData pd = parser.parsePacket(packets[0].data(), packets[0].size(), -1);
+        assert(parser.getParseFault().empty());
+        const GhostTracker& tracker = parser.getGhostTracker();
+        std::map<std::string, const GhostEntry*> byClass;
+        for (int index = 1024 - 7; index < 1024; ++index) {
+            const GhostEntry* ghost = tracker.getGhost(index);
+            assert(ghost);
+            byClass[ghost->className] = ghost;
+        }
+        assert(byClass.size() == 7);
+        auto prop = [&](const char* cls, const char* name) {
+            const auto* ghost = byClass.at(cls);
+            for (const auto& [key, value] : ghost->sceneProps) if (key == name) return value;
+            return std::string();
+        };
+        assert(prop("TerrainBlock", "terrainFile") == "Minotaur.ter");
+        assert(prop("TerrainBlock", "emptySquares") == "150887 151143");
+        assert(prop("Sky", "materialList") == "sky_badlands_cloudy.dml");
+        assert(prop("Sky", "cloudText1") == "skies/cloud1");
+        assert(prop("InteriorInstance", "interiorFile") == "xbunk1.dif");
+        assert(prop("TSStatic", "shapeName") == "xorg20.dts");
+        assert(prop("MissionArea", "area") == "-536 -648 880 592");
+        assert(prop("WaterBlock", "liquidType") == "4");
+        assert(std::abs(byClass.at("InteriorInstance")->position.x - 10.0f) < 1e-4f);
+        // The client answers GhostAlwaysDone with ReadyForNormalGhosts; the
+        // ghost section then opens (empty: every object went as an event).
+        V12::ProtocolState client;
+        V12::DnetHeader header;
+        {
+            V12BitStream stream(packets[0].data(), packets[0].size());
+            assert(V12::readDnetHeader(stream, header));
+            client.processReceived(header);
+        }
+        V12::ClientPacketOptions reply;
+        reply.events.push_back(V12::makeGhostingMessageEvent(1, GameConnection::ReadyForNormalGhosts, 0));
+        const auto replyPacket = client.buildClientPacket(reply);
+        connection.receivePacket(replyPacket.data(), replyPacket.size());
+        assert(connection.isGhosting());
+    }
     return 0;
 }

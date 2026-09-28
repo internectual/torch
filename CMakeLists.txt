@@ -42,6 +42,8 @@ add_executable(torch
     src/sim/game_base.cpp
     src/sim/shape_base.cpp
     src/sim/game_connection.cpp
+    src/sim/net_object.cpp
+    src/sim/scene_objects.cpp
     src/script/torquescript.cpp
     src/render/renderer.cpp
     src/render/shader.cpp
@@ -126,6 +128,8 @@ add_executable(torch_server
     src/sim/game_base.cpp
     src/sim/shape_base.cpp
     src/sim/game_connection.cpp
+    src/sim/net_object.cpp
+    src/sim/scene_objects.cpp
     src/script/torquescript.cpp
     src/render/renderer.cpp
     src/render/shader.cpp
@@ -383,6 +387,8 @@ add_executable(torch_parity_test
     src/sim/game_base.cpp
     src/sim/shape_base.cpp
     src/sim/game_connection.cpp
+    src/sim/net_object.cpp
+    src/sim/scene_objects.cpp
     src/script/torquescript.cpp
     src/render/renderer.cpp
     src/render/shader.cpp
@@ -448,6 +454,8 @@ add_executable(torch_network_loopback_test
     src/sim/game_base.cpp
     src/sim/shape_base.cpp
     src/sim/game_connection.cpp
+    src/sim/net_object.cpp
+    src/sim/scene_objects.cpp
     src/script/torquescript.cpp
     src/render/renderer.cpp
     src/render/shader.cpp

@@ -1,5 +1,6 @@
 #include "sim/engine_object.h"
 #include "sim/engine_classes.h"
+#include "sim/net_object.h"
 #include "script/script_engine.h"
 #include "sim/sim_state.h"
 #include <algorithm>
@@ -23,6 +24,7 @@ void attach(ScriptObject* object) {
         if (it == factories().end()) continue;
         object->engine = it->second();
         object->engine->script = object;
+        if (auto* net = dynamic_cast<NetObject*>(object->engine.get())) net->readFields();
         return;
     }
 }

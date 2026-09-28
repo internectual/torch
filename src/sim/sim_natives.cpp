@@ -7,11 +7,13 @@
 #include "script/torquescript.h"
 #include "sim/shape_base.h"
 #include "sim/game_connection.h"
+#include "sim/net_object.h"
 #include "sim/net_string_table.h"
 
 void registerSimNatives(TorqueScript& ts) {
     registerShapeBaseNatives(ts);
     registerGameConnectionNatives(ts);
+    registerSceneObjectClasses();
 
     // game/net.cc and consoleFunctions.cc tagged strings.
     ts.registerNative("addTaggedString", [](const std::vector<VMValue>& args) -> VMValue {

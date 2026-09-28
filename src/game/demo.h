@@ -967,6 +967,11 @@ public:
     int getGhostResets() const { return ghostResets_; }
 
     DemoBlock* nextBlock();
+    // A live stream is a recording being made: blocks are appended as the
+    // connection produces them (server packets, move ticks, sends).
+    void beginLiveStream();
+    void appendLiveBlock(int type, const uint8_t* data, size_t size);
+    bool isLiveStream() const { return live_; }
     void reset();
     void resetMissionState();
     int processBlocks(int count);
@@ -1018,6 +1023,7 @@ private:
 
     // Decompressed block stream
     uint8_t* decompressed{};
+    bool live_ = false;
     size_t decompressedSize{};
     int blockStreamOffset{};
     int blockCount_{ -1 };

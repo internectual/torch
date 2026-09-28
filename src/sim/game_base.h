@@ -1,11 +1,13 @@
 #pragma once
 // GameBase: an object with a datablock, reporting to the datablock's
 // namespace (%data.onX(%obj)).
-#include "sim/engine_object.h"
+#include "sim/net_object.h"
 #include <string>
 
-class GameBase : public EngineObject {
+class GameBase : public SceneObject {
 public:
+    // Not ghosted until the ShapeBase-family packUpdate writers land.
+    GameBase() { ghostable = false; }
     bool processesTicks() const override { return true; }
     // The datablock object's id, or "" when none is set.
     std::string dataBlock() const;

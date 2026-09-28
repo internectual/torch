@@ -26,6 +26,17 @@ struct NetEventOut {
     std::function<void(bool delivered)> notify;
 };
 
+// NetConnection::GhostInfo.
+struct GhostInfo {
+    enum Flags { InScope = 1, ScopeAlways = 2, NotYetGhosted = 4, Ghosting = 8, KillGhost = 16,
+                 KillingGhost = 32, ScopedEvent = 64 };
+    std::string object; // script object key; empty once detached
+    int index = -1;
+    uint32_t flags = 0;
+    uint32_t updateMask = 0;
+    int updateSkipCount = 0;
+};
+
 struct ClientMoveIn {
     uint32_t id = 0;
     int16_t yaw = 0, pitch = 0, roll = 0; // 16-bit angle units
@@ -48,6 +59,15 @@ public:
     // sendRemoteCommand: tags among argv get their NetStringEvent first.
     void sendRemoteCommand(const std::vector<std::string>& argv);
     void setMissionCRC(uint32_t crc);
+
+    // NetConnection ghosting (netGhost.cc).
+    enum GhostMessage { GhostAlwaysDone = 0, ReadyForNormalGhosts = 1, EndGhosting = 2, GhostAlwaysStarting = 3 };
+    void activateGhosting();
+    void resetGhosting();
+    // An object came into scope (ScopeAlways objects added while scoping).
+    void objectInScope(const std::string& object);
+    int ghostIndex(const std::string& object) const;
+    bool isGhosting() const { return ghosting; }
 
     // NetConnection::checkPacketSend.
     void checkPacketSend(double now);
@@ -75,6 +95,17 @@ private:
     std::bitset<1024> stringSent;
     double lastUpdate = -1.0;
     V12::NetStringTable remoteStrings; // the client's tag ids
+
+    struct GhostRef { int index; uint32_t mask; uint32_t flags; };
+    void writeGhosts(TorqueBitWriter& w, std::vector<GhostRef>& refs);
+    void ghostPacketDropped(std::vector<GhostRef>& refs);
+    void ghostPacketReceived(std::vector<GhostRef>& refs);
+    void handleGhostMessage(int message, uint32_t sequence);
+    std::vector<GhostInfo> ghosts = std::vector<GhostInfo>(1024);
+    std::map<uint32_t, std::vector<GhostRef>> ghostsInFlight;
+    bool scoping = false;
+    bool ghosting = false;
+    uint32_t ghostingSequence = 0;
 };
 
 void registerGameConnectionNatives(class TorqueScript& ts);

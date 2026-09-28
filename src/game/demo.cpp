@@ -1143,6 +1143,48 @@ const std::vector<int>& DemoParser::getMoveTicksBefore() {
     return moveTicksBefore_;
 }
 
+void DemoParser::beginLiveStream() {
+    if (decompressed) free(decompressed);
+    decompressed = nullptr;
+    decompressedSize = 0;
+    header = {};
+    initialBlock = {};
+    ibGhostTracker.clear();
+    ghostTracker.clear();
+    playerInfo_.clear();
+    initialTaggedStrings_.clear();
+    initialPlayerInfo_.clear();
+    skinToPlayer_.clear();
+    targets_.clear();
+    initialTargets_.clear();
+    missionChanges_.clear();
+    missionCrcChanges_.clear();
+    eventLog_.clear();
+    packetsParsed = 0;
+    parseFault_.clear();
+    packetsDroppedAfterFault_ = 0;
+    s_pendingExplosions.clear();
+    blockStreamOffset = 0;
+    blockCursor_ = 0;
+    blockCount_ = 0;
+    moveTicksBefore_.assign(1, 0);
+    live_ = true;
+}
+
+void DemoParser::appendLiveBlock(int type, const uint8_t* data, size_t size) {
+    if (!live_ || size > 0xfff) return;
+    uint8_t* grown = (uint8_t*)realloc(decompressed, decompressedSize + 2 + size);
+    if (!grown) return;
+    decompressed = grown;
+    const int header16 = (type << 12) | (int)size;
+    decompressed[decompressedSize] = (uint8_t)(header16 & 0xff);
+    decompressed[decompressedSize + 1] = (uint8_t)(header16 >> 8);
+    if (size) memcpy(decompressed + decompressedSize + 2, data, size);
+    decompressedSize += 2 + size;
+    ++blockCount_;
+    moveTicksBefore_.push_back(moveTicksBefore_.back() + (type == T2Demo::BlockTypeMove ? 1 : 0));
+}
+
 DemoBlock* DemoParser::nextBlock() {
     if (!decompressed || blockStreamOffset + 2 > (int)decompressedSize) return nullptr;
     int ts = decompressed[blockStreamOffset] | (decompressed[blockStreamOffset+1] << 8);
@@ -1799,6 +1841,31 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
         ev.rawArguments = ev.arguments;
         ev.taggedArguments = tagged;
         RemoteCommand::expandTagged(ev.arguments, tagged);
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 3) { // GhostAlwaysObjectEvent
+        // netGhost.cc: the ghost index, then the object's full update, sent
+        // as an event while ghosting is activated.
+        const int index = bs.readInt(10);
+        if (bs.readFlag()) {
+            const int classId = bs.readInt(T2Demo::NetObjectClassBitSize) + T2Demo::NetObjectClassFirst;
+            if (bs.isError()) return false;
+            std::string className;
+            if (const char* name = V12::ghostClassName((size_t)classId)) className = name;
+            else className = "Class" + std::to_string(classId);
+            if (applyEffects) {
+                ghostTracker.createGhost(index, classId, className);
+                GhostEntry* entry = ghostTracker.getMutableGhost(index);
+                if (!readGhostClassData(bs, classId, true, compressionPoint, entry)) {
+                    ghostTracker.deleteGhost(index);
+                    return false;
+                }
+                if (entry && entry->targetId >= 0) applyTarget(*entry);
+            } else {
+                GhostTracker scratch;
+                scratch.createGhost(index, classId, className);
+                if (!readGhostClassData(bs, classId, true, compressionPoint, scratch.getMutableGhost(index)))
+                    return false;
+            }
+        }
     } else if (ev.classId == T2Demo::NetEventClassFirst + 7) { // NetStringEvent
         const int id = bs.readInt(10);
         if (bs.readFlag()) {
