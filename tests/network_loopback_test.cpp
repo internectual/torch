@@ -1102,5 +1102,20 @@ int main() {
         server->transmitDataBlocks(8);
         assert(script.ts()->getGlobal("$LinkDone").toString() == "8");
     }
+    {
+        // scan.l FLOAT is {INTEGER}.{INTEGER}: "<id>.field" is an object id
+        // and a field access.
+        script.ts()->execute("new ScriptObject(IdFieldProbe) { text = \"LOBBY\"; };");
+        const int id = ScriptEngine::instance().objectId(ScriptEngine::instance().findObject("IdFieldProbe"));
+        script.ts()->execute("$idFieldTest = (" + std::to_string(id) + ".text $= \"LOBBY\"); $floatTest = 3.25 + 1.5e1;");
+        assert(script.ts()->getGlobal("$idFieldTest").toInt() == 1);
+        assert(std::abs(script.ts()->getGlobal("$floatTest").toFloat() - 18.25f) < 1e-4f);
+    }
+    {
+        // An exec'd file's top-level locals live in its own frame; eval runs
+        // in the caller's frame.
+        script.ts()->execute("for (%i = 0; %i < 3; %i++) eval(\"$frameProbe\" @ %i @ \" = %i + 10;\");", "frame_probe.cs");
+        assert(script.ts()->getGlobal("$frameProbe2").toInt() == 12);
+    }
     return 0;
 }

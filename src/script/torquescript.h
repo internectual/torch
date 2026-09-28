@@ -42,6 +42,7 @@ public:
     void pop();
     void set(const std::string& name, const VMValue& val);
     VMValue get(const std::string& name);
+    size_t depth() const { return scopes.size(); }
 private:
     std::vector<std::unordered_map<std::string, VMValue>> scopes;
 };

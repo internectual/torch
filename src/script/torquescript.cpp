@@ -552,7 +552,12 @@ void TorqueScript::Impl::tokenize(const std::string& source) {
                 tokens.push_back(tok);
                 continue;
             }
-            while (srcPtr < srcEnd && ((*srcPtr >= '0' && *srcPtr <= '9') || *srcPtr == '.')) srcPtr++;
+            // FLOAT is {INTEGER}\.{INTEGER}: "3511.text" is an id, then a field.
+            while (srcPtr < srcEnd && *srcPtr >= '0' && *srcPtr <= '9') srcPtr++;
+            if (srcPtr + 1 < srcEnd && *srcPtr == '.' && srcPtr[1] >= '0' && srcPtr[1] <= '9') {
+                ++srcPtr;
+                while (srcPtr < srcEnd && *srcPtr >= '0' && *srcPtr <= '9') srcPtr++;
+            }
             if (srcPtr < srcEnd && (*srcPtr == 'e' || *srcPtr == 'E')) {
                 const char* exp = srcPtr + 1;
                 if (exp < srcEnd && (*exp == '+' || *exp == '-')) ++exp;
@@ -2403,7 +2408,23 @@ static bool isPrefsScript(const std::string& path) {
            low.find("serverprefs.cs") != std::string::npos;
 }
 
+// CodeBlock::exec: an exec'd file runs in a frame of its own (setFrame -1);
+// eval and console lines (Con::evaluate, setFrame 0) run in the current
+// frame, and get one when no function is executing.
+namespace {
+struct ExecFrame {
+    TSLocals& locals;
+    bool pushed = false;
+    ExecFrame(TSLocals& locals, const std::string& filename) : locals(locals) {
+        const bool evaluate = filename.empty() || filename == "eval" || filename == "console";
+        if (!evaluate || locals.depth() == 0) { locals.push(); pushed = true; }
+    }
+    ~ExecFrame() { if (pushed) locals.pop(); }
+};
+}
+
 VMValue TorqueScript::executeNested(const std::string& source, const std::string& path) {
+    ExecFrame frame(impl->locals, path);
     Console::instance().printf(LogLevel::Debug, "TS: nested enter '%s'", path.c_str());
     // Save outer state
     struct StateGuard {
@@ -2642,6 +2663,7 @@ VMValue TorqueScript::execute(const std::string& source, const std::string& file
         return executeNested(source, filename.empty() ? "console" : filename);
     // Track depth for THIS execution too, so any reentrant execute() while
     // this parse is in flight is routed through the guarded nested path.
+    ExecFrame frame(impl->locals, filename);
     impl->execDepth++;
     impl->currentFile = filename;
     impl->running = true;
