@@ -20,6 +20,7 @@ extern char** environ;
 
 static void syncGuiField(const std::string& objName, const std::string& field, const VMValue& val);
 #include <cctype>
+#include <strings.h>
 
 static std::string toLower(const std::string& s) {
     std::string r = s;
@@ -28,8 +29,22 @@ static std::string toLower(const std::string& s) {
 }
 
 static bool sameName(const std::string& a, const std::string& b) {
-    return toLower(a) == toLower(b);
+    return a.size() == b.size() && strncasecmp(a.c_str(), b.c_str(), a.size()) == 0;
 }
+
+// TorqueScript names are case-insensitive: key function tables that way so
+// lookups are hashed rather than scanned.
+struct NameHash {
+    size_t operator()(const std::string& s) const {
+        size_t h = 1469598103934665603ull;
+        for (unsigned char c : s) { h ^= (size_t)tolower(c); h *= 1099511628211ull; }
+        return h;
+    }
+};
+struct NameEqual {
+    bool operator()(const std::string& a, const std::string& b) const { return sameName(a, b); }
+};
+using FunctionTable = std::unordered_map<std::string, TSFunc, NameHash, NameEqual>;
 
 static void syncPackageConsole(const std::vector<std::string>& packages) {
     const int oldCount = Console::instance().getIntVariable("$TotalNumberOfPackages", 0);
@@ -76,8 +91,8 @@ static bool readStringBounded(const std::vector<uint8_t>& data, size_t& offset,
 struct TorqueScript::Impl {
     TorqueScript* outer;
     std::unordered_map<std::string, std::function<VMValue(const std::vector<VMValue>&)>> natives;
-    std::unordered_map<std::string, TSFunc> functions;
-    std::unordered_map<std::string, std::unordered_map<std::string, TSFunc>> packageFunctions;
+    FunctionTable functions;
+    std::unordered_map<std::string, FunctionTable> packageFunctions;
     std::vector<std::string> activePackages;
     std::vector<std::string> callPackages;
     std::vector<std::string> callNames; // executing script functions
@@ -462,11 +477,12 @@ void TSLocals::set(const std::string& name, const VMValue& val) {
     }
     scopes.back()[name] = val;
 }
+// Locals belong to the executing function's frame only; a name it never
+// set is empty, not the caller's value.
 VMValue TSLocals::get(const std::string& name) {
-    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
-        for (const auto& [stored, value] : *it)
-            if (sameName(stored, name)) return value;
-    }
+    if (scopes.empty()) return VMValue();
+    for (const auto& [stored, value] : scopes.back())
+        if (sameName(stored, name)) return value;
     return VMValue();
 }
 
@@ -2795,12 +2811,13 @@ bool TorqueScript::hasFunction(const std::string& name) const {
     for (auto package = impl->activePackages.rbegin(); package != impl->activePackages.rend(); ++package) {
         auto it = impl->packageFunctions.find(*package);
         if (it == impl->packageFunctions.end()) continue;
-        for (const auto& [stored, function] : it->second)
-            if (sameName(stored, name)) return true;
+        if (it->second.count(name)) return true;
     }
-    for (const auto& [stored, function] : impl->functions)
-        if (sameName(stored, name)) return true;
-    return false;
+    return impl->functions.count(name) != 0;
+}
+
+bool TorqueScript::isFunction(const std::string& name) const {
+    return hasFunction(name) || impl->natives.count(toLower(name)) != 0;
 }
 
 bool TorqueScript::activatePackage(const std::string& name) {
@@ -2865,32 +2882,25 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
         for (auto package = begin; package != impl->activePackages.rend() && !selected; ++package) {
             auto packageIt = impl->packageFunctions.find(*package);
             if (packageIt == impl->packageFunctions.end()) continue;
-            for (const auto& [stored, function] : packageIt->second) {
-                if (sameName(stored, name)) {
-                    selected = &function;
-                    selectedPackage = *package;
-                    break;
-                }
+            auto function = packageIt->second.find(name);
+            if (function != packageIt->second.end()) {
+                selected = &function->second;
+                selectedPackage = *package;
             }
         }
     } else {
         for (auto package = impl->activePackages.rbegin(); package != impl->activePackages.rend(); ++package) {
             auto packageIt = impl->packageFunctions.find(*package);
             if (packageIt == impl->packageFunctions.end()) continue;
-            for (const auto& [stored, function] : packageIt->second)
-                if (sameName(stored, name)) {
-                    selected = &function;
-                    selectedPackage = *package;
-                    break;
-                }
-            if (selected) break;
+            auto function = packageIt->second.find(name);
+            if (function != packageIt->second.end()) {
+                selected = &function->second;
+                selectedPackage = *package;
+                break;
+            }
         }
     }
     auto it = impl->functions.find(name);
-    if (!selected && it == impl->functions.end()) {
-        for (auto candidate = impl->functions.begin(); candidate != impl->functions.end(); ++candidate)
-            if (sameName(candidate->first, name)) { it = candidate; break; }
-    }
     if (!selected && it == impl->functions.end()) {
         std::string nativeName = name;
         for (char& c : nativeName)
@@ -3045,7 +3055,9 @@ size_t TorqueScript::processScheduledEvents(double now) {
             callFunction(method, args);
             return;
         }
-        if (hasFunction(event.command)) callFunction(event.command, args);
+        // SimConsoleEvent: Con::execute resolves script functions and
+        // natives alike, with the scheduled arguments.
+        if (isFunction(event.command)) callFunction(event.command, args);
         else execute(event.command, "schedule");
     });
 }

@@ -58,7 +58,10 @@ done
 for name in mapper preview; do
     grep -q 'Goodbye' "$log_dir/$name.log" || { printf '%s did not clean up\n' "$name" >&2; exit 1; }
 done
-grep -q 'Bootstrap:' "$log_dir/retail.log" || exit 1
+# -nologin hands startup to the configured init script; Torch loads no
+# client scripts of its own.
+grep -q 'Init script' "$log_dir/retail.log" || { printf 'retail did not reach the init script\n' >&2; exit 1; }
+if grep -q 'Bootstrap:' "$log_dir/retail.log"; then printf 'retail loaded hardcoded scripts\n' >&2; exit 1; fi
 for name in playback demo-mode mapper; do
     grep -q -- '-nologin: dev panel\|Mapper mode:' "$log_dir/$name.log" || exit 1
 done

@@ -541,6 +541,9 @@ bool Engine::init(int argc, char* argv[]) {
     if (!explicitModPath && std::filesystem::is_directory(dataDir + "/classic"))
         modPath = "classic";
     Console::instance().setVariable("dataDir", dataDir.c_str());
+    // initScript comes from torch.cfg (may be empty); -init overrides it.
+    if (!initScriptSetting.empty() && !*Console::instance().getStringVariable("initScript", ""))
+        Console::instance().setVariable("initScript", initScriptSetting.c_str());
     Console::instance().setVariable("modPath", modPath.c_str());
     std::error_code outputError;
     std::filesystem::create_directories(outputDir, outputError);
@@ -640,6 +643,14 @@ bool Engine::init(int argc, char* argv[]) {
     else
         activeRoot = installRoot / modPath;
 
+    // export() writes to <outputDir>/<mod>, standing in for the game's own
+    // mod folder: mount it first so scripts read back what they wrote
+    // (console_start's exec of prefs/ClientPrefs.cs).
+    if (!outputDir.empty()) {
+        std::error_code error;
+        std::filesystem::create_directories(std::filesystem::path(outputDir) / modPath, error);
+        addDataPath((std::filesystem::path(outputDir) / modPath).string());
+    }
     addDataPath(activeRoot.string());
     addDataPath(baseRoot.string());
     if (!directBase) addDataPath(configuredRoot.string());
@@ -1405,9 +1416,6 @@ bool Engine::init(int argc, char* argv[]) {
 
     Console::instance().printf(LogLevel::Info, "Engine initialized successfully");
 
-    // Auto-accept EULA for development (-nologin) flow
-    Console::instance().setVariable("$pref::AcceptedEULA", "1");
-
     // T2 device type constants for ActionMap.bind(device, key, command)
     if (scr->ts()) {
         scr->ts()->setGlobal("$keyboard", VMValue(0));
@@ -1634,14 +1642,8 @@ bool Engine::init(int argc, char* argv[]) {
     // The init script (console_start.cs) parses args, creates profiles,
     // GUI controls, and execs any other scripts it needs.
     if (scr->ts()) {
-        // -nologin: follow the game's own headless path — skip the GG intro
-        // splash and the login dialog, landing directly on the shell.
-        if (noLogin) {
-            Console::instance().setVariable("$pref::SkipIntro", "true");
-            Console::instance().setVariable("$SkipLogin", "true");
-            Console::instance().setVariable("$pref::AcceptedEULA", "1");
-            Console::instance().setVariable("$LaunchMode", "Offline");
-        }
+        // -nologin reaches console_start.cs in $Game::argv; the script owns
+        // the offline path (console_end.cs, PlayOffline).
         if (mapperMode) {
             // Mapper still needs the normal script bootstrap: datablocks and
             // their asset references are created by TorqueScript. The mapper
@@ -1653,6 +1655,9 @@ bool Engine::init(int argc, char* argv[]) {
         std::string initPath = Console::instance().getStringVariable("initScript", "");
         auto initData = fs.read(initPath.c_str());
         if (!mapperMode && !initData.empty()) {
+            // The init script loads and exports prefs itself; modes that skip
+            // it (the mapper) never write ClientPrefs.
+            allowClientPrefsExport(true);
             std::string src((const char*)initData.data(), initData.size());
             scr->ts()->executeNested(src, initPath);
             Console::instance().printf(LogLevel::Info, "Init script: %s (%zu bytes)", initPath.c_str(), initData.size());
@@ -1678,63 +1683,7 @@ bool Engine::init(int argc, char* argv[]) {
             Console::instance().printf(LogLevel::Info,
                 "Mapper: executed %d discovered asset scripts", executed);
         }
-
-        // console_start creates the canvas but the stock client bootstrap that
-        // normally loads these resources lives in console_end.cs, which is not
-        // part of the supplied installation.  Load only the stock resources
-        // needed by the native client; do not synthesize replacements when a
-        // supplied resource is absent.
-        if (!mapperMode) {
-            const char* clientScripts[] = {
-                "scripts/player.cs", "scripts/gameCanvas.cs", "scripts/hud.cs",
-                "scripts/inventoryHud.cs", "scripts/GameGui.cs",
-                // console_end.cs "Load material properties".
-                "scripts/badlandsPropMap.cs", "scripts/desertPropMap.cs", "scripts/icePropMap.cs",
-                "scripts/lavaPropMap.cs", "scripts/lushPropMap.cs"
-            };
-            for (const char* path : clientScripts) {
-                // Match Torque's exec search order: the selected mod overlays
-                // base resources, while missing mod files fall back to base.
-                std::vector<uint8_t> data;
-                std::string loadedPath = path;
-                if (modPath != "base") {
-                    loadedPath = modPath + "/" + path;
-                    data = fs.read(loadedPath.c_str());
-                }
-                if (data.empty()) {
-                    loadedPath = path;
-                    data = fs.read(path);
-                }
-                if (data.empty()) {
-                    Console::instance().printf(LogLevel::Warn,
-                        "Bootstrap: stock script not found: %s", path);
-                    continue;
-                }
-                scr->ts()->executeNested(
-                    std::string((const char*)data.data(), data.size()), loadedPath);
-                Console::instance().printf(LogLevel::Debug,
-                    "Bootstrap: loaded stock script: %s", loadedPath.c_str());
-            }
-
-            const char* clientGuis[] = {"gui/PlayGui.gui", "gui/GameGui.gui"};
-            for (const char* path : clientGuis) {
-                auto data = fs.read(path);
-                if (data.empty()) {
-                    Console::instance().printf(LogLevel::Warn,
-                        "Bootstrap: stock GUI not found: %s", path);
-                    continue;
-                }
-                scr->ts()->executeNested(
-                    std::string((const char*)data.data(), data.size()), path);
-                Console::instance().printf(LogLevel::Debug,
-                    "Bootstrap: loaded stock GUI: %s", path);
-            }
-        }
     }
-    // Boot scripts (incl. autoexec default-seeders) may export() before real
-    // prefs were loaded — those writes are gated off. Prefs are live now.
-    allowClientPrefsExport(true);
-
     // Skin discovery override: stock GMW_SkinPopup::fillList scans only
     // "textures/skins/<skin>.lmale.png".  Mods commonly drop skins at the
     // textures root instead (e.g. TR2 ships textures/TR2-1.lmale.png), and
@@ -1858,68 +1807,6 @@ bool Engine::init(int argc, char* argv[]) {
         }
     } else if (noLogin) {
         Console::instance().printf(LogLevel::Info, "-nologin: dev panel (F1 overlay, ~ console, Pause debug)");
-        // clientDefaults.cs forces $pref::Player::Count = 0 on fresh configs,
-        // so activating the warrior pane pushes NewWarriorDlg over everything.
-        // A headless/dev session has no warrior to create — pretend one exists.
-        // ONLY when the user has no warriors: clobbering a real Count here
-        // made DELETE ALIAS misbehave (guard/shift ran against wrong data).
-        // Load persisted prefs. console_start execs "prefs/clientPrefs.cs"
-        // relative to the data dir, but exports land under
-        // <outputDir>/<mod>/prefs/ — load THAT here so warriors survive.
-        if (auto* ts = scr->ts()) {
-            std::string outDir = Console::instance().getStringVariable("outputDir", "");
-            std::string modP = Console::instance().getStringVariable("modPath", "base");
-            if (!outDir.empty()) {
-                std::string prefPath = outDir + "/" + modP + "/prefs/ClientPrefs.cs";
-                struct stat st;
-                if (stat(prefPath.c_str(), &st) == 0 && st.st_size > 0) {
-                    std::ifstream pf(prefPath.c_str());
-                    if (pf) {
-                        std::string src((std::istreambuf_iterator<char>(pf)), std::istreambuf_iterator<char>());
-                        if (!src.empty()) {
-                            ts->execute(src, prefPath);
-                            // Self-heal warrior records corrupted by earlier
-                            // builds (blank skin fields left Show:Custom with
-                            // an empty Skin list on startup).
-                            double cnt2 = ts->getGlobal("$pref::Player::Count").toDouble();
-                            for (int i = 0; i < (int)cnt2 && i < 32; i++) {
-                                std::string key = "$pref::Player[" + std::to_string(i) + "]";
-                                std::string rec = ts->getGlobal(key).toString();
-                                auto fld = [&](int f) {
-                                    size_t p2 = 0;
-                                    for (int k = 0; k < f; k++) {
-                                        size_t t = rec.find('\t', p2);
-                                        if (t == std::string::npos) return std::string();
-                                        p2 = t + 1;
-                                    }
-                                    size_t e = rec.find('\t', p2);
-                                    return rec.substr(p2, e == std::string::npos ? std::string::npos : e - p2);
-                                };
-                                auto setFld = [&](int f, const std::string& v) {
-                                    std::vector<std::string> parts(5);
-                                    size_t p2 = 0;
-                                    for (int k = 0; k < 5; k++) {
-                                        size_t e = rec.find('\t', p2);
-                                        parts[k] = (k == f) ? v : rec.substr(p2, e == std::string::npos ? std::string::npos : e - p2);
-                                        if (e == std::string::npos) { for (int m = k+1; m < 5; m++) parts[m] = ""; break; }
-                                        p2 = e + 1;
-                                    }
-                                    std::string out;
-                                    for (int k = 0; k < 5; k++) { if (k) out += '\t'; out += parts[k]; }
-                                    return out;
-                                };
-                                bool changed = false;
-                                if (fld(1).empty() || (fld(1) == "Human Male" && fld(0).empty())) { /* keep */ }
-                                if (fld(2).empty()) { rec = setFld(2, "beagle"); changed = true; }
-                                if (fld(3).empty()) { rec = setFld(3, "Male1"); changed = true; }
-                                if ((int)rec.size() > 0 && fld(0).empty()) { /* name empty: leave */ }
-                                if (changed) ts->setGlobal(key, VMValue(rec));
-                            }
-                        }
-                    }
-                }
-            }
-        }
         // Do not fabricate a warrior or dismiss stock dialogs here. The
         // original scripts own profile creation and shell transitions.
         plat->processEvents();
@@ -3640,10 +3527,10 @@ void Engine::shutdown() {
         return;
     Console::instance().printf(LogLevel::Info, "Shutting down...");
 
-    // Window-close and SDL quit events bypass the console quit command. Save
-    // the live warrior/preferences state before the script VM is destroyed.
-    if (scr && scr->ts() && clientPrefsExportAllowed())
-        scr->ts()->execute("export(\"$pref::*\", \"prefs/ClientPrefs.cs\", false);", "shutdown-export");
+    // main.cc: the script onExit() runs as the game exits (console_end.cs
+    // exports prefs there). Only when the init script loaded them.
+    if (scr && scr->ts() && clientPrefsExportAllowed() && scr->ts()->isFunction("onExit"))
+        scr->ts()->callFunction("onExit", {});
 
     // GUI callbacks need the script VM and platform while they sleep. Tear the
     // stack down before either subsystem is destroyed, then release the GUI.

@@ -67,6 +67,8 @@ public:
     VMValue executeFile(const std::string& path);
     void unloadFile(const std::string& path);
     bool hasFunction(const std::string& name) const;
+    // Console isFunction: a script function or a native in the global namespace.
+    bool isFunction(const std::string& name) const;
     const std::string& dbgFile() const;
     int dbgLine() const;
     VMValue callFunction(const std::string& name, const std::vector<VMValue>& args);

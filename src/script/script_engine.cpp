@@ -1609,6 +1609,21 @@ bool ScriptEngine::clearDeleteNotify(ScriptObject* listener, ScriptObject* targe
     return oldSize != listeners.size();
 }
 
+// Drop `childKey` from a SimGroup's member list; false if it was not a member.
+static bool removeSimGroupChild(ScriptObject* group, const std::string& childKey) {
+    const int count = group->internals["__childCount"].toInt();
+    for (int i = 0; i < count; ++i) {
+        if (group->internals["__child" + std::to_string(i)].toString() != childKey) continue;
+        for (int j = i + 1; j < count; ++j)
+            group->internals["__child" + std::to_string(j - 1)] =
+                group->internals["__child" + std::to_string(j)];
+        group->internals.erase("__child" + std::to_string(count - 1));
+        group->internals["__childCount"] = VMValue(count - 1);
+        return true;
+    }
+    return false;
+}
+
 bool ScriptEngine::deleteScriptObject(const std::string& name) {
     ScriptObject* object = findObject(name.c_str());
     if (!object) return false;
@@ -1624,7 +1639,12 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
         if (child && child->internals["parent"].toString() == objectName)
             children.push_back(childName);
     }
+    // SimGroup::onRemove deletes the group's members too.
+    const int memberCount = object->internals["__childCount"].toInt();
+    for (int i = 0; i < memberCount; ++i)
+        children.push_back(object->internals["__child" + std::to_string(i)].toString());
     std::sort(children.begin(), children.end());
+    children.erase(std::unique(children.begin(), children.end()), children.end());
     for (const auto& child : children) deleteScriptObject(child);
 
     if (tsInstance) {
@@ -1653,6 +1673,10 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
         notifications.erase(std::remove(notifications.begin(), notifications.end(), objectName),
                             notifications.end());
     }
+    // SimObject::unregisterObject leaves its group.
+    if (auto parent = object->internals.find("__parent"); parent != object->internals.end())
+        if (auto* group = findObject(parent->second.toString().c_str()))
+            removeSimGroupChild(group, objectName);
     objects.erase(it);
     forgetObject(object);
     delete object;
@@ -1992,14 +2016,6 @@ bool ScriptEngine::init() {
         const std::string path = args[0].toString();
         const size_t slash = path.find_last_of("/\\");
         return VMValue(slash == std::string::npos ? "" : path.substr(0, slash + 1));
-    });
-    tsInstance->registerNative("fileExt", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue("");
-        const std::string name = args[0].toString();
-        const size_t slash = name.find_last_of("/\\");
-        const size_t dot = name.find_last_of('.');
-        return VMValue(dot == std::string::npos || (slash != std::string::npos && dot < slash)
-                           ? "" : name.substr(dot + 1));
     });
     tsInstance->registerNative("fileBase", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
@@ -3739,14 +3755,12 @@ bool ScriptEngine::init() {
         return VMValue(!outDir.empty() && std::filesystem::is_regular_file(
             std::filesystem::path(outDir) / modPath / path));
     });
+    // consoleFunctions.cc fileExt: from the last '.', dot included.
     tsInstance->registerNative("fileExt", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
         const std::string path = args[0].toString();
-        const size_t slash = path.find_last_of("/\\");
         const size_t dot = path.find_last_of('.');
-        if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
-            return VMValue(path.substr(dot + 1));
-        return VMValue("");
+        return VMValue(dot == std::string::npos ? std::string() : path.substr(dot));
     });
     tsInstance->registerNative("getFileName", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue("");
@@ -3857,7 +3871,7 @@ bool ScriptEngine::init() {
         }
         if (fullPath.find("ClientPrefs") != std::string::npos && !clientPrefsExportAllowed()) {
             Console::instance().printf(LogLevel::Info,
-                "export: skipping ClientPrefs write (prefs not loaded yet this session)");
+                "export: skipping ClientPrefs write (no init script loaded prefs)");
             return VMValue(1);
         }
         FILE* f = fopen(fullPath.c_str(), append ? "a" : "w");
@@ -4259,9 +4273,27 @@ bool ScriptEngine::init() {
             auto* group = ScriptEngine::instance().findObject(args[0].toString().c_str());
             auto* childObject = ScriptEngine::instance().findObject(args[1].toString().c_str());
             if (group && childObject && group->className.find("Sim") == 0) {
-                const int count = group->internals["__childCount"].toInt();
                 auto& engine = ScriptEngine::instance();
-                group->internals["__child" + std::to_string(count)] = VMValue(engine.objectKey(childObject));
+                const std::string childKey = engine.objectKey(childObject);
+                const std::string groupKey = engine.objectKey(group);
+                // SimGroup::addObject: an object is in one group at a time,
+                // so adding moves it out of its current group.
+                std::string oldGroupKey;
+                if (auto it = childObject->internals.find("__parent"); it != childObject->internals.end())
+                    oldGroupKey = it->second.toString();
+                else if (auto it = childObject->internals.find("parent"); it != childObject->internals.end()) {
+                    auto* declared = engine.findObject(it->second.toString().c_str());
+                    if (declared && declared->className.find("Sim") == 0) {
+                        oldGroupKey = engine.objectKey(declared);
+                        childObject->internals.erase(it);
+                    }
+                }
+                if (oldGroupKey == groupKey && childObject->internals.count("__parent")) return VMValue(1);
+                if (!oldGroupKey.empty() && oldGroupKey != groupKey)
+                    if (auto* oldGroup = engine.findObject(oldGroupKey.c_str()))
+                        removeSimGroupChild(oldGroup, childKey);
+                const int count = group->internals["__childCount"].toInt();
+                group->internals["__child" + std::to_string(count)] = VMValue(childKey);
                 group->internals["__childCount"] = VMValue(count + 1);
                 childObject->internals["__parent"] = VMValue(engine.objectKey(group));
                 return VMValue(1);
@@ -4297,18 +4329,11 @@ bool ScriptEngine::init() {
         if (args.size() < 2) return VMValue(1);
         auto* group = ScriptEngine::instance().findObject(args[0].toString().c_str());
         if (group && group->className.find("Sim") == 0) {
-            const std::string childName = ScriptEngine::instance().canonicalName(args[1].toString());
-            const int count = group->internals["__childCount"].toInt();
-            for (int i = 0; i < count; ++i) {
-                if (group->internals["__child" + std::to_string(i)].toString() != childName) continue;
-                for (int j = i + 1; j < count; ++j)
-                    group->internals["__child" + std::to_string(j - 1)] =
-                        group->internals["__child" + std::to_string(j)];
-                group->internals.erase("__child" + std::to_string(count - 1));
-                group->internals["__childCount"] = VMValue(count - 1);
-                return VMValue(1);
-            }
-            return VMValue(0);
+            auto& engine = ScriptEngine::instance();
+            const std::string childName = engine.canonicalName(args[1].toString());
+            if (!removeSimGroupChild(group, childName)) return VMValue(0);
+            if (auto* child = engine.findObject(childName.c_str())) child->internals.erase("__parent");
+            return VMValue(1);
         }
         auto* parent = getListCtrl(args[0].toString());
         auto* child = getListCtrl(args[1].toString());
@@ -7629,6 +7654,9 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("setEchoFileLoads", [](const auto& args) -> VMValue {
         if (!args.empty()) Console::instance().setVariable("echoFileLoads", args[0].toInt() ? "1" : "0");
         return VMValue(1);
+    });
+    tsInstance->registerNative("isFunction", [this](const auto& args) -> VMValue {
+        return VMValue(!args.empty() && tsInstance->isFunction(args[0].toString()) ? 1 : 0);
     });
     tsInstance->registerNative("setPureServer", [](const auto& args) -> VMValue {
         if (!args.empty()) Console::instance().setVariable("pref::pureServer", args[0].toInt() ? "1" : "0");

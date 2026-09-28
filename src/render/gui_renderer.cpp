@@ -220,6 +220,12 @@ int GuiRenderer::keyNameToScancode(const std::string& name) {
 }
 
 void GuiRenderer::init() {
+    // Scripts may already have set the canvas content and pushed dialogs
+    // (console_start -> console_end -> PlayOffline); keep them across the
+    // rebuild.
+    std::vector<std::string> stackNames;
+    for (auto* dlg : dialogStack)
+        if (dlg && !dlg->name.empty()) stackNames.push_back(dlg->name);
     canvas = nullptr;
     dialogStack.clear();
     lastPushed.clear();
@@ -350,6 +356,13 @@ void GuiRenderer::init() {
 
     // Third pass: no extent propagation — each control keeps its declared extent.
 
+    for (const auto& name : stackNames) {
+        auto ctl = controlMap.find(name);
+        if (ctl != controlMap.end() && ctl->second != canvas) {
+            dialogStack.push_back(ctl->second);
+            lastPushed[name] = ctl->second;
+        }
+    }
 }
 
 void GuiRenderer::refresh() {

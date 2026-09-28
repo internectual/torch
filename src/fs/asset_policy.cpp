@@ -37,7 +37,10 @@ bool isOriginalRuntimePath(std::string_view path) {
     static constexpr std::string_view allowed[] = {
         ".dts", ".dsq", ".dif", ".ter", ".dml", ".ifl", ".bm8",
         ".gft", ".wav", ".ogg", ".mis", ".mispk", ".cs", ".gui", ".dso",
-         ".vl2", ".vol", ".rec", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tga", ".dds"
+         ".vl2", ".vol", ".rec", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tga", ".dds",
+        // Text data that stock and mod scripts read with FileObject
+        // (autoload.cs reads prefs/autoload.ini).
+        ".ini", ".txt"
     };
     for (const auto candidate : allowed)
         if (extension == candidate) return true;

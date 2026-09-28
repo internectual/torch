@@ -307,7 +307,7 @@ int main() {
     assert(stringNatives.at("filename")({VMValue("scripts/server.cs")}).toString() == "server.cs");
     assert(stringNatives.at("filepath")({VMValue("scripts/server.cs")}).toString() == "scripts/");
     assert(stringNatives.at("filebase")({VMValue("scripts/server.cs")}).toString() == "server");
-    assert(stringNatives.at("fileext")({VMValue("scripts/server.cs")}).toString() == "cs");
+    assert(stringNatives.at("fileext")({VMValue("scripts/server.cs")}).toString() == ".cs");
     assert(stringNatives.at("getsubstr")({VMValue("abcdef"), VMValue(2), VMValue(-1)}).toString() == "cdef");
     script.ts()->execute(
         "function Lifecycle::onAdd(%this) { $lifecycleAdd = $lifecycleAdd + 1; }"
