@@ -601,6 +601,14 @@ void GameConnection::ghostPacketReceived(std::vector<GhostRef>& refs) {
     }
 }
 
+std::function<void(GameConnection&)> gLocalClientStarted;
+
+void clientNetProcess(double now) {
+    if (!ScriptEngine::exists()) return;
+    if (auto* connection = EngineObjects::get<GameConnection>("ServerConnection"))
+        if (!connection->isServer) connection->checkPacketSend(now);
+}
+
 void serverNetProcess(double now) {
     if (!ScriptEngine::exists()) return;
     ScriptObject* group = ScriptEngine::instance().findObject("ClientGroup");
@@ -626,6 +634,30 @@ void registerGameConnectionNatives(TorqueScript& ts) {
         std::vector<std::string> argv;
         for (size_t i = 1; i < args.size(); ++i) argv.push_back(args[i].toString());
         connection->sendRemoteCommand(argv);
+        return VMValue("");
+    });
+    // netDispatch.cc cLocalConnect: the client's ServerConnection and the
+    // server's LocalClientConnection, linked in process; GameClientAdded
+    // puts the latter in ClientGroup and calls its onConnect(args...).
+    ts.registerNative("localConnect", [](const Args& args) -> VMValue {
+        auto& engine = ScriptEngine::instance();
+        engine.ensureEngineGroups();
+        ScriptObject* clientObject = engine.createEngineObject("GameConnection", "ServerConnection");
+        ScriptObject* serverObject = engine.createEngineObject("GameConnection", "LocalClientConnection");
+        auto* client = EngineObjects::get<GameConnection>(engine.objectKey(clientObject));
+        auto* server = EngineObjects::get<GameConnection>(engine.objectKey(serverObject));
+        if (!client || !server) return VMValue("");
+        client->isServer = false;
+        client->local = server->local = true;
+        server->deliver = [client](const std::vector<uint8_t>& p) { client->receivePacket(p.data(), p.size()); };
+        client->deliver = [server](const std::vector<uint8_t>& p) { server->receivePacket(p.data(), p.size()); };
+        if (gLocalClientStarted) gLocalClientStarted(*client);
+        if (ScriptObject* group = engine.findObject("ClientGroup")) engine.addToSet(group, serverObject);
+        auto* script = engine.ts();
+        if (!script) return VMValue("");
+        std::vector<VMValue> connectArgs(args.begin(), args.end());
+        script->callObjectMethod(engine.objectKey(serverObject), "onConnect", connectArgs);
+        script->callFunction("LocalConnectionAccepted", {});
         return VMValue("");
     });
     ts.registerNative("GameConnection::setMissionCRC", [](const Args& args) -> VMValue {

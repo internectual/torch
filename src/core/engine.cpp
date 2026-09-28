@@ -607,6 +607,7 @@ bool Engine::init(int argc, char* argv[]) {
     scr = new ScriptEngine;
     net = new NetworkManager;
     g = new Game;
+    gLocalClientStarted = [this](GameConnection& connection) { g->startLiveClient(connection); };
     g->menu().setActive(false);
     gui = new GuiRenderer;
 
@@ -2215,6 +2216,8 @@ void Engine::run() {
         if (scr->ts()) scr->ts()->processScheduledEvents(now);
         SimState::advanceServer(now);
         serverNetProcess(now);
+        if (g) g->tickLiveClient((float)dt);
+        clientNetProcess(now);
 
         // Process GUI events
         if (gui) gui->update(dt);

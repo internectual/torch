@@ -138,6 +138,11 @@ private:
     uint32_t ghostingSequence = 0;
 };
 
+// localConnect: the client half is handed to the game's client, which
+// reads its packets.
+extern std::function<void(GameConnection& serverConnection)> gLocalClientStarted;
 void registerGameConnectionNatives(class TorqueScript& ts);
+// clientNetProcess: the ServerConnection's packet chance.
+void clientNetProcess(double now);
 // serverNetProcess: every connection in ClientGroup gets its packet chance.
 void serverNetProcess(double now);

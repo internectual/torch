@@ -1881,9 +1881,10 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
                 initialBlock.taggedStrings[id] = value;
         }
     } else if (ev.classId == T2Demo::NetEventClassFirst + 4) { // GhostingMessageEvent
-        bs.readU32();
+        ev.ghostSequence = bs.readU32();
         const int message = bs.readInt(3);
-        bs.readInt(11);
+        ev.ghostCount = bs.readInt(11);
+        ev.ghostMessage = message;
         // NetConnection::handleGhostMessage EndGhosting deletes the client's
         // ghosts (datablocks are connection state and stay). Events are read
         // before the packet's ghost section, as the engine applies them.

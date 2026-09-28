@@ -1,4 +1,5 @@
 #include "script/script_engine.h"
+#include "sim/game_connection.h"
 #include "sim/engine_classes.h"
 #include "sim/sim_natives.h"
 #include "sim/engine_object.h"
@@ -6706,13 +6707,6 @@ bool ScriptEngine::init() {
         Engine::instance().network().stopServerQuery();
         return VMValue(1);
     });
-    tsInstance->registerNative("localConnect", [](const auto& args) -> VMValue {
-        auto* ts = Engine::instance().script().ts();
-        std::string mission = ts ? ts->getGlobal("$Host::Map").toString() : "";
-        Console::instance().printf(LogLevel::Info, "localConnect: starting local game '%s'", mission.c_str());
-        Engine::instance().game().startLocalGame(mission.empty() ? nullptr : mission.c_str());
-        return VMValue(1);
-    });
     tsInstance->registerNative("addColumn", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
         if (ctl && args.size() >= 3) {
@@ -7355,6 +7349,13 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("commandToServer", [](const auto& args) -> VMValue {
         // commandToServer(funcName, arg1, arg2, ...)
         if (args.empty()) return VMValue(0);
+        // game/net.cc: a RemoteCommandEvent on the ServerConnection.
+        if (auto* server = EngineObjects::get<GameConnection>("ServerConnection"); server && !server->isServer) {
+            std::vector<std::string> argv;
+            for (const auto& arg : args) argv.push_back(arg.toString());
+            server->sendRemoteCommand(argv);
+            return VMValue("");
+        }
         std::string func = args[0].toString();
         std::vector<std::string> callbackArgs;
         for (size_t i = 1; i < args.size(); i++) callbackArgs.push_back(args[i].toString());
@@ -9141,6 +9142,16 @@ void ScriptEngine::ensureEngineGroups() {
         objectId(group);
         if (tsInstance) tsInstance->setGlobal(name, VMValue(name));
     }
+}
+
+ScriptObject* ScriptEngine::createEngineObject(const std::string& className, const std::string& name) {
+    auto* object = new ScriptObject;
+    object->className = className;
+    object->name = name;
+    objects[objectKey(object)] = object;
+    if (tsInstance && !name.empty()) tsInstance->setGlobal(name, VMValue(name));
+    objectAdded(object);
+    return object;
 }
 
 void ScriptEngine::registerDataBlock(ScriptObject* object) {

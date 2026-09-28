@@ -38,6 +38,7 @@
 #include "game/ctf_runtime.h"
 #include "game/trigger.h"
 #include "game/animation_parity.h"
+#include "sim/game_connection.h"
 #include "game/particle_parity.h"
 #include "game/sky_parity.h"
 #include <SDL3/SDL.h>
@@ -7245,6 +7246,11 @@ void Game::update(float dt) {
                 ? std::max(demoPlaybackRate, 4.0f) : demoPlaybackRate;
             Engine::instance().audio().setPlaybackRate(playbackRate);
             const std::vector<int>& demoTicks = demoParser->getMoveTicksBefore();
+            if (demoLive) {
+                // The recording ends at what the connection has delivered.
+                demoBlocksTotal = demoParser->getBlockCount();
+                demoTotalTime = T2Demo::playbackBlockTime(demoBlocksTotal, demoTicks);
+            }
             const float playbackDt = stepDemo
                 ? std::max(0.0f, T2Demo::playbackBlockTime(
                       std::min(demoBlocksDone + std::min(stepBlocks, 500), demoBlocksTotal),
@@ -7279,6 +7285,7 @@ void Game::update(float dt) {
 
             for (int i = 0; i < blocksThisFrame; i++) {
                 DemoBlock* block = demoParser->nextBlock();
+                if (!block && demoLive) break;
                 if (!block) {
                     Console::instance().printf(LogLevel::Info,
                         "Demo playback complete: %d blocks in %.1f seconds",
@@ -7306,6 +7313,7 @@ void Game::update(float dt) {
                     demoParser->onSendPacketTrigger();
                 } else if (block->type == T2Demo::BlockTypePacket) {
                     PacketData pd = demoParser->parsePacket(block->data.data(), block->data.size(), demoBlocksDone - 1);
+                    if (demoLive) forwardLiveEvents(pd);
                     // Collect chat/server events for the event pane
                     for (size_t eventIndex = 0; eventIndex < pd.events.size(); ++eventIndex) {
                         const auto& ev = pd.events[eventIndex];
@@ -12210,6 +12218,8 @@ bool Game::playDemo(const char* path) {
 }
 
 void Game::stopDemoPlayback() {
+    demoLive = false;
+    liveConnection = nullptr;
     if (auto* ts = Engine::instance().script().ts()) ts->clearPackages();
     resetInputState();
     demoPlaying = false;
@@ -12238,6 +12248,140 @@ void Game::stopDemoPlayback() {
     auto& gui = Engine::instance().guiRenderer();
     if (gui.findControl("LobbyGui")) gui.setContentImmediate("LobbyGui");
     else gui.setContentImmediate("LaunchGui");
+}
+
+// The recording's Move block: the engine Move struct as the client
+// produced it (px/py/pz, pyaw/ppitch/proll, the unclamped floats, id,
+// sendCount, freeLook, triggers).
+static std::vector<uint8_t> rawMoveBlock(const ClientMoveIn& move) {
+    std::vector<uint8_t> block(64, 0);
+    auto put = [&](int offset, uint32_t value) {
+        for (int i = 0; i < 4; ++i) block[offset + i] = (uint8_t)(value >> (8 * i));
+    };
+    auto putF = [&](int offset, float value) { uint32_t u; memcpy(&u, &value, 4); put(offset, u); };
+    constexpr float AngleUnit = 2.0f * Math::PI / 65536.0f;
+    put(0, (uint32_t)move.x); put(4, (uint32_t)move.y); put(8, (uint32_t)move.z);
+    put(12, (uint16_t)move.yaw); put(16, (uint16_t)move.pitch); put(20, (uint16_t)move.roll);
+    putF(24, (move.x - 16) / 16.0f); putF(28, (move.y - 16) / 16.0f); putF(32, (move.z - 16) / 16.0f);
+    putF(36, (uint16_t)move.yaw * AngleUnit);
+    putF(40, (uint16_t)move.pitch * AngleUnit);
+    putF(44, (uint16_t)move.roll * AngleUnit);
+    put(48, move.id); put(52, (uint32_t)move.sendCount);
+    block[56] = move.freeLook ? 1 : 0;
+    for (int i = 0; i < 6; ++i) block[57 + i] = move.trigger[i] ? 1 : 0;
+    return block;
+}
+
+void Game::startLiveClient(GameConnection& connection) {
+    if (demoParser) delete demoParser;
+    demoParser = new DemoParser;
+    demoParser->beginLiveStream();
+    demoLive = true;
+    demoPlaying = false;
+    demoPaused = false;
+    liveConnection = &connection;
+    liveMissionName.clear();
+    liveMoveClock = 0.0f;
+    demoMissionState = {};
+    demoWorldGhostResets = -1;
+    demoBlocksDone = 0;
+    demoBlocksTotal = 0;
+    demoTime = 0.0f;
+    demoTotalTime = 0.0f;
+    demoSnapshots.clear();
+    demoViewSnapshots.clear();
+    demoAudioEventsPlayed.clear();
+    connection.onServerPacket = [this](const std::vector<uint8_t>& packet) {
+        if (demoParser && demoLive)
+            demoParser->appendLiveBlock(T2Demo::BlockTypePacket, packet.data(), packet.size());
+    };
+    auto send = connection.deliver;
+    connection.deliver = [this, send](const std::vector<uint8_t>& packet) {
+        if (demoParser && demoLive) demoParser->appendLiveBlock(T2Demo::BlockTypeSendPacket, nullptr, 0);
+        if (send) send(packet);
+    };
+}
+
+// The client's process list: one move per 32 ms tick (getNextMove), which
+// the recording keeps as a Move block.
+void Game::tickLiveClient(float dt) {
+    if (!demoLive || !liveConnection || !demoParser) return;
+    liveMoveClock += std::max(0.0f, dt);
+    while (liveMoveClock >= 0.032f) {
+        liveMoveClock -= 0.032f;
+        ClientMoveIn move;
+        if (liveConnection->pushMove(move)) {
+            move = liveConnection->moves.back();
+            const auto block = rawMoveBlock(move);
+            demoParser->appendLiveBlock(T2Demo::BlockTypeMove, block.data(), block.size());
+        }
+    }
+    if (!demoPlaying) pumpLiveClient();
+}
+
+// NetConnection::handleGhostMessage and GhostAlwaysObjectEvent::process on
+// the client.
+void Game::forwardLiveEvents(const PacketData& pd) {
+    if (!liveConnection) return;
+    for (const auto& ev : pd.events) {
+        if (ev.ghostMessage >= 0)
+            liveConnection->clientGhostMessage(ev.ghostMessage, ev.ghostSequence, (uint32_t)ev.ghostCount);
+        if (ev.classId == T2Demo::NetEventClassFirst + 3)
+            if (auto* ts = Engine::instance().script().ts()) ts->callFunction("ghostAlwaysObjectReceived", {});
+    }
+}
+
+// Before the world: read the stream as it arrives, running its commands.
+void Game::pumpLiveClient() {
+    while (demoLive && !demoPlaying && demoParser) {
+        std::unique_ptr<DemoBlock> block(demoParser->nextBlock());
+        if (!block) break;
+        ++demoBlocksDone;
+        if (block->type == T2Demo::BlockTypeSendPacket) {
+            demoParser->onSendPacketTrigger();
+            continue;
+        }
+        if (block->type != T2Demo::BlockTypePacket) continue;
+        PacketData pd = demoParser->parsePacket(block->data.data(), block->data.size(), demoBlocksDone - 1);
+        bool ghostAlwaysDone = false;
+        for (const auto& ev : pd.events) {
+            if (ev.classId != T2Demo::NetEventClassFirst + 9 || ev.arguments.empty()) continue;
+            // clientCmdMissionStartPhase1(%seq, %missionName, %musicTrack).
+            if (ev.arguments[0] == "MissionStartPhase1" && ev.arguments.size() > 2)
+                liveMissionName = extractMapName(ev.arguments[2]);
+            dispatchClientCommand(ev.rawArguments, ev.taggedArguments);
+        }
+        for (const auto& ev : pd.events) ghostAlwaysDone = ghostAlwaysDone || ev.ghostMessage == 0;
+        forwardLiveEvents(pd);
+        if (ghostAlwaysDone && startLiveWorld()) break;
+    }
+}
+
+bool Game::startLiveWorld() {
+    std::vector<MisObject> scene = demoSceneObjects();
+    if (scene.empty() || liveMissionName.empty()) {
+        Console::instance().printf(LogLevel::Error,
+            "Live client: the ghosted scene has no TerrainBlock (mission '%s')", liveMissionName.c_str());
+        return false;
+    }
+    Console::instance().printf(LogLevel::Info, "Live client: loading %s from %zu scene ghosts",
+                               liveMissionName.c_str(), scene.size());
+    startLocalGame(liveMissionName.c_str(), &scene);
+    if (gameState != Playing) return false;
+    demoWorldGhostResets = demoParser->getGhostResets();
+    applyDemoSceneEffects();
+    demoMissionState = {liveMissionName, {}};
+    demoPlaybackRate = 1.0f;
+    demoFastForward = false;
+    demoFirstPersonCam = true;
+    demoRecordedFirstPerson = true;
+    controlGhostIndex = -1;
+    demoTime = T2Demo::playbackBlockTime(demoBlocksDone, demoParser->getMoveTicksBefore());
+    demoBlocksTotal = demoParser->getBlockCount();
+    demoTotalTime = demoTime;
+    demoPlaying = true;
+    setState(Playing);
+    return true;
 }
 
 void Game::toggleDemoPause() {

@@ -845,6 +845,15 @@ public:
                          const char* password = nullptr);
     bool playDemo(const char* path);
     void stopDemoPlayback();
+    // The local client of the in-process retail server (localConnect): the
+    // demo pipeline reads the connection's packets as a recording being
+    // made. Until the scene ghosts are in, the packets are read here; the
+    // world then loads from them and playback continues at the live edge.
+    void startLiveClient(class GameConnection& connection);
+    // Every frame, in menus too: the client's move ticks, and before the
+    // world the stream's packets.
+    void tickLiveClient(float dt);
+    bool isLiveClient() const { return demoLive; }
     void disconnectedCleanup();
 
     GameConfig& config() { return cfg; }
@@ -1153,6 +1162,13 @@ private:
     void applyDemoPacketView(const PacketData& pd);
     T2Demo::MissionReplacementState demoMissionState;
     bool demoPlaying = false;
+    bool demoLive = false;
+    class GameConnection* liveConnection{};
+    std::string liveMissionName;
+    float liveMoveClock = 0.0f;
+    void pumpLiveClient();
+    bool startLiveWorld();
+    void forwardLiveEvents(const PacketData& pd);
     bool gamePaused = false;
     bool demoPaused = false;
     bool demoStepRequest = false;

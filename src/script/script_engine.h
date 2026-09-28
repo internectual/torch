@@ -396,6 +396,8 @@ public:
     // SimDataBlock::assignId/onAdd: a datablock id, the next modified key,
     // and membership of DataBlockGroup (creation order).
     void registerDataBlock(ScriptObject* object);
+    // An object the engine creates itself (registerObject + assignName).
+    ScriptObject* createEngineObject(const std::string& className, const std::string& name);
     // deleteDataBlocks(): every datablock, last first; ids restart at 3.
     void deleteDataBlocks();
     // The engine's named groups (RootGroup children): ClientGroup, DataBlockGroup.
