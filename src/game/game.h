@@ -918,7 +918,7 @@ public:
     uint32_t moveSeq = 0;
     std::deque<StoredMove> pendingMoves;
     void reconcile(const Point3F& serverPos, const Point3F& serverVel, uint32_t lastProcessedSeq);
-    void dispatchHudClientCommand(const std::vector<std::string>& args);
+    void dispatchClientCommand(const std::vector<std::string>& args);
     void resetLiveMissionState();
     void clearMissionAudio();
     void clearProjectileAudio();
@@ -1195,7 +1195,7 @@ private:
     // centre of Camera::interpolateTick (getRenderWorldBox().getCenter()).
     std::unordered_map<int, Point3F> demoBoxCenters;
     std::vector<DemoTimedEvent> demoEventLog;
-    bool demoShowEvents = true;
+    bool demoShowEvents = false;
     // Orbit camera for demo spectator mode
     bool demoOrbitCam = false;
     // demoObserve: a chase camera behind one ghost (-1 = off).

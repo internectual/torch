@@ -1,5 +1,6 @@
 #include <set>
 #include "game/demo.h"
+#include "net/remote_command.h"
 #include "net/v12_datablocks.h"
 #include "net/v12_registry.h"
 #include "net/v12_ghosts.h"
@@ -1780,18 +1781,23 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
         ev.message = bs.readString();
     } else if (ev.classId == T2Demo::NetEventClassFirst + 9) { // RemoteCommandEvent
         int argc = bs.readInt(5);
+        std::vector<bool> tagged;
         for (int i = 0; i < argc; i++) {
             std::string arg = bs.unpackNetString();
             // unpackNetString marks tagged strings as "\\x01<id>".
-            if (arg.size() > 4 && arg.compare(0, 4, "\\x01") == 0) {
+            const bool isTag = arg.size() > 4 && arg.compare(0, 4, "\\x01") == 0;
+            if (isTag) {
                 int tag = atoi(arg.c_str() + 4);
                 auto it = initialBlock.taggedStrings.find(tag);
                 if (it != initialBlock.taggedStrings.end()) arg = it->second;
             }
             ev.arguments.push_back(arg);
+            tagged.push_back(isTag);
             if (!ev.message.empty()) ev.message += ' ';
             ev.message += arg;
         }
+        ev.rawArguments = ev.arguments;
+        RemoteCommand::expandTagged(ev.arguments, tagged);
     } else if (ev.classId == T2Demo::NetEventClassFirst + 7) { // NetStringEvent
         const int id = bs.readInt(10);
         if (bs.readFlag()) {

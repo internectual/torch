@@ -490,7 +490,8 @@ struct NetEventInfo {
     int sequenceNumber{};
     int dataBitsStart{}, dataBitsEnd{};
     std::string message;    // parsed text for chat/server messages
-    std::vector<std::string> arguments; // decoded remote-command arguments
+    std::vector<std::string> arguments; // remote-command arguments, tags expanded
+    std::vector<std::string> rawArguments; // as sent (tag templates unexpanded)
     std::string eventName;  // class name for display
     int audioProfileId = -1; // for audio events
     bool directAudioProfile = false;

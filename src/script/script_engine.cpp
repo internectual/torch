@@ -690,6 +690,21 @@ VMValue VirtualMachine::callFunction(const char* name, const std::vector<VMValue
     return {};
 }
 
+bool VirtualMachine::callScriptFunction(const char* name, const std::vector<VMValue>& args,
+                                        VMValue& result) {
+    for (auto* dso : impl->loaded) {
+        auto fit = dso->funcMap.find(name);
+        if (fit == dso->funcMap.end()) continue;
+        if (!fit->second->package.empty() &&
+            (!ScriptEngine::instance().ts() ||
+             !ScriptEngine::instance().ts()->isActivePackage(fit->second->package)))
+            continue;
+        result = execute(dso, fit->second->startIp, args);
+        return true;
+    }
+    return false;
+}
+
 VMValue VirtualMachine::callMethod(const char* objName, const char* method, const std::vector<VMValue>& args) {
     // DSO methods receive the target as %this before explicit arguments.
     std::string fullName = std::string(objName) + "::" + method;

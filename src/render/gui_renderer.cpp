@@ -220,6 +220,10 @@ int GuiRenderer::keyNameToScancode(const std::string& name) {
     return -1;
 }
 
+// The viewport of the frame being drawn; GUI clip rects are logical units.
+static GuiViewport s_renderViewport;
+static int s_renderDrawableHeight = 1;
+
 // GuiScrollCtrl hScrollBar/vScrollBar: "alwaysOn", "alwaysOff" or
 // "dynamic" (shown when the content overflows).
 static bool scrollBarShown(const std::string& mode, bool overflow) {
@@ -454,6 +458,8 @@ void GuiRenderer::render() {
     const bool gameCanvas = Engine::instance().game().state() == Game::Playing;
     const GuiViewport viewport = guiViewport(w, h, gameCanvas ? 640.0f : (float)plat.width(),
                                              gameCanvas ? 480.0f : (float)plat.height());
+    s_renderViewport = viewport;
+    s_renderDrawableHeight = h;
     GLint oldViewport[4];
     glGetIntegerv(GL_VIEWPORT, oldViewport);
     GLint oldScissor[4];
@@ -1577,7 +1583,20 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         auto* prof = getProfile(ctl->profileName);
         if (prof) font = getProfileFont(prof);
-        ColorF curColor{1,1,1,1};
+        // GuiControlProfile::mFontColors: fontColor, fontColorHL, fontColorNA,
+        // fontColorSEL, then fontColors[4..9]. Text starts in fontColor.
+        ColorF colourTable[10];
+        for (auto& c : colourTable) c = {1, 1, 1, 1};
+        if (prof) {
+            static const char* named[4] = {"fontColor", "fontColorHL", "fontColorNA", "fontColorSEL"};
+            for (int k = 0; k < 10; ++k) {
+                auto it = prof->fields.find("fontColors[" + std::to_string(k) + "]");
+                if (it == prof->fields.end() && k < 4) it = prof->fields.find(named[k]);
+                if (it != prof->fields.end()) parseColor(it->second.toString(), colourTable[k]);
+            }
+        }
+        ColorF curColor = colourTable[0];
+        ColorF stackColor = curColor;
         auto getHexColor = [](const std::string& hex) -> ColorF {
             if (hex.size() < 6) return {1,1,1,1};
             auto h2i = [](char c) -> int { if (c>='0'&&c<='9') return c-'0'; if (c>='a'&&c<='f') return c-'a'+10; if (c>='A'&&c<='F') return c-'A'+10; return 0; };
@@ -1648,8 +1667,23 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     spans.push_back({"\n", "", 0, {0,0,0,0}, Justify::Left, false, "", ""});
                     i++;
                 } else {
-                    if (src[i] == '\t') cur.text += ' ';
-                    else cur.text += src[i];
+                    // dglDrawTextN colour bytes: 0x2-0x8, 0xb, 0xc, 0xe pick
+                    // colours 0-9; 15 resets to the anchor, 16/17 push/pop.
+                    static const int remap[15] = {0, 0, 0, 1, 2, 3, 4, 5, 6, 0, 0, 7, 8, 0, 9};
+                    const unsigned char b = (unsigned char)src[i];
+                    if ((b >= 2 && b <= 8) || b == 11 || b == 12 || b == 14) {
+                        flushSpan(spans, cur);
+                        cur.color = colourTable[remap[b]];
+                    } else if (b == 15) {
+                        flushSpan(spans, cur);
+                        cur.color = colourTable[0];
+                    } else if (b == 16) {
+                        stackColor = cur.color;
+                    } else if (b == 17) {
+                        flushSpan(spans, cur);
+                        cur.color = stackColor;
+                    } else if (src[i] == '\t') cur.text += ' ';
+                    else if (b >= 32) cur.text += src[i];
                     i++;
                 }
             }
@@ -2497,7 +2531,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         ColorF sc{0.18f,0.18f,0.22f,1};
         auto* prof = getProfile(ctl->profileName);
         if (prof) { auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), sc); }
-        if (!isVirtualScroll)
+        // GuiScrollCtrl::onRender fills only for an opaque profile.
+        bool opaque = false;
+        if (prof) { auto oi = prof->fields.find("opaque"); if (oi != prof->fields.end()) opaque = oi->second.toBool(); }
+        if (!isVirtualScroll && opaque)
             r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, sc);
 
         // Save old content height to detect if user was at bottom
@@ -2533,12 +2570,15 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             useScissor = true;
         }
         if (useScissor) {
-            auto& plat = Engine::instance().platform();
-            int winH = plat.height();
+            // Children are batched: flush what precedes the clip, then clip
+            // in drawable pixels.
+            r.flushSpriteBatch();
+            int sx, sy, sw, sh;
+            guiLogicalToScissor(s_renderViewport, s_renderDrawableHeight,
+                                childClip.x, childClip.y, childClip.w, childClip.h, sx, sy, sw, sh);
             glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
             glEnable(GL_SCISSOR_TEST);
-            glScissor((GLint)childClip.x, (GLint)(winH - childClip.y - childClip.h),
-                      (GLint)childClip.w, (GLint)childClip.h);
+            glScissor(sx, sy, sw, sh);
         }
 
         // Render children at normal positions (each control uses scrollY directly).
@@ -2553,6 +2593,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
 
         // Restore scissor
         if (useScissor) {
+            r.flushSpriteBatch();
             if (scissorWas)
                 glScissor(oldScissor[0], oldScissor[1], oldScissor[2], oldScissor[3]);
             else

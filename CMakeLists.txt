@@ -710,3 +710,8 @@ target_include_directories(torch_dts_triggers_test PRIVATE src)
 target_link_libraries(torch_dts_triggers_test PRIVATE PkgConfig::GLEW OpenGL::GL)
 target_compile_options(torch_dts_triggers_test PRIVATE -UNDEBUG)
 add_test(NAME torch_dts_triggers COMMAND torch_dts_triggers_test)
+
+add_executable(torch_remote_command_test tests/remote_command_test.cpp)
+target_include_directories(torch_remote_command_test PRIVATE src)
+target_compile_options(torch_remote_command_test PRIVATE -UNDEBUG)
+add_test(NAME torch_remote_command COMMAND torch_remote_command_test)

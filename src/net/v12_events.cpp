@@ -1,4 +1,5 @@
 #include "net/v12_events.h"
+#include "net/remote_command.h"
 #include "net/v12_datablocks.h"
 #include "net/v12_registry.h"
 
@@ -72,16 +73,20 @@ bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
         } else if (header.classId == 9) {
             const uint32_t argc = stream.readUnsigned(5);
             if (stream.failed() || argc > 20) return false;
+            std::vector<bool> tagged;
             for (uint32_t i = 0; i < argc; ++i) {
                 std::string arg = stream.unpackNetString();
-                if (arg.size() > 1 && arg[0] == '\x01') {
+                const bool isTag = arg.size() > 1 && arg[0] == '\x01';
+                if (isTag) {
                     const uint16_t id = (uint16_t)std::strtoul(arg.c_str() + 1, nullptr, 10);
                     if (const std::string* value = strings.get(id)) arg = *value;
                 }
                 event.arguments.push_back(arg);
+                tagged.push_back(isTag);
                 if (!event.message.empty()) event.message.push_back(' ');
                 event.message += arg;
             }
+            RemoteCommand::expandTagged(event.arguments, tagged);
         } else if (header.classId == 0) {
             stream.readUnsigned(32);
             stream.readUnsigned(32);

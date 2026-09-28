@@ -7338,13 +7338,9 @@ void Game::update(float dt) {
                                 setDemoMatchEnded(true);
                             else if (command == "ServerMessage" && type == "MsgClientReady")
                                 setDemoMatchEnded(false);
-                            // HUD remote commands (clientCmdSetWeaponsHudItem, ...)
-                            // change HUD state; apply them before the chat filter
-                            // below skips them.
-                            if (command != "ServerMessage") {
+                            if (command != "ServerMessage")
                                 demoParser->handleHudRemoteCommand(command, ev.arguments);
-                                dispatchHudClientCommand(ev.arguments);
-                            }
+                            dispatchClientCommand(ev.arguments);
                         }
                         if (ev.message.empty()) continue;
                         std::string displayText = ev.message;
@@ -7356,24 +7352,14 @@ void Game::update(float dt) {
                             if ((command == "ServerMessage" || command == "ChatMessage") &&
                                 ev.arguments.size() >= (command == "ServerMessage" ? 3u : 5u)) {
                                 const size_t templateIndex = command == "ServerMessage" ? 2 : 4;
-                                std::vector<std::string> values(
-                                    ev.arguments.begin() + templateIndex + 1, ev.arguments.end());
-                                displayText = formatDemoRemoteText(ev.arguments[templateIndex], values);
+                                // The event pane formats the template as sent.
+                                const auto& raw = ev.rawArguments.size() == ev.arguments.size()
+                                    ? ev.rawArguments : ev.arguments;
+                                std::vector<std::string> values(raw.begin() + templateIndex + 1, raw.end());
+                                displayText = formatDemoRemoteText(raw[templateIndex], values);
                             } else if (command != "ServerMessage" && command != "ChatMessage") {
                                 // HUD-only remote commands are state changes, not chat entries.
                                 continue;
-                            }
-                        }
-                        if (ev.classId == T2Demo::NetEventClassFirst + 9 &&
-                            !ev.arguments.empty() && ev.arguments[0] == "ServerMessage") {
-                            std::vector<VMValue> callbackArgs;
-                            if (ev.arguments.size() >= 2) {
-                                // clientCmdServerMessage(%msgType, %msgString, %a1...)
-                                for (size_t i = 1; i < ev.arguments.size(); ++i)
-                                    callbackArgs.emplace_back(ev.arguments[i]);
-                                if (callbackArgs.size() < 2) callbackArgs.emplace_back(std::string());
-                                if (auto* ts = Engine::instance().script().ts())
-                                    ts->dispatchMessageCallback(ev.arguments[1], callbackArgs);
                             }
                         }
                         // Score and state messages carry no text.
@@ -10852,76 +10838,14 @@ void Game::startLocalGame(const char* map, std::vector<MisObject>* sceneObjects)
     }
 }
 
-void Game::dispatchHudClientCommand(const std::vector<std::string>& args) {
+void Game::dispatchClientCommand(const std::vector<std::string>& args) {
+    // RemoteCommandEvent::process: every server command runs as the script
+    // function clientCmd<name> with its arguments.
     if (args.empty()) return;
-    std::string command = args[0];
-    std::string lower = command;
-    for (char& c : lower) c = (char)std::tolower((unsigned char)c);
-    static const std::set<std::string> allowed = {
-        "setweaponshudactive", "setweaponshuditem", "setweaponshudammo",
-        "setweaponshudbitmap", "setweaponshudbackgroundbmp",
-        "setweaponshudhighlightbmp", "setweaponshudinfiniteammobmp",
-        "setweaponshudclearall", "setammohudcount", "setbackpackhuditem",
-        "setbackpackhudbitmap",
-        "setinventoryhudbitmap", "setinventoryhuditem", "setinventoryhudamount",
-        "setinventoryhudbackgroundbmp", "setinventoryhudclearall",
-        "setvweaponshudactive", "setvweaponshudclearall", "setrepairreticle",
-        "setcloakiconon", "setcloakiconoff", "setrepairpackiconon",
-        "setrepairpackiconoff", "setshieldiconon", "setshieldiconoff",
-        "setsenjamiconon", "setsenjamiconoff", "updatepacktext",
-        "checkpassengers", "showpassenger", "sethalftimeclock",
-        "setsatchelarmed", "setbeaconnames", "removereticle",
-        "startbombersight", "endbombersight", "starteffect", "stopeffect",
-         "setpoweraudioprofiles", "setvoiceinfo", "togglehudmode",
-         "sethudmode", "displayhuds", "resethud", "toggledashhud",
-         "setpowersoundprofiles", "setcontrolobjectreticle",
-         "centerprint", "bottomprint", "clearcenterprint", "clearbottomprint",
-         "toggleplayhuds",
-         "setstationkeys", "setdefaultvehiclekeys", "setweaponryvehiclekeys",
-         "setpilotvehiclekeys", "setpassengervehiclekeys",
-         "setplaycontent", "pickteammenu", "processpickteam", "pickteam",
-         "setfirstperson", "getfirstperson", "vehiclemount", "vehicledismount",
-         "missionstartphase1", "missionstartphase2", "missionstartphase3",
-         "missionend",
-         "playmusic", "stopmusic", "playcdtrack", "stopcd",
-         "playerstarttalking", "playerstoppedtalking",
-         "chatmessage", "cannedchatmessage", "teamrepairmessage",
-         "showvehiclegauges", "stationvehicleshowhud", "stationvehiclehidehud",
-         "stationvehiclehidejusthud", "clearpassengers", "protectingstaticobjects",
-         "resetcommandmap", "scopecommandermap", "cameraattachresponse",
-         "controlobjectresponse", "controlobjectreset",
-         "resettasklist", "taskinfo", "potentialteamtask", "potentialtask",
-         "taskdeclined", "taskaccepted", "taskcompleted", "taskfailed", "acceptedtask"
-    };
-    if (!allowed.count(lower)) return;
-    if (!command.empty()) command[0] = (char)std::toupper((unsigned char)command[0]);
     if (auto* ts = Engine::instance().script().ts()) {
-        // Keep the wire words intact, including empty positional arguments.
-        // The script dispatcher performs the case-insensitive clientCmd lookup.
         if (!ts->dispatchClientCommand(args))
             Console::instance().printf(LogLevel::Warn,
                 "Client: ignored unknown clientCmd '%s'", args[0].c_str());
-    }
-    // The retail task callback has a misspelled parameter but writes the
-    // correctly spelled field, losing the AI objective in the process.
-    if (lower == "taskinfo" && args.size() >= 5) {
-        if (auto* taskList = Engine::instance().script().findObject("TaskList")) {
-            taskList->fields["currentTaskClient"] = VMValue(args[1]);
-            taskList->fields["currentAIObjective"] = VMValue(args[2]);
-            taskList->fields["currentTaskIsTeam"] = VMValue(args[3]);
-            taskList->fields["currentTaskDescription"] = VMValue(args[4]);
-        }
-        if (hud) hud->setObjectiveTask(args[4].c_str());
-    } else if (lower == "resettasklist") {
-        if (auto* taskList = Engine::instance().script().findObject("TaskList")) {
-            taskList->fields["currentTaskClient"] = VMValue("");
-            taskList->fields["currentAIObjective"] = VMValue("");
-            taskList->fields["currentTaskIsTeam"] = VMValue("0");
-            taskList->fields["currentTaskDescription"] = VMValue("");
-        }
-        if (hud) hud->clearObjectiveTask();
-    } else if (lower == "taskcompleted" || lower == "taskfailed" || lower == "acceptedtask") {
-        if (hud && args.size() >= 2) hud->setObjectiveTask(args[1].c_str());
     }
 }
 
@@ -11013,7 +10937,7 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                         std::vector<std::string> args;
                         std::string token;
                         while (tokens >> token && args.size() < 20) args.push_back(token);
-                        if (!args.empty()) dispatchHudClientCommand(args);
+                        if (!args.empty()) dispatchClientCommand(args);
                     }
                     return;
                 }
@@ -11042,10 +10966,6 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                     if (T2Protocol::decodeChat(data, size, chat)) {
                         Console::instance().printf(LogLevel::Info, "[CHAT] %s: %s", chat.sender, chat.text);
                         playChatBeep();
-                        if (hud) {
-                            std::string line = std::string(chat.sender) + ": " + chat.text;
-                            hud->addChatLine(line.c_str());
-                        }
                         if (auto* ts = Engine::instance().script().ts()) {
                             if (ts->hasFunction("addMessageHudLine"))
                                 ts->callFunction("addMessageHudLine", {
@@ -11234,7 +11154,7 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
             }
         });
         activeConn->setClientCommandCallback([this](const std::vector<std::string>& args) {
-            dispatchHudClientCommand(args);
+            dispatchClientCommand(args);
         });
          activeConn->setStateCallback([this](const V12::ServerGameState& state) {
              if (!state.sensorGroupListenMasks.empty())
@@ -11364,10 +11284,11 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
         activeConn->setServerMessageCallback([this](const std::vector<std::string>& argv) {
             if (argv.empty()) return;
             if (argv[0] == "ChatMessage") {
-                if (argv.size() >= 2) {
+                // Remote clientCmdChatMessage runs through the client command
+                // dispatch; only the plain chat event (text alone) lands here.
+                if (argv.size() == 2) {
                      Console::instance().printf(LogLevel::Info, "[CHAT] %s", argv[1].c_str());
                      playChatBeep();
-                     if (hud) hud->addChatLine(argv[1].c_str());
                     if (auto* ts = Engine::instance().script().ts();
                         ts && ts->hasFunction("addMessageHudLine"))
                         ts->callFunction("addMessageHudLine", {VMValue(argv[1])});
@@ -11375,15 +11296,6 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                 return;
             }
             if (argv[0] != "ServerMessage") return;
-            if (argv.size() >= 2) {
-                std::vector<VMValue> callbackArgs;
-                // clientCmdServerMessage(%msgType, %msgString, %a1...)
-                for (size_t i = 1; i < argv.size(); ++i)
-                    callbackArgs.emplace_back(argv[i]);
-                if (callbackArgs.size() < 2) callbackArgs.emplace_back(std::string());
-                if (auto* ts = Engine::instance().script().ts())
-                    ts->dispatchMessageCallback(argv[1], callbackArgs);
-            }
             if (argv.size() >= 2 && argv[1] == "MsgMissionStart") {
                 liveMatchStarted_ = true;
                 liveMatchEnded_ = false;

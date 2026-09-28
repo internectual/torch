@@ -20,7 +20,6 @@ public:
     void renderMessage(const char* text, float duration = 3.0f);
 
     void showMessage(const char* text, const ColorF& color = {1,1,1,1});
-    void addChatLine(const char* text);
     void setChatInput(const char* text);
     void resetState();
     void setObjectiveTask(const char* line1, const char* line2 = nullptr);

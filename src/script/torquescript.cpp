@@ -545,13 +545,30 @@ void TorqueScript::Impl::tokenize(const std::string& source) {
                 if (*srcPtr == quote) { srcPtr++; srcCol++; break; }
                 if (*srcPtr == '\\' && srcPtr + 1 < srcEnd) {
                     srcPtr++; srcCol++;
-                    switch (*srcPtr) {
+                    // scan.l collapseEscape: \xHH, \c0-\c9 colour codes
+                    // (remapped around \t \n \r), \cr/\cp/\co, else charConv.
+                    auto hexDigit = [](char h) -> int {
+                        if (h >= '0' && h <= '9') return h - '0';
+                        if (h >= 'A' && h <= 'F') return h - 'A' + 10;
+                        if (h >= 'a' && h <= 'f') return h - 'a' + 10;
+                        return -1;
+                    };
+                    static const char colourRemap[10] = {0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0xb, 0xc, 0xe};
+                    if (*srcPtr == 'x' && srcPtr + 2 < srcEnd &&
+                        hexDigit(srcPtr[1]) >= 0 && hexDigit(srcPtr[2]) >= 0) {
+                        val += (char)(hexDigit(srcPtr[1]) * 16 + hexDigit(srcPtr[2]));
+                        srcPtr += 2; srcCol += 2;
+                    } else if (*srcPtr == 'c' && srcPtr + 1 < srcEnd &&
+                               (srcPtr[1] == 'r' || srcPtr[1] == 'p' || srcPtr[1] == 'o' ||
+                                (srcPtr[1] >= '0' && srcPtr[1] <= '9'))) {
+                        const char code = srcPtr[1];
+                        val += code == 'r' ? (char)15 : code == 'p' ? (char)16 : code == 'o' ? (char)17
+                                                                          : colourRemap[code - '0'];
+                        srcPtr++; srcCol++;
+                    } else switch (*srcPtr) {
                         case 'n': val += '\n'; break;
                         case 't': val += '\t'; break;
                         case 'r': val += '\r'; break;
-                        case '"': val += '"'; break;
-                        case '\'': val += '\''; break;
-                        case '\\': val += '\\'; break;
                         default: val += *srcPtr; break;
                     }
                 } else {
@@ -2002,10 +2019,9 @@ VMValue TorqueScript::Impl::parsePrimary() {
                     return outer->callFunction(lastVarName, args);
                 }
                 auto& engine = ScriptEngine::instance();
-                if (engine.vm()) {
-                    VMValue vmResult = engine.vm()->callFunction(lastVarName.c_str(), args);
-                    if (vmResult.type != VMValue::None) return vmResult;
-                }
+                VMValue vmResult;
+                if (engine.vm() && engine.vm()->callScriptFunction(lastVarName.c_str(), args, vmResult))
+                    return vmResult;
                 // Keep the complete spelling for namespaced natives.  Looking
                 // up only nameTok made $Foo::bar() resolve as $Foo().
                 auto nit = natives.find(toLower(lastVarName));
@@ -2034,10 +2050,9 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 if (outer->hasFunction(nameTok.text)) return outer->callFunction(nameTok.text, args);
 
                 auto& engine = ScriptEngine::instance();
-                if (engine.vm()) {
-                    VMValue vmResult = engine.vm()->callFunction(nameTok.text.c_str(), args);
-                    if (vmResult.type != VMValue::None) return vmResult;
-                }
+                VMValue vmResult;
+                if (engine.vm() && engine.vm()->callScriptFunction(nameTok.text.c_str(), args, vmResult))
+                    return vmResult;
 
                 auto nit = natives.find(toLower(nameTok.text));
                 if (nit != natives.end()) return nit->second(args);
@@ -2086,10 +2101,9 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 // the native through callFunction.
                 if (outer->hasFunction(fn)) return outer->callFunction(fn, args);
                 auto& engine = ScriptEngine::instance();
-                if (engine.vm()) {
-                    VMValue vmResult = engine.vm()->callFunction(fn.c_str(), args);
-                    if (vmResult.type != VMValue::None) return vmResult;
-                }
+                VMValue vmResult;
+                if (engine.vm() && engine.vm()->callScriptFunction(fn.c_str(), args, vmResult))
+                    return vmResult;
                 auto nit = natives.find(toLower(fn));
                 if (nit != natives.end()) return nit->second(args);
                 // Check console commands
@@ -2656,6 +2670,16 @@ VMValue TorqueScript::executeFile(const std::string& path) {
                 if (cacheSeconds < sourceTime) dsoData.clear();
             }
             if (!dsoData.empty() && !impl->readDependencyManifest(configuredDsoPath, cachedDependencies))
+                dsoData.clear();
+        }
+        // Torch's source cache (v0x54534F02) holds only function bodies, not
+        // the file's top-level statements; running it for a repeated exec
+        // skipped datablocks and objects. exec runs the whole file, as a
+        // compiled Torque DSO does, so the source is executed instead.
+        if (dsoData.size() >= 4) {
+            size_t versionOffset = 0;
+            uint32_t cacheVersion = 0;
+            if (readU32Bounded(dsoData, versionOffset, cacheVersion) && cacheVersion == 0x54534F02)
                 dsoData.clear();
         }
         if (!dsoData.empty()) {

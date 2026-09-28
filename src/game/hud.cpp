@@ -34,7 +34,6 @@ struct HUD::Impl {
         double duration;
     };
     std::vector<Message> messages;
-    std::vector<std::string> chatLines;
     std::string chatInput;
     double messageStart = 0;
     std::string targetSearch;
@@ -50,7 +49,6 @@ void HUD::init() {}
 
 void HUD::resetState() {
     impl->messages.clear();
-    impl->chatLines.clear();
     impl->chatInput.clear();
     impl->messageStart = 0;
     impl->targetSearch.clear();
@@ -275,28 +273,6 @@ void HUD::render(Game* game) {
             }
         }
 
-        // Chat message overlay (recent demo events)
-        if (font) {
-            const auto& events = game->getDemoEventLog();
-            int total = (int)events.size();
-            int chatStart = std::max(0, total - 6);
-            float cy = (float)h - 180.0f;
-            for (int i = chatStart; i < total; i++) {
-                const auto& e = events[i];
-                ColorF chatCol = (e.type == 0) ? ColorF{0.3f, 1.0f, 0.3f, 0.8f} :
-                                 (e.type == 1) ? ColorF{1.0f, 1.0f, 0.3f, 0.8f} :
-                                                  ColorF{0.8f, 0.8f, 0.8f, 0.7f};
-                char line[512];
-                if (e.text.size() > 80) {
-                    snprintf(line, sizeof(line), "<%.60s...", e.text.c_str());
-                } else {
-                    snprintf(line, sizeof(line), "<%s", e.text.c_str());
-                }
-                font->render(line, 20.0f, cy, chatCol, 2.0f);
-                cy += 20.0f;
-            }
-        }
-
         // Event log pane
         // Restore ortho projection for 2D HUD elements
         r.setProjection(ortho);
@@ -325,16 +301,6 @@ void HUD::render(Game* game) {
                 font->render(line, 20.0f, ey, col, 2.0f);
                 ey += 22.0f;
             }
-        }
-    }
-
-    if (font && !game->isDemoPlaying()) {
-        const int total = (int)impl->chatLines.size();
-        float cy = (float)h - 180.0f;
-        for (int i = std::max(0, total - 6); i < total; ++i) {
-            font->render(impl->chatLines[i].c_str(), 20.0f, cy,
-                         {0.8f, 1.0f, 0.8f, 0.85f}, 2.0f);
-            cy += 20.0f;
         }
     }
 
@@ -744,12 +710,6 @@ void HUD::showMessage(const char* text, const ColorF& color) {
                               Engine::instance().timer().now(), 3.0});
 }
 
-void HUD::addChatLine(const char* text) {
-    if (!text || !*text) return;
-    impl->chatLines.emplace_back(text);
-    if (impl->chatLines.size() > 50)
-        impl->chatLines.erase(impl->chatLines.begin());
-}
 
 void HUD::setChatInput(const char* text) {
     impl->chatInput = text ? text : "";

@@ -38,3 +38,15 @@ inline bool guiPhysicalToLogical(const GuiViewport& viewport,
     return logicalX >= 0.0f && logicalX < viewport.logicalWidth &&
            logicalY >= 0.0f && logicalY < viewport.logicalHeight;
 }
+
+// A logical-unit rect (top-left origin) as a glScissor box in drawable pixels
+// (bottom-left origin) inside the viewport.
+inline void guiLogicalToScissor(const GuiViewport& viewport, int drawableHeight,
+                                float x, float y, float w, float h,
+                                int& sx, int& sy, int& sw, int& sh) {
+    sx = viewport.x + (int)std::lround(x * viewport.scale);
+    sw = std::max(0, (int)std::lround(w * viewport.scale));
+    sh = std::max(0, (int)std::lround(h * viewport.scale));
+    const int top = viewport.y + (int)std::lround(y * viewport.scale);
+    sy = drawableHeight - top - sh;
+}

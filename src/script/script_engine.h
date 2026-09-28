@@ -182,6 +182,9 @@ public:
     bool loadScriptFile(const char* path);
 
     VMValue callFunction(const char* name, const std::vector<VMValue>& args = {});
+    // A function compiled into a loaded DSO (natives excluded); false when
+    // no active DSO defines it.
+    bool callScriptFunction(const char* name, const std::vector<VMValue>& args, VMValue& result);
     VMValue callMethod(const char* objName, const char* method, const std::vector<VMValue>& args = {});
 
     void setVariable(const char* name, const VMValue& val);
