@@ -1,3 +1,6 @@
+#include "sim/game_connection.h"
+#include "sim/net_string_table.h"
+#include "game/demo.h"
 #include "net/network.h"
 #include "net/protocol.h"
 #include "script/script_engine.h"
@@ -947,5 +950,40 @@ int main() {
     Engine::instance().scr = nullptr;
     Engine::instance().filesys = nullptr;
     delete testFileSystem;
+    {
+        // Server GameConnection packets decode with the demo reader: the
+        // remote command's tags arrive with their NetStringEvents first and
+        // expand like RemoteCommandEvent::process.
+        GameConnection connection;
+        std::vector<std::vector<uint8_t>> packets;
+        connection.deliver = [&](const std::vector<uint8_t>& packet) { packets.push_back(packet); };
+        const std::string command = NetStrings::literal("ServerMessage");
+        const std::string type = NetStrings::literal("MsgProbe");
+        const std::string format = NetStrings::literal("%1 joined the %2.");
+        connection.sendRemoteCommand({command, type, format, "Bob", "game", "12", "-40000"});
+        connection.setMissionCRC(0x1234abcd);
+        connection.checkPacketSend(1.0);
+        assert(packets.size() == 1);
+        DemoParser parser;
+        PacketData pd = parser.parsePacket(packets[0].data(), packets[0].size(), -1);
+        const NetEventInfo* remote = nullptr;
+        bool crc = false;
+        int strings = 0;
+        for (const auto& event : pd.events) {
+            if (event.classId == T2Demo::NetEventClassFirst + 9) remote = &event;
+            if (event.classId == T2Demo::NetEventClassFirst + 13) crc = true;
+            if (event.classId == T2Demo::NetEventClassFirst + 7) ++strings;
+        }
+        assert(strings == 3 && crc && remote);
+        assert(remote->arguments.size() == 7);
+        assert(remote->arguments[0] == "ServerMessage" && remote->arguments[1] == "MsgProbe");
+        assert(remote->arguments[2] == "Bob joined the game.");
+        assert(remote->arguments[5] == "12" && remote->arguments[6] == "-40000");
+        // Nothing new to send: the next packet carries no events again.
+        connection.checkPacketSend(2.0);
+        assert(packets.size() == 2);
+        PacketData again = parser.parsePacket(packets[1].data(), packets[1].size(), -1);
+        assert(again.events.empty());
+    }
     return 0;
 }
