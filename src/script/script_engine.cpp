@@ -2065,12 +2065,26 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("strUpr", [changeCase](const auto& args) {
         return changeCase(args, true);
     });
+    // consoleFunctions.cc ltrim/rtrim/trim: space, newline and tab.
+    static auto trimSpace = [](char c) { return c == ' ' || c == '\n' || c == '\t'; };
+    tsInstance->registerNative("ltrim", [](const auto& args) -> VMValue {
+        const std::string value = args.empty() ? "" : args[0].toString();
+        size_t first = 0;
+        while (first < value.size() && trimSpace(value[first])) ++first;
+        return VMValue(value.substr(first));
+    });
+    tsInstance->registerNative("rtrim", [](const auto& args) -> VMValue {
+        const std::string value = args.empty() ? "" : args[0].toString();
+        size_t last = value.size();
+        while (last > 0 && trimSpace(value[last - 1])) --last;
+        return VMValue(value.substr(0, last));
+    });
     tsInstance->registerNative("trim", [](const auto& args) -> VMValue {
         std::string value = args.empty() ? "" : args[0].toString();
         size_t first = 0;
-        while (first < value.size() && std::isspace((unsigned char)value[first])) ++first;
+        while (first < value.size() && trimSpace(value[first])) ++first;
         size_t last = value.size();
-        while (last > first && std::isspace((unsigned char)value[last - 1])) --last;
+        while (last > first && trimSpace(value[last - 1])) --last;
         return VMValue(value.substr(first, last - first));
     });
     tsInstance->registerNative("strreplace", [](const auto& args) -> VMValue {
@@ -3504,13 +3518,17 @@ bool ScriptEngine::init() {
 #ifdef TORCH_DEDICATED
         return VMValue(0);
 #else
+        // platformLinux/audio.cc: detect() lists the one OpenAL driver,
+        // "None"; setDriver maps "default" to it and rejects other names.
         auto& audio = Engine::instance().audio();
         const std::string driver = args.empty() ? "" : args[0].toString();
-        if (driver.empty() || driver == "miles" || driver == "openal") {
+        if (driver.empty() || strcasecmp(driver.c_str(), "none") == 0 ||
+            strcasecmp(driver.c_str(), "default") == 0) {
             const bool ok = audio.isInitialized() || audio.init();
-            if (ok) Console::instance().setVariable("Audio::activeDriver", "openal");
+            if (ok) Console::instance().setVariable("Audio::activeDriver", "None");
             return VMValue(ok ? 1 : 0);
         }
+        Console::instance().printf(LogLevel::Error, "Unknown OpenAL audio driver '%s'", driver.c_str());
         return VMValue(0);
 #endif
     });
@@ -3548,13 +3566,17 @@ bool ScriptEngine::init() {
 #ifdef TORCH_DEDICATED
         return VMValue(0);
 #else
+        // platformLinux/audio.cc: detect() lists the one OpenAL driver,
+        // "None"; setDriver maps "default" to it and rejects other names.
         auto& audio = Engine::instance().audio();
         const std::string driver = args.empty() ? "" : args[0].toString();
-        if (driver.empty() || driver == "miles" || driver == "openal") {
+        if (driver.empty() || strcasecmp(driver.c_str(), "none") == 0 ||
+            strcasecmp(driver.c_str(), "default") == 0) {
             const bool ok = audio.isInitialized() || audio.init();
-            if (ok) Console::instance().setVariable("Audio::activeDriver", "openal");
+            if (ok) Console::instance().setVariable("Audio::activeDriver", "None");
             return VMValue(ok ? 1 : 0);
         }
+        Console::instance().printf(LogLevel::Error, "Unknown OpenAL audio driver '%s'", driver.c_str());
         return VMValue(0);
 #endif
     });

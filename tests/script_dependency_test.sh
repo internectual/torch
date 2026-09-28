@@ -41,5 +41,5 @@ grep -q 'CYCLE-A' "$root/circular.log"
 run packages scripts/packages.cs
 grep -q 'base-low-high' "$root/packages.log"
 run reload scripts/reload-driver.cs
-test "$(grep -c 'reload' "$root/reload.log")" -eq 2
+test "$(grep -c '\] reload$' "$root/reload.log")" -eq 2
 printf 'script dependency tracking passed\n'

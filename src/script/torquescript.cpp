@@ -46,15 +46,6 @@ struct NameEqual {
 };
 using FunctionTable = std::unordered_map<std::string, TSFunc, NameHash, NameEqual>;
 
-static void syncPackageConsole(const std::vector<std::string>& packages) {
-    const int oldCount = Console::instance().getIntVariable("$TotalNumberOfPackages", 0);
-    for (int i = 0; i < oldCount; ++i)
-        Console::instance().setVariable(("$Package[" + std::to_string(i) + "]").c_str(), "");
-    for (size_t i = 0; i < packages.size(); ++i)
-        Console::instance().setVariable(("$Package[" + std::to_string(i) + "]").c_str(), packages[i].c_str());
-    Console::instance().setVariable("$TotalNumberOfPackages", std::to_string(packages.size()).c_str());
-}
-
 static VMValue* findField(ScriptObject* object, const std::string& name) {
     if (!object) return nullptr;
     for (auto& [field, value] : object->fields)
@@ -372,7 +363,6 @@ void TorqueScript::unloadFile(const std::string& path) {
             ++package;
         }
     }
-    syncPackageConsole(impl->activePackages);
 }
 
 void TorqueScript::init() {}
@@ -2006,24 +1996,21 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 expect(TSTokenType::RParen);
                 if (!evaluating) return VMValue(0);
 
-                // Try native first
-                // Keep the complete spelling for namespaced natives.  Looking
-                // up only nameTok made $Foo::bar() resolve as $Foo().
-                auto nit = natives.find(toLower(lastVarName));
-                if (nit != natives.end()) {
-                    return nit->second(args);
+                // A script definition replaces a console function of the
+                // same name (Namespace::addFunction), so scripts come first.
+                if (outer->hasFunction(lastVarName)) {
+                    return outer->callFunction(lastVarName, args);
                 }
-
-                // Try DSO function (via ScriptEngine VM)
                 auto& engine = ScriptEngine::instance();
                 if (engine.vm()) {
                     VMValue vmResult = engine.vm()->callFunction(lastVarName.c_str(), args);
                     if (vmResult.type != VMValue::None) return vmResult;
                 }
-
-                // Try TS function
-                if (outer->hasFunction(lastVarName)) {
-                    return outer->callFunction(lastVarName, args);
+                // Keep the complete spelling for namespaced natives.  Looking
+                // up only nameTok made $Foo::bar() resolve as $Foo().
+                auto nit = natives.find(toLower(lastVarName));
+                if (nit != natives.end()) {
+                    return nit->second(args);
                 }
 
                 Console::instance().printf(LogLevel::Warn, "TS: unknown function '%s'", lastVarName.c_str());
@@ -2044,8 +2031,7 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 expect(TSTokenType::RParen);
                 if (!evaluating) return VMValue(0);
 
-                auto nit = natives.find(toLower(nameTok.text));
-                if (nit != natives.end()) return nit->second(args);
+                if (outer->hasFunction(nameTok.text)) return outer->callFunction(nameTok.text, args);
 
                 auto& engine = ScriptEngine::instance();
                 if (engine.vm()) {
@@ -2053,7 +2039,8 @@ VMValue TorqueScript::Impl::parsePrimary() {
                     if (vmResult.type != VMValue::None) return vmResult;
                 }
 
-                if (outer->hasFunction(nameTok.text)) return outer->callFunction(nameTok.text, args);
+                auto nit = natives.find(toLower(nameTok.text));
+                if (nit != natives.end()) return nit->second(args);
 
                 Console::instance().printf(LogLevel::Warn, "TS: unknown function '%s'", nameTok.text.c_str());
                 return VMValue(0);
@@ -2094,17 +2081,17 @@ VMValue TorqueScript::Impl::parsePrimary() {
                                  : "TS: exec file not found: %s", execPath.c_str());
                     return VMValue(0);
                 }
-                // Try natives
-                auto nit = natives.find(toLower(fn));
-                if (nit != natives.end()) return nit->second(args);
-                // Try DSO VM
+                // Script functions (packages included) replace console
+                // functions of the same name; Parent:: from a package reaches
+                // the native through callFunction.
+                if (outer->hasFunction(fn)) return outer->callFunction(fn, args);
                 auto& engine = ScriptEngine::instance();
                 if (engine.vm()) {
                     VMValue vmResult = engine.vm()->callFunction(fn.c_str(), args);
                     if (vmResult.type != VMValue::None) return vmResult;
                 }
-                // Try TS functions
-                if (outer->hasFunction(fn)) return outer->callFunction(fn, args);
+                auto nit = natives.find(toLower(fn));
+                if (nit != natives.end()) return nit->second(args);
                 // Check console commands
                 auto* item = Console::instance().find(fn.c_str());
                 if (item && item->type == Console::ConsoleItem::Command) {
@@ -2825,7 +2812,6 @@ bool TorqueScript::activatePackage(const std::string& name) {
     const std::string package = toLower(name);
     if (impl->packageFunctions.find(package) == impl->packageFunctions.end()) return false;
     impl->activePackages.push_back(package);
-    syncPackageConsole(impl->activePackages);
     return true;
 }
 
@@ -2833,7 +2819,6 @@ bool TorqueScript::deactivatePackage(const std::string& name) {
     for (auto it = impl->activePackages.begin(); it != impl->activePackages.end(); ++it) {
         if (sameName(*it, name)) {
             impl->activePackages.erase(it);
-            syncPackageConsole(impl->activePackages);
             return true;
         }
     }
@@ -2842,7 +2827,6 @@ bool TorqueScript::deactivatePackage(const std::string& name) {
 
 void TorqueScript::clearPackages() {
     impl->activePackages.clear();
-    syncPackageConsole(impl->activePackages);
     impl->resolveParentNext = false;
 }
 

@@ -397,12 +397,8 @@ int main() {
         "$packageActive = PackageProbe();");
     assert(script.ts()->getGlobal("$packageActive").toString() == "base-patch");
     assert(script.ts()->isActivePackage("PatchProbe"));
-    assert(Console::instance().getIntVariable("$TotalNumberOfPackages", 0) == 1);
-    assert(std::string(Console::instance().getStringVariable("$Package[0]", "")) == "patchprobe");
     assert(script.ts()->execute("deactivatePackage('PatchProbe'); PackageProbe();").toString() == "base");
     assert(!script.ts()->isActivePackage("PatchProbe"));
-    assert(Console::instance().getIntVariable("$TotalNumberOfPackages", 0) == 0);
-    assert(std::string(Console::instance().getStringVariable("$Package[0]", "x")).empty());
     script.ts()->execute(
         "function StackProbe() { return 'base'; }"
         "package StackLow { function StackProbe() { return Parent::StackProbe() @ '-low'; } }"
@@ -422,7 +418,6 @@ int main() {
     script.ts()->execute("package StaleParent { function StaleProbe() { return Parent::Missing(); } } activatePackage('StaleParent'); StaleProbe();");
     assert(script.ts()->execute("function AfterParent() { return 'normal'; } AfterParent();").toString() == "normal");
     script.ts()->clearPackages();
-    assert(Console::instance().getIntVariable("$TotalNumberOfPackages", 0) == 0);
     assert(!script.ts()->isActivePackage("StaleParent"));
     script.ts()->execute("$syntaxBefore = 1; function Broken( { $syntaxAfter = 1; }");
     assert(script.ts()->getGlobal("$syntaxBefore").toInt() == 1);
