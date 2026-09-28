@@ -1,4 +1,5 @@
 #include "script/script_engine.h"
+#include "sim/engine_classes.h"
 #include "game/material_property_map.h"
 #include <limits>
 #include "script/conversion_parity.h"
@@ -9052,15 +9053,27 @@ std::string ScriptEngine::canonicalName(const std::string& handle) {
 }
 
 std::vector<std::string> ScriptEngine::objectNamespaces(ScriptObject* object) {
+    // Namespace linking: a datablock links name -> className -> its C++
+    // class (GameBaseData::onAdd); a ScriptObject links class -> superClass
+    // (ScriptObject::onAdd); every object ends in its C++ class chain.
     std::vector<std::string> spaces;
     if (!object) return spaces;
-    if (!scriptObjectName(object).empty()) spaces.push_back(object->name);
+    auto add = [&](const std::string& space) {
+        if (space.empty()) return;
+        for (const auto& existing : spaces)
+            if (strcasecmp(existing.c_str(), space.c_str()) == 0) return;
+        spaces.push_back(space);
+    };
+    if (!scriptObjectName(object).empty()) add(object->name);
+    const auto marker = object->internals.find("__datablock");
+    const bool datablock = marker != object->internals.end() && marker->second.toBool();
+    if (datablock) {
+        if (const auto* value = findObjectField(object, "className")) add(value->toString());
+    }
     for (const char* field : {"class", "superClass"})
-        if (const auto* value = findObjectField(object, field)) {
-            const std::string space = value->toString();
-            if (!space.empty()) spaces.push_back(space);
-        }
-    if (!object->className.empty()) spaces.push_back(object->className);
+        if (const auto* value = findObjectField(object, field)) add(value->toString());
+    if (!object->className.empty())
+        for (const auto& space : EngineClasses::chain(object->className)) add(space);
     return spaces;
 }
 

@@ -1,4 +1,5 @@
 #include "script/torquescript.h"
+#include "sim/engine_classes.h"
 #include "script/script_engine.h"
 #include "render/gui_renderer.h"
 #include "core/console.h"
@@ -87,6 +88,18 @@ struct TorqueScript::Impl {
     std::vector<std::string> activePackages;
     std::vector<std::string> callPackages;
     std::vector<std::string> callNames; // executing script functions
+    // A lower active package or the base table defines `name` below the
+    // package `currentPackage` (the target of Parent:: from that package).
+    bool packageParentExists(const std::string& name, const std::string& currentPackage) const {
+        auto current = std::find_if(activePackages.rbegin(), activePackages.rend(),
+            [&](const std::string& package) { return strcasecmp(package.c_str(), currentPackage.c_str()) == 0; });
+        if (current != activePackages.rend())
+            for (auto package = current + 1; package != activePackages.rend(); ++package) {
+                auto it = packageFunctions.find(*package);
+                if (it != packageFunctions.end() && it->second.count(name)) return true;
+            }
+        return functions.count(name) != 0;
+    }
     std::string parsingPackage;
     std::unordered_map<std::string, VMValue> globals;
     // Lowercased name -> key in `globals` (names are case-insensitive).
@@ -876,6 +889,7 @@ VMValue TorqueScript::Impl::parseDatablock() {
 
     // Datablocks take ids from the datablock range.
     auto& engine = ScriptEngine::instance();
+    object->internals["__datablock"] = VMValue(1);
     engine.assignDatablockId(object);
     engine.objects[engine.objectKey(object)] = object;
     outer->setGlobal("$" + object->name, VMValue(object->name));
@@ -1879,51 +1893,24 @@ VMValue TorqueScript::Impl::parsePostfix() {
                     className = "ActionMap";
                 std::string bareLower = fullName;
                 for (auto& c : bareLower) c = (char)tolower((unsigned char)c);
-                if (!called) {
-                    // Try object-qualified: objectName::method
-                    std::string nsFull = objName + "::" + methodName;
-                    if (outer->hasFunction(nsFull)) { val = outer->callFunction(nsFull, methodArgs); called = true; }
-                }
-                if (!called && sobj) {
-                    // An object referenced by id still dispatches through its
-                    // name namespace (e.g. $Hud[%tag] -> ScoreScreen::addLine),
-                    // then its ScriptObject class / superClass.
-                    for (const std::string& space : ScriptEngine::instance().objectNamespaces(sobj)) {
-                        if (sameName(space, objName) || sameName(space, className)) continue;
-                        std::string spaceFull = space + "::" + methodName;
-                        if (outer->hasFunction(spaceFull)) {
-                            val = outer->callFunction(spaceFull, methodArgs);
-                            called = true;
-                            break;
-                        }
+                // Namespace::lookup along the object's linked namespaces:
+                // at each level a script function, else the console method.
+                std::vector<std::string> spaces = sobj
+                    ? ScriptEngine::instance().objectNamespaces(sobj)
+                    : std::vector<std::string>{objName};
+                if (!sobj && !className.empty()) spaces.push_back(className);
+                for (const std::string& space : spaces) {
+                    if (called) break;
+                    const std::string spaceFull = space + "::" + methodName;
+                    if (outer->hasFunction(spaceFull)) {
+                        val = outer->callFunction(spaceFull, methodArgs);
+                        called = true;
+                        break;
                     }
-                }
-                if (!called) {
-                    std::string nsFull = objName + "::" + methodName;
-                    std::string nsLower = nsFull;
-                    for (auto& c : nsLower) c = (char)tolower((unsigned char)c);
-                    auto nsNit = natives.find(nsLower);
-                    if (nsNit != natives.end()) { val = nsNit->second(methodArgs); called = true; }
-                }
-                if (!called) {
-                    // Resolve the object's namespace before a same-named
-                    // global native. Otherwise a global helper can shadow
-                    // Foo::method.
-                    if (!className.empty()) {
-                        std::string clsFull = className + "::" + methodName;
-                        if (outer->hasFunction(clsFull)) {
-                            val = outer->callFunction(clsFull, methodArgs);
-                            called = true;
-                        }
-                        if (!called) {
-                            std::string clsLower = clsFull;
-                            for (auto& c : clsLower) c = (char)tolower((unsigned char)c);
-                            auto clsNit = natives.find(clsLower);
-                            if (clsNit != natives.end()) {
-                                val = clsNit->second(methodArgs);
-                                called = true;
-                            }
-                        }
+                    auto nit = natives.find(toLower(spaceFull));
+                    if (nit != natives.end()) {
+                        val = nit->second(methodArgs);
+                        called = true;
                     }
                 }
                 if (!called) {
@@ -2140,11 +2127,45 @@ VMValue TorqueScript::Impl::parsePrimary() {
                     parseArgumentList(args);
                     expect(TSTokenType::RParen);
 
-                    // Parent:: bypasses the active package once, then nested calls
-                    // use normal package dispatch again.
+                    // Parent:: first reaches the definition the current package
+                    // function overrides (a lower package, then the base
+                    // definition); failing that, the next namespace linked
+                    // above the current function's (Namespace::mParent).
                     if (name == "Parent") {
-                        resolveParentNext = true;
-                        return lookupAndCall(methodName, args);
+                        if (!evaluating) return VMValue(0);
+                        const std::string current = callNames.empty() ? std::string() : callNames.back();
+                        const std::string currentPackage = callPackages.empty() ? std::string() : callPackages.back();
+                        const size_t sep = current.rfind("::");
+                        const std::string space = sep == std::string::npos ? std::string() : current.substr(0, sep);
+                        const std::string sameName = space.empty() ? methodName : space + "::" + methodName;
+                        if (!currentPackage.empty() && packageParentExists(sameName, currentPackage)) {
+                            resolveParentNext = true;
+                            return outer->callFunction(sameName, args);
+                        }
+                        if (space.empty()) {
+                            auto nit = natives.find(toLower(methodName));
+                            if (nit != natives.end()) return nit->second(args);
+                            Console::instance().printf(LogLevel::Warn, "TS: no parent for '%s'", methodName.c_str());
+                            return VMValue("");
+                        }
+                        ScriptObject* self = args.empty() ? nullptr
+                            : ScriptEngine::instance().findObject(args[0].toString().c_str());
+                        std::vector<std::string> spaces = self
+                            ? ScriptEngine::instance().objectNamespaces(self)
+                            : EngineClasses::chain(space);
+                        bool past = false;
+                        for (const auto& candidate : spaces) {
+                            if (!past) { past = strcasecmp(candidate.c_str(), space.c_str()) == 0; continue; }
+                            const std::string full = candidate + "::" + methodName;
+                            if (outer->hasFunction(full)) return outer->callFunction(full, args);
+                            auto nit = natives.find(toLower(full));
+                            if (nit != natives.end()) return nit->second(args);
+                        }
+                        // Torch's flat console methods stand for the engine
+                        // classes' own.
+                        auto nit = natives.find(toLower(methodName));
+                        if (nit != natives.end()) return nit->second(args);
+                        return VMValue("");
                     }
                     if (outer->hasFunction(fullName)) return outer->callFunction(fullName, args);
                     auto nativeIt = natives.find(toLower(fullName));
