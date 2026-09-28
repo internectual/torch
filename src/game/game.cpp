@@ -827,11 +827,8 @@ void Player::loadModel() {
     const std::string currentName = ts->getGlobal("$pref::Player::Current").toString();
     const std::string profile = ts->getGlobal(
         "$pref::Player[" + currentName + "]").toString();
-    if (profile.empty()) {
-        Console::instance().printf(LogLevel::Error,
-            "Player: script did not provide the active player profile");
-        return;
-    }
+    // Without a warrior the client connects with empty fields and
+    // GameConnection::onConnect falls back to a Human Male (below).
 
     auto field = [](const std::string& value, int index) {
         size_t start = 0;
