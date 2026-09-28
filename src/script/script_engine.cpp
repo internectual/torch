@@ -3809,7 +3809,7 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("eval", [](const auto& args) -> VMValue {
         if (!args.empty()) {
             std::string code = args[0].toString();
-            auto* ts = Engine::instance().script().ts();
+            auto* ts = ScriptEngine::instance().ts();
             if (ts) ts->execute(code, "eval");
         }
         return VMValue(1);

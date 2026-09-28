@@ -1047,5 +1047,60 @@ int main() {
         connection.receivePacket(replyPacket.data(), replyPacket.size());
         assert(connection.isGhosting());
     }
+    {
+        // transmitDataBlocks over a local link: more datablocks than the
+        // DataBlockQueueCount window; each SimDataBlockEvent decodes in the
+        // demo reader, and the client role's acks bring dataBlocksDone.
+        std::string source =
+            "datablock AudioDescription(LinkDescription) { volume = 1.0; is3D = true; };"
+            "datablock AudioProfile(LinkSound) { filename = \"fx/misc/thunder.wav\"; description = LinkDescription; };"
+            "function GameConnection::dataBlocksDone(%this, %sequence) { $LinkDone = %sequence; }"
+            "new GameConnection(LinkClient);";
+        for (int i = 0; i < 20; ++i)
+            source += "datablock DebrisData(LinkDebris" + std::to_string(i) + ") { numBounces = " +
+                      std::to_string(i) + "; shapeName = \"debris_generic.dts\"; };";
+        script.ts()->execute(source);
+        auto* server = EngineObjects::get<GameConnection>("LinkClient");
+        assert(server);
+        GameConnection client;
+        client.isServer = false;
+        DemoParser parser;
+        int packets = 0;
+        server->deliver = [&](const std::vector<uint8_t>& p) { client.receivePacket(p.data(), p.size()); };
+        client.onServerPacket = [&](const std::vector<uint8_t>& p) {
+            parser.parsePacket(p.data(), p.size(), packets++);
+        };
+        // The recording's SendPacket block: the reader follows the client's
+        // own packet sequence.
+        client.deliver = [&](const std::vector<uint8_t>& p) {
+            parser.onSendPacketTrigger();
+            server->receivePacket(p.data(), p.size());
+        };
+        server->transmitDataBlocks(7);
+        for (int tick = 0; tick < 200 && script.ts()->getGlobal("$LinkDone").toString().empty(); ++tick) {
+            server->checkPacketSend(100.0 + tick);
+            client.checkPacketSend(100.0 + tick + 0.5);
+        }
+        assert(parser.getParseFault().empty());
+        assert(script.ts()->getGlobal("$LinkDone").toString() == "7");
+        ScriptObject* group = ScriptEngine::instance().findObject("DataBlockGroup");
+        assert(group);
+        const size_t total = (size_t)group->internals["__childCount"].toInt();
+        const auto& blocks = parser.getInitialBlock().dataBlocks;
+        assert(total >= 22 && blocks.size() == total);
+        // Ids go out as id - DataBlockObjectIdFirst.
+        ScriptObject* debris = ScriptEngine::instance().findObject("LinkDebris19");
+        auto decoded = blocks.find((uint32_t)ScriptEngine::instance().objectId(debris) - 3);
+        assert(decoded != blocks.end() && decoded->second.className == "DebrisData");
+        assert(decoded->second.decoded.debris.numBounces == 19);
+        assert(decoded->second.decoded.debris.shape == "debris_generic.dts");
+        ScriptObject* sound = ScriptEngine::instance().findObject("LinkSound");
+        auto profile = blocks.find((uint32_t)ScriptEngine::instance().objectId(sound) - 3);
+        assert(profile != blocks.end() && profile->second.decoded.audioFilename == "fx/misc/thunder.wav");
+        // The client's modified key is current: nothing more to send.
+        script.ts()->execute("$LinkDone = \"\";");
+        server->transmitDataBlocks(8);
+        assert(script.ts()->getGlobal("$LinkDone").toString() == "8");
+    }
     return 0;
 }

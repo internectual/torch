@@ -103,6 +103,7 @@ static std::map<std::string, PackFn>& table() {
 void registerClass(const std::string& className, PackFn fn) { table()[className] = std::move(fn); }
 
 const PackFn* find(const std::string& className) {
+    registerAll();
     auto it = table().find(className);
     return it == table().end() ? nullptr : &it->second;
 }
