@@ -5,8 +5,10 @@
 #include "sim/sim_state.h"
 #include "core/engine.h"
 #include "script/torquescript.h"
+#include "sim/shape_base.h"
 
 void registerSimNatives(TorqueScript& ts) {
+    registerShapeBaseNatives(ts);
     // consoleFunctions.cc getFileCRC: -1 when the file is not found.
     ts.registerNative("getFileCRC", [](const std::vector<VMValue>& args) -> VMValue {
         if (args.empty()) return VMValue(-1);

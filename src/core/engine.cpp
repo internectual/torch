@@ -1,4 +1,5 @@
 #include "core/engine.h"
+#include "sim/sim_state.h"
 #include "core/console_args.h"
 #include "core/input_parity.h"
 #include "core/config.h"
@@ -2211,6 +2212,7 @@ void Engine::run() {
         g->gameServer().update();
         scr->vm()->setVariable("time", (float)now);
         if (scr->ts()) scr->ts()->processScheduledEvents(now);
+        SimState::advanceServer(now);
 
         // Process GUI events
         if (gui) gui->update(dt);

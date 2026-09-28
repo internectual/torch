@@ -1950,7 +1950,23 @@ VMValue TorqueScript::Impl::parsePostfix() {
                     }
                 }
                 if (!called) {
-                    val = VMValue(0);
+                    // compiledEval.cc: an unresolved method warns and yields "".
+                    const int line = tokenPos > 0 && tokenPos <= tokens.size()
+                        ? tokens[tokenPos - 1].pos.line : 0;
+                    if (!sobj && ScriptEngine::instance().missionObjects().empty())
+                        Console::instance().printf(LogLevel::Warn,
+                            "%s (%d): Unable to find object: '%s' attempting to call function '%s'",
+                            currentFile.c_str(), line, objName.c_str(), methodName.c_str());
+                    else if (sobj) {
+                        std::string list;
+                        for (const auto& space : spaces) list += (list.empty() ? "" : " -> ") + space;
+                        Console::instance().printf(LogLevel::Warn, "%s (%d): Unknown command %s.",
+                                                   currentFile.c_str(), line, methodName.c_str());
+                        Console::instance().printf(LogLevel::Warn, "  Object %s(%d) %s",
+                                                   sobj->name.c_str(), ScriptEngine::instance().objectId(sobj),
+                                                   list.c_str());
+                    }
+                    val = VMValue("");
                 }
             } else {
                 // Field access
@@ -2324,16 +2340,22 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 if (peekToken().type == TSTokenType::RBrace) nextToken();
             }
 
-            // Link parent-child for GUI controls
+            // OP_ADD_OBJECT: a nested object joins the enclosing SimGroup/SimSet
+            // (GUI controls link to their parent control); a top-level one
+            // joins the group named by $instantGroup.
             auto& engine = ScriptEngine::instance();
-            if (!guiParentStack.empty()) {
-                ScriptObject* parent = guiParentStack.back();
-                if (parent != obj) {
-                    obj->internals["parent"] = VMValue(engine.objectKey(parent));
-                }
+            engine.objects[engine.objectKey(obj)] = obj;
+            ScriptObject* enclosing = guiParentStack.empty() ? nullptr : guiParentStack.back();
+            if (enclosing == obj) enclosing = nullptr;
+            if (enclosing && engine.isSimSet(enclosing)) {
+                engine.addToSet(enclosing, obj);
+            } else if (enclosing) {
+                obj->internals["parent"] = VMValue(engine.objectKey(enclosing));
+            } else if (ScriptObject* instant = engine.findObject(outer->getGlobal("$instantGroup").toString().c_str());
+                       instant && engine.isSimGroup(instant)) {
+                engine.addToSet(instant, obj);
             }
 
-            engine.objects[engine.objectKey(obj)] = obj;
             // Set globals so script can reference the object by name (both $name and bare name)
             if (!obj->name.empty()) {
                 outer->setGlobal("$" + obj->name, VMValue(obj->name));

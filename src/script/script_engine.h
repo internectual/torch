@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 #include "script/dso_reader.h"
 #include "core/console.h"
 #include "core/math.h"
@@ -138,6 +139,8 @@ struct VMValue {
     bool toBool() const;
 };
 
+class EngineObject;
+
 struct ScriptObject {
     // SimObject id: datablocks from 3, dynamic objects from 1027. Assigned
     // on first use (ScriptEngine::objectId); an id is only ever handed out
@@ -148,6 +151,8 @@ struct ScriptObject {
     std::unordered_map<std::string, VMValue> fields;
     std::unordered_map<std::string, VMValue> internals;
     std::vector<std::string> deleteNotifyListeners;
+    // Engine-class state (src/sim), when the class is an engine class.
+    std::shared_ptr<EngineObject> engine;
 };
 
 struct ScriptMissionObject {
@@ -358,6 +363,13 @@ public:
     ScriptObject* findObject(const char* name);
 
     void objectAdded(ScriptObject* object);
+    bool isSimSet(ScriptObject* object);
+    bool isSimGroup(ScriptObject* object);
+    // SimSet::addObject (a SimGroup takes the object from its old group).
+    bool addToSet(ScriptObject* set, ScriptObject* object);
+    bool removeFromSet(ScriptObject* set, ScriptObject* object);
+    // The id of the object's dataBlock field target, or "" (GameBase).
+    std::string objectDataBlock(ScriptObject* object);
     bool setObjectField(ScriptObject* object, const std::string& field, const VMValue& value);
     bool addDeleteNotify(ScriptObject* listener, ScriptObject* target);
     bool clearDeleteNotify(ScriptObject* listener, ScriptObject* target);

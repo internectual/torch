@@ -37,6 +37,9 @@ add_executable(torch
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
+    src/sim/engine_object.cpp
+    src/sim/game_base.cpp
+    src/sim/shape_base.cpp
     src/script/torquescript.cpp
     src/render/renderer.cpp
     src/render/shader.cpp
@@ -116,6 +119,9 @@ add_executable(torch_server
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
+    src/sim/engine_object.cpp
+    src/sim/game_base.cpp
+    src/sim/shape_base.cpp
     src/script/torquescript.cpp
     src/render/renderer.cpp
     src/render/shader.cpp
@@ -368,6 +374,9 @@ add_executable(torch_parity_test
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
+    src/sim/engine_object.cpp
+    src/sim/game_base.cpp
+    src/sim/shape_base.cpp
     src/script/torquescript.cpp
     src/render/renderer.cpp
     src/render/shader.cpp
@@ -428,6 +437,9 @@ add_executable(torch_network_loopback_test
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
+    src/sim/engine_object.cpp
+    src/sim/game_base.cpp
+    src/sim/shape_base.cpp
     src/script/torquescript.cpp
     src/render/renderer.cpp
     src/render/shader.cpp

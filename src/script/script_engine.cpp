@@ -1,6 +1,7 @@
 #include "script/script_engine.h"
 #include "sim/engine_classes.h"
 #include "sim/sim_natives.h"
+#include "sim/engine_object.h"
 #include "game/material_property_map.h"
 #include <limits>
 #include "script/conversion_parity.h"
@@ -1566,15 +1567,54 @@ ScriptEngine::~ScriptEngine() {
     instance_ = nullptr;
 }
 
+// GameBase::scriptOnAdd/OnNewDataBlock/OnRemove: server GameBase objects
+// report to their datablock's namespace (%data.onAdd(%obj)); which leaf
+// classes call which comes from the engine's game/*.cc.
+static bool callsScriptOnAdd(const std::string& cls) {
+    for (const char* base : {"StaticShape", "Player", "Item", "FlyingVehicle", "HoverVehicle",
+                             "WheeledVehicle", "ForceFieldBare"})
+        if (EngineClasses::isA(cls, base)) return true;
+    return false;
+}
+static bool callsScriptOnNewDataBlock(const std::string& cls) {
+    if (callsScriptOnAdd(cls)) return true;
+    for (const char* base : {"Projectile", "Debris", "Explosion", "FireballAtmosphere", "Lightning",
+                             "MissionMarker", "ParticleEmissionDummy", "ParticleEmitter", "Precipitation",
+                             "Shockwave", "Splash", "StationFXPersonal", "StationFXVehicle", "Trigger",
+                             "Turret"})
+        if (EngineClasses::isA(cls, base)) return true;
+    return false;
+}
+
+std::string ScriptEngine::objectDataBlock(ScriptObject* object) {
+    if (!object) return {};
+    for (const auto& [field, value] : object->fields)
+        if (strcasecmp(field.c_str(), "dataBlock") == 0) {
+            ScriptObject* block = findObject(value.toString().c_str());
+            return block ? std::to_string(objectId(block)) : std::string();
+        }
+    return {};
+}
+
 void ScriptEngine::objectAdded(ScriptObject* object) {
     if (!object || object->internals["__added"].toBool()) return;
     object->internals["__added"] = VMValue(1);
+    EngineObjects::attach(object);
     if (tsInstance) {
         // %this is the object's id, named or not; onAdd resolves through the
         // object's namespace chain. GUI controls get their named onAdd from
         // the GUI renderer once they sit in their parent (callOnAddOnce), so
         // only their class callback runs here.
         const std::string& cls = object->className;
+        if (EngineClasses::isA(cls, "GameBase")) {
+            const std::string block = objectDataBlock(object);
+            const VMValue self(objectId(object));
+            if (!block.empty() && callsScriptOnNewDataBlock(cls))
+                tsInstance->callObjectMethod(block, "onNewDataBlock", {self});
+            if (!block.empty() && callsScriptOnAdd(cls))
+                tsInstance->callObjectMethod(block, "onAdd", {self});
+            return;
+        }
         const bool guiControl = cls.rfind("Gui", 0) == 0 || cls.rfind("Shell", 0) == 0 ||
                                 cls.rfind("Hud", 0) == 0 || cls == "GameTSCtrl" ||
                                 cls == "VirtualScrollCtrl" || cls == "VirtualScrollContentCtrl";
@@ -1641,6 +1681,75 @@ static bool removeSimGroupChild(ScriptObject* group, const std::string& childKey
     return false;
 }
 
+// SimSet::addObject / SimGroup::addObject. A set lists members (__childN)
+// and each member records the sets it is in (__sets); an object is in one
+// SimGroup at a time (__parent), so adding it to a group moves it.
+bool ScriptEngine::isSimSet(ScriptObject* object) {
+    return object && EngineClasses::isA(object->className, "SimSet");
+}
+bool ScriptEngine::isSimGroup(ScriptObject* object) {
+    return object && EngineClasses::isA(object->className, "SimGroup");
+}
+static bool setHasMember(ScriptObject* set, const std::string& key) {
+    const int count = set->internals["__childCount"].toInt();
+    for (int i = 0; i < count; ++i)
+        if (set->internals["__child" + std::to_string(i)].toString() == key) return true;
+    return false;
+}
+static std::vector<std::string> memberSets(ScriptObject* object) {
+    std::vector<std::string> sets;
+    auto it = object->internals.find("__sets");
+    if (it == object->internals.end()) return sets;
+    std::string list = it->second.toString(), item;
+    for (char c : list) {
+        if (c == '\t') { if (!item.empty()) sets.push_back(item); item.clear(); }
+        else item += c;
+    }
+    if (!item.empty()) sets.push_back(item);
+    return sets;
+}
+static void storeMemberSets(ScriptObject* object, const std::vector<std::string>& sets) {
+    std::string list;
+    for (const auto& set : sets) list += (list.empty() ? "" : "\t") + set;
+    if (list.empty()) object->internals.erase("__sets");
+    else object->internals["__sets"] = VMValue(list);
+}
+
+bool ScriptEngine::addToSet(ScriptObject* set, ScriptObject* object) {
+    if (!isSimSet(set) || !object || set == object) return false;
+    const std::string key = objectKey(object);
+    const std::string setKey = objectKey(set);
+    if (isSimGroup(set)) {
+        if (auto it = object->internals.find("__parent"); it != object->internals.end()) {
+            if (it->second.toString() == setKey) return true;
+            if (auto* old = findObject(it->second.toString().c_str())) removeSimGroupChild(old, key);
+        }
+        object->internals["__parent"] = VMValue(setKey);
+    } else {
+        if (setHasMember(set, key)) return true;
+        auto sets = memberSets(object);
+        sets.push_back(setKey);
+        storeMemberSets(object, sets);
+    }
+    const int count = set->internals["__childCount"].toInt();
+    set->internals["__child" + std::to_string(count)] = VMValue(key);
+    set->internals["__childCount"] = VMValue(count + 1);
+    return true;
+}
+
+bool ScriptEngine::removeFromSet(ScriptObject* set, ScriptObject* object) {
+    if (!set || !object) return false;
+    const std::string key = objectKey(object);
+    const std::string setKey = objectKey(set);
+    if (!removeSimGroupChild(set, key)) return false;
+    if (auto it = object->internals.find("__parent"); it != object->internals.end() && it->second.toString() == setKey)
+        object->internals.erase(it);
+    auto sets = memberSets(object);
+    sets.erase(std::remove(sets.begin(), sets.end(), setKey), sets.end());
+    storeMemberSets(object, sets);
+    return true;
+}
+
 bool ScriptEngine::deleteScriptObject(const std::string& name) {
     ScriptObject* object = findObject(name.c_str());
     if (!object) return false;
@@ -1656,10 +1765,19 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
         if (child && child->internals["parent"].toString() == objectName)
             children.push_back(childName);
     }
-    // SimGroup::onRemove deletes the group's members too.
+    // SimGroup::onRemove deletes the group's members too; a SimSet only
+    // lets go of them.
     const int memberCount = object->internals["__childCount"].toInt();
-    for (int i = 0; i < memberCount; ++i)
-        children.push_back(object->internals["__child" + std::to_string(i)].toString());
+    if (isSimGroup(object) || !isSimSet(object))
+        for (int i = 0; i < memberCount; ++i)
+            children.push_back(object->internals["__child" + std::to_string(i)].toString());
+    else
+        for (int i = 0; i < memberCount; ++i)
+            if (auto* member = findObject(object->internals["__child" + std::to_string(i)].toString().c_str())) {
+                auto sets = memberSets(member);
+                sets.erase(std::remove(sets.begin(), sets.end(), objectName), sets.end());
+                storeMemberSets(member, sets);
+            }
     std::sort(children.begin(), children.end());
     children.erase(std::unique(children.begin(), children.end()), children.end());
     for (const auto& child : children) deleteScriptObject(child);
@@ -1668,11 +1786,17 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
         // Events may have been scheduled on the name or on the id.
         tsInstance->cancelEventsForObject(objectName);
         if (objectHandle != objectName) tsInstance->cancelEventsForObject(objectHandle);
-        for (const std::string& space : objectNamespaces(object)) {
-            const std::string callback = space + "::onRemove";
-            if (!tsInstance->hasFunction(callback)) continue;
-            tsInstance->callFunction(callback, {VMValue(object->id)});
-            break;
+        if (EngineClasses::isA(object->className, "GameBase")) {
+            const std::string block = objectDataBlock(object);
+            if (!block.empty() && callsScriptOnAdd(object->className))
+                tsInstance->callObjectMethod(block, "onRemove", {VMValue(object->id)});
+        } else {
+            for (const std::string& space : objectNamespaces(object)) {
+                const std::string callback = space + "::onRemove";
+                if (!tsInstance->hasFunction(callback)) continue;
+                tsInstance->callFunction(callback, {VMValue(object->id)});
+                break;
+            }
         }
     }
     const auto listeners = object->deleteNotifyListeners;
@@ -1690,10 +1814,12 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
         notifications.erase(std::remove(notifications.begin(), notifications.end(), objectName),
                             notifications.end());
     }
-    // SimObject::unregisterObject leaves its group.
+    // SimObject::unregisterObject leaves its group and every set.
     if (auto parent = object->internals.find("__parent"); parent != object->internals.end())
         if (auto* group = findObject(parent->second.toString().c_str()))
             removeSimGroupChild(group, objectName);
+    for (const auto& setKey : memberSets(object))
+        if (auto* set = findObject(setKey.c_str())) removeSimGroupChild(set, objectName);
     objects.erase(it);
     forgetObject(object);
     delete object;
@@ -2320,6 +2446,10 @@ bool ScriptEngine::init() {
         if (args.empty()) return VMValue("");
         auto* object = namedScriptObject(args[0].toString());
         if (!object) return VMValue("");
+        auto& engine = ScriptEngine::instance();
+        if (const auto it = object->internals.find("__parent"); it != object->internals.end())
+            if (auto* group = engine.findObject(it->second.toString().c_str()))
+                return VMValue(engine.objectId(group));
         if (const auto it = object->internals.find("parent"); it != object->internals.end()) return it->second;
         return VMValue("");
     };
@@ -4324,30 +4454,10 @@ bool ScriptEngine::init() {
         if (args.size() >= 2) {
             auto* group = ScriptEngine::instance().findObject(args[0].toString().c_str());
             auto* childObject = ScriptEngine::instance().findObject(args[1].toString().c_str());
-            if (group && childObject && group->className.find("Sim") == 0) {
-                auto& engine = ScriptEngine::instance();
-                const std::string childKey = engine.objectKey(childObject);
-                const std::string groupKey = engine.objectKey(group);
-                // SimGroup::addObject: an object is in one group at a time,
-                // so adding moves it out of its current group.
-                std::string oldGroupKey;
-                if (auto it = childObject->internals.find("__parent"); it != childObject->internals.end())
-                    oldGroupKey = it->second.toString();
-                else if (auto it = childObject->internals.find("parent"); it != childObject->internals.end()) {
-                    auto* declared = engine.findObject(it->second.toString().c_str());
-                    if (declared && declared->className.find("Sim") == 0) {
-                        oldGroupKey = engine.objectKey(declared);
-                        childObject->internals.erase(it);
-                    }
-                }
-                if (oldGroupKey == groupKey && childObject->internals.count("__parent")) return VMValue(1);
-                if (!oldGroupKey.empty() && oldGroupKey != groupKey)
-                    if (auto* oldGroup = engine.findObject(oldGroupKey.c_str()))
-                        removeSimGroupChild(oldGroup, childKey);
-                const int count = group->internals["__childCount"].toInt();
-                group->internals["__child" + std::to_string(count)] = VMValue(childKey);
-                group->internals["__childCount"] = VMValue(count + 1);
-                childObject->internals["__parent"] = VMValue(engine.objectKey(group));
+            if (group && childObject && ScriptEngine::instance().isSimSet(group)) {
+                // A declared (nested) parent link gives way to real membership.
+                childObject->internals.erase("parent");
+                ScriptEngine::instance().addToSet(group, childObject);
                 return VMValue(1);
             }
         }
@@ -4380,12 +4490,9 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("remove", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(1);
         auto* group = ScriptEngine::instance().findObject(args[0].toString().c_str());
-        if (group && group->className.find("Sim") == 0) {
-            auto& engine = ScriptEngine::instance();
-            const std::string childName = engine.canonicalName(args[1].toString());
-            if (!removeSimGroupChild(group, childName)) return VMValue(0);
-            if (auto* child = engine.findObject(childName.c_str())) child->internals.erase("__parent");
-            return VMValue(1);
+        if (group && ScriptEngine::instance().isSimSet(group)) {
+            auto* child = ScriptEngine::instance().findObject(args[1].toString().c_str());
+            return VMValue(ScriptEngine::instance().removeFromSet(group, child) ? 1 : 0);
         }
         auto* parent = getListCtrl(args[0].toString());
         auto* child = getListCtrl(args[1].toString());
