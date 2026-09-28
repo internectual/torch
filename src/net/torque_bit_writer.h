@@ -64,6 +64,8 @@ public:
 
     // BitStream::setStringBuffer: strings share a prefix with the last one.
     void setStringBuffer(bool enabled) { stringBufferEnabled = enabled; stringBuffer.clear(); }
+    // A Huffman string with no string-buffer prefix (the reader's readHuffmanString).
+    void writeHuffmanString(const std::string& value) { writer.writeHuffmanString(value.substr(0, 255)); }
     void writeString(const std::string& value, size_t maxLen = 255) {
         std::string s = value.substr(0, maxLen);
         if (stringBufferEnabled) {

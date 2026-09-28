@@ -44,6 +44,11 @@ add_executable(torch
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
+    src/sim/datablock_pack.cpp
+    src/sim/datablocks/shapes.cpp
+    src/sim/datablocks/projectiles.cpp
+    src/sim/datablocks/effects.cpp
+    src/sim/datablocks/misc.cpp
     src/script/torquescript.cpp
     src/render/renderer.cpp
     src/render/shader.cpp
@@ -130,6 +135,11 @@ add_executable(torch_server
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
+    src/sim/datablock_pack.cpp
+    src/sim/datablocks/shapes.cpp
+    src/sim/datablocks/projectiles.cpp
+    src/sim/datablocks/effects.cpp
+    src/sim/datablocks/misc.cpp
     src/script/torquescript.cpp
     src/render/renderer.cpp
     src/render/shader.cpp
@@ -389,6 +399,11 @@ add_executable(torch_parity_test
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
+    src/sim/datablock_pack.cpp
+    src/sim/datablocks/shapes.cpp
+    src/sim/datablocks/projectiles.cpp
+    src/sim/datablocks/effects.cpp
+    src/sim/datablocks/misc.cpp
     src/script/torquescript.cpp
     src/render/renderer.cpp
     src/render/shader.cpp
@@ -456,6 +471,11 @@ add_executable(torch_network_loopback_test
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
+    src/sim/datablock_pack.cpp
+    src/sim/datablocks/shapes.cpp
+    src/sim/datablocks/projectiles.cpp
+    src/sim/datablocks/effects.cpp
+    src/sim/datablocks/misc.cpp
     src/script/torquescript.cpp
     src/render/renderer.cpp
     src/render/shader.cpp
@@ -544,6 +564,74 @@ target_include_directories(torch_torque_bit_writer_test PRIVATE src)
 target_link_libraries(torch_torque_bit_writer_test PRIVATE ZLIB::ZLIB m)
 target_compile_options(torch_torque_bit_writer_test PRIVATE -UNDEBUG)
 add_test(NAME torch_torque_bit_writer COMMAND torch_torque_bit_writer_test)
+
+add_executable(torch_datablock_pack_shapes_test
+    tests/datablock_pack_shapes_test.cpp
+    tests/console_stub.cpp
+    tests/vmvalue_stub.cpp
+    src/sim/datablock_pack.cpp
+    src/sim/datablocks/shapes.cpp
+    src/sim/datablocks/projectiles.cpp
+    src/sim/datablocks/effects.cpp
+    src/sim/datablocks/misc.cpp
+    src/net/v12_bitstream.cpp
+    src/net/v12_registry.cpp
+    src/net/v12_datablocks.cpp
+)
+target_include_directories(torch_datablock_pack_shapes_test PRIVATE src .)
+target_compile_options(torch_datablock_pack_shapes_test PRIVATE -UNDEBUG)
+add_test(NAME torch_datablock_pack_shapes COMMAND torch_datablock_pack_shapes_test)
+
+add_executable(torch_datablock_pack_projectiles_test
+    tests/datablock_pack_projectiles_test.cpp
+    tests/console_stub.cpp
+    tests/vmvalue_stub.cpp
+    src/sim/datablock_pack.cpp
+    src/sim/datablocks/shapes.cpp
+    src/sim/datablocks/projectiles.cpp
+    src/sim/datablocks/effects.cpp
+    src/sim/datablocks/misc.cpp
+    src/net/v12_bitstream.cpp
+    src/net/v12_registry.cpp
+    src/net/v12_datablocks.cpp
+)
+target_include_directories(torch_datablock_pack_projectiles_test PRIVATE src .)
+target_compile_options(torch_datablock_pack_projectiles_test PRIVATE -UNDEBUG)
+add_test(NAME torch_datablock_pack_projectiles COMMAND torch_datablock_pack_projectiles_test)
+
+add_executable(torch_datablock_pack_effects_test
+    tests/datablock_pack_effects_test.cpp
+    tests/console_stub.cpp
+    tests/vmvalue_stub.cpp
+    src/sim/datablock_pack.cpp
+    src/sim/datablocks/shapes.cpp
+    src/sim/datablocks/projectiles.cpp
+    src/sim/datablocks/effects.cpp
+    src/sim/datablocks/misc.cpp
+    src/net/v12_bitstream.cpp
+    src/net/v12_registry.cpp
+    src/net/v12_datablocks.cpp
+)
+target_include_directories(torch_datablock_pack_effects_test PRIVATE src .)
+target_compile_options(torch_datablock_pack_effects_test PRIVATE -UNDEBUG)
+add_test(NAME torch_datablock_pack_effects COMMAND torch_datablock_pack_effects_test)
+
+add_executable(torch_datablock_pack_misc_test
+    tests/datablock_pack_misc_test.cpp
+    tests/console_stub.cpp
+    tests/vmvalue_stub.cpp
+    src/sim/datablock_pack.cpp
+    src/sim/datablocks/shapes.cpp
+    src/sim/datablocks/projectiles.cpp
+    src/sim/datablocks/effects.cpp
+    src/sim/datablocks/misc.cpp
+    src/net/v12_bitstream.cpp
+    src/net/v12_registry.cpp
+    src/net/v12_datablocks.cpp
+)
+target_include_directories(torch_datablock_pack_misc_test PRIVATE src .)
+target_compile_options(torch_datablock_pack_misc_test PRIVATE -UNDEBUG)
+add_test(NAME torch_datablock_pack_misc COMMAND torch_datablock_pack_misc_test)
 
 add_executable(torch_demo_mission_replacement_test
     tests/demo_mission_replacement_test.cpp
