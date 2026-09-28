@@ -446,6 +446,13 @@ public:
     void addSceneEmitter(const Point3F& pos, const Point3F& axis,
                          const V12::DecodedDataBlock::ParticleEmitterData& emitter,
                          const V12::DecodedDataBlock::ParticleData& particle);
+    // Player::updateActionThread footstep effects (Y-up): a burst of
+    // `count` particles within `radius` coloured by the terrain's puff
+    // colours, and a footprint decal facing `forward`.
+    void addFootPuff(const Point3F& pos, uint32_t emitterRef, float radius, int count,
+                     const ColorF colors[2], const std::map<uint32_t, ParsedDataBlock>& dataBlocks);
+    void addFootprint(const Point3F& pos, const Point3F& normal, const Point3F& forward, uint32_t decalRef,
+                      const std::map<uint32_t, ParsedDataBlock>& dataBlocks);
     // A Lightning object from mission-file fields (get returns "" if unset).
     void addSceneLightning(const std::function<std::string(const char*)>& get);
     void syncForceFieldGhost(int ghostIndex, int state, uint32_t position, int updates);
@@ -557,6 +564,11 @@ private:
         int64_t nodeKey = -1;
         bool stopped = false;
         float emitScale = 1.0f; // node emitters: share of the frame they emit over
+        // ParticleEmitter::emitParticles(centre, normal, radius, ..., count):
+        // a burst placed in a half box of `radialRadius` about the normal,
+        // each particle ejected along its own offset. Negative: not radial.
+        float radialRadius = -1.0f;
+        Point3F radialNormal{0, 1, 0};
         std::vector<uint32_t> textures;
         std::vector<float> textureDurations;
     };
@@ -662,6 +674,9 @@ private:
     struct EffectDecal {
         Point3F pos{};
         Point3F normal{0, 1, 0};
+        // The decal's in-plane up axis: DecalManager::addDecal's direction
+        // for footprints, else the fixed decal basis.
+        Point3F up{};
         V12::DecodedDataBlock::DecalData data;
         float age = 0.0f;
         float lifetime = 1.0f;

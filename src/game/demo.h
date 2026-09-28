@@ -704,6 +704,10 @@ struct GhostEntry {
     int playerUpdates = 0;
     int predictionUpdate = -1;
     PlayerPrediction::State prediction;
+    // TSShapeInstance trigger state of the drawn player animation.
+    const void* footClip = nullptr;
+    float footPhase = 0.0f;
+    uint32_t footState = 0;
     // Item PositionMask: the server's position, velocity and rest state, and
     // a count of such updates so the client simulation restarts from each.
     Vec3 itemVelocity{};

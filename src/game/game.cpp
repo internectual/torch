@@ -20,6 +20,8 @@
 #include "game/link_beam.h"
 #include "game/projectile_physics.h"
 #include "game/item_physics.h"
+#include "game/dts_triggers.h"
+#include "game/material_property_map.h"
 #include "game/physics.h"
 #include "game/time_scale.h"
 #include "game/projectile_audio.h"
@@ -3915,6 +3917,67 @@ void World::addSceneLightning(const std::function<std::string(const char*)>& get
     effectLightnings.push_back(std::move(lightning));
 }
 
+void World::addFootPuff(const Point3F& pos, uint32_t emitterRef, float radius, int count,
+                        const ColorF colors[2], const std::map<uint32_t, ParsedDataBlock>& dataBlocks) {
+    auto find = [&](uint32_t id) -> const V12::DecodedDataBlock* {
+        auto it = dataBlocks.find(id);
+        return it == dataBlocks.end() ? nullptr : &it->second.decoded;
+    };
+    const auto* emitterBlock = find(emitterRef);
+    if (!emitterBlock || !emitterBlock->hasEmitter || emitterBlock->emitter.particleRefs.empty()) return;
+    const auto* particleBlock = find(emitterBlock->emitter.particleRefs.front());
+    if (!particleBlock || !particleBlock->hasParticle) return;
+    EffectEmitter emitter;
+    emitter.pos = pos;
+    emitter.axis = {0, 1, 0};
+    emitter.emitter = emitterBlock->emitter;
+    emitter.particle = particleBlock->particle;
+    // ParticleEmitter::setColors: the terrain's two puff colours, then
+    // transparent white.
+    emitter.emitter.useEmitterColors = true;
+    emitter.emitter.colors.assign(4, {});
+    for (int i = 0; i < 4; ++i) {
+        const ColorF c = i < 2 ? colors[i] : ColorF{1, 1, 1, 0};
+        emitter.emitter.colors[i].red = c.r;
+        emitter.emitter.colors[i].green = c.g;
+        emitter.emitter.colors[i].blue = c.b;
+        emitter.emitter.colors[i].alpha = c.a;
+    }
+    for (const auto& textureName : emitter.particle.textures) {
+        std::vector<uint32_t> frames; std::vector<float> durations;
+        Engine::instance().renderer().loadTextureFrames(textureName.c_str(), frames, durations);
+        emitter.textures.insert(emitter.textures.end(), frames.begin(), frames.end());
+        emitter.textureDurations.insert(emitter.textureDurations.end(), durations.begin(), durations.end());
+    }
+    if (!emitter.textures.empty()) emitter.texture = emitter.textures.front();
+    emitter.burst = true;
+    emitter.burstCount = std::clamp(count, 0, 512);
+    emitter.radialRadius = std::max(0.0f, radius);
+    emitter.radialNormal = {0, 1, 0};
+    emitter.nextEmission = -1.0f;
+    if (effectEmitters.size() < 4096) effectEmitters.push_back(std::move(emitter));
+}
+
+void World::addFootprint(const Point3F& pos, const Point3F& normal, const Point3F& forward, uint32_t decalRef,
+                         const std::map<uint32_t, ParsedDataBlock>& dataBlocks) {
+    auto it = dataBlocks.find(decalRef);
+    if (it == dataBlocks.end() || !it->second.decoded.hasDecal || it->second.decoded.decal.texture.empty()) return;
+    const auto& data = it->second.decoded.decal;
+    EffectDecal decal;
+    decal.data = data;
+    decal.sourceRef = decalRef;
+    const DecalBasis basis = makeDecalBasis(pos, normal);
+    decal.pos = basis.position;
+    decal.normal = basis.normal;
+    decal.up = forward;
+    decal.sizeX = std::max(0.001f, std::fabs(data.sizeX));
+    decal.sizeY = std::max(0.001f, std::fabs(data.sizeY));
+    decal.lifetime = std::max(0.1f, data.lifetimeMS / 1000.0f);
+    Engine::instance().renderer().loadTextureFrames(data.texture.c_str(), decal.textures, decal.textureDurations);
+    if (!decal.textures.empty()) decal.texture = decal.textures.front();
+    if (effectDecals.size() < 4096) effectDecals.push_back(std::move(decal));
+}
+
 void World::addSceneEmitter(const Point3F& pos, const Point3F& axis,
                             const V12::DecodedDataBlock::ParticleEmitterData& emitterData,
                             const V12::DecodedDataBlock::ParticleData& particle) {
@@ -5264,6 +5327,7 @@ void World::spawnExplosionEffect(const Point3F& pos,
             decal.sourceRef = ref;
             decal.normal = basis.normal;
             decal.pos = basis.position;
+            decal.up = basis.bitangent;
             decal.sizeX = std::max(0.001f, std::fabs(block->decal.sizeX));
             decal.sizeY = std::max(0.001f, std::fabs(block->decal.sizeY));
             decal.lifetime = std::max(0.1f, block->decal.lifetimeMS / 1000.0f);
@@ -5298,7 +5362,7 @@ void World::spawnExplosionEffect(const Point3F& pos,
     if (!selectedExplosion || !selectedExplosion->hasExplosion) return;
     const auto addEmitter = [&](uint32_t emitterId, bool burst, int burstCount,
                                 float effectLifetime, float effectDelay, const Point3F& origin,
-                                TimelineRandom& random) {
+                                TimelineRandom& random, float radialRadius = -1.0f) {
         const auto* emitterBlock = find(emitterId);
         if (!emitterBlock || !emitterBlock->hasEmitter || emitterBlock->emitter.particleRefs.empty()) return;
         const auto* particleBlock = find(emitterBlock->emitter.particleRefs.front());
@@ -5318,6 +5382,8 @@ void World::spawnExplosionEffect(const Point3F& pos,
         if (!emitter.textures.empty()) emitter.texture = emitter.textures.front();
         emitter.burst = burst;
         emitter.burstCount = std::max(0, burstCount);
+        emitter.radialRadius = radialRadius;
+        emitter.radialNormal = impactNormal;
         emitter.delay = effectDelay;
         emitter.age = -effectDelay;
         if (effectLifetime > 0.0f) {
@@ -5488,7 +5554,10 @@ void World::spawnExplosionEffect(const Point3F& pos,
             }
         }
         if (effect.particleEmitterRef)
-            addEmitter(effect.particleEmitterRef, true, density, effectLifetime, effectDelay, effectOrigin, random);
+            // Explosion::explode: particleDensity particles within
+            // particleRadius about the impact normal.
+            addEmitter(effect.particleEmitterRef, true, density, effectLifetime, effectDelay, effectOrigin, random,
+                       std::max(0.0f, effect.particleRadius));
         for (uint32_t ref : effect.emitterRefs)
             if (ref) addEmitter(ref, false, 0, effectLifetime, effectDelay, effectOrigin, random);
         if (effect.shockwaveRef) {
@@ -5856,7 +5925,7 @@ void World::updateParticles(float dt) {
         // emitParticles(..., dt * scale): a contrail emits over part of the frame.
         emitter.age += emitter.nodeEmitter ? dt * emitter.emitScale : dt;
         if (emitter.age < 0.0f) continue;
-        auto emitOne = [&](float ageOffset) {
+        auto emitOne = [&](float ageOffset, const Point3F& axis, const Point3F& base) {
             EffectParticle p;
             const float theta = Math::DEG2RAD(emitter.emitter.thetaMin + random01() *
                 (emitter.emitter.thetaMax - emitter.emitter.thetaMin));
@@ -5867,7 +5936,6 @@ void World::updateParticles(float dt) {
 
             // Start along the emitter axis, then apply theta and phi. The
             // perpendicular basis matches ParticleSystem.ts for arbitrary axes.
-            const Point3F axis = emitter.axis;
             Point3F axisX = std::fabs(axis.z) < 0.9f
                 ? Point3F{axis.y, -axis.x, 0}
                 : Point3F{-axis.z, 0, axis.x};
@@ -5894,7 +5962,7 @@ void World::updateParticles(float dt) {
             };
             const float speed = ((float)emitter.emitter.ejectionVelocity +
                 (random01() * 2.0f - 1.0f) * emitter.emitter.velocityVariance) / 100.0f;
-            p.pos = emitter.pos;
+            p.pos = base;
             p.pos.x += dir.x * (float)emitter.emitter.ejectionOffset / 100.0f;
             p.pos.y += dir.y * (float)emitter.emitter.ejectionOffset / 100.0f;
             p.pos.z += dir.z * (float)emitter.emitter.ejectionOffset / 100.0f;
@@ -5934,7 +6002,30 @@ void World::updateParticles(float dt) {
                 emitter.particles.push_back(p);
         };
         if (emitter.burst && emitter.nextEmission < 0.0f) {
-            for (int i = 0; i < emitter.burstCount; ++i) emitOne(0.0f);
+            if (emitter.radialRadius >= 0.0f) {
+                Point3F az = emitter.radialNormal;
+                const float azLen = std::sqrt(az.x * az.x + az.y * az.y + az.z * az.z);
+                az = azLen > 1e-6f ? Point3F{az.x / azLen, az.y / azLen, az.z / azLen} : Point3F{0, 1, 0};
+                const Point3F ref = std::fabs(az.y) < 0.98f ? Point3F{0, 1, 0} : Point3F{0, 0, -1};
+                auto crossN = [](const Point3F& a, const Point3F& b) {
+                    Point3F c{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+                    const float l = std::sqrt(c.x * c.x + c.y * c.y + c.z * c.z);
+                    return l > 1e-6f ? Point3F{c.x / l, c.y / l, c.z / l} : Point3F{1, 0, 0};
+                };
+                const Point3F ay = crossN(az, ref), ax = crossN(az, ay);
+                const float r = emitter.radialRadius;
+                for (int i = 0; i < emitter.burstCount; ++i) {
+                    const float u = r * (1.0f - 2.0f * random01()), v = r * (1.0f - 2.0f * random01());
+                    const float w = r * random01();
+                    const Point3F offset{ax.x * u + ay.x * v + az.x * w, ax.y * u + ay.y * v + az.y * w,
+                                         ax.z * u + ay.z * v + az.z * w};
+                    const float l = std::sqrt(offset.x * offset.x + offset.y * offset.y + offset.z * offset.z);
+                    const Point3F axis = l > 1e-6f ? Point3F{offset.x / l, offset.y / l, offset.z / l} : az;
+                    emitOne(0.0f, axis, {emitter.pos.x + offset.x, emitter.pos.y + offset.y, emitter.pos.z + offset.z});
+                }
+            } else {
+                for (int i = 0; i < emitter.burstCount; ++i) emitOne(0.0f, emitter.axis, emitter.pos);
+            }
             emitter.nextEmission = 0.0f;
         } else if (!emitter.burst && !emitter.stopped) {
             // A long frame can cross more than one ejection period. Torque
@@ -5942,7 +6033,7 @@ void World::updateParticles(float dt) {
             while (emitter.age >= emitter.nextEmission &&
                    (emitter.lifetime <= 0.0f || emitter.nextEmission <= emitter.lifetime)) {
                 const float ageOffset = std::max(0.0f, emitter.age - emitter.nextEmission);
-                emitOne(ageOffset);
+                emitOne(ageOffset, emitter.axis, emitter.pos);
                 const float period = std::max(0.001f,
                     ((float)emitter.emitter.ejectionPeriodMS +
                      (random01() * 2.0f - 1.0f) * emitter.emitter.periodVariance) / 1000.0f);
@@ -6277,8 +6368,11 @@ void World::renderParticles() {
             std::min<uint32_t>((uint32_t)(decal.age / std::max(0.001f, decal.lifetime) * rows * cols), rows * cols - 1);
         const float u0 = (atlasFrame % cols) / (float)cols, u1 = (atlasFrame % cols + 1) / (float)cols;
         const float v0 = (atlasFrame / cols) / (float)rows, v1 = (atlasFrame / cols + 1) / (float)rows;
+        // Decals keep a world-fixed orientation (not toward the camera).
+        const Point3F up = decal.up.x != 0.0f || decal.up.y != 0.0f || decal.up.z != 0.0f
+            ? decal.up : makeDecalBasis(decal.pos, decal.normal).bitangent;
         r.drawOrientedSpriteRect(decal.pos, decal.sizeX, decal.sizeY, {1, 1, 1, alpha}, decal.normal,
-                                 decal.angle, texture, u0, v0, u1, v1, false);
+                                 decal.angle, texture, u0, v0, u1, v1, false, &up);
     }
     for (auto& p : particles) {
         if (!p.active) continue;
@@ -9668,6 +9762,7 @@ void Game::render(float dt) {
                 // movement action.
                 const bool playerAnimated = isPlayer && !shape->actionTable.empty();
                 const float animationNow = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                float animationPhase = -1.0f; // unwrapped for cyclic clips
                 if (playerAnimated) {
                     const auto& table = shape->actionTable;
                     auto tableAnimation = [&](int action) -> int {
@@ -9688,6 +9783,7 @@ void Game::render(float dt) {
                             if (position < 1.0f || holds) {
                                 animation = &clip;
                                 animationPosition = position;
+                                animationPhase = position;
                             }
                         }
                     }
@@ -9705,6 +9801,76 @@ void Game::render(float dt) {
                             animationPosition = clip.looping
                                 ? cycles - std::floor(cycles)
                                 : std::clamp(cycles, 0.0f, 1.0f);
+                            animationPhase = clip.looping ? cycles : animationPosition;
+                        }
+                    }
+                }
+                // Player::updateActionThread: a foot trigger (1 left, 2 right)
+                // drops a foot puff and footprint where the foot meets terrain.
+                if (playerAnimated && animation && !demoMatchEnded && w && g->hasDatablock) {
+                    if (animation != mg->footClip) {
+                        mg->footState = DTSTriggers::advance(animation->triggers, 0.0f, animationPhase,
+                                                             animation->looping, mg->footState);
+                        mg->footClip = animation;
+                    } else {
+                        mg->footState = DTSTriggers::advance(animation->triggers, mg->footPhase, animationPhase,
+                                                             animation->looping, mg->footState);
+                    }
+                    mg->footPhase = animationPhase;
+                                        const uint32_t foot = (mg->footState & 1) ? 1u : (mg->footState & 2) ? 2u : 0u;
+                    const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+                    auto block = blocks.find((uint32_t)g->datablockId);
+                    const MatrixF shapeFrame = model * shape->upOrientation();
+                    if (foot && block != blocks.end() && block->second.decoded.isPlayerData) {
+                        mg->footState &= ~foot;
+                        const auto& data = block->second.decoded;
+                        const float offset = (foot == 1 ? -1.0f : 1.0f) * data.playerDecalOffset;
+                        // The DTS loader's local frame swaps Torque's y and z.
+                        const Point3F pos = shapeFrame.transform({offset, 0.0f, 0.0f});
+                        Point3F forward = shapeFrame.transformNormal({0.0f, 0.0f, 1.0f});
+                        const float fl = std::sqrt(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
+                        if (fl > 1e-6f) forward = {forward.x / fl, forward.y / fl, forward.z / fl};
+                        const Point3F start{pos.x, pos.y + 0.01f, pos.z};
+                        const auto* terrain = w->terrain();
+                        const MaterialProperties* material = terrain && terrain->loaded && !terrain->textureNames.empty()
+                            ? MaterialPropertyMap::instance().terrain(terrain->textureNames[0]) : nullptr;
+                        if (material && !terrain->isEmptySquare(pos.x, pos.z)) {
+                            const float height = w->getHeight(pos.x, pos.z);
+                            const float t = (start.y - height) / 2.01f;
+                            float interiorT; Point3F hitPos, hitNormal;
+                            const bool interiorFirst = w->collision().raycast(start, {0, -1, 0}, 2.01f,
+                                                                              interiorT, hitPos, hitNormal) &&
+                                                       interiorT < (start.y - height);
+                            // mWaterCoverage: liquid above the player box's bottom
+                            // (the foot's height). Torque (x, y) is (pos.x, -pos.z).
+                            const float waterLevel = w->waterSurfaceAt(pos.x, -pos.z);
+                            const bool wet = std::isfinite(waterLevel) && waterLevel > pos.y;
+                            if (t >= 0.0f && t <= 0.5f && !interiorFirst && !wet) {
+                                const Point3F normal = terrainNormalFromHeights(
+                                    w->getHeight(pos.x - 1.0f, pos.z), w->getHeight(pos.x + 1.0f, pos.z),
+                                    w->getHeight(pos.x, pos.z - 1.0f), w->getHeight(pos.x, pos.z + 1.0f));
+                                if (data.playerFootPuffEmitter)
+                                    w->addFootPuff(pos, data.playerFootPuffEmitter, data.playerFootPuffRadius,
+                                                   data.playerFootPuffNumParts, material->puffColor, blocks);
+                                if (data.playerDecalData)
+                                    w->addFootprint({pos.x, height, pos.z}, normal, forward, data.playerDecalData, blocks);
+                            }
+                        }
+                    }
+                    // Player::updateJetting: jet dust on the terrain below
+                    // (0.3 behind, a 2 m terrain-only ray, 0.3 above the hit).
+                    const bool jetting = mg->prediction.initialized ? mg->prediction.jetting : g->jetting;
+                    if (jetting && block != blocks.end() && block->second.decoded.playerDustEmitter &&
+                        w->terrain() && w->terrain()->loaded) {
+                        Point3F p = shapeFrame.transform({0.0f, 0.0f, -0.3f});
+                        p.y = Math::torquePointToYUp({g->position.x, g->position.y, g->position.z}).y;
+                        const float height = w->getHeight(p.x, p.z);
+                        if (!w->terrain()->isEmptySquare(p.x, p.z) && p.y >= height && p.y - height <= 2.0f) {
+                            const Point3F normal = terrainNormalFromHeights(
+                                w->getHeight(p.x - 1.0f, p.z), w->getHeight(p.x + 1.0f, p.z),
+                                w->getHeight(p.x, p.z - 1.0f), w->getHeight(p.x, p.z + 1.0f));
+                            w->syncNodeEmitter((int64_t)idx * 16 + 15, block->second.decoded.playerDustEmitter,
+                                               {p.x, height + 0.3f, p.z}, {0, 0, 0}, normal, blocks);
                         }
                     }
                 }

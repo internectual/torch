@@ -202,6 +202,10 @@ struct DTSShape {
         std::vector<ObjectKeyframe> objectKeyframes; // vis/frame animation
         std::vector<int32_t> iflMatters; // IFL materials this sequence drives
         float toolBegin = 0.0f;
+        // TSShape::Trigger: state bits (low 5 = trigger number mask, 31 =
+        // on, 30 = reverse on backward play) at a sequence position.
+        struct Trigger { uint32_t state = 0; float position = 0.0f; };
+        std::vector<Trigger> triggers;
     };
     std::vector<Animation> animations;
     // IFL materials (TSShape::readIflMaterials): frames replace one material
@@ -475,7 +479,8 @@ public:
                             uint32_t texture = 0, bool additive = false);
     void drawOrientedSpriteRect(const Point3F& pos, float width, float height, const ColorF& color,
                                 const Point3F& direction, float angle, uint32_t texture,
-                                float u0, float v0, float u1, float v1, bool additive = false);
+                                float u0, float v0, float u1, float v1, bool additive = false,
+                                const Point3F* upAxis = nullptr);
     void drawTexturedQuad(const Point3F& a, const Point3F& b, const Point3F& c,
                           const Point3F& d, uint32_t texture,
                           const ColorF& tint, float u0 = 0.0f, float v0 = 0.0f,

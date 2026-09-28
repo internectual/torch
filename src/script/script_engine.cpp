@@ -1,4 +1,5 @@
 #include "script/script_engine.h"
+#include "game/material_property_map.h"
 #include <limits>
 #include "script/conversion_parity.h"
 #include "script/torquescript.h"
@@ -7159,12 +7160,9 @@ bool ScriptEngine::init() {
 
     // addMaterialMapping is called by material scripts
     tsInstance->registerNative("addMaterialMapping", [](const auto& args) -> VMValue {
-        if (args.size() >= 2) {
-            std::string material = args[0].toString();
-            std::string sound = args[1].toString();
-            Console::instance().printf(LogLevel::Debug, "addMaterialMapping: %s -> %s", material.c_str(), sound.c_str());
-            Console::instance().setVariable(("MaterialMap::" + material).c_str(), sound.c_str());
-        }
+        std::vector<std::string> values;
+        for (const auto& arg : args) values.push_back(arg.toString());
+        MaterialPropertyMap::instance().addMapping(values);
         return VMValue(1);
     });
 

@@ -1687,7 +1687,10 @@ bool Engine::init(int argc, char* argv[]) {
         if (!mapperMode) {
             const char* clientScripts[] = {
                 "scripts/player.cs", "scripts/gameCanvas.cs", "scripts/hud.cs",
-                "scripts/inventoryHud.cs", "scripts/GameGui.cs"
+                "scripts/inventoryHud.cs", "scripts/GameGui.cs",
+                // console_end.cs "Load material properties".
+                "scripts/badlandsPropMap.cs", "scripts/desertPropMap.cs", "scripts/icePropMap.cs",
+                "scripts/lavaPropMap.cs", "scripts/lushPropMap.cs"
             };
             for (const char* path : clientScripts) {
                 // Match Torque's exec search order: the selected mod overlays

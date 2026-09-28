@@ -144,6 +144,10 @@ struct DecodedDataBlock {
     float playerMinLookAngle = 0.0f, playerMaxLookAngle = 0.0f, playerMaxFreelookAngle = 0.0f;
     // PlayerData fields the client Player simulation uses.
     PlayerPrediction::Data playerPhysics;
+    // Footsteps (Player::updateActionThread) and jet dust.
+    uint32_t playerFootPuffEmitter = 0, playerDecalData = 0, playerDustEmitter = 0;
+    int32_t playerFootPuffNumParts = 15;
+    float playerFootPuffRadius = 0.25f, playerDecalOffset = 0.0f;
     // ShapeBaseData drag/density/maxEnergy (flag-gated; engine defaults).
     float shapeDrag = 0.0f, shapeDensity = 1.0f, shapeMaxEnergy = 0.0f;
     float playerRunSurfaceAngle = 0.0f;

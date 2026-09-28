@@ -734,13 +734,15 @@ void Renderer::drawOrientedSprite(const Point3F& pos, float size, const ColorF& 
 
 void Renderer::drawOrientedSpriteRect(const Point3F& pos, float width, float height, const ColorF& color,
                                       const Point3F& direction, float angle, uint32_t texture,
-                                      float u0, float v0, float u1, float v1, bool additive) {
+                                      float u0, float v0, float u1, float v1, bool additive,
+                                      const Point3F* upAxis) {
     initSpriteVAO();
     Point3F normal = direction;
     float length = std::sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
     if (length < 0.0001f) { drawSprite(pos, std::max(width, height), color, texture, additive); return; }
     normal.x /= length; normal.y /= length; normal.z /= length;
-    Point3F toCamera{cameraPos.x - pos.x, cameraPos.y - pos.y, cameraPos.z - pos.z};
+    // A world-fixed up axis (decals) or, by default, toward the camera.
+    Point3F toCamera = upAxis ? *upAxis : Point3F{cameraPos.x - pos.x, cameraPos.y - pos.y, cameraPos.z - pos.z};
     float projection = toCamera.x * normal.x + toCamera.y * normal.y + toCamera.z * normal.z;
     Point3F up{toCamera.x - normal.x * projection, toCamera.y - normal.y * projection,
                toCamera.z - normal.z * projection};

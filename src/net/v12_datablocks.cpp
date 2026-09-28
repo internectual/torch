@@ -597,7 +597,15 @@ void player(Stream& s) {
     for (auto& sound : playerSounds) sound = optionalRef(s);
     const float boxX = s.readF32(), boxY = s.readF32(), boxZ = s.readF32();
     d.boxSize = {boxX, boxY, boxZ};
-    refs(s, 1); f32s(s, 2); refs(s, 1); s.readF32(); refs(s, 2); refs(s, 3); f32s(s, 11);
+    const uint32_t footPuffEmitter = optionalRef(s);
+    const int32_t footPuffNumParts = s.readSigned(32);
+    const float footPuffRadius = s.readF32();
+    const uint32_t decalData = optionalRef(s);
+    const float decalOffset = s.readF32();
+    const uint32_t dustEmitter = optionalRef(s);
+    refs(s, 1); // splash
+    refs(s, 3); // splash emitters
+    f32s(s, 11); // heat rates, ground impact shake
     if (activeDecoded) {
         d.mass = activeDecoded->shapeMass;
         d.drag = activeDecoded->shapeDrag;
@@ -614,6 +622,12 @@ void player(Stream& s) {
         activeDecoded->playerBoxSize[0] = boxX;
         activeDecoded->playerBoxSize[1] = boxY;
         activeDecoded->playerBoxSize[2] = boxZ;
+        activeDecoded->playerFootPuffEmitter = footPuffEmitter;
+        activeDecoded->playerFootPuffNumParts = footPuffNumParts;
+        activeDecoded->playerFootPuffRadius = footPuffRadius;
+        activeDecoded->playerDecalData = decalData;
+        activeDecoded->playerDecalOffset = decalOffset;
+        activeDecoded->playerDustEmitter = dustEmitter;
     }
 }
 

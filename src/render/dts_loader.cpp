@@ -1281,7 +1281,11 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     buf.checkGuard(); // 10
     for (int i = 0; i < numDecalStates; i++) capCount(buf.readS32());
     buf.checkGuard(); // 11
-    for (int i = 0; i < numTriggers; i++) { buf.readU32(); buf.readF32(); }
+    std::vector<DTSShape::Animation::Trigger> shapeTriggers((size_t)std::max(0, numTriggers));
+    for (int i = 0; i < numTriggers; i++) {
+        shapeTriggers[i].state = buf.readU32();
+        shapeTriggers[i].position = buf.readF32();
+    }
     buf.checkGuard(); // 12
 
     // ─── Detail levels ─────────────────────────────────────────────
@@ -1608,6 +1612,10 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         buildDTSNodeAnimation(anim, seq, pools, [](int32_t node) { return node; });
 
         buildDTSObjectAnimation(anim, seq, objStates);
+        for (int32_t t = 0; t < seq.numTriggers; ++t) {
+            const int32_t index = seq.firstTrigger + t;
+            if (index >= 0 && index < (int32_t)shapeTriggers.size()) anim.triggers.push_back(shapeTriggers[index]);
+        }
 
         result.animations.push_back(anim);
     }
@@ -2125,6 +2133,7 @@ int importDSQ(const uint8_t* data, size_t size, const std::vector<DTSShape::Node
     const DTSKeyPools pools{&rotations, &translations, &uniformScales, &alignedScales};
     const int32_t numSequences = capCount(r.s32());
     const size_t first = out.size();
+    std::vector<std::pair<int32_t, int32_t>> triggerRanges;
     for (int32_t i = 0; i < numSequences; i++) {
         DTSShape::Animation anim;
         anim.name = r.name();
@@ -2135,8 +2144,27 @@ int importDSQ(const uint8_t* data, size_t size, const std::vector<DTSShape::Node
             return node >= 0 && node < (int32_t)nodeMap.size() ? nodeMap[node] : -1;
         });
         out.push_back(std::move(anim));
+        triggerRanges.push_back({seq.firstTrigger, seq.numTriggers});
     }
     if (out.size() == first) return -1;
+    // TSShape::importSequences: the triggers follow the sequences; each
+    // sequence's firstTrigger indexes this list.
+    if (remaining >= 4) {
+        const int32_t numTriggers = capCount(r.s32());
+        std::vector<DTSShape::Animation::Trigger> triggers;
+        for (int32_t i = 0; i < numTriggers && remaining >= 8; ++i) {
+            DTSShape::Animation::Trigger trigger;
+            trigger.state = (uint32_t)r.s32();
+            trigger.position = r.f32();
+            triggers.push_back(trigger);
+        }
+        for (size_t i = 0; i < triggerRanges.size() && first + i < out.size(); ++i)
+            for (int32_t t = 0; t < triggerRanges[i].second; ++t) {
+                const int32_t index = triggerRanges[i].first + t;
+                if (index >= 0 && index < (int32_t)triggers.size())
+                    out[first + i].triggers.push_back(triggers[index]);
+            }
+    }
     // TSShapeConstructor: "file.dsq name" renames only the last sequence.
     if (!alias.empty()) out.back().name = alias;
     return (int)(out.size() - first);
