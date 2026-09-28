@@ -21,6 +21,7 @@
 #include "game/projectile_physics.h"
 #include "game/item_physics.h"
 #include "game/dts_triggers.h"
+#include "net/remote_command.h"
 #include "game/material_property_map.h"
 #include "game/physics.h"
 #include "game/time_scale.h"
@@ -7337,7 +7338,7 @@ void Game::update(float dt) {
                                 setDemoMatchEnded(false);
                             if (command != "ServerMessage")
                                 demoParser->handleHudRemoteCommand(command, ev.arguments);
-                            dispatchClientCommand(ev.arguments);
+                            dispatchClientCommand(ev.rawArguments, ev.taggedArguments);
                         }
                         if (ev.message.empty()) continue;
                         std::string displayText = ev.message;
@@ -10835,9 +10836,10 @@ void Game::startLocalGame(const char* map, std::vector<MisObject>* sceneObjects)
     }
 }
 
-void Game::dispatchClientCommand(const std::vector<std::string>& args) {
+void Game::dispatchClientCommand(const std::vector<std::string>& raw, const std::vector<bool>& tagged) {
     // RemoteCommandEvent::process: every server command runs as the script
-    // function clientCmd<name> with its arguments.
+    // function clientCmd<name> with its arguments, tags expanded.
+    const std::vector<std::string> args = RemoteCommand::scriptArguments(raw, tagged);
     if (args.empty()) return;
     if (auto* ts = Engine::instance().script().ts()) {
         if (!ts->dispatchClientCommand(args))
@@ -10934,7 +10936,7 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                         std::vector<std::string> args;
                         std::string token;
                         while (tokens >> token && args.size() < 20) args.push_back(token);
-                        if (!args.empty()) dispatchClientCommand(args);
+                        if (!args.empty()) dispatchClientCommand(args, {});
                     }
                     return;
                 }
@@ -11150,8 +11152,9 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                     "Ignored untrusted server command: %s", command.c_str());
             }
         });
-        activeConn->setClientCommandCallback([this](const std::vector<std::string>& args) {
-            dispatchClientCommand(args);
+        activeConn->setClientCommandCallback([this](const std::vector<std::string>& raw,
+                                                    const std::vector<bool>& tagged) {
+            dispatchClientCommand(raw, tagged);
         });
          activeConn->setStateCallback([this](const V12::ServerGameState& state) {
              if (!state.sensorGroupListenMasks.empty())

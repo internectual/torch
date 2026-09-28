@@ -33,6 +33,7 @@ struct TSToken {
     std::string text;
     double numVal{};
     TSPosition pos;
+    bool tagged = false; // 'single-quoted': a tagged string
 };
 
 class TSLocals {

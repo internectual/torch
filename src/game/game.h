@@ -918,7 +918,7 @@ public:
     uint32_t moveSeq = 0;
     std::deque<StoredMove> pendingMoves;
     void reconcile(const Point3F& serverPos, const Point3F& serverVel, uint32_t lastProcessedSeq);
-    void dispatchClientCommand(const std::vector<std::string>& args);
+    void dispatchClientCommand(const std::vector<std::string>& raw, const std::vector<bool>& tagged);
     void resetLiveMissionState();
     void clearMissionAudio();
     void clearProjectileAudio();

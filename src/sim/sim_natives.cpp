@@ -6,9 +6,47 @@
 #include "core/engine.h"
 #include "script/torquescript.h"
 #include "sim/shape_base.h"
+#include "sim/net_string_table.h"
 
 void registerSimNatives(TorqueScript& ts) {
     registerShapeBaseNatives(ts);
+
+    // game/net.cc and consoleFunctions.cc tagged strings.
+    ts.registerNative("addTaggedString", [](const std::vector<VMValue>& args) -> VMValue {
+        return VMValue(NetStrings::tag(NetStrings::add(args.empty() ? "" : args[0].toString())));
+    });
+    ts.registerNative("removeTaggedString", [](const std::vector<VMValue>& args) -> VMValue {
+        if (!args.empty()) NetStrings::remove(NetStrings::tagId(args[0].toString()));
+        return VMValue("");
+    });
+    ts.registerNative("getTaggedString", [](const std::vector<VMValue>& args) -> VMValue {
+        const std::string* text = args.empty() ? nullptr : NetStrings::lookup(NetStrings::tagId(args[0].toString()));
+        return VMValue(text ? *text : std::string());
+    });
+    ts.registerNative("detag", [](const std::vector<VMValue>& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const std::string value = args[0].toString();
+        if (!NetStrings::isTag(value)) return VMValue(value);
+        const size_t space = value.find(' ');
+        return VMValue(space == std::string::npos ? std::string() : value.substr(space + 1));
+    });
+    ts.registerNative("buildTaggedString", [](const std::vector<VMValue>& args) -> VMValue {
+        if (args.empty()) return VMValue("");
+        const std::string* format = NetStrings::lookup(NetStrings::tagId(args[0].toString()));
+        if (!format) return VMValue("");
+        std::string out;
+        for (size_t i = 0; i < format->size(); ++i) {
+            if ((*format)[i] == '%' && i + 1 < format->size() && (*format)[i + 1] >= '1' && (*format)[i + 1] <= '9') {
+                const size_t index = (size_t)((*format)[i + 1] - '0');
+                if (index >= args.size()) break;
+                out += args[index].toString();
+                ++i;
+                continue;
+            }
+            out += (*format)[i];
+        }
+        return VMValue(out.substr(0, 511));
+    });
     // consoleFunctions.cc getFileCRC: -1 when the file is not found.
     ts.registerNative("getFileCRC", [](const std::vector<VMValue>& args) -> VMValue {
         if (args.empty()) return VMValue(-1);

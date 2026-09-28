@@ -739,7 +739,7 @@ void Connection::update() {
                             if (event.classId == 9 && commandCb)
                                 commandCb(event.message);
                             if (event.classId == 9 && clientCommandCb)
-                                clientCommandCb(event.arguments);
+                                clientCommandCb(event.rawArguments, event.taggedArguments);
                              if (event.classId == 9 && !event.arguments.empty() &&
                                   (event.arguments[0] == "ServerMessage" ||
                                    !event.arguments[0].empty())) {

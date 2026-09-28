@@ -314,14 +314,14 @@ int main() {
         "function Lifecycle::onFieldModified(%this,%field,%old,%new) { $lifecycleField = $lifecycleField + 1; }"
          "function Lifecycle::onRemove(%this) { $lifecycleRemove = $lifecycleRemove + 1; }"
          "function Listener::onDeleteNotify(%this,%deleted) { $lifecycleNotify = $lifecycleNotify + 1; }"
-         "function Lifecycle::getName(%this) { return 'class:' @ %this; }"
-        "function Lifecycle::onTimer(%this,%value) { $timerTrace = $timerTrace @ %this @ ':' @ %value; }"
-        "function globalTimer(%value) { $timerTrace = $timerTrace @ 'global:' @ %value; }"
-        "function clientCmdPing(%a,%b) { $commandTrace = %a @ ':' @ %b; }"
+         "function Lifecycle::getName(%this) { return \"class:\" @ %this; }"
+        "function Lifecycle::onTimer(%this,%value) { $timerTrace = $timerTrace @ %this @ \":\" @ %value; }"
+        "function globalTimer(%value) { $timerTrace = $timerTrace @ \"global:\" @ %value; }"
+        "function clientCmdPing(%a,%b) { $commandTrace = %a @ \":\" @ %b; }"
         "function serverCmdPing(%value) { $serverTrace = %value; }"
-        "function onMissionEnd() { $missionTrace = $missionTrace @ 'end>'; }"
-        "function onMissionStart(%mission) { $missionTrace = $missionTrace @ 'start:' @ %mission; }"
-        "function messageCallback(%type,%unused,%value) { $messageTrace = %type @ ':' @ %value; }");
+        "function onMissionEnd() { $missionTrace = $missionTrace @ \"end>\"; }"
+        "function onMissionStart(%mission) { $missionTrace = $missionTrace @ \"start:\" @ %mission; }"
+        "function messageCallback(%type,%unused,%value) { $messageTrace = %type @ \":\" @ %value; }");
     assert(script.ts()->dispatchClientCommand({"Ping", "left", "right"}));
     assert(script.ts()->dispatchServerCommand({"Ping", "server"}));
     assert(script.ts()->getGlobal("$commandTrace").toString() == "left:right");
@@ -370,11 +370,11 @@ int main() {
     assert(VMValue("FALSE").toBool() == false);
     script.ts()->execute(
         "function ArgumentSemantics(%first,%second,%third) { "
-        "$argumentTrace = %first @ ':' @ %second @ ':' @ %third; "
+        "$argumentTrace = %first @ \":\" @ %second @ \":\" @ %third; "
         "$argumentCount = %argc; $argumentZero = %argv[0]; $argumentTwo = %argv[2]; "
         "}"
         "$Indexed[2] = 4; $indexedAlias = $indexed2; "
-        "ArgumentSemantics('one');");
+        "ArgumentSemantics(\"one\");");
     assert(script.ts()->getGlobal("$argumentTrace").toString() == "one::");
     assert(script.ts()->getGlobal("$argumentCount").toInt() == 1);
     assert(script.ts()->getGlobal("$argumentZero").toString() == "one");
@@ -382,41 +382,41 @@ int main() {
     assert(script.ts()->getGlobal("$indexedAlias").toInt() == 4);
     script.ts()->execute(
         "function CallSemantics(%first,%second) { "
-        "$callTrace = %argc @ ':' @ %argv[0] @ ':' @ %argv[1] @ ':' @ %second; "
+        "$callTrace = %argc @ \":\" @ %argv[0] @ \":\" @ %argv[1] @ \":\" @ %second; "
         "return %argc + 0; } "
         "function NestedCall(%value) { if (%value <= 0) return %argc; "
         "return NestedCall(%value - 1) + 1; } "
-        "$callResult = CallSemantics('x'); $nestedResult = NestedCall(3);");
+        "$callResult = CallSemantics(\"x\"); $nestedResult = NestedCall(3);");
     assert(script.ts()->getGlobal("$callTrace").toString() == "1:x::");
     assert(script.ts()->getGlobal("$callResult").toInt() == 1);
     assert(script.ts()->getGlobal("$nestedResult").toInt() == 4);
     script.ts()->execute(
-        "function PackageProbe() { return 'base'; }"
-        "package PatchProbe { function PackageProbe() { return Parent::PackageProbe() @ '-patch'; } }"
-        "activatePackage('PatchProbe');"
+        "function PackageProbe() { return \"base\"; }"
+        "package PatchProbe { function PackageProbe() { return Parent::PackageProbe() @ \"-patch\"; } }"
+        "activatePackage(\"PatchProbe\");"
         "$packageActive = PackageProbe();");
     assert(script.ts()->getGlobal("$packageActive").toString() == "base-patch");
     assert(script.ts()->isActivePackage("PatchProbe"));
-    assert(script.ts()->execute("deactivatePackage('PatchProbe'); PackageProbe();").toString() == "base");
+    assert(script.ts()->execute("deactivatePackage(\"PatchProbe\"); PackageProbe();").toString() == "base");
     assert(!script.ts()->isActivePackage("PatchProbe"));
     script.ts()->execute(
-        "function StackProbe() { return 'base'; }"
-        "package StackLow { function StackProbe() { return Parent::StackProbe() @ '-low'; } }"
-        "package StackHigh { function StackProbe() { return Parent::StackProbe() @ '-high'; } }"
-        "activatePackage('stacklow'); activatePackage('STACKHIGH');"
+        "function StackProbe() { return \"base\"; }"
+        "package StackLow { function StackProbe() { return Parent::StackProbe() @ \"-low\"; } }"
+        "package StackHigh { function StackProbe() { return Parent::StackProbe() @ \"-high\"; } }"
+        "activatePackage(\"stacklow\"); activatePackage(\"STACKHIGH\");"
         "$stackResult = StackProbe();");
     assert(script.ts()->getGlobal("$stackResult").toString() == "base-low-high");
-    assert(script.ts()->execute("deactivatePackage('stackhigh'); StackProbe();").toString() == "base-low");
-    assert(script.ts()->execute("deactivatePackage('STACKLOW'); StackProbe();").toString() == "base");
-    assert(script.ts()->execute("activatePackage('missingPackage');").toInt() == 0);
+    assert(script.ts()->execute("deactivatePackage(\"stackhigh\"); StackProbe();").toString() == "base-low");
+    assert(script.ts()->execute("deactivatePackage(\"STACKLOW\"); StackProbe();").toString() == "base");
+    assert(script.ts()->execute("activatePackage(\"missingPackage\");").toInt() == 0);
     script.ts()->execute(
-        "function NamespaceProbe::value() { return 'base'; }"
-        "package NamespacePatch { function NamespaceProbe::value() { return 'patch'; } }"
-        "activatePackage('namespacepatch'); $namespaceResult = NamespaceProbe::value();");
+        "function NamespaceProbe::value() { return \"base\"; }"
+        "package NamespacePatch { function NamespaceProbe::value() { return \"patch\"; } }"
+        "activatePackage(\"namespacepatch\"); $namespaceResult = NamespaceProbe::value();");
     assert(script.ts()->getGlobal("$namespaceResult").toString() == "patch");
-    assert(script.ts()->execute("deactivatePackage('NamespacePatch'); NamespaceProbe::value();").toString() == "base");
-    script.ts()->execute("package StaleParent { function StaleProbe() { return Parent::Missing(); } } activatePackage('StaleParent'); StaleProbe();");
-    assert(script.ts()->execute("function AfterParent() { return 'normal'; } AfterParent();").toString() == "normal");
+    assert(script.ts()->execute("deactivatePackage(\"NamespacePatch\"); NamespaceProbe::value();").toString() == "base");
+    script.ts()->execute("package StaleParent { function StaleProbe() { return Parent::Missing(); } } activatePackage(\"StaleParent\"); StaleProbe();");
+    assert(script.ts()->execute("function AfterParent() { return \"normal\"; } AfterParent();").toString() == "normal");
     script.ts()->clearPackages();
     assert(!script.ts()->isActivePackage("StaleParent"));
     script.ts()->execute("$syntaxBefore = 1; function Broken( { $syntaxAfter = 1; }");
@@ -430,7 +430,7 @@ int main() {
         "$compound = 5; $compound += 3; $compound *= 2; $compound %= 5; "
         "$compound |= 8; $compound &= 11; $compound ^= 2; $compound <<= 1; $compound >>= 2; "
         "$doCount = 0; do { $doCount++; } while ($doCount < 3); "
-        "$numericStringEqual = ('02' == 2); $stringEqual = ('Foo' $= 'fOO'); "
+        "$numericStringEqual = (\"02\" == 2); $stringEqual = (\"Foo\" $= \"fOO\"); "
         "switch (2) { case 1: $switchResult = 1; break; case 2: $switchResult = 2; break; default: $switchResult = 3; } "
         "function EmptyReturn() { return; } EmptyReturn();");
     assert(script.ts()->getGlobal("$short").toInt() == 0);
@@ -442,8 +442,8 @@ int main() {
     assert(script.ts()->getGlobal("$switchResult").toInt() == 2);
     assert(script.ts()->callFunction("EmptyReturn", {}).type == VMValue::None);
     script.ts()->execute(
-        "$loopTrace = ''; $i = 0; while ($i < 1) { $i++; $loopTrace = 'body'; break; $loopTrace = 'bad'; } "
-        "while (0) { $loopTrace = 'bad2'; } "
+        "$loopTrace = \"\"; $i = 0; while ($i < 1) { $i++; $loopTrace = \"body\"; break; $loopTrace = \"bad\"; } "
+        "while (0) { $loopTrace = \"bad2\"; } "
         "for ($j = 0; $j < 3; $j++) { if ($j == 1) continue; $loopTrace = $loopTrace @ $j; } "
         "$conditionProbe = 0; $conditionBodies = 0; while (++$conditionProbe < 3) { $conditionBodies++; } "
         "$forProbe = 0; for ($k = 0; ++$forProbe < 3; $k++) { } "
@@ -460,7 +460,7 @@ int main() {
     script.ts()->registerNative("Interop::Capture", [](const auto& args) {
         return VMValue(args.size() == 2 ? args[0].toString() + "|" + args[1].toString() : "");
     });
-    assert(script.ts()->execute("interop::capture('left', 'right');").toString() == "left|right");
+    assert(script.ts()->execute("interop::capture(\"left\", \"right\");").toString() == "left|right");
     assert(script.ts()->execute("LifecycleChild.deleteNotify(LifecycleListener);").toInt() == 1);
     assert(script.ts()->execute("LifecycleChild.clearNotify(LifecycleListener);").toInt() == 1);
     assert(script.ts()->execute("LifecycleChild.deleteNotify(LifecycleListener);").toInt() == 1);
@@ -508,7 +508,7 @@ int main() {
     script.setMissionObjects({
         ScriptMissionObject{0, "MissionTimer", "MissionTimerObject", "", {}}
     });
-    script.ts()->execute("function MissionTimer::onTick(%this,%value) { $missionTimer = %this @ ':' @ %value; }");
+    script.ts()->execute("function MissionTimer::onTick(%this,%value) { $missionTimer = %this @ \":\" @ %value; }");
     const std::string timerId = std::to_string(script.missionObjects().front().id);
     const int missionEvent = script.ts()->scheduleEvent(20.0, 0.0, timerId, "onTick", {VMValue("tick")}, true);
     assert(script.ts()->processScheduledEvents(20.0) == 1);
@@ -528,7 +528,7 @@ int main() {
     const auto cycleOrder = script.missionDeletionOrder("CycleA");
     assert((cycleOrder == std::vector<std::string>{"CycleB", "CycleA"}));
     script.clearMissionObjects();
-    script.ts()->execute("function MissionThing::onRemove(%this) { $missionRemovalTrace = $missionRemovalTrace @ %this @ ';'; }");
+    script.ts()->execute("function MissionThing::onRemove(%this) { $missionRemovalTrace = $missionRemovalTrace @ %this @ \";\"; }");
     script.setMissionObjects({
         ScriptMissionObject{0, "MissionThing", "MissionRoot", "", {}},
         ScriptMissionObject{0, "MissionThing", "MissionChild", "MissionRoot", {}}

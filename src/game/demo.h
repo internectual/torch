@@ -492,6 +492,7 @@ struct NetEventInfo {
     std::string message;    // parsed text for chat/server messages
     std::vector<std::string> arguments; // remote-command arguments, tags expanded
     std::vector<std::string> rawArguments; // as sent (tag templates unexpanded)
+    std::vector<bool> taggedArguments;     // which arguments were tags
     std::string eventName;  // class name for display
     int audioProfileId = -1; // for audio events
     bool directAudioProfile = false;

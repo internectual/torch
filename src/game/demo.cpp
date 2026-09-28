@@ -1797,6 +1797,7 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
             ev.message += arg;
         }
         ev.rawArguments = ev.arguments;
+        ev.taggedArguments = tagged;
         RemoteCommand::expandTagged(ev.arguments, tagged);
     } else if (ev.classId == T2Demo::NetEventClassFirst + 7) { // NetStringEvent
         const int id = bs.readInt(10);

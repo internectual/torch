@@ -130,7 +130,8 @@ public:
 
     using CommandCallback = std::function<void(const std::string&)>;
     void setCommandCallback(CommandCallback cb) { commandCb = cb; }
-    using ClientCommandCallback = std::function<void(const std::vector<std::string>&)>;
+    // Raw arguments and which were tags (RemoteCommandEvent).
+    using ClientCommandCallback = std::function<void(const std::vector<std::string>&, const std::vector<bool>&)>;
     void setClientCommandCallback(ClientCommandCallback cb) { clientCommandCb = std::move(cb); }
 
     using TargetCallback = std::function<void(const V12::ServerEvent::TargetInfo*,

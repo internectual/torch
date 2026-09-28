@@ -37,6 +37,7 @@ add_executable(torch
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
+    src/sim/net_string_table.cpp
     src/sim/engine_object.cpp
     src/sim/game_base.cpp
     src/sim/shape_base.cpp
@@ -119,6 +120,7 @@ add_executable(torch_server
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
+    src/sim/net_string_table.cpp
     src/sim/engine_object.cpp
     src/sim/game_base.cpp
     src/sim/shape_base.cpp
@@ -374,6 +376,7 @@ add_executable(torch_parity_test
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
+    src/sim/net_string_table.cpp
     src/sim/engine_object.cpp
     src/sim/game_base.cpp
     src/sim/shape_base.cpp
@@ -437,6 +440,7 @@ add_executable(torch_network_loopback_test
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
+    src/sim/net_string_table.cpp
     src/sim/engine_object.cpp
     src/sim/game_base.cpp
     src/sim/shape_base.cpp
@@ -510,6 +514,24 @@ add_test(NAME torch_demo_damnation
         $ENV{HOME}/.torch/base/recordings/lonzo_damnation.rec)
 set_tests_properties(torch_demo_snapshot torch_demo_minotaur torch_demo_damnation
     PROPERTIES SKIP_REGULAR_EXPRESSION "^SKIP:")
+
+add_executable(torch_torque_bit_writer_test
+    tests/torque_bit_writer_test.cpp
+    tests/console_stub.cpp
+    src/game/demo.cpp
+    src/core/math.cpp
+    src/net/v12_bitstream.cpp
+    src/net/v12_protocol.cpp
+    src/net/v12_registry.cpp
+    src/net/v12_events.cpp
+    src/net/v12_datablocks.cpp
+    src/net/v12_ghosts.cpp
+    src/net/v12_ghost_packet.cpp
+)
+target_include_directories(torch_torque_bit_writer_test PRIVATE src)
+target_link_libraries(torch_torque_bit_writer_test PRIVATE ZLIB::ZLIB m)
+target_compile_options(torch_torque_bit_writer_test PRIVATE -UNDEBUG)
+add_test(NAME torch_torque_bit_writer COMMAND torch_torque_bit_writer_test)
 
 add_executable(torch_demo_mission_replacement_test
     tests/demo_mission_replacement_test.cpp

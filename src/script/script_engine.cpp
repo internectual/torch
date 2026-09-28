@@ -40,8 +40,6 @@
 extern char** environ;
 
 namespace {
-std::map<int, std::string> s_taggedStrings;
-int s_nextTaggedStringId = 1;
 
 static bool sameFieldName(const std::string& a, const std::string& b) {
     if (a.size() != b.size()) return false;
@@ -2460,11 +2458,16 @@ bool ScriptEngine::init() {
         ScriptObject* groupObject = namedScriptObject(group);
         if (!groupObject) return VMValue(0);
         // Members added with add() plus objects declared inside the group.
+        // Members, plus objects linked only by a declared parent.
         int count = groupObject->internals["__childCount"].toInt();
+        const std::string groupKey = engine.objectKey(groupObject);
         for (const auto& [name, object] : ScriptEngine::instance().objects) {
             if (!object) continue;
             const auto it = object->internals.find("parent");
-            if (it != object->internals.end() && it->second.toString() == group) ++count;
+            if (it == object->internals.end() || it->second.toString() != group) continue;
+            const auto member = object->internals.find("__parent");
+            if (member != object->internals.end() && member->second.toString() == groupKey) continue;
+            ++count;
         }
         return VMValue(count);
     };
@@ -2869,22 +2872,6 @@ bool ScriptEngine::init() {
         return VMValue(result);
     });
 
-    tsInstance->registerNative("detag", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue("");
-        std::string s = args[0].toString();
-        std::string result;
-        for (size_t i = 0; i < s.size(); i++) {
-            if (s[i] == '\\' && i + 1 < s.size() && s[i+1] == 'c') {
-                i += 2;
-                if (i < s.size() && s[i] >= '0' && s[i] <= '9') continue;
-                if (i < s.size() && s[i] == 'o') continue;
-                i--;
-                continue;
-            }
-            result += s[i];
-        }
-        return VMValue(result);
-    });
 
     tsInstance->registerNative("strcmp", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(-1);
@@ -3142,12 +3129,6 @@ bool ScriptEngine::init() {
         return VMValue(result);
     });
 
-    tsInstance->registerNative("addTaggedString", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        const int id = s_nextTaggedStringId++;
-        s_taggedStrings[id] = args[0].toString();
-        return VMValue(id);
-    });
 
     // Math functions
     tsInstance->registerNative("mSin", [](const auto& args) -> VMValue {
@@ -4150,11 +4131,6 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    tsInstance->registerNative("getTaggedString", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(std::string(""));
-        const auto it = s_taggedStrings.find(args[0].toInt());
-        return it == s_taggedStrings.end() ? VMValue(std::string("")) : VMValue(it->second);
-    });
 
     // nameToID: the id of a named (or numbered) object, -1 when none.
     tsInstance->registerNative("nameToId", [](const auto& args) -> VMValue {
@@ -8507,10 +8483,6 @@ bool ScriptEngine::init() {
         }
     }
 
-    tsInstance->registerNative("removeTaggedString", [](const auto& args) -> VMValue {
-        if (!args.empty()) s_taggedStrings.erase(args[0].toInt());
-        return VMValue(1);
-    });
 
     // getRecords(objName, tag) — return concatenation of all tagged fields
     tsInstance->registerNative("getRecords", [](const auto& args) -> VMValue {

@@ -84,7 +84,9 @@ struct ServerEvent {
     V12Vec3 audioPosition{};
     bool hasMissionCrc = false;
     uint32_t missionCrc = 0;
-    std::vector<std::string> arguments;
+    std::vector<std::string> arguments;      // tags expanded to text
+    std::vector<std::string> rawArguments;   // as sent
+    std::vector<bool> taggedArguments;
     bool hasSensorGroup = false;
     uint8_t sensorGroup = 0;
     bool hasSensorGroupColor = false;

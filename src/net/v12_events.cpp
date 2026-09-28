@@ -86,6 +86,8 @@ bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
                 if (!event.message.empty()) event.message.push_back(' ');
                 event.message += arg;
             }
+            event.rawArguments = event.arguments;
+            event.taggedArguments = tagged;
             RemoteCommand::expandTagged(event.arguments, tagged);
         } else if (header.classId == 0) {
             stream.readUnsigned(32);

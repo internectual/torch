@@ -1572,8 +1572,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         auto vectorIt = ctl->fields.find("messageVector");
         if (vectorIt != ctl->fields.end()) {
             if (auto* vector = ScriptEngine::instance().findObject(vectorIt->second.c_str())) {
-                std::string lines;
                 const int count = vector->internals["__lineCount"].toInt();
+                std::string lines;
                 for (int i = 0; i < count; ++i) {
                     if (i) lines += "\n";
                     lines += vector->internals["__line" + std::to_string(i)].toString();
@@ -1692,11 +1692,9 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         };
         auto spans = parseRich(ctl->text);
         // Render spans
-        float lineY = y + 2;
         float maxW = ctl->extentX - 4;
         float penX = x + 2;
-        for (int si = 0; si < (int)spans.size(); ) {
-            // Collect spans for this line
+        auto breakLine = [&](int si) {
             float lineW = 0;
             int sj = si;
             while (sj < (int)spans.size()) {
@@ -1723,6 +1721,27 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 lineW += adv; sj++;
             }
             if (sj == si) sj = si + 1; // at least one span
+            return sj;
+        };
+        std::vector<std::pair<int, int>> lineRanges;
+        for (int si = 0; si < (int)spans.size();) {
+            const int sj = breakLine(si);
+            lineRanges.push_back({si, sj});
+            si = sj;
+        }
+        float lineY = y + 2;
+        // GuiMessageVectorCtrl::lineInserted keeps a bottom-scrolled view at
+        // the bottom: an overflowing vector shows its newest lines.
+        if (cn == "GuiMessageVectorCtrl") {
+            // The visible bottom is the enclosing scroll view's when it ends
+            // above the control's.
+            float bottom = y + ctl->extentY;
+            if (clip) bottom = std::min(bottom, clip->y + clip->h);
+            const float total = (float)lineRanges.size() * (float)font->charHeight;
+            if (y + 2 + total > bottom) lineY = bottom - total;
+        }
+        for (const auto& [si, sj] : lineRanges) {
+            if (lineY < y) { lineY += (float)font->charHeight; continue; } // scrolled off the top
             // Determine line width for justification
             float actualW = 0;
             for (int k = si; k < sj; k++) {
@@ -1764,7 +1783,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 }
             }
             lineY += lineH;
-            si = sj;
         }
     } else if (cn == "GuiBitmapCtrl" || cn == "GuiChunkedBitmapCtrl" || cn == "GuiFadeinBitmapCtrl") {
         std::string bmpPath;

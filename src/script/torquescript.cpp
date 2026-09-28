@@ -1,5 +1,6 @@
 #include "script/torquescript.h"
 #include "sim/engine_classes.h"
+#include "sim/net_string_table.h"
 #include "script/script_engine.h"
 #include "render/gui_renderer.h"
 #include "core/console.h"
@@ -572,6 +573,7 @@ void TorqueScript::Impl::tokenize(const std::string& source) {
         if (c == '"' || c == '\'') {
             char quote = c;
             tok.type = TSTokenType::String;
+            tok.tagged = quote == '\'';
             tok.pos.col = srcCol;
             srcPtr++; srcCol++;
             std::string val;
@@ -2008,7 +2010,8 @@ VMValue TorqueScript::Impl::parsePrimary() {
             return VMValue(tok.numVal);
 
         case TSTokenType::String:
-            return VMValue(tok.text);
+            // OP_TAG_TO_STR: a 'literal' is its tag, "\x01<id>".
+            return tok.tagged ? VMValue(NetStrings::literal(tok.text)) : VMValue(tok.text);
 
         case TSTokenType::True:
             return VMValue(1);
@@ -2349,6 +2352,11 @@ VMValue TorqueScript::Impl::parsePrimary() {
             if (enclosing == obj) enclosing = nullptr;
             if (enclosing && engine.isSimSet(enclosing)) {
                 engine.addToSet(enclosing, obj);
+                // GuiControl is a SimGroup; the GUI renderer also follows the
+                // declared parent link.
+                if (EngineClasses::isA(enclosing->className, "GuiControl") ||
+                    !EngineClasses::isEngineClass(enclosing->className))
+                    obj->internals["parent"] = VMValue(engine.objectKey(enclosing));
             } else if (enclosing) {
                 obj->internals["parent"] = VMValue(engine.objectKey(enclosing));
             } else if (ScriptObject* instant = engine.findObject(outer->getGlobal("$instantGroup").toString().c_str());
