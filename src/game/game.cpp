@@ -9824,37 +9824,70 @@ void Game::render(float dt) {
                     if (foot && block != blocks.end() && block->second.decoded.isPlayerData) {
                         mg->footState &= ~foot;
                         const auto& data = block->second.decoded;
-                        const float offset = (foot == 1 ? -1.0f : 1.0f) * data.playerDecalOffset;
+                        const bool left = foot == 1;
+                        const float offset = (left ? -1.0f : 1.0f) * data.playerDecalOffset;
                         // The DTS loader's local frame swaps Torque's y and z.
                         const Point3F pos = shapeFrame.transform({offset, 0.0f, 0.0f});
                         Point3F forward = shapeFrame.transformNormal({0.0f, 0.0f, 1.0f});
                         const float fl = std::sqrt(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
                         if (fl > 1e-6f) forward = {forward.x / fl, forward.y / fl, forward.z / fl};
+                        // A ray from 0.01 above the foot to 2 below, against
+                        // terrain and interiors (the nearer hit wins).
                         const Point3F start{pos.x, pos.y + 0.01f, pos.z};
+                        constexpr float rayLength = 2.01f;
                         const auto* terrain = w->terrain();
-                        const MaterialProperties* material = terrain && terrain->loaded && !terrain->textureNames.empty()
-                            ? MaterialPropertyMap::instance().terrain(terrain->textureNames[0]) : nullptr;
-                        if (material && !terrain->isEmptySquare(pos.x, pos.z)) {
-                            const float height = w->getHeight(pos.x, pos.z);
-                            const float t = (start.y - height) / 2.01f;
-                            float interiorT; Point3F hitPos, hitNormal;
-                            const bool interiorFirst = w->collision().raycast(start, {0, -1, 0}, 2.01f,
-                                                                              interiorT, hitPos, hitNormal) &&
-                                                       interiorT < (start.y - height);
-                            // mWaterCoverage: liquid above the player box's bottom
-                            // (the foot's height). Torque (x, y) is (pos.x, -pos.z).
-                            const float waterLevel = w->waterSurfaceAt(pos.x, -pos.z);
-                            const bool wet = std::isfinite(waterLevel) && waterLevel > pos.y;
-                            if (t >= 0.0f && t <= 0.5f && !interiorFirst && !wet) {
-                                const Point3F normal = terrainNormalFromHeights(
-                                    w->getHeight(pos.x - 1.0f, pos.z), w->getHeight(pos.x + 1.0f, pos.z),
-                                    w->getHeight(pos.x, pos.z - 1.0f), w->getHeight(pos.x, pos.z + 1.0f));
-                                if (data.playerFootPuffEmitter)
-                                    w->addFootPuff(pos, data.playerFootPuffEmitter, data.playerFootPuffRadius,
-                                                   data.playerFootPuffNumParts, material->puffColor, blocks);
-                                if (data.playerDecalData)
-                                    w->addFootprint({pos.x, height, pos.z}, normal, forward, data.playerDecalData, blocks);
+                        float terrainT = -1.0f, height = 0.0f;
+                        if (terrain && terrain->loaded && !terrain->isEmptySquare(pos.x, pos.z)) {
+                            height = w->getHeight(pos.x, pos.z);
+                            const float drop = start.y - height;
+                            if (drop >= 0.0f && drop <= rayLength) terrainT = drop / rayLength;
+                        }
+                        float interiorDistance; Point3F hitPos, hitNormal;
+                        const bool interiorHit = w->collision().raycast(start, {0, -1, 0}, rayLength,
+                                                                        interiorDistance, hitPos, hitNormal);
+                        const bool terrainFirst = terrainT >= 0.0f &&
+                            (!interiorHit || terrainT * rayLength <= interiorDistance);
+                        // mWaterCoverage: the share of the player box (bottom at
+                        // the foot's height) under liquid. Torque (x, y) is (pos.x, -pos.z).
+                        const float waterLevel = w->waterSurfaceAt(pos.x, -pos.z);
+                        const float boxHeight = std::max(0.001f, data.playerBoxSize[2]);
+                        const float waterCoverage = std::isfinite(waterLevel)
+                            ? std::clamp((waterLevel - pos.y) / boxHeight, 0.0f, 1.0f) : 0.0f;
+                        int sound = -1;
+                        if (terrainFirst) {
+                            const MaterialProperties* material = !terrain->textureNames.empty()
+                                ? MaterialPropertyMap::instance().terrain(terrain->textureNames[0]) : nullptr;
+                            if (material) {
+                                sound = material->sound;
+                                if (terrainT <= 0.5f && waterCoverage == 0.0f) {
+                                    const Point3F normal = terrainNormalFromHeights(
+                                        w->getHeight(pos.x - 1.0f, pos.z), w->getHeight(pos.x + 1.0f, pos.z),
+                                        w->getHeight(pos.x, pos.z - 1.0f), w->getHeight(pos.x, pos.z + 1.0f));
+                                    if (data.playerFootPuffEmitter)
+                                        w->addFootPuff(pos, data.playerFootPuffEmitter, data.playerFootPuffRadius,
+                                                       data.playerFootPuffNumParts, material->puffColor, blocks);
+                                    if (data.playerDecalData)
+                                        w->addFootprint({pos.x, height, pos.z}, normal, forward,
+                                                        data.playerDecalData, blocks);
+                                }
                             }
+                        }
+                        // Player::playFootstepSound. Retail PlayerData sounds
+                        // lead with jetSound and wetJetSound, so the foot
+                        // sounds (soft, hard, metal, snow, then shallow,
+                        // wading, underwater, bubbles; left then right) start at 2.
+                        auto& audio = Engine::instance().audio();
+                        if ((terrainFirst || interiorHit) && audio.isInitialized()) {
+                            const Point3F soundPos = Math::torquePointToYUp({rp.x, rp.y, rp.z});
+                            auto play = [&](int slot) {
+                                const int index = 2 + slot * 2 + (left ? 0 : 1);
+                                if (index < (int)data.playerSounds.size())
+                                    playNativeAudioProfile(audio, blocks, data.playerSounds[index], soundPos);
+                            };
+                            if (waterCoverage == 0.0f) play(sound >= 0 && sound <= 3 ? sound : 1);
+                            else if (waterCoverage < data.playerFootSplashHeight) play(4);
+                            else if (waterCoverage < 1.0f) play(5);
+                            else { play(6); play(7); }
                         }
                     }
                     // Player::updateJetting: jet dust on the terrain below

@@ -590,7 +590,8 @@ void player(Stream& s) {
     d.upMaxSpeed = s.readF32();
     d.upResistSpeed = s.readF32();
     d.upResistFactor = s.readF32();
-    f32s(s, 9); // splash and bubble tuning
+    f32s(s, 8); // splash and bubble tuning
+    const float footSplashHeight = s.readF32();
     d.minImpactSpeed = s.readF32();
     // PlayerData::Sounds (MaxSounds 32); jetSound is first, wetJetSound second.
     std::vector<uint32_t> playerSounds(32);
@@ -628,6 +629,7 @@ void player(Stream& s) {
         activeDecoded->playerDecalData = decalData;
         activeDecoded->playerDecalOffset = decalOffset;
         activeDecoded->playerDustEmitter = dustEmitter;
+        activeDecoded->playerFootSplashHeight = footSplashHeight;
     }
 }
 

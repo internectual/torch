@@ -146,6 +146,7 @@ struct DecodedDataBlock {
     PlayerPrediction::Data playerPhysics;
     // Footsteps (Player::updateActionThread) and jet dust.
     uint32_t playerFootPuffEmitter = 0, playerDecalData = 0, playerDustEmitter = 0;
+    float playerFootSplashHeight = 0.1f; // footstepSplashHeight (share of the box)
     int32_t playerFootPuffNumParts = 15;
     float playerFootPuffRadius = 0.25f, playerDecalOffset = 0.0f;
     // ShapeBaseData drag/density/maxEnergy (flag-gated; engine defaults).
