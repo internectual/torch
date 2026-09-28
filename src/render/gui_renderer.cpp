@@ -1,3 +1,4 @@
+#include <strings.h>
 #include "render/gui_renderer.h"
 #include "game/observer_parity.h"
 #include "render/shader.h"
@@ -217,6 +218,14 @@ int GuiRenderer::keyNameToScancode(const std::string& name) {
     for (auto& [sc, nm] : t)
         if (name == nm) return sc;
     return -1;
+}
+
+// GuiScrollCtrl hScrollBar/vScrollBar: "alwaysOn", "alwaysOff" or
+// "dynamic" (shown when the content overflows).
+static bool scrollBarShown(const std::string& mode, bool overflow) {
+    if (strcasecmp(mode.c_str(), "alwaysOn") == 0) return true;
+    if (strcasecmp(mode.c_str(), "alwaysOff") == 0) return false;
+    return overflow;
 }
 
 void GuiRenderer::init() {
@@ -2562,8 +2571,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         //   down arrow, bottom piece at downArrowRect.y (later covered by the
         //   down button); horizontal mirrored (track = ex-g-thickness = 20px).
         float maxScrollX = ctl->contentW - ctl->extentX;
-        bool hasV = maxScroll > 0 || ctl->vScrollBarMode == "alwaysOn";
-        bool hasH = maxScrollX > 0 || ctl->hScrollBarMode == "alwaysOn";
+        bool hasV = scrollBarShown(ctl->vScrollBarMode, maxScroll > 0);
+        bool hasH = scrollBarShown(ctl->hScrollBarMode, maxScrollX > 0);
         const ScrollTex& vField = getScrollTex(r, "shll_scroll_vertfield.png");
         const ScrollTex& vBar = getScrollTex(r, "shll_scroll_vertbar.png");
         const ScrollTex& vBtn = getScrollTex(r, "shll_scroll_vertbuttons.png");
@@ -4186,8 +4195,8 @@ GuiControl* GuiRenderer::popupMenuAt(int mx, int my) {
 // Geometry mirrors the draw path in renderControlRec's GuiScrollCtrl branch.
 static std::string scrollBarHit(GuiControl* ctl, float ax, float ay, int mx, int my) {
     const float g = 4.0f;
-    bool hasV = ctl->contentH > ctl->extentY || ctl->vScrollBarMode == "alwaysOn";
-    bool hasH = ctl->contentW > ctl->extentX || ctl->hScrollBarMode == "alwaysOn";
+    bool hasV = scrollBarShown(ctl->vScrollBarMode, ctl->contentH > ctl->extentY);
+    bool hasH = scrollBarShown(ctl->hScrollBarMode, ctl->contentW > ctl->extentX);
     if (!hasV && !hasH) return "";
     float x = ax, y = ay;
     if (hasV) {
@@ -4934,7 +4943,7 @@ bool GuiRenderer::handleDrag(int x, int y) {
             float g = 4.0f;
             float arrowLen = btnS - 2.0f * g;
             float thickness = 16.0f;
-            bool hasH = ctl->contentW > ctl->extentX || ctl->hScrollBarMode == "alwaysOn";
+            bool hasH = scrollBarShown(ctl->hScrollBarMode, ctl->contentW > ctl->extentX);
             float downArrowY = ctl->extentY - g - arrowLen - (hasH ? thickness + 1.0f : 0.0f);
             float trackTop = g + arrowLen;
             float trackLen = downArrowY - trackTop;
@@ -4970,7 +4979,7 @@ bool GuiRenderer::handleDrag(int x, int y) {
             float g = 4.0f;
             float arrowLen = btnS - 2.0f * g;
             float thickness = 16.0f;
-            bool hasV = ctl->contentH > ctl->extentY || ctl->vScrollBarMode == "alwaysOn";
+            bool hasV = scrollBarShown(ctl->vScrollBarMode, ctl->contentH > ctl->extentY);
             float rightArrowX = ctl->extentX - g - (hasV ? thickness : 0.0f) - arrowLen;
             float trackL = g + arrowLen;
             float trackLen = rightArrowX - trackL;

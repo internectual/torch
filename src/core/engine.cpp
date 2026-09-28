@@ -1684,68 +1684,6 @@ bool Engine::init(int argc, char* argv[]) {
                 "Mapper: executed %d discovered asset scripts", executed);
         }
     }
-    // Skin discovery override: stock GMW_SkinPopup::fillList scans only
-    // "textures/skins/<skin>.lmale.png".  Mods commonly drop skins at the
-    // textures root instead (e.g. TR2 ships textures/TR2-1.lmale.png), and
-    // players expect loose custom skins anywhere under dataDir to show up.
-    // Scan both locations; everything not in the $Skin alias table still
-    // lands under Show: Custom Skins via the stock filter.
-    if (scr->ts()) {
-        scr->ts()->execute(
-             "function GMW_SkinPopup::fillList( %this, %raceGender )\n"
-            "{\n"
-            "   for ( %i = 0; %i < %this.size(); %i++ )\n"
-            "      %this.realSkin[%i] = \"\";\n"
-            "   %this.clear();\n"
-            "   switch ( %raceGender )\n"
-            "   {\n"
-            "      case 0:  %pattern = \".lmale.png\";\n"
-            "      case 1:  %pattern = \".lfemale.png\";\n"
-            "      case 2:  %pattern = \".lbioderm.png\";\n"
-            "   }\n"
-            "   %customSkins = GMW_SkinPrefPopup.getSelected();\n"
-            "   %count = 0;\n"
-            "   %added = \",\";\n"
-            "   for ( %scan = 0; %scan < 2; %scan++ )\n"
-            "   {\n"
-            "      %path = ( %scan == 0 ) ? \"textures/skins/\" : \"textures/\";\n"
-            "      for ( %file = findFirstFile( %path @ \"*\" @ %pattern ); %file !$= \"\"; %file = findNextFile( %path @ \"*\" @ %pattern ) )\n"
-            "      {\n"
-            "         %slP = strlen( %path );\n"
-            "         %slF = strlen( %file );\n"
-            "         %slPat = strlen( %pattern );\n"
-            "         %skin = getSubStr( %file, %slP, %slF - %slP - %slPat );\n"
-             "         if ( %skin !$= \"basebot\" && %skin !$= \"basebbot\" &&\n"
-             "              %skin !$= \"databasedir\" && %skin !$= \"datadirroot\" )\n"
-            "         {\n"
-            "            %baseSkin = false;\n"
-            "            for ( %i = 0; %i < $SkinCount; %i++ )\n"
-            "            {\n"
-            "               if ( %skin $= $Skin[%i, code] )\n"
-            "               {\n"
-            "                  %baseSkin = true;\n"
-            "                  %skin = $Skin[%i, name];\n"
-            "                  break;\n"
-            "               }\n"
-            "            }\n"
-            "            // Mods may ship the same skin in several spots\n"
-            "            // (e.g. textures/base.lmale.png overriding the\n"
-            "            // default) - keep the first occurrence only.\n"
-            "            if ( %customSkins != %baseSkin && strstr( %added, \",\" @ %skin @ \",\" ) == -1 )\n"
-            "            {\n"
-            "               if ( %baseSkin )\n"
-            "                  %this.realSkin[%count] = $Skin[%i, code];\n"
-            "               %this.add( %skin, %count );\n"
-            "               %added = %added @ %skin @ \",\";\n"
-            "               %count++;\n"
-            "            }\n"
-            "         }\n"
-            "      }\n"
-            "   }\n"
-            "   %this.sort( true );\n"
-            "}\n",
-            "torch-skin-scan");
-    }
 
     // Host-tab "Mission Name:" list (GMH_MissionList): the native buildMissionList
     // (script_engine.cpp) overrides the stock script function of the same name.
