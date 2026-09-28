@@ -37,7 +37,9 @@ inline PackRoundTrip packRoundTrip(const std::string& className,
     PackRoundTrip result;
     result.writtenBits = w.bitPosition();
     const auto& bytes = w.data();
-    V12BitStream stream(bytes.data(), bytes.size());
+    // A class that writes no bits still reads from a (zero-length) buffer.
+    static const uint8_t none = 0;
+    V12BitStream stream(bytes.empty() ? &none : bytes.data(), bytes.size());
     stream.setStringBuffer(true);
     const int index = DataBlockPack::classIndex(className);
     assert(index >= 0);

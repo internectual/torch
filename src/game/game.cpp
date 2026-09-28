@@ -9669,24 +9669,14 @@ void Game::render(float dt) {
                 // Appearance comes from native material and skin data only.
                 if (defShader) defShader->setUniform("uTint", ColorF{1, 1, 1, 1});
 
-                // ShapeBase replaces the normal material map with cloakTexture.
+                // ShapeBase replaces the normal material map with the engine's
+                // special/cloakTexture.
                 Texture* cloakTexture = nullptr;
                 // ShapeBase::updateCloak: mCloakLevel ramps 0 -> 1 over 0.5 s.
                 if (!demoMatchEnded)
                     mg->cloakLevel = std::clamp(mg->cloakLevel + (g->cloaked ? 1.0f : -1.0f) *
                                                 demoInterpolationDt / 0.5f, 0.0f, 1.0f);
-                if (mg->cloakLevel > 0.0f && g->hasDatablock && demoParser) {
-                    const auto& blocks = demoParser->getInitialBlock().dataBlocks;
-                    auto block = blocks.find((uint32_t)g->datablockId);
-                    if (block != blocks.end() && !block->second.decoded.cloakTexture.empty()) {
-                        const std::string& path = block->second.decoded.cloakTexture;
-                        // Datablock texture names are relative to textures/.
-                        cloakTexture = r.loadTexture(("textures/" + path).c_str());
-                        if (!cloakTexture) cloakTexture = r.loadTexture(path.c_str());
-                        if (!cloakTexture) cloakTexture = r.loadTexture(("textures/" + path + ".png").c_str());
-                    }
-                    if (!cloakTexture) cloakTexture = r.loadTexture("textures/special/cloakTexture.png");
-                }
+                if (mg->cloakLevel > 0.0f) cloakTexture = r.loadTexture("textures/special/cloakTexture.png");
                 shape->cloakTextureOverride = cloakTexture && cloakTexture->loaded ? cloakTexture : nullptr;
 
                 // ShapeBase::renderObject: vertex alpha 0.125 + (1 - level) x 0.875.
@@ -10515,18 +10505,8 @@ void Game::render(float dt) {
                  g->shape->emapEnabled = block != nativeDatablocks.end() && block->second.decoded.shapeEmap;
              }
              Texture* cloakTexture = nullptr;
-             if ((g->cloaked || g->cloakLevel > 0.0f) && g->hasDatablock) {
-                 auto block = nativeDatablocks.find((uint32_t)g->datablockId);
-                 if (block != nativeDatablocks.end() &&
-                     !block->second.decoded.cloakTexture.empty()) {
-                     const std::string& path = block->second.decoded.cloakTexture;
-                     // Datablock texture names are relative to textures/.
-                     cloakTexture = r.loadTexture(("textures/" + path).c_str());
-                     if (!cloakTexture) cloakTexture = r.loadTexture(path.c_str());
-                     if (!cloakTexture) cloakTexture = r.loadTexture(("textures/" + path + ".png").c_str());
-                 }
-                 if (!cloakTexture) cloakTexture = r.loadTexture("textures/special/cloakTexture.png");
-             }
+             if (g->cloaked || g->cloakLevel > 0.0f)
+                 cloakTexture = r.loadTexture("textures/special/cloakTexture.png");
              g->shape->cloakTextureOverride = cloakTexture && cloakTexture->loaded ? cloakTexture : nullptr;
              g->cloakLevel = std::clamp(g->cloakLevel + (g->cloaked ? 1.0f : -1.0f) * dt / 0.5f, 0.0f, 1.0f);
              g->shape->alphaScale = g->cloakLevel > 0.0f ? 0.125f + (1.0f - g->cloakLevel) * 0.875f : 1.0f;

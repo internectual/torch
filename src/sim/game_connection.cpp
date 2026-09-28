@@ -1,6 +1,7 @@
 #include "sim/game_connection.h"
 #include "sim/net_string_table.h"
 #include "sim/net_object.h"
+#include "sim/datablock_pack.h"
 #include "net/remote_command.h"
 #include "net/v12_bitstream.h"
 #include "script/script_engine.h"
@@ -91,6 +92,93 @@ void GameConnection::setMissionCRC(uint32_t crc) {
     postEvent(event);
 }
 
+// --- Datablocks (gameConnection.cc, gameConnectionEvents.cc) ---------------
+
+static std::vector<std::string> dataBlockGroupMembers() {
+    std::vector<std::string> members;
+    ScriptObject* group = ScriptEngine::instance().findObject("DataBlockGroup");
+    if (!group) return members;
+    const int count = group->internals["__childCount"].toInt();
+    for (int i = 0; i < count; ++i) members.push_back(group->internals["__child" + std::to_string(i)].toString());
+    return members;
+}
+
+static int modifiedKey(const ScriptObject* data) {
+    auto it = data->internals.find("__datablockKey");
+    return it == data->internals.end() ? 0 : it->second.toInt();
+}
+
+static uint32_t dataBlockIdOf(const std::string& handle) {
+    ScriptObject* object = ScriptEngine::instance().findObject(handle.c_str());
+    if (!object || !object->internals.count("__datablockKey")) return 0;
+    const int id = ScriptEngine::instance().objectId(object);
+    return id >= (int)DataBlockPack::ObjectIdFirst && id <= (int)DataBlockPack::ObjectIdLast ? (uint32_t)id : 0;
+}
+
+void GameConnection::transmitDataBlocks(uint32_t sequence) {
+    dataBlockSequence = sequence;
+    const auto members = dataBlockGroupMembers();
+    if (members.empty()) return;
+    // The first one the client does not have.
+    size_t i = 0;
+    for (; i < members.size(); ++i) {
+        ScriptObject* data = ScriptEngine::instance().findObject(members[i].c_str());
+        if (data && modifiedKey(data) > dataBlockModifiedKey) break;
+    }
+    if (i == members.size()) {
+        if (auto* ts = ScriptEngine::instance().ts())
+            ts->callObjectMethod(ScriptEngine::instance().objectKey(script), "dataBlocksDone",
+                                 {VMValue(std::to_string(sequence))});
+        return;
+    }
+    maxDataBlockModifiedKey = dataBlockModifiedKey;
+    const size_t max = std::min(i + DataBlockQueueCount, members.size());
+    for (; i < max; ++i) postDataBlock(members[i], (uint32_t)i, (uint32_t)members.size(), sequence);
+}
+
+void GameConnection::postDataBlock(const std::string& object, uint32_t index, uint32_t total, uint32_t sequence) {
+    auto event = std::make_shared<NetEventOut>();
+    event->classIndex = SimDataBlock;
+    event->pack = [this, object, index, total](TorqueBitWriter& w) {
+        ScriptObject* data = ScriptEngine::instance().findObject(object.c_str());
+        const int key = data ? modifiedKey(data) : 0;
+        if (!w.writeFlag(data && dataBlockModifiedKey < key)) return;
+        if (key > maxDataBlockModifiedKey) maxDataBlockModifiedKey = key;
+        const int id = ScriptEngine::instance().objectId(data);
+        const int classIndex = DataBlockPack::classIndex(data->className);
+        const DataBlockPack::PackFn* pack = DataBlockPack::find(data->className);
+        if (classIndex < 0 || !pack)
+            Console::instance().printf(LogLevel::Error, "SimDataBlockEvent: no packData for %s (%s)",
+                                       data->className.c_str(), object.c_str());
+        w.writeInt(id - (int)DataBlockPack::ObjectIdFirst, 11);
+        w.writeInt(std::max(classIndex, 0), 7);
+        w.writeInt((int32_t)index, 11);
+        w.writeInt((int32_t)total, 12);
+        if (!pack) return;
+        DataBlockPack::Context context(data, w, dataBlockIdOf);
+        (*pack)(context);
+    };
+    event->notify = [this, index, sequence](bool delivered) {
+        if (delivered) dataBlockDelivered(index, sequence);
+    };
+    postEvent(event);
+}
+
+// SimDataBlockEvent::notifyDelivered.
+void GameConnection::dataBlockDelivered(uint32_t index, uint32_t sequence) {
+    if (dataBlockSequence != sequence) return;
+    const auto members = dataBlockGroupMembers();
+    const size_t next = index + DataBlockQueueCount;
+    if (!members.empty() && index == members.size() - 1) {
+        dataBlockModifiedKey = maxDataBlockModifiedKey;
+        if (auto* ts = ScriptEngine::instance().ts())
+            ts->callObjectMethod(ScriptEngine::instance().objectKey(script), "dataBlocksDone",
+                                 {VMValue(std::to_string(sequence))});
+    }
+    if (members.size() <= next) return;
+    postDataBlock(members[next], (uint32_t)next, (uint32_t)members.size(), sequence);
+}
+
 // NetConnection::eventPacketDropped: ordered events go back in sequence,
 // guaranteed ones to the front, unguaranteed ones are lost.
 void GameConnection::packetDropped(std::vector<std::shared_ptr<NetEventOut>>& events) {
@@ -144,7 +232,52 @@ void GameConnection::writePacket(TorqueBitWriter& w, std::vector<std::shared_ptr
     w.writeFlag(false); // no control object
     w.writeFlag(false); // visible target masks unchanged
     w.writeFlag(false); // camera fov
-    // eventWritePacket
+    writeEvents(w, sent);
+}
+
+// GameConnection::writePacket, client half (Tribes 2: first-person flag and
+// control-object checksum, then moveWritePacket and the camera fov).
+void GameConnection::writeClientPacket(TorqueBitWriter& w, std::vector<std::shared_ptr<NetEventOut>>& sent) {
+    w.writeFlag(false);
+    w.writeFlag(false);
+    w.setStringBuffer(true);
+    w.clearCompression();
+    w.writeFlag(firstPerson);
+    w.writeU32(0); // control object checksum
+    size_t offset = 0;
+    while (offset < moves.size() && moves[offset].sendCount >= MaxMovePacketSends) ++offset;
+    if (offset == moves.size() && !moves.empty()) --offset;
+    const size_t count = std::min(moves.size() - offset, (size_t)MaxMoveCount);
+    w.writeU32(lastMoveAck + (uint32_t)offset);
+    w.writeInt((int32_t)count, 5);
+    for (size_t i = 0; i < count; ++i) {
+        ClientMoveIn& move = moves[offset + i];
+        ++move.sendCount;
+        // Move::pack.
+        if (w.writeFlag(move.yaw != 0)) w.writeInt((uint16_t)move.yaw, 16);
+        if (w.writeFlag(move.pitch != 0)) w.writeInt((uint16_t)move.pitch, 16);
+        if (w.writeFlag(move.roll != 0)) w.writeInt((uint16_t)move.roll, 16);
+        w.writeInt(move.x, 6);
+        w.writeInt(move.y, 6);
+        w.writeInt(move.z, 6);
+        w.writeFlag(move.freeLook);
+        for (bool trigger : move.trigger) w.writeFlag(trigger);
+    }
+    w.writeFlag(false); // camera fov
+    writeEvents(w, sent);
+}
+
+bool GameConnection::pushMove(const ClientMoveIn& move) {
+    if (moves.size() > MaxMoveQueueSize) return false;
+    ClientMoveIn queued = move;
+    queued.id = lastMoveAck + (uint32_t)moves.size();
+    queued.sendCount = 0;
+    moves.push_back(queued);
+    return true;
+}
+
+// NetConnection::eventWritePacket.
+void GameConnection::writeEvents(TorqueBitWriter& w, std::vector<std::shared_ptr<NetEventOut>>& sent) {
     while (!unorderedQueue.empty() && w.bitPosition() < PacketBudgetBits) {
         auto event = unorderedQueue.front();
         unorderedQueue.pop_front();
@@ -176,9 +309,13 @@ void GameConnection::checkPacketSend(double now) {
     TorqueBitWriter w;
     protocol.writePacketHeader(w.raw(), V12::PacketType::Data);
     std::vector<std::shared_ptr<NetEventOut>> sent;
-    writePacket(w, sent);
     std::vector<GhostRef> refs;
-    writeGhosts(w, refs);
+    if (isServer) {
+        writePacket(w, sent);
+        writeGhosts(w, refs);
+    } else {
+        writeClientPacket(w, sent);
+    }
     inFlight[protocol.lastSent()] = std::move(sent);
     ghostsInFlight[protocol.lastSent()] = std::move(refs);
     deliver(w.data());
@@ -207,6 +344,10 @@ void GameConnection::receivePacket(const uint8_t* data, size_t size) {
         return;
     }
     if (!result.dispatchData || header.packetType != V12::PacketType::Data) return;
+    if (!isServer) {
+        clientReadPacket(stream, data, size);
+        return;
+    }
     // Rate fields.
     if (stream.readFlag()) { stream.readUnsigned(10); stream.readUnsigned(10); }
     if (stream.readFlag()) { stream.readUnsigned(10); stream.readUnsigned(10); }
@@ -250,6 +391,42 @@ void GameConnection::receivePacket(const uint8_t* data, size_t size) {
         for (size_t i = 1; i < args.size(); ++i) callArgs.emplace_back(args[i]);
         const std::string function = "serverCmd" + args[0];
         if (ts->isFunction(function)) ts->callFunction(function, callArgs);
+    }
+}
+
+// GameConnection::readPacket, client half: the move acknowledgement; the
+// packet then goes to the client's reader whole.
+void GameConnection::clientReadPacket(V12BitStream& stream, const uint8_t* data, size_t size) {
+    if (stream.readFlag()) { stream.readUnsigned(10); stream.readUnsigned(10); }
+    if (stream.readFlag()) { stream.readUnsigned(10); stream.readUnsigned(10); }
+    const uint32_t ack = stream.readUnsigned(32);
+    if (stream.failed()) return;
+    while (lastMoveAck < ack && !moves.empty()) {
+        moves.pop_front();
+        ++lastMoveAck;
+    }
+    if (lastMoveAck < ack) lastMoveAck = ack;
+    if (onServerPacket) onServerPacket(std::vector<uint8_t>(data, data + size));
+}
+
+void GameConnection::clientGhostMessage(int message, uint32_t sequence, uint32_t count) {
+    auto* ts = ScriptEngine::instance().ts();
+    switch (message) {
+        case GhostAlwaysDone: {
+            auto event = std::make_shared<NetEventOut>();
+            event->classIndex = GhostingMessage;
+            event->pack = [sequence](TorqueBitWriter& w) {
+                w.writeU32(sequence);
+                w.writeInt(ReadyForNormalGhosts, 3);
+                w.writeInt(0, 11);
+            };
+            postEvent(event);
+            break;
+        }
+        case GhostAlwaysStarting:
+            if (ts) ts->callFunction("ghostAlwaysStarted", {VMValue(std::to_string(count))});
+            break;
+        default: break;
     }
 }
 
@@ -454,6 +631,11 @@ void registerGameConnectionNatives(TorqueScript& ts) {
     ts.registerNative("GameConnection::setMissionCRC", [](const Args& args) -> VMValue {
         if (auto* connection = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString()))
             if (args.size() > 1) connection->setMissionCRC((uint32_t)args[1].toDouble());
+        return VMValue("");
+    });
+    ts.registerNative("GameConnection::transmitDataBlocks", [](const Args& args) -> VMValue {
+        if (auto* c = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString()))
+            if (args.size() > 1) c->transmitDataBlocks((uint32_t)args[1].toDouble());
         return VMValue("");
     });
     ts.registerNative("NetConnection::getAddress", [](const Args& args) -> VMValue {

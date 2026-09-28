@@ -43,6 +43,7 @@ struct ClientMoveIn {
     int x = 16, y = 16, z = 16;           // 0..32, 16 = still
     bool freeLook = false;
     bool trigger[6]{};
+    int sendCount = 0; // client: packets that carried this move
 };
 
 class GameConnection : public EngineObject {
@@ -51,6 +52,9 @@ public:
     enum EventClass { GhostingMessage = 4, Gravity = 5, NetString = 7, RemoteCommand = 9,
                       SetMissionCRC = 13, SimDataBlock = 19, SimpleMessage = 22 };
 
+    // NetConnection role: a client's connection on the server (ClientGroup),
+    // or the client's ServerConnection.
+    bool isServer = true;
     bool local = false;
     std::string address = "Local";
     std::function<void(const std::vector<uint8_t>&)> deliver;
@@ -59,6 +63,15 @@ public:
     // sendRemoteCommand: tags among argv get their NetStringEvent first.
     void sendRemoteCommand(const std::vector<std::string>& argv);
     void setMissionCRC(uint32_t crc);
+
+    // GameConnection::transmitDataBlocks(seq): DataBlockQueueCount
+    // SimDataBlockEvents in flight, each delivery posting the next; the
+    // last one calls %conn.dataBlocksDone(seq).
+    enum { DataBlockQueueCount = 16 };
+    void transmitDataBlocks(uint32_t sequence);
+    uint32_t dataBlockSequence = 0;
+    int dataBlockModifiedKey = 0;
+    int maxDataBlockModifiedKey = 0;
 
     // NetConnection ghosting (netGhost.cc).
     enum GhostMessage { GhostAlwaysDone = 0, ReadyForNormalGhosts = 1, EndGhosting = 2, GhostAlwaysStarting = 3 };
@@ -74,6 +87,18 @@ public:
     // processRawPacket from the client.
     void receivePacket(const uint8_t* data, size_t size);
 
+    // Client role (GameConnection::readPacket/writePacket, client half):
+    // every server packet goes whole to `onServerPacket` (the demo reader
+    // decodes it); moves wait in `moves` until the server acknowledges them.
+    std::function<void(const std::vector<uint8_t>&)> onServerPacket;
+    enum { MaxMoveCount = 30, MaxMoveQueueSize = 45, MaxMovePacketSends = 4 };
+    // getNextMove: dropped while MaxMoveQueueSize moves are unacknowledged.
+    bool pushMove(const ClientMoveIn& move);
+    // Ghost messages the client decoded (NetConnection::handleGhostMessage).
+    void clientGhostMessage(int message, uint32_t sequence, uint32_t count);
+
+    // Server: the next move the client has not had processed. Client: the
+    // server's acknowledgement (mLastMoveAck = mFirstMoveIndex).
     uint32_t lastMoveAck = 0;
     std::deque<ClientMoveIn> moves;
     bool firstPerson = true;
@@ -81,8 +106,13 @@ public:
 
 private:
     void validateSendString(const std::string& value);
+    void postDataBlock(const std::string& object, uint32_t index, uint32_t total, uint32_t sequence);
+    void dataBlockDelivered(uint32_t index, uint32_t sequence);
     void packString(TorqueBitWriter& w, const std::string& value);
     void writePacket(TorqueBitWriter& w, std::vector<std::shared_ptr<NetEventOut>>& sent);
+    void writeClientPacket(TorqueBitWriter& w, std::vector<std::shared_ptr<NetEventOut>>& sent);
+    void writeEvents(TorqueBitWriter& w, std::vector<std::shared_ptr<NetEventOut>>& sent);
+    void clientReadPacket(V12BitStream& stream, const uint8_t* data, size_t size);
     void packetDropped(std::vector<std::shared_ptr<NetEventOut>>& events);
     void packetReceived(std::vector<std::shared_ptr<NetEventOut>>& events);
 

@@ -55,6 +55,12 @@ public:
     std::string readRawString();
     std::string unpackNetString();
     void setStringBufferEnabled(bool en) { stringBufferEnabled = en; if (!en) stringBuffer.clear(); }
+    bool stringBufferOn() const { return stringBufferEnabled; }
+    const std::string& stringBufferContents() const { return stringBuffer; }
+    void restoreStringBuffer(bool enabled, std::string contents) {
+        stringBufferEnabled = enabled;
+        stringBuffer = std::move(contents);
+    }
 
     int  getCurPos() const { return bitNum; }
     void setCurPos(int pos) {
@@ -1080,6 +1086,8 @@ private:
     bool readInitialBlock(const uint8_t* data, size_t size, uint32_t protocolVersion);
     void readTaggedStrings(BitStream& bs);
     bool readDataBlocks(BitStream& bs);
+    // SimDataBlockEvent::unpack: process flag, header, packData payload.
+    bool readSimDataBlockEvent(BitStream& bs);
     QueuedMove readQueuedMove(BitStream& bs);
     std::vector<std::string> readDemoValues(BitStream& bs);
     void readComplexTargetManager(BitStream& bs);

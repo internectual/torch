@@ -46,6 +46,13 @@ public:
     std::string readString(size_t maxLength = 255);
     std::string unpackNetString();
     void setStringBuffer(bool enabled);
+    // The string buffer carried across readers of one packet.
+    bool stringBufferOn() const { return stringBufferEnabled; }
+    const std::string& stringBufferContents() const { return stringBuffer; }
+    void restoreStringBuffer(bool enabled, std::string contents) {
+        stringBufferEnabled = enabled;
+        stringBuffer = std::move(contents);
+    }
 
     size_t position() const { return bitPosition; }
     size_t sizeBits() const { return bitSize; }

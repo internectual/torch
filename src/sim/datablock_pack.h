@@ -42,6 +42,8 @@ public:
     int enumValue(const char* field, std::initializer_list<const char*> names, int fallback) const;
     // A datablock-typed field: the referenced datablock's id, 0 when unset.
     uint32_t ref(const char* field) const;
+    // A datablock name or id (from a list-valued field): its id, 0 when none.
+    uint32_t resolve(const std::string& name) const { return resolver && !name.empty() ? resolver(name) : 0; }
 
     // if (writeFlag(id)) writeRangedU32(id, DataBlockObjectIdFirst, DataBlockObjectIdLast)
     void writeRef(uint32_t id);

@@ -15,6 +15,7 @@ struct DecodedDataBlock {
     // AudioProfile data is sent as a path without the .wav suffix.
     std::string audioFilename;
     uint32_t audioDescriptionRef = 0;
+    uint32_t audioEffectRef = 0;
     uint32_t audioEnvironmentRef = 0;
     float audioVolume = 1.0f;
     float audioMinDistance = 1.0f;
@@ -194,7 +195,7 @@ struct DecodedDataBlock {
     uint32_t mountPoint = 0;
     bool hasMountPoint{};
     std::string debrisShape;
-    std::string cloakTexture;
+    std::string cmdCategory;      // ShapeBaseData::cmdCategory
     bool shapeEmap = false;       // ShapeBaseData::emap
     // TurretData elevation limits (degrees); t2-mapper clamps and defaults
     // them to [0, 90] / [90, 180] and 45 / 135.

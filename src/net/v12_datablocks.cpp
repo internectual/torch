@@ -54,18 +54,18 @@ void audioDescription(Stream& s) {
     }
 }
 void audioProfile(Stream& s) {
+    // Retail AudioProfile: description, effect (EffectProfile), sample
+    // environment, then the filename.
     const uint32_t description = optionalRef(s);
+    const uint32_t effect = optionalRef(s);
     const uint32_t environment = optionalRef(s);
-    // AudioProfileData has a third optional datablock reference on the wire
-    // before the filename. Keep it consumed even though runtime playback only
-    // needs the description and environment references here.
-    optionalRef(s);
     std::string filename = s.readString();
     if (!filename.empty() && (filename.size() < 4 ||
         filename.substr(filename.size() - 4) != ".wav"))
         filename += ".wav";
     if (activeDecoded) {
         activeDecoded->audioDescriptionRef = description;
+        activeDecoded->audioEffectRef = effect;
         activeDecoded->audioEnvironmentRef = environment;
         activeDecoded->audioFilename = filename;
     }
@@ -338,9 +338,56 @@ void legacyDecal(Stream& s) {
         activeDecoded->decal.fadeTimeMS = 1250;
     }
 }
+// DebrisData::packData.
+void debrisData(Stream& s) {
+    const float elasticity = s.readF32();
+    const float friction = s.readF32();
+    const int32_t numBounces = (int32_t)s.readUnsigned(32);
+    const int32_t bounceVariance = (int32_t)s.readUnsigned(32);
+    const float minSpin = s.readF32();
+    const float maxSpin = s.readF32();
+    s.readUnsigned(8); // render2D
+    const bool explodeOnMaxBounce = s.readUnsigned(8) != 0;
+    const bool staticOnMaxBounce = s.readUnsigned(8) != 0;
+    const bool snapOnMaxBounce = s.readUnsigned(8) != 0;
+    const float lifetime = s.readF32();
+    const float lifetimeVariance = s.readF32();
+    f32s(s, 2); // minSpinSpeed, maxSpinSpeed again
+    const float velocity = s.readF32();
+    const float velocityVariance = s.readF32();
+    bools(s, 2); // fade, useRadiusMass
+    s.readF32(); // baseRadius
+    const float gravModifier = s.readF32();
+    const float terminalVelocity = s.readF32();
+    bools(s, 1); // ignoreWater
+    s.readString(); // texture
+    const std::string shape = s.readString();
+    refs(s, 3); // emitters[2], explosion
+    if (auto* d = activeDecoded) {
+        auto& debris = d->debris;
+        debris.shape = shape;
+        debris.lifetimeMS = (int32_t)(lifetime * 1000.0f);
+        debris.lifetimeVarianceMS = (int32_t)(lifetimeVariance * 1000.0f);
+        debris.velocity = velocity;
+        debris.velocityVariance = velocityVariance;
+        debris.minSpin = minSpin;
+        debris.maxSpin = maxSpin;
+        debris.elasticity = elasticity;
+        debris.friction = friction;
+        debris.numBounces = numBounces;
+        debris.bounceVariance = bounceVariance;
+        debris.explodeOnMaxBounce = explodeOnMaxBounce;
+        debris.staticOnMaxBounce = staticOnMaxBounce;
+        debris.snapOnMaxBounce = snapOnMaxBounce;
+        debris.gravModifier = gravModifier;
+        debris.terminalVelocity = terminalVelocity;
+    }
+}
 void shapeBase(Stream& s) {
     if (s.readFlag()) s.readUnsigned(32);
-    const std::string shape = s.readHuffmanString();
+    // Every packData string goes through writeString (the packet's string
+    // buffer when it is enabled).
+    const std::string shape = s.readString();
     if (activeDecoded) activeDecoded->shapeFile = shape;
     // mass (default 1), drag, density, maxEnergy, camera distances, ...
     const float mass = s.readFlag() ? s.readF32() : 1.0f;
@@ -356,11 +403,12 @@ void shapeBase(Stream& s) {
         if (activeDecoded && i == 3) activeDecoded->cameraMaxDist = value;
         if (activeDecoded && i == 4) activeDecoded->cameraMinDist = value;
     }
-    const std::string debrisShape = s.readHuffmanString();
+    const std::string debrisShape = s.readString();
     if (activeDecoded) activeDecoded->debrisShape = debrisShape;
     if (s.readFlag()) { s.readUnsigned(10); u32s(s, 1); }
     if (s.readFlag()) s.readF32();
-    if (activeDecoded) activeDecoded->cloakTexture = s.readString();
+    // cmdCategory, cmdMiniIconName.
+    if (activeDecoded) activeDecoded->cmdCategory = s.readString();
     else s.readString();
     s.readString();
     // canControl, canObserve, observeThroughObject, emap, isInvincible,
@@ -375,8 +423,8 @@ void shapeBase(Stream& s) {
     if (s.readFlag()) f32s(s, 3);
     for (int i = 0; i < 8; ++i) {
         if (!s.readFlag()) continue;
-        s.readHuffmanString();
-        if (s.readFlag()) s.readHuffmanString();
+        s.readString();
+        if (s.readFlag()) s.readString();
         for (int j = 0; j < 5; ++j) s.readFlag();
     }
 }
@@ -665,18 +713,11 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
      case 3: rangedS32(s,-10000,1000); rangedS32(s,-10000,0); rangedS32(s,-10000,1000); rangedS32(s,-10000,0); rangedF32(s,0,1,9); rangedF32(s,0,1,8); rangedF32(s,0,1,9); rangedF32(s,0,1,8); rangedF32(s,0,10,9); rangedF32(s,0,10,9); rangedF32(s,0,10,9); rangedS32(s,-10000,0); s.readUnsigned(3); break;
      case 4: grenade(s); f32s(s,6); strings(s,2); break;
       case 5: shapeBase(s); break;
-      case 6: {
-          // DebrisData carries the debris shape as a regular network string.
-          // It is not shapeBase's Huffman-encoded field layout.
-          const std::string shape = s.readString();
-           if (activeDecoded) {
-               activeDecoded->debrisShape = shape;
-               activeDecoded->debris.shape = shape;
-           }
+      case 6:
+          // CannedChatItem: retail uses SimDataBlock::packData (no bits).
           break;
-      }
       case 7: strings(s,5); break;
-     case 8: f32s(s,2); u32s(s,2); f32s(s,2); bools(s,4); f32s(s,4); f32s(s,2); bools(s,2); f32s(s,3); bools(s,1); strings(s,2); refs(s,3); break;
+     case 8: debrisData(s); break;
      case 9: (classId >= 128 ? legacyDecal : decal)(s); break; case 10: { // ELFProjectileData
         projectile(s);
         float f[6];

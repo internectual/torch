@@ -145,14 +145,13 @@ static V12BitStream stream(const V12BitWriter& w) {
 }
 
 static void testDataBlocks() {
-    V12BitWriter debris;
-    debris.writeHuffmanString("shapes/debris.dts");
-    debris.writeUnsigned(0x0a, 5);
-    V12::DecodedDataBlock debrisDecoded;
-    auto debrisStream = stream(debris);
-    assert(V12::readDataBlockPayload(debrisStream, 6, &debrisDecoded));
-    assert(debrisDecoded.debrisShape == "shapes/debris.dts");
-    assert(debrisStream.readUnsigned(5) == 0x0a && !debrisStream.failed());
+    // CannedChatItem (class 6) is SimDataBlock::packData in retail: no bits.
+    V12BitWriter canned;
+    canned.writeUnsigned(0x0a, 5);
+    V12::DecodedDataBlock cannedDecoded;
+    auto cannedStream = stream(canned);
+    assert(V12::readDataBlockPayload(cannedStream, 6, &cannedDecoded));
+    assert(cannedStream.readUnsigned(5) == 0x0a && !cannedStream.failed());
 
     V12BitWriter particle;
     particle.writeUnsigned(0, 10); particle.writeFlag(true); f32(particle, 2.0f);

@@ -723,6 +723,54 @@ static bool readInitialControlPacket(BitStream& bs, const GhostEntry& ghost,
     return !bs.isError();
 }
 
+bool DemoParser::readSimDataBlockEvent(BitStream& bs) {
+    // SimDataBlockEvent::pack writes its own process flag (clear when the
+    // client already has this modified key) before the object metadata.
+    if (!bs.readFlag()) return !bs.isError();
+
+    DataBlockHeader header{};
+    header.objectId = (uint32_t)bs.readInt(T2Demo::SimDBEventObjectIdBits);
+    header.classId = (uint32_t)bs.readInt(T2Demo::SimDBEventClassIdBits) + T2Demo::DataBlockClassFirst;
+    header.index = (uint32_t)bs.readInt(T2Demo::SimDBEventIndexBits);
+    header.total = (uint32_t)bs.readInt(T2Demo::SimDBEventTotalBits);
+    header.dataBitsStart = bs.getCurPos();
+
+    if (bs.isError()) return false;
+
+    // packData reads from the packet's stream, string buffer included.
+    V12::DecodedDataBlock decoded;
+    V12BitStream payload(bs.getBuffer(), bs.getBufferSize(),
+                         (size_t)header.dataBitsStart);
+    payload.restoreStringBuffer(bs.stringBufferOn(), bs.stringBufferContents());
+    if (!V12::readDataBlockPayload(payload, header.classId, &decoded) || payload.failed()) {
+        const char* className = V12::dataBlockClassName(header.classId - T2Demo::DataBlockClassFirst);
+        Console::instance().printf(LogLevel::Error,
+            "Demo: unsupported or malformed datablock class %u %s",
+            header.classId, className ? className : "");
+        return false;
+    }
+
+    const size_t consumed = payload.position() - (size_t)header.dataBitsStart;
+    if (consumed > (size_t)bs.getRemainingBits()) return false;
+    bs.setCurPos(header.dataBitsStart + (int)consumed);
+    bs.restoreStringBuffer(payload.stringBufferOn(), payload.stringBufferContents());
+    initialBlock.dataBlockHeaders.push_back(header);
+    ParsedDataBlock parsed;
+    parsed.classId = header.classId;
+    parsed.decoded = decoded;
+    if (const char* name = V12::dataBlockClassName(header.classId - T2Demo::DataBlockClassFirst))
+        parsed.className = name;
+    parsed.objectId = header.objectId;
+    if (!decoded.shapeFile.empty()) {
+        parsed.data["shapeFile"] = decoded.shapeFile;
+        initialBlock.datablockWeaponShapes[header.objectId] = decoded.shapeFile;
+    }
+    if (!decoded.debrisShape.empty()) parsed.data["debrisShape"] = decoded.debrisShape;
+    if (!decoded.cmdCategory.empty()) parsed.data["cmdCategory"] = decoded.cmdCategory;
+    initialBlock.dataBlocks[header.objectId] = std::move(parsed);
+    return !bs.isError();
+}
+
 bool DemoParser::readDataBlocks(BitStream& bs) {
     int count = 0;
     while (bs.readFlag()) {
@@ -731,49 +779,8 @@ bool DemoParser::readDataBlocks(BitStream& bs) {
                 "Demo: too many initial datablocks");
             return false;
         }
-
-        // The outer flag is the event list entry. SimDataBlockEvent::pack
-        // writes its own process flag before the object metadata.
-        if (!bs.readFlag()) continue;
-
-        DataBlockHeader header{};
-        const uint32_t objectIndex = (uint32_t)bs.readInt(11);
-        header.objectId = objectIndex;
-        header.classId = (uint32_t)bs.readInt(7) + T2Demo::DataBlockClassFirst;
-        header.index = (uint32_t)bs.readInt(11);
-        header.total = (uint32_t)bs.readInt(12);
-        header.dataBitsStart = bs.getCurPos();
-
-        if (bs.isError()) return false;
-
-        V12::DecodedDataBlock decoded;
-        V12BitStream payload(bs.getBuffer(), bs.getBufferSize(),
-                             (size_t)header.dataBitsStart);
-        if (!V12::readDataBlockPayload(payload, header.classId, &decoded)) {
-            const char* className = V12::dataBlockClassName(header.classId - T2Demo::DataBlockClassFirst);
-            Console::instance().printf(LogLevel::Error,
-                "Demo: unsupported or malformed initial datablock class %u%s",
-                header.classId, className ? className : "");
-            return false;
-        }
-
-        const size_t consumed = payload.position() - (size_t)header.dataBitsStart;
-        if (consumed > (size_t)bs.getRemainingBits()) return false;
-        bs.setCurPos(header.dataBitsStart + (int)consumed);
-        initialBlock.dataBlockHeaders.push_back(header);
-        ParsedDataBlock parsed;
-        parsed.classId = header.classId;
-        parsed.decoded = decoded;
-        if (const char* name = V12::dataBlockClassName(header.classId - T2Demo::DataBlockClassFirst))
-            parsed.className = name;
-        parsed.objectId = header.objectId;
-        if (!decoded.shapeFile.empty()) {
-            parsed.data["shapeFile"] = decoded.shapeFile;
-            initialBlock.datablockWeaponShapes[header.objectId] = decoded.shapeFile;
-        }
-        if (!decoded.debrisShape.empty()) parsed.data["debrisShape"] = decoded.debrisShape;
-        if (!decoded.cloakTexture.empty()) parsed.data["cloakTexture"] = decoded.cloakTexture;
-        initialBlock.dataBlocks[header.objectId] = std::move(parsed);
+        // The outer flag is the event list entry.
+        if (!readSimDataBlockEvent(bs)) return false;
     }
 
     initialBlock.dataBlockCount = count;
@@ -1890,10 +1897,7 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
     } else if (ev.classId == T2Demo::NetEventClassFirst + 1) { // CRCChallengeResponseEvent
         bs.readU32(); bs.readU32(); bs.readU32();
     } else if (ev.classId == T2Demo::NetEventClassFirst + 19) { // SimDataBlockEvent
-        int objId  = bs.readInt(T2Demo::SimDBEventObjectIdBits); (void)objId;
-        int clsId  = bs.readInt(T2Demo::SimDBEventClassIdBits); (void)clsId;
-        int idx    = bs.readInt(T2Demo::SimDBEventIndexBits); (void)idx;
-        int total_ = bs.readInt(T2Demo::SimDBEventTotalBits); (void)total_;
+        if (!readSimDataBlockEvent(bs)) bs.fail();
     } else if (ev.classId == T2Demo::NetEventClassFirst + 17 ||
                ev.classId == T2Demo::NetEventClassFirst + 18) {
         ev.audioProfileId = bs.readInt(11);

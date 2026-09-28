@@ -9152,7 +9152,10 @@ void ScriptEngine::registerDataBlock(ScriptObject* object) {
         object->id = allocateObjectId(true);
         objectsById[object->id] = object;
     }
-    object->internals["__datablockKey"] = VMValue(nextDataBlockModifiedKey_++);
+    // SimDataBlock::onAdd takes sNextModifiedKey after onStaticModified has
+    // bumped it for the static fields the datablock set, so a datablock's
+    // key is above a connection's initial 0.
+    object->internals["__datablockKey"] = VMValue(++nextDataBlockModifiedKey_);
     ensureEngineGroups();
     if (ScriptObject* group = findObject("DataBlockGroup")) addToSet(group, object);
 }
