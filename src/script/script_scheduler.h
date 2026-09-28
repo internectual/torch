@@ -15,12 +15,15 @@ public:
         std::string object;
         std::string command;
         std::vector<std::string> args;
+        // SimObject::schedule runs a method on `object`; the global form
+        // runs a function and only ties its lifetime to `object`.
+        bool onObject = false;
     };
 
     int schedule(double now, double delay, std::string object,
-                 std::string command, std::vector<std::string> args) {
+                 std::string command, std::vector<std::string> args, bool onObject = false) {
         Event event{nextId++, now + std::max(0.0, delay), std::move(object),
-                    std::move(command), std::move(args)};
+                    std::move(command), std::move(args), onObject};
         events.push_back(std::move(event));
         return events.back().id;
     }

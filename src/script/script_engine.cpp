@@ -1,5 +1,6 @@
 #include "script/script_engine.h"
 #include "sim/engine_classes.h"
+#include "sim/sim_natives.h"
 #include "game/material_property_map.h"
 #include <limits>
 #include "script/conversion_parity.h"
@@ -3813,6 +3814,8 @@ bool ScriptEngine::init() {
     });
 
     // Schedule: store callback for later execution
+    // schedule(time, refObject, command, args...): a function call that is
+    // cancelled if refObject is deleted.
     tsInstance->registerNative("schedule", [](const auto& args) -> VMValue {
         if (args.size() >= 3) {
             double delay = args[0].toDouble() / 1000.0; // ms to seconds
@@ -3820,6 +3823,17 @@ bool ScriptEngine::init() {
             return VMValue(ScriptEngine::instance().ts()->scheduleEvent(
                 Engine::instance().timer().now(), delay, args[1].toString(),
                 args[2].toString(), callbackArgs));
+        }
+        return VMValue(0);
+    });
+    // %obj.schedule(time, method, args...): SimObject::schedule.
+    tsInstance->registerNative("SimObject::schedule", [](const auto& args) -> VMValue {
+        if (args.size() >= 3) {
+            double delay = args[1].toDouble() / 1000.0;
+            std::vector<VMValue> callbackArgs(args.begin() + 3, args.end());
+            return VMValue(ScriptEngine::instance().ts()->scheduleEvent(
+                Engine::instance().timer().now(), delay, args[0].toString(),
+                args[2].toString(), callbackArgs, true));
         }
         return VMValue(0);
     });
@@ -8897,6 +8911,8 @@ bool ScriptEngine::init() {
             if (sameFieldName(name, args[1].toString())) return value;
         return VMValue("");
     });
+
+    registerSimNatives(*tsInstance);
 
     // Copy all TS-registered natives to DSO VM so DSO functions can find them
     for (auto& entry : tsInstance->getNatives()) {

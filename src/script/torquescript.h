@@ -76,8 +76,15 @@ public:
     bool deactivatePackage(const std::string& name);
     void clearPackages();
     bool isActivePackage(const std::string& name) const;
+    // A package of that name has been declared (isPackage).
+    bool isPackage(const std::string& name) const;
     int scheduleEvent(double now, double delay, const std::string& object,
-                      const std::string& command, const std::vector<VMValue>& args);
+                      const std::string& command, const std::vector<VMValue>& args, bool onObject = false);
+    // obj.method(args): the object's linked namespaces in order (script
+    // function, then console method), then Torch's flat console methods.
+    // Returns false when nothing handles it.
+    bool callObjectMethod(const std::string& object, const std::string& method,
+                          const std::vector<VMValue>& args, VMValue* result = nullptr);
     bool cancelEvent(int id);
     size_t cancelEventsForObject(const std::string& object);
     bool isEventPending(int id) const;

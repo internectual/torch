@@ -479,7 +479,7 @@ int main() {
     assert(!script.findObject("LifecycleChild") && !script.findObject("LifecycleGroup"));
 
     script.ts()->execute("new Lifecycle(LifecycleTimer);");
-    const int methodEvent = script.ts()->scheduleEvent(10.0, 1.0, "LifecycleTimer", "onTimer", {VMValue("method")});
+    const int methodEvent = script.ts()->scheduleEvent(10.0, 1.0, "LifecycleTimer", "onTimer", {VMValue("method")}, true);
     const int globalEvent = script.ts()->scheduleEvent(10.0, 1.0, "0", "globalTimer", {VMValue("global")});
     const int invalidEvent = script.ts()->scheduleEvent(10.0, 1.0, "MissingObject", "globalTimer", {VMValue("invalid")});
     assert(script.ts()->getNatives().count("cancelevent") == 1);
@@ -510,7 +510,7 @@ int main() {
     });
     script.ts()->execute("function MissionTimer::onTick(%this,%value) { $missionTimer = %this @ ':' @ %value; }");
     const std::string timerId = std::to_string(script.missionObjects().front().id);
-    const int missionEvent = script.ts()->scheduleEvent(20.0, 0.0, timerId, "onTick", {VMValue("tick")});
+    const int missionEvent = script.ts()->scheduleEvent(20.0, 0.0, timerId, "onTick", {VMValue("tick")}, true);
     assert(script.ts()->processScheduledEvents(20.0) == 1);
     assert(script.ts()->getGlobal("$missionTimer").toString() == timerId + ":tick");
     assert(!script.ts()->isEventPending(missionEvent));

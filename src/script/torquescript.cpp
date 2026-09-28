@@ -538,7 +538,28 @@ void TorqueScript::Impl::tokenize(const std::string& source) {
         if (c >= '0' && c <= '9') {
             tok.type = TSTokenType::Number;
             const char* start = srcPtr;
+            // scan.l: 0[xX]{HEXDIGIT}+ is an S32 (Sc_ScanHex: %x); FLOAT
+            // allows an exponent.
+            if (c == '0' && srcPtr + 2 < srcEnd && (srcPtr[1] == 'x' || srcPtr[1] == 'X') &&
+                isxdigit((unsigned char)srcPtr[2])) {
+                srcPtr += 2;
+                while (srcPtr < srcEnd && isxdigit((unsigned char)*srcPtr)) srcPtr++;
+                tok.text = std::string(start, srcPtr - start);
+                tok.numVal = (double)(int32_t)(uint32_t)std::strtoul(tok.text.c_str() + 2, nullptr, 16);
+                tok.pos.col = srcCol;
+                srcCol += (int)(srcPtr - start);
+                tokens.push_back(tok);
+                continue;
+            }
             while (srcPtr < srcEnd && ((*srcPtr >= '0' && *srcPtr <= '9') || *srcPtr == '.')) srcPtr++;
+            if (srcPtr < srcEnd && (*srcPtr == 'e' || *srcPtr == 'E')) {
+                const char* exp = srcPtr + 1;
+                if (exp < srcEnd && (*exp == '+' || *exp == '-')) ++exp;
+                if (exp < srcEnd && *exp >= '0' && *exp <= '9') {
+                    srcPtr = exp;
+                    while (srcPtr < srcEnd && *srcPtr >= '0' && *srcPtr <= '9') srcPtr++;
+                }
+            }
             tok.text = std::string(start, srcPtr - start);
             tok.numVal = atof(tok.text.c_str());
             tok.pos.col = srcCol;
@@ -2852,6 +2873,10 @@ bool TorqueScript::isFunction(const std::string& name) const {
     return hasFunction(name) || impl->natives.count(toLower(name)) != 0;
 }
 
+bool TorqueScript::isPackage(const std::string& name) const {
+    return impl->packageFunctions.count(toLower(name)) != 0;
+}
+
 bool TorqueScript::activatePackage(const std::string& name) {
     if (name.empty() || isActivePackage(name)) return !name.empty();
     const std::string package = toLower(name);
@@ -3045,10 +3070,54 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
 }
 
 int TorqueScript::scheduleEvent(double now, double delay, const std::string& object,
-                                const std::string& command, const std::vector<VMValue>& args) {
+                                const std::string& command, const std::vector<VMValue>& args,
+                                bool onObject) {
     std::vector<std::string> values;
     for (const auto& arg : args) values.push_back(arg.toString());
-    return impl->scheduler.schedule(now, delay, object, command, std::move(values));
+    return impl->scheduler.schedule(now, delay, object, command, std::move(values), onObject);
+}
+
+bool TorqueScript::callObjectMethod(const std::string& object, const std::string& method,
+                                    const std::vector<VMValue>& args, VMValue* result) {
+    std::vector<VMValue> methodArgs;
+    methodArgs.reserve(args.size() + 1);
+    methodArgs.emplace_back(object);
+    methodArgs.insert(methodArgs.end(), args.begin(), args.end());
+    std::vector<std::string> spaces;
+    if (ScriptEngine::exists()) {
+        if (ScriptObject* sobj = ScriptEngine::instance().findObject(object.c_str()))
+            spaces = ScriptEngine::instance().objectNamespaces(sobj);
+        else
+            for (const auto& mission : ScriptEngine::instance().missionObjects()) {
+                char* end = nullptr;
+                const long id = std::strtol(object.c_str(), &end, 10);
+                if (mission.name == object || (end && *end == '\0' && id > 0 && mission.id == id)) {
+                    spaces = EngineClasses::chain(mission.className);
+                    break;
+                }
+            }
+    }
+    for (const auto& space : spaces) {
+        const std::string full = space + "::" + method;
+        if (hasFunction(full)) {
+            VMValue value = callFunction(full, methodArgs);
+            if (result) *result = value;
+            return true;
+        }
+        auto nit = impl->natives.find(toLower(full));
+        if (nit != impl->natives.end()) {
+            VMValue value = nit->second(methodArgs);
+            if (result) *result = value;
+            return true;
+        }
+    }
+    auto nit = impl->natives.find(toLower(method));
+    if (nit != impl->natives.end() && !spaces.empty()) {
+        VMValue value = nit->second(methodArgs);
+        if (result) *result = value;
+        return true;
+    }
+    return false;
 }
 bool TorqueScript::cancelEvent(int id) { return impl->scheduler.cancel(id); }
 size_t TorqueScript::cancelEventsForObject(const std::string& object) {
@@ -3059,29 +3128,9 @@ size_t TorqueScript::processScheduledEvents(double now) {
     return impl->scheduler.advance(now, [this](const ScriptScheduler::Event& event) {
         std::vector<VMValue> args;
         for (const auto& value : event.args) args.emplace_back(value);
-        if (!event.object.empty() && event.object != "0") {
-            ScriptObject* object = nullptr;
-            if (ScriptEngine::exists()) object = ScriptEngine::instance().findObject(event.object.c_str());
-            std::string method;
-            if (object) {
-                method = object->className + "::" + event.command;
-            } else if (ScriptEngine::exists()) {
-                for (const auto& mission : ScriptEngine::instance().missionObjects()) {
-                    char* end = nullptr;
-                    const long id = std::strtol(event.object.c_str(), &end, 10);
-                    if (mission.name == event.object ||
-                        (end && *end == '\0' && id > 0 && mission.id == id)) {
-                        method = mission.className + "::" + event.command;
-                        break;
-                    }
-                }
-            }
-            if (method.empty() || !hasFunction(method)) return;
-            // Preserve the handle spelling used by schedule.  Stock scripts
-            // may pass this value back to getName/getId, so an ID must not be
-            // silently converted into the mission object's name.
-            args.insert(args.begin(), VMValue(event.object));
-            callFunction(method, args);
+        if (event.onObject) {
+            // Deleting the object cancelled its events; a stale handle runs nothing.
+            callObjectMethod(event.object, event.command, args);
             return;
         }
         // SimConsoleEvent: Con::execute resolves script functions and
