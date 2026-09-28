@@ -1597,6 +1597,7 @@ std::string ScriptEngine::objectDataBlock(ScriptObject* object) {
 void ScriptEngine::objectAdded(ScriptObject* object) {
     if (!object || object->internals["__added"].toBool()) return;
     object->internals["__added"] = VMValue(1);
+    if (EngineClasses::isA(object->className, "SimDataBlock")) registerDataBlock(object);
     EngineObjects::attach(object);
     if (tsInstance) {
         // %this is the object's id, named or not; onAdd resolves through the
@@ -8992,6 +8993,7 @@ bool ScriptEngine::init() {
     });
 
     registerSimNatives(*tsInstance);
+    ensureEngineGroups();
 
     // Copy all TS-registered natives to DSO VM so DSO functions can find them
     for (auto& entry : tsInstance->getNatives()) {
@@ -9014,7 +9016,7 @@ void ScriptEngine::shutdown() {
     objects.clear();
     objectsById.clear();
     nextDatablockObjectId_ = 3;
-    nextDynamicObjectId_ = 1027;
+    nextDynamicObjectId_ = 2051;
     if (tsInstance) tsInstance->clearScheduledEvents();
     missionObjects_.clear();
     missionObjectsWorldBacked_ = false;
@@ -9127,6 +9129,44 @@ void ScriptEngine::assignDatablockId(ScriptObject* object) {
     if (!object || object->id != 0) return;
     object->id = allocateObjectId(true);
     objectsById[object->id] = object;
+}
+
+void ScriptEngine::ensureEngineGroups() {
+    for (const char* name : {"ClientGroup", "DataBlockGroup"}) {
+        if (findObject(name)) continue;
+        auto* group = new ScriptObject;
+        group->name = name;
+        group->className = "SimGroup";
+        objects[name] = group;
+        objectId(group);
+        if (tsInstance) tsInstance->setGlobal(name, VMValue(name));
+    }
+}
+
+void ScriptEngine::registerDataBlock(ScriptObject* object) {
+    if (!object || object->internals.count("__datablockKey")) return;
+    object->internals["__datablock"] = VMValue(1);
+    if (object->id < 3 || object->id > 2050) {
+        if (object->id) objectsById.erase(object->id);
+        object->id = 0;
+        object->id = allocateObjectId(true);
+        objectsById[object->id] = object;
+    }
+    object->internals["__datablockKey"] = VMValue(nextDataBlockModifiedKey_++);
+    ensureEngineGroups();
+    if (ScriptObject* group = findObject("DataBlockGroup")) addToSet(group, object);
+}
+
+void ScriptEngine::deleteDataBlocks() {
+    ScriptObject* group = findObject("DataBlockGroup");
+    if (group) {
+        std::vector<std::string> members;
+        const int count = group->internals["__childCount"].toInt();
+        for (int i = 0; i < count; ++i) members.push_back(group->internals["__child" + std::to_string(i)].toString());
+        for (auto it = members.rbegin(); it != members.rend(); ++it) deleteScriptObject(*it);
+    }
+    nextDatablockObjectId_ = 3;
+    nextDataBlockModifiedKey_ = 0;
 }
 
 void ScriptEngine::forgetObject(ScriptObject* object) {

@@ -912,9 +912,9 @@ VMValue TorqueScript::Impl::parseDatablock() {
 
     // Datablocks take ids from the datablock range.
     auto& engine = ScriptEngine::instance();
-    object->internals["__datablock"] = VMValue(1);
     engine.assignDatablockId(object);
     engine.objects[engine.objectKey(object)] = object;
+    engine.registerDataBlock(object);
     outer->setGlobal("$" + object->name, VMValue(object->name));
     outer->setGlobal(object->name, VMValue(object->name));
     return VMValue(object->id);

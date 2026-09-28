@@ -5,6 +5,8 @@
 #include "sim/sim_state.h"
 #include "core/engine.h"
 #include "script/torquescript.h"
+#include "script/script_engine.h"
+#include <map>
 #include "sim/shape_base.h"
 #include "sim/game_connection.h"
 #include "sim/net_object.h"
@@ -86,6 +88,10 @@ void registerSimNatives(TorqueScript& ts) {
     });
     // ResManager::purge frees unreferenced cached resources; Torch's
     // resource caches hold nothing the scripts can observe.
+    ts.registerNative("deleteDataBlocks", [](const std::vector<VMValue>&) -> VMValue {
+        ScriptEngine::instance().deleteDataBlocks();
+        return VMValue("");
+    });
     ts.registerNative("purgeResources", [](const std::vector<VMValue>&) -> VMValue {
         return VMValue(1);
     });

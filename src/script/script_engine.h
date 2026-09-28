@@ -142,7 +142,8 @@ struct VMValue {
 class EngineObject;
 
 struct ScriptObject {
-    // SimObject id: datablocks from 3, dynamic objects from 1027. Assigned
+    // SimObject id: datablocks from 3, dynamic objects from 2051 (Tribes 2:
+    // 11-bit datablock ids, 3..2050). Assigned
     // on first use (ScriptEngine::objectId); an id is only ever handed out
     // after that, so every id lookup can be answered.
     int id = 0;
@@ -390,8 +391,15 @@ public:
     std::unordered_map<int, ScriptObject*> objectsById;
     // The object's SimObject id, assigned from the dynamic range on first use.
     int objectId(ScriptObject* object);
-    // Datablocks take ids from their own range (3..1026).
+    // Datablocks take ids from their own range (3..2050).
     void assignDatablockId(ScriptObject* object);
+    // SimDataBlock::assignId/onAdd: a datablock id, the next modified key,
+    // and membership of DataBlockGroup (creation order).
+    void registerDataBlock(ScriptObject* object);
+    // deleteDataBlocks(): every datablock, last first; ids restart at 3.
+    void deleteDataBlocks();
+    // The engine's named groups (RootGroup children): ClientGroup, DataBlockGroup.
+    void ensureEngineGroups();
     int allocateObjectId(bool datablock = false);
     // Forget a deleted object's id.
     void forgetObject(ScriptObject* object);
@@ -407,7 +415,8 @@ public:
 private:
     // SimObject id ranges (DataBlockObjectIdFirst, DynamicObjectIdFirst).
     int nextDatablockObjectId_ = 3;
-    int nextDynamicObjectId_ = 1027;
+    int nextDataBlockModifiedKey_ = 0;
+    int nextDynamicObjectId_ = 2051;
     static ScriptEngine* instance_;
     VirtualMachine* vmInstance{};
     TorqueScript* tsInstance{};
