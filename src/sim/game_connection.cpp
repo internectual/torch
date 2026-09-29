@@ -598,8 +598,46 @@ void GameConnection::objectLocalScopeAlways(const std::string& object) {
         if (ghost.index >= 0 && ghost.object == object) { ghost.flags |= GhostInfo::ScopeLocalAlways; return; }
 }
 
+// NetConnection::ghostWritePacket scoping: every ghost not scoped always
+// leaves scope, the scope object scopes the scene (onCameraScopeQuery:
+// itself, then SceneGraph::scopeScene within the visible distance), and a
+// ghost left out of scope is killed.
+void GameConnection::scopeScene() {
+    for (auto& ghost : ghosts)
+        if (ghost.index >= 0 && !(ghost.flags & (GhostInfo::ScopeAlways | GhostInfo::ScopeLocalAlways)))
+            ghost.flags &= ~GhostInfo::InScope;
+    auto* scope = controlObject_.empty() ? nullptr : EngineObjects::get<SceneObject>(controlObject_);
+    if (scope) {
+        objectInScope(controlObject_);
+        float visible = 0.0f;
+        auto& engine = ScriptEngine::instance();
+        for (auto& [name, object] : engine.objects)
+            if (object && object->className == "Sky") {
+                visible = Fields::f32(object, "visibleDistance", 0.0f);
+                break;
+            }
+        const float x = scope->transform[3], y = scope->transform[7], z = scope->transform[11];
+        std::vector<std::string> inRange;
+        for (auto& [name, object] : engine.objects) {
+            auto* net = object ? dynamic_cast<SceneObject*>(object->engine.get()) : nullptr;
+            if (!net || !net->ghostable || net->scopeAlways || net->netClassId() < 0) continue;
+            const float dx = net->transform[3] - x, dy = net->transform[7] - y, dz = net->transform[11] - z;
+            if (dx * dx + dy * dy + dz * dz <= visible * visible) inRange.push_back(engine.objectKey(object));
+        }
+        for (const auto& key : inRange) objectInScope(key);
+    }
+    for (auto& ghost : ghosts)
+        if (ghost.index >= 0 && !(ghost.flags & (GhostInfo::InScope | GhostInfo::ScopeAlways |
+                                                 GhostInfo::ScopeLocalAlways | GhostInfo::KillGhost |
+                                                 GhostInfo::KillingGhost))) {
+            ghost.flags |= GhostInfo::KillGhost;
+            ghost.updateMask = 0xFFFFFFFFu;
+        }
+}
+
 void GameConnection::writeGhosts(TorqueBitWriter& w, std::vector<GhostRef>& refs) {
     if (!w.writeFlag(ghosting)) return;
+    if (scoping) scopeScene();
     // Dirty state set on the objects since the last packet.
     int maxIndex = 0;
     std::vector<GhostInfo*> updates;

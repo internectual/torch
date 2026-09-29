@@ -3,6 +3,7 @@
 #include "sim/sim_natives.h"
 #include "sim/camera.h"
 #include "sim/player.h"
+#include "sim/static_shapes.h"
 #include "sim/torque_math.h"
 #include "sim/engine_crc.h"
 #include "sim/sim_state.h"
@@ -21,6 +22,7 @@ void registerSimNatives(TorqueScript& ts) {
     registerShapeBaseNatives(ts);
     registerCameraNatives(ts);
     registerPlayerNatives(ts);
+    registerStaticShapeNatives(ts);
     registerGameConnectionNatives(ts);
     registerSceneObjectClasses();
 

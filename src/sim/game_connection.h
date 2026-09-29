@@ -141,6 +141,7 @@ private:
 
     struct GhostRef { int index; uint32_t mask; uint32_t flags; };
     void writeGhosts(TorqueBitWriter& w, std::vector<GhostRef>& refs);
+    void scopeScene();
     void ghostPacketDropped(std::vector<GhostRef>& refs);
     void ghostPacketReceived(std::vector<GhostRef>& refs);
     void handleGhostMessage(int message, uint32_t sequence);
