@@ -1989,7 +1989,7 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
                 DemoPlayerInfo added;
                 added.name = ev.targetName;
                 added.skin = ev.targetSkin;
-                added.teamId = ev.targetSensorGroup;
+                added.teamId = ev.targetSensorGroup >= 0 ? ev.targetSensorGroup : 0;
                 added.clientId = ev.targetId;
                 playerInfo_.push_back(std::move(added));
             }

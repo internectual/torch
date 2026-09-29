@@ -510,7 +510,7 @@ struct NetEventInfo {
     bool hasMissionCrc = false;
     std::string targetName, targetSkin, targetSkinPreference;
     std::string targetVoice, targetType;
-    int targetSensorGroup = 0;
+    int targetSensorGroup = -1; // -1: not in this update
     int targetDataBlockId = -2;
     int targetRenderFlags = 0;
     bool hasTargetRenderFlags = false;
