@@ -260,6 +260,22 @@ void registerPlayerNatives(TorqueScript& ts) {
         }
         return VMValue(std::string(vert) + " " + quad);
     });
+    // Player::setMoveState: a disabled player ignores its moves.
+    ts.registerNative("Player::disableMove", [player](const Args& args) -> VMValue {
+        auto* p = player(args);
+        if (p) {
+            p->state.disableMove = args.size() > 1 && args[1].toBool();
+            if (!p->controllingClient.empty())
+                if (auto* c = EngineObjects::get<GameConnection>(p->controllingClient)) c->setControlObjectDirty();
+        }
+        return VMValue("");
+    });
+    ts.registerNative("Player::setArmThread", [player](const Args& args) -> VMValue {
+        auto* p = player(args);
+        if (!p || args.size() < 2) return VMValue(0);
+        p->armThread = args[1].toString();
+        return VMValue(1);
+    });
     ts.registerNative("Player::applyImpulse", [player](const Args& args) -> VMValue {
         auto* p = player(args);
         if (!p || args.size() < 3) return VMValue("");

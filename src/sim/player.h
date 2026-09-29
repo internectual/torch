@@ -19,6 +19,7 @@ public:
     void readFields() override;
 
     PlayerPrediction::State state;
+    std::string armThread = "look"; // setArmThread (the arm animation is not sent yet)
     // Moves the player's transform (setTransform): position and yaw.
     void setTransform(const std::array<float, 16>& matrix);
     const char* stateName() const;

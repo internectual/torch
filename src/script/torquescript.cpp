@@ -1,4 +1,5 @@
 #include "script/torquescript.h"
+#include "sim/net_object.h"
 #include "sim/engine_classes.h"
 #include "sim/net_string_table.h"
 #include "script/script_engine.h"
@@ -2002,7 +2003,11 @@ VMValue TorqueScript::Impl::parsePostfix() {
                 lastFieldObj = val.toString();
                 lastFieldName = member.text;
                 auto* obj = ScriptEngine::instance().findObject(lastFieldObj.c_str());
-                if (obj) {
+                std::string live;
+                auto* scene = obj ? dynamic_cast<SceneObject*>(obj->engine.get()) : nullptr;
+                if (scene && scene->liveField(lastFieldName, live)) {
+                    val = VMValue(live);
+                } else if (obj) {
                     auto* field = findField(obj, lastFieldName);
                     if (field) val = *field;
                     else val = VMValue("");

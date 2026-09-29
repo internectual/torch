@@ -1,5 +1,6 @@
 #include "sim/shape_base.h"
 #include "sim/static_shapes.h"
+#include "sim/trigger.h"
 #include "sim/sim_state.h"
 #include <unordered_map>
 #include "core/engine.h"
@@ -815,6 +816,8 @@ void PlayerContacts::queue(PlayerObject& player) {
     float plo[3], phi[3];
     player.worldBox(plo, phi);
     const std::string self = player.handle();
+    // Triggers in the working set: potentialEnterObject.
+    triggersPotentialEnter(self, plo, phi);
     for (auto& [name, object] : ScriptEngine::instance().objects) {
         auto* shape = object ? dynamic_cast<ShapeBase*>(object->engine.get()) : nullptr;
         if (!shape || shape == &player) continue;
@@ -979,6 +982,9 @@ void registerShapeBaseNatives(TorqueScript& ts) {
         return VMValue("");
     });
     method("isHidden", [](ShapeBase& s, const Args&) { return VMValue(s.hidden ? 1 : 0); });
+    // Object mounting is not ported: nothing is mounted.
+    method("getObjectMount", [](ShapeBase&, const Args&) { return VMValue(0); });
+    method("isMounted", [](ShapeBase&, const Args&) { return VMValue(0); });
     // startFade(timeMS, delayMS, fadeOut).
     method("startFade", [arg](ShapeBase& s, const Args& a) {
         s.startFade(arg(a, 1).toInt() / 1000.0f, arg(a, 2).toInt() / 1000.0f, arg(a, 3).toBool());

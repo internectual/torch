@@ -35,6 +35,9 @@ public:
     void writeTransform(TorqueBitWriter& w) const;       // mathWrite(MatrixF)
     void writeAffineTransform(TorqueBitWriter& w) const; // position, quaternion x/y/z, w sign
     void writeScale(TorqueBitWriter& w) const;
+    // The persist fields that read the live transform (TypeMatrixPosition,
+    // TypeMatrixRotation, scale); false for any other field.
+    bool liveField(const std::string& name, std::string& out) const;
 };
 
 // Typed reads of a script object's persist fields (console type parsing).

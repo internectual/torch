@@ -1,4 +1,6 @@
 #include "sim/net_object.h"
+#include "sim/torque_math.h"
+#include <cstdio>
 #include "net/v12_registry.h"
 #include "script/script_engine.h"
 #include <cmath>
@@ -161,4 +163,24 @@ void SceneObject::writeAffineTransform(TorqueBitWriter& w) const {
 
 void SceneObject::writeScale(TorqueBitWriter& w) const {
     w.writePoint({scale[0], scale[1], scale[2]});
+}
+
+bool SceneObject::liveField(const std::string& name, std::string& out) const {
+    char buffer[128];
+    if (strcasecmp(name.c_str(), "position") == 0) {
+        std::snprintf(buffer, sizeof(buffer), "%g %g %g", transform[3], transform[7], transform[11]);
+    } else if (strcasecmp(name.c_str(), "rotation") == 0) {
+        // AngAxisF(mat), axis normalized, angle in degrees.
+        const auto aa = TorqueMath::angAxis(TorqueMath::quat(transform));
+        float x = aa.x, y = aa.y, z = aa.z;
+        const float len = std::sqrt(x * x + y * y + z * z);
+        if (len > 0) { x /= len; y /= len; z /= len; }
+        std::snprintf(buffer, sizeof(buffer), "%g %g %g %g", x, y, z, aa.angle * 180.0f / (float)M_PI);
+    } else if (strcasecmp(name.c_str(), "scale") == 0) {
+        std::snprintf(buffer, sizeof(buffer), "%g %g %g", scale[0], scale[1], scale[2]);
+    } else {
+        return false;
+    }
+    out = buffer;
+    return true;
 }

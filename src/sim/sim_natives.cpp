@@ -4,6 +4,7 @@
 #include "sim/camera.h"
 #include "sim/player.h"
 #include "sim/static_shapes.h"
+#include "sim/trigger.h"
 #include "sim/nav_graph.h"
 #include "sim/projectiles.h"
 #include "sim/target_manager.h"
@@ -30,6 +31,7 @@ void registerSimNatives(TorqueScript& ts) {
     registerCameraNatives(ts);
     registerPlayerNatives(ts);
     registerStaticShapeNatives(ts);
+    registerTriggerNatives(ts);
     registerNavGraphNatives(ts);
     registerTargetManagerNatives(ts);
     // The server's own static geometry and water (gServerContainer).
