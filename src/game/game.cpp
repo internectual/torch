@@ -12293,15 +12293,6 @@ void Game::startLiveClient(GameConnection& connection) {
     demoSnapshots.clear();
     demoViewSnapshots.clear();
     demoAudioEventsPlayed.clear();
-    // The in-process server's players collide with this client's world
-    // (see ServerCollision).
-    serverCollision().triangles = [this](const Point3F& lo, const Point3F& hi,
-                                         std::vector<PlayerPrediction::Triangle>& out) {
-        if (w) w->playerTrianglesInBox(lo, hi, out);
-    };
-    serverCollision().water = [this](float x, float y) {
-        return w ? w->waterSurfaceAt(x, y) : std::numeric_limits<float>::quiet_NaN();
-    };
     connection.onServerPacket = [this](const std::vector<uint8_t>& packet) {
         if (demoParser && demoLive)
             demoParser->appendLiveBlock(T2Demo::BlockTypePacket, packet.data(), packet.size());

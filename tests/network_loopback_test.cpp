@@ -15,6 +15,7 @@
 #include "core/engine.h"
 
 #include <cassert>
+#include <limits>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -1385,6 +1386,9 @@ int main() {
         // search), and ghost in the layout the client's readers decode,
         // explosions included.
         auto savedTriangles = serverCollision().triangles;
+        auto savedWater = serverCollision().water;
+        // No water here (an earlier block left a lava WaterBlock at 0 0 50).
+        serverCollision().water = [](float, float) { return std::numeric_limits<float>::quiet_NaN(); };
         serverCollision().triangles = [](const Point3F&, const Point3F&, std::vector<PlayerPrediction::Triangle>& out) {
             out.push_back({{-1000, -1000, 0}, {1000, -1000, 0}, {1000, 1000, 0}, {0, 0, 1}});
             out.push_back({{-1000, -1000, 0}, {1000, 1000, 0}, {-1000, 1000, 0}, {0, 0, 1}});
@@ -1546,6 +1550,7 @@ int main() {
             ScriptEngine::instance().deleteScriptObject(script.ts()->getGlobal(var).toString());
         assert(script.ts()->getGlobal("$projUnzap").toInt() == targetId);
         serverCollision().triangles = savedTriangles;
+        serverCollision().water = savedWater;
     }
     return 0;
 }

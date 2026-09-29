@@ -36,9 +36,8 @@ private:
     bool physicsValid = false;
 };
 
-// The world geometry the server's players collide with. The in-process
-// server uses the client's loaded world until the server keeps its own
-// container (Container::castRay / findObjects on server objects).
+// The static world geometry and water the server collides with: set to
+// ServerContainer (the server's mission objects) at registration.
 struct ServerCollision {
     PlayerPrediction::GatherTriangles triangles;
     PlayerPrediction::WaterLevel water;

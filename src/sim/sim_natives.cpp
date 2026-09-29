@@ -7,6 +7,7 @@
 #include "sim/nav_graph.h"
 #include "sim/projectiles.h"
 #include "sim/target_manager.h"
+#include "sim/server_container.h"
 #include "sim/engine_classes.h"
 #include "sim/torque_math.h"
 #include "sim/engine_crc.h"
@@ -31,6 +32,9 @@ void registerSimNatives(TorqueScript& ts) {
     registerStaticShapeNatives(ts);
     registerNavGraphNatives(ts);
     registerTargetManagerNatives(ts);
+    // The server's own static geometry and water (gServerContainer).
+    serverCollision().triangles = ServerContainer::gatherTriangles;
+    serverCollision().water = ServerContainer::waterSurfaceAt;
     registerContainerNatives(ts);
     registerProjectileNatives(ts);
     // ai/aiConsole.cc AISystemEnabled([bool]): no argument enables it.

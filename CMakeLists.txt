@@ -48,6 +48,7 @@ add_executable(torch
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
+    src/sim/server_container.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
@@ -146,6 +147,7 @@ add_executable(torch_server
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
+    src/sim/server_container.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
@@ -417,6 +419,7 @@ add_executable(torch_parity_test
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
+    src/sim/server_container.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
@@ -496,6 +499,7 @@ add_executable(torch_network_loopback_test
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
+    src/sim/server_container.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
@@ -577,6 +581,7 @@ add_executable(torch_target_manager_test
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
+    src/sim/server_container.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
