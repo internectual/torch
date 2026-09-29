@@ -1,4 +1,7 @@
 #include "sim/shape_base.h"
+#include <unordered_map>
+#include "core/engine.h"
+#include "render/dts_loader.h"
 #include "sim/datablock_pack.h"
 #include "sim/engine_classes.h"
 #include "sim/game_connection.h"
@@ -130,6 +133,51 @@ float eyeHeight(const ShapeBase& shape) {
     return dynamic_cast<const PlayerObject*>(&shape) ? boxHeight(shape) * 0.9f : 0.0f;
 }
 
+// A shape's named node positions at the bind pose (shape space), from the
+// DTS the datablock names. The engine reads the animated node transforms;
+// the server has no animation, so the root pose stands in.
+const std::unordered_map<std::string, std::array<float, 3>>* shapeNodes(const std::string& shapeFile) {
+    static std::unordered_map<std::string, std::unordered_map<std::string, std::array<float, 3>>> cache;
+    if (shapeFile.empty()) return nullptr;
+    std::string key = shapeFile;
+    for (char& ch : key) ch = (char)std::tolower((unsigned char)ch);
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        std::unordered_map<std::string, std::array<float, 3>> nodes;
+        const auto bytes = Engine::instance().fs().read(("shapes/" + shapeFile).c_str());
+        if (!bytes.empty()) {
+            const DTSLoadResult shape = loadDTS(bytes.data(), bytes.size(), shapeFile.c_str());
+            for (size_t n = 0; n < shape.nodes.size() && n < shape.defaultTransforms.size(); ++n) {
+                const Point3F p = shape.defaultTransforms[n].transform({0, 0, 0});
+                std::string name = shape.nodes[n].name;
+                for (char& ch : name) ch = (char)std::tolower((unsigned char)ch);
+                // The loader's frame has height in y and forward in z.
+                nodes[name] = {p.x, p.z, p.y};
+            }
+        }
+        it = cache.emplace(key, std::move(nodes)).first;
+    }
+    return &it->second;
+}
+
+bool shapeNode(const std::string& shapeFile, const char* node, float out[3]) {
+    const auto* nodes = shapeNodes(shapeFile);
+    if (!nodes) return false;
+    auto it = nodes->find(node);
+    if (it == nodes->end()) return false;
+    out[0] = it->second[0]; out[1] = it->second[1]; out[2] = it->second[2];
+    return true;
+}
+
+std::string objectShapeFile(const ShapeBase& shape) {
+    ScriptObject* data = ScriptEngine::instance().findObject(shape.dataBlock().c_str());
+    return Fields::string(data, "shapeFile", "");
+}
+
+std::array<float, 16> translation(const float p[3]) {
+    return {1, 0, 0, p[0], 0, 1, 0, p[1], 0, 0, 1, p[2], 0, 0, 0, 1};
+}
+
 } // namespace
 
 int ShapeBaseImageData::lookupState(const std::string& name) const {
@@ -153,6 +201,7 @@ std::shared_ptr<const ShapeBaseImageData> ShapeBaseImageData::find(const std::st
     const DataBlockPack::Context c(object, unused, nullptr);
     data->mountPoint = c.s32("mountPoint", 0);
     data->offsetTransform = DataBlockPack::imageOffsetTransform(c);
+    data->shapeFile = c.str("shapeFile");
     data->mass = c.f32("mass", 0.0f);
     data->usesEnergy = c.boolean("usesEnergy", false);
     data->minEnergy = c.f32("minEnergy", 2.0f);
@@ -515,7 +564,10 @@ void ShapeBase::updateImageState(uint32_t slot, float dt) {
 // feet); the engine's fallback when the shape has no mount node is the
 // object transform itself.
 std::array<float, 16> ShapeBase::getMountTransform(uint32_t mountPoint) const {
-    (void)mountPoint;
+    // The shape's "mount<n>" node (bind pose) when the shape has one.
+    float node[3];
+    const std::string name = "mount" + std::to_string(mountPoint);
+    if (shapeNode(objectShapeFile(*this), name.c_str(), node)) return TorqueMath::mul(transform, translation(node));
     Matrix m = transform;
     const float h = eyeHeight(*this);
     m[3] += m[2] * h;
@@ -530,7 +582,14 @@ std::array<float, 16> ShapeBase::getMountTransform(uint32_t mountPoint) const {
 std::array<float, 16> ShapeBase::getImageTransform(uint32_t slot) const {
     const MountedImage& image = images[slot];
     if (!image.dataBlock) return transform;
-    return TorqueMath::mul(getMountTransform((uint32_t)image.dataBlock->mountPoint), image.dataBlock->offsetTransform);
+    Matrix mount = TorqueMath::mul(getMountTransform((uint32_t)image.dataBlock->mountPoint), image.dataBlock->offsetTransform);
+    // mountTransform = offsetTransform * inverse(image "mountPoint" node).
+    float node[3];
+    if (shapeNode(image.dataBlock->shapeFile, "mountpoint", node)) {
+        const float back[3] = {-node[0], -node[1], -node[2]};
+        mount = TorqueMath::mul(mount, translation(back));
+    }
+    return mount;
 }
 
 // ShapeBase::getMuzzleTransform, with Player::getMuzzleTransform's
@@ -543,8 +602,10 @@ std::array<float, 16> ShapeBase::getImageTransform(uint32_t slot) const {
 // exact: the player's transform pitched by its head pitch (Player's
 // standard-animation branch; Torch's server player is always in one).
 std::array<float, 16> ShapeBase::getMuzzleTransform(uint32_t slot) const {
-    const Matrix nmat = getImageTransform(slot);
+    Matrix nmat = getImageTransform(slot);
     if (!images[slot].dataBlock) return transform;
+    float node[3];
+    if (shapeNode(images[slot].dataBlock->shapeFile, "muzzlepoint", node)) nmat = TorqueMath::mul(nmat, translation(node));
     if (auto* player = dynamic_cast<const PlayerObject*>(this)) {
         Matrix mat = TorqueMath::mul(transform, rotX(player->state.headPitch));
         mat[3] = nmat[3];
@@ -562,9 +623,11 @@ std::array<float, 16> ShapeBase::getMuzzleTransform(uint32_t slot) const {
 std::array<float, 16> ShapeBase::getEyeTransform() const {
     if (auto* player = dynamic_cast<const PlayerObject*>(this)) {
         Matrix pmat = TorqueMath::mul(rotZ(player->state.headYaw), rotX(player->state.headPitch));
-        pmat[3] = 0;
-        pmat[7] = 0;
-        pmat[11] = eyeHeight(*this);
+        float eye[3] = {0, 0, eyeHeight(*this)};
+        shapeNode(objectShapeFile(*this), "eye", eye);
+        pmat[3] = eye[0];
+        pmat[7] = eye[1];
+        pmat[11] = eye[2];
         return TorqueMath::mul(transform, pmat);
     }
     return transform;

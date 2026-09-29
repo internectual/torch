@@ -54,6 +54,7 @@ struct ShapeBaseImageData {
     std::string className;
     int mountPoint = 0;
     std::array<float, 16> offsetTransform{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    std::string shapeFile; // the image shape, for its mountPoint/muzzlePoint nodes
     float mass = 0.0f;
     bool usesEnergy = false;
     float minEnergy = 2.0f;
