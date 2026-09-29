@@ -35,6 +35,7 @@ public:
     float heat = 0.0f;
     bool hidden = false;
     float cameraFov = 90.0f;
+    bool trigger[6]{}; // mTrigger: the last move's trigger states
 
     float maxDamage() const { return dataFloat("maxDamage", 1.0f); }
     float maxEnergy() const { return dataFloat("maxEnergy", 0.0f); }
@@ -52,6 +53,7 @@ public:
     const char* damageStateName() const;
 
     void processMove(const ClientMoveIn* move) override;
+    void processShapeTick(); // energy and repair
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
     bool writePacketData(GameConnection& connection, TorqueBitWriter& w) override;
 };

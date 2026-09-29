@@ -1,4 +1,5 @@
 #include "sim/shape_base.h"
+#include "sim/game_connection.h"
 #include "script/script_engine.h"
 #include "script/torquescript.h"
 #include "core/console.h"
@@ -66,7 +67,18 @@ bool ShapeBase::setDamageState(const std::string& name) {
     return false;
 }
 
-void ShapeBase::processMove(const ClientMoveIn*) {
+void ShapeBase::processMove(const ClientMoveIn* move) {
+    processShapeTick();
+    // Script on trigger state changes: %data.onTrigger(%obj, %trigger, %state).
+    if (move)
+        for (int i = 0; i < 6; ++i)
+            if (move->trigger[i] != trigger[i]) {
+                trigger[i] = move->trigger[i];
+                callDataBlock("onTrigger", {std::to_string(i), trigger[i] ? "1" : "0"});
+            }
+}
+
+void ShapeBase::processShapeTick() {
     // Energy management
     if (damageState == Enabled && !dataBool("inheritEnergyFromMount", false))
         energy = std::clamp(energy + rechargeRate, 0.0f, std::max(0.0f, maxEnergy()));
@@ -154,6 +166,12 @@ void registerShapeBaseNatives(TorqueScript& ts) {
         });
     };
     (void)self;
+    // ShapeBase::getControllingClient: the connection's id, 0 when none.
+    method("getControllingClient", [](ShapeBase& s, const Args&) {
+        ScriptObject* client = s.controllingClient.empty() ? nullptr
+            : ScriptEngine::instance().findObject(s.controllingClient.c_str());
+        return VMValue(client ? ScriptEngine::instance().objectId(client) : 0);
+    });
     method("setEnergyLevel", [arg](ShapeBase& s, const Args& a) { s.setEnergyLevel(arg(a, 1).toFloat()); return VMValue(""); });
     method("getEnergyLevel", [](ShapeBase& s, const Args&) { return VMValue(s.getEnergyLevel()); });
     method("getEnergyPercent", [](ShapeBase& s, const Args&) { return VMValue(s.getEnergyValue()); });

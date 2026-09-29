@@ -2,6 +2,7 @@
 // the simulation/server layer rather than the client.
 #include "sim/sim_natives.h"
 #include "sim/camera.h"
+#include "sim/player.h"
 #include "sim/torque_math.h"
 #include "sim/engine_crc.h"
 #include "sim/sim_state.h"
@@ -19,6 +20,7 @@
 void registerSimNatives(TorqueScript& ts) {
     registerShapeBaseNatives(ts);
     registerCameraNatives(ts);
+    registerPlayerNatives(ts);
     registerGameConnectionNatives(ts);
     registerSceneObjectClasses();
 

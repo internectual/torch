@@ -39,6 +39,7 @@
 #include "game/trigger.h"
 #include "game/animation_parity.h"
 #include "sim/game_connection.h"
+#include "sim/player.h"
 #include "game/particle_parity.h"
 #include "game/sky_parity.h"
 #include <SDL3/SDL.h>
@@ -12291,6 +12292,15 @@ void Game::startLiveClient(GameConnection& connection) {
     demoSnapshots.clear();
     demoViewSnapshots.clear();
     demoAudioEventsPlayed.clear();
+    // The in-process server's players collide with this client's world
+    // (see ServerCollision).
+    serverCollision().triangles = [this](const Point3F& lo, const Point3F& hi,
+                                         std::vector<PlayerPrediction::Triangle>& out) {
+        if (w) w->playerTrianglesInBox(lo, hi, out);
+    };
+    serverCollision().water = [this](float x, float y) {
+        return w ? w->waterSurfaceAt(x, y) : std::numeric_limits<float>::quiet_NaN();
+    };
     connection.onServerPacket = [this](const std::vector<uint8_t>& packet) {
         if (demoParser && demoLive)
             demoParser->appendLiveBlock(T2Demo::BlockTypePacket, packet.data(), packet.size());
@@ -12302,6 +12312,37 @@ void Game::startLiveClient(GameConnection& connection) {
     };
 }
 
+// GameConnection::getNextMove: the MoveManager variables the client's
+// action maps set, clamped for the network (Move::clamp).
+ClientMoveIn Game::nextLiveMove() {
+    ClientMoveIn move;
+    auto* ts = Engine::instance().script().ts();
+    if (!ts) return move;
+    auto f = [&](const char* name) { return ts->getGlobal(name).toFloat(); };
+    const float pitch = f("$mvPitch") + f("$mvPitchUpSpeed") - f("$mvPitchDownSpeed");
+    const float yaw = f("$mvYaw") + f("$mvYawLeftSpeed") - f("$mvYawRightSpeed");
+    const float roll = f("$mvRoll") + f("$mvRollRightSpeed") - f("$mvRollLeftSpeed");
+    ts->setGlobal("$mvPitch", VMValue(0.0f));
+    ts->setGlobal("$mvYaw", VMValue(0.0f));
+    ts->setGlobal("$mvRoll", VMValue(0.0f));
+    constexpr float TwoPi = 6.28318530717958647692f;
+    auto angle = [&](float a) { return (int16_t)(uint16_t)((uint32_t)(int64_t)((a / TwoPi) * 0x10000) & 0xFFFF); };
+    auto axis = [](float v) { return v < -1 ? 0 : v > 1 ? 32 : (int)((v + 1) * 16); };
+    move.pitch = angle(pitch);
+    move.yaw = angle(yaw);
+    move.roll = angle(roll);
+    move.x = axis(f("$mvRightAction") - f("$mvLeftAction"));
+    move.y = axis(f("$mvForwardAction") - f("$mvBackwardAction"));
+    move.z = axis(f("$mvUpAction") - f("$mvDownAction"));
+    move.freeLook = ts->getGlobal("$mvFreeLook").toBool();
+    for (int i = 0; i < 6; ++i) {
+        const int count = ts->getGlobal("$mvTriggerCount" + std::to_string(i)).toInt();
+        move.trigger[i] = (count & 1) || (!(livePrevTriggerCount[i] & 1) && livePrevTriggerCount[i] != count);
+        livePrevTriggerCount[i] = count;
+    }
+    return move;
+}
+
 // The client's process list: one move per 32 ms tick (getNextMove), which
 // the recording keeps as a Move block.
 void Game::tickLiveClient(float dt) {
@@ -12309,7 +12350,7 @@ void Game::tickLiveClient(float dt) {
     liveMoveClock += std::max(0.0f, dt);
     while (liveMoveClock >= 0.032f) {
         liveMoveClock -= 0.032f;
-        ClientMoveIn move;
+        ClientMoveIn move = nextLiveMove();
         if (liveConnection->pushMove(move)) {
             move = liveConnection->moves.back();
             const auto block = rawMoveBlock(move);

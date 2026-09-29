@@ -26,6 +26,7 @@
 #include <map>
 
 class Menu;
+struct ClientMoveIn;
 class Game;
 
 struct GameConfig {
@@ -1166,6 +1167,8 @@ private:
     class GameConnection* liveConnection{};
     std::string liveMissionName;
     float liveMoveClock = 0.0f;
+    int livePrevTriggerCount[6]{};
+    ClientMoveIn nextLiveMove();
     void pumpLiveClient();
     bool startLiveWorld();
     void forwardLiveEvents(const PacketData& pd);

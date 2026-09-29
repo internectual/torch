@@ -2359,9 +2359,10 @@ void Engine::run() {
                         }
                         if (action.cmdOn.empty() || !mapActive) continue;
                         if (device == 1 && (keyName == "xaxis" || keyName == "yaxis")) {
+                            // The axis event value is the mouse delta.
                             const float value = keyName == "xaxis"
-                                ? (float)plat->input().mouseDeltaX * 0.002f
-                                : (float)plat->input().mouseDeltaY * 0.002f;
+                                ? (float)plat->input().mouseDeltaX
+                                : (float)plat->input().mouseDeltaY;
                             if (value != 0.0f && !action.isCmd && tsInput->hasFunction(action.cmdOn))
                                 tsInput->callFunction(action.cmdOn, {VMValue(value)});
                             continue;
@@ -2408,9 +2409,12 @@ void Engine::run() {
                                 g->player().weaponCycle(command == "nextWeapon" ? 1 : -1);
                             continue;
                         }
-                        if (command == "moveforward" || command == "movebackward" ||
-                            command == "moveleft" || command == "moveright" ||
-                            command == "jump" || command == "jet")
+                        // The live client's moves come from the scripts' $mv*
+                        // variables; Torch's own sim reads the keys itself.
+                        if (!g->isLiveClient() &&
+                            (command == "moveforward" || command == "movebackward" ||
+                             command == "moveleft" || command == "moveright" ||
+                             command == "jump" || command == "jet"))
                             continue;
                         if (action.isCmd)
                             tsInput->execute(command);

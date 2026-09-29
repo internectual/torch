@@ -1,6 +1,7 @@
 #include "sim/game_connection.h"
 #include "sim/net_string_table.h"
 #include "sim/camera.h"
+#include "sim/player.h"
 #include "sim/sim_state.h"
 #include "game/demo.h"
 #include "net/network.h"
@@ -1190,6 +1191,67 @@ int main() {
         assert(std::abs(x) < 1e-5f && std::abs(y + 1.0f) < 1e-5f && std::abs(z) < 1e-5f);
         assert(script.ts()->getGlobal("$mulP").toString() == "2 3 4");
         assert(script.ts()->getGlobal("$create").toString() == "1 2 3 0 0 1 3.14159");
+    }
+    {
+        // A controlled Player: its packet data (Player::writePacketData)
+        // decodes as the control player with the server's position, and
+        // moves run Player::processTick.
+        script.ts()->execute("datablock PlayerData(LinkArmor) { maxForwardSpeed = 14; runForce = 4200; mass = 90; "
+                             "  maxEnergy = 60; boxSize = \"1.2 1.2 2.3\"; };"
+                             "new GameConnection(PlayerLinkClient);"
+                             "new Player(PlayerLinkPlayer) { dataBlock = LinkArmor; };"
+                             "PlayerLinkPlayer.setTransform(\"5 6 400 0 0 1 0\");");
+        auto* server = EngineObjects::get<GameConnection>("PlayerLinkClient");
+        auto* player = EngineObjects::get<PlayerObject>("PlayerLinkPlayer");
+        assert(server && player);
+        assert(std::abs(player->transform[11] - 400.0f) < 1e-4f);
+        GameConnection client;
+        client.isServer = false;
+        DemoParser parser;
+        int packets = 0;
+        GameState last{};
+        bool sawPlayer = false;
+        server->deliver = [&](const std::vector<uint8_t>& p) { client.receivePacket(p.data(), p.size()); };
+        client.onServerPacket = [&](const std::vector<uint8_t>& p) {
+            PacketData pd = parser.parsePacket(p.data(), p.size(), packets++);
+            for (const auto& ev : pd.events)
+                if (ev.ghostMessage >= 0) client.clientGhostMessage(ev.ghostMessage, ev.ghostSequence, (uint32_t)ev.ghostCount);
+            if (pd.gameState.controlPlayer.hasPosition) { last = pd.gameState; sawPlayer = true; }
+        };
+        client.deliver = [&](const std::vector<uint8_t>& p) {
+            parser.onSendPacketTrigger();
+            server->receivePacket(p.data(), p.size());
+        };
+        server->activateGhosting();
+        double now = 500.0;
+        for (int i = 0; i < 20 && !server->isGhosting(); ++i, now += 1.0) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.5);
+        }
+        assert(server->isGhosting());
+        script.ts()->execute("PlayerLinkClient.setControlObject(PlayerLinkPlayer);");
+        for (int tick = 0; tick < 20; ++tick) {
+            client.pushMove(ClientMoveIn{});
+            client.checkPacketSend(now);
+            SimState::advanceServer(now);
+            server->checkPacketSend(now + 0.01);
+            now += 0.032;
+        }
+        for (int i = 0; i < 20; ++i, now += 0.1) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.05);
+        }
+        assert(parser.getParseFault().empty());
+        const int ghostIndex = server->ghostIndex(ScriptEngine::instance().objectKey(
+            ScriptEngine::instance().findObject("PlayerLinkPlayer")));
+        assert(ghostIndex >= 0);
+        const GhostEntry* ghost = parser.getGhostTracker().getGhost(ghostIndex);
+        assert(ghost && ghost->className == "Player");
+        // Falling under gravity: the client's control data is the server's.
+        assert(player->transform[11] < 400.0f);
+        assert(sawPlayer);
+        assert(std::abs(last.controlPlayer.position.x - 5.0f) < 1e-4f);
+        assert(std::abs(last.controlPlayer.position.z - player->transform[11]) < 1e-3f);
     }
     return 0;
 }

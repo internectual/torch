@@ -3,6 +3,8 @@
 // row-major with the translation in column 3.
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <string>
 
 namespace TorqueMath {
 
@@ -101,6 +103,24 @@ inline void mulP(const Matrix& m, const float p[3], float out[3]) {
 
 inline void mulV(const Matrix& m, const float v[3], float out[3]) {
     for (int i = 0; i < 3; ++i) out[i] = m[i * 4] * v[0] + m[i * 4 + 1] * v[1] + m[i * 4 + 2] * v[2];
+}
+
+// SceneObject getTransform: "x y z ax ay az angle" (AngAxisF of the matrix).
+inline std::string format(const Matrix& m) {
+    AngAxis aa = angAxis(quat(m));
+    const float len = std::sqrt(aa.x * aa.x + aa.y * aa.y + aa.z * aa.z);
+    if (len > 0) { aa.x /= len; aa.y /= len; aa.z /= len; }
+    char buffer[200];
+    std::snprintf(buffer, sizeof(buffer), "%g %g %g %g %g %g %g", m[3], m[7], m[11], aa.x, aa.y, aa.z, aa.angle);
+    return buffer;
+}
+
+// "x y z ax ay az angle" as dSscanf reads it: missing values are 0.
+inline Matrix parse(const std::string& text) {
+    float pos[3] = {0, 0, 0};
+    AngAxis aa{0, 0, 0, 0};
+    std::sscanf(text.c_str(), "%g %g %g %g %g %g %g", &pos[0], &pos[1], &pos[2], &aa.x, &aa.y, &aa.z, &aa.angle);
+    return matrix(pos, aa);
 }
 
 } // namespace TorqueMath
