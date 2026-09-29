@@ -1,4 +1,6 @@
 #include "sim/shape_base.h"
+#include "sim/static_shapes.h"
+#include "sim/sim_state.h"
 #include <unordered_map>
 #include "core/engine.h"
 #include "render/dts_loader.h"
@@ -140,7 +142,7 @@ float eyeHeight(const ShapeBase& shape) {
 // the server has no animation, so the root pose stands in.
 const std::unordered_map<std::string, std::array<float, 3>>* shapeNodes(const std::string& shapeFile) {
     static std::unordered_map<std::string, std::unordered_map<std::string, std::array<float, 3>>> cache;
-    if (shapeFile.empty()) return nullptr;
+    if (shapeFile.empty() || !Engine::instance().filesys) return nullptr;
     std::string key = shapeFile;
     for (char& ch : key) ch = (char)std::tolower((unsigned char)ch);
     auto it = cache.find(key);
@@ -160,6 +162,30 @@ const std::unordered_map<std::string, std::array<float, 3>>* shapeNodes(const st
         it = cache.emplace(key, std::move(nodes)).first;
     }
     return &it->second;
+}
+
+// The shape's bounds (TSShape::bounds, shape space as stored).
+bool shapeBounds(const std::string& shapeFile, float lo[3], float hi[3]) {
+    static std::unordered_map<std::string, std::array<float, 6>> cache;
+    if (shapeFile.empty() || !Engine::instance().filesys) return false;
+    std::string key = shapeFile;
+    for (char& ch : key) ch = (char)std::tolower((unsigned char)ch);
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        std::array<float, 6> box{0, 0, 0, -1, -1, -1};
+        const auto bytes = Engine::instance().fs().read(("shapes/" + shapeFile).c_str());
+        if (!bytes.empty()) {
+            const DTSLoadResult shape = loadDTS(bytes.data(), bytes.size(), shapeFile.c_str());
+            if (shape.hasBounds)
+                box = {shape.boundsMin.x, shape.boundsMin.y, shape.boundsMin.z,
+                       shape.boundsMax.x, shape.boundsMax.y, shape.boundsMax.z};
+        }
+        it = cache.emplace(key, box).first;
+    }
+    const auto& b = it->second;
+    if (b[3] < b[0]) return false;
+    lo[0] = b[0]; lo[1] = b[1]; lo[2] = b[2]; hi[0] = b[3]; hi[1] = b[4]; hi[2] = b[5];
+    return true;
 }
 
 bool shapeNode(const std::string& shapeFile, const char* node, float out[3]) {
@@ -701,6 +727,47 @@ void ShapeBase::getMuzzlePoint(uint32_t slot, float pos[3]) const {
 // ShapeBase::processTick, server side: energy and repair, the wet and
 // seeker target states, the images, then the onTrigger callbacks; for a
 // Player, Player::updateMove's image triggers.
+bool ShapeBase::worldBox(float lo[3], float hi[3]) const {
+    float blo[3], bhi[3];
+    if (!shapeBounds(objectShapeFile(*this), blo, bhi)) {
+        // No shape: a point at the origin.
+        for (int i = 0; i < 3; ++i) lo[i] = hi[i] = transform[i * 4 + 3];
+        return false;
+    }
+    for (int i = 0; i < 3; ++i) { lo[i] = 1e30f; hi[i] = -1e30f; }
+    for (int c = 0; c < 8; ++c) {
+        const float p[3] = {(c & 1) ? bhi[0] * scale[0] : blo[0] * scale[0],
+                            (c & 2) ? bhi[1] * scale[1] : blo[1] * scale[1],
+                            (c & 4) ? bhi[2] * scale[2] : blo[2] * scale[2]};
+        float w[3];
+        TorqueMath::mulP(transform, p, w);
+        for (int i = 0; i < 3; ++i) { lo[i] = std::min(lo[i], w[i]); hi[i] = std::max(hi[i], w[i]); }
+    }
+    return true;
+}
+
+void ShapeBase::queueCollision(const std::string& other) {
+    const uint64_t now = SimState::server().timeMs;
+    auto it = collisionTimeouts.find(other);
+    if (it != collisionTimeouts.end() && it->second >= now) return;
+    collisionTimeouts[other] = now + 250;
+    collisionsQueued.push_back(other);
+}
+
+void ShapeBase::notifyCollision() {
+    std::vector<std::string> queued;
+    queued.swap(collisionsQueued);
+    const std::string self = handle();
+    for (const auto& other : queued) {
+        auto* shape = EngineObjects::get<ShapeBase>(other);
+        if (!shape) continue;
+        callDataBlock("onCollision", {other});
+        if (!EngineObjects::get<ShapeBase>(self)) return; // deleted by the callback
+        if (auto* still = EngineObjects::get<ShapeBase>(other)) still->callDataBlock("onCollision", {self});
+        if (!EngineObjects::get<ShapeBase>(self)) return;
+    }
+}
+
 void ShapeBase::processMove(const ClientMoveIn* move) {
     processShapeTick();
     auto* player = dynamic_cast<PlayerObject*>(this);
@@ -740,6 +807,26 @@ void ShapeBase::processMove(const ClientMoveIn* move) {
     if (player && damageState == Enabled) {
         setImageTriggerState(0, move && move->trigger[0]);
         setImageTriggerState(1, move && move->trigger[1]);
+    }
+}
+
+// Player::findContact's item and corpse contacts: overlapping world boxes.
+void PlayerContacts::queue(PlayerObject& player) {
+    float plo[3], phi[3];
+    player.worldBox(plo, phi);
+    const std::string self = player.handle();
+    for (auto& [name, object] : ScriptEngine::instance().objects) {
+        auto* shape = object ? dynamic_cast<ShapeBase*>(object->engine.get()) : nullptr;
+        if (!shape || shape == &player) continue;
+        auto* item = dynamic_cast<ItemObject*>(shape);
+        auto* corpse = dynamic_cast<PlayerObject*>(shape);
+        if (!item && !(corpse && corpse->damageState != ShapeBase::Enabled)) continue;
+        if (shape->hidden) continue;
+        if (item && item->collisionObject == self) continue;
+        float lo[3], hi[3];
+        shape->worldBox(lo, hi);
+        if (lo[0] <= phi[0] && hi[0] >= plo[0] && lo[1] <= phi[1] && hi[1] >= plo[1] && lo[2] <= phi[2] && hi[2] >= plo[2])
+            player.queueCollision(shape->handle());
     }
 }
 
@@ -882,6 +969,16 @@ void registerShapeBaseNatives(TorqueScript& ts) {
         });
     };
     (void)self;
+    // ShapeBase::setHidden: out of the scene, so every client's ghost goes.
+    method("hide", [arg](ShapeBase& s, const Args& a) {
+        const bool hide = arg(a, 1).toBool();
+        if (hide != s.hidden) {
+            s.setMaskBits(ShapeBase::CloakMask);
+            s.hidden = hide;
+        }
+        return VMValue("");
+    });
+    method("isHidden", [](ShapeBase& s, const Args&) { return VMValue(s.hidden ? 1 : 0); });
     // startFade(timeMS, delayMS, fadeOut).
     method("startFade", [arg](ShapeBase& s, const Args& a) {
         s.startFade(arg(a, 1).toInt() / 1000.0f, arg(a, 2).toInt() / 1000.0f, arg(a, 3).toBool());

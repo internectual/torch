@@ -621,6 +621,8 @@ void GameConnection::scopeScene() {
         for (auto& [name, object] : engine.objects) {
             auto* net = object ? dynamic_cast<SceneObject*>(object->engine.get()) : nullptr;
             if (!net || !net->ghostable || net->scopeAlways || net->netClassId() < 0) continue;
+            // A hidden shape is out of the scene.
+            if (auto* shape = dynamic_cast<ShapeBase*>(net); shape && shape->hidden) continue;
             const float dx = net->transform[3] - x, dy = net->transform[7] - y, dz = net->transform[11] - z;
             if (dx * dx + dy * dy + dz * dz <= visible * visible) inRange.push_back(engine.objectKey(object));
         }

@@ -37,7 +37,19 @@ public:
     void readFields() override;
     bool rotate = false, isStatic = false, collideable = false, atRest = true;
     float velocity[3] = {0, 0, 0};
+    int atRestCounter = 0;
+    // setCollisionTimeout: the thrower, not collided with for 15 ticks.
+    std::string collisionObject;
+    int collisionTimeout = 0;
+    float stickyPos[3] = {0, 0, 0}, stickyNormal[3] = {0, 0, 1};
+    void setVelocity(const float v[3]);
+    void processMove(const ClientMoveIn* move) override;
+
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
+
+private:
+    void updateVelocity(float dt);
+    void updatePos(float dt);
 };
 
 void registerStaticShapeNatives(class TorqueScript& ts);

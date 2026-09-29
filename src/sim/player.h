@@ -24,6 +24,7 @@ public:
     const char* stateName() const;
     // Player::updateDamageLevel: disabled (dead) at maxDamage.
     void updateDamageLevel() override;
+    bool worldBox(float lo[3], float hi[3]) const override;
     void setVelocity(const Point3F& velocity);
     // Player::applyImpulse: players ignore the angular part.
     void applyImpulse(const Point3F& impulse);
@@ -43,6 +44,10 @@ private:
 
 // The static world geometry and water the server collides with: set to
 // ServerContainer (the server's mission objects) at registration.
+struct PlayerContacts {
+    static void queue(PlayerObject& player);
+};
+
 struct ServerCollision {
     PlayerPrediction::GatherTriangles triangles;
     PlayerPrediction::WaterLevel water;

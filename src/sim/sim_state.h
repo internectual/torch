@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 // Engine-side server state the retail server scripts toggle.
 
 namespace SimState {
@@ -9,6 +10,7 @@ struct Server {
     bool heartbeat = false;             // startHeartbeat / stopHeartbeat
     float gravity = -20.0f;             // Player::mGravity / Item::mGravity
     bool aiSystemEnabled = false;       // gAISystemEnabled
+    uint64_t timeMs = 0;                // server sim time, 32 ms per tick
 };
 
 // gServerProcessList: GameBase objects advance in fixed 32 ms ticks.

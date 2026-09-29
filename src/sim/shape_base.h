@@ -3,6 +3,9 @@
 // and its mounted images (shapeImage.cc): the ShapeBaseImageData state
 // machine as the server runs it.
 #include "sim/game_base.h"
+#include <string>
+#include <vector>
+#include <map>
 #include <array>
 #include <memory>
 
@@ -141,6 +144,14 @@ public:
     void setDamageLevel(float level);
     // Server: the damage level's effect on the damage state (Player).
     virtual void updateDamageLevel() {}
+    // mWorldBox: the shape's DTS bounds through the transform.
+    virtual bool worldBox(float lo[3], float hi[3]) const;
+    // queueCollision / notifyCollision: %data.onCollision(%obj, %col) on both
+    // sides, at most once per CollisionTimeoutValue (250 ms) per pair.
+    void queueCollision(const std::string& other);
+    void notifyCollision();
+    std::map<std::string, uint64_t> collisionTimeouts;
+    std::vector<std::string> collisionsQueued;
     bool fading = false, fadeOut = false;
     float fadeTime = 0, fadeDelay = 0, fadeElapsedTime = 0, fadeVal = 1.0f;
     void startFade(float time, float delay, bool out);

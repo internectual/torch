@@ -75,6 +75,7 @@ void advanceServer(double now) {
             object.processTick();
         });
         lastTick += TickSeconds;
+        SimState::server().timeMs += 32;
         ++ticks;
     }
     // A long stall does not replay a burst of ticks afterwards.

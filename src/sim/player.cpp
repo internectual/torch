@@ -88,6 +88,17 @@ void PlayerObject::updateDamageLevel() {
     setDamageState(damage >= maxDamage() ? Disabled : Enabled);
 }
 
+// The PlayerData box, feet at the origin.
+bool PlayerObject::worldBox(float lo[3], float hi[3]) const {
+    ScriptObject* data = ScriptEngine::instance().findObject(dataBlock().c_str());
+    const auto box = Fields::point(data, "boxSize", {1, 1, 2.3f});
+    const float x = transform[3], y = transform[7], z = transform[11];
+    lo[0] = x - box[0] * 0.5f; hi[0] = x + box[0] * 0.5f;
+    lo[1] = y - box[1] * 0.5f; hi[1] = y + box[1] * 0.5f;
+    lo[2] = z; hi[2] = z + box[2];
+    return true;
+}
+
 void PlayerObject::setVelocity(const Point3F& velocity) {
     state.velocity = velocity;
     setMaskBits(MoveMask);
@@ -122,6 +133,11 @@ void PlayerObject::processMove(const ClientMoveIn* move) {
     PlayerPrediction::processTick(state, *data, SimState::server().gravity, &m, 0.0f, collision, world.triangles, world.water);
     energy = state.energy;
     syncTransform();
+    // The items and corpses the player touches: onCollision both ways.
+    if (damageState == Enabled) {
+        PlayerContacts::queue(*this);
+        notifyCollision();
+    }
     if (before.x != state.position.x || before.y != state.position.y || before.z != state.position.z ||
         yawBefore != state.yaw || move)
         setMaskBits(MoveMask);
