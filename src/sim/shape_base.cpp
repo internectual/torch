@@ -728,6 +728,36 @@ void ShapeBase::getMuzzlePoint(uint32_t slot, float pos[3]) const {
 // ShapeBase::processTick, server side: energy and repair, the wet and
 // seeker target states, the images, then the onTrigger callbacks; for a
 // Player, Player::updateMove's image triggers.
+// ShapeBase::mountObject / unmountObject (onMount / onUnmount on the
+// mounted object's datablock).
+void ShapeBase::mountObject(ShapeBase& object, int node) {
+    if (!object.mount.empty()) object.unmount();
+    object.mount = handle();
+    object.mountNode = node >= 0 && node < 8 ? node : 0;
+    mounted.insert(mounted.begin(), object.handle());
+    object.setMaskBits(MountedMask);
+    object.callDataBlock("onMount", {handle(), std::to_string(node)});
+}
+
+void ShapeBase::unmountObject(ShapeBase& object) {
+    if (object.mount != handle()) return;
+    mounted.erase(std::remove(mounted.begin(), mounted.end(), object.handle()), mounted.end());
+    object.mount.clear();
+    object.setMaskBits(MountedMask);
+    object.callDataBlock("onUnmount", {handle(), std::to_string(object.mountNode)});
+}
+
+void ShapeBase::unmount() {
+    if (auto* m = mount.empty() ? nullptr : EngineObjects::get<ShapeBase>(mount)) m->unmountObject(*this);
+    else mount.clear();
+}
+
+void ShapeBase::followMount() {
+    auto* m = mount.empty() ? nullptr : EngineObjects::get<ShapeBase>(mount);
+    if (!m) { mount.clear(); return; }
+    transform = m->getMountTransform((uint32_t)mountNode);
+}
+
 bool ShapeBase::worldBox(float lo[3], float hi[3]) const {
     float blo[3], bhi[3];
     if (!shapeBounds(objectShapeFile(*this), blo, bhi)) {
@@ -771,6 +801,7 @@ void ShapeBase::notifyCollision() {
 
 void ShapeBase::processMove(const ClientMoveIn* move) {
     processShapeTick();
+    if (!mount.empty()) followMount();
     auto* player = dynamic_cast<PlayerObject*>(this);
     if (player) {
         // mWaterCoverage (updateContainer, from the last tick's position):
@@ -941,9 +972,24 @@ uint32_t ShapeBase::packUpdate(GameConnection& connection, uint32_t mask, Torque
             w.writeF32(invincibleSpeed);
         }
     }
-    // Not mounted: an unmount unless this is the initial update.
-    if (w.writeFlag((mask & MountedMask) && !(mask & InitialUpdateMask))) w.writeFlag(false);
-    return ret;
+    uint32_t retMask = ret;
+    if (mask & MountedMask) {
+        if (!mount.empty()) {
+            const int ghost = connection.ghostIndex(mount);
+            if (w.writeFlag(ghost != -1)) {
+                w.writeFlag(true);
+                w.writeInt(ghost, 10);
+                w.writeInt(mountNode, 5);
+            } else {
+                retMask |= MountedMask; // try again once the mount is ghosted
+            }
+        } else if (w.writeFlag(!(mask & InitialUpdateMask))) {
+            w.writeFlag(false); // unmount
+        }
+    } else {
+        w.writeFlag(false);
+    }
+    return retMask;
 }
 
 bool ShapeBase::writePacketData(GameConnection& connection, TorqueBitWriter& w) {
@@ -983,8 +1029,42 @@ void registerShapeBaseNatives(TorqueScript& ts) {
     });
     method("isHidden", [](ShapeBase& s, const Args&) { return VMValue(s.hidden ? 1 : 0); });
     // Object mounting is not ported: nothing is mounted.
-    method("getObjectMount", [](ShapeBase&, const Args&) { return VMValue(0); });
-    method("isMounted", [](ShapeBase&, const Args&) { return VMValue(0); });
+    auto idOf = [](const std::string& handle) -> VMValue {
+        ScriptObject* o = handle.empty() ? nullptr : ScriptEngine::instance().findObject(handle.c_str());
+        return VMValue(o ? ScriptEngine::instance().objectId(o) : 0);
+    };
+    method("mountObject", [arg](ShapeBase& s, const Args& a) {
+        auto* object = EngineObjects::get<ShapeBase>(arg(a, 1).toString());
+        if (!object) return VMValue(0);
+        s.mountObject(*object, arg(a, 2).toInt());
+        return VMValue(1);
+    });
+    method("unmountObject", [arg](ShapeBase& s, const Args& a) {
+        auto* object = EngineObjects::get<ShapeBase>(arg(a, 1).toString());
+        if (!object) return VMValue(0);
+        s.unmountObject(*object);
+        return VMValue(1);
+    });
+    method("unmount", [](ShapeBase& s, const Args&) { s.unmount(); return VMValue(""); });
+    method("isMounted", [](ShapeBase& s, const Args&) { return VMValue(s.mount.empty() ? 0 : 1); });
+    method("getObjectMount", [idOf](ShapeBase& s, const Args&) { return idOf(s.mount); });
+    method("getMountedObjectCount", [](ShapeBase& s, const Args&) { return VMValue((int)s.mounted.size()); });
+    method("getMountedObject", [arg, idOf](ShapeBase& s, const Args& a) {
+        const int i = arg(a, 1).toInt();
+        return i >= 0 && i < (int)s.mounted.size() ? idOf(s.mounted[i]) : VMValue(0);
+    });
+    method("getMountedObjectNode", [arg](ShapeBase& s, const Args& a) {
+        const int i = arg(a, 1).toInt();
+        if (i < 0 || i >= (int)s.mounted.size()) return VMValue(-1);
+        auto* o = EngineObjects::get<ShapeBase>(s.mounted[i]);
+        return VMValue(o ? o->mountNode : -1);
+    });
+    method("getMountNodeObject", [arg, idOf](ShapeBase& s, const Args& a) {
+        const int node = arg(a, 1).toInt();
+        for (const auto& handle : s.mounted)
+            if (auto* o = EngineObjects::get<ShapeBase>(handle); o && o->mountNode == node) return idOf(handle);
+        return VMValue(0);
+    });
     // startFade(timeMS, delayMS, fadeOut).
     method("startFade", [arg](ShapeBase& s, const Args& a) {
         s.startFade(arg(a, 1).toInt() / 1000.0f, arg(a, 2).toInt() / 1000.0f, arg(a, 3).toBool());

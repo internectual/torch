@@ -152,6 +152,16 @@ public:
     void notifyCollision();
     std::map<std::string, uint64_t> collisionTimeouts;
     std::vector<std::string> collisionsQueued;
+    // mMount: what this object is mounted on (handle), its node, and the
+    // objects mounted on this one (mMount.list order: newest first).
+    std::string mount;
+    int mountNode = 0;
+    std::vector<std::string> mounted;
+    void mountObject(ShapeBase& object, int node);
+    void unmountObject(ShapeBase& object);
+    void unmount();
+    // A mounted object follows its mount's mount point.
+    void followMount();
     bool fading = false, fadeOut = false;
     float fadeTime = 0, fadeDelay = 0, fadeElapsedTime = 0, fadeVal = 1.0f;
     void startFade(float time, float delay, bool out);

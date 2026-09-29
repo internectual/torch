@@ -209,6 +209,12 @@ void PlayerObject::processMove(const ClientMoveIn* move) {
     if (move) m = unclamp(*move);
     state.energy = energy;
     state.damageState = (int)damageState;
+    // Mounted: the mount places the player (followMount in ShapeBase).
+    state.mounted = !mount.empty();
+    if (state.mounted) {
+        state.position = {transform[3], transform[7], transform[11]};
+        state.velocity = {0, 0, 0};
+    }
     state.predictionCount = PlayerPrediction::MaxPredictionTicks; // the server always ticks
     const Point3F before = state.position;
     const float yawBefore = state.yaw;
