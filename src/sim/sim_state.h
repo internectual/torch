@@ -8,6 +8,7 @@ struct Server {
     bool cyclingConnectionsDisabled = false; // disableCyclingConnections(bool)
     bool heartbeat = false;             // startHeartbeat / stopHeartbeat
     float gravity = -20.0f;             // Player::mGravity / Item::mGravity
+    bool aiSystemEnabled = false;       // gAISystemEnabled
 };
 
 // gServerProcessList: GameBase objects advance in fixed 32 ms ticks.

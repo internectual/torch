@@ -7793,6 +7793,10 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
+    // ResManager::getModPaths: the path list setModPaths stored.
+    tsInstance->registerNative("getModPaths", [](const auto&) -> VMValue {
+        return VMValue(std::string(Console::instance().getStringVariable("modPath")));
+    });
     tsInstance->registerNative("setEchoFileLoads", [](const auto& args) -> VMValue {
         if (!args.empty()) Console::instance().setVariable("echoFileLoads", args[0].toInt() ? "1" : "0");
         return VMValue(1);

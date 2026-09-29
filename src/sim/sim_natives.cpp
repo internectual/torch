@@ -14,6 +14,7 @@
 #include "script/torquescript.h"
 #include "script/script_engine.h"
 #include <map>
+#include <strings.h>
 #include <cstdio>
 #include <cmath>
 #include "sim/shape_base.h"
@@ -27,6 +28,16 @@ void registerSimNatives(TorqueScript& ts) {
     registerPlayerNatives(ts);
     registerStaticShapeNatives(ts);
     registerNavGraphNatives(ts);
+    // ai/aiConsole.cc AISystemEnabled([bool]): no argument enables it.
+    ts.registerNative("AISystemEnabled", [](const std::vector<VMValue>& args) -> VMValue {
+        bool status = true;
+        if (!args.empty()) {
+            const std::string v = args[0].toString();
+            status = strcasecmp(v.c_str(), "true") == 0 || std::atoi(v.c_str()) != 0;
+        }
+        SimState::server().aiSystemEnabled = status;
+        return VMValue("");
+    });
 
     // simBase.cc consoleInit: the object type masks (game/objectTypes.h).
     static const std::pair<const char*, int> typeMasks[] = {
