@@ -52,8 +52,8 @@ inline float scoreboardHeaderY(float top, int teamRows) {
     return top + 86.0f + std::max(0, teamRows) * 16.0f;
 }
 
-inline int scoreboardTeamRows(bool connected, bool observerMode, int teamRows) {
-    return connected && observerMode ? std::max(0, teamRows) : 0;
+inline int scoreboardTeamRows(bool liveObserver, int teamRows) {
+    return liveObserver ? std::max(0, teamRows) : 0;
 }
 
 // The stock scoreboard groups players by team, then ranks each team by score.

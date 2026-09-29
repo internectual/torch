@@ -7606,23 +7606,6 @@ bool ScriptEngine::init() {
                  server.numPlayers, server.maxPlayers, server.numBots, server.ping);
         return VMValue(text);
     });
-    tsInstance->registerNative("joinSelectedGame", [](const auto&) -> VMValue {
-        auto* ts = ScriptEngine::instance().ts();
-        std::string addr = ts ? ts->getGlobal("$JoinGameAddress").toString() : "";
-        if (!addr.empty()) {
-            Console::instance().printf(LogLevel::Info, "joinSelectedGame: connecting to %s", addr.c_str());
-            auto colon = addr.rfind(':');
-            if (colon != std::string::npos) {
-                std::string host = addr.substr(0, colon);
-                int port = atoi(addr.substr(colon + 1).c_str());
-                const std::string password = ts
-                    ? ts->getGlobal("$JoinGamePassword").toString() : std::string();
-                Engine::instance().game().connectToServer(
-                    host.c_str(), (uint16_t)port, false, password.c_str());
-            }
-        }
-        return VMValue(1);
-    });
     tsInstance->registerNative("setTitle", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() >= 2) {
             auto* ctl = getListCtrl(args[0].toString());
@@ -8790,30 +8773,6 @@ bool ScriptEngine::init() {
         return VMValue(Engine::instance().audio().isInitialized() ? 1 : 0);
     });
 
-    // connect(host, port) — native client connection entry point
-    tsInstance->registerNative("connect", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        std::string address = args[0].toString();
-        if (address.empty()) return VMValue(0);
-        uint16_t port = T2Protocol::DEFAULT_PORT;
-        const auto colon = address.rfind(':');
-        if (colon != std::string::npos) {
-            if (colon + 1 >= address.size()) return VMValue(0);
-            uint16_t parsedPort = 0;
-            if (!parseConsolePort(address.substr(colon + 1), parsedPort) || colon == 0 ||
-                address.find(':') != colon)
-                return VMValue(0);
-            port = parsedPort;
-            address.resize(colon);
-        } else if (args.size() > 1) {
-            if (args[1].toInt() < 1 || args[1].toInt() > 65535) return VMValue(0);
-            port = (uint16_t)args[1].toInt();
-        }
-        const std::string password = args.size() > 1 && colon != std::string::npos
-            ? args[1].toString() : std::string();
-        Engine::instance().game().connectToServer(address.c_str(), port, false, password.c_str());
-        return VMValue(1);
-    });
     tsInstance->registerNative("connectSpectator", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         std::string host;
@@ -8824,7 +8783,7 @@ bool ScriptEngine::init() {
             if (args.size() > 1 && args[1].toInt() > 0)
                 port = (uint16_t)args[1].toInt();
         }
-        Engine::instance().game().connectToServer(host.c_str(), port, true);
+        Engine::instance().game().connectToServer(host.c_str(), port);
         return VMValue(1);
     });
     tsInstance->registerNative("watchServer", [](const auto& args) -> VMValue {
@@ -8832,7 +8791,7 @@ bool ScriptEngine::init() {
         std::string host;
         uint16_t port = 0;
         if (!parseConsoleHostPort(args[0].toString(), host, port)) return VMValue(0);
-        Engine::instance().game().connectToServer(host.c_str(), port, true);
+        Engine::instance().game().connectToServer(host.c_str(), port);
         return VMValue(1);
     });
     tsInstance->registerNative("watchSelectedServer", [](const auto&) -> VMValue {
@@ -8842,7 +8801,7 @@ bool ScriptEngine::init() {
         const std::string address = browser->sbServers[browser->sbSelected].addr.toString();
         Engine::instance().game().connectToServer(
             address.substr(0, address.rfind(':')).c_str(),
-            browser->sbServers[browser->sbSelected].addr.port, true);
+            browser->sbServers[browser->sbSelected].addr.port);
         return VMValue(1);
     });
 

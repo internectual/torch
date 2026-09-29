@@ -82,8 +82,6 @@ add_executable(torch
     src/net/v12_events.cpp
     src/net/v12_ghosts.cpp
     src/net/v12_ghost_packet.cpp
-    src/net/protocol.cpp
-    src/net/connection.cpp
     src/game/world.cpp
     src/game/game.cpp
     src/render/projected_shadows.cpp
@@ -182,8 +180,6 @@ add_executable(torch_server
     src/net/v12_datablocks.cpp
     src/net/v12_ghosts.cpp
     src/net/v12_ghost_packet.cpp
-    src/net/protocol.cpp
-    src/net/connection.cpp
     src/game/world.cpp
     src/game/player.cpp
     src/game/physics.cpp
@@ -462,8 +458,6 @@ add_executable(torch_parity_test
     src/net/v12_ghosts.cpp
     src/net/v12_registry.cpp
     src/net/v12_ghost_packet.cpp
-    src/net/protocol.cpp
-    src/net/connection.cpp
     src/render/terrain_holes.cpp
     src/render/terrain.cpp
 )
@@ -538,8 +532,6 @@ add_executable(torch_network_loopback_test
     src/net/v12_datablocks.cpp
     src/net/v12_ghosts.cpp
     src/net/v12_ghost_packet.cpp
-    src/net/protocol.cpp
-    src/net/connection.cpp
     src/game/world.cpp
     src/game/player.cpp
     src/game/physics.cpp
@@ -622,8 +614,6 @@ add_executable(torch_target_manager_test
     src/net/v12_datablocks.cpp
     src/net/v12_ghosts.cpp
     src/net/v12_ghost_packet.cpp
-    src/net/protocol.cpp
-    src/net/connection.cpp
     src/game/world.cpp
     src/game/player.cpp
     src/game/physics.cpp

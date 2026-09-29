@@ -14,7 +14,6 @@
 #include "sim/sim_state.h"
 #include "game/demo.h"
 #include "net/network.h"
-#include "net/protocol.h"
 #include "script/script_engine.h"
 #include "script/torquescript.h"
 #include "game/game.h"

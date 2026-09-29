@@ -68,9 +68,7 @@ void HUD::clearObjectiveTask() {
 
 void HUD::render(Game* game) {
     const bool dead = game && game->state() == Game::Dead;
-    const bool liveObserver = game && game->isConnected() &&
-        game->activeConnection() && ObserverParity::isLiveObserver(
-            game->isConnected(), game->activeConnection()->isObserverMode());
+    const bool liveObserver = game && game->isConnected();
     if (!visible || !game || (game->state() != Game::Playing && !dead)) return;
 
     auto& input = Engine::instance().platform().input();
@@ -476,10 +474,8 @@ void HUD::renderScoreboard(Game* game) {
     int32_t h = Engine::instance().platform().height();
 
     // Leave room for the team/flag strip above the player table.
-    const bool observerMode = game->isConnected() && game->activeConnection() &&
-        game->activeConnection()->isObserverMode();
     const int teamRows = HudParity::scoreboardTeamRows(
-        game->isConnected(), observerMode, (int)game->getLiveTeamScores().size());
+        game->isConnected(), (int)game->getLiveTeamScores().size());
     float bw = 550.0f, bh = std::max(400.0f, 430.0f + teamRows * 16.0f);
     float bx = (w - bw) * 0.5f, by = (h - bh) * 0.5f;
     r.drawBox(Box3F{{bx, by, 0}, {bx + bw, by + bh, 0}}, {0, 0, 0, 0.7f});
@@ -488,8 +484,7 @@ void HUD::renderScoreboard(Game* game) {
 
     // Title
     if (font) font->render("SCOREBOARD", bx + 10, by + 10, {1, 1, 0, 1}, 2.0f);
-    if (game->isConnected() && game->activeConnection() &&
-        game->activeConnection()->isObserverMode()) {
+    if (game->isConnected()) {
         const auto observer = game->activeConnection()->observerSnapshot();
         snprintf(buf, sizeof(buf), "Observed players: %zu  targets: %zu  mission CRC: %08X",
                  observer.players.size(), observer.targets.size(), observer.missionCrc);

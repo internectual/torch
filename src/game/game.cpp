@@ -6798,18 +6798,6 @@ bool Game::init() {
         }
     }, "setFov <degrees> - script-owned camera FOV bridge");
 
-    con.addCommand("connect", [this](int32_t argc, const char* const* argv) {
-        if (argc < 2 || !argv[1][0]) {
-            Console::instance().printf(LogLevel::Warn, "Usage: connect <host> [port]");
-            return;
-        }
-        uint16_t port = T2Protocol::DEFAULT_PORT;
-        if (argc > 2 && !parseConsolePort(argv[2], port)) {
-            Console::instance().printf(LogLevel::Warn, "Invalid port: %s", argv[2]);
-            return;
-        }
-        connectToServer(argv[1], port);
-    }, "connect <host> [port] - connect to a server");
     con.addCommand("watchServer", [this](int32_t argc, const char* const* argv) {
         std::string host;
         uint16_t port = 0;
@@ -6817,7 +6805,7 @@ bool Game::init() {
             Console::instance().printf(LogLevel::Warn, "Usage: watchServer <host:port>");
             return;
         }
-        connectToServer(host.c_str(), port, true);
+        connectToServer(host.c_str(), port);
     }, "watchServer <host:port> - connect as an anonymous observer");
 
     con.addCommand("loadMission", [this](int32_t argc, const char* const* argv) {
@@ -7678,85 +7666,9 @@ void Game::update(float dt) {
             previousFire = currentInput.fire;
             previousAltFire = currentInput.altFire;
 
-            // ─── Chat input ──────────────────────────────────────
-            if (cfg.online && activeConn && !activeConn->isObserverMode() &&
-                activeConn->state() >= Connection::Connected) {
-                static bool chatActive = false;
-                static std::string chatBuf;
-                auto& plat = Engine::instance().platform();
-                hud->setChatInput("");
-                bool enterDown = plat.input().keysDown[SCANCODE_RETURN];
-                bool escDown = plat.input().keysDown[SCANCODE_ESCAPE];
-                if (!chatActive) {
-                    static bool prevEnter = false;
-                    if (enterDown && !prevEnter) {
-                        chatActive = true;
-                        chatBuf.clear();
-                        plat.startTextInput();
-                        plat.setRelativeMouse(false);
-                        plat.showMouse(true);
-                    }
-                    prevEnter = enterDown;
-                } else {
-                    const std::string& ti = plat.input().textInput;
-                    for (char c : ti) {
-                        if (c >= 0x20 && c <= 0x7e && chatBuf.size() < 200)
-                            chatBuf += c;
-                    }
-                    static bool prevEnter = false;
-                    if (enterDown && !prevEnter && !chatBuf.empty()) {
-                        // Native Tribes 2 routes chat through commandToServer.
-                        std::string command = "messageSent \"";
-                        for (char c : chatBuf) {
-                            if (c == '\\' || c == '"') command.push_back('\\');
-                            command.push_back(c);
-                        }
-                        command.push_back('"');
-                        activeConn->sendCommandPacket(command.c_str());
-                        chatBuf.clear();
-                        chatActive = false;
-                        plat.stopTextInput();
-                        plat.setRelativeMouse(true);
-                        plat.showMouse(false);
-                    }
-                    prevEnter = enterDown;
-                    static bool prevEsc = false;
-                    if (escDown && !prevEsc) {
-                        chatActive = false;
-                        chatBuf.clear();
-                        plat.stopTextInput();
-                        plat.setRelativeMouse(true);
-                        plat.showMouse(false);
-                    }
-                    prevEsc = escDown;
-                     // Backspace
-                     static bool prevBS = false;
-                     static int backspaceRepeat = 0;
-                     const bool backspaceDown = plat.input().keysDown[SCANCODE_BACKSPACE];
-                     if (backspaceDown) {
-                         // SDL key state does not expose text-input repeat. Emulate
-                         // the native editor's initial delay and repeat cadence.
-                         if (!prevBS) backspaceRepeat = 0;
-                         if ((!prevBS || backspaceRepeat++ >= 5) && !chatBuf.empty()) {
-                             chatBuf.pop_back();
-                             backspaceRepeat = 0;
-                         }
-                     } else {
-                         backspaceRepeat = 0;
-                     }
-                     prevBS = backspaceDown;
-                    // Keep the editable line separate from expiring popups.
-                    hud->setChatInput(chatBuf.c_str());
-                }
-            }
-
-            // Client-side prediction: store move and send to server
+            // Send the move to the server
             if (cfg.online && activeConn && activeConn->state() >= Connection::Connected) {
                 uint32_t thisSeq = ++moveSeq;
-                // Store input for later reconciliation
-                pendingMoves.push_back({thisSeq, currentInput, simulationDt});
-                if (pendingMoves.size() > 128)
-                    pendingMoves.pop_front();
 
                 V12::ClientMove nativeMove;
                 nativeMove.x = (currentInput.right ? 1.0f : 0.0f) -
@@ -7793,7 +7705,6 @@ void Game::update(float dt) {
         if (pl->health() <= 0 && gameState == Playing) {
             deathTimer = 0.0f;
             currentInput = {};
-            pendingMoves.clear();
             w->projectiles().clear();
             setState(Dead);
         }
@@ -7839,13 +7750,11 @@ void Game::update(float dt) {
                 // Native observers already receive the server's current target;
                 // use it before falling back to stable ghost order.
                 int initial = -1;
-                if (activeConn->isObserverMode()) {
-                     const int control = ObserverParity::controlGhostIndex(
-                         activeConn->observerSnapshot().controlGhost);
-                    if (std::find(spectatableIndices.begin(), spectatableIndices.end(),
-                                  control) != spectatableIndices.end())
-                        initial = control;
-                }
+                const int control = ObserverParity::controlGhostIndex(
+                    activeConn->observerSnapshot().controlGhost);
+                if (std::find(spectatableIndices.begin(), spectatableIndices.end(),
+                              control) != spectatableIndices.end())
+                    initial = control;
                 if (initial < 0) initial = spectatableIndices.front();
                  liveSpectateInit = true;
                  freeCamActive = false;
@@ -10301,8 +10210,7 @@ void Game::render(float dt) {
              if (serverPlayerGhostSynced && (uint32_t)idx == serverPlayerGhostIndex) continue;
              GhostEntry* g = liveGhosts.getMutableGhost(idx);
              if (!g) continue;
-             if (activeConn->isObserverMode() &&
-                 !isSensorGroupTargetVisible(activeConn->observerSnapshot().playerSensorGroup,
+             if (!isSensorGroupTargetVisible(activeConn->observerSnapshot().playerSensorGroup,
                                              g->sensorGroup)) continue;
             Vec3 p = g->position;
              // Origin is a valid mission position. Use the decoded presence
@@ -10693,18 +10601,17 @@ void Game::dispatchClientCommand(const std::vector<std::string>& raw, const std:
     }
 }
 
-void Game::connectToServer(const char* host, uint16_t port, bool observer, const char* password) {
+void Game::connectToServer(const char* host, uint16_t port) {
     if (!host || !host[0] || port == 0) {
         Console::instance().printf(LogLevel::Warn, "Invalid server address");
         return;
     }
     if (!allowDemoConnection(isDemoBuildMode(Engine::instance().demoMode,
-                                             config().dedicated), observer,
+                                             config().dedicated), true,
                              Console::instance().getBoolVariable("demoAllowConnect", false),
                              Console::instance().getBoolVariable("demoAllowWatch", true))) {
         Console::instance().printf(LogLevel::Warn,
-            "Demo mode policy rejected %s connection; set demoAllow%s=1 to allow it",
-            observer ? "observer" : "player", observer ? "Watch" : "Connect");
+            "Demo mode policy rejected observer connection; set demoAllowWatch=1 to allow it");
         return;
     }
     if (demoPlaying) stopDemoPlayback();
@@ -10726,18 +10633,21 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
 
     auto& net = Engine::instance().network();
     activeConn = net.createConnection();
-    activeConn->setPlayerName(cfg.playerName.c_str());
-    activeConn->setJoinPassword(password ? password : "");
-    activeConn->setObserverMode(observer);
     {
         activeConn->setConnectCallback([this](bool success) {
             if (success) {
                 Console::instance().printf(LogLevel::Info, "Connected!");
-                if (activeConn->isObserverMode()) {
-                    activeConn->sendCommandPacket("setPlayerTeam 0");
-                    activeConn->sendCommandPacket("ScopeCommanderMap 1");
-                    activeConn->sendCommandPacket("WatchOnly ImaWatcher");
-                }
+                activeConn->sendCommandPacket("setPlayerTeam 0");
+                activeConn->sendCommandPacket("ScopeCommanderMap 1");
+                activeConn->sendCommandPacket("WatchOnly ImaWatcher");
+                liveSpectateInit = false;
+                spectateGhostIndex = -1;
+                liveFollowGhostIndex = -1;
+                liveFollowCenterInit = false;
+                setState(Dead);
+                auto& gui = Engine::instance().guiRenderer();
+                gui.clearDialogs();
+                gui.setContent("PlayGui");
             } else {
                 Console::instance().printf(LogLevel::Info, "Connection failed");
                 // Transport failures must restore the same world, audio, HUD,
@@ -10752,245 +10662,6 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
 
         // Install every callback before opening the socket. This keeps a fast
         // local response from racing the launch transition setup.
-        // Handle incoming packets
-        activeConn->setPacketCallback([this](PacketType type, const uint8_t* data, size_t size) {
-            if (type == PacketType::ConnectOK) {
-                activeConn->setState(Connection::Connected);
-                Console::instance().printf(LogLevel::Info, "Connection established, entering game");
-                if (activeConn->isObserverMode()) {
-                    liveSpectateInit = false;
-                    spectateGhostIndex = -1;
-                    liveFollowGhostIndex = -1;
-                    liveFollowCenterInit = false;
-                    setState(Dead);
-                    auto& gui = Engine::instance().guiRenderer();
-                    gui.clearDialogs();
-                    gui.setContent("PlayGui");
-                } else {
-                    startLocalGame();
-                }
-            } else if (type == PacketType::GameData && size > 0) {
-                // Check for command packet
-                if (data[0] == T2Protocol::GDT_Command && size >= 3) {
-                    uint16_t cmdLen = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
-                    if (cmdLen > 0 && (size_t)(3 + cmdLen) <= size) {
-                        std::string cmd((const char*)data + 3, cmdLen);
-                        Console::instance().printf(LogLevel::Warn,
-                            "Ignored untrusted legacy server command: %s", cmd.c_str());
-                        std::istringstream tokens(cmd);
-                        std::vector<std::string> args;
-                        std::string token;
-                        while (tokens >> token && args.size() < 20) args.push_back(token);
-                        if (!args.empty()) dispatchClientCommand(args, {});
-                    }
-                    return;
-                }
-
-                // Handle datablock packets
-                if (data[0] == T2Protocol::GDT_Datablock) {
-                    T2Protocol::DatablockHeader hdr;
-                    const uint8_t* payload;
-                    size_t payloadLen;
-                    if (T2Protocol::decodeDatablock(data, size, hdr, payload, payloadLen)) {
-                        ReceivedDatablock rdb;
-                        rdb.hdr = hdr;
-                        rdb.payload.assign(payload, payload + payloadLen);
-                        receivedDatablocks[hdr.classId].push_back(std::move(rdb));
-                        Console::instance().printf(LogLevel::Debug,
-                            "Received datablock: class=%u obj=%u idx=%u/%u (%zu bytes)",
-                            (unsigned)hdr.classId, (unsigned)hdr.objectId,
-                            (unsigned)hdr.index, (unsigned)hdr.total, payloadLen);
-                    }
-                    return;
-                }
-
-                // Handle chat messages
-                if (data[0] == T2Protocol::GDT_ChatMessage) {
-                    T2Protocol::ChatMessage chat;
-                    if (T2Protocol::decodeChat(data, size, chat)) {
-                        Console::instance().printf(LogLevel::Info, "[CHAT] %s: %s", chat.sender, chat.text);
-                        playChatBeep();
-                        if (auto* ts = Engine::instance().script().ts()) {
-                            if (ts->hasFunction("addMessageHudLine"))
-                                ts->callFunction("addMessageHudLine", {
-                                    VMValue(std::string(chat.sender) + ": " + chat.text)});
-                        }
-                    }
-                    return;
-                }
-
-                // Handle game state packets
-                if (data[0] == T2Protocol::GDT_GameState) {
-                    T2Protocol::GameStateMessage gs;
-                    if (T2Protocol::decodeGameState(data, size, gs)) {
-                        serverPlayerGhostIndex = gs.controlObjectGhostIndex;
-                        serverPlayerGhostSynced = true;
-                        Console::instance().printf(LogLevel::Info,
-                            "GameState: control ghost idx=%u", (unsigned)gs.controlObjectGhostIndex);
-                    }
-                    return;
-                }
-
-                // Handle ghost packets (server batches multiple ghosts into one datagram — loop over them)
-                if (data[0] == T2Protocol::GDT_Ghost || data[0] == T2Protocol::GDT_GhostAlways) {
-                    const uint8_t* gp = data;
-                    size_t grem = size;
-                    while (grem > 0 && (gp[0] == T2Protocol::GDT_Ghost || gp[0] == T2Protocol::GDT_GhostAlways)) {
-                        T2Protocol::GhostMessage gm;
-                        if (!T2Protocol::decodeGhostHeader(gp, grem, gm)) break;
-                        size_t hdrSize = 1 + 4 + 1 + 4; // GDT + index + type + classId
-                        const uint8_t* ghostPayload = gp + hdrSize;
-                        size_t ghostPayloadLen = (grem > hdrSize) ? grem - hdrSize : 0;
-
-                        if (gm.type == T2Protocol::Ghost_Delete) {
-                            liveGhosts.deleteGhost((int)gm.index);
-                            Console::instance().printf(LogLevel::Debug, "Ghost delete idx=%u", (unsigned)gm.index);
-                        } else if (gm.type == T2Protocol::Ghost_Create) {
-                            if (!liveGhosts.hasGhost((int)gm.index)) {
-                                std::string cn;
-                                if (const char* name = V12::ghostClassName((size_t)gm.classId)) cn = name;
-                                else
-                                    cn = "Class" + std::to_string(gm.classId);
-                                liveGhosts.createGhost((int)gm.index, gm.classId, cn);
-                                // Look up datablock and apply config
-                                auto dbs = getDatablocksForClass((uint32_t)gm.classId);
-                                if (dbs && !dbs->empty()) {
-                                    auto* ge = liveGhosts.getMutableGhost((int)gm.index);
-                                    if (ge) {
-                                        const auto& payload = dbs->front().payload;
-                                        if (payload.size() >= 6) {
-                                            float hp;
-                                            memcpy(&hp, payload.data(), 4);
-                                            ge->maxHealth = hp;
-                                            uint16_t nameLen;
-                                            memcpy(&nameLen, payload.data() + 4, 2);
-                                            if (nameLen > 0 && (size_t)(6 + nameLen) <= payload.size()) {
-                                                ge->shapeName.assign((const char*)payload.data() + 6, nameLen);
-                                            }
-                                        }
-                                    }
-                                }
-                                // Read position from payload
-                                if (ghostPayloadLen >= 24) {
-                                    float px, py, pz, rx, rz, hp;
-                                    uint32_t p = 0;
-                                    memcpy(&px, ghostPayload + p, 4); p += 4;
-                                    memcpy(&py, ghostPayload + p, 4); p += 4;
-                                    memcpy(&pz, ghostPayload + p, 4); p += 4;
-                                    memcpy(&rx, ghostPayload + p, 4); p += 4;
-                                    memcpy(&rz, ghostPayload + p, 4); p += 4;
-                                    memcpy(&hp, ghostPayload + p, 4); p += 4;
-                                    auto* ge = liveGhosts.getMutableGhost((int)gm.index);
-                                    if (ge) {
-                                        ge->position = {px, py, pz};
-                                        float halfYaw = rz * 0.5f;
-                                        float halfPitch = rx * 0.5f;
-                                        float cy = cosf(halfYaw), sy = sinf(halfYaw);
-                                        float cp = cosf(halfPitch), sp = sinf(halfPitch);
-                                        ge->rotation = {sp * cy, cp * sy, sp * sy, cp * cy};
-                                        ge->hasRotation = true;
-                                        ge->health = hp;
-                                        // Parse kills/deaths/team/name (payload: 24=pos, 8=k/d, 4=team, name)
-                                        if (ghostPayloadLen >= 36) {
-                                            float fk, fd, fteam;
-                                            memcpy(&fk, ghostPayload + p, 4); p += 4;
-                                            memcpy(&fd, ghostPayload + p, 4); p += 4;
-                                            memcpy(&fteam, ghostPayload + p, 4); p += 4;
-                                            ge->kills = (int32_t)fk;
-                                            ge->deaths = (int32_t)fd;
-                                            ge->teamId = (int32_t)fteam;
-                                            // Parse player name if present (null-terminated, bounded)
-                                            if (ghostPayloadLen > p && ghostPayload[p] != 0) {
-                                                size_t maxName = ghostPayloadLen - p;
-                                                size_t nl = 0;
-                                                while (nl < maxName && ghostPayload[p + nl] != 0) nl++;
-                                                ge->playerName.assign((const char*)ghostPayload + p, nl);
-                                            }
-                                        }
-                                    }
-                                }
-                                Console::instance().printf(LogLevel::Debug,
-                                    "Ghost create idx=%u class=%d (%s)", (unsigned)gm.index, gm.classId, cn.c_str());
-                            }
-                        } else if (gm.type == T2Protocol::Ghost_Update) {
-                            auto* ge = liveGhosts.getMutableGhost((int)gm.index);
-                            if (ge && ghostPayloadLen >= 24) {
-                                float px, py, pz, rx, rz, hp;
-                                uint32_t p = 0;
-                                memcpy(&px, ghostPayload + p, 4); p += 4;
-                                memcpy(&py, ghostPayload + p, 4); p += 4;
-                                memcpy(&pz, ghostPayload + p, 4); p += 4;
-                                memcpy(&rx, ghostPayload + p, 4); p += 4;
-                                memcpy(&rz, ghostPayload + p, 4); p += 4;
-                                memcpy(&hp, ghostPayload + p, 4); p += 4;
-                                ge->position = {px, py, pz};
-                                float halfYaw = rz * 0.5f;
-                                float halfPitch = rx * 0.5f;
-                                float cy = cosf(halfYaw), sy = sinf(halfYaw);
-                                float cp = cosf(halfPitch), sp = sinf(halfPitch);
-                                ge->rotation = {sp * cy, cp * sy, sp * sy, cp * cy};
-                                 ge->hasRotation = true;
-                                 ge->health = hp;
-                                 // Parse kills/deaths/team/name
-                                 if (ghostPayloadLen >= 36) {
-                                     float fk, fd, fteam;
-                                     memcpy(&fk, ghostPayload + p, 4); p += 4;
-                                     memcpy(&fd, ghostPayload + p, 4); p += 4;
-                                     memcpy(&fteam, ghostPayload + p, 4); p += 4;
-                                      ge->kills = (int32_t)fk;
-                                      ge->deaths = (int32_t)fd;
-                                      ge->teamId = (int32_t)fteam;
-                                      if (ghostPayloadLen > p && ghostPayload[p] != 0) {
-                                          size_t maxName = ghostPayloadLen - p;
-                                          size_t nl = 0;
-                                          while (nl < maxName && ghostPayload[p + nl] != 0) nl++;
-                                          ge->playerName.assign((const char*)ghostPayload + p, nl);
-                                      }
-                                  }
-                             }
-                         }
-                         // Advance to the next ghost in the batch (variable-length null-terminated name).
-                         size_t consumed = hdrSize;
-                         if (gm.type != T2Protocol::Ghost_Delete && ghostPayloadLen >= 36) {
-                             size_t avail = ghostPayloadLen - 36;
-                             const uint8_t* np = ghostPayload + 36;
-                             size_t nl = 0;
-                             while (nl < avail && np[nl] != 0) nl++;
-                             consumed += 36 + (nl < avail ? nl + 1 : avail);
-                         } else {
-                             consumed += ghostPayloadLen;
-                         }
-                         if (consumed > grem) break;
-                         gp += consumed;
-                         grem -= consumed;
-                     }
-                     return;
-                     }
-
-                     T2Protocol::UpdateMessage update;
-                if (T2Protocol::decodeUpdate(data, size, update)) {
-                    // Reconcile: set to server state then replay pending moves
-                    Point3F serverPos = {update.posX, update.posY, update.posZ};
-                    Point3F serverVel = {update.velX, update.velY, update.velZ};
-                     if (pl) {
-                         reconcile(serverPos, serverVel, update.lastMoveSeq);
-                         pl->setRotation({update.rotX, 0, update.rotZ});
-                         pl->setHealth(update.health);
-                         if ((update.flags & T2Protocol::UPDATE_DEAD) != 0 && gameState == Playing) {
-                             deathTimer = 0.0f;
-                             currentInput = {};
-                             pendingMoves.clear();
-                             w->projectiles().clear();
-                             setState(Dead);
-                         } else if ((update.flags & T2Protocol::UPDATE_DEAD) == 0 &&
-                                    update.health > 0.0f && gameState == Dead) {
-                             deathTimer = 0.0f;
-                             setState(Playing);
-                         }
-                     }
-                }
-            }
-        });
         activeConn->setCommandCallback([](const std::string& command) {
             if (!command.empty()) {
                 Console::instance().printf(LogLevel::Warn,
@@ -11121,7 +10792,7 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
         activeConn->setMissionCallback([this](uint32_t crc) {
             if (liveMissionCrc != 0 && liveMissionCrc != crc) {
                 resetLiveMissionState();
-                if (activeConn && activeConn->isObserverMode() && w)
+                if (activeConn && w)
                     w->cleanupMission();
             }
             liveMissionCrc = crc;
@@ -11597,7 +11268,7 @@ void Game::connectToServer(const char* host, uint16_t port, bool observer, const
                  }
                  serverPlayerGhostIndex = targetId;
                  serverPlayerGhostSynced = true;
-                 if (activeConn && activeConn->isObserverMode()) {
+                 if (activeConn) {
                      spectateGhostIndex = targetId;
                      if (hasPosition) {
                          liveFollowCenter = {position.x, position.y, position.z};
@@ -11629,25 +11300,6 @@ int Game::liveClockRemainingMs() const {
     if (liveClockDurationMs_ <= 0 || liveClockReceivedAt_ <= 0.0) return 0;
     const double elapsed = Engine::instance().timer().now() - liveClockReceivedAt_;
     return std::max(0, liveClockDurationMs_ - (int)(elapsed * 1000.0));
-}
-
-void Game::reconcile(const Point3F& serverPos, const Point3F& serverVel, uint32_t lastProcessedSeq) {
-    if (!pl) return;
-
-    // Pop all moves that were processed by server
-    while (!pendingMoves.empty() && pendingMoves.front().seq <= lastProcessedSeq)
-        pendingMoves.pop_front();
-
-    // Set player to authoritative server state
-    pl->setPosition(serverPos);
-    pl->setVelocity(serverVel);
-
-    // Re-apply pending moves to stay ahead of server
-    Physics physics;
-    for (auto& move : pendingMoves) {
-        // Reconstruct InputMove from stored data
-        physics.update(pl, move.dt, move.input);
-    }
 }
 
 static std::string extractMapName(const std::string& missionPath) {
@@ -12879,8 +12531,7 @@ void Game::resetLiveMissionState() {
 }
 
 void Game::toggleTargetFinder() {
-    const bool available = demoPlaying || (activeConn && activeConn->isConnected() &&
-                                           activeConn->isObserverMode());
+    const bool available = demoPlaying || (activeConn && activeConn->isConnected());
     if (available) targetFinderShown = !targetFinderShown;
 }
 
@@ -12893,7 +12544,7 @@ void Game::selectSpectateTarget(int ghostIndex) {
             demoFirstPersonCam = true;
             demoOrbitCam = false;
         }
-    } else if (activeConn && activeConn->isObserverMode() && liveGhosts.getGhost(ghostIndex)) {
+    } else if (activeConn && liveGhosts.getGhost(ghostIndex)) {
         spectateGhostIndex = ghostIndex;
         liveFollowGhostIndex = -1;
         liveFollowCenterInit = false;
@@ -12951,7 +12602,7 @@ void Game::applyInput(const InputMove& input) {
                 Console::instance().printf(LogLevel::Info, "Spectating ghost %d", spectateGhostIndex);
             }
         }
-    } else if (observerCycle && !previousObserverCycle && activeConn && activeConn->isObserverMode()) {
+    } else if (observerCycle && !previousObserverCycle && activeConn) {
         const auto observer = activeConn->observerSnapshot();
         const auto indices = liveGhosts.getAllIndices();
         std::vector<int> targets;
