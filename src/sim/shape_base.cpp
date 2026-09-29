@@ -211,6 +211,132 @@ std::array<float, 16> translation(const float p[3]) {
 } // namespace
 
 std::string shapeFileOf(const ShapeBase& shape) { return objectShapeFile(shape); }
+
+namespace {
+// TSShape::sequences as the shape stores them: name, duration, cyclic.
+struct SequenceInfo { std::string name; float duration; bool cyclic; };
+const std::vector<SequenceInfo>& shapeSequences(const std::string& shapeFile) {
+    static std::unordered_map<std::string, std::vector<SequenceInfo>> cache;
+    static const std::vector<SequenceInfo> none;
+    if (shapeFile.empty() || !Engine::instance().filesys) return none;
+    std::string key = shapeFile;
+    for (char& ch : key) ch = (char)std::tolower((unsigned char)ch);
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        std::vector<SequenceInfo> list;
+        const auto bytes = Engine::instance().fs().read(("shapes/" + shapeFile).c_str());
+        if (!bytes.empty()) {
+            const DTSLoadResult shape = loadDTS(bytes.data(), bytes.size(), shapeFile.c_str());
+            for (const auto& a : shape.animations) list.push_back({a.name, a.duration, a.looping});
+        }
+        it = cache.emplace(key, std::move(list)).first;
+    }
+    return it->second;
+}
+} // namespace
+
+int ShapeBase::findSequence(const std::string& name) const {
+    const auto& list = shapeSequences(objectShapeFile(*this));
+    for (size_t i = 0; i < list.size(); ++i)
+        if (strcasecmp(list[i].name.c_str(), name.c_str()) == 0) return (int)i;
+    return -1;
+}
+
+// ShapeBase::updateThread: the time scale (and position) for the state.
+static void updateThread(ShapeBase::ScriptThread& st) {
+    switch (st.state) {
+    case ShapeBase::ScriptThread::Stop:
+        st.pos = 0;
+        [[fallthrough]];
+    case ShapeBase::ScriptThread::Pause:
+        st.timeScale = 0;
+        break;
+    case ShapeBase::ScriptThread::Play:
+        if (st.atEnd) {
+            st.pos = st.forward ? 1 : 0;
+            st.timeScale = 0;
+        } else {
+            st.timeScale = st.forward ? 1 : -1;
+        }
+        break;
+    }
+}
+
+bool ShapeBase::setThreadSequence(uint32_t slot, int sequence, bool reset) {
+    ScriptThread& st = threads[slot];
+    if (st.sequence == sequence && st.state == ScriptThread::Play) return true;
+    if (sequence < 0 || sequence >= 32) return false; // MaxSequenceIndex (ThreadSequenceBits 5)
+    setMaskBits(ThreadMaskN << slot);
+    st.sequence = sequence;
+    if (reset) {
+        st.state = ScriptThread::Play;
+        st.atEnd = false;
+        st.forward = true;
+    }
+    st.pos = 0;
+    updateThread(st);
+    return true;
+}
+
+bool ShapeBase::stopThread(uint32_t slot) {
+    ScriptThread& st = threads[slot];
+    if (st.sequence == -1 || st.state == ScriptThread::Stop) return false;
+    setMaskBits(ThreadMaskN << slot);
+    st.state = ScriptThread::Stop;
+    updateThread(st);
+    return true;
+}
+
+bool ShapeBase::pauseThread(uint32_t slot) {
+    ScriptThread& st = threads[slot];
+    if (st.sequence == -1 || st.state == ScriptThread::Pause) return false;
+    setMaskBits(ThreadMaskN << slot);
+    st.state = ScriptThread::Pause;
+    updateThread(st);
+    return true;
+}
+
+bool ShapeBase::playThread(uint32_t slot) {
+    ScriptThread& st = threads[slot];
+    if (st.sequence == -1 || st.state == ScriptThread::Play) return false;
+    setMaskBits(ThreadMaskN << slot);
+    st.state = ScriptThread::Play;
+    updateThread(st);
+    return true;
+}
+
+bool ShapeBase::setThreadDir(uint32_t slot, bool forward) {
+    ScriptThread& st = threads[slot];
+    if (st.sequence == -1) return false;
+    if (st.forward != forward) {
+        setMaskBits(ThreadMaskN << slot);
+        st.forward = forward;
+        st.atEnd = false;
+        updateThread(st);
+    }
+    return true;
+}
+
+// ShapeBase::advanceThreads: TSThread::advanceTime over the sequence's
+// duration; a non-cyclic sequence at its end calls onEndSequence.
+void ShapeBase::advanceThreads(float dt) {
+    const auto& sequences = shapeSequences(objectShapeFile(*this));
+    for (uint32_t i = 0; i < MaxScriptThreads; ++i) {
+        ScriptThread& st = threads[i];
+        if (st.sequence < 0 || st.sequence >= (int)sequences.size()) continue;
+        const SequenceInfo& seq = sequences[st.sequence];
+        if (!seq.cyclic && !st.atEnd && (st.forward ? st.pos >= 1.0f : st.pos <= 0.0f)) {
+            st.atEnd = true;
+            updateThread(st);
+            callDataBlock("onEndSequence", {std::to_string(i)});
+        }
+        if (seq.duration > 0) {
+            st.pos += dt * st.timeScale / seq.duration;
+            if (seq.cyclic) st.pos -= std::floor(st.pos);
+            else st.pos = std::clamp(st.pos, 0.0f, 1.0f);
+        }
+    }
+}
 bool shapeFileBounds(const std::string& shapeFile, float lo[3], float hi[3]) { return shapeBounds(shapeFile, lo, hi); }
 
 int ShapeBaseImageData::lookupState(const std::string& name) const {
@@ -883,6 +1009,7 @@ void ShapeBase::startFade(float time, float delay, bool out) {
 }
 
 void ShapeBase::processShapeTick() {
+    advanceThreads(0.032f);
     if (fading) {
         const float newElapsed = fadeElapsedTime + 0.032f;
         if (fadeElapsedTime < fadeDelay && newElapsed >= fadeDelay) setMaskBits(CloakMask);
@@ -916,7 +1043,9 @@ uint32_t ShapeBase::packUpdate(GameConnection& connection, uint32_t mask, Torque
     if (mask & InitialUpdateMask) {
         // No sound plays and no script thread runs yet; mask off images
         // that aren't mounted.
-        mask &= ~(SoundMask | ThreadMask);
+        mask &= ~SoundMask;
+        for (uint32_t i = 0; i < MaxScriptThreads; ++i)
+            if (threads[i].sequence == -1) mask &= ~(ThreadMaskN << i);
         for (uint32_t i = 0; i < MaxMountedImages; ++i)
             if (!images[i].dataBlock) mask &= ~(ImageMaskN << i);
     }
@@ -930,9 +1059,17 @@ uint32_t ShapeBase::packUpdate(GameConnection& connection, uint32_t mask, Torque
         w.writeFlag(false); // blowApart
         w.writeNormalVector({0, 0, 1}, 8); // damageDir
     }
-    if (w.writeFlag(mask & SoundMask))
-        for (int i = 0; i < 4; ++i) w.writeFlag(false);
     if (w.writeFlag(mask & ThreadMask))
+        for (uint32_t i = 0; i < MaxScriptThreads; ++i) {
+            const ScriptThread& st = threads[i];
+            if (!w.writeFlag(st.sequence != -1 && (mask & (ThreadMaskN << i)))) continue;
+            w.writeInt(st.sequence, 5);
+            w.writeInt(st.state, 2);
+            w.writeF32(st.timeScale);
+            w.writeF32(st.pos);
+            w.writeFlag(st.atEnd);
+        }
+    if (w.writeFlag(mask & SoundMask))
         for (int i = 0; i < 4; ++i) w.writeFlag(false);
     if (w.writeFlag(mask & ImageMask))
         for (uint32_t i = 0; i < MaxMountedImages; ++i) {
@@ -1025,6 +1162,28 @@ void registerShapeBaseNatives(TorqueScript& ts) {
         });
     };
     (void)self;
+    // playThread(slot [, sequence]), stopThread, pauseThread, setThreadDir.
+    method("playThread", [arg](ShapeBase& s, const Args& a) {
+        const int slot = arg(a, 1).toInt();
+        if (slot < 0 || slot >= ShapeBase::MaxScriptThreads) return VMValue(0);
+        if (a.size() > 2) {
+            const int seq = s.findSequence(a[2].toString());
+            return VMValue(seq != -1 && s.setThreadSequence(slot, seq) ? 1 : 0);
+        }
+        return VMValue(s.playThread(slot) ? 1 : 0);
+    });
+    method("stopThread", [arg](ShapeBase& s, const Args& a) {
+        const int slot = arg(a, 1).toInt();
+        return VMValue(slot >= 0 && slot < ShapeBase::MaxScriptThreads && s.stopThread(slot) ? 1 : 0);
+    });
+    method("pauseThread", [arg](ShapeBase& s, const Args& a) {
+        const int slot = arg(a, 1).toInt();
+        return VMValue(slot >= 0 && slot < ShapeBase::MaxScriptThreads && s.pauseThread(slot) ? 1 : 0);
+    });
+    method("setThreadDir", [arg](ShapeBase& s, const Args& a) {
+        const int slot = arg(a, 1).toInt();
+        return VMValue(slot >= 0 && slot < ShapeBase::MaxScriptThreads && s.setThreadDir(slot, arg(a, 2).toBool()) ? 1 : 0);
+    });
     // ShapeBase::setHidden: out of the scene, so every client's ghost goes.
     method("hide", [arg](ShapeBase& s, const Args& a) {
         const bool hide = arg(a, 1).toBool();

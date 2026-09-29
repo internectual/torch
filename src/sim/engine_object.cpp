@@ -52,11 +52,21 @@ void forEachTicking(const std::function<void(EngineObject&)>& visit) {
 
 namespace SimState {
 
+namespace {
+double gSimTime = 0.0;
+}
+
+double simTime() { return gSimTime; }
+
+void advanceSimTime(double realElapsed) {
+    if (realElapsed > 0) gSimTime += std::min(realElapsed, 1.024);
+}
+
+// ProcessList::advanceServerTime: every tick up to `now`.
 void advanceServer(double now) {
     static double lastTick = -1.0;
     if (lastTick < 0.0 || now < lastTick) lastTick = now;
-    int ticks = 0;
-    while (now - lastTick >= TickSeconds && ticks < 8) {
+    while (now - lastTick >= TickSeconds) {
         EngineObjects::forEachTicking([](EngineObject& object) {
             // ProcessList::advanceObjects: an object its client controls
             // ticks once for each pending move.
@@ -76,10 +86,7 @@ void advanceServer(double now) {
         });
         lastTick += TickSeconds;
         SimState::server().timeMs += 32;
-        ++ticks;
     }
-    // A long stall does not replay a burst of ticks afterwards.
-    if (now - lastTick >= TickSeconds) lastTick = now;
 }
 
 } // namespace SimState

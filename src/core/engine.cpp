@@ -1900,14 +1900,17 @@ void Engine::runDedicated() {
     const int stdinFlags = fcntl(STDIN_FILENO, F_GETFL, 0);
     if (stdinFlags >= 0) fcntl(STDIN_FILENO, F_SETFL, stdinFlags | O_NONBLOCK);
     std::string line;
+    double lastFrame = Timer::now();
     while (running && !quitRequested) {
         const double now = Timer::now();
+        SimState::advanceSimTime(now - lastFrame);
+        lastFrame = now;
         net->update();
         scr->vm()->setVariable("time", (float)now);
-        if (scr->ts()) scr->ts()->processScheduledEvents(now);
-        netInterfaceProcess(now);
-        SimState::advanceServer(now);
+        SimState::advanceServer(SimState::simTime());
         serverNetProcess(now);
+        if (scr->ts()) scr->ts()->processScheduledEvents(SimState::simTime());
+        netInterfaceProcess(now);
         for (int c; (c = getchar()) != EOF;) {
             if (c != '\n') { line += (char)c; continue; }
             if (scr->ts()) scr->ts()->execute(line, "stdin");
@@ -2242,9 +2245,14 @@ void Engine::run() {
         // Update active game connection (receive packets, handle timeouts)
         if (g && g->activeConnection()) g->activeConnection()->update();
         scr->vm()->setVariable("time", (float)now);
-        if (scr->ts()) scr->ts()->processScheduledEvents(now);
+        {
+            static double lastSimFrame = now;
+            SimState::advanceSimTime(now - lastSimFrame);
+            lastSimFrame = now;
+        }
+        if (scr->ts()) scr->ts()->processScheduledEvents(SimState::simTime());
         netInterfaceProcess(now);
-        SimState::advanceServer(now);
+        SimState::advanceServer(SimState::simTime());
         serverNetProcess(now);
         if (g) g->tickLiveClient((float)dt);
         clientNetProcess(now);

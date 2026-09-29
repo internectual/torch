@@ -212,6 +212,26 @@ public:
     // object ticks inside that player's processTick (setProcessTick(false)).
     std::string controllingObject;
     bool processesTicks() const override { return controllingObject.empty(); }
+
+    // Script threads (mScriptThread): a sequence of the shape played,
+    // stopped, paused or reversed from script; a non-cyclic one reaching its
+    // end calls %data.onEndSequence(%obj, %slot).
+    enum { MaxScriptThreads = 4 };
+    struct ScriptThread {
+        enum State { Play, Stop, Pause };
+        int sequence = -1;
+        int state = Stop;
+        bool forward = true, atEnd = false;
+        float pos = 0, timeScale = 1;
+    };
+    ScriptThread threads[MaxScriptThreads];
+    int findSequence(const std::string& name) const;
+    bool setThreadSequence(uint32_t slot, int sequence, bool reset = true);
+    bool playThread(uint32_t slot);
+    bool stopThread(uint32_t slot);
+    bool pauseThread(uint32_t slot);
+    bool setThreadDir(uint32_t slot, bool forward);
+    void advanceThreads(float dt);
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
     bool writePacketData(GameConnection& connection, TorqueBitWriter& w) override;
 

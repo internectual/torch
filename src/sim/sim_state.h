@@ -17,6 +17,12 @@ struct Server {
 constexpr double TickSeconds = 0.032;
 void advanceServer(double now);
 
+// Sim::getCurrentTime (seconds): advanced once a frame by the elapsed real
+// time, capped at 1024 ms (TribesGame::processTimeEvent). Scheduled events
+// and the server's ticks run on it.
+double simTime();
+void advanceSimTime(double realElapsed);
+
 inline Server& server() {
     static Server state;
     return state;

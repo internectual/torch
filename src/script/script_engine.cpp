@@ -1,6 +1,7 @@
 #include "script/script_engine.h"
 #include "sim/game_connection.h"
 #include "sim/engine_classes.h"
+#include "sim/sim_state.h"
 #include "sim/sim_natives.h"
 #include "sim/engine_object.h"
 #include "game/material_property_map.h"
@@ -3095,13 +3096,9 @@ bool ScriptEngine::init() {
         return VMValue(Engine::instance().fs().removeFile(args[0].toString().c_str()) ? 1 : 0);
     });
 
+    // Sim::getCurrentTime.
     tsInstance->registerNative("getSimTime", [](const auto&) -> VMValue {
-        // Simulation time advances with Game::update and therefore follows
-        // the same time scale as the rest of the game. Keep the timer fallback
-        // for script-only users that have not created an Engine game yet.
-        const double seconds = Engine::instance().g
-            ? Engine::instance().game().gameTime() : Timer::now();
-        return VMValue((int32_t)(seconds * 1000.0));
+        return VMValue((int32_t)(SimState::simTime() * 1000.0));
     });
     tsInstance->registerNative("getRealTime", [](const auto&) -> VMValue {
         const auto now = std::chrono::system_clock::now().time_since_epoch();
@@ -3940,7 +3937,7 @@ bool ScriptEngine::init() {
             double delay = args[0].toDouble() / 1000.0; // ms to seconds
             std::vector<VMValue> callbackArgs(args.begin() + 3, args.end());
             return VMValue(ScriptEngine::instance().ts()->scheduleEvent(
-                Engine::instance().timer().now(), delay, args[1].toString(),
+                SimState::simTime(), delay, args[1].toString(),
                 args[2].toString(), callbackArgs));
         }
         return VMValue(0);
@@ -3951,7 +3948,7 @@ bool ScriptEngine::init() {
             double delay = args[1].toDouble() / 1000.0;
             std::vector<VMValue> callbackArgs(args.begin() + 3, args.end());
             return VMValue(ScriptEngine::instance().ts()->scheduleEvent(
-                Engine::instance().timer().now(), delay, args[0].toString(),
+                SimState::simTime(), delay, args[0].toString(),
                 args[2].toString(), callbackArgs, true));
         }
         return VMValue(0);
