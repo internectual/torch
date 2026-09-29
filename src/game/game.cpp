@@ -7243,8 +7243,9 @@ void Game::update(float dt) {
             }
             const bool stepDemo = demoStepRequest;
             const int stepBlocks = stepDemo ? std::max(1, demoStepBlocks) : 0;
-            const float playbackRate = (demoFastForward || currentInput.jet)
-                ? std::max(demoPlaybackRate, 4.0f) : demoPlaybackRate;
+            // A live connection runs in real time.
+            const float playbackRate = demoLive ? 1.0f
+                : (demoFastForward || currentInput.jet) ? std::max(demoPlaybackRate, 4.0f) : demoPlaybackRate;
             Engine::instance().audio().setPlaybackRate(playbackRate);
             const std::vector<int>& demoTicks = demoParser->getMoveTicksBefore();
             if (demoLive) {
@@ -7264,7 +7265,7 @@ void Game::update(float dt) {
                 blocksThisFrame = std::min(stepBlocks, 500);
                 demoStepRequest = false;
                 demoStepBlocks = 1;
-            } else if (demoFastForward || currentInput.jet) {
+            } else if (!demoLive && (demoFastForward || currentInput.jet)) {
                 demoJetHeld = currentInput.jet;
                 // Use the same playhead-to-block conversion as normal
                 // playback. Integer truncation here used to stall 4x playback
@@ -7529,7 +7530,7 @@ void Game::update(float dt) {
 
             // Free camera toggle during demos (F1)
             static bool prevDemoFreeCam = false;
-            if (currentInput.freeCam && !prevDemoFreeCam) {
+            if (currentInput.freeCam && !prevDemoFreeCam && !demoLive) {
                 freeCamActive = !freeCamActive;
                 if (freeCamActive) {
                     freeCamPos = demoHasPos ? demoCameraPos : pl->cameraPos();
@@ -12431,7 +12432,8 @@ void Game::toggleDemoPause() {
 }
 
 void Game::pauseDemo() {
-    if (!demoPlaying || demoPaused) return;
+    // A live connection cannot be paused from the client.
+    if (!demoPlaying || demoPaused || demoLive) return;
     demoPaused = true;
     Engine::instance().audio().pauseAll();
 }

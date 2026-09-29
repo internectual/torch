@@ -201,8 +201,8 @@ void HUD::render(Game* game) {
                          {1, 1, 1, 1}, 1.0f);
     }
 
-    // Demo playback info
-    if (game->isDemoPlaying()) {
+    // Demo playback info (a live connection is not a playback).
+    if (game->isDemoPlaying() && !game->isLiveClient()) {
         const char* status = "> PLAY";
         ColorF statusColor = {0, 1, 0, 1};
         if (game->demoStepFeedback()) {
