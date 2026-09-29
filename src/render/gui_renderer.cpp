@@ -3425,8 +3425,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                  auto drawMarker = [&](const GhostEntry* ghost) {
                      if (!ghost) return;
                      if (!Engine::instance().game().isDemoPlaying() &&
-                         Engine::instance().game().activeConnection() &&
-                         Engine::instance().game().activeConnection()->isObserverMode()) {
+                         Engine::instance().game().activeConnection()) {
                          const auto observer = Engine::instance().game().activeConnection()->observerSnapshot();
                          if (!Engine::instance().game().isSensorGroupTargetVisible(
                                  observer.playerSensorGroup, ghost->sensorGroup)) return;
@@ -3454,8 +3453,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     const float markerX = std::clamp(mx, x + 5.0f, x + ctl->extentX - 5.0f);
                     const float markerY = std::clamp(my, y + 5.0f, y + ctl->extentY - 5.0f);
                      int listenerGroup = Engine::instance().game().player().team();
-                     if (Engine::instance().game().activeConnection() &&
-                         Engine::instance().game().activeConnection()->isObserverMode())
+                     if (Engine::instance().game().activeConnection())
                          listenerGroup = Engine::instance().game().activeConnection()->observerSnapshot().playerSensorGroup;
                      const bool friendUnit = Engine::instance().game().isTargetFriendly(
                          listenerGroup, ghost->sensorGroup);

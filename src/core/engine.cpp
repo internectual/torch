@@ -240,7 +240,7 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  -debug             Enable debug logging and diagnostics\n");
             fprintf(stdout, "  -help              Show this help\n\n");
             fprintf(stdout, "Console commands:\n");
-            fprintf(stdout, "  connect <host> [port]       Connect to a server\n");
+            fprintf(stdout, "  connect(\"host:port\")        Join a server (retail script call)\n");
             fprintf(stdout, "  watchServer <host:port>     Connect as an anonymous observer\n");
             fprintf(stdout, "  loadMission <name>          Load a local mission\n");
              fprintf(stdout, "  playdemo <path>             Play a demo recording\n");
@@ -862,7 +862,7 @@ bool Engine::init(int argc, char* argv[]) {
         if (auto* connection = g->activeConnection()) {
             state.serverAddress = connection->address().toString();
             state.serverPort = connection->address().port;
-            state.observer = connection->isObserverMode();
+            state.observer = true;
         }
         return state;
     });
@@ -975,8 +975,7 @@ bool Engine::init(int argc, char* argv[]) {
     // player.  Demo ghosts and other clients remain read-only snapshots.
     auto isControlledPlayer = [this](int objectId) {
         return objectId > 0 && objectId == g->getControlGhostIndex() &&
-               !g->isDemoPlaying() &&
-               (!g->activeConnection() || !g->activeConnection()->isObserverMode());
+               !g->isDemoPlaying() && !g->activeConnection();
     };
     scr->setHealthMutationProvider([this, isControlledPlayer](int objectId, float health) {
         if (!isControlledPlayer(objectId)) return false;

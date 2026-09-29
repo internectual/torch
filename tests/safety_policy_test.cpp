@@ -1,6 +1,5 @@
 #include "fs/path_policy.h"
 #include "net/master_query.h"
-#include "net/protocol.h"
 #include "net/network.h"
 #include "game/mission_parser.h"
 
@@ -53,37 +52,11 @@ int main() {
     CHECK(!TorchMaster::parseAddressLine("../evil:28000", host, port));
     CHECK(!TorchMaster::parseAddressLine("host/name:28000", host, port));
 
-    T2Protocol::ChatMessage chat{};
-    const uint8_t oversizedSender[] = {T2Protocol::GDT_ChatMessage, 32, 0, 0, 0};
-    CHECK(!T2Protocol::decodeChat(oversizedSender, sizeof(oversizedSender), chat));
-    const uint8_t oversizedText[] = {T2Protocol::GDT_ChatMessage, 0, 0xff, 0x01};
-    CHECK(!T2Protocol::decodeChat(oversizedText, sizeof(oversizedText), chat));
-    std::strcpy(chat.sender, "spoofed");
-    T2Protocol::setAuthoritativeChatSender(chat, "AuthenticatedPlayer");
-    CHECK(std::strcmp(chat.sender, "AuthenticatedPlayer") == 0);
-    T2Protocol::setAuthoritativeChatSender(chat, "abcdefghijklmnopqrstuvwxyz0123456789");
-    CHECK(std::strlen(chat.sender) == sizeof(chat.sender) - 1);
     CHECK(isObserverSetupCommand({"setPlayerTeam", "0"}));
     CHECK(isObserverSetupCommand({"ScopeCommanderMap", "1"}));
     CHECK(isObserverSetupCommand({"WatchOnly", "ImaWatcher"}));
     CHECK(!isObserverSetupCommand({"setPlayerTeam", "1"}));
     CHECK(!isObserverSetupCommand({"WatchOnly", "ImaWatcher", "extra"}));
-
-    WireHeader wire{0x11223344u, 0x55667788u, 0x99aabbccu, 0x0d, 0xeeff};
-    uint8_t wireBytes[sizeof(WireHeader)]{};
-    encodeWireHeader(wireBytes, wire);
-    CHECK(sizeof(WireHeader) == 15);
-    CHECK(wireBytes[0] == 0x44 && wireBytes[1] == 0x33 && wireBytes[2] == 0x22 && wireBytes[3] == 0x11);
-    CHECK(wireBytes[12] == 0x0d && wireBytes[13] == 0xff && wireBytes[14] == 0xee);
-    const WireHeader decoded = decodeWireHeader(wireBytes);
-    CHECK(decoded.sequence == wire.sequence && decoded.ack == wire.ack &&
-          decoded.ackMask == wire.ackMask && decoded.type == wire.type &&
-          decoded.checksum == wire.checksum);
-    CHECK(isNewerWireSequence(0, UINT32_MAX));
-    CHECK(isNewerWireSequence(1, 0));
-    CHECK(!isNewerWireSequence(UINT32_MAX, 0));
-    CHECK(!isNewerWireSequence(42, 42));
-
 
     const auto mission = parseMisFile(
         "new SimGroup(MissionGroup) { new StaticShape(TestShape) { position = \"1 2 3\"; }; };");

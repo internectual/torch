@@ -6,7 +6,7 @@
 #include "game/collision.h"
 #include "game/shape_lighting.h"
 #include "game/weapon.h"
-#include "net/protocol.h"
+#include "net/network.h"
 #include "game/demo.h"
 #include "game/mission_parser.h"
 #include "game/death_respawn.h"
@@ -842,8 +842,8 @@ public:
     void applyDemoSceneEffects();
     // demoParser->getGhostResets() the demo world was built at.
     int demoWorldGhostResets = -1;
-    void connectToServer(const char* host, uint16_t port, bool observer = false,
-                         const char* password = nullptr);
+    // Watch a retail server as an anonymous observer.
+    void connectToServer(const char* host, uint16_t port);
     bool playDemo(const char* path);
     void stopDemoPlayback();
     // The local client of the in-process retail server (localConnect): the
@@ -918,15 +918,7 @@ public:
     void setTimeScale(float value);
     float getTimeScale() const { return timeScale; }
 
-    // Client-side prediction
-    struct StoredMove {
-        uint32_t seq;
-        InputMove input;
-        float dt;
-    };
     uint32_t moveSeq = 0;
-    std::deque<StoredMove> pendingMoves;
-    void reconcile(const Point3F& serverPos, const Point3F& serverVel, uint32_t lastProcessedSeq);
     void dispatchClientCommand(const std::vector<std::string>& raw, const std::vector<bool>& tagged);
     void resetLiveMissionState();
     void clearMissionAudio();
@@ -1250,12 +1242,6 @@ private:
 
     // Live network ghost tracking
     GhostTracker liveGhosts;
-    // Received datablock tracking: classId → list of datablocks with payload
-    struct ReceivedDatablock {
-        T2Protocol::DatablockHeader hdr;
-        std::vector<uint8_t> payload;
-    };
-    std::map<uint32_t, std::vector<ReceivedDatablock>> receivedDatablocks;
     std::map<uint16_t, std::string> nativeDatablockShapes;
     std::map<uint32_t, ParsedDataBlock> nativeDatablocks;
      std::map<uint16_t, V12::ServerEvent::TargetInfo> liveTargets;
@@ -1277,10 +1263,6 @@ private:
     int liveClockDurationMs_ = 0;
     double liveClockReceivedAt_ = 0.0;
     std::vector<std::string> liveLoadInfoLines_;
-    const std::vector<ReceivedDatablock>* getDatablocksForClass(uint32_t classId) const {
-        auto it = receivedDatablocks.find(classId);
-        return it != receivedDatablocks.end() ? &it->second : nullptr;
-    }
     // Ghost index assigned by server for this client's player
     uint32_t serverPlayerGhostIndex = 0;
     bool serverPlayerGhostSynced = false;

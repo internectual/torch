@@ -1,6 +1,5 @@
 #include "net/v12_datablocks.h"
 #include "net/v12_ghosts.h"
-#include "net/protocol.h"
 #include "net/v12_events.h"
 #include "render/renderer.h"
 #include "game/game.h"
@@ -252,9 +251,6 @@ static void testDataBlocks() {
 static void testObserverTargetParity() {
     assert(!ObserverParity::isPositionReady(false));
     assert(ObserverParity::isPositionReady(true));
-    assert(ObserverParity::isLiveObserver(true, true));
-    assert(!ObserverParity::isLiveObserver(false, true));
-    assert(!ObserverParity::isLiveObserver(true, false));
     assert(ObserverParity::controlGhostIndex(0) == -1);
     assert(ObserverParity::controlGhostIndex(7) == 7);
     assert(ObserverParity::isPlayerTarget("Player", 0));
@@ -470,10 +466,9 @@ static void testResourceBarFractions() {
 }
 
 static void testScoreboardTeamRowsOnlyReserveVisibleStrip() {
-    assert(HudParity::scoreboardTeamRows(false, false, 2) == 0);
-    assert(HudParity::scoreboardTeamRows(true, false, 2) == 0);
-    assert(HudParity::scoreboardTeamRows(true, true, 2) == 2);
-    assert(HudParity::scoreboardTeamRows(true, true, -1) == 0);
+    assert(HudParity::scoreboardTeamRows(false, 2) == 0);
+    assert(HudParity::scoreboardTeamRows(true, 2) == 2);
+    assert(HudParity::scoreboardTeamRows(true, -1) == 0);
 }
 
 static void testArmorCannotAbsorbMoreThanRemains() {

@@ -9,10 +9,6 @@ inline bool isPositionReady(bool hasPosition) {
     return hasPosition;
 }
 
-inline bool isLiveObserver(bool connected, bool observerMode) {
-    return connected && observerMode;
-}
-
 // The live observer snapshot uses native ghost id zero as its no-target
 // sentinel. Convert it before presentation, where -1 already means free
 // camera and positive ids are actual ghosts.

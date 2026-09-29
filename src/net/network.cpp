@@ -1,6 +1,5 @@
 #include "net/network.h"
 #include "net/master_query.h"
-#include "net/protocol.h"
 #include "net/v12_protocol.h"
 #include "core/console.h"
 #include "core/config.h"
@@ -15,7 +14,6 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <vector>
-#include <queue>
 #include <deque>
 #include <chrono>
 #include <map>
@@ -33,13 +31,6 @@ static const char* nativeFlagStatus(const std::string& status) {
     return "home";
 }
 
-static uint16_t wireChecksum(const uint8_t* data, size_t size) {
-    uint32_t sum = 0;
-    for (size_t i = 0; i < size; i++)
-        sum += data[i];
-    return (uint16_t)(sum & 0xFFFF);
-}
-
 static bool parseMessageIndex(const std::string& text, int& value) {
     if (text.empty()) return false;
     char* end = nullptr;
@@ -55,29 +46,9 @@ struct Connection::Impl {
     int sock = -1;
     sockaddr_in addr{};
 
-    // Sequence numbers (32-bit for proper ack tracking)
-    uint32_t sendSeq = 1;
-    uint32_t recvSeq = 0;
-    uint32_t recvMask = 0;
-    bool haveReceivedSequence = false;
-
-    // Sent reliable packets keyed by sequence number
-    struct SentPacket {
-        std::vector<uint8_t> data;
-        PacketType type;
-        double sendTime;
-        int retries;
-        bool reliable;
-    };
-    std::map<uint32_t, SentPacket> sentPackets; // unacked sent packets
-    static constexpr int MAX_RETRIES = 5;
-    static constexpr double RETRY_TIMEOUT = 1.0; // seconds
-
     // Connection timers
     double connectTime = 0;
     double lastPing = 0;
-    double lastReceive = 0;
-    uint32_t challenge[2]{};
     uint32_t clientConnectSequence = 0;
     uint32_t serverConnectSequence = 0;
     std::vector<uint8_t> connectRequest;
@@ -174,11 +145,7 @@ struct Connection::Impl {
         pendingNativeMove = false;
         nativeRateAdvertised = false;
         lastNativeDataSend = 0;
-        lastReceive = 0;
         lastPing = 0;
-        recvSeq = 0;
-        recvMask = 0;
-        haveReceivedSequence = false;
     }
 
     void flushNativeMove() {
@@ -215,54 +182,6 @@ struct Connection::Impl {
         sentByteCount += packet.size();
     }
 
-    void sendFramedAt(PacketType ptype, uint32_t sequence,
-                      const uint8_t* payload, size_t payloadLen) {
-        constexpr size_t kMaxUdpPayload = 60 * 1024;
-        if (sock < 0 || payloadLen > kMaxUdpPayload || (payloadLen > 0 && !payload)) return;
-
-        // Build wire header
-        WireHeader hdr;
-        hdr.sequence = sequence;
-        hdr.ack = recvSeq;
-        // Advertise only packets actually received in the preceding 32 slots.
-        hdr.ackMask = recvMask;
-        hdr.type = (uint8_t)ptype;
-        hdr.checksum = 0; // placeholder
-
-        // Assemble full packet: header + payload
-        std::vector<uint8_t> packet;
-        packet.resize(sizeof(WireHeader) + payloadLen);
-        encodeWireHeader(packet.data(), hdr);
-        if (payload && payloadLen > 0)
-            memcpy(packet.data() + sizeof(WireHeader), payload, payloadLen);
-
-        // Calculate checksum over header + payload (with checksum=0)
-        uint16_t csum = wireChecksum(packet.data(), packet.size());
-        packet[13] = (uint8_t)(csum & 0xff);
-        packet[14] = (uint8_t)(csum >> 8);
-
-        sendto(sock, packet.data(), packet.size(), 0, (sockaddr*)&addr, sizeof(addr));
-        ++sentPacketCount;
-        sentByteCount += packet.size();
-    }
-
-    // Send a pre-built payload (without wire header) with proper framing.
-    void sendFramed(PacketType ptype, const uint8_t* payload, size_t payloadLen, bool reliable) {
-        const uint32_t sequence = sendSeq++;
-        sendFramedAt(ptype, sequence, payload, payloadLen);
-
-        // Track reliable packets for retransmission
-        if (reliable) {
-            sentPackets[sequence] = {
-                payloadLen == 0 ? std::vector<uint8_t>{}
-                                : std::vector<uint8_t>(payload, payload + payloadLen),
-                ptype,
-                Engine::instance().timer().now(),
-                0,
-                true
-            };
-        }
-    }
 };
 
 // ── Public API ────────────────────────────────────────────────────
@@ -338,15 +257,11 @@ bool Connection::connect(const char* host, uint16_t port) {
     impl->connectTime = Engine::instance().timer().now();
     resetProtocolEpoch();
 
-    // Generate random challenge
     std::random_device random;
-    impl->challenge[0] = random();
-    impl->challenge[1] = random();
-
-    impl->clientConnectSequence = impl->challenge[0];
+    impl->clientConnectSequence = random();
     impl->serverConnectSequence = 0;
     impl->sendRaw(V12::buildConnectChallengeRequest(
-        V12::ProtocolVersion, impl->clientConnectSequence, joinPassword));
+        V12::ProtocolVersion, impl->clientConnectSequence));
 
     Console::instance().printf(LogLevel::Info, "Connecting to %s:%d", host, port);
     return true;
@@ -548,7 +463,6 @@ void Connection::disconnect() {
         impl->sock = -1;
     }
     connState = Disconnected;
-    impl->sentPackets.clear();
     impl->injectedObserverPackets.clear();
     // A disconnected browser/observer must not continue displaying the prior
     // mission while the graceful disconnect packet is retried.
@@ -563,13 +477,6 @@ void Connection::update() {
     if ((connState == Connecting || connState == Challenging) &&
         now - impl->connectTime > 10.0) {
         Console::instance().printf(LogLevel::Warn, "Connection timeout");
-        if (connectCb) connectCb(false);
-        disconnect();
-        return;
-    }
-    if (connState >= Connected && impl->lastReceive > 0 &&
-        now - impl->lastReceive > 15.0) {
-        Console::instance().printf(LogLevel::Warn, "Connection receive timeout");
         if (connectCb) connectCb(false);
         disconnect();
         return;
@@ -639,7 +546,7 @@ void Connection::update() {
                         impl->clientConnectSequence,
                         V12::ProtocolVersion,
                         false,
-                        {observerMode ? "ImaWatcher" : playerName,
+                        {"ImaWatcher",
                          "Male Human", "beagle", "male1", "1.0"});
                     impl->sendRaw(impl->connectRequest);
                     impl->connectTime = now;
@@ -658,7 +565,6 @@ void Connection::update() {
                     impl->clientConnectSequence ^ impl->serverConnectSequence);
                 Console::instance().printf(LogLevel::Info, "Connection established");
                 if (connectCb) connectCb(true);
-                if (packetCb) packetCb(PacketType::ConnectOK, nullptr, 0);
                 continue;
             }
             if (type == 28 || type == 34) {
@@ -682,8 +588,6 @@ void Connection::update() {
         }
 
         // Native dnet packets are bit-packed after the first discriminator.
-        // Do not pass their payload to the legacy byte-oriented callback yet;
-        // gameplay event and move decoding is migrated separately.
         if (connState >= Connected) {
             V12BitStream stream(buf, (size_t)n);
             V12::DnetHeader header;
@@ -1109,99 +1013,6 @@ void Connection::update() {
                 continue;
             }
         }
-
-        if ((size_t)n < sizeof(WireHeader)) continue;
-
-        // Parse wire header
-        WireHeader hdr;
-        hdr = decodeWireHeader(buf);
-
-        // Verify checksum
-        uint16_t savedCsum = hdr.checksum;
-        WireHeader hdrNoCsum = hdr;
-        hdrNoCsum.checksum = 0;
-        std::vector<uint8_t> tmp(sizeof(WireHeader) + n - sizeof(WireHeader));
-        encodeWireHeader(tmp.data(), hdrNoCsum);
-        if (n > (int)sizeof(WireHeader))
-            memcpy(tmp.data() + sizeof(WireHeader), buf + sizeof(WireHeader), n - sizeof(WireHeader));
-        if (wireChecksum(tmp.data(), tmp.size()) != savedCsum)
-            continue; // bad checksum
-
-        impl->lastReceive = now;
-
-        // Update ack tracking — remove acked packets
-        uint32_t ackSeq = hdr.ack;
-        uint32_t ackMask = hdr.ackMask;
-        auto it = impl->sentPackets.begin();
-        while (it != impl->sentPackets.end()) {
-            // Acknowledge if seq matches or is within ackMask range
-            if (it->first == ackSeq) {
-                it = impl->sentPackets.erase(it);
-                continue;
-            }
-            // Check ack mask: bits correspond to packets (ack-1, ack-2, ... ack-32)
-            if (ackSeq > it->first) {
-                uint32_t diff = ackSeq - it->first;
-                if (diff > 0 && diff <= 32 && (ackMask & (1 << (diff - 1)))) {
-                    it = impl->sentPackets.erase(it);
-                    continue;
-                }
-            }
-            ++it;
-        }
-
-        // Update the actual receive window used for future acknowledgements.
-        if (!impl->haveReceivedSequence) {
-            impl->recvSeq = hdr.sequence;
-            impl->recvMask = 0;
-            impl->haveReceivedSequence = true;
-        } else if (isNewerWireSequence(hdr.sequence, impl->recvSeq)) {
-            const uint32_t diff = hdr.sequence - impl->recvSeq;
-            if (diff < 32)
-                impl->recvMask = (impl->recvMask << diff) | (1u << (diff - 1));
-            else
-                impl->recvMask = 0;
-            impl->recvSeq = hdr.sequence;
-        } else if (hdr.sequence != impl->recvSeq) {
-            const uint32_t diff = impl->recvSeq - hdr.sequence;
-            if (diff <= 32)
-                impl->recvMask |= 1u << (diff - 1);
-        }
-
-        PacketType ptype = (PacketType)hdr.type;
-        const uint8_t* payload = buf + sizeof(WireHeader);
-        size_t payloadLen = n - sizeof(WireHeader);
-
-        // Handle connection protocol packets internally
-        if (ptype == PacketType::Challenge && connState == Connecting && payloadLen >= 8) {
-            // Server sent a challenge — respond with challenge response
-            T2Protocol::ChallengeMessage chal;
-            memcpy(&chal, payload, sizeof(uint32_t) * 2);
-            T2Protocol::ChallengeResponse resp;
-            resp.response[0] = chal.challenge[0] ^ impl->challenge[0];
-            resp.response[1] = chal.challenge[1] ^ impl->challenge[1];
-            impl->sendFramed(PacketType::ChallengeResponse, (const uint8_t*)&resp, sizeof(resp), true);
-            connState = Challenging;
-            continue;
-        }
-
-        if (ptype == PacketType::ConnectOK && connState == Challenging) {
-            connState = Connected;
-            Console::instance().printf(LogLevel::Info, "Connection established");
-            if (connectCb) connectCb(true);
-            continue;
-        }
-
-        if (ptype == PacketType::ConnectReject) {
-            Console::instance().printf(LogLevel::Warn, "Connection rejected by server");
-            if (connectCb) connectCb(false);
-            disconnect();
-            continue;
-        }
-
-        // Forward other packets to callback
-        if (packetCb)
-            packetCb(ptype, payload, payloadLen);
     }
 
     // ── Timeout ──────────────────────────────────────────────────
@@ -1213,41 +1024,13 @@ void Connection::update() {
         return;
     }
 
-    // ── Reliable retransmission ──────────────────────────────────
-    std::vector<uint32_t> toRemove;
-    bool reliableFailure = false;
-    for (auto& [seq, sp] : impl->sentPackets) {
-        if (!sp.reliable) continue;
-        if (now - sp.sendTime >= Impl::RETRY_TIMEOUT) {
-            sp.retries++;
-            if (sp.retries > Impl::MAX_RETRIES) {
-                Console::instance().printf(LogLevel::Warn, "Reliable send failed (seq=%u, retries=%d)", seq, sp.retries);
-                toRemove.push_back(seq);
-                if (connState != Connected) {
-                    reliableFailure = true;
-                    if (connectCb) connectCb(false);
-                }
-            } else {
-                // Retransmit
-                sp.sendTime = now;
-                impl->sendFramedAt(sp.type, seq, sp.data.data(), sp.data.size());
-            }
-        }
-    }
-    for (uint32_t seq : toRemove)
-        impl->sentPackets.erase(seq);
-    if (reliableFailure) {
-        disconnect();
-        return;
-    }
-
     impl->flushNativeMove();
 
     // ── Send Connect retry (no response yet) ────────────────────
     if (connState == Connecting && (now - impl->connectTime) > 1.0) {
         impl->connectTime = now;
         impl->sendRaw(V12::buildConnectChallengeRequest(
-            V12::ProtocolVersion, impl->clientConnectSequence, joinPassword));
+            V12::ProtocolVersion, impl->clientConnectSequence));
     } else if (connState == Challenging && !impl->connectRequest.empty() &&
                (now - impl->connectTime) > 1.0) {
         impl->connectTime = now;
@@ -1257,7 +1040,8 @@ void Connection::update() {
     // ── Ping ─────────────────────────────────────────────────────
     if (connState >= Connected && (now - impl->lastPing) > 5.0) {
         impl->lastPing = now;
-        sendPacket(PacketType::Ping, nullptr, 0);
+        if (impl->serverConnectSequence != 0)
+            impl->sendRaw(impl->nativeProtocol.buildPacket(V12::PacketType::Ping));
     }
 }
 
@@ -1268,19 +1052,6 @@ bool Connection::ingestObserverPacket(const uint8_t* data, size_t size) {
         return false;
     impl->injectedObserverPackets.emplace_back(data, data + size);
     return true;
-}
-
-void Connection::sendPacket(PacketType type, const uint8_t* data, size_t size) {
-    if (type == PacketType::Ping && impl->serverConnectSequence != 0) {
-        impl->sendRaw(impl->nativeProtocol.buildPacket(V12::PacketType::Ping));
-        return;
-    }
-    impl->sendFramed(type, data, size, false);
-}
-
-void Connection::sendGamePacket(const uint8_t* data, size_t size, bool reliable) {
-    // Reliable: track for retransmission (handled by sendFramed with reliable=true)
-    impl->sendFramed(PacketType::GameData, data, size, reliable);
 }
 
 void Connection::sendNativeMove(uint32_t moveStart, const V12::ClientMove& move) {
@@ -1322,7 +1093,7 @@ void Connection::sendCommandPacket(const char* command) {
         }
     }
     if (argv.empty()) return;
-    if (observerMode && !isObserverSetupCommand(argv)) {
+    if (!isObserverSetupCommand(argv)) {
         Console::instance().printf(LogLevel::Warn,
             "Ignored observer command: %s", argv.front().c_str());
         return;
@@ -1336,7 +1107,7 @@ void Connection::sendRemoteCommand(const std::string& command,
     std::vector<std::string> wireArgs = args;
     std::vector<std::string> argv{command};
     argv.insert(argv.end(), wireArgs.begin(), wireArgs.end());
-    if (observerMode && !isObserverSetupCommand(argv)) {
+    if (!isObserverSetupCommand(argv)) {
         Console::instance().printf(LogLevel::Warn,
             "Ignored observer command: %s", command.c_str());
         return;
@@ -1396,41 +1167,6 @@ void NetworkManager::shutdown() {
     impl->queryTargets.clear();
     impl->nativeInfoRequested.clear();
     impl->querySentTimes.clear();
-}
-
-static bool parseServerResponse(const uint8_t* data, size_t size, NetworkManager::ServerInfo& info) {
-    // Format: 4B ip | 2B port | 2B nameLen | name | 2B mapLen | map | 2B typeLen | type | 1B players | 1B maxPlayers | 1B password | 2B ping
-    size_t off = 0;
-    bool valid = true;
-    auto r32 = [&]() -> uint32_t {
-        if (off + 4 > size) { valid = false; return 0; }
-        uint32_t v = data[off] | ((uint32_t)data[off+1]<<8) | ((uint32_t)data[off+2]<<16) | ((uint32_t)data[off+3]<<24);
-        off += 4; return v;
-    };
-    auto r16 = [&]() -> uint16_t {
-        if (off + 2 > size) { valid = false; return 0; }
-        uint16_t v = data[off] | ((uint16_t)data[off+1]<<8);
-        off += 2; return v;
-    };
-    auto rstr = [&]() -> std::string {
-        uint16_t len = r16();
-        if (!valid || off + len > size) { valid = false; return {}; }
-        std::string s((const char*)data+off, len);
-        off += len;
-        return s;
-    };
-    if (!data || size < 6) return false;
-    info.addr.ip = r32();
-    info.addr.port = r16();
-    info.name = rstr();
-    info.map = rstr();
-    info.gameType = rstr();
-    if (!valid || off + 5 > size) return false;
-    info.numPlayers = data[off++];
-    info.maxPlayers = data[off++];
-    info.password = data[off++] != 0;
-    info.ping = r16();
-    return valid && off <= size;
 }
 
 static size_t masterResponseWrite(char* data, size_t size, size_t count, void* user) {
@@ -1533,17 +1269,6 @@ void NetworkManager::update() {
                 if (serverListCb) serverListCb();
             }
             continue;
-        }
-
-        if (n >= 1 && buf[0] == (uint8_t)PacketType::QueryResponse) {
-            ServerInfo info;
-            if (!parseServerResponse(buf + 1, n - 1, info)) continue;
-            std::string key = info.addr.toString();
-            if (impl->seenServers.find(key) == impl->seenServers.end()) {
-                impl->seenServers[key] = info;
-                servers.push_back(info);
-                if (serverListCb) serverListCb();
-            }
         }
     }
 

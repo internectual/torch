@@ -11,7 +11,7 @@ for option in "-demo <file.rec>" "--demo <file.rec>" "-playdemo <file.rec>" \
     "-demo-mode" "-demo-master-server <url>" "-mapper <map>" "-output <dir>" "-mod <path>" "-exec,-e <file>" \
     "demoMasterServer" "demoAllowConnect" "demoAllowWatch" "default: empty = LAN" \
     "isDemo()" "isDemoPlaying()" \
-    "-quit-after-frames <n>" "connect <host> [port]" \
+    "-quit-after-frames <n>" 'connect("host:port")' \
     "watchServer <host:port>" "loadMission <name>" \
     "TORCH-RUN-START"; do
     case "$client_help" in
