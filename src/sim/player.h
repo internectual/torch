@@ -5,6 +5,8 @@
 #include "sim/shape_base.h"
 #include "game/player_prediction.h"
 #include <functional>
+#include <string>
+#include <vector>
 
 class PlayerObject : public ShapeBase {
 public:
@@ -19,7 +21,14 @@ public:
     void readFields() override;
 
     PlayerPrediction::State state;
-    std::string armThread = "look"; // setArmThread (the arm animation is not sent yet)
+    // mActionAnimation / mArmAnimation: indices into the PlayerData action
+    // list (actionNames); -1 is none.
+    int action = -1, armAction = -1;
+    bool actionHold = false, actionFirstPerson = true;
+    // PlayerData::preload's action list for this player's shape (names).
+    const std::vector<std::string>& actionNames();
+    bool setActionThread(const std::string& name, bool hold, bool firstPerson);
+    bool setArmThread(const std::string& name);
     // Moves the player's transform (setTransform): position and yaw.
     void setTransform(const std::array<float, 16>& matrix);
     const char* stateName() const;

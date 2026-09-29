@@ -1,5 +1,10 @@
 #include "sim/player.h"
 #include "sim/datablock_pack.h"
+#include "game/player_animation.h"
+#include "render/dts_loader.h"
+#include "core/engine.h"
+#include <map>
+#include <strings.h>
 #include "sim/game_connection.h"
 #include "sim/torque_math.h"
 #include "sim/sim_state.h"
@@ -111,6 +116,84 @@ void PlayerObject::applyImpulse(const Point3F& impulse) {
                  state.velocity.z + impulse.z / mass});
 }
 
+// PlayerData::preload: the shape's sequences, then the TSShapeConstructor's
+// sequence0.. DSQs (aliases rename), as the retail action table
+// (PlayerAnimation::buildActionTable, the client's same table).
+const std::vector<std::string>& PlayerObject::actionNames() {
+    static std::map<std::string, std::vector<std::string>> cache;
+    static const std::vector<std::string> none;
+    ScriptObject* data = ScriptEngine::instance().findObject(dataBlock().c_str());
+    std::string shapeFile = Fields::string(data, "shapeFile");
+    if (shapeFile.empty() || !Engine::instance().filesys) return none;
+    std::string key = shapeFile;
+    for (char& c : key) c = (char)std::tolower((unsigned char)c);
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    std::vector<std::string> names;
+    const auto bytes = Engine::instance().fs().read(("shapes/" + shapeFile).c_str());
+    if (!bytes.empty()) {
+        DTSLoadResult shape = loadDTS(bytes.data(), bytes.size(), shapeFile.c_str());
+        std::vector<DTSShape::Animation> animations = shape.animations;
+        // The constructor whose baseShape is this shape.
+        ScriptObject* ctor = nullptr;
+        for (auto& [name, object] : ScriptEngine::instance().objects)
+            if (object && strcasecmp(object->className.c_str(), "TSShapeConstructor") == 0 &&
+                strcasecmp(Fields::string(object, "baseShape").c_str(), shapeFile.c_str()) == 0) {
+                ctor = object;
+                break;
+            }
+        for (int i = 0; ctor && i < 127; ++i) {
+            const std::string entry = Fields::string(ctor, ("sequence" + std::to_string(i)).c_str());
+            if (entry.empty()) continue;
+            const size_t split = entry.find_first_of(" \t");
+            const std::string file = entry.substr(0, split);
+            std::string alias;
+            if (split != std::string::npos) {
+                const size_t start = entry.find_first_not_of(" \t", split);
+                if (start != std::string::npos) alias = entry.substr(start);
+                while (!alias.empty() && std::isspace((unsigned char)alias.back())) alias.pop_back();
+            }
+            const auto dsq = Engine::instance().fs().read(("shapes/" + file).c_str());
+            if (dsq.empty() || importDSQ(dsq.data(), dsq.size(), shape.nodes, alias, animations) < 0) continue;
+        }
+        std::vector<std::string> sequenceNames;
+        for (const auto& a : animations) sequenceNames.push_back(a.name);
+        for (int index : PlayerAnimation::buildActionTable(sequenceNames))
+            names.push_back(index >= 0 && index < (int)sequenceNames.size() ? sequenceNames[index] : std::string());
+    }
+    return cache.emplace(key, std::move(names)).first->second;
+}
+
+// Player::setActionThread(name, hold, wait, fsp): the first match after the
+// root action.
+bool PlayerObject::setActionThread(const std::string& name, bool hold, bool firstPerson) {
+    const auto& names = actionNames();
+    for (size_t i = 1; i < names.size(); ++i) {
+        if (names[i].empty() || strcasecmp(names[i].c_str(), name.c_str()) != 0) continue;
+        if (action != (int)i) {
+            action = (int)i;
+            actionHold = hold;
+            actionFirstPerson = firstPerson;
+        }
+        setMaskBits(ActionMask);
+        return true;
+    }
+    return false;
+}
+
+bool PlayerObject::setArmThread(const std::string& name) {
+    const auto& names = actionNames();
+    for (size_t i = 0; i < names.size(); ++i)
+        if (!names[i].empty() && strcasecmp(names[i].c_str(), name.c_str()) == 0) {
+            if (armAction != (int)i) {
+                armAction = (int)i;
+                setMaskBits(ActionMask);
+            }
+            return true;
+        }
+    return false;
+}
+
 const char* PlayerObject::stateName() const {
     if (damageState != Enabled) return "Dead";
     if (state.mounted) return "Mounted";
@@ -147,8 +230,23 @@ void PlayerObject::processMove(const ClientMoveIn* move) {
 uint32_t PlayerObject::packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) {
     const uint32_t ret = ShapeBase::packUpdate(connection, mask, w);
     w.writeFlag(false); // ImpactMask
-    w.writeFlag(false); // ActionMask: no action animation
-    w.writeFlag(false); // arm action
+    // ActionMask: an action beyond the movement table (deaths, taunts).
+    if (w.writeFlag((mask & ActionMask) && action >= PlayerAnimation::NumTableActions)) {
+        w.writeInt(action, 8);
+        w.writeFlag(actionHold);
+        w.writeFlag(false); // not at its end (the server does not animate)
+        w.writeFlag(actionFirstPerson);
+        w.writeFlag(false); // from the start
+    }
+    // The arm thread, unless it is the look action on the initial update.
+    int lookAction = -1;
+    {
+        const auto& names = actionNames();
+        for (size_t i = 0; i < names.size(); ++i)
+            if (strcasecmp(names[i].c_str(), "look") == 0) { lookAction = (int)i; break; }
+    }
+    if (w.writeFlag((mask & ActionMask) && armAction >= 0 && (!(mask & InitialUpdateMask) || armAction != lookAction)))
+        w.writeInt(armAction, 8);
     const bool controlledHere = !controllingClient.empty() && connection.script &&
                                 controllingClient == ScriptEngine::instance().objectKey(connection.script);
     if (w.writeFlag(controlledHere && !(mask & InitialUpdateMask))) return ret;
@@ -272,9 +370,15 @@ void registerPlayerNatives(TorqueScript& ts) {
     });
     ts.registerNative("Player::setArmThread", [player](const Args& args) -> VMValue {
         auto* p = player(args);
+        return VMValue(p && args.size() > 1 && p->setArmThread(args[1].toString()) ? 1 : 0);
+    });
+    // setActionThread(sequenceName, <hold>, <fsp>).
+    ts.registerNative("Player::setActionThread", [player](const Args& args) -> VMValue {
+        auto* p = player(args);
         if (!p || args.size() < 2) return VMValue(0);
-        p->armThread = args[1].toString();
-        return VMValue(1);
+        const bool hold = args.size() > 2 && args[2].toBool();
+        const bool fsp = args.size() > 3 ? args[3].toBool() : true;
+        return VMValue(p->setActionThread(args[1].toString(), hold, fsp) ? 1 : 0);
     });
     ts.registerNative("Player::applyImpulse", [player](const Args& args) -> VMValue {
         auto* p = player(args);
