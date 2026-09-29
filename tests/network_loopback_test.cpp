@@ -2,6 +2,9 @@
 #include "sim/net_string_table.h"
 #include "sim/camera.h"
 #include "sim/player.h"
+#include "sim/projectiles.h"
+#include <map>
+#include <set>
 #include "sim/sim_state.h"
 #include "game/demo.h"
 #include "net/network.h"
@@ -1373,6 +1376,176 @@ int main() {
         assert(parser.getParseFault().empty());
         ghost = parser.getGhostTracker().getGhost(ghostIndex);
         assert(ghost && ghost->mountedImages[0].datablockId == -1);
+    }
+    {
+        // Projectiles (projectile.cc, linearProjectile.cc and the retail
+        // proj*.cc): created from script with retail-like datablocks, they
+        // tick on the server against a ground plane and a Player, run the
+        // datablock's onCollision / onExplode (RadiusExplosion's container
+        // search), and ghost in the layout the client's readers decode,
+        // explosions included.
+        auto savedTriangles = serverCollision().triangles;
+        serverCollision().triangles = [](const Point3F&, const Point3F&, std::vector<PlayerPrediction::Triangle>& out) {
+            out.push_back({{-1000, -1000, 0}, {1000, -1000, 0}, {1000, 1000, 0}, {0, 0, 1}});
+            out.push_back({{-1000, -1000, 0}, {1000, 1000, 0}, {-1000, 1000, 0}, {0, 0, 1}});
+        };
+        script.ts()->execute(
+            "datablock PlayerData(ProjArmor) { maxForwardSpeed = 14; runForce = 4200; mass = 90; maxEnergy = 60; "
+            "  boxSize = \"1.2 1.2 2.3\"; maxDamage = 1.0; };"
+            "datablock LinearProjectileData(ProjDisc) { directDamage = 0.5; hasDamageRadius = true; indirectDamage = 0.5; "
+            "  damageRadius = 7.5; kickBackStrength = 1750; dryVelocity = 90; wetVelocity = 50; velInheritFactor = 0.5; "
+            "  fizzleTimeMS = 5000; lifetimeMS = 5000; explodeOnDeath = true; };"
+            "datablock TracerProjectileData(ProjTracer) { directDamage = 0.1; dryVelocity = 425; wetVelocity = 100; "
+            "  fizzleTimeMS = 3000; lifetimeMS = 3000; tracerLength = 15; tracerWidth = 0.1; };"
+            "datablock GrenadeProjectileData(ProjGrenade) { hasDamageRadius = true; indirectDamage = 0.4; damageRadius = 15; "
+            "  grenadeElasticity = 0.3; grenadeFriction = 0.2; armingDelayMS = 250; muzzleVelocity = 40; gravityMod = 1.9; };"
+            "datablock EnergyProjectileData(ProjBolt) { directDamage = 0.15; grenadeElasticity = 0.998; grenadeFriction = 0; "
+            "  armingDelayMS = 500; muzzleVelocity = 90; drag = 0.05; gravityMod = 0; };"
+            "datablock BombProjectileData(ProjBomb) { hasDamageRadius = true; indirectDamage = 1.1; damageRadius = 30; "
+            "  grenadeElasticity = 0.25; grenadeFriction = 0.4; armingDelayMS = 2000; muzzleVelocity = 0.1; drag = 0.3; };"
+            "datablock FlareProjectileData(ProjFlare) { grenadeElasticity = 0.35; grenadeFriction = 0.2; armingDelayMS = 6000; "
+            "  muzzleVelocity = 15; drag = 0.1; gravityMod = 0.15; };"
+            "datablock SeekerProjectileData(ProjMissile) { hasDamageRadius = true; indirectDamage = 0.8; damageRadius = 8; "
+            "  lifetimeMS = 6000; muzzleVelocity = 10; maxVelocity = 80; turningSpeed = 110; acceleration = 200; "
+            "  proximityRadius = 3; flechetteDelayMs = 550; };"
+            "datablock SniperProjectileData(ProjSniper) { directDamage = 0.4; maxRifleRange = 1000; fadeTime = 1.0; };"
+            "datablock TargetProjectileData(ProjLaser) { maxRifleRange = 1000; };"
+            "datablock ShockLanceProjectileData(ProjLance) { zapDuration = 1.0; boltLength = 16.0; };"
+            "datablock ELFProjectileData(ProjElf) { beamRange = 75; };"
+            "datablock RepairProjectileData(ProjRepair) { beamRange = 10; };"
+            "function ProjectileData::onCollision(%data, %proj, %col, %mod, %pos, %normal) {"
+            "  $projCollision = $projCollision @ %data.getName() SPC %col SPC %mod @ \";\"; }"
+            "function ProjectileData::onExplode(%data, %proj, %pos, %mod) {"
+            "  $projExplode = $projExplode @ %data.getName() @ \";\";"
+            "  InitContainerRadiusSearch(%pos, %data.damageRadius, $TypeMasks::PlayerObjectType);"
+            "  while ((%t = containerSearchNext()) != 0)"
+            "    $projRadius = $projRadius @ %t SPC containerSearchCurrRadDamageDist() SPC"
+            "      calcExplosionCoverage(%pos, %t, $TypeMasks::TerrainObjectType) @ \";\"; }"
+            "function ProjElf::zapTarget(%data, %proj, %target, %targeter) { $projZap = %target SPC %targeter; }"
+            "function ProjElf::unzapTarget(%data, %proj, %target, %targeter) { $projUnzap = %target; }"
+            "new GameConnection(ProjClient);"
+            "new Camera(ProjCamera) { position = \"0 0 20\"; };"
+            "new Player(ProjTarget) { dataBlock = ProjArmor; };"
+            "ProjTarget.setTransform(\"0 40 0 0 0 1 0\");"
+            "new Player(ProjShooter) { dataBlock = ProjArmor; };"
+            "ProjShooter.setTransform(\"0 -5 0 0 0 1 0\");"
+            "new Player(ProjZapper) { dataBlock = ProjArmor; };"
+            "ProjZapper.setTransform(\"0 -5 5 0 0 1 0\");");
+        auto* server = EngineObjects::get<GameConnection>("ProjClient");
+        assert(server);
+        GameConnection client;
+        client.isServer = false;
+        DemoParser parser;
+        parser.consumeExplosions();
+        int packets = 0;
+        std::set<std::string> classes;
+        std::vector<DemoParser::PendingExplosion> explosions;
+        server->deliver = [&](const std::vector<uint8_t>& p) { client.receivePacket(p.data(), p.size()); };
+        client.onServerPacket = [&](const std::vector<uint8_t>& p) {
+            PacketData pd = parser.parsePacket(p.data(), p.size(), packets++);
+            for (const auto& ev : pd.events)
+                if (ev.ghostMessage >= 0) client.clientGhostMessage(ev.ghostMessage, ev.ghostSequence, (uint32_t)ev.ghostCount);
+            for (auto& e : parser.consumeExplosions()) explosions.push_back(e);
+            for (int i = 0; i < 1024; ++i)
+                if (const GhostEntry* g = parser.getGhostTracker().getGhost(i))
+                    if (g->className.find("Projectile") != std::string::npos) classes.insert(g->className);
+        };
+        client.deliver = [&](const std::vector<uint8_t>& p) {
+            parser.onSendPacketTrigger();
+            server->receivePacket(p.data(), p.size());
+        };
+        server->activateGhosting();
+        double now = 700.0;
+        for (int i = 0; i < 20 && !server->isGhosting(); ++i, now += 1.0) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.5);
+        }
+        assert(server->isGhosting());
+        script.ts()->execute("ProjCamera.scopeToClient(ProjClient); ProjClient.setControlObject(ProjCamera);");
+        auto step = [&](int ticks) {
+            for (int tick = 0; tick < ticks; ++tick) {
+                SimState::advanceServer(now);
+                server->checkPacketSend(now + 0.01);
+                client.checkPacketSend(now + 0.02);
+                now += 0.032;
+            }
+        };
+        step(1);
+        // (Torch's parser does not take `new (%class)()` yet, so each is spelled out.)
+        auto fire = [&](const char* var, const char* cls, const char* data, const char* pos, const char* dir,
+                        const char* shooter = "ProjShooter") {
+            script.ts()->execute(std::string("$") + var + " = new " + cls + "() { dataBlock = " + data +
+                                 "; initialPosition = \"" + pos + "\"; initialDirection = \"" + dir +
+                                 "\"; sourceObject = " + shooter + "; sourceSlot = 0; vehicleObject = 0; };"
+                                 "$" + var + ".scopeToClient(ProjClient);");
+        };
+        fire("projDisc", "LinearProjectile", "ProjDisc", "0 0 1", "0 1 0");
+        fire("projGren", "GrenadeProjectile", "ProjGrenade", "0 0 5", "1 0 0");
+        fire("projTracer", "TracerProjectile", "ProjTracer", "5 0 1", "0 0 -1");
+        fire("projBolt", "EnergyProjectile", "ProjBolt", "-5 0 1", "0 -1 0");
+        fire("projBomb", "BombProjectile", "ProjBomb", "10 10 8", "0 0 -1");
+        fire("projFlare", "FlareProjectile", "ProjFlare", "-10 -10 3", "0 0 1");
+        fire("projMissile", "SeekerProjectile", "ProjMissile", "0 0 3", "0 1 0");
+        fire("projSniper", "SniperProjectile", "ProjSniper", "0 0 1", "0 1 0");
+        fire("projLaser", "TargetProjectile", "ProjLaser", "0 0 1", "0 1 0");
+        fire("projLance", "ShockLanceProjectile", "ProjLance", "0 38 1", "0 1 0");
+        // The ELF's source is in the air when it fires (no image is mounted, so
+        // the muzzle is the shape's origin).
+        fire("projElf", "ELFProjectile", "ProjElf", "0 0 1", "0 1 0", "ProjZapper");
+        script.ts()->execute(
+            "$projMissile.setObjectTarget(ProjTarget);"
+            "$projMissileTarget = $projMissile.getTargetObject();"
+            "$projSniper.setEnergyPercentage(0.5);"
+            "$projRepair = new RepairProjectile() { dataBlock = ProjRepair; initialPosition = \"0 0 1\"; "
+            "  initialDirection = \"0 1 0\"; sourceObject = ProjShooter; sourceSlot = 0; targetObject = ProjTarget; };"
+            "$projRepair.scopeToClient(ProjClient);");
+        // The sniper hit the target in onAdd.
+        const int targetId = ScriptEngine::instance().objectId(ScriptEngine::instance().findObject("ProjTarget"));
+        assert(script.ts()->getGlobal("$projCollision").toString().find("ProjSniper " + std::to_string(targetId)) !=
+               std::string::npos);
+        assert(script.ts()->getGlobal("$projMissileTarget").toInt() == targetId);
+        const std::string discKey = script.ts()->getGlobal("$projDisc").toString();
+        auto* disc = EngineObjects::get<LinearProjectileObject>(discKey);
+        assert(disc && !disc->segments[0].cutShort && disc->numSegments == 1);
+        step(60);
+        assert(parser.getParseFault().empty());
+        // The disc struck the Player (a dynamic hit: the explosion update).
+        const std::string collisions = script.ts()->getGlobal("$projCollision").toString();
+        assert(collisions.find("ProjDisc " + std::to_string(targetId) + " 1") != std::string::npos);
+        const std::string exploded = script.ts()->getGlobal("$projExplode").toString();
+        assert(exploded.find("ProjDisc;") != std::string::npos);
+        assert(exploded.find("ProjGrenade;") != std::string::npos);
+        assert(exploded.find("ProjTracer;") != std::string::npos);
+        assert(exploded.find("ProjBomb;") != std::string::npos);
+        assert(exploded.find("ProjBolt") == std::string::npos); // unarmed bolt: mirrored off the ground
+        // RadiusExplosion's search found the target, in the open.
+        const std::string radius = script.ts()->getGlobal("$projRadius").toString();
+        assert(radius.find(std::to_string(targetId) + " ") != std::string::npos);
+        assert(radius.find(" 1;") != std::string::npos);
+        // The ELF latched onto the Player in front of it.
+        assert(script.ts()->getGlobal("$projZap").toString().find(std::to_string(targetId)) == 0);
+        bool discExplosion = false, groundExplosion = false;
+        for (const auto& e : explosions) {
+            if (std::fabs(e.position.y - 39.4f) < 0.2f && std::fabs(e.position.z - 1.0f) < 0.1f) discExplosion = true;
+            if (std::fabs(e.position.z) < 0.1f && e.normal.z > 0.99f) groundExplosion = true;
+        }
+        assert(discExplosion && groundExplosion);
+        for (const char* cls : {"LinearProjectile", "TracerProjectile", "GrenadeProjectile", "EnergyProjectile",
+                                "BombProjectile", "FlareProjectile", "SeekerProjectile", "SniperProjectile",
+                                "TargetProjectile", "ShockLanceProjectile", "ELFProjectile", "RepairProjectile"})
+            assert(classes.count(cls));
+        // A spent grenade is deleted DeleteWaitTicks after it explodes; a
+        // linear projectile stays hidden until its forecast end (+13 ticks).
+        step(40);
+        disc = EngineObjects::get<LinearProjectileObject>(discKey);
+        assert(disc && disc->hidden);
+        assert(!ScriptEngine::instance().findObject(script.ts()->getGlobal("$projGren").toString().c_str()));
+        assert(parser.getParseFault().empty());
+        // (the delete() native reaches for the client World, absent here)
+        for (const char* var : {"$projElf", "$projLaser", "$projRepair", "$projFlare"})
+            ScriptEngine::instance().deleteScriptObject(script.ts()->getGlobal(var).toString());
+        assert(script.ts()->getGlobal("$projUnzap").toInt() == targetId);
+        serverCollision().triangles = savedTriangles;
     }
     return 0;
 }

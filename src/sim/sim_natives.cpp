@@ -5,6 +5,7 @@
 #include "sim/player.h"
 #include "sim/static_shapes.h"
 #include "sim/nav_graph.h"
+#include "sim/projectiles.h"
 #include "sim/target_manager.h"
 #include "sim/engine_classes.h"
 #include "sim/torque_math.h"
@@ -30,6 +31,8 @@ void registerSimNatives(TorqueScript& ts) {
     registerStaticShapeNatives(ts);
     registerNavGraphNatives(ts);
     registerTargetManagerNatives(ts);
+    registerContainerNatives(ts);
+    registerProjectileNatives(ts);
     // ai/aiConsole.cc AISystemEnabled([bool]): no argument enables it.
     ts.registerNative("AISystemEnabled", [](const std::vector<VMValue>& args) -> VMValue {
         bool status = true;
