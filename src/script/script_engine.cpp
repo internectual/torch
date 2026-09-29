@@ -5993,7 +5993,7 @@ bool ScriptEngine::init() {
             }
             // Mission objects are not ScriptObject instances. Remove them
             // through World so schedules and lifecycle callbacks agree.
-             Engine::instance().game().world().deleteMissionObject(objName);
+            if (!obj && Engine::instance().g) Engine::instance().game().world().deleteMissionObject(objName);
         }
         return VMValue(1);
     });

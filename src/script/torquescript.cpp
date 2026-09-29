@@ -2278,8 +2278,15 @@ VMValue TorqueScript::Impl::parsePrimary() {
             return parseBlock();
 
         case TSTokenType::New: {
-            // new ObjectType(name, ...) { fields }
-            TSToken className = nextToken();
+            // new ObjectType(name, ...) { fields }; gram.y class_name_expr is
+            // also '(' expr ')' (new (%data.projectileType)()).
+            TSToken className;
+            if (match(TSTokenType::LParen)) {
+                className = TSToken{TSTokenType::Ident, parseExpression().toString(), 0, tok.pos};
+                expect(TSTokenType::RParen);
+            } else {
+                className = nextToken();
+            }
             expect(TSTokenType::LParen);
             std::vector<VMValue> args;
             // Parse arguments: treat bare identifiers as string literals
