@@ -23,6 +23,7 @@
 #include <cmath>
 #include "sim/shape_base.h"
 #include "sim/game_connection.h"
+#include "sim/net_interface.h"
 #include "sim/net_object.h"
 #include "sim/net_string_table.h"
 
@@ -178,6 +179,7 @@ void registerSimNatives(TorqueScript& ts) {
         return VMValue(1);
     });
     registerGameConnectionNatives(ts);
+    registerNetInterfaceNatives(ts);
     registerSceneObjectClasses();
 
     // math/mathTypes.cc console functions.

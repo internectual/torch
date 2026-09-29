@@ -1,4 +1,10 @@
 #include "sim/game_connection.h"
+#include "sim/net_interface.h"
+#include "core/timer.h"
+#include "net/v12_protocol.h"
+#include "net/v12_bitstream.h"
+#include <fcntl.h>
+#include <functional>
 #include "sim/net_string_table.h"
 #include "sim/camera.h"
 #include "sim/player.h"
@@ -1551,6 +1557,139 @@ int main() {
         assert(script.ts()->getGlobal("$projUnzap").toInt() == targetId);
         serverCollision().triangles = savedTriangles;
         serverCollision().water = savedWater;
+    }
+    {
+        // netDispatch.cc over real loopback UDP: setNetPort opens the
+        // server's port, connect() runs the challenge / connect request, the
+        // server's GameConnection gets onConnect(args...) and the client's
+        // ServerConnection the server's packets.
+        TorqueScript* ts = script.ts();
+        uint16_t port = 0;
+        {
+            const int probe = socket(AF_INET, SOCK_DGRAM, 0);
+            sockaddr_in local{};
+            local.sin_family = AF_INET;
+            local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            assert(bind(probe, reinterpret_cast<sockaddr*>(&local), sizeof local) == 0);
+            socklen_t length = sizeof local;
+            assert(getsockname(probe, reinterpret_cast<sockaddr*>(&local), &length) == 0);
+            port = ntohs(local.sin_port);
+            close(probe);
+        }
+        ts->execute(
+            "function GameConnection::onConnect(%client, %name, %raceGender, %skin, %voice, %voicePitch) {"
+            "  $netConnectArgs = %name @ \"|\" @ %raceGender @ \"|\" @ %skin @ \"|\" @ %voice @ \"|\" @ %voicePitch;"
+            "  $netClient = %client; $netClientAddress = %client.getAddress();"
+            "  commandToClient(%client, 'NetHello', \"world\", 42); }"
+            "function GameConnection::onDrop(%client, %reason) { $netDrop = %client @ \":\" @ %reason; }"
+            "function ServerConnectionAccepted() { $netAccepted = $netAccepted + 1; }"
+            "function onChallengeRequestRejected(%msg) { $netChallengeReject = %msg; }"
+            "function onConnectRequestRejected(%msg) { $netConnectReject = %msg; }"
+            "function onConnectionToServerLost(%msg) { $netLost = %msg; }");
+        ts->setGlobal("$Host::MaxPlayers", VMValue(16));
+        ts->setGlobal("$HostGamePlayerCount", VMValue(0));
+        ts->setGlobal("$Host::Password", VMValue(""));
+        ts->setGlobal("$ServerName", VMValue("Torch Loopback"));
+        ts->callFunction("setNetPort", {VMValue((int)port)});
+        ts->callFunction("allowConnections", {VMValue(1)});
+
+        GameConnection* clientConnection = nullptr;
+        std::vector<std::vector<uint8_t>> clientPackets;
+        auto savedStarted = gLocalClientStarted;
+        gLocalClientStarted = [&](GameConnection& connection) {
+            clientConnection = &connection;
+            connection.onServerPacket = [&](const std::vector<uint8_t>& packet) { clientPackets.push_back(packet); };
+        };
+        auto pump = [&](const std::function<bool()>& done) {
+            bool finished = false;
+            for (int i = 0; i < 1500 && !(finished = done()); ++i) {
+                const double now = Timer::now();
+                netInterfaceProcess(now);
+                serverNetProcess(now);
+                clientNetProcess(now);
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            return finished;
+        };
+        const std::string address = "127.0.0.1:" + std::to_string(port);
+        ts->callFunction("connect", {VMValue(address), VMValue(""), VMValue("Tester"), VMValue("Human Male"),
+                                     VMValue("beagle"), VMValue("Male1")});
+        DemoParser parser;
+        bool hello = false;
+        assert(pump([&] {
+            for (const auto& packet : clientPackets) {
+                PacketData pd = parser.parsePacket(packet.data(), packet.size(), -1);
+                for (const auto& event : pd.events)
+                    if (event.classId == T2Demo::NetEventClassFirst + 9 && event.arguments.size() == 3 &&
+                        event.arguments[0] == "NetHello" && event.arguments[1] == "world" &&
+                        event.arguments[2] == "42")
+                        hello = true;
+            }
+            clientPackets.clear();
+            return hello;
+        }));
+        assert(ts->getGlobal("$netConnectArgs").toString() == "Tester|Human Male|beagle|Male1|");
+        assert(ts->getGlobal("$netClientAddress").toString().rfind("IP:127.0.0.1:", 0) == 0);
+        assert(ts->getGlobal("$netAccepted").toInt() == 1);
+        assert(clientConnection && !clientConnection->isServer);
+        auto* serverSide = EngineObjects::get<GameConnection>(ts->getGlobal("$netClient").toString());
+        assert(serverSide && serverSide->isServer && serverSide->address.rfind("IP:127.0.0.1:", 0) == 0);
+        auto* named = EngineObjects::get<GameConnection>("ServerConnection");
+        assert(named == clientConnection && named->address == "IP:127.0.0.1:" + std::to_string(port));
+        ScriptObject* clientGroup = ScriptEngine::instance().findObject("ClientGroup");
+        assert(clientGroup);
+
+        // handleGamePingRequest: the server answers from $ServerName.
+        {
+            const int query = socket(AF_INET, SOCK_DGRAM, 0);
+            sockaddr_in server{};
+            server.sin_family = AF_INET;
+            server.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            server.sin_port = htons(port);
+            const auto request = V12::buildGameQuery(V12::OobGamePingRequest, 0, 0x1234);
+            sendto(query, request.data(), request.size(), 0, reinterpret_cast<sockaddr*>(&server), sizeof server);
+            fcntl(query, F_SETFL, O_NONBLOCK);
+            uint8_t reply[1500];
+            ssize_t got = -1;
+            pump([&] { got = recv(query, reply, sizeof reply, 0); return got > 0; });
+            assert(got > 6 && reply[0] == 16);
+            V12BitStream stream(reply + 1, (size_t)got - 1);
+            stream.readU8();
+            assert(stream.readU32() == 0x1234);
+            assert(stream.readHuffmanString() == "VER5");
+            assert(stream.readU32() == V12::ProtocolVersion);
+            stream.readU32();
+            stream.readU32();
+            assert(stream.readHuffmanString() == "Torch Loopback");
+            close(query);
+        }
+
+        // Disconnect() deletes the ServerConnection: GameConnection::onRemove
+        // sends the Disconnect, and the server drops the client.
+        const std::string serverKey = ts->getGlobal("$netClient").toString();
+        ts->execute("ServerConnection.delete();");
+        assert(!ScriptEngine::instance().findObject("ServerConnection"));
+        assert(pump([&] { return !ts->getGlobal("$netDrop").toString().empty(); }));
+        assert(ts->getGlobal("$netDrop").toString() == serverKey + ":");
+        assert(!EngineObjects::get<GameConnection>(serverKey));
+
+        // A server with a password turns a wrong one away at the challenge.
+        ts->setGlobal("$Host::Password", VMValue("secret"));
+        ts->callFunction("connect", {VMValue("IP:" + address), VMValue("wrong"), VMValue("Tester")});
+        assert(pump([&] { return !ts->getGlobal("$netChallengeReject").toString().empty(); }));
+        assert(ts->getGlobal("$netChallengeReject").toString() == "PASSWORD");
+        assert(ts->getGlobal("$netAccepted").toInt() == 1);
+
+        // A full server rejects the connect request.
+        ts->setGlobal("$Host::Password", VMValue(""));
+        ts->setGlobal("$Host::MaxPlayers", VMValue(0));
+        ts->callFunction("connect", {VMValue(address), VMValue(""), VMValue("Tester")});
+        assert(pump([&] { return !ts->getGlobal("$netConnectReject").toString().empty(); }));
+        assert(ts->getGlobal("$netConnectReject").toString() == "CR_SERVERFULL");
+        assert(ts->getGlobal("$netAccepted").toInt() == 1);
+
+        ts->callFunction("allowConnections", {VMValue(0)});
+        gLocalClientStarted = savedStarted;
     }
     return 0;
 }

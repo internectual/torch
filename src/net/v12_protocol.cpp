@@ -210,6 +210,123 @@ std::vector<uint8_t> buildDisconnectPacket(uint32_t serverSequence,
     return packet;
 }
 
+std::vector<uint8_t> buildConnectChallengeResponse(uint32_t serverSequence,
+                                                   uint32_t clientSequence,
+                                                   uint32_t protocolVersion,
+                                                   bool authenticated) {
+    V12BitWriter payload;
+    payload.writeUnsigned(OobConnectChallengeResponse, 8);
+    payload.writeUnsigned(protocolVersion, 32);
+    payload.writeUnsigned(serverSequence, 32);
+    payload.writeUnsigned(clientSequence, 32);
+    payload.writeFlag(authenticated);
+    return payload.data();
+}
+
+std::vector<uint8_t> buildConnectChallengeReject(uint32_t clientSequence,
+                                                 const std::string& reason) {
+    V12BitWriter payload;
+    payload.writeUnsigned(OobConnectChallengeReject, 8);
+    payload.writeUnsigned(clientSequence, 32);
+    payload.writeHuffmanString(reason.substr(0, 255));
+    return payload.data();
+}
+
+std::vector<uint8_t> buildConnectReject(uint32_t serverSequence,
+                                        uint32_t clientSequence,
+                                        const std::string& reason) {
+    V12BitWriter payload;
+    payload.writeUnsigned(OobConnectReject, 8);
+    payload.writeUnsigned(serverSequence, 32);
+    payload.writeUnsigned(clientSequence, 32);
+    payload.writeHuffmanString(reason.substr(0, 255));
+    return payload.data();
+}
+
+std::vector<uint8_t> buildConnectAccept(uint32_t serverSequence,
+                                         uint32_t clientSequence,
+                                         uint32_t protocolVersion,
+                                         uint32_t connectionId) {
+    V12BitWriter payload;
+    payload.writeUnsigned(OobConnectAccept, 8);
+    payload.writeUnsigned(serverSequence, 32);
+    payload.writeUnsigned(clientSequence, 32);
+    payload.writeUnsigned(protocolVersion, 32);
+    payload.writeUnsigned(connectionId, 32);
+    return payload.data();
+}
+
+std::vector<uint8_t> buildDisconnectPacket(uint32_t serverSequence,
+                                            uint32_t clientSequence,
+                                            const std::string& reason) {
+    V12BitWriter payload;
+    payload.writeUnsigned(OobDisconnect, 8);
+    payload.writeUnsigned(serverSequence, 32);
+    payload.writeUnsigned(clientSequence, 32);
+    payload.writeHuffmanString(reason.substr(0, 255));
+    return payload.data();
+}
+
+// serverQuery.cc writeCString / writeLongCString.
+static void writeCString(V12BitWriter& w, const std::string& s) {
+    const size_t length = std::min<size_t>(s.size(), 255);
+    w.writeUnsigned((uint32_t)length, 8);
+    for (size_t i = 0; i < length; ++i) w.writeUnsigned((uint8_t)s[i], 8);
+}
+
+static void writeLongCString(V12BitWriter& w, const std::string& s) {
+    const size_t length = std::min<size_t>(s.size(), 65535);
+    w.writeUnsigned((uint32_t)length, 16);
+    for (size_t i = 0; i < length; ++i) w.writeUnsigned((uint8_t)s[i], 8);
+}
+
+std::vector<uint8_t> buildGamePingResponse(uint8_t flags, uint32_t key,
+                                           const std::string& versionString,
+                                           uint32_t currentProtocol,
+                                           uint32_t minProtocol,
+                                           uint32_t buildVersion,
+                                           const std::string& serverName) {
+    const bool compress = !(flags & PingNoStringCompress);
+    V12BitWriter payload;
+    payload.writeUnsigned(16, 8); // GamePingResponse
+    payload.writeUnsigned(flags, 8);
+    payload.writeUnsigned(key, 32);
+    if (compress) payload.writeHuffmanString(versionString);
+    else writeCString(payload, versionString);
+    payload.writeUnsigned(currentProtocol, 32);
+    payload.writeUnsigned(minProtocol, 32);
+    payload.writeUnsigned(buildVersion, 32);
+    // A 24-character limit on the server name.
+    const std::string name = serverName.substr(0, 24);
+    if (compress) payload.writeHuffmanString(name);
+    else writeCString(payload, name);
+    return payload.data();
+}
+
+std::vector<uint8_t> buildGameInfoResponse(uint8_t flags, uint32_t key,
+                                           const GameInfoResponse& info) {
+    const bool compress = !(flags & PingNoStringCompress);
+    V12BitWriter payload;
+    auto string = [&](const std::string& s) {
+        if (compress) payload.writeHuffmanString(s.substr(0, 255));
+        else writeCString(payload, s);
+    };
+    payload.writeUnsigned(20, 8); // GameInfoResponse
+    payload.writeUnsigned(flags, 8);
+    payload.writeUnsigned(key, 32);
+    string(info.mod);
+    string(info.gameType);
+    string(info.missionName);
+    payload.writeUnsigned(info.status, 8);
+    payload.writeUnsigned(info.players, 8);
+    payload.writeUnsigned(info.maxPlayers, 8);
+    payload.writeUnsigned(info.bots, 8);
+    payload.writeUnsigned(info.cpuMhz, 16);
+    string(info.info);
+    writeLongCString(payload, info.statusString);
+    return payload.data();
+}
+
 bool ReceiveWindow::accept(uint16_t sequence, bool packetConnectSequenceBit) {
     sequence &= 0x1ff;
     if (packetConnectSequenceBit != connectSequenceBit) return false;

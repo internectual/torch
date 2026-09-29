@@ -1,6 +1,7 @@
 #include "core/engine.h"
 #include "sim/sim_state.h"
 #include "sim/game_connection.h"
+#include "sim/net_interface.h"
 #include "core/console_args.h"
 #include "core/input_parity.h"
 #include "core/config.h"
@@ -2214,6 +2215,7 @@ void Engine::run() {
         g->gameServer().update();
         scr->vm()->setVariable("time", (float)now);
         if (scr->ts()) scr->ts()->processScheduledEvents(now);
+        netInterfaceProcess(now);
         SimState::advanceServer(now);
         serverNetProcess(now);
         if (g) g->tickLiveClient((float)dt);

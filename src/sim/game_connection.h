@@ -94,6 +94,9 @@ public:
     void checkPacketSend(double now);
     // processRawPacket from the client.
     void receivePacket(const uint8_t* data, size_t size);
+    // NetConnection::setConnectSequence (clientSeq ^ serverSeq for a network
+    // connection): its low bit is the dnet header's connect-sequence bit.
+    void setConnectSequence(uint32_t sequence) { protocol.setConnectSequence(sequence); }
 
     // Client role (GameConnection::readPacket/writePacket, client half):
     // every server packet goes whole to `onServerPacket` (the demo reader

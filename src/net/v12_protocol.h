@@ -19,7 +19,9 @@ constexpr int PacketSequenceBits = 9;
 constexpr int MaxPacketSequence = 1 << PacketSequenceBits;
 constexpr uint8_t OobConnectChallengeRequest = 26;
 constexpr uint8_t OobConnectRequest = 32;
+constexpr uint8_t OobConnectChallengeReject = 28;
 constexpr uint8_t OobConnectChallengeResponse = 30;
+constexpr uint8_t OobConnectReject = 34;
 constexpr uint8_t OobConnectAccept = 36;
 constexpr uint8_t OobDisconnect = 38;
 constexpr uint8_t OobGamePingRequest = 14;
@@ -96,6 +98,63 @@ std::vector<uint8_t> buildGameInfoResponse(uint8_t flags, uint32_t key,
                                            uint8_t maxPlayers, uint8_t bots);
 std::vector<uint8_t> buildDisconnectPacket(uint32_t serverSequence,
                                             uint32_t clientSequence);
+
+// netDispatch.cc packets in full, as the retail (protocol 0x33) engine
+// writes them.
+// ConnectChallengeResponse: protocol, server/client sequences, then the
+// authentication flag (the retail server writes it; no WON data follows
+// when it is clear).
+std::vector<uint8_t> buildConnectChallengeResponse(uint32_t serverSequence,
+                                                   uint32_t clientSequence,
+                                                   uint32_t protocolVersion,
+                                                   bool authenticated);
+// ConnectChallengeReject: client sequence, reason string.
+std::vector<uint8_t> buildConnectChallengeReject(uint32_t clientSequence,
+                                                 const std::string& reason);
+// ConnectReject: server/client sequences, reason string.
+std::vector<uint8_t> buildConnectReject(uint32_t serverSequence,
+                                        uint32_t clientSequence,
+                                        const std::string& reason);
+// sendConnectAccept: server/client sequences, protocol, the connection's
+// SimObject id (the retail client drops an accept whose protocol is not
+// 0x33).
+std::vector<uint8_t> buildConnectAccept(uint32_t serverSequence,
+                                         uint32_t clientSequence,
+                                         uint32_t protocolVersion,
+                                         uint32_t connectionId);
+// GameConnection::onRemove's Disconnect: sequences and the reason.
+std::vector<uint8_t> buildDisconnectPacket(uint32_t serverSequence,
+                                            uint32_t clientSequence,
+                                            const std::string& reason);
+
+// serverQuery.cc Ping flags.
+constexpr uint8_t PingOfflineQuery = 1 << 0;
+constexpr uint8_t PingNoStringCompress = 1 << 1;
+
+// handleGamePingRequest: strings Huffman-coded unless the query set
+// NoStringCompress (then writeCString: U8 length, bytes).
+std::vector<uint8_t> buildGamePingResponse(uint8_t flags, uint32_t key,
+                                           const std::string& versionString,
+                                           uint32_t currentProtocol,
+                                           uint32_t minProtocol,
+                                           uint32_t buildVersion,
+                                           const std::string& serverName);
+
+struct GameInfoResponse {
+    std::string mod;          // mod paths less ";base"
+    std::string gameType;     // $MissionTypeDisplayName
+    std::string missionName;  // $MissionDisplayName
+    uint8_t status = 0;
+    uint8_t players = 0;
+    uint8_t maxPlayers = 0;
+    uint8_t bots = 0;
+    uint16_t cpuMhz = 0;
+    std::string info;         // $Host::Info
+    std::string statusString; // getServerStatusString() (writeLongCString)
+};
+// handleGameInfoRequest.
+std::vector<uint8_t> buildGameInfoResponse(uint8_t flags, uint32_t key,
+                                           const GameInfoResponse& info);
 
 class ReceiveWindow {
 public:
