@@ -97,6 +97,7 @@ public:
     // NetConnection::setConnectSequence (clientSeq ^ serverSeq for a network
     // connection): its low bit is the dnet header's connect-sequence bit.
     void setConnectSequence(uint32_t sequence) { protocol.setConnectSequence(sequence); }
+    uint32_t getConnectSequence() const { return protocol.connectionSequence(); }
 
     // Client role (GameConnection::readPacket/writePacket, client half):
     // every server packet goes whole to `onServerPacket` (the demo reader
@@ -113,7 +114,19 @@ public:
     uint32_t lastMoveAck = 0;
     std::deque<ClientMoveIn> moves;
     bool firstPerson = true;
-    double updateDelaySeconds = 0.032;
+
+    // NetConnection::mCurRate / mMaxRate: the packet interval (ms) and the
+    // size the packet stream fills to, negotiated through the rate fields
+    // each packet may carry.
+    struct NetRate {
+        uint32_t updateDelay = 102, packetSize = 200;
+        bool changed = false;
+    };
+    NetRate curRate, maxRate;
+    GameConnection() { checkMaxRate(); }
+    // NetConnection::checkMaxRate: mMaxRate from $pref::Net::PacketRateToClient
+    // and $pref::Net::PacketSize.
+    void checkMaxRate();
 
 private:
     void validateSendString(const std::string& value);
@@ -134,6 +147,11 @@ private:
     uint32_t controlObjectModifyKey = 0, ackedControlObjectModifyKey = 0;
     int controlStateSkipCount = 0;
     std::map<uint32_t, uint32_t> controlKeyInFlight; // packet -> modify key written
+    // PacketNotify::rateChanged / maxRateChanged: resent when dropped.
+    std::map<uint32_t, std::pair<bool, bool>> rateInFlight;
+    void writeRates(TorqueBitWriter& w);
+    void readRates(V12BitStream& stream);
+    size_t packetBudgetBits() const { return (size_t)curRate.packetSize * 8; }
     void writeControlObject(TorqueBitWriter& w, uint32_t& noteKey);
     std::vector<std::shared_ptr<NetEventOut>> notifyList;
     int nextSendEventSeq = 0;

@@ -1459,11 +1459,15 @@ bool Engine::init(int argc, char* argv[]) {
         return result.toInt() != 0;
     }
 
-    // Wire console commands into TorqueScript interpreter
+    // Wire console commands into TorqueScript interpreter.  A script
+    // native of the same name (the engine's console function, e.g. the
+    // retail connect()) keeps precedence over the Torch command.
     if (scr->ts()) {
         auto* tsi = scr->ts();
         con->forEach([tsi](const char* name, const Console::ConsoleItem& item) {
-            if (item.type == Console::ConsoleItem::Command) {
+            std::string lower = name;
+            for (auto& c : lower) c = (char)tolower((unsigned char)c);
+            if (item.type == Console::ConsoleItem::Command && !tsi->getNatives().count(lower)) {
                 tsi->registerNative(name, [item](const auto& args) -> VMValue {
                     // Two-pass marshalling: taking c_str() during insertion
                     // dangles every earlier pointer when the vector grows.

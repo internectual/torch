@@ -265,6 +265,8 @@ public:
     uint32_t receiveAckMask() const { return receiveMask; }
     uint32_t connectionSequence() const { return connectSequence; }
     bool established() const { return connectionEstablished; }
+    // ConnectionProtocol::windowFull: 30 packets unacknowledged.
+    bool windowFull() const { return lastSentSequence - highestAcked >= 30; }
     ProtocolStateSnapshot snapshot() const;
     void restore(const ProtocolStateSnapshot& state);
 

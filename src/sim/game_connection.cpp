@@ -12,7 +12,63 @@
 
 namespace {
 constexpr int NetEventClassBits = 6;
-constexpr size_t PacketBudgetBits = 1400 * 8; // MaxPacketDataSize less headroom
+// NetConnection.cc's gPacketUpdateDelayToServer (1024 / PacketRateToServer).
+uint32_t gPacketUpdateDelayToServer = 32;
+
+// A $pref::Net value; the engine variable's default until a script sets it.
+uint32_t netPref(const char* name, uint32_t fallback) {
+    auto* ts = ScriptEngine::instance().ts();
+    const VMValue value = ts ? ts->getGlobal(name) : VMValue();
+    return value.toString().empty() ? fallback : (uint32_t)std::max(0, value.toInt());
+}
+}
+
+void GameConnection::checkMaxRate() {
+    const uint32_t rateToServer = std::clamp(netPref("$pref::Net::PacketRateToServer", 32), 8u, 32u);
+    const uint32_t rateToClient = std::clamp(netPref("$pref::Net::PacketRateToClient", 10), 1u, 32u);
+    const uint32_t packetSize = std::clamp(netPref("$pref::Net::PacketSize", 200), 100u, 450u);
+    gPacketUpdateDelayToServer = 1024 / rateToServer;
+    const uint32_t toClientUpdateDelay = 1024 / rateToClient;
+    if (maxRate.updateDelay != toClientUpdateDelay || maxRate.packetSize != packetSize) {
+        maxRate.updateDelay = toClientUpdateDelay;
+        maxRate.packetSize = packetSize;
+        maxRate.changed = true;
+    }
+}
+
+// NetConnection::checkPacketSend: the changed rates, before writePacket.
+void GameConnection::writeRates(TorqueBitWriter& w) {
+    rateInFlight[protocol.lastSent()] = {curRate.changed, maxRate.changed};
+    if (w.writeFlag(curRate.changed)) {
+        w.writeInt((int32_t)curRate.updateDelay, 10);
+        w.writeInt((int32_t)curRate.packetSize, 10);
+        curRate.changed = false;
+    }
+    if (w.writeFlag(maxRate.changed)) {
+        w.writeInt((int32_t)maxRate.updateDelay, 10);
+        w.writeInt((int32_t)maxRate.packetSize, 10);
+        maxRate.changed = false;
+    }
+}
+
+// NetConnection::handlePacket: the sender's current rate, and its maximum
+// clamped to ours.
+void GameConnection::readRates(V12BitStream& stream) {
+    if (stream.readFlag()) {
+        curRate.updateDelay = stream.readUnsigned(10);
+        curRate.packetSize = stream.readUnsigned(10);
+    }
+    if (stream.readFlag()) {
+        uint32_t omaxDelay = stream.readUnsigned(10);
+        uint32_t omaxSize = stream.readUnsigned(10);
+        if (omaxDelay < maxRate.updateDelay) omaxDelay = maxRate.updateDelay;
+        if (omaxSize > maxRate.packetSize) omaxSize = maxRate.packetSize;
+        if (omaxDelay != curRate.updateDelay || omaxSize != curRate.packetSize) {
+            curRate.updateDelay = omaxDelay;
+            curRate.packetSize = omaxSize;
+            curRate.changed = true;
+        }
+    }
 }
 
 void GameConnection::postEvent(std::shared_ptr<NetEventOut> event) {
@@ -218,9 +274,7 @@ void GameConnection::packetReceived(std::vector<std::shared_ptr<NetEventOut>>& e
 }
 
 void GameConnection::writePacket(TorqueBitWriter& w, std::vector<std::shared_ptr<NetEventOut>>& sent) {
-    // checkPacketSend: current and maximum rate unchanged.
-    w.writeFlag(false);
-    w.writeFlag(false);
+    writeRates(w);
     w.setStringBuffer(true);
     w.clearCompression();
     // GameConnection::writePacket, server half: the moves processed so far.
@@ -291,8 +345,7 @@ void GameConnection::setControlObject(const std::string& object) {
 // GameConnection::writePacket, client half (Tribes 2: first-person flag and
 // control-object checksum, then moveWritePacket and the camera fov).
 void GameConnection::writeClientPacket(TorqueBitWriter& w, std::vector<std::shared_ptr<NetEventOut>>& sent) {
-    w.writeFlag(false);
-    w.writeFlag(false);
+    writeRates(w);
     w.setStringBuffer(true);
     w.clearCompression();
     w.writeFlag(firstPerson);
@@ -331,7 +384,7 @@ bool GameConnection::pushMove(const ClientMoveIn& move) {
 
 // NetConnection::eventWritePacket.
 void GameConnection::writeEvents(TorqueBitWriter& w, std::vector<std::shared_ptr<NetEventOut>>& sent) {
-    while (!unorderedQueue.empty() && w.bitPosition() < PacketBudgetBits) {
+    while (!unorderedQueue.empty() && w.bitPosition() <= packetBudgetBits()) {
         auto event = unorderedQueue.front();
         unorderedQueue.pop_front();
         w.writeFlag(true);
@@ -341,7 +394,7 @@ void GameConnection::writeEvents(TorqueBitWriter& w, std::vector<std::shared_ptr
     }
     w.writeFlag(false);
     int prevSeq = -2;
-    while (!orderedQueue.empty() && w.bitPosition() < PacketBudgetBits) {
+    while (!orderedQueue.empty() && w.bitPosition() <= packetBudgetBits()) {
         auto event = orderedQueue.front();
         if (event->sequence > lastAckedEventSeq + 126) break;
         orderedQueue.pop_front();
@@ -357,7 +410,9 @@ void GameConnection::writeEvents(TorqueBitWriter& w, std::vector<std::shared_ptr
 
 void GameConnection::checkPacketSend(double now) {
     if (!deliver) return;
-    if (lastUpdate >= 0.0 && now < lastUpdate + updateDelaySeconds) return;
+    const uint32_t delay = isServer ? curRate.updateDelay : gPacketUpdateDelayToServer;
+    if (lastUpdate >= 0.0 && now < lastUpdate + delay / 1000.0) return;
+    if (protocol.windowFull()) return;
     lastUpdate = now;
     TorqueBitWriter w;
     protocol.writePacketHeader(w.raw(), V12::PacketType::Data);
@@ -385,6 +440,11 @@ void GameConnection::receivePacket(const uint8_t* data, size_t size) {
             else packetDropped(it->second);
             inFlight.erase(it);
         }
+        if (auto it = rateInFlight.find(ack.sequence); it != rateInFlight.end()) {
+            if (it->second.first && !ack.acknowledged) curRate.changed = true;
+            if (it->second.second && !ack.acknowledged) maxRate.changed = true;
+            rateInFlight.erase(it);
+        }
         if (auto it = controlKeyInFlight.find(ack.sequence); it != controlKeyInFlight.end()) {
             if (ack.acknowledged) ackedControlObjectModifyKey = it->second;
             controlKeyInFlight.erase(it);
@@ -405,9 +465,7 @@ void GameConnection::receivePacket(const uint8_t* data, size_t size) {
         clientReadPacket(stream, data, size);
         return;
     }
-    // Rate fields.
-    if (stream.readFlag()) { stream.readUnsigned(10); stream.readUnsigned(10); }
-    if (stream.readFlag()) { stream.readUnsigned(10); stream.readUnsigned(10); }
+    readRates(stream);
     // GameConnection::readPacket, client half (Tribes 2: first-person flag,
     // control-object checksum, then moveReadPacket).
     firstPerson = stream.readFlag();
@@ -454,8 +512,7 @@ void GameConnection::receivePacket(const uint8_t* data, size_t size) {
 // GameConnection::readPacket, client half: the move acknowledgement; the
 // packet then goes to the client's reader whole.
 void GameConnection::clientReadPacket(V12BitStream& stream, const uint8_t* data, size_t size) {
-    if (stream.readFlag()) { stream.readUnsigned(10); stream.readUnsigned(10); }
-    if (stream.readFlag()) { stream.readUnsigned(10); stream.readUnsigned(10); }
+    readRates(stream);
     const uint32_t ack = stream.readUnsigned(32);
     if (stream.failed()) return;
     while (lastMoveAck < ack && !moves.empty()) {
@@ -660,7 +717,7 @@ void GameConnection::writeGhosts(TorqueBitWriter& w, std::vector<GhostRef>& refs
     if (sendSize < 3) sendSize = 3;
     w.writeInt(sendSize - 3, 3);
     for (GhostInfo* ghost : updates) {
-        if (w.bitPosition() >= PacketBudgetBits) break;
+        if (w.bitPosition() > packetBudgetBits()) break;
         w.writeFlag(true);
         w.writeInt(ghost->index, sendSize);
         const uint32_t updateMask = ghost->updateMask;
@@ -821,6 +878,10 @@ void registerGameConnectionNatives(TorqueScript& ts) {
     ts.registerNative("NetConnection::getAddress", [](const Args& args) -> VMValue {
         auto* connection = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString());
         return VMValue(connection ? connection->address : std::string());
+    });
+    ts.registerNative("NetConnection::checkMaxRate", [](const Args& args) -> VMValue {
+        if (auto* c = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString())) c->checkMaxRate();
+        return VMValue("");
     });
     ts.registerNative("GameConnection::isAIControlled", [](const Args&) -> VMValue { return VMValue(0); });
     ts.registerNative("GameConnection::activateGhosting", [](const Args& args) -> VMValue {

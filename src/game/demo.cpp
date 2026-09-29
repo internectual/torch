@@ -1150,7 +1150,7 @@ const std::vector<int>& DemoParser::getMoveTicksBefore() {
     return moveTicksBefore_;
 }
 
-void DemoParser::beginLiveStream() {
+void DemoParser::beginLiveStream(uint32_t sequence) {
     if (decompressed) free(decompressed);
     decompressed = nullptr;
     decompressedSize = 0;
@@ -1175,6 +1175,7 @@ void DemoParser::beginLiveStream() {
     blockCursor_ = 0;
     blockCount_ = 0;
     moveTicksBefore_.assign(1, 0);
+    connectSequence = sequence;
     live_ = true;
 }
 

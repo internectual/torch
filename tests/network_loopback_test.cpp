@@ -1000,10 +1000,13 @@ int main() {
         std::vector<std::vector<uint8_t>> packets;
         connection.deliver = [&](const std::vector<uint8_t>& packet) { packets.push_back(packet); };
         connection.activateGhosting();
-        connection.checkPacketSend(10.0);
-        assert(packets.size() == 1);
+        // The events fill packets to the connection's packetSize (200
+        // bytes by default), so the scene spans several packets.
+        for (int i = 0; i < 12; ++i) connection.checkPacketSend(10.0 + i);
+        assert(packets.size() == 12);
         DemoParser parser;
-        PacketData pd = parser.parsePacket(packets[0].data(), packets[0].size(), -1);
+        for (const auto& packet : packets) parser.parsePacket(packet.data(), packet.size(), -1);
+        for (const auto& packet : packets) assert(packet.size() <= V12::MaxPacketDataSize);
         assert(parser.getParseFault().empty());
         const GhostTracker& tracker = parser.getGhostTracker();
         std::map<std::string, const GhostEntry*> byClass;
@@ -1031,8 +1034,8 @@ int main() {
         // ghost section then opens (empty: every object went as an event).
         V12::ProtocolState client;
         V12::DnetHeader header;
-        {
-            V12BitStream stream(packets[0].data(), packets[0].size());
+        for (const auto& packet : packets) {
+            V12BitStream stream(packet.data(), packet.size());
             assert(V12::readDnetHeader(stream, header));
             client.processReceived(header);
         }
@@ -1155,9 +1158,11 @@ int main() {
             server->checkPacketSend(now + 0.01);
             now += 0.032;
         }
-        for (int i = 0; i < 20; ++i, now += 0.1) {
+        // The unchanged control state goes whole again after
+        // ControlStateSkipAmount packets of position only.
+        for (int i = 0; i < GameConnection::ControlStateSkipAmount + 4; ++i, now += 0.2) {
             server->checkPacketSend(now);
-            client.checkPacketSend(now + 0.05);
+            client.checkPacketSend(now + 0.1);
         }
         assert(parser.getParseFault().empty());
         const int ghostIndex = server->ghostIndex(ScriptEngine::instance().objectKey(
@@ -1229,9 +1234,10 @@ int main() {
             server->checkPacketSend(now + 0.01);
             now += 0.032;
         }
-        for (int i = 0; i < 20; ++i, now += 0.1) {
+        // The whole control state again after ControlStateSkipAmount packets.
+        for (int i = 0; i < GameConnection::ControlStateSkipAmount + 4; ++i, now += 0.2) {
             server->checkPacketSend(now);
-            client.checkPacketSend(now + 0.05);
+            client.checkPacketSend(now + 0.1);
         }
         assert(parser.getParseFault().empty());
         const int ghostIndex = server->ghostIndex(ScriptEngine::instance().objectKey(
@@ -1433,6 +1439,9 @@ int main() {
             "      calcExplosionCoverage(%pos, %t, $TypeMasks::TerrainObjectType) @ \";\"; }"
             "function ProjElf::zapTarget(%data, %proj, %target, %targeter) { $projZap = %target SPC %targeter; }"
             "function ProjElf::unzapTarget(%data, %proj, %target, %targeter) { $projUnzap = %target; }"
+            // A burst of twelve projectiles: OptionsDlg's T1/LAN preset
+            // ghosts them all before they expire.
+            "$pref::Net::PacketRateToClient = 32; $pref::Net::PacketSize = 450; $pref::Net::PacketRateToServer = 32;"
             "new GameConnection(ProjClient);"
             "new Camera(ProjCamera) { position = \"0 0 20\"; };"
             "new Player(ProjTarget) { dataBlock = ProjArmor; };"
@@ -1445,6 +1454,8 @@ int main() {
         assert(server);
         GameConnection client;
         client.isServer = false;
+        script.ts()->execute("$pref::Net::PacketRateToClient = \"\"; $pref::Net::PacketSize = \"\"; "
+                             "$pref::Net::PacketRateToServer = \"\";");
         DemoParser parser;
         parser.consumeExplosions();
         int packets = 0;

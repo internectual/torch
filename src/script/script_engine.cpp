@@ -626,9 +626,10 @@ bool VirtualMachine::loadScript(const uint8_t* data, size_t size, const char* na
                     }
 
                     dso->functions.push_back(fn);
-                    dso->funcMap[fn.name] = &dso->functions.back();
-                    if (!fn.ns.empty())
-                        dso->funcMap[fn.ns + "::" + fn.name] = &dso->functions.back();
+                    // A namespaced function is only Namespace::name: a bare
+                    // call must not reach IRCClient::connect.
+                    if (fn.ns.empty()) dso->funcMap[fn.name] = &dso->functions.back();
+                    else dso->funcMap[fn.ns + "::" + fn.name] = &dso->functions.back();
 
                     Console::instance().printf(LogLevel::Debug, "VM: func %s (ip=%u, end=%u, argc=%u%s)%s%s%s",
                         fn.name.c_str(), fn.startIp, fn.endIp, fn.argc, fn.hasVarArgs ? "+" : "",

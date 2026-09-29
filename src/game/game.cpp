@@ -12277,7 +12277,7 @@ static std::vector<uint8_t> rawMoveBlock(const ClientMoveIn& move) {
 void Game::startLiveClient(GameConnection& connection) {
     if (demoParser) delete demoParser;
     demoParser = new DemoParser;
-    demoParser->beginLiveStream();
+    demoParser->beginLiveStream(connection.getConnectSequence());
     demoLive = true;
     demoPlaying = false;
     demoPaused = false;
