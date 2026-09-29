@@ -50,8 +50,13 @@ cmake --build build -j$(nproc)
 
 ### Dedicated Server
 ```sh
-./build/torch_server -p 28000 -m test
+./build/torch_server -nologin -mission TWL_Minotaur CTF
 ```
+`torch_server` is the retail DedicatedServer launch (`console_start.cs`
+`-dedicated`) without a window: the stock server scripts host the mission,
+the port is `$Host::Port` (from `-serverprefs <file>`), and TorqueScript is
+read from stdin (`quit();` stops it). Clients join with the stock
+`JoinGame("host:port")` / `connect()`.
 
 Use `-data <dir>` to select the untouched Tribes 2 installation, `-mod <path>`
 to select its active mod, and `-output <dir>` to select writable runtime state
@@ -86,15 +91,8 @@ loop begins.
 ## Console Commands
 
 ### Server
-| Command | Description |
-|---------|-------------|
-| `startServer [port] [mission]` | Start a game server |
-| `sv_addbot` | Spawn an AI bot |
-| `sv_mission <name>` | Set mission for next start |
-| `sv_gamemode <0|1>` | 0=Deathmatch, 1=Team DM |
-| `sv_scorelimit <n>` | Score limit (default: 25) |
-| `kick <id>` | Kick a player |
-| `ban <id>` | Ban a player by IP |
+Server administration is the stock scripts' (`server.cs`: `kick`, `ban`;
+`admin.cs`: votes) on the dedicated server's console.
 
 Environment TorqueScript natives:
 
@@ -108,10 +106,6 @@ Environment TorqueScript natives:
 The same setters are available as `WaterBlock::set...` methods. They return
 `1` only when a matching authored water body exists and validation succeeds;
 otherwise they return `0`. Water state is cleared when a mission is replaced.
-| `unbanall` | Clear ban list |
-| `sv_map <mission>` | Change map during game |
-| `record <path>` | Start recording |
-| `stoprecord` | Stop recording |
 
 ### Client
 | Command | Description |
@@ -119,7 +113,6 @@ otherwise they return `0`. Water state is cleared when a mission is replaced.
 | `connect <host> [port]` | Connect to a server |
 | `watchServer <host:port>` | Connect as an anonymous native UDP observer |
 | `loadMission <name>` | Load a local mission |
-| `startServer [port] [mission]` | Start a local server |
 | `playdemo <path>` | Play a .rec demo file |
 | `seekDemoBlock <index>` | Seek the active demo to a block index |
 | `testshape <path>` | Load a test DTS/GLB shape |

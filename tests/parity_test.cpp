@@ -1578,17 +1578,6 @@ static void testProjectileGravityParity() {
            malformed.y == 4.0f && malformed.z == 0.0f);
 }
 
-static float testGroundSample(float, float, void* context) {
-    return *static_cast<float*>(context);
-}
-
-static void testServerGroundHeightParity() {
-    float authoredHeight = -5.0f;
-    assert(serverGroundHeight(2.0f, testGroundSample, &authoredHeight, 0, 0) == -5.0f);
-    authoredHeight = -1.0e10f;
-    assert(serverGroundHeight(2.0f, testGroundSample, &authoredHeight, 0, 0) == 2.0f);
-    assert(serverGroundHeight(2.0f, nullptr, nullptr, 0, 0) == 2.0f);
-}
 
 static void testItemPickupParity() {
     assert(itemWithinPickupRange(2.0f));
@@ -2075,7 +2064,6 @@ int main() {
     testProjectileTerrainCrossingParity();
     testPrecipitationEnableRestoresCoverage();
     testProjectileGravityParity();
-    testServerGroundHeightParity();
     testItemPickupParity(); testWeaponSelectionAndStateParity();
     testHudStateAndLifecycleParity();
     testDeathRespawnParity();

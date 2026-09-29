@@ -6820,34 +6820,6 @@ bool Game::init() {
         connectToServer(host.c_str(), port, true);
     }, "watchServer <host:port> - connect as an anonymous observer");
 
-    con.addCommand("startServer", [this](int32_t argc, const char* const* argv) {
-        uint16_t port = T2Protocol::DEFAULT_PORT;
-        if (argc > 1 && !parseConsolePort(argv[1], port)) {
-            Console::instance().printf(LogLevel::Warn, "Invalid port: %s", argv[1]);
-            return;
-        }
-        if (argc > 2) {
-            const std::string mission = missionLoadPath(argv[2]);
-            if (mission.empty()) {
-                Console::instance().printf(LogLevel::Warn, "Invalid mission: %s", argv[2]);
-                return;
-            }
-            Console::instance().setVariable("sv_mission", mission.c_str());
-        }
-        // Wire terrain height callback for server-side collision
-        server.setHeightCallback(+[](float x, float z, void* ctx) -> float {
-            return static_cast<World*>(ctx)->getHeight(x, z);
-        }, &w);
-        server.setRayCallback(+[](float ox, float oy, float oz, float dx, float dy, float dz,
-                                  float distance, void* ctx) -> bool {
-            float hitDistance = 0.0f;
-            Point3F hitPoint{}, hitNormal{};
-            return static_cast<World*>(ctx)->collision().raycast(
-                {ox, oy, oz}, {dx, dy, dz}, distance, hitDistance, hitPoint, hitNormal);
-        }, &w);
-        server.start(port);
-    }, "startServer [port] [mission] - Start a game server on the given port");
-
     con.addCommand("loadMission", [this](int32_t argc, const char* const* argv) {
         if (argc < 2) {
             Console::instance().printf(LogLevel::Warn, "Usage: loadMission <name>");
@@ -7050,73 +7022,6 @@ bool Game::init() {
         if (!shapeViewerActive) { Console::instance().printf(LogLevel::Warn, "shapeviewer not active"); return; }
         shapeViewerPrev();
     }, "sv_prev - Previous shape in shape viewer");
-
-    con.addCommand("sv_ghosts", [this](int32_t, const char* const*) {
-        Console::instance().printf(LogLevel::Info, "Total server ghosts: %zu", server.ghostCount());
-    }, "sv_ghosts - List server ghost count");
-
-    con.addCommand("sv_spawn", [this](int32_t argc, const char* const* argv) {
-        if (argc < 4) { Console::instance().printf(LogLevel::Warn, "Usage: sv_spawn <classId> <x> <y> [z]"); return; }
-        int classId = atoi(argv[1]);
-        float x = (float)atof(argv[2]);
-        float y = (float)atof(argv[3]);
-        float z = (argc > 4) ? (float)atof(argv[4]) : 2.0f;
-        uint32_t idx = server.spawnGhost(classId, x, y, z);
-        if (idx > 0)
-            Console::instance().printf(LogLevel::Info, "Spawned ghost idx=%u class=%d at (%.1f, %.1f, %.1f)",
-                (unsigned)idx, classId, x, y, z);
-    }, "sv_spawn <classId> <x> <y> [z] - Spawn a ghost on the server");
-
-    con.addCommand("sv_removeghost", [this](int32_t argc, const char* const* argv) {
-        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: sv_removeghost <index>"); return; }
-        uint32_t idx = (uint32_t)atoi(argv[1]);
-        if (server.removeGhost(idx))
-            Console::instance().printf(LogLevel::Info, "Removed ghost idx=%u", (unsigned)idx);
-        else
-            Console::instance().printf(LogLevel::Warn, "Ghost idx=%u not found", (unsigned)idx);
-    }, "sv_removeghost <index> - Remove a ghost on the server");
-
-    con.addCommand("sv_addbot", [this](int32_t, const char* const*) {
-        server.spawnBot();
-        Console::instance().printf(LogLevel::Info, "Bot spawned");
-    }, "sv_addbot - Spawn an AI bot on the server");
-
-    con.addCommand("kick", [this](int32_t argc, const char* const* argv) {
-        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: kick <clientId>"); return; }
-        server.kickClient(atoi(argv[1]));
-    }, "kick <clientId> - Kick a client by index");
-
-    con.addCommand("ban", [this](int32_t argc, const char* const* argv) {
-        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: ban <clientId>"); return; }
-        server.banClient(atoi(argv[1]));
-    }, "ban <clientId> - Ban a client by IP");
-
-    con.addCommand("unbanall", [this](int32_t, const char* const*) {
-        server.clearBans();
-    }, "unbanall - Clear the ban list");
-
-    con.addCommand("sv_map", [this](int32_t argc, const char* const* argv) {
-        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: sv_map <mission>"); return; }
-        server.changeMap(argv[1]);
-    }, "sv_map <mission> - Change the current mission");
-
-    con.addCommand("sv_gamemode", [this](int32_t argc, const char* const* argv) {
-        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: sv_gamemode <0|1> (0=DM, 1=TDM)"); return; }
-        server.setGameMode(atoi(argv[1]));
-    }, "sv_gamemode <0|1> - Set game mode (0=Deathmatch, 1=Team Deathmatch)");
-
-    con.addCommand("sv_nat", [this](int32_t, const char* const*) {
-        Console::instance().printf(LogLevel::Info, "NAT relay: see server console");
-    }, "sv_nat - Show NAT relay info");
-
-    con.addCommand("record", [this](int32_t argc, const char* const* argv) {
-        if (argc < 2) { Console::instance().printf(LogLevel::Warn, "Usage: record <path>"); return; }
-        server.startRecording(argv[1]);
-    }, "record <path> - Start recording server state to file");
-
-    con.addCommand("stoprecord", [this](int32_t, const char* const*) {
-        server.stopRecording();
-    }, "stoprecord - Stop recording");
 
     return true;
 }
@@ -7676,19 +7581,7 @@ void Game::update(float dt) {
         }
         prevF2 = currentInput.orbitCam;
 
-        // F3 toggle for editor mode
         auto& plat = Engine::instance().platform();
-        static bool prevF3 = false;
-        bool f3Down = plat.input().keysDown[SCANCODE_F3];
-        if (f3Down && !prevF3) {
-            editorActive = !editorActive;
-            if (editorActive) {
-                freeCamActive = true;
-                Console::instance().printf(LogLevel::Info, "Editor mode %s", editorActive ? "ON" : "OFF");
-            }
-        }
-        prevF3 = f3Down;
-
         // F4 toggle for first-person camera
         static bool prevF4 = false;
         bool f4Down = plat.input().keysDown[SCANCODE_F4];
@@ -7700,48 +7593,10 @@ void Game::update(float dt) {
         }
         prevF4 = f4Down;
 
-        // Editor: place ghost on left click, cycle class on scroll
-        if (editorActive && freeCamActive) {
-            static bool prevClick = false;
-            bool click = plat.input().mouseButtons[mouseLeftButton];
-            if (click && !prevClick) {
-                // Place a ghost at the camera's target position
-                float dist = 20.0f;
-                Point3F dir = {freeCamTarget.x - freeCamPos.x, freeCamTarget.y - freeCamPos.y, freeCamTarget.z - freeCamPos.z};
-                float len = sqrtf(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
-                if (len > 0.001f) { dir.x /= len; dir.y /= len; dir.z /= len; }
-                Point3F placePos = {freeCamPos.x + dir.x * dist, freeCamPos.y + dir.y * dist, freeCamPos.z + dir.z * dist};
-                editorLastGhost = server.spawnGhost(editorPlaceClass, placePos.x,
-                                                    placePos.y, placePos.z);
-                editorHasGhost = editorLastGhost != 0;
-                Console::instance().printf(LogLevel::Info, "Placed ghost class=%d at (%.1f,%.1f,%.1f)",
-                    editorPlaceClass, placePos.x, placePos.y, placePos.z);
-            }
-            prevClick = click;
-            // Right click to remove nearest ghost
-            static bool prevRight = false;
-            bool right = plat.input().mouseButtons[mouseRightButton];
-            if (right && !prevRight) {
-                if (editorHasGhost && server.removeGhost(editorLastGhost)) {
-                    editorHasGhost = false;
-                    Console::instance().printf(LogLevel::Info,
-                        "Removed ghost index=%u", editorLastGhost);
-                }
-            }
-            prevRight = right;
-            // Scroll wheel is a per-frame signed delta. Comparing it to the
-            // prior frame makes the following zero-input frame undo a notch.
-            const int scroll = plat.input().mouseWheel;
-            if (scroll != 0) {
-                editorPlaceClass = cycleIndexByWheel(editorPlaceClass, scroll, 63);
-                Console::instance().printf(LogLevel::Info, "Editor: placing class %d", editorPlaceClass);
-            }
-        }
-
         // Tribes 2 maps the mouse wheel to weapon cycling during normal play.
-        // Keep editor/free-camera scrolling local to those tools instead of
+        // Keep free-camera scrolling local to that tool instead of
         // changing the player's loadout while inspecting a mission.
-        if (!freeCamActive && !editorActive && !pl->isDead() &&
+        if (!freeCamActive && !pl->isDead() &&
             plat.input().mouseWheel != 0) {
             const int direction = plat.input().mouseWheel > 0 ? 1 : -1;
             // A coalesced SDL event is normally only a few notches; cap a

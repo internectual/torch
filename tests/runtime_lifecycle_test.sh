@@ -95,25 +95,25 @@ if ! grep -q "Cannot resolve\|Connection failed\|Invalid mission" "$log_dir/comm
     exit 1
 fi
 
-if ! printf 'quit\n' | timeout --kill-after=3s 10s env \
-    TORCH_TEST_DATA="$data" "$server" -data "$data" -output "$log_dir/server-output" \
-    -p 28997 -m missions/does-not-exist.mis >"$log_dir/server.out" 2>&1; then
-    printf 'dedicated server -m smoke failed\n' >&2
+# The dedicated server is the retail DedicatedServer launch: run from the
+# source tree it reads torch.cfg (the Tribes 2 dataDir and init script),
+# hosts the mission, opens its UDP port and takes TorqueScript on stdin.
+# Without an install it stops at the missing init script.
+source_dir=$(cd "$(dirname "$0")/.." && pwd)
+install=$(sed -n 's/^dataDir = //p' "$source_dir/torch.cfg" 2>/dev/null)
+install=${install/#\~/$HOME}
+if ! (cd "$source_dir" && (sleep 8; printf 'quit();\n') | timeout --kill-after=3s 30s \
+    "$server" -nologin -output "$log_dir/server-output" \
+    -mission TWL_Minotaur CTF) >"$log_dir/server.out" 2>&1; then
+    printf 'dedicated server smoke failed\n' >&2
     exit 1
 fi
-if ! grep -q "no terrain loaded" "$log_dir/server.out"; then
-    printf 'dedicated server -m path was not exercised\n' >&2
-    exit 1
-fi
-
-if timeout --kill-after=3s 10s env TORCH_TEST_DATA="$data" "$server" \
-    -data "$data" -output "$log_dir/bad-port-output" -p 0 >"$log_dir/bad-port.out" 2>&1; then
-    printf 'dedicated server accepted invalid port\n' >&2
-    exit 1
-fi
-if ! grep -q "Invalid server port" "$log_dir/bad-port.out"; then
-    printf 'dedicated server invalid-port failure was not reported\n' >&2
-    exit 1
+if [[ -n "$install" && -f "$install/console_start.cs" ]]; then
+    grep -q "UDP initialized on port" "$log_dir/server.out" || {
+        printf 'dedicated server did not open its port\n' >&2; exit 1; }
+else
+    grep -q "Init script not found" "$log_dir/server.out" || {
+        printf 'dedicated server without an install did not report it\n' >&2; exit 1; }
 fi
 
 printf 'runtime lifecycle smoke passed\n'

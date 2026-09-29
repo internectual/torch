@@ -23,6 +23,7 @@
 #include <vector>
 #include <glob.h>
 #include <chrono>
+#include <thread>
 #include <filesystem>
 #include <sys/file.h>
 #include <map>
@@ -242,7 +243,6 @@ bool Engine::init(int argc, char* argv[]) {
             fprintf(stdout, "  connect <host> [port]       Connect to a server\n");
             fprintf(stdout, "  watchServer <host:port>     Connect as an anonymous observer\n");
             fprintf(stdout, "  loadMission <name>          Load a local mission\n");
-            fprintf(stdout, "  startServer [port] [mission] Start a local dedicated server\n");
              fprintf(stdout, "  playdemo <path>             Play a demo recording\n");
             fprintf(stdout, "  quit                        Exit\n\n");
             fprintf(stdout, "Diagnostics: stderr includes TORCH-RUN-START; console.log is written\n");
@@ -760,14 +760,6 @@ bool Engine::init(int argc, char* argv[]) {
         exit(0);
     }
 
-#ifdef TORCH_DEDICATED
-    // The dedicated server does not need the client script/GUI/render/audio
-    // stack. Returning here also prevents startup GUI code from touching an
-    // uninitialized renderer or creating a window.
-    net->init();
-    return true;
-#endif
-
     // Renderer
 #ifndef TORCH_DEDICATED
     if (!ren->init(plat->nativeWindow())) { releaseLock(); return false; }
@@ -858,7 +850,6 @@ bool Engine::init(int argc, char* argv[]) {
     scr->setDemoModeProvider([this]() {
         return isDemoBuildMode(demoMode, g->config().dedicated);
     });
-    scr->setServerStateProvider([this]() { return g->gameServer().isRunning(); });
     scr->setClientStateProvider([]() { return true; });
     scr->setConnectionStateProvider([this]() {
         ScriptConnectionState state;
@@ -1755,6 +1746,7 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().printf(LogLevel::Info, "-nologin: dev panel (F1 overlay, ~ console, Pause debug)");
         // Do not fabricate a warrior or dismiss stock dialogs here. The
         // original scripts own profile creation and shell transitions.
+#ifndef TORCH_DEDICATED
         plat->processEvents();
         // In mapper mode, skip the dev panel render — we render the 3D world only
         if (!mapperMode) {
@@ -1763,6 +1755,7 @@ bool Engine::init(int argc, char* argv[]) {
             ren->endFrame();
             ren->flushQueuedScreenshots(); plat->swapBuffers();
         }
+#endif
     }
 
     // -testshape: load a native DTS shape for preview
@@ -1900,11 +1893,44 @@ bool Engine::init(int argc, char* argv[]) {
     return true;
 }
 
+#ifdef TORCH_DEDICATED
+// The dedicated server's main loop (DemoGame::main with $Server::Dedicated):
+// no window, renderer or audio; the scheduler, the net interface, the
+// server's process list and its connections, and console input on stdin.
+void Engine::runDedicated() {
+    const int stdinFlags = fcntl(STDIN_FILENO, F_GETFL, 0);
+    if (stdinFlags >= 0) fcntl(STDIN_FILENO, F_SETFL, stdinFlags | O_NONBLOCK);
+    std::string line;
+    while (running && !quitRequested) {
+        const double now = Timer::now();
+        net->update();
+        scr->vm()->setVariable("time", (float)now);
+        if (scr->ts()) scr->ts()->processScheduledEvents(now);
+        netInterfaceProcess(now);
+        SimState::advanceServer(now);
+        serverNetProcess(now);
+        for (int c; (c = getchar()) != EOF;) {
+            if (c != '\n') { line += (char)c; continue; }
+            if (scr->ts()) scr->ts()->execute(line, "stdin");
+            line.clear();
+        }
+        clearerr(stdin);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (stdinFlags >= 0) fcntl(STDIN_FILENO, F_SETFL, stdinFlags);
+    running = false;
+}
+#endif
+
 void Engine::run() {
     // A quit() issued before the loop starts (e.g. the final line of an
     // -exec script) must not be lost by forcing running=true below.
     if (quitRequested) { running = false; return; }
     running = true;
+#ifdef TORCH_DEDICATED
+    runDedicated();
+    return;
+#endif
 
     fprintf(stderr, "TORCH-RUN-START\n");
     double lastTime = Timer::now();
@@ -2216,7 +2242,6 @@ void Engine::run() {
         net->update();
         // Update active game connection (receive packets, handle timeouts)
         if (g && g->activeConnection()) g->activeConnection()->update();
-        g->gameServer().update();
         scr->vm()->setVariable("time", (float)now);
         if (scr->ts()) scr->ts()->processScheduledEvents(now);
         netInterfaceProcess(now);

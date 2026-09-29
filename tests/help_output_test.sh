@@ -12,7 +12,7 @@ for option in "-demo <file.rec>" "--demo <file.rec>" "-playdemo <file.rec>" \
     "demoMasterServer" "demoAllowConnect" "demoAllowWatch" "default: empty = LAN" \
     "isDemo()" "isDemoPlaying()" \
     "-quit-after-frames <n>" "connect <host> [port]" \
-    "watchServer <host:port>" "loadMission <name>" "startServer [port] [mission]" \
+    "watchServer <host:port>" "loadMission <name>" \
     "TORCH-RUN-START"; do
     case "$client_help" in
         *"$option"*) ;;
@@ -20,7 +20,7 @@ for option in "-demo <file.rec>" "--demo <file.rec>" "-playdemo <file.rec>" \
     esac
 done
 
-for option in "-p <port>" "-m <mission>" "-data <dir>" "-output <dir>" "console.log"; do
+for option in "-mission <name> <type>" "-serverprefs <file>" "-data <dir>" "-output <dir>" "console.log"; do
     case "$server_help" in
         *"$option"*) ;;
         *) printf 'server help missing: %s\n' "$option" >&2; exit 1 ;;

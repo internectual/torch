@@ -917,7 +917,6 @@ public:
     float getGravity() const { return gravity; }
     void setTimeScale(float value);
     float getTimeScale() const { return timeScale; }
-    GameServer& gameServer() { return server; }
 
     // Client-side prediction
     struct StoredMove {
@@ -1136,7 +1135,6 @@ private:
     Point3F freeCamTarget{0, 10, -1};
     Point3F freeCamRot{0, 0, 0};
     bool mapperMode = false;  // -mapper: no player, free-fly camera only
-    GameServer server;
     Connection* activeConn{};
 
     // Demo playback
@@ -1247,10 +1245,6 @@ private:
     bool previousObserverCycle = false;
 
     // Editor mode
-    bool editorActive = false;
-    int editorPlaceClass = 31; // classId to place
-    uint32_t editorLastGhost = 0;
-    bool editorHasGhost = false;
 
     // Projectile trail system
 

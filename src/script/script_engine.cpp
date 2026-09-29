@@ -8862,16 +8862,6 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    tsInstance->registerNative("createServer", [](const auto& args) -> VMValue {
-        const uint16_t port = args.empty() ? T2Protocol::DEFAULT_PORT
-                                           : (uint16_t)std::clamp(args[0].toInt(), 1, 65535);
-        auto& game = Engine::instance().game();
-        game.gameServer().setHeightCallback(+[](float x, float z, void* context) -> float {
-            return static_cast<World*>(context)->getHeight(x, z);
-        }, &game.world());
-        return VMValue(game.gameServer().start(port) ? 1 : 0);
-    });
-
     // These names are also used by GUI-specific helpers registered above.
     // Install the object-aware forms last so ordinary SimObjects never enter
     // a GUI lookup path that may not have a renderer/control tree.

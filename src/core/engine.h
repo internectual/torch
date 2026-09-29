@@ -22,6 +22,8 @@ public:
 
     bool init(int argc, char* argv[]);
     void run();
+    // TORCH_DEDICATED: the headless server loop.
+    void runDedicated();
     void shutdown();
     bool isRunning() const;
 
