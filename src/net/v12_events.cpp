@@ -228,6 +228,10 @@ bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
                 event.audioHasPosition = true;
             }
             stream.readFlag(); // update sound
+        } else if (header.classId == 10) {
+            stream.readRange(0, 3); // RemoveClientTargetTypeEvent
+        } else if (header.classId == 11) {
+            stream.readFlag(); // ResetClientTargetsEvent: client targets only
         } else if (header.classId == 15) {
             event.hasSensorGroup = true;
             event.sensorGroup = (uint8_t)stream.readUnsigned(5);

@@ -2024,6 +2024,13 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
         playerInfo_.erase(std::remove_if(playerInfo_.begin(), playerInfo_.end(),
             [&](const DemoPlayerInfo& player) { return player.clientId == ev.targetId; }),
             playerInfo_.end());
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 10) { // RemoveClientTargetTypeEvent
+        bs.readRangedU32(0, 3); // ClientTarget type (HUD task list only)
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 11) { // ResetClientTargetsEvent
+        // TargetManager::resetClient clears every client target; tasks-only
+        // clears just the HUD task list.
+        const bool clientTargetsOnly = bs.readFlag();
+        if (applyEffects && !clientTargetsOnly) targets_.clear();
     } else if (ev.classId == T2Demo::NetEventClassFirst + 13) { // SetMissionCRCEvent
         ev.hasMissionCrc = true;
         ev.missionCrc = bs.readU32();

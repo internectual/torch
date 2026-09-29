@@ -902,6 +902,14 @@ VMValue TorqueScript::Impl::parseDatablock() {
                 match(TSTokenType::Semicolon);
                 continue;
             }
+            // Array fields: stateName[0] = ... (the same key form as new {}).
+            if (match(TSTokenType::LBracket)) {
+                VMValue index = parseExpression();
+                while (match(TSTokenType::Comma))
+                    index = VMValue(index.toString() + "," + parseExpression().toString());
+                expect(TSTokenType::RBracket);
+                field.text += "[" + index.toString() + "]";
+            }
             if (!match(TSTokenType::Eq)) {
                 while (peekToken().type != TSTokenType::Semicolon &&
                        peekToken().type != TSTokenType::RBrace &&
@@ -1833,8 +1841,10 @@ VMValue TorqueScript::Impl::parsePostfix() {
                 // (TS semantics: $Skin[0, name] indexes by the TEXT "name").
                 // Routing them through parseExpression() let contaminated
                 // locals frames resolve them to garbage/empty values.
+                // A bare word is its text; "Game.teamCount[%t]" is not bare.
                 VMValue idx2;
-                if (peekToken().type == TSTokenType::Ident)
+                if (peekToken().type == TSTokenType::Ident &&
+                    (peekToken(1).type == TSTokenType::Comma || peekToken(1).type == TSTokenType::RBracket))
                     idx2 = VMValue(nextToken().text);
                 else
                     idx2 = parseExpression();

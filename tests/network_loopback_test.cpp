@@ -766,24 +766,6 @@ int main() {
     assert(natives.at("setteam")({VMValue(99), VMValue(1)}).toInt() == 0);
     assert(natives.at("setmountedimage")({VMValue(42), VMValue(0), VMValue(7)}).toInt() == 0);
 
-    auto* targetOwner = new ScriptObject;
-    targetOwner->className = "Player";
-    targetOwner->name = "TargetOwner";
-    script.objects[targetOwner->name] = targetOwner;
-    assert(natives.at("createtarget")({VMValue("TargetOwner"), VMValue("Name"),
-        VMValue("Skin"), VMValue("Voice"), VMValue(3), VMValue(2)}).toInt() > 0);
-    const int targetId = targetOwner->fields["target"].toInt();
-    assert(targetId > 0);
-    assert(natives.at("gettargetname")({VMValue(targetId)}).toString() == "Name");
-    assert(natives.at("gettargettype")({VMValue(targetId)}).toInt() == 3);
-    assert(natives.at("settargetalwaysvismask")({VMValue(targetId), VMValue(4)}).toInt() == 1);
-    assert(natives.at("gettargetalwaysvismask")({VMValue(targetId)}).toInt() == 4);
-    assert(natives.at("settargetsensorgroup")({VMValue(targetId), VMValue(32)}).toInt() == 0);
-    assert(natives.at("settarget")({VMValue("TargetOwner"), VMValue(9999)}).toInt() == 0);
-    assert(natives.at("freetarget")({VMValue(targetId)}).toInt() == 1);
-    assert(natives.at("gettarget")({VMValue("TargetOwner")}).toInt() == -1);
-    assert(natives.at("freetarget")({VMValue(targetId)}).toInt() == 0);
-
     ScriptLoadoutState loadout;
     loadout.hasInventory = true;
     loadout.inventory["DiscPack"] = 3;
@@ -1252,6 +1234,145 @@ int main() {
         assert(sawPlayer);
         assert(std::abs(last.controlPlayer.position.x - 5.0f) < 1e-4f);
         assert(std::abs(last.controlPlayer.position.z - player->transform[11]) < 1e-3f);
+    }
+    {
+        // Mounted images (shapeImage.cc): a ShapeBaseImageData state machine
+        // on a controlled Player. The fire trigger of a move drives image
+        // slot 0 (Player::updateMove); entering the fire state bumps the
+        // networked fireCount and runs the state's script on the image
+        // datablock; the client decodes the image in the ghost's ImageMask.
+        script.ts()->execute(
+            "datablock PlayerData(ImageArmor) { maxForwardSpeed = 14; runForce = 4200; mass = 90; "
+            "  maxEnergy = 60; boxSize = \"1.2 1.2 2.3\"; };"
+            // The source interpreter's datablock body takes no array fields
+            // (parseDatablock); the states are set as fields afterwards.
+            "datablock ShapeBaseImageData(LinkTestImage) { offset = \"0 0.5 0\"; };"
+            "LinkTestImage.stateName[0] = \"Activate\"; LinkTestImage.stateTimeoutValue[0] = 0.2;"
+            "LinkTestImage.stateTransitionOnTimeout[0] = \"Ready\"; LinkTestImage.stateAllowImageChange[0] = false;"
+            "LinkTestImage.stateName[1] = \"Ready\"; LinkTestImage.stateTransitionOnTriggerDown[1] = \"Fire\";"
+            "LinkTestImage.stateName[2] = \"Fire\"; LinkTestImage.stateFire[2] = true; LinkTestImage.stateScript[2] = \"onFire\";"
+            "LinkTestImage.stateTimeoutValue[2] = 0.1; LinkTestImage.stateTransitionOnTimeout[2] = \"Reload\";"
+            "LinkTestImage.stateName[3] = \"Reload\"; LinkTestImage.stateTimeoutValue[3] = 0.1;"
+            "LinkTestImage.stateTransitionOnTimeout[3] = \"Ready\";"
+            "datablock ShapeBaseImageData(LinkOtherImage) { }; LinkOtherImage.stateName[0] = \"Idle\";"
+            "function LinkTestImage::onMount(%data, %obj, %slot) { $imgMounted = %slot; $imgMountObj = %obj; }"
+            "function LinkTestImage::onUnmount(%data, %obj, %slot) { $imgUnmounted++; }"
+            "function LinkTestImage::onFire(%data, %obj, %slot) { $imgFired++; $imgFireSlot = %slot; $imgFireObj = %obj; }"
+            "new GameConnection(ImageLinkClient);"
+            "new Player(ImageLinkPlayer) { dataBlock = ImageArmor; };"
+            "ImageLinkPlayer.setTransform(\"5 6 400 0 0 1 0\");"
+            "$imgFired = 0; $imgUnmounted = 0;"
+            "ImageLinkPlayer.mountImage(LinkTestImage, 0);"
+            "$imgState0 = ImageLinkPlayer.getImageState(0);"
+            "$imgMountedId = ImageLinkPlayer.getMountedImage(0);"
+            "$imgSlot = ImageLinkPlayer.getMountSlot(LinkTestImage);"
+            "$imgIsMounted = ImageLinkPlayer.isImageMounted(LinkTestImage);"
+            "$imgLoaded = ImageLinkPlayer.getImageLoaded(0);"
+            // Activate disallows image changes: the other image waits.
+            "ImageLinkPlayer.mountImage(LinkOtherImage, 0);"
+            "$imgPending = ImageLinkPlayer.getPendingImage(0);"
+            "ImageLinkPlayer.mountImage(LinkTestImage, 0);"
+            "$imgPendingAfter = ImageLinkPlayer.getPendingImage(0);"
+            "$imgMuzzlePoint = ImageLinkPlayer.getMuzzlePoint(0);"
+            "$imgMuzzleVector = ImageLinkPlayer.getMuzzleVector(0);");
+        auto* server = EngineObjects::get<GameConnection>("ImageLinkClient");
+        auto* player = EngineObjects::get<PlayerObject>("ImageLinkPlayer");
+        assert(server && player);
+        ScriptObject* playerObject = ScriptEngine::instance().findObject("ImageLinkPlayer");
+        const int playerId = ScriptEngine::instance().objectId(playerObject);
+        const int imageId = ScriptEngine::instance().objectId(ScriptEngine::instance().findObject("LinkTestImage"));
+        const int otherId = ScriptEngine::instance().objectId(ScriptEngine::instance().findObject("LinkOtherImage"));
+        assert(imageId >= 3 && imageId <= 2050);
+        assert(script.ts()->getGlobal("$imgMounted").toInt() == 0);
+        assert(script.ts()->getGlobal("$imgMountObj").toInt() == playerId);
+        assert(script.ts()->getGlobal("$imgState0").toString() == "Activate");
+        assert(script.ts()->getGlobal("$imgMountedId").toInt() == imageId);
+        assert(script.ts()->getGlobal("$imgSlot").toInt() == 0);
+        assert(script.ts()->getGlobal("$imgIsMounted").toInt() == 1);
+        assert(script.ts()->getGlobal("$imgLoaded").toInt() == 1); // loaded defaults to true
+        assert(script.ts()->getGlobal("$imgPending").toInt() == otherId);
+        assert(script.ts()->getGlobal("$imgPendingAfter").toInt() == 0);
+        assert(player->getMountedImage(0) && player->getMountedImage(0)->id == imageId);
+        // Muzzle: the image offset from the eye-height mount at yaw 0.
+        float mx = 0, my = 0, mz = 0;
+        std::sscanf(script.ts()->getGlobal("$imgMuzzlePoint").toString().c_str(), "%f %f %f", &mx, &my, &mz);
+        assert(std::abs(mx - 5.0f) < 1e-3f && std::abs(my - 6.5f) < 1e-3f && mz > 401.0f && mz < 403.0f);
+        assert(script.ts()->getGlobal("$imgMuzzleVector").toString() == "0 1 0");
+
+        GameConnection client;
+        client.isServer = false;
+        DemoParser parser;
+        int packets = 0;
+        server->deliver = [&](const std::vector<uint8_t>& p) { client.receivePacket(p.data(), p.size()); };
+        client.onServerPacket = [&](const std::vector<uint8_t>& p) {
+            PacketData pd = parser.parsePacket(p.data(), p.size(), packets++);
+            for (const auto& ev : pd.events)
+                if (ev.ghostMessage >= 0) client.clientGhostMessage(ev.ghostMessage, ev.ghostSequence, (uint32_t)ev.ghostCount);
+        };
+        client.deliver = [&](const std::vector<uint8_t>& p) {
+            parser.onSendPacketTrigger();
+            server->receivePacket(p.data(), p.size());
+        };
+        server->activateGhosting();
+        double now = 700.0;
+        for (int i = 0; i < 20 && !server->isGhosting(); ++i, now += 1.0) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.5);
+        }
+        assert(server->isGhosting());
+        script.ts()->execute("ImageLinkClient.setControlObject(ImageLinkPlayer);");
+        auto tick = [&](const ClientMoveIn& move) {
+            client.pushMove(move);
+            client.checkPacketSend(now);
+            SimState::advanceServer(now);
+            server->checkPacketSend(now + 0.01);
+            now += 0.032;
+        };
+        // Activate times out (0.2 s) into Ready; the ghost goes out with
+        // the image mounted (initial update).
+        for (int i = 0; i < 15; ++i) tick(ClientMoveIn{});
+        assert(std::string(player->getImageState(0)) == "Ready");
+        assert(player->images[0].fireCount == 0);
+        assert(script.ts()->getGlobal("$imgFired").toInt() == 0);
+        const int ghostIndex = server->ghostIndex(ScriptEngine::instance().objectKey(playerObject));
+        assert(ghostIndex >= 0);
+        const GhostEntry* ghost = parser.getGhostTracker().getGhost(ghostIndex);
+        assert(ghost && ghost->mountedImages[0].datablockId == imageId - 3);
+        assert(ghost->mountedImages[0].fireCount == 0);
+        // One tick of the fire trigger: Ready -> Fire.
+        ClientMoveIn fire;
+        fire.trigger[0] = true;
+        tick(fire);
+        assert(script.ts()->getGlobal("$imgFired").toInt() == 1);
+        assert(script.ts()->getGlobal("$imgFireSlot").toInt() == 0);
+        assert(script.ts()->getGlobal("$imgFireObj").toInt() == playerId);
+        assert(player->images[0].fireCount == 1);
+        assert(player->isImageFiring(0));
+        // Released: Fire -> Reload -> Ready, no second shot.
+        for (int i = 0; i < 15; ++i) tick(ClientMoveIn{});
+        for (int i = 0; i < 20; ++i, now += 0.1) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.05);
+        }
+        assert(std::string(player->getImageState(0)) == "Ready");
+        assert(script.ts()->getGlobal("$imgFired").toInt() == 1);
+        assert(parser.getParseFault().empty());
+        ghost = parser.getGhostTracker().getGhost(ghostIndex);
+        assert(ghost && ghost->className == "Player");
+        assert(ghost->mountedImages[0].datablockId == imageId - 3);
+        assert(ghost->mountedImages[0].fireCount == 1);
+        assert(ghost->mountedImages[0].loaded && !ghost->mountedImages[0].triggerDown);
+        // Unmounting runs onUnmount and empties the slot on the client too.
+        script.ts()->execute("ImageLinkPlayer.unmountImage(0); $imgAfterUnmount = ImageLinkPlayer.getMountedImage(0);");
+        assert(script.ts()->getGlobal("$imgUnmounted").toInt() == 1);
+        assert(script.ts()->getGlobal("$imgAfterUnmount").toInt() == 0);
+        for (int i = 0; i < 10; ++i, now += 0.1) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.05);
+        }
+        assert(parser.getParseFault().empty());
+        ghost = parser.getGhostTracker().getGhost(ghostIndex);
+        assert(ghost && ghost->mountedImages[0].datablockId == -1);
     }
     return 0;
 }

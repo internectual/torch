@@ -12,6 +12,7 @@
 // are sent as the engine's "not found" value (CRC 0, sequence -1, node -1,
 // hasFlash false).
 #include "sim/datablock_pack.h"
+#include "sim/shape_base.h"
 
 #include <algorithm>
 #include <cmath>
@@ -20,6 +21,35 @@
 #include <strings.h>
 
 namespace DataBlockPack {
+
+// ShapeBaseImageData::offsetTransform from the "offset" (TypeMatrixPosition)
+// and "rotation" (TypeMatrixRotation: axis + degrees) fields.
+std::array<float, 16> imageOffsetTransform(const Context& c) {
+    std::array<float, 16> m = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    if (c.has("rotation")) {
+        float ax = 0, ay = 0, az = 0, deg = 0;
+        std::sscanf(c.str("rotation").c_str(), "%g %g %g %g", &ax, &ay, &az, &deg);
+        const float angle = deg * (float)(M_PI / 180.0);
+        const float s = std::sin(angle * 0.5f), co = std::cos(angle * 0.5f);
+        const float x = ax * s, y = ay * s, z = az * s, qw = co;
+        // QuatF::setMatrix (identity below 10E-20f).
+        if (x * x + y * y + z * z >= 10E-20f) {
+            const float xs = x * 2, ys = y * 2, zs = z * 2;
+            const float wx = qw * xs, wy = qw * ys, wz = qw * zs;
+            const float xx = x * xs, xy = x * ys, xz = x * zs;
+            const float yy = y * ys, yz = y * zs, zz = z * zs;
+            m[0] = 1 - (yy + zz); m[4] = xy - wz;       m[8] = xz + wy;
+            m[1] = xy + wz;       m[5] = 1 - (xx + zz); m[9] = yz - wx;
+            m[2] = xz - wy;       m[6] = yz + wx;       m[10] = 1 - (xx + yy);
+        }
+    }
+    if (c.has("offset")) {
+        float p[4] = {0, 0, 0, 1};
+        std::sscanf(c.str("offset").c_str(), "%g %g %g %g", &p[0], &p[1], &p[2], &p[3]);
+        m[3] = p[0]; m[7] = p[1]; m[11] = p[2]; m[15] = p[3];
+    }
+    return m;
+}
 
 namespace {
 
@@ -445,34 +475,12 @@ void item(Context& c) {
 // --------------------------------------------------------------------------
 // ShapeBaseImageData::packData (retail layout).
 
-// offsetTransform from the "offset" (TypeMatrixPosition) and "rotation"
-// (TypeMatrixRotation: axis + degrees) fields, written as
-// BitStream::writeAffineTransform when it is not the identity.
+// offsetTransform written as BitStream::writeAffineTransform when it is not
+// the identity.
 void writeOffsetTransform(Context& c) {
     auto& w = c.w;
-    float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-    if (c.has("rotation")) {
-        float ax = 0, ay = 0, az = 0, deg = 0;
-        std::sscanf(c.str("rotation").c_str(), "%g %g %g %g", &ax, &ay, &az, &deg);
-        const float angle = deg * (float)(M_PI / 180.0);
-        const float s = std::sin(angle * 0.5f), co = std::cos(angle * 0.5f);
-        const float x = ax * s, y = ay * s, z = az * s, qw = co;
-        // QuatF::setMatrix (identity below 10E-20f).
-        if (x * x + y * y + z * z >= 10E-20f) {
-            const float xs = x * 2, ys = y * 2, zs = z * 2;
-            const float wx = qw * xs, wy = qw * ys, wz = qw * zs;
-            const float xx = x * xs, xy = x * ys, xz = x * zs;
-            const float yy = y * ys, yz = y * zs, zz = z * zs;
-            m[0] = 1 - (yy + zz); m[4] = xy - wz;       m[8] = xz + wy;
-            m[1] = xy + wz;       m[5] = 1 - (xx + zz); m[9] = yz - wx;
-            m[2] = xz - wy;       m[6] = yz + wx;       m[10] = 1 - (xx + yy);
-        }
-    }
-    if (c.has("offset")) {
-        float p[4] = {0, 0, 0, 1};
-        std::sscanf(c.str("offset").c_str(), "%g %g %g %g", &p[0], &p[1], &p[2], &p[3]);
-        m[3] = p[0]; m[7] = p[1]; m[11] = p[2]; m[15] = p[3];
-    }
+    const std::array<float, 16> offset = imageOffsetTransform(c);
+    const float* m = offset.data();
     static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     if (w.writeFlag(std::equal(m, m + 16, identity))) return;
 
