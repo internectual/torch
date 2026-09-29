@@ -139,6 +139,11 @@ public:
     float getEnergyValue() const;
     void setEnergyLevel(float level);
     void setDamageLevel(float level);
+    // Server: the damage level's effect on the damage state (Player).
+    virtual void updateDamageLevel() {}
+    bool fading = false, fadeOut = false;
+    float fadeTime = 0, fadeDelay = 0, fadeElapsedTime = 0, fadeVal = 1.0f;
+    void startFade(float time, float delay, bool out);
     void applyDamage(float amount) { if (amount > 0) setDamageLevel(damage + amount); }
     void applyRepair(float amount);
     float getDamageValue() const;

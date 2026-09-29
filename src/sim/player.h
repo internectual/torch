@@ -22,6 +22,11 @@ public:
     // Moves the player's transform (setTransform): position and yaw.
     void setTransform(const std::array<float, 16>& matrix);
     const char* stateName() const;
+    // Player::updateDamageLevel: disabled (dead) at maxDamage.
+    void updateDamageLevel() override;
+    void setVelocity(const Point3F& velocity);
+    // Player::applyImpulse: players ignore the angular part.
+    void applyImpulse(const Point3F& impulse);
 
     void processMove(const ClientMoveIn* move) override;
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;

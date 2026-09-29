@@ -33,6 +33,8 @@ void ShapeBase::setEnergyLevel(float level) {
 void ShapeBase::setDamageLevel(float level) {
     if (invincible() || level == damage) return;
     damage = std::clamp(level, 0.0f, maxDamage());
+    updateDamageLevel();
+    setMaskBits(DamageMask);
     callDataBlock("onDamage");
 }
 
@@ -741,7 +743,27 @@ void ShapeBase::processMove(const ClientMoveIn* move) {
     }
 }
 
+// ShapeBase::startFade: fade out (or in) over fadeTime after fadeDelay (s).
+void ShapeBase::startFade(float time, float delay, bool out) {
+    setMaskBits(CloakMask);
+    fadeElapsedTime = 0;
+    fading = true;
+    fadeDelay = std::max(0.0f, delay);
+    fadeTime = std::max(0.0f, time);
+    fadeOut = out;
+    fadeVal = out ? 1.0f : 0.0f;
+}
+
 void ShapeBase::processShapeTick() {
+    if (fading) {
+        const float newElapsed = fadeElapsedTime + 0.032f;
+        if (fadeElapsedTime < fadeDelay && newElapsed >= fadeDelay) setMaskBits(CloakMask);
+        fadeElapsedTime = newElapsed;
+        if (fadeElapsedTime > fadeTime + fadeDelay) {
+            fadeVal = fadeOut ? 0.0f : 1.0f;
+            fading = false;
+        }
+    }
     // Energy management
     if (damageState == Enabled && !dataBool("inheritEnergyFromMount", false))
         energy = std::clamp(energy + rechargeRate, 0.0f, std::max(0.0f, maxEnergy()));
@@ -812,8 +834,12 @@ uint32_t ShapeBase::packUpdate(GameConnection& connection, uint32_t mask, Torque
         if (w.writeFlag(mask & CloakMask)) {
             w.writeFlag(cloaked);
             w.writeFlag(!controllingClient.empty());
-            w.writeFlag(false); // not fading
-            w.writeFlag(true);  // mFadeVal == 1
+            if (w.writeFlag(fading && fadeElapsedTime >= fadeDelay)) {
+                w.writeFlag(fadeOut);
+                w.writeF32(fadeTime);
+            } else {
+                w.writeFlag(fadeVal == 1.0f);
+            }
         }
         if (w.writeFlag(mask & ShieldMask)) {
             w.writeFlag(false);
@@ -856,6 +882,11 @@ void registerShapeBaseNatives(TorqueScript& ts) {
         });
     };
     (void)self;
+    // startFade(timeMS, delayMS, fadeOut).
+    method("startFade", [arg](ShapeBase& s, const Args& a) {
+        s.startFade(arg(a, 1).toInt() / 1000.0f, arg(a, 2).toInt() / 1000.0f, arg(a, 3).toBool());
+        return VMValue("");
+    });
     // ShapeBase::getControllingClient: the connection's id, 0 when none.
     method("getControllingClient", [](ShapeBase& s, const Args&) {
         ScriptObject* client = s.controllingClient.empty() ? nullptr

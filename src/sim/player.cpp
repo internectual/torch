@@ -84,6 +84,22 @@ void PlayerObject::setTransform(const std::array<float, 16>& m) {
     setMaskBits(MoveMask | NoWarpMask);
 }
 
+void PlayerObject::updateDamageLevel() {
+    setDamageState(damage >= maxDamage() ? Disabled : Enabled);
+}
+
+void PlayerObject::setVelocity(const Point3F& velocity) {
+    state.velocity = velocity;
+    setMaskBits(MoveMask);
+}
+
+void PlayerObject::applyImpulse(const Point3F& impulse) {
+    const float mass = dataFloat("mass", 1.0f);
+    if (mass <= 0) return;
+    setVelocity({state.velocity.x + impulse.x / mass, state.velocity.y + impulse.y / mass,
+                 state.velocity.z + impulse.z / mass});
+}
+
 const char* PlayerObject::stateName() const {
     if (damageState != Enabled) return "Dead";
     if (state.mounted) return "Mounted";
@@ -193,6 +209,63 @@ void registerPlayerNatives(TorqueScript& ts) {
     ts.registerNative("Player::setTransform", [player](const Args& args) -> VMValue {
         if (auto* p = player(args); p && args.size() > 1) p->setTransform(TorqueMath::parse(args[1].toString()));
         return VMValue("");
+    });
+    // Player::getDamageLocation(pos): "legs|torso|head <quadrant>".
+    ts.registerNative("Player::getDamageLocation", [player](const Args& args) -> VMValue {
+        auto* p = player(args);
+        if (!p || args.size() < 2) return VMValue("");
+        float w[3] = {0, 0, 0};
+        std::sscanf(args[1].toString().c_str(), "%f %f %f", &w[0], &w[1], &w[2]);
+        // mWorldToObj: the inverse of the yaw-only transform.
+        const auto& m = p->transform;
+        const float d[3] = {w[0] - m[3], w[1] - m[7], w[2] - m[11]};
+        const float x = m[0] * d[0] + m[4] * d[1] + m[8] * d[2];
+        const float y = m[1] * d[0] + m[5] * d[1] + m[9] * d[2];
+        const float z = m[2] * d[0] + m[6] * d[1] + m[10] * d[2];
+        ScriptObject* data = ScriptEngine::instance().findObject(p->dataBlock().c_str());
+        const auto box = Fields::point(data, "boxSize", {1, 1, 2.3f});
+        const float torso = Fields::f32(data, "boxTorsoPercentage", 0.55f) * box[2];
+        const float head = Fields::f32(data, "boxHeadPercentage", 0.85f) * box[2];
+        const char* vert = z <= torso ? "legs" : z <= head ? "torso" : "head";
+        const char* quad;
+        if (std::string(vert) != "head") {
+            quad = y >= 0 ? (x <= 0 ? "front_left" : "front_right") : (x <= 0 ? "back_left" : "back_right");
+        } else {
+            // The head fractions are TypeS32 fields in the engine.
+            const float backPoint = box[0] * (Fields::s32(data, "boxHeadBackPercentage", 0) - 0.5f);
+            const float frontPoint = box[0] * (Fields::s32(data, "boxHeadFrontPercentage", 1) - 0.5f);
+            const float leftPoint = box[1] * (Fields::s32(data, "boxHeadLeftPercentage", 0) - 0.5f);
+            const float rightPoint = box[1] * (Fields::s32(data, "boxHeadRightPercentage", 1) - 0.5f);
+            int index = y < backPoint ? 0 : y <= frontPoint ? 3 : 6;
+            index += x < leftPoint ? 0 : x <= rightPoint ? 1 : 2;
+            static const char* names[9] = {"left_back", "middle_back", "right_back", "left_middle", "middle_middle",
+                                           "right_middle", "left_front", "middle_front", "right_front"};
+            quad = names[index];
+        }
+        return VMValue(std::string(vert) + " " + quad);
+    });
+    ts.registerNative("Player::applyImpulse", [player](const Args& args) -> VMValue {
+        auto* p = player(args);
+        if (!p || args.size() < 3) return VMValue("");
+        Point3F v{};
+        std::sscanf(args[2].toString().c_str(), "%f %f %f", &v.x, &v.y, &v.z);
+        p->applyImpulse(v);
+        return VMValue("");
+    });
+    ts.registerNative("Player::setVelocity", [player](const Args& args) -> VMValue {
+        auto* p = player(args);
+        if (!p || args.size() < 2) return VMValue("");
+        Point3F v{};
+        std::sscanf(args[1].toString().c_str(), "%f %f %f", &v.x, &v.y, &v.z);
+        p->setVelocity(v);
+        return VMValue(1);
+    });
+    ts.registerNative("Player::getVelocity", [player](const Args& args) -> VMValue {
+        auto* p = player(args);
+        if (!p) return VMValue("0 0 0");
+        char buffer[100];
+        std::snprintf(buffer, sizeof(buffer), "%g %g %g", p->state.velocity.x, p->state.velocity.y, p->state.velocity.z);
+        return VMValue(buffer);
     });
     // SceneObject transform methods for engine scene objects.
     auto scene = [](const Args& args) -> SceneObject* {
