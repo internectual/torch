@@ -208,6 +208,10 @@ public:
 
     void processMove(const ClientMoveIn* move) override;
     void processShapeTick(); // energy and repair
+    // mControllingObject: the Player whose control object this is. Such an
+    // object ticks inside that player's processTick (setProcessTick(false)).
+    std::string controllingObject;
+    bool processesTicks() const override { return controllingObject.empty(); }
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
     bool writePacketData(GameConnection& connection, TorqueBitWriter& w) override;
 
@@ -220,3 +224,6 @@ private:
 };
 
 void registerShapeBaseNatives(class TorqueScript& ts);
+// The datablock's shapeFile, and a shape's TSShape::bounds (shape space).
+std::string shapeFileOf(const ShapeBase& shape);
+bool shapeFileBounds(const std::string& shapeFile, float lo[3], float hi[3]);

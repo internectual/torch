@@ -9157,6 +9157,11 @@ ScriptObject* ScriptEngine::createEngineObject(const std::string& className, con
 void ScriptEngine::registerDataBlock(ScriptObject* object) {
     if (!object || object->internals.count("__datablockKey")) return;
     object->internals["__datablock"] = VMValue(1);
+    // GameBaseData::onAdd: a className not given is the C++ class name.
+    if (EngineClasses::isA(object->className, "GameBaseData")) {
+        const VMValue* value = findObjectField(object, "className");
+        if (!value || value->toString().empty()) object->fields["className"] = VMValue(object->className);
+    }
     if (object->id < 3 || object->id > 2050) {
         if (object->id) objectsById.erase(object->id);
         object->id = 0;

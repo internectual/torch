@@ -42,6 +42,11 @@ public:
     void processMove(const ClientMoveIn* move) override;
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
     bool writePacketData(GameConnection& connection, TorqueBitWriter& w) override;
+    // Player::setControlObject: the object (a vehicle or turret) the player's
+    // moves drive; empty or the player itself clears it.
+    void setControlObject(const std::string& object);
+    std::string controlObject;
+    bool pilot = false;
 
 private:
     const PlayerPrediction::Data* physics();

@@ -201,7 +201,50 @@ const char* PlayerObject::stateName() const {
     return "Move";
 }
 
+void PlayerObject::setControlObject(const std::string& object) {
+    const std::string self = script ? ScriptEngine::instance().objectKey(script) : std::string();
+    if (auto* old = controlObject.empty() ? nullptr : EngineObjects::get<ShapeBase>(controlObject)) {
+        old->controllingObject.clear();
+        old->controllingClient.clear();
+    }
+    controlObject.clear();
+    auto* shape = object.empty() || object == self ? nullptr : EngineObjects::get<ShapeBase>(object);
+    if (!shape) return;
+    if (auto* other = EngineObjects::get<PlayerObject>(shape->controllingObject)) other->setControlObject("");
+    if (auto* client = EngineObjects::get<GameConnection>(shape->controllingClient);
+        client && client->controlObject() == object)
+        client->setControlObject("");
+    controlObject = object;
+    shape->controllingObject = self;
+    shape->controllingClient = controllingClient;
+}
+
 void PlayerObject::processMove(const ClientMoveIn* move) {
+    // The control object gets the move, less the jump trigger while mounted
+    // and the view while free-looking; the player keeps those.
+    ClientMoveIn pMove;
+    if (auto* control = controlObject.empty() ? nullptr : EngineObjects::get<ShapeBase>(controlObject)) {
+        control->controllingClient = controllingClient;
+        if (!move) {
+            control->processMove(nullptr);
+        } else {
+            ClientMoveIn cMove = *move;
+            if (!mount.empty()) {
+                pMove.trigger[2] = move->trigger[2];
+                cMove.trigger[2] = false;
+            }
+            if (move->freeLook) {
+                pMove.yaw = move->yaw;
+                pMove.pitch = move->pitch;
+                pMove.roll = move->roll;
+                pMove.freeLook = true;
+                cMove.freeLook = false;
+                cMove.yaw = cMove.pitch = cMove.roll = 0;
+            }
+            control->processMove(damageState == Enabled ? &cMove : nullptr);
+            move = &pMove;
+        }
+    }
     ShapeBase::processMove(move);
     const PlayerPrediction::Data* data = physics();
     if (!data) return;
@@ -310,10 +353,21 @@ bool PlayerObject::writePacketData(GameConnection& connection, TorqueBitWriter& 
     w.writeF32(state.headPitch);
     w.writeF32(state.headYaw);
     w.writeF32(state.yaw);
-    w.writeFlag(false); // no controlled (piloted) object
+    bool result = ret;
+    if (auto* control = controlObject.empty() ? nullptr : EngineObjects::get<ShapeBase>(controlObject)) {
+        const int index = connection.ghostIndex(controlObject);
+        if (w.writeFlag(index != -1)) {
+            w.writeInt(index, 10);
+            result = control->writePacketData(connection, w);
+        } else {
+            result = false; // the control object is not on the other side yet
+        }
+    } else {
+        w.writeFlag(false);
+    }
     w.writeFlag(state.disableMove);
-    w.writeFlag(false); // pilot
-    return ret;
+    w.writeFlag(pilot);
+    return result;
 }
 
 void registerPlayerNatives(TorqueScript& ts) {
@@ -322,6 +376,28 @@ void registerPlayerNatives(TorqueScript& ts) {
     auto player = [](const Args& args) -> PlayerObject* {
         return args.empty() ? nullptr : EngineObjects::get<PlayerObject>(args[0].toString());
     };
+    // Player::setControlObject(obj) / getControlObject / clearControlObject.
+    ts.registerNative("Player::setControlObject", [player](const Args& args) -> VMValue {
+        auto* p = player(args);
+        if (!p || args.size() < 2) return VMValue(0);
+        ScriptObject* object = ScriptEngine::instance().findObject(args[1].toString().c_str());
+        p->setControlObject(object ? ScriptEngine::instance().objectKey(object) : std::string());
+        return VMValue(1);
+    });
+    ts.registerNative("Player::getControlObject", [player](const Args& args) -> VMValue {
+        auto* p = player(args);
+        ScriptObject* object = p && !p->controlObject.empty()
+            ? ScriptEngine::instance().findObject(p->controlObject.c_str()) : nullptr;
+        return VMValue(object ? ScriptEngine::instance().objectId(object) : 0);
+    });
+    ts.registerNative("Player::clearControlObject", [player](const Args& args) -> VMValue {
+        if (auto* p = player(args)) p->setControlObject("");
+        return VMValue("");
+    });
+    ts.registerNative("Player::setPilot", [player](const Args& args) -> VMValue {
+        if (auto* p = player(args); p && args.size() > 1) p->pilot = args[1].toBool();
+        return VMValue("");
+    });
     ts.registerNative("Player::getState", [player](const Args& args) -> VMValue {
         auto* p = player(args);
         return VMValue(p ? p->stateName() : "");

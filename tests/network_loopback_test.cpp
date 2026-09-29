@@ -9,6 +9,7 @@
 #include "sim/camera.h"
 #include "sim/player.h"
 #include "sim/projectiles.h"
+#include "sim/vehicle.h"
 #include <map>
 #include <set>
 #include "sim/sim_state.h"
@@ -1400,6 +1401,82 @@ int main() {
         for (const char* var : {"$projElf", "$projLaser", "$projRepair", "$projFlare"})
             ScriptEngine::instance().deleteScriptObject(script.ts()->getGlobal(var).toString());
         assert(script.ts()->getGlobal("$projUnzap").toInt() == targetId);
+        serverCollision().triangles = savedTriangles;
+        serverCollision().water = savedWater;
+    }
+    {
+        // Vehicles (vehicle.cc, hoverVehicle.cc, flyingVehicle.cc): the
+        // Rigid body over a ground plane. A HoverVehicle settles on its
+        // stabilizer springs, a FlyingVehicle holds its height on the
+        // hovering jet, and the hover's ghost decodes in the client's reader.
+        auto savedTriangles = serverCollision().triangles;
+        auto savedWater = serverCollision().water;
+        serverCollision().water = [](float, float) { return std::numeric_limits<float>::quiet_NaN(); };
+        serverCollision().triangles = [](const Point3F&, const Point3F&, std::vector<PlayerPrediction::Triangle>& out) {
+            out.push_back({{-1000, -1000, 0}, {1000, -1000, 0}, {1000, 1000, 0}, {0, 0, 1}});
+            out.push_back({{-1000, -1000, 0}, {1000, 1000, 0}, {-1000, 1000, 0}, {0, 0, 1}});
+        };
+        script.ts()->execute(
+            "datablock HoverVehicleData(TestHover) { mass = 400; dragForce = 25 / 45.0; mainThrustForce = 30; "
+            "  strafeThrustForce = 20; stabLenMin = 2.25; stabLenMax = 3.75; stabSpringConstant = 30; "
+            "  stabDampingConstant = 16; floatingGravMag = 3.5; maxEnergy = 150; };"
+            "datablock FlyingVehicleData(TestFlyer) { mass = 150; maxAutoSpeed = 15; autoAngularForce = 400; "
+            "  autoLinearForce = 300; hoverHeight = 5; jetForce = 3000; maxEnergy = 150; };"
+            "new GameConnection(VehLinkClient);"
+            "new HoverVehicle(TestHoverV) { dataBlock = TestHover; position = \"0 0 6\"; };"
+            "new FlyingVehicle(TestFlyerV) { dataBlock = TestFlyer; position = \"30 0 12\"; };"
+            "$hoverClass = TestHoverV.getDataBlock().className;");
+        // GameBaseData::onAdd: className defaults to the C++ class name.
+        assert(script.ts()->getGlobal("$hoverClass").toString() == "HoverVehicleData");
+        auto* hover = EngineObjects::get<HoverVehicleObject>("TestHoverV");
+        auto* flyer = EngineObjects::get<FlyingVehicleObject>("TestFlyerV");
+        assert(hover && flyer);
+        for (int i = 0; i < 250; ++i) {
+            hover->processMove(nullptr);
+            flyer->processMove(nullptr);
+        }
+        // The hover's box floats above the ground, at rest.
+        assert(hover->transform[11] > 0.05f && hover->transform[11] < 4.0f);
+        assert(std::abs(hover->getVelocity().z) < 0.5f);
+        assert(std::abs(flyer->transform[11] - 12.0f) < 1.0f);
+
+        auto* server = EngineObjects::get<GameConnection>("VehLinkClient");
+        assert(server);
+        GameConnection client;
+        client.isServer = false;
+        DemoParser parser;
+        int packets = 0;
+        server->deliver = [&](const std::vector<uint8_t>& p) { client.receivePacket(p.data(), p.size()); };
+        client.onServerPacket = [&](const std::vector<uint8_t>& p) {
+            PacketData pd = parser.parsePacket(p.data(), p.size(), packets++);
+            for (const auto& ev : pd.events)
+                if (ev.ghostMessage >= 0) client.clientGhostMessage(ev.ghostMessage, ev.ghostSequence, (uint32_t)ev.ghostCount);
+        };
+        client.deliver = [&](const std::vector<uint8_t>& p) {
+            parser.onSendPacketTrigger();
+            server->receivePacket(p.data(), p.size());
+        };
+        server->activateGhosting();
+        double now = 900.0;
+        for (int i = 0; i < 20 && !server->isGhosting(); ++i, now += 1.0) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.5);
+        }
+        assert(server->isGhosting());
+        script.ts()->execute("TestHoverV.scopeToClient(VehLinkClient); TestFlyerV.scopeToClient(VehLinkClient);");
+        for (int i = 0; i < 20; ++i, now += 0.2) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.1);
+        }
+        assert(parser.getParseFault().empty());
+        const int hoverGhost = server->ghostIndex(ScriptEngine::instance().objectKey(hover->script));
+        const int flyerGhost = server->ghostIndex(ScriptEngine::instance().objectKey(flyer->script));
+        assert(hoverGhost >= 0 && flyerGhost >= 0);
+        const GhostEntry* ghost = parser.getGhostTracker().getGhost(hoverGhost);
+        assert(ghost && ghost->className == "HoverVehicle");
+        assert(std::abs(ghost->position.z - hover->transform[11]) < 0.05f);
+        assert(parser.getGhostTracker().getGhost(flyerGhost)->className == "FlyingVehicle");
+        for (const char* name : {"TestHoverV", "TestFlyerV"}) ScriptEngine::instance().deleteScriptObject(name);
         serverCollision().triangles = savedTriangles;
         serverCollision().water = savedWater;
     }

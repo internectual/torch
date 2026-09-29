@@ -86,6 +86,19 @@ inline AngAxis angAxis(const Quat& q) {
     return a;
 }
 
+// QuatF::mul(a, b).
+inline Quat mul(const Quat& a, const Quat& b) {
+    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y + a.y * b.w + a.z * b.x - a.x * b.z,
+            a.w * b.z + a.z * b.w + a.x * b.y - a.y * b.x, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+
+// QuatF::normalize.
+inline Quat normalize(const Quat& q) {
+    const float l = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    if (l == 0.0f) return {};
+    return {q.x / l, q.y / l, q.z / l, q.w / l};
+}
+
 inline Matrix mul(const Matrix& a, const Matrix& b) {
     Matrix r{};
     for (int i = 0; i < 4; ++i)

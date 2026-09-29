@@ -22,7 +22,9 @@ struct Terrain {
 };
 
 struct Water {
-    float x0, y0, x1, y1, level;
+    float x0, y0, x1, y1, bottom, level;
+    float density, viscosity;
+    int liquidType;
 };
 
 // Interior hull triangles on a uniform grid over x/y.
@@ -149,11 +151,21 @@ void addInterior(const ScriptObject* object, std::vector<PlayerPrediction::Trian
     }
 }
 
+// WaterBlock's liquidType enum (eOceanWater when unnamed).
+int liquidType(const std::string& name) {
+    static const char* types[] = {"Water", "OceanWater", "RiverWater", "StagnantWater",
+                                  "Lava", "HotLava", "CrustyLava", "Quicksand"};
+    for (int i = 0; i < 8; ++i) if (strcasecmp(name.c_str(), types[i]) == 0) return i;
+    return 1;
+}
+
 void addWater(const ScriptObject* object) {
     const auto p = Fields::point(object, "position", {0, 0, 0});
     const auto sc = Fields::point(object, "scale", {1, 1, 1});
     if (sc[0] <= 0 || sc[1] <= 0) return;
-    state().water.push_back({p[0], p[1], p[0] + sc[0], p[1] + sc[1], p[2] + sc[2]});
+    state().water.push_back({p[0], p[1], p[0] + sc[0], p[1] + sc[1], p[2], p[2] + sc[2],
+                             Fields::f32(object, "density", 1.0f), Fields::f32(object, "viscosity", 15.0f),
+                             liquidType(Fields::string(object, "liquidType"))});
 }
 
 void buildGrid(Interiors& in) {
@@ -253,6 +265,23 @@ void gatherTriangles(const Point3F& min, const Point3F& max, std::vector<PlayerP
                     out.push_back(t);
                 }
     }
+}
+
+bool waterFind(const Point3F& min, const Point3F& max, WaterInfo& out) {
+    ensureBuilt();
+    bool found = false;
+    for (const auto& w : state().water) {
+        if (min.x > std::max(w.x0, w.x1) || max.x < std::min(w.x0, w.x1) || min.y > std::max(w.y0, w.y1) ||
+            max.y < std::min(w.y0, w.y1) || min.z > w.level || max.z < w.bottom)
+            continue;
+        out.coverage = w.level < max.z ? (w.level - min.z) / (max.z - min.z) : 1.0f;
+        out.liquidType = w.liquidType;
+        out.density = w.density;
+        out.viscosity = w.viscosity;
+        out.surface = w.level;
+        found = true;
+    }
+    return found;
 }
 
 float waterSurfaceAt(float x, float y) {

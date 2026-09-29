@@ -1,4 +1,5 @@
 #include "sim/shape_base.h"
+#include "sim/vehicle.h"
 #include "sim/static_shapes.h"
 #include "sim/trigger.h"
 #include "sim/sim_state.h"
@@ -208,6 +209,9 @@ std::array<float, 16> translation(const float p[3]) {
 }
 
 } // namespace
+
+std::string shapeFileOf(const ShapeBase& shape) { return objectShapeFile(shape); }
+bool shapeFileBounds(const std::string& shapeFile, float lo[3], float hi[3]) { return shapeBounds(shapeFile, lo, hi); }
 
 int ShapeBaseImageData::lookupState(const std::string& name) const {
     if (name.empty()) return -1;
@@ -854,7 +858,10 @@ void PlayerContacts::queue(PlayerObject& player) {
         if (!shape || shape == &player) continue;
         auto* item = dynamic_cast<ItemObject*>(shape);
         auto* corpse = dynamic_cast<PlayerObject*>(shape);
-        if (!item && !(corpse && corpse->damageState != ShapeBase::Enabled)) continue;
+        auto* vehicle = dynamic_cast<VehicleObject*>(shape);
+        if (!item && !vehicle && !(corpse && corpse->damageState != ShapeBase::Enabled)) continue;
+        // A vehicle the player rides is not touched.
+        if (vehicle && player.mount == ScriptEngine::instance().objectKey(vehicle->script)) continue;
         if (shape->hidden) continue;
         if (item && item->collisionObject == self) continue;
         float lo[3], hi[3];
