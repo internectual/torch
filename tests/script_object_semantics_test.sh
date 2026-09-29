@@ -38,7 +38,9 @@ function ids() {
    %b = new ScriptObject() { v = 3; class = IdSpace; };
    echo("R7 " @ (%named == IdNamed.getId()) @ " " @ (%named == nameToId(IdNamed)) @ " " @ (%named >= 1027));
    echo("R8 " @ (%a != %b) @ " " @ %a.v @ %b.v @ " [" @ %a.getName() @ "] " @ IdNamed.getName());
-   echo("R9 " @ ($idOnAdd == %b) @ " " @ (%b.who() $= "who" @ %b));
+   echo("R9 " @ ($idOnAdd == %b) @ " " @ (%b.who() $= ("who" @ %b)));
+   // gram.y: '@' and '$=' share a level (left-associative), below '+'.
+   echo("R10 " @ ("x" $= "x" @ "y") @ " team" @ 1 + 1);
    %g = new SimGroup();
    %g.add(%a);
    echo("R10 " @ %g.getCount() @ " " @ (%g.getObject(0) == %a));
@@ -71,6 +73,7 @@ grep -qF '[INFO] R6 after eval' "$root/client.log"
 grep -qF '[INFO] R7 1 1 1' "$root/client.log"
 grep -qF '[INFO] R8 1 23 [] IdNamed' "$root/client.log"
 grep -qF '[INFO] R9 1 1' "$root/client.log"
+grep -qF '[INFO] R10 1y team2' "$root/client.log"
 grep -qF '[INFO] R10 1 1' "$root/client.log"
 grep -qF '[INFO] R11 01 2' "$root/client.log"
 ! grep -qF 'Expected token' "$root/client.log"

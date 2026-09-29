@@ -40,7 +40,9 @@ bool isOriginalRuntimePath(std::string_view path) {
          ".vl2", ".vol", ".rec", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tga", ".dds",
         // Text data that stock and mod scripts read with FileObject
         // (autoload.cs reads prefs/autoload.ini).
-        ".ini", ".txt"
+        ".ini", ".txt",
+        // Navigation and spawn graphs (terrains/<mission>.nav / .spn).
+        ".nav", ".spn"
     };
     for (const auto candidate : allowed)
         if (extension == candidate) return true;

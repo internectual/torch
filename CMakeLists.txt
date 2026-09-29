@@ -44,6 +44,7 @@ add_executable(torch
     src/sim/camera.cpp
     src/sim/player.cpp
     src/sim/static_shapes.cpp
+    src/sim/nav_graph.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
@@ -138,6 +139,7 @@ add_executable(torch_server
     src/sim/camera.cpp
     src/sim/player.cpp
     src/sim/static_shapes.cpp
+    src/sim/nav_graph.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
@@ -405,6 +407,7 @@ add_executable(torch_parity_test
     src/sim/camera.cpp
     src/sim/player.cpp
     src/sim/static_shapes.cpp
+    src/sim/nav_graph.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
@@ -480,6 +483,7 @@ add_executable(torch_network_loopback_test
     src/sim/camera.cpp
     src/sim/player.cpp
     src/sim/static_shapes.cpp
+    src/sim/nav_graph.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp

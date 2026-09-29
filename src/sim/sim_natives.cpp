@@ -4,10 +4,13 @@
 #include "sim/camera.h"
 #include "sim/player.h"
 #include "sim/static_shapes.h"
+#include "sim/nav_graph.h"
+#include "sim/engine_classes.h"
 #include "sim/torque_math.h"
 #include "sim/engine_crc.h"
 #include "sim/sim_state.h"
 #include "core/engine.h"
+#include "core/timer.h"
 #include "script/torquescript.h"
 #include "script/script_engine.h"
 #include <map>
@@ -23,6 +26,135 @@ void registerSimNatives(TorqueScript& ts) {
     registerCameraNatives(ts);
     registerPlayerNatives(ts);
     registerStaticShapeNatives(ts);
+    registerNavGraphNatives(ts);
+
+    // simBase.cc consoleInit: the object type masks (game/objectTypes.h).
+    static const std::pair<const char*, int> typeMasks[] = {
+        {"StaticObjectType", 1 << 0}, {"EnvironmentObjectType", 1 << 1}, {"TerrainObjectType", 1 << 2},
+        {"InteriorObjectType", 1 << 3}, {"WaterObjectType", 1 << 4}, {"TriggerObjectType", 1 << 5},
+        {"MarkerObjectType", 1 << 6}, {"ForceFieldObjectType", 1 << 8}, {"GameBaseObjectType", 1 << 10},
+        {"ShapeBaseObjectType", 1 << 11}, {"CameraObjectType", 1 << 12}, {"StaticShapeObjectType", 1 << 13},
+        {"PlayerObjectType", 1 << 14}, {"ItemObjectType", 1 << 15}, {"VehicleObjectType", 1 << 16},
+        {"VehicleBlockerObjectType", 1 << 17}, {"ProjectileObjectType", 1 << 18},
+        {"ExplosionObjectType", 1 << 19}, {"CorpseObjectType", 1 << 20}, {"TurretObjectType", 1 << 21},
+        {"DebrisObjectType", 1 << 22}, {"PhysicalZoneObjectType", 1 << 23}, {"StaticTSObjectType", 1 << 24},
+        {"GuiControlObjectType", 1 << 25}, {"StaticRenderedObjectType", 1 << 26},
+        {"DamagableItemObjectType", 1 << 27}, {"SensorObjectType", 1 << 28}, {"StationObjectType", 1 << 29},
+        {"GeneratorObjectType", 1 << 30}};
+    for (const auto& [name, value] : typeMasks) ts.setGlobal(std::string("$TypeMasks::") + name, VMValue(value));
+    // SimObject::mTypeMask as each class's constructor sets it.
+    static auto typeMaskOf = [](const std::string& cls) {
+        int mask = 0;
+        auto is = [&](const char* base) { return EngineClasses::isA(cls, base); };
+        if (is("GameBase")) mask |= 1 << 10;
+        if (is("ShapeBase")) mask |= 1 << 11;
+        if (is("Camera")) mask |= 1 << 12;
+        if (is("StaticShape")) mask |= 1 << 13;
+        if (is("Player")) mask |= 1 << 14;
+        if (is("Item")) mask |= 1 << 15;
+        if (is("Vehicle")) mask |= 1 << 16;
+        if (is("Turret")) mask |= 1 << 21;
+        if (is("TerrainBlock")) mask |= (1 << 2) | 1;
+        if (is("InteriorInstance")) mask |= (1 << 3) | 1;
+        if (is("WaterBlock")) mask |= 1 << 4;
+        if (is("Trigger")) mask |= 1 << 5;
+        if (is("ForceFieldBare")) mask |= 1 << 8;
+        if (is("TSStatic")) mask |= (1 << 24) | 1;
+        if (is("MissionMarker")) mask |= 1 << 6;
+        return mask;
+    };
+    ts.registerNative("SceneObject::getType", [](const std::vector<VMValue>& args) -> VMValue {
+        ScriptObject* object = args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str());
+        return VMValue(object ? typeMaskOf(object->className) : 0);
+    });
+
+    // math/mathTypes.cc getRandom / setRandomSeed / getRandomSeed on gRandGen.
+    ts.registerNative("getRandom", [](const std::vector<VMValue>& args) -> VMValue {
+        auto& rng = Nav::gRandGen();
+        if (args.size() == 1) return VMValue((float)rng.randI(0, args[0].toInt()));
+        if (args.size() == 2) {
+            int32_t lo = args[0].toInt(), hi = args[1].toInt();
+            if (lo > hi) std::swap(lo, hi);
+            return VMValue((float)rng.randI(lo, hi));
+        }
+        return VMValue(rng.randF());
+    });
+    ts.registerNative("setRandomSeed", [](const std::vector<VMValue>& args) -> VMValue {
+        Nav::setGlobalRandSeed(args.empty() ? (uint32_t)(Timer::now() * 1000.0) : (uint32_t)args[0].toInt());
+        return VMValue("");
+    });
+    ts.registerNative("getRandomSeed", [](const std::vector<VMValue>&) -> VMValue {
+        return VMValue(Nav::gRandGen().getSeed());
+    });
+
+    // gServerContainer.castRay over the server's collision geometry
+    // (terrain, interiors, force fields).
+    Nav::setRayCaster([](const Nav::Point3& a, const Nav::Point3& b, uint32_t, Nav::RayHit& hit) {
+        const auto& world = serverCollision();
+        if (!world.triangles) return false;
+        std::vector<PlayerPrediction::Triangle> tris;
+        world.triangles({std::min(a.x, b.x) - 0.1f, std::min(a.y, b.y) - 0.1f, std::min(a.z, b.z) - 0.1f},
+                        {std::max(a.x, b.x) + 0.1f, std::max(a.y, b.y) + 0.1f, std::max(a.z, b.z) + 0.1f}, tris);
+        const Point3F d{b.x - a.x, b.y - a.y, b.z - a.z};
+        float best = 2.0f;
+        for (const auto& t : tris) {
+            // Moller-Trumbore.
+            const Point3F e1 = PlayerPrediction::sub(t.b, t.a), e2 = PlayerPrediction::sub(t.c, t.a);
+            const Point3F p = PlayerPrediction::cross(d, e2);
+            const float det = PlayerPrediction::dot(e1, p);
+            if (std::fabs(det) < 1e-9f) continue;
+            const Point3F s{a.x - t.a.x, a.y - t.a.y, a.z - t.a.z};
+            const float u = PlayerPrediction::dot(s, p) / det;
+            if (u < 0 || u > 1) continue;
+            const Point3F q = PlayerPrediction::cross(s, e1);
+            const float v = PlayerPrediction::dot(d, q) / det;
+            if (v < 0 || u + v > 1) continue;
+            const float tt = PlayerPrediction::dot(e2, q) / det;
+            if (tt < 0 || tt > 1 || tt >= best) continue;
+            best = tt;
+            hit.point = {a.x + d.x * tt, a.y + d.y * tt, a.z + d.z * tt};
+            hit.normal = {t.n.x, t.n.y, t.n.z};
+        }
+        return best <= 1.0f;
+    });
+
+    // ContainerBoxEmpty(mask, center, xRad [, yRad, zRad]): nothing of the
+    // masked types in the box (geometry by its triangles; objects by their
+    // box around the origin: a player's PlayerData boxSize, else a point).
+    ts.registerNative("ContainerBoxEmpty", [](const std::vector<VMValue>& args) -> VMValue {
+        if (args.size() < 3) return VMValue(1);
+        const int mask = args[0].toInt();
+        float c[3] = {0, 0, 0};
+        std::sscanf(args[1].toString().c_str(), "%f %f %f", &c[0], &c[1], &c[2]);
+        const float rx = args[2].toFloat();
+        const float ry = args.size() > 3 ? args[3].toFloat() : rx;
+        const float rz = args.size() > 4 ? args[4].toFloat() : rx;
+        const Point3F lo{c[0] - rx, c[1] - ry, c[2] - rz}, hi{c[0] + rx, c[1] + ry, c[2] + rz};
+        constexpr int geometry = (1 << 0) | (1 << 2) | (1 << 3) | (1 << 8);
+        if ((mask & geometry) && serverCollision().triangles) {
+            std::vector<PlayerPrediction::Triangle> tris;
+            serverCollision().triangles(lo, hi, tris);
+            const PlayerPrediction::Box box{lo, hi};
+            for (const auto& t : tris)
+                if (PlayerPrediction::boxIntersectsTriangle(box, t)) return VMValue(0);
+        }
+        for (auto& [name, object] : ScriptEngine::instance().objects) {
+            auto* scene = object ? dynamic_cast<SceneObject*>(object->engine.get()) : nullptr;
+            if (!scene || !(typeMaskOf(object->className) & mask & ~geometry)) continue;
+            float half[3] = {0, 0, 0}, height = 0;
+            if (auto* player = dynamic_cast<PlayerObject*>(scene)) {
+                (void)player;
+                const auto size = Fields::point(ScriptEngine::instance().findObject(
+                    ScriptEngine::instance().objectDataBlock(object).c_str()), "boxSize", {1, 1, 2});
+                half[0] = size[0] * 0.5f; half[1] = size[1] * 0.5f; height = size[2];
+            }
+            const float x = scene->transform[3], y = scene->transform[7], z = scene->transform[11];
+            if (x + half[0] >= lo.x && x - half[0] <= hi.x && y + half[1] >= lo.y && y - half[1] <= hi.y &&
+                z + height >= lo.z && z <= hi.z)
+                return VMValue(0);
+        }
+        return VMValue(1);
+    });
     registerGameConnectionNatives(ts);
     registerSceneObjectClasses();
 

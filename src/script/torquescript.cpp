@@ -292,6 +292,7 @@ struct TorqueScript::Impl {
     VMValue parseBitwiseAnd();
     VMValue parseEquality();
     VMValue parseRelational();
+    VMValue parseConcat();
     VMValue parseShift();
     VMValue parseAdditive();
     VMValue parseMultiplicative();
@@ -1589,27 +1590,21 @@ VMValue TorqueScript::Impl::parseBitwiseAnd() {
 
 VMValue TorqueScript::Impl::parseEquality() {
     VMValue lhs = parseRelational();
-    while (peekToken().type == TSTokenType::EqEq || peekToken().type == TSTokenType::Neq ||
-           peekToken().type == TSTokenType::StrEq || peekToken().type == TSTokenType::StrNeq) {
+    while (peekToken().type == TSTokenType::EqEq || peekToken().type == TSTokenType::Neq) {
         TSTokenType op = nextToken().type;
         VMValue rhs = parseRelational();
-        bool eq;
-        if (op == TSTokenType::StrEq || op == TSTokenType::StrNeq) {
-            eq = (strcasecmp(lhs.toString().c_str(), rhs.toString().c_str()) == 0);
-        } else {
-            eq = lhs.toDouble() == rhs.toDouble();
-        }
-        lhs = VMValue((op == TSTokenType::EqEq || op == TSTokenType::StrEq) == eq ? 1 : 0);
+        const bool eq = lhs.toDouble() == rhs.toDouble();
+        lhs = VMValue((op == TSTokenType::EqEq) == eq ? 1 : 0);
     }
     return lhs;
 }
 
 VMValue TorqueScript::Impl::parseRelational() {
-    VMValue lhs = parseShift();
+    VMValue lhs = parseConcat();
     while (peekToken().type == TSTokenType::Lt || peekToken().type == TSTokenType::Gt ||
            peekToken().type == TSTokenType::Le || peekToken().type == TSTokenType::Ge) {
         TSTokenType op = nextToken().type;
-        VMValue rhs = parseShift();
+        VMValue rhs = parseConcat();
         double a = lhs.toDouble(), b = rhs.toDouble();
         bool r = false;
         switch (op) {
@@ -1620,6 +1615,42 @@ VMValue TorqueScript::Impl::parseRelational() {
             default: break;
         }
         lhs = VMValue(r ? 1 : 0);
+    }
+    return lhs;
+}
+
+// gram.y: '@', the SPC/TAB/NL concatenations and $= / !$= share one level,
+// below the shifts and above the relational operators.
+VMValue TorqueScript::Impl::parseConcat() {
+    VMValue lhs = parseShift();
+    while (true) {
+        const TSToken& t = peekToken();
+        if (t.type == TSTokenType::At) {
+            nextToken();
+            VMValue rhs = parseShift();
+            lhs = VMValue(lhs.toString() + rhs.toString());
+            continue;
+        }
+        if (t.type == TSTokenType::StrEq || t.type == TSTokenType::StrNeq) {
+            const TSTokenType op = nextToken().type;
+            VMValue rhs = parseShift();
+            const bool eq = strcasecmp(lhs.toString().c_str(), rhs.toString().c_str()) == 0;
+            lhs = VMValue((op == TSTokenType::StrEq) == eq ? 1 : 0);
+            continue;
+        }
+        if (t.type == TSTokenType::Ident) {
+            std::string sep;
+            if (t.text == "TAB") sep = "\t";
+            else if (t.text == "SPC") sep = " ";
+            else if (t.text == "NL") sep = "\n";
+            if (!sep.empty()) {
+                nextToken();
+                VMValue rhs = parseShift();
+                lhs = VMValue(lhs.toString() + sep + rhs.toString());
+                continue;
+            }
+        }
+        break;
     }
     return lhs;
 }
@@ -1640,13 +1671,6 @@ VMValue TorqueScript::Impl::parseShift() {
 VMValue TorqueScript::Impl::parseAdditive() {
     VMValue lhs = parseMultiplicative();
     while (true) {
-        std::string sep;
-        if (peekToken().type == TSTokenType::At) {
-            nextToken();
-            VMValue rhs = parseMultiplicative();
-            lhs = VMValue(lhs.toString() + rhs.toString());
-            continue;
-        }
         if (peekToken().type == TSTokenType::Plus) {
             nextToken();
             VMValue rhs = parseMultiplicative();
@@ -1660,18 +1684,6 @@ VMValue TorqueScript::Impl::parseAdditive() {
             VMValue rhs = parseMultiplicative();
             lhs = VMValue(lhs.toDouble() - rhs.toDouble());
             continue;
-        }
-        if (peekToken().type == TSTokenType::Ident) {
-            std::string txt = peekToken().text;
-            if (txt == "TAB") { sep = "\t"; }
-            else if (txt == "SPC") { sep = " "; }
-            else if (txt == "NL") { sep = "\n"; }
-            if (!sep.empty()) {
-                nextToken();
-                VMValue rhs = parseMultiplicative();
-                lhs = VMValue(lhs.toString() + sep + rhs.toString());
-                continue;
-            }
         }
         break;
     }
