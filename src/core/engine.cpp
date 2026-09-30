@@ -355,7 +355,6 @@ bool Engine::init(int argc, char* argv[]) {
     std::string dataDir = ".";
     std::string outputDir = "";
     std::string modPath = "base";
-    bool configModPath = false;
     std::string exeDir = ".";
     std::string initScriptSetting;  // from torch.cfg; empty = no init script
     std::string configPath = "torch.cfg";
@@ -393,7 +392,7 @@ bool Engine::init(int argc, char* argv[]) {
                 trim(key); trim(val);
                 if (key == "dataDir") dataDir = val;
                 if (key == "outputDir") outputDir = val;
-                if (key == "modPath") { modPath = val; configModPath = true; }
+                if (key == "modPath") modPath = val;
                 if (key == "initScript") initScriptSetting = val;
                 if (key == "demoMasterServer")
                     Console::instance().setVariable("demoMasterServer", val.c_str());
@@ -444,7 +443,6 @@ bool Engine::init(int argc, char* argv[]) {
     // Parse args
     bool noLogin = false;
     bool explicitPreviewCamera = false;
-    bool explicitModPath = configModPath;
     int mapperCamera = 0;
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-data") == 0) && i + 1 < argc) dataDir = argv[i + 1];
@@ -458,7 +456,6 @@ bool Engine::init(int argc, char* argv[]) {
         if (strcmp(argv[i], "-output") == 0 && i + 1 < argc) outputDir = argv[i + 1];
         if (strcmp(argv[i], "-mod") == 0 && i + 1 < argc) {
             modPath = argv[i + 1];
-            explicitModPath = true;
         }
         if (strcmp(argv[i], "-online") == 0) Console::instance().setVariable("online", "1");
         if (strcmp(argv[i], "-demo-mode") == 0) {
@@ -541,8 +538,6 @@ bool Engine::init(int argc, char* argv[]) {
         const char* home = getenv("HOME");
         outputDir = home ? std::string(home) + "/.torch" : dataDir;
     }
-    if (!explicitModPath && std::filesystem::is_directory(dataDir + "/classic"))
-        modPath = "classic";
     Console::instance().setVariable("dataDir", dataDir.c_str());
     // initScript comes from torch.cfg (may be empty); -init overrides it.
     if (!initScriptSetting.empty() && !*Console::instance().getStringVariable("initScript", ""))
