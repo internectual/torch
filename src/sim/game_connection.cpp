@@ -5,6 +5,7 @@
 #include "sim/net_object.h"
 #include "sim/datablock_pack.h"
 #include "sim/shape_base.h"
+#include "sim/containers.h"
 #include "sim/torque_math.h"
 #include "net/remote_command.h"
 #include "net/v12_bitstream.h"
@@ -723,8 +724,22 @@ void GameConnection::scopeScene() {
         }
         for (const auto& key : inRange) objectInScope(key);
     }
-    // GameConnection::doneScopingScene: the sensor-visible set.
-    {
+    // GameConnection::doneScopingScene: in the commander map, everything
+    // of the map's types (commanderScopeCallback); otherwise the
+    // sensor-visible set.
+    if (inCommanderMap) {
+        constexpr uint32_t scopeMask = SimContainer::TerrainObjectType | SimContainer::InteriorObjectType |
+                                       SimContainer::WaterObjectType | SimContainer::PlayerObjectType |
+                                       SimContainer::VehicleObjectType | SimContainer::StaticShapeObjectType;
+        std::vector<std::string> all;
+        auto& engine = ScriptEngine::instance();
+        for (auto& [name, object] : engine.objects) {
+            auto* net = object ? dynamic_cast<NetObject*>(object->engine.get()) : nullptr;
+            if (!net || !net->ghostable || net->netClassId() < 0) continue;
+            if (SimContainer::typeMask(object) & scopeMask) all.push_back(engine.objectKey(object));
+        }
+        for (const auto& key : all) objectInScope(key);
+    } else {
         const uint32_t group = ServerTargets::connectionSensorGroup(*this);
         std::vector<std::string> visible;
         auto& engine = ScriptEngine::instance();
@@ -960,6 +975,43 @@ void registerGameConnectionNatives(TorqueScript& ts) {
     auto conn = [](const Args& args, size_t i) -> GameConnection* {
         return i < args.size() ? EngineObjects::get<GameConnection>(args[i].toString()) : nullptr;
     };
+    // GameConnection::setObjectActiveImage: the client's ghost of `obj` makes
+    // the image in `slot` its active one (SetObjectActiveImageEvent).
+    ts.registerNative("GameConnection::setObjectActiveImage", [conn](const Args& args) -> VMValue {
+        auto* c = conn(args, 0);
+        if (!c || !c->isServer) return VMValue("");
+        const std::string objName = args.size() > 1 ? args[1].toString() : std::string();
+        ScriptObject* object = ScriptEngine::instance().findObject(objName.c_str());
+        if (!object || !dynamic_cast<ShapeBase*>(object->engine.get())) {
+            Console::instance().printf(LogLevel::Error, "GameConnection::cSetObjectActiveImage: invalid object %s",
+                                       objName.c_str());
+            return VMValue("");
+        }
+        const uint32_t slot = args.size() > 2 ? (uint32_t)args[2].toInt() : 0;
+        if (slot >= ShapeBase::MaxMountedImages) {
+            Console::instance().printf(LogLevel::Error,
+                                       "GameConnection::cSetControlObjectActiveImage: image slot out of range [%u]", slot);
+            return VMValue("");
+        }
+        const int ghost = c->ghostIndex(ScriptEngine::instance().objectKey(object));
+        if (ghost == -1) return VMValue("");
+        auto event = std::make_shared<NetEventOut>();
+        event->classIndex = GameConnection::SetObjectActiveImage;
+        event->pack = [ghost, slot](TorqueBitWriter& w) {
+            w.writeRangedU32((uint32_t)ghost, 0, 1023);
+            w.writeRangedU32(slot, 0, ShapeBase::MaxMountedImages);
+        };
+        c->postEvent(event);
+        return VMValue("");
+    });
+    ts.registerNative("GameConnection::scopeCommanderMap", [conn](const Args& args) -> VMValue {
+        if (auto* c = conn(args, 0)) c->inCommanderMap = args.size() > 1 && args[1].toBool();
+        return VMValue("");
+    });
+    ts.registerNative("GameConnection::isScopingCommanderMap", [conn](const Args& args) -> VMValue {
+        auto* c = conn(args, 0);
+        return VMValue(c && c->inCommanderMap ? 1 : 0);
+    });
     ts.registerNative("NetConnection::getPing", [conn](const Args& args) -> VMValue {
         auto* c = conn(args, 0);
         return VMValue((int32_t)(c ? c->roundTripTime : 0.0f));

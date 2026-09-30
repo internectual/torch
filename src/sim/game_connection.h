@@ -54,7 +54,7 @@ struct ClientMoveIn {
 class GameConnection : public EngineObject {
 public:
     // Engine event class indices (NetEventClassFirst-relative).
-    enum EventClass { GhostingMessage = 4, Gravity = 5, NetString = 7, PathManagerEvent = 8, RemoteCommand = 9,
+    enum EventClass { GhostingMessage = 4, Gravity = 5, NetString = 7, PathManagerEvent = 8, RemoteCommand = 9, SetObjectActiveImage = 14,
                       SetMissionCRC = 13, Sim2DAudio = 17, Sim3DAudio = 18, SimDataBlock = 19,
                       SimpleMessage = 22 };
 
@@ -147,6 +147,8 @@ public:
     bool vehicleTeleportEnabled = true;
     // NetConnection::mMissionPathsSent: the client has the mission's paths.
     bool missionPathsSent = false;
+    // mInCommanderMap: scope the whole map while the commander map is up.
+    bool inCommanderMap = false;
 
     // Voice (gameConnection.cc): the connection's voice id (1..MaxClients),
     // who it would listen to and who is talking to it.
