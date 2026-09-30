@@ -1168,18 +1168,20 @@ uint32_t ShapeBase::packUpdate(GameConnection& connection, uint32_t mask, Torque
         w.writeFlag(false); // blowApart
         w.writeNormalVector({0, 0, 1}, 8); // damageDir
     }
+    // The shipped order (ShapeBase::unpackUpdate, FUN_005ef0e0): sounds, then
+    // threads as sequence, state, direction and end flags (V12 has threads
+    // first with float time scale and position).
+    if (w.writeFlag(mask & SoundMask))
+        for (int i = 0; i < 4; ++i) w.writeFlag(false);
     if (w.writeFlag(mask & ThreadMask))
         for (uint32_t i = 0; i < MaxScriptThreads; ++i) {
             const ScriptThread& st = threads[i];
             if (!w.writeFlag(st.sequence != -1 && (mask & (ThreadMaskN << i)))) continue;
             w.writeInt(st.sequence, 5);
             w.writeInt(st.state, 2);
-            w.writeF32(st.timeScale);
-            w.writeF32(st.pos);
+            w.writeFlag(st.forward);
             w.writeFlag(st.atEnd);
         }
-    if (w.writeFlag(mask & SoundMask))
-        for (int i = 0; i < 4; ++i) w.writeFlag(false);
     if (w.writeFlag(mask & ImageMask))
         for (uint32_t i = 0; i < MaxMountedImages; ++i) {
             if (!w.writeFlag(mask & (ImageMaskN << i))) continue;

@@ -3359,6 +3359,9 @@ void DemoParser::readGhosts(BitStream& bs, std::vector<GhostUpdate>& outGhosts, 
         return;
     }
     int maxGhosts = 1024;
+    // The update being read when the stream runs out (the malformed report).
+    int failIndex = -1, failClass = -1, failStart = -1;
+    bool failNew = false;
     while (bs.readFlag() && !bs.isError() && (int)outGhosts.size() < maxGhosts) {
         GhostUpdate gu{};
         gu.index = bs.readInt(idSize);
@@ -3387,6 +3390,10 @@ void DemoParser::readGhosts(BitStream& bs, std::vector<GhostUpdate>& outGhosts, 
             if (existing) gu.classId = existing->classId;
         }
         gu.updateBitsStart = bs.savePos();
+        failIndex = gu.index;
+        failClass = gu.classId;
+        failStart = gu.updateBitsStart;
+        failNew = isNew;
         GhostEntry* entry = ghostTracker.getMutableGhost(gu.index);
         bool known = readGhostClassData(bs, gu.classId, isNew, cp, entry);
         if (!known) {
@@ -3408,9 +3415,17 @@ void DemoParser::readGhosts(BitStream& bs, std::vector<GhostUpdate>& outGhosts, 
         outGhosts.push_back(gu);
     }
     if (bs.isError()) {
+        const char* failName = failClass >= 0 ? V12::ghostClassName((size_t)failClass) : nullptr;
         Console::instance().printf(LogLevel::Error,
-            "Demo: malformed ghost section seq=%d at bit=%d/%d after %zu updates",
-            seqNumber, bs.getCurPos(), bs.getMaxPos(), outGhosts.size());
+            "Demo: malformed ghost section seq=%d at bit=%d/%d after %zu updates "
+            "(reading index=%d class=%d %s %s from bit %d; previous index=%d class=%d %s bits %d-%d)",
+            seqNumber, bs.getCurPos(), bs.getMaxPos(), outGhosts.size(), failIndex, failClass,
+            failName ? failName : "?", failNew ? "create" : "update", failStart,
+            outGhosts.empty() ? -1 : outGhosts.back().index, outGhosts.empty() ? -1 : outGhosts.back().classId,
+            outGhosts.empty() ? "" : (V12::ghostClassName((size_t)outGhosts.back().classId)
+                                          ? V12::ghostClassName((size_t)outGhosts.back().classId) : "?"),
+            outGhosts.empty() ? -1 : outGhosts.back().updateBitsStart,
+            outGhosts.empty() ? -1 : outGhosts.back().updateBitsEnd);
     } else if ((int)outGhosts.size() >= maxGhosts) {
         Console::instance().printf(LogLevel::Error,
             "Demo: ghost section seq=%d exceeded %d updates at bit=%d",
@@ -3499,7 +3514,9 @@ PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIn
         recordParseFault("gameState", blockIndex);
         return pd;
     }
+    const int gameStateEnd = bs.getCurPos();
     readEvents(bs, pd.events, pd.gameState.compressionPoint);
+    const int eventsEnd = bs.getCurPos();
     if (bs.isError()) {
         Console::instance().printf(LogLevel::Error,
             "Demo: malformed or unsupported event section seq=%d at bit=%d/%d (block=%d)",
@@ -3510,7 +3527,15 @@ PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIn
     }
     readGhosts(bs, pd.ghosts, pd.dnetHeader.seqNumber, &pd.gameState.compressionPoint);
     bs.setStringBufferEnabled(false);
-    if (bs.isError()) recordParseFault("ghost", blockIndex);
+    if (bs.isError()) {
+        // What preceded the ghosts: a desync upstream shows as a bad first ghost.
+        std::string events;
+        for (const auto& ev : pd.events) events += " " + std::to_string(ev.classId - T2Demo::NetEventClassFirst);
+        Console::instance().printf(LogLevel::Error,
+            "Demo: packet seq=%d game state ended at bit %d, events [%s ] at bits %d-%d",
+            pd.dnetHeader.seqNumber, gameStateEnd, events.c_str(), gameStateEnd, eventsEnd);
+        recordParseFault("ghost", blockIndex);
+    }
     if (blockIndex >= 0) {
         const double blockTime = T2Demo::playbackBlockTime(blockIndex, getMoveTicksBefore());
         for (const auto& event : pd.events) {

@@ -982,6 +982,58 @@ int main() {
         assert(std::abs(lastCamera.cameraPosition.z - 30.0f) < 1e-3f);
     }
     {
+        // A StaticShape running a script thread ghosts in the shipped layout
+        // (sounds, then threads as sequence, state, direction, end): the
+        // ghost after it in the same packet still reads.
+        script.ts()->execute("datablock StaticShapeData(ThreadStation) { maxDamage = 1.0; };"
+                             "new GameConnection(ThreadLinkClient);"
+                             "new StaticShape(ThreadLinkShape) { dataBlock = ThreadStation; position = \"1 2 3\"; };"
+                             "new Camera(ThreadLinkCamera) { position = \"4 5 6\"; };");
+        auto* server = EngineObjects::get<GameConnection>("ThreadLinkClient");
+        auto* shape = EngineObjects::get<ShapeBase>("ThreadLinkShape");
+        assert(server && shape);
+        shape->threads[0].sequence = 3;
+        shape->threads[0].state = ShapeBase::ScriptThread::Play;
+        shape->threads[0].forward = false;
+        GameConnection client;
+        client.isServer = false;
+        DemoParser parser;
+        int packets = 0;
+        server->deliver = [&](const std::vector<uint8_t>& p) { client.receivePacket(p.data(), p.size()); };
+        client.onServerPacket = [&](const std::vector<uint8_t>& p) {
+            PacketData pd = parser.parsePacket(p.data(), p.size(), packets++);
+            for (const auto& ev : pd.events)
+                if (ev.ghostMessage >= 0) client.clientGhostMessage(ev.ghostMessage, ev.ghostSequence, (uint32_t)ev.ghostCount);
+        };
+        client.deliver = [&](const std::vector<uint8_t>& p) {
+            parser.onSendPacketTrigger();
+            server->receivePacket(p.data(), p.size());
+        };
+        server->activateGhosting();
+        double now = 500.0;
+        for (int i = 0; i < 20 && !server->isGhosting(); ++i, now += 1.0) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.5);
+        }
+        assert(server->isGhosting());
+        script.ts()->execute("ThreadLinkShape.scopeToClient(ThreadLinkClient); ThreadLinkCamera.scopeToClient(ThreadLinkClient);");
+        for (int i = 0; i < 6; ++i, now += 0.2) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.1);
+        }
+        assert(parser.getParseFault().empty());
+        auto& engine = ScriptEngine::instance();
+        const int shapeGhost = server->ghostIndex(engine.objectKey(engine.findObject("ThreadLinkShape")));
+        const int cameraGhost = server->ghostIndex(engine.objectKey(engine.findObject("ThreadLinkCamera")));
+        assert(shapeGhost >= 0 && cameraGhost >= 0);
+        const GhostEntry* shapeEntry = parser.getGhostTracker().getGhost(shapeGhost);
+        const GhostEntry* cameraEntry = parser.getGhostTracker().getGhost(cameraGhost);
+        assert(shapeEntry && shapeEntry->className == "StaticShape");
+        assert(cameraEntry && cameraEntry->className == "Camera");
+        assert(shapeEntry->threads[0].valid && shapeEntry->threads[0].sequence == 3 &&
+               shapeEntry->threads[0].state == ShapeBase::ScriptThread::Play && !shapeEntry->threads[0].forward);
+    }
+    {
         // math/mathTypes.cc: AngAxisF matrices as the engine builds them.
         script.ts()->execute("$mulV = MatrixMulVector(\"0 0 0 0 0 1 1.5707963\", \"1 0 0\");"
                              "$mulP = MatrixMulPoint(\"1 2 3 0 0 1 0\", \"1 1 1\");"
