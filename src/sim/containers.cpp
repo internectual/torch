@@ -140,9 +140,11 @@ Point3F position(ScriptObject* object) {
     return {scene->transform[3], scene->transform[7], scene->transform[11]};
 }
 
-uint32_t typeMask(ScriptObject* object) {
-    if (!object) return 0;
-    const std::string& cls = object->className;
+namespace {
+// The class's own bits (the constructors' mTypeMask).
+uint32_t classTypeMask(const std::string& cls) {
+    static std::unordered_map<std::string, uint32_t> cache;
+    if (auto it = cache.find(cls); it != cache.end()) return it->second;
     uint32_t mask = 0;
     if (is(cls, "GameBase")) mask |= GameBaseObjectType;
     if (is(cls, "ShapeBase")) mask |= ShapeBaseObjectType;
@@ -160,8 +162,17 @@ uint32_t typeMask(ScriptObject* object) {
     if (is(cls, "ForceFieldBare")) mask |= ForceFieldObjectType;
     if (is(cls, "TSStatic")) mask |= StaticTSObjectType | StaticObjectType;
     if (is(cls, "MissionMarker")) mask |= MarkerObjectType;
+    cache.emplace(cls, mask);
+    return mask;
+}
+} // namespace
+
+uint32_t typeMask(ScriptObject* object) {
+    if (!object) return 0;
+    const std::string& cls = object->className;
+    uint32_t mask = classTypeMask(cls);
     // ShapeBase::onNewDataBlock: mTypeMask |= mDataBlock->dynamicTypeField.
-    if (is(cls, "ShapeBase")) {
+    if (mask & ShapeBaseObjectType) {
         const std::string block = ScriptEngine::instance().objectDataBlock(object);
         if (ScriptObject* data = block.empty() ? nullptr : ScriptEngine::instance().findObject(block.c_str()))
             mask |= (uint32_t)Fields::s32(data, "dynamicType", 0);

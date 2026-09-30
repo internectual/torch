@@ -35,6 +35,20 @@ void ShapeBase::setEnergyLevel(float level) {
     if (damageState == Enabled) energy = std::clamp(level, 0.0f, std::max(0.0f, maxEnergy()));
 }
 
+bool ShapeBase::onNewDataBlock() {
+    if (!GameBase::onNewDataBlock()) return false;
+    setMaskBits(DamageMask);
+    for (uint32_t i = 0; i < MaxScriptThreads; i++)
+        if (threads[i].sequence != -1) setThreadSequence(i, threads[i].sequence, true);
+    energy = 0;
+    damage = 0;
+    damageState = Enabled;
+    repairReserve = 0;
+    updateDamageLevel();
+    cameraFov = dataFloat("cameraDefaultFov", 90.0f);
+    return true;
+}
+
 void ShapeBase::setDamageLevel(float level) {
     if (invincible() || level == damage) return;
     damage = std::clamp(level, 0.0f, maxDamage());
@@ -1245,6 +1259,17 @@ void registerShapeBaseNatives(TorqueScript& ts) {
         return args.empty() ? nullptr : EngineObjects::get<ShapeBase>(args[0].toString());
     };
     auto arg = [](const Args& args, size_t i) { return i < args.size() ? args[i] : VMValue(""); };
+    // GameBase::setDataBlock (gameBase.cc cSetDataBlock).
+    ts.registerNative("GameBase::setDataBlock", [](const Args& args) -> VMValue {
+        auto* object = args.empty() ? nullptr : EngineObjects::get<GameBase>(args[0].toString());
+        const std::string name = args.size() > 1 ? args[1].toString() : std::string();
+        ScriptObject* data = ScriptEngine::instance().findObject(name.c_str());
+        if (!data || !EngineClasses::isA(data->className, "GameBaseData")) {
+            Console::instance().printf(LogLevel::Info, "Could not find data block \"%s\"", name.c_str());
+            return VMValue(0);
+        }
+        return VMValue(object && object->setDataBlock(data) ? 1 : 0);
+    });
     auto method = [&ts](const char* name, std::function<VMValue(ShapeBase&, const Args&)> body) {
         ts.registerNative(std::string("ShapeBase::") + name, [name, body](const Args& args) -> VMValue {
             ShapeBase* shape = args.empty() ? nullptr : EngineObjects::get<ShapeBase>(args[0].toString());

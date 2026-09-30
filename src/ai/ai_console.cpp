@@ -42,7 +42,7 @@ std::string addEngineObject(const std::string& className, std::shared_ptr<Engine
     object->className = className;
     object->engine = std::move(engine);
     object->engine->script = object;
-    se.objects[se.objectKey(object)] = object;
+    se.addObject(object);
     se.objectAdded(object);
     return se.objectKey(object);
 }

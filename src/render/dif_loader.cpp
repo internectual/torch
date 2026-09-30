@@ -952,19 +952,9 @@ static bool interiorToMeshes(DIFInterior& interior,
             for (uint16_t j = 0; j < hull.surfaceCount; j++) {
                 uint32_t surfIdx = hull.surfaceStart + j < interior.hullSurfaceIndices.size()
                     ? interior.hullSurfaceIndices[hull.surfaceStart + j] : UINT32_MAX;
-                if (surfIdx >= interior.surfaces.size()) continue;
-                totalSurfs++;
-                auto& surf = interior.surfaces[surfIdx];
-                if (surf.windingCount < 3) continue;
                 std::vector<uint32_t> collVerts;
-                std::vector<uint32_t> order;
-                order.push_back(0);
-                for (uint32_t k = 1; k < surf.windingCount; k += 2) order.push_back(k);
-                for (uint32_t k = (surf.windingCount - 1) & ~1u; k > 0; k -= 2) order.push_back(k);
-                for (uint32_t k : order) {
-                    if (k >= 32 || (surf.fanMask & (uint32_t(1) << k)) == 0) continue;
-                    const uint32_t windingIndex = surf.windingStart + k;
-                    if (windingIndex >= interior.windings.size()) continue;
+                auto addPoint = [&](uint32_t windingIndex) {
+                    if (windingIndex >= interior.windings.size()) return;
                     uint32_t ptIdx = interior.windings[windingIndex];
                     const size_t pointOffset = (size_t)ptIdx * 3;
                     if (pointOffset <= interior.points.size() &&
@@ -975,12 +965,49 @@ static bool interiorToMeshes(DIFInterior& interior,
                         outCollVerts->push_back(interior.points[pointOffset + 2]);
                         collVerts.push_back(vi);
                     }
-                }
+                };
                 const size_t firstIndex = outCollIndices->size();
-                stripToTriangles(collVerts, *outCollIndices, 0);
+                uint16_t planeIndex = 0;
+                if (surfIdx != UINT32_MAX && (surfIdx & 0x80000000u)) {
+                    // Interior::buildPolyList: a NULL surface (a face with no
+                    // texture, collision only) is its winding as a polygon.
+                    const uint32_t nullIdx = surfIdx & ~0x80000000u;
+                    if (nullIdx >= interior.nullSurfaces.size()) continue;
+                    totalSurfs++;
+                    const auto& ns = interior.nullSurfaces[nullIdx];
+                    if (ns.windingCount < 3) continue;
+                    for (uint32_t k = 0; k < ns.windingCount; k++) addPoint(ns.windingStart + k);
+                    for (size_t k = 1; k + 1 < collVerts.size(); k++) {
+                        outCollIndices->push_back(collVerts[0]);
+                        outCollIndices->push_back(collVerts[k]);
+                        outCollIndices->push_back(collVerts[k + 1]);
+                    }
+                    planeIndex = ns.planeIndex;
+                } else {
+                    if (surfIdx >= interior.surfaces.size()) continue;
+                    totalSurfs++;
+                    auto& surf = interior.surfaces[surfIdx];
+                    if (surf.windingCount < 3) continue;
+                    // Interior::collisionFanFromSurface: the strip winding as a
+                    // polygon loop (0, 1, 3, 5, ..., 4, 2), keeping the loop
+                    // positions set in fanMask.
+                    std::vector<uint32_t> loop;
+                    loop.push_back(0);
+                    for (uint32_t k = 1; k < surf.windingCount; k += 2) loop.push_back(k);
+                    for (uint32_t k = (surf.windingCount - 1) & ~1u; k > 0; k -= 2) loop.push_back(k);
+                    for (uint32_t i = 0; i < surf.windingCount && i < 32 && i < loop.size(); i++)
+                        if (surf.fanMask & (uint32_t(1) << i)) addPoint(surf.windingStart + loop[i]);
+                    // The poly list takes it as one convex polygon.
+                    for (size_t k = 1; k + 1 < collVerts.size(); k++) {
+                        outCollIndices->push_back(collVerts[0]);
+                        outCollIndices->push_back(collVerts[k]);
+                        outCollIndices->push_back(collVerts[k + 1]);
+                    }
+                    planeIndex = surf.planeIndex;
+                }
                 // Collision faces point toward free space: the surface plane
                 // (its flip bit applied), whatever the strip's parity.
-                const Point3F planeNormal = getPlaneNormal(surf.planeIndex);
+                const Point3F planeNormal = getPlaneNormal(planeIndex);
                 auto& idx = *outCollIndices;
                 const auto& v = *outCollVerts;
                 for (size_t t = firstIndex; t + 2 < idx.size(); t += 3) {

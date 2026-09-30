@@ -388,7 +388,9 @@ int main() {
     assert(script.ts()->processScheduledEvents(10.5) == 0);
     assert(script.ts()->getNatives().at("cancelevent")({VMValue(invalidEvent)}).toInt() == 1);
     assert(script.ts()->processScheduledEvents(11.0) == 2);
-    assert(script.ts()->getGlobal("$timerTrace").toString() == "LifecycleTimer:methodglobal:global");
+    // SimConsoleEvent: %this is the object's id.
+    assert(script.ts()->getGlobal("$timerTrace").toString() ==
+           std::to_string(script.findObject("LifecycleTimer")->id) + ":methodglobal:global");
     assert(!script.ts()->isEventPending(methodEvent) && !script.ts()->isEventPending(globalEvent));
 
     script.ts()->execute("new Lifecycle(ArrayFields) { Values[0] = 4; };"
@@ -588,18 +590,18 @@ int main() {
     testData->name = "TestPlayerData";
     testData->fields["mass"] = VMValue(42.5f);
     testData->fields["shapeFile"] = VMValue("shapes/test.dts");
-    script.objects[testData->name] = testData;
+    script.addObject(testData);
     auto* testObject = new ScriptObject;
     testObject->className = "Player";
     testObject->name = "TestScriptObject";
     testObject->fields["datablock"] = VMValue("TestPlayerData");
     testObject->fields["dynamicValue"] = VMValue("initial");
     testObject->internals["parent"] = VMValue("MissionGroup");
-    script.objects[testObject->name] = testObject;
+    script.addObject(testObject);
     auto* missionGroup = new ScriptObject;
     missionGroup->className = "SimGroup";
     missionGroup->name = "MissionGroup";
-    script.objects[missionGroup->name] = missionGroup;
+    script.addObject(missionGroup);
     assert(natives.at("getfield")({VMValue("TestScriptObject"), VMValue("dynamicValue")}).toString() == "initial");
     assert(natives.at("getfield")({VMValue("TestScriptObject"), VMValue("DYNAMICVALUE")}).toString() == "initial");
     assert(natives.at("getdatafield")({VMValue("TestScriptObject"), VMValue("mass")}).toFloat() == 42.5f);

@@ -154,6 +154,9 @@ public:
     void setDamageLevel(float level);
     // Server: the damage level's effect on the damage state (Player).
     virtual void updateDamageLevel() {}
+    // ShapeBase::onNewDataBlock: the threads restart on the new shape; energy,
+    // damage and the repair reserve start over, the shape Enabled.
+    bool onNewDataBlock() override;
     // mWorldBox: the shape's DTS bounds through the transform.
     virtual bool worldBox(float lo[3], float hi[3]) const;
     // The world box of the shape's collision mesh (what rays and vehicles

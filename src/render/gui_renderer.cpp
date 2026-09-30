@@ -28,6 +28,22 @@ static bool nameEqual(const std::string& a, const std::string& b) {
     return a.size() == b.size() && lowerKey(a) == lowerKey(b);
 }
 
+// The script controls declared inside `parent` (their parent link), in
+// creation order, by GUI key (name, or id when unnamed).
+static std::vector<std::string> guiChildren(ScriptObject* parent) {
+    auto& engine = ScriptEngine::instance();
+    std::vector<ScriptObject*> kids;
+    for (auto& [key, obj] : engine.objects) {
+        auto pit = obj->internals.find("parent");
+        if (pit != obj->internals.end() && engine.findObject(pit->second.toString().c_str()) == parent)
+            kids.push_back(obj);
+    }
+    std::sort(kids.begin(), kids.end(), [](const ScriptObject* a, const ScriptObject* b) { return a->id < b->id; });
+    std::vector<std::string> names;
+    for (auto* kid : kids) names.push_back(engine.nameOrId(std::to_string(kid->id)));
+    return names;
+}
+
 GuiControl* GuiControl::findChild(const std::string& name) {
     for (auto* c : children) if (c && nameEqual(c->name, name)) return c;
     for (auto* c : children) { if (!c) continue; auto* r = c->findChild(name); if (r) return r; }
@@ -253,7 +269,8 @@ void GuiRenderer::init() {
     // script object as the renderer root even when an earlier script path
     // left its class metadata incomplete.
     bool hasCanvas = false;
-    for (auto& [name, object] : objs) {
+    for (auto& [objKey, object] : objs) {
+        const std::string name = object->name.empty() ? objKey : object->name;
         if (object && lowerKey(name) == "canvas") {
             object->className = "GuiCanvas";
             hasCanvas = true;
@@ -271,7 +288,8 @@ void GuiRenderer::init() {
 
     // First pass: create/adopt GuiControl objects for all GUI-related ScriptObjects
     std::unordered_map<std::string, GuiControl*> controlMap;
-    for (auto& [name, obj] : objs) {
+    for (auto& [objKey, obj] : objs) {
+        const std::string name = obj->name.empty() ? objKey : obj->name;
         if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
             GuiControl*& slot = createdControls()[lowerKey(name)];
@@ -349,7 +367,8 @@ void GuiRenderer::init() {
             "GUI: stock GuiCanvas was not created by TorqueScript");
 
     // Second pass: link parent-child relationships
-    for (auto& [name, obj] : objs) {
+    for (auto& [objKey, obj] : objs) {
+        const std::string name = obj->name.empty() ? objKey : obj->name;
         if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
             auto ctl = controlMap.find(name);
@@ -380,7 +399,8 @@ void GuiRenderer::init() {
 
 void GuiRenderer::refresh() {
     auto& objs = ScriptEngine::instance().objects;
-    for (auto& [name, obj] : objs) {
+    for (auto& [objKey, obj] : objs) {
+        const std::string name = obj->name.empty() ? objKey : obj->name;
             if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
             if (findControl(name)) continue;
@@ -428,7 +448,8 @@ void GuiRenderer::refresh() {
     // Link pass #2: map iteration order is arbitrary, so a child can be
     // processed before its parent and skipped. Re-link any control that still
     // has no parent.
-    for (auto& [name, obj] : objs) {
+    for (auto& [objKey, obj] : objs) {
+        const std::string name = obj->name.empty() ? objKey : obj->name;
         if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
             GuiControl* ctl = findControl(name);
@@ -559,10 +580,8 @@ struct ClipRect { float x, y, w, h; };
 struct BmpCell { int x, y, w, h; };
 
 static ScriptObject* getProfile(const std::string& name) {
-    auto& objs = ScriptEngine::instance().objects;
-    auto it = objs.find(name);
-    if (it != objs.end() && it->second && it->second->className == "GuiControlProfile")
-        return it->second;
+    ScriptObject* profile = ScriptEngine::instance().findObject(name.c_str());
+    if (profile && profile->className == "GuiControlProfile") return profile;
     return nullptr;
 }
 
@@ -5333,10 +5352,9 @@ void GuiRenderer::handleKeyboard() {
 
 // Create a GuiControl from a ScriptObject (and recursively create children)
 GuiControl* GuiRenderer::soToGui(const std::string& handle, GuiControl* parent) {
-    const std::string name = ScriptEngine::instance().canonicalName(handle);
-    auto& objs = ScriptEngine::instance().objects;
-    auto it = objs.find(name);
-    if (it == objs.end() || !(it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className.find("Hud") == 0 || it->second->className == "GameTSCtrl"))
+    const std::string name = ScriptEngine::instance().nameOrId(handle);
+    ScriptObject* so = ScriptEngine::instance().findObject(name.c_str());
+    if (!so || !(so->className.find("Gui") == 0 || so->className.find("Shell") == 0 || so->className.find("Hud") == 0 || so->className == "GameTSCtrl"))
         return nullptr;
     // Canonical identity: reuse the registered instance if one exists.
     {
@@ -5351,12 +5369,7 @@ GuiControl* GuiRenderer::soToGui(const std::string& handle, GuiControl* parent) 
             // Snapshot child names first: soToGui() can re-enter script
             // execution (onWake etc.) which inserts into the objects map,
             // invalidating a live iterator.
-            std::vector<std::string> kidNames;
-            for (auto& [n, obj] : objs) {
-                auto pit = obj->internals.find("parent");
-                if (pit != obj->internals.end() && pit->second.toString() == name)
-                    kidNames.push_back(n);
-            }
+            const std::vector<std::string> kidNames = guiChildren(so);
             for (auto& n : kidNames)
                 if (!findControl(n)) soToGui(n, ctl);
             return ctl;
@@ -5364,36 +5377,36 @@ GuiControl* GuiRenderer::soToGui(const std::string& handle, GuiControl* parent) 
     }
     GuiControl* ctl = new GuiControl;
     createdControls()[lowerKey(name)] = ctl;
-    ctl->name = it->second->name;
-    ctl->className = normalizeGuiClassName(it->second->className);
+    ctl->name = so->name;
+    ctl->className = normalizeGuiClassName(so->className);
     auto parsePair = [&](const std::string& key, float& a, float& b) {
-        auto fi = it->second->fields.find(key);
-        if (fi != it->second->fields.end()) { std::string s = fi->second.toString(); sscanf(s.c_str(), "%f %f", &a, &b); }
+        auto fi = so->fields.find(key);
+        if (fi != so->fields.end()) { std::string s = fi->second.toString(); sscanf(s.c_str(), "%f %f", &a, &b); }
     };
     parsePair("position", ctl->posX, ctl->posY);
     parsePair("extent", ctl->extentX, ctl->extentY);
-    auto fi = it->second->fields.find("text"); if (fi != it->second->fields.end()) ctl->text = fi->second.toString();
-    fi = it->second->fields.find("bitmap"); if (fi != it->second->fields.end()) ctl->bitmap = fi->second.toString();
-    fi = it->second->fields.find("command"); if (fi != it->second->fields.end()) ctl->command = fi->second.toString();
-    fi = it->second->fields.find("altCommand"); if (fi != it->second->fields.end()) ctl->altCommand = fi->second.toString();
-    fi = it->second->fields.find("profile"); if (fi != it->second->fields.end()) ctl->profileName = fi->second.toString();
-    fi = it->second->fields.find("visible"); if (fi != it->second->fields.end()) ctl->visible = fi->second.toBool();
-    fi = it->second->fields.find("groupNum"); if (fi != it->second->fields.end()) ctl->groupNum = (int)fi->second.toDouble();
-    fi = it->second->fields.find("id"); if (fi != it->second->fields.end()) ctl->id = (int)fi->second.toDouble();
-    fi = it->second->fields.find("sel"); if (fi != it->second->fields.end()) ctl->checked = fi->second.toBool();
-    fi = it->second->fields.find("active"); if (fi != it->second->fields.end()) ctl->active = fi->second.toBool();
-    fi = it->second->fields.find("variable"); if (fi != it->second->fields.end()) ctl->variable = fi->second.toString();
-    for (const auto& [field, value] : it->second->fields)
+    auto fi = so->fields.find("text"); if (fi != so->fields.end()) ctl->text = fi->second.toString();
+    fi = so->fields.find("bitmap"); if (fi != so->fields.end()) ctl->bitmap = fi->second.toString();
+    fi = so->fields.find("command"); if (fi != so->fields.end()) ctl->command = fi->second.toString();
+    fi = so->fields.find("altCommand"); if (fi != so->fields.end()) ctl->altCommand = fi->second.toString();
+    fi = so->fields.find("profile"); if (fi != so->fields.end()) ctl->profileName = fi->second.toString();
+    fi = so->fields.find("visible"); if (fi != so->fields.end()) ctl->visible = fi->second.toBool();
+    fi = so->fields.find("groupNum"); if (fi != so->fields.end()) ctl->groupNum = (int)fi->second.toDouble();
+    fi = so->fields.find("id"); if (fi != so->fields.end()) ctl->id = (int)fi->second.toDouble();
+    fi = so->fields.find("sel"); if (fi != so->fields.end()) ctl->checked = fi->second.toBool();
+    fi = so->fields.find("active"); if (fi != so->fields.end()) ctl->active = fi->second.toBool();
+    fi = so->fields.find("variable"); if (fi != so->fields.end()) ctl->variable = fi->second.toString();
+    for (const auto& [field, value] : so->fields)
         ctl->fields[field] = value.toString();
-    fi = it->second->fields.find("range"); if (fi != it->second->fields.end()) {
+    fi = so->fields.find("range"); if (fi != so->fields.end()) {
         float lo = 0, hi = 1;
         sscanf(fi->second.toString().c_str(), "%f %f", &lo, &hi);
         ctl->sliderMin = lo; ctl->sliderMax = hi;
     }
-    fi = it->second->fields.find("ticks"); if (fi != it->second->fields.end()) ctl->sliderTicks = (int)fi->second.toDouble();
-    fi = it->second->fields.find("usePlusMinus"); if (fi != it->second->fields.end()) ctl->usePlusMinus = fi->second.toBool();
-    fi = it->second->fields.find("noTitleBar"); if (fi != it->second->fields.end()) ctl->usePlusMinus = !fi->second.toBool(); // repurpose: no titlebar
-    fi = it->second->fields.find("value"); if (fi != it->second->fields.end()) {
+    fi = so->fields.find("ticks"); if (fi != so->fields.end()) ctl->sliderTicks = (int)fi->second.toDouble();
+    fi = so->fields.find("usePlusMinus"); if (fi != so->fields.end()) ctl->usePlusMinus = fi->second.toBool();
+    fi = so->fields.find("noTitleBar"); if (fi != so->fields.end()) ctl->usePlusMinus = !fi->second.toBool(); // repurpose: no titlebar
+    fi = so->fields.find("value"); if (fi != so->fields.end()) {
         float v = (float)fi->second.toDouble();
         ctl->hudValue = v;
         ctl->hudValueSet = true;
@@ -5413,12 +5426,7 @@ GuiControl* GuiRenderer::soToGui(const std::string& handle, GuiControl* parent) 
     // NOTE: children must be created BEFORE adding to parent/canvas, so that
     // findControl doesn't find this control prematurely during child creation.
     {
-        std::vector<std::string> kidNames;
-        for (auto& [n, obj] : objs) {
-            auto pit = obj->internals.find("parent");
-            if (pit != obj->internals.end() && pit->second.toString() == name)
-                kidNames.push_back(n);
-        }
+        const std::vector<std::string> kidNames = guiChildren(so);
         for (auto& n : kidNames) soToGui(n, ctl);
     }
     if (parent) {
@@ -5433,9 +5441,8 @@ void GuiRenderer::pushDialog(const std::string& name) {
     GuiControl* ctl = findControl(name);
     if (!ctl) {
         // Try creating the GuiControl from the ScriptObject on-the-fly
-        auto& objs = ScriptEngine::instance().objects;
-        auto it = objs.find(name);
-        if (it != objs.end() && (it->second->className.find("Gui") == 0 || it->second->className.find("Shell") == 0 || it->second->className.find("Hud") == 0 || it->second->className == "GameTSCtrl")) {
+        ScriptObject* so = ScriptEngine::instance().findObject(name.c_str());
+        if (so && (so->className.find("Gui") == 0 || so->className.find("Shell") == 0 || so->className.find("Hud") == 0 || so->className == "GameTSCtrl")) {
             ctl = soToGui(name, nullptr);
         }
     }
@@ -5757,7 +5764,7 @@ GuiControl* GuiRenderer::activeKeyCapture() const {
 
 GuiControl* GuiRenderer::findControl(const std::string& handle) {
     // Script handles may be SimObject ids; controls are keyed by name.
-    const std::string name = ScriptEngine::instance().canonicalName(handle);
+    const std::string name = ScriptEngine::instance().nameOrId(handle);
     {
         auto& reg = createdControls();
         auto it = reg.find(lowerKey(name));

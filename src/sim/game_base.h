@@ -28,6 +28,12 @@ public:
     // Con::executef(mDataBlock, ..., callback, scriptThis(), args...)
     void callDataBlock(const char* callback, const std::vector<std::string>& extra = {}) const;
     std::string handle() const;
+    // GameBase::setDataBlock: a new datablock takes effect through
+    // onNewDataBlock (and the script's onNewDataBlock after it).
+    bool setDataBlock(ScriptObject* data);
+    // GameBase::onNewDataBlock: the DataBlockMask; subclasses reset the state
+    // their datablock sets.
+    virtual bool onNewDataBlock() { setMaskBits(DataBlockMask); return true; }
 
     // The connection controlling this object (its key), empty when none.
     std::string controllingClient;

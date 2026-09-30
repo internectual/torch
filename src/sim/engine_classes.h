@@ -292,7 +292,11 @@ inline bool isEngineClass(const std::string& name) {
 }
 
 // The class and its ancestors, most derived first, ending at SimObject.
-inline std::vector<std::string> chain(const std::string& name) {
+// The table is fixed, so each class's chain is built once.
+inline const std::vector<std::string>& chain(const std::string& name) {
+    static std::unordered_map<std::string, std::vector<std::string>, CaseHash, CaseEqual> cache;
+    auto cached = cache.find(name);
+    if (cached != cache.end()) return cached->second;
     std::vector<std::string> out;
     std::string current = name;
     for (int guard = 0; !current.empty() && guard < 32; ++guard) {
@@ -302,7 +306,7 @@ inline std::vector<std::string> chain(const std::string& name) {
         current = it->second;
     }
     if (out.empty() || !CaseEqual{}(out.back(), "SimObject")) out.push_back("SimObject");
-    return out;
+    return cache.emplace(name, std::move(out)).first->second;
 }
 
 inline bool isA(const std::string& name, const std::string& base) {

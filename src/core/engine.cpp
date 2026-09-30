@@ -2932,7 +2932,7 @@ void Engine::run() {
                         // Gather all named objects
                         std::vector<std::string> allNames;
                         for (auto& kv : scr->objects)
-                            if (!kv.second->name.empty()) allNames.push_back(kv.second->name);
+                            if (!kv.second->name.empty()) allNames.push_back(kv.first);
                         // Also collect unnamed objects
                         for (auto& kv : scr->objects) {
                             // If the object has a parent, link it

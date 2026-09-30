@@ -41,6 +41,20 @@ void GameBase::callDataBlock(const char* callback, const std::vector<std::string
     ts->callObjectMethod(block, callback, args);
 }
 
+bool GameBase::setDataBlock(ScriptObject* data) {
+    if (!script || !data) return false;
+    auto& engine = ScriptEngine::instance();
+    if (dataBlock() == std::to_string(engine.objectId(data))) return true;
+    std::string field = "dataBlock";
+    for (const auto& [name, value] : script->fields)
+        if (strcasecmp(name.c_str(), "dataBlock") == 0) field = name;
+    script->fields[field] = VMValue(data->name.empty() ? std::to_string(engine.objectId(data)) : data->name);
+    if (!onNewDataBlock()) return false;
+    // scriptOnNewDataBlock, by the leaf class once everything is loaded.
+    callDataBlock("onNewDataBlock");
+    return true;
+}
+
 // Retail GameBase::packUpdate: the datablock, then the target id.
 uint32_t GameBase::packUpdate(GameConnection&, uint32_t mask, TorqueBitWriter& w) {
     const std::string block = dataBlock();

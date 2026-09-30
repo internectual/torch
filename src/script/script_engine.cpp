@@ -39,6 +39,15 @@
 #include <fnmatch.h>
 #include <chrono>
 
+namespace {
+std::string lowerName(const std::string& name) {
+    std::string lower = name;
+    for (char& c : lower) c = (char)std::tolower((unsigned char)c);
+    return lower;
+}
+} // namespace
+
+
 extern char** environ;
 
 namespace {
@@ -544,8 +553,7 @@ ScriptObject* VirtualMachine::getObject(const char* name) {
 
 void VirtualMachine::addObject(ScriptObject* obj) {
     if (!obj) return;
-    auto& engine = ScriptEngine::instance();
-    engine.objects[engine.objectKey(obj)] = obj;
+    ScriptEngine::instance().addObject(obj);
 }
 
 bool VirtualMachine::loadScript(const uint8_t* data, size_t size, const char* name) {
@@ -1347,8 +1355,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp,
 
             case (uint32_t)DSOOpcode::OP_ADD_OBJECT: {
                 if (frame->curObject) {
-                    auto& engine = ScriptEngine::instance();
-                    engine.objects[engine.objectKey(frame->curObject)] = frame->curObject;
+                    ScriptEngine::instance().addObject(frame->curObject);
                 }
                 break;
             }
@@ -1654,9 +1661,10 @@ bool ScriptEngine::setObjectField(ScriptObject* object, const std::string& field
 
 bool ScriptEngine::addDeleteNotify(ScriptObject* listener, ScriptObject* target) {
     if (!listener || !target || listener == target) return false;
-    if (std::find(target->deleteNotifyListeners.begin(), target->deleteNotifyListeners.end(),
-                  listener->name) == target->deleteNotifyListeners.end())
-        target->deleteNotifyListeners.push_back(listener->name);
+    const std::string key = objectKey(listener);
+    if (std::find(target->deleteNotifyListeners.begin(), target->deleteNotifyListeners.end(), key) ==
+        target->deleteNotifyListeners.end())
+        target->deleteNotifyListeners.push_back(key);
     return true;
 }
 
@@ -1664,7 +1672,7 @@ bool ScriptEngine::clearDeleteNotify(ScriptObject* listener, ScriptObject* targe
     if (!listener || !target) return false;
     auto& listeners = target->deleteNotifyListeners;
     const auto oldSize = listeners.size();
-    listeners.erase(std::remove(listeners.begin(), listeners.end(), listener->name), listeners.end());
+    listeners.erase(std::remove(listeners.begin(), listeners.end(), objectKey(listener)), listeners.end());
     return oldSize != listeners.size();
 }
 
@@ -1769,7 +1777,9 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
 
     std::vector<std::string> children;
     for (const auto& [childName, child] : objects) {
-        if (child && child->internals["parent"].toString() == objectName)
+        if (!child) continue;
+        const auto parent = child->internals.find("parent");
+        if (parent != child->internals.end() && findObject(parent->second.toString().c_str()) == object)
             children.push_back(childName);
     }
     // SimGroup::onRemove deletes the group's members too; a SimSet only
@@ -1808,9 +1818,9 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
     }
     const auto listeners = object->deleteNotifyListeners;
     for (const auto& listenerName : listeners) {
-        auto listenerIt = objects.find(listenerName);
-        if (listenerIt != objects.end() && listenerIt->second && tsInstance) {
-            const std::string callback = listenerIt->second->className + "::onDeleteNotify";
+        ScriptObject* listener = findObject(listenerName.c_str());
+        if (listener && tsInstance) {
+            const std::string callback = listener->className + "::onDeleteNotify";
             if (tsInstance->hasFunction(callback))
                 tsInstance->callFunction(callback, {VMValue(listenerName), VMValue(object->id)});
         }
@@ -1827,8 +1837,7 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
             removeSimGroupChild(group, objectName);
     for (const auto& setKey : memberSets(object))
         if (auto* set = findObject(setKey.c_str())) removeSimGroupChild(set, objectName);
-    objects.erase(it);
-    forgetObject(object);
+    removeObject(object);
     delete object;
     return true;
 }
@@ -2367,7 +2376,8 @@ bool ScriptEngine::init() {
         for (const auto& [name, object] : ScriptEngine::instance().objects) {
             if (!object) continue;
             const auto it = object->internals.find("parent");
-            if (it == object->internals.end() || it->second.toString() != group) continue;
+            if (it == object->internals.end() || engine.findObject(it->second.toString().c_str()) != groupObject)
+                continue;
             const auto member = object->internals.find("__parent");
             if (member != object->internals.end() && member->second.toString() == groupKey) continue;
             ++count;
@@ -2790,7 +2800,7 @@ bool ScriptEngine::init() {
         canvas->name = "Canvas";
         canvas->fields["extent"] = VMValue("1024 768");
         canvas->fields["position"] = VMValue("0 0");
-        ScriptEngine::instance().objects["Canvas"] = canvas;
+        ScriptEngine::instance().addObject(canvas);
         Console::instance().printf(LogLevel::Info, "GUI: created GuiCanvas");
         return VMValue(1);
     });
@@ -8349,12 +8359,12 @@ bool ScriptEngine::init() {
             name = "ActionMap_" + std::to_string(mapCount++);
         }
         // Create the object if it doesn't exist
-        auto& objs = ScriptEngine::instance().objects;
-        if (objs.find(name) == objs.end()) {
+        auto& engine = ScriptEngine::instance();
+        if (!engine.findObject(name.c_str())) {
             auto* obj = new ScriptObject;
             obj->name = name;
             obj->className = "ActionMap";
-            objs[name] = obj;
+            engine.addObject(obj);
         }
         return VMValue(name);
     });
@@ -8363,22 +8373,22 @@ bool ScriptEngine::init() {
     // start, so its binds record under "GlobalActionMap" (ActionMap::save /
     // getBinding key off the object name).
     {
-        auto& objs = ScriptEngine::instance().objects;
-        if (objs.find("GlobalActionMap") == objs.end()) {
+        auto& engine = ScriptEngine::instance();
+        if (!engine.findObject("GlobalActionMap")) {
             auto* obj = new ScriptObject;
             obj->name = "GlobalActionMap";
             obj->className = "ActionMap";
-            objs["GlobalActionMap"] = obj;
+            engine.addObject(obj);
         }
         // Stock input scripts copy defaults into these maps before they
         // populate them.  They are engine singletons in Torque, not objects
         // that depend on a particular prefs file being present.
         for (const char* name : {"moveMap", "observerMap"}) {
-            if (objs.find(name) != objs.end()) continue;
+            if (engine.findObject(name)) continue;
             auto* obj = new ScriptObject;
             obj->name = name;
             obj->className = "ActionMap";
-            objs[name] = obj;
+            engine.addObject(obj);
         }
     }
 
@@ -9005,8 +9015,7 @@ void ScriptEngine::ensureEngineGroups() {
         auto* group = new ScriptObject;
         group->name = name;
         group->className = "SimGroup";
-        objects[name] = group;
-        objectId(group);
+        addObject(group);
         if (tsInstance) tsInstance->setGlobal(name, VMValue(name));
     }
 }
@@ -9015,7 +9024,7 @@ ScriptObject* ScriptEngine::createEngineObject(const std::string& className, con
     auto* object = new ScriptObject;
     object->className = className;
     object->name = name;
-    objects[objectKey(object)] = object;
+    addObject(object);
     if (tsInstance && !name.empty()) tsInstance->setGlobal(name, VMValue(name));
     objectAdded(object);
     return object;
@@ -9030,10 +9039,15 @@ void ScriptEngine::registerDataBlock(ScriptObject* object) {
         if (!value || value->toString().empty()) object->fields["className"] = VMValue(object->className);
     }
     if (object->id < 3 || object->id > 2050) {
-        if (object->id) objectsById.erase(object->id);
+        // The registry key is the id: a registered object moves with it.
+        const bool registered = object->id && objects.count(std::to_string(object->id)) &&
+                                objects[std::to_string(object->id)] == object;
+        if (registered) removeObject(object);
+        else if (object->id) objectsById.erase(object->id);
         object->id = 0;
         object->id = allocateObjectId(true);
         objectsById[object->id] = object;
+        if (registered) addObject(object);
     }
     // SimDataBlock::onAdd takes sNextModifiedKey after onStaticModified has
     // bumped it for the static fields the datablock set, so a datablock's
@@ -9041,6 +9055,19 @@ void ScriptEngine::registerDataBlock(ScriptObject* object) {
     object->internals["__datablockKey"] = VMValue(++nextDataBlockModifiedKey_);
     ensureEngineGroups();
     if (ScriptObject* group = findObject("DataBlockGroup")) addToSet(group, object);
+}
+
+ScriptObject* ScriptEngine::findDataBlock(const std::string& name) const {
+    auto named = nameDictionary_.find(lowerName(name));
+    if (named == nameDictionary_.end()) return nullptr;
+    for (auto it = named->second.rbegin(); it != named->second.rend(); ++it)
+        if ((*it)->internals.count("__datablockKey")) return *it;
+    return nullptr;
+}
+
+void ScriptEngine::dataBlockModified(ScriptObject* object) {
+    if (object && object->internals.count("__datablockKey"))
+        object->internals["__datablockKey"] = VMValue(++nextDataBlockModifiedKey_);
 }
 
 void ScriptEngine::deleteDataBlocks() {
@@ -9063,14 +9090,66 @@ void ScriptEngine::forgetObject(ScriptObject* object) {
 
 std::string ScriptEngine::objectKey(ScriptObject* object) {
     if (!object) return {};
+    return std::to_string(objectId(object));
+}
+
+std::string ScriptEngine::nameOrId(const std::string& handle) {
+    ScriptObject* object = findObject(handle.c_str());
+    if (!object) return handle;
     return object->name.empty() ? std::to_string(objectId(object)) : object->name;
 }
 
 std::string ScriptEngine::canonicalName(const std::string& handle) {
-    int id = 0;
-    if (!parseObjectId(handle, id)) return handle;
-    auto it = objectsById.find(id);
-    return it != objectsById.end() && it->second ? objectKey(it->second) : handle;
+    ScriptObject* object = findObject(handle.c_str());
+    return object ? objectKey(object) : handle;
+}
+
+void ScriptEngine::addObject(ScriptObject* object) {
+    if (!object) return;
+    const std::string key = objectKey(object);
+    auto existing = objects.find(key);
+    if (existing != objects.end() && existing->second == object) return;
+    objects[key] = object;
+    if (!object->name.empty()) {
+        auto& taken = nameDictionary_[lowerName(object->name)];
+        taken.erase(std::remove(taken.begin(), taken.end(), object), taken.end());
+        taken.push_back(object);
+    }
+}
+
+void ScriptEngine::removeObject(ScriptObject* object) {
+    if (!object) return;
+    auto it = objects.find(std::to_string(object->id));
+    if (it != objects.end() && it->second == object) objects.erase(it);
+    if (!object->name.empty()) {
+        auto named = nameDictionary_.find(lowerName(object->name));
+        if (named != nameDictionary_.end()) {
+            auto& taken = named->second;
+            taken.erase(std::remove(taken.begin(), taken.end(), object), taken.end());
+            if (taken.empty()) nameDictionary_.erase(named);
+        }
+    }
+    forgetObject(object);
+}
+
+void ScriptEngine::setObjectName(ScriptObject* object, const std::string& name) {
+    if (!object) return;
+    const bool registered = objects.count(std::to_string(object->id)) != 0;
+    if (registered && !object->name.empty()) {
+        auto named = nameDictionary_.find(lowerName(object->name));
+        if (named != nameDictionary_.end()) {
+            auto& taken = named->second;
+            taken.erase(std::remove(taken.begin(), taken.end(), object), taken.end());
+            if (taken.empty()) nameDictionary_.erase(named);
+        }
+    }
+    object->name = name;
+    if (registered && !name.empty()) nameDictionary_[lowerName(name)].push_back(object);
+}
+
+ScriptObject* ScriptEngine::findObjectByName(const std::string& name) const {
+    auto named = nameDictionary_.find(lowerName(name));
+    return named == nameDictionary_.end() || named->second.empty() ? nullptr : named->second.back();
 }
 
 std::vector<std::string> ScriptEngine::objectNamespaces(ScriptObject* object) {
@@ -9134,18 +9213,9 @@ ScriptObject* ScriptEngine::findObject(const char* name) {
     int id = 0;
     if (parseObjectId(name, id)) {
         auto byId = objectsById.find(id);
-        if (byId != objectsById.end()) return byId->second;
+        return byId != objectsById.end() ? byId->second : nullptr;
     }
-    auto it = objects.find(name);
-    if (it != objects.end()) return it->second;
-    std::string wanted(name);
-    for (char& c : wanted) c = (char)std::tolower((unsigned char)c);
-    for (auto& [objectName, object] : objects) {
-        std::string candidate = objectName;
-        for (char& c : candidate) c = (char)std::tolower((unsigned char)c);
-        if (candidate == wanted) return object;
-    }
-    return nullptr;
+    return findObjectByName(name);
 }
 
 void ScriptEngine::executeString(const char* script) {

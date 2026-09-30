@@ -882,11 +882,19 @@ VMValue TorqueScript::Impl::parseDatablock() {
         parentName = parentToken.text;
     }
 
+    // OP_CREATE_OBJECT: a datablock declared again under its name is the
+    // same datablock, its fields set anew (a different class is refused).
+    auto& engine = ScriptEngine::instance();
+    ScriptObject* existing = engine.findDataBlock(nameToken.text);
+    const bool redeclared = existing && strcasecmp(existing->className.c_str(), classToken.text.c_str()) != 0;
+    if (redeclared)
+        Console::instance().printf(LogLevel::Error, "Cannot re-declare data block %s with a different class.",
+                                   nameToken.text.c_str());
     auto* object = new ScriptObject;
     object->className = classToken.text;
     object->name = nameToken.text;
-    if (!parentName.empty()) {
-        if (auto* parent = ScriptEngine::instance().findObject(parentName.c_str()))
+    if (!existing && !parentName.empty()) {
+        if (auto* parent = engine.findObject(parentName.c_str()))
             object->fields = parent->fields;
     }
 
@@ -925,10 +933,18 @@ VMValue TorqueScript::Impl::parseDatablock() {
         match(TSTokenType::RBrace);
     }
 
+    if (existing) {
+        const bool reuse = !redeclared;
+        if (reuse) {
+            for (auto& [field, value] : object->fields) existing->fields[field] = value;
+            engine.dataBlockModified(existing);
+        }
+        delete object;
+        return reuse ? VMValue(existing->id) : VMValue(0);
+    }
     // Datablocks take ids from the datablock range.
-    auto& engine = ScriptEngine::instance();
     engine.assignDatablockId(object);
-    engine.objects[engine.objectKey(object)] = object;
+    engine.addObject(object);
     engine.registerDataBlock(object);
     outer->setGlobal("$" + object->name, VMValue(object->name));
     outer->setGlobal(object->name, VMValue(object->name));
@@ -2386,7 +2402,7 @@ VMValue TorqueScript::Impl::parsePrimary() {
             // (GUI controls link to their parent control); a top-level one
             // joins the group named by $instantGroup.
             auto& engine = ScriptEngine::instance();
-            engine.objects[engine.objectKey(obj)] = obj;
+            engine.addObject(obj);
             ScriptObject* enclosing = guiParentStack.empty() ? nullptr : guiParentStack.back();
             if (enclosing == obj) enclosing = nullptr;
             if (enclosing && engine.isSimSet(enclosing)) {
@@ -2395,9 +2411,9 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 // declared parent link.
                 if (EngineClasses::isA(enclosing->className, "GuiControl") ||
                     !EngineClasses::isEngineClass(enclosing->className))
-                    obj->internals["parent"] = VMValue(engine.objectKey(enclosing));
+                    obj->internals["parent"] = VMValue(engine.nameOrId(engine.objectKey(enclosing)));
             } else if (enclosing) {
-                obj->internals["parent"] = VMValue(engine.objectKey(enclosing));
+                obj->internals["parent"] = VMValue(engine.nameOrId(engine.objectKey(enclosing)));
             } else if (ScriptObject* instant = engine.findObject(outer->getGlobal("$instantGroup").toString().c_str());
                        instant && engine.isSimGroup(instant)) {
                 engine.addToSet(instant, obj);
@@ -3160,7 +3176,13 @@ int TorqueScript::scheduleEvent(double now, double delay, const std::string& obj
                                 bool onObject) {
     std::vector<std::string> values;
     for (const auto& arg : args) values.push_back(arg.toString());
-    return impl->scheduler.schedule(now, delay, object, command, std::move(values), onObject);
+    // Sim::postEvent holds the object itself: the event follows it, not
+    // whichever object later takes its name.
+    std::string target = object;
+    if (ScriptEngine::exists())
+        if (ScriptObject* sobj = ScriptEngine::instance().findObject(object.c_str()))
+            target = ScriptEngine::instance().objectKey(sobj);
+    return impl->scheduler.schedule(now, delay, target, command, std::move(values), onObject);
 }
 
 bool TorqueScript::callObjectMethod(const std::string& object, const std::string& method,

@@ -385,10 +385,20 @@ public:
     std::vector<std::string> missionDeletionOrder(const std::string& name) const;
     void removeMissionObjects(const std::vector<std::string>& names);
 
-    // Global object registry, keyed by objectKey (the name, or the id for an
-    // anonymous object).
+    // Global object registry (Sim::gIdDictionary), keyed by objectKey: the
+    // object's id. Names live in the name dictionary.
     std::unordered_map<std::string, ScriptObject*> objects;
     std::unordered_map<int, ScriptObject*> objectsById;
+    // SimObject::registerObject: into the registry under its id, its name
+    // (if any) into the name dictionary.
+    void addObject(ScriptObject* object);
+    // SimObject::unregisterObject: out of the registry and the dictionary.
+    void removeObject(ScriptObject* object);
+    // SimObject::assignName: the dictionary follows the rename.
+    void setObjectName(ScriptObject* object, const std::string& name);
+    // Sim::gNameDictionary lookup (case-insensitive): the newest object that
+    // took the name; an older one answers again once the newer is gone.
+    ScriptObject* findObjectByName(const std::string& name) const;
     // The object's SimObject id, assigned from the dynamic range on first use.
     int objectId(ScriptObject* object);
     // Datablocks take ids from their own range (3..2050).
@@ -396,6 +406,11 @@ public:
     // SimDataBlock::assignId/onAdd: a datablock id, the next modified key,
     // and membership of DataBlockGroup (creation order).
     void registerDataBlock(ScriptObject* object);
+    // DataBlockGroup->findObject(name): the datablock under that name.
+    ScriptObject* findDataBlock(const std::string& name) const;
+    // SimDataBlock::onStaticModified: a changed datablock takes the next
+    // modified key (connections send it again).
+    void dataBlockModified(ScriptObject* object);
     // An object the engine creates itself (registerObject + assignName).
     ScriptObject* createEngineObject(const std::string& className, const std::string& name);
     // deleteDataBlocks(): every datablock, last first; ids restart at 3.
@@ -405,11 +420,13 @@ public:
     int allocateObjectId(bool datablock = false);
     // Forget a deleted object's id.
     void forgetObject(ScriptObject* object);
-    // Registry key: the name, or the id for an anonymous object.
+    // Registry key: the object's id (names are not unique).
     std::string objectKey(ScriptObject* object);
-    // A handle (name or numeric id) as the registry key it refers to; other
-    // strings pass through unchanged.
+    // A handle (name or numeric id) as the registry key of the object it
+    // finds; other strings pass through unchanged.
     std::string canonicalName(const std::string& handle);
+    // The GUI's handle for an object: its name, or its id when unnamed.
+    std::string nameOrId(const std::string& handle);
     // The object's script namespaces in dispatch order: its name, the
     // ScriptObject class / superClass fields, then its C++ class.
     std::vector<std::string> objectNamespaces(ScriptObject* object);
@@ -444,6 +461,7 @@ private:
     ThreadMutation threadMutationProvider;
     ObjectMutation controlObjectMutationProvider;
     std::vector<ScriptMissionObject> missionObjects_;
+    std::unordered_map<std::string, std::vector<ScriptObject*>> nameDictionary_;
     bool missionObjectsWorldBacked_ = false;
 };
 

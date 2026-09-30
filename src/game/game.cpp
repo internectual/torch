@@ -117,7 +117,7 @@ static void scanDatablockShapesFromCS(World& world) {
         std::string path = shape->second.toString();
         if (path.find("shapes/") != 0 && path.find("interiors/") != 0)
             path = "shapes/" + path;
-        world.datablockShapes[name] = path;
+        world.datablockShapes[object->name.empty() ? name : object->name] = path;
         found++;
     }
     Console::instance().printf(LogLevel::Debug, "  loaded datablock shapes from script objects: %d found", found);
@@ -270,15 +270,7 @@ static const VMValue* scriptField(const ScriptObject* object, const std::string&
 }
 
 static ScriptObject* findScriptObject(const std::string& name) {
-    for (const auto& [objectName, object] : ScriptEngine::instance().objects) {
-        if (!object || objectName.size() != name.size()) continue;
-        bool equal = true;
-        for (size_t i = 0; i < name.size(); ++i)
-            if (std::tolower((unsigned char)objectName[i]) !=
-                std::tolower((unsigned char)name[i])) { equal = false; break; }
-        if (equal) return object;
-    }
-    return nullptr;
+    return ScriptEngine::instance().findObject(name.c_str());
 }
 
 static float scriptFloat(const ScriptObject* object, const char* field, float fallback = 0.0f) {
@@ -872,35 +864,21 @@ void Player::loadModel() {
     resolver->name = resolverName;
     resolver->fields["race"] = VMValue(race);
     resolver->fields["sex"] = VMValue(sex);
-    ScriptEngine::instance().objects[resolverName] = resolver;
+    ScriptEngine::instance().addObject(resolver);
     std::string datablockName;
     if (race == "Bioderm")
         datablockName = armorSize + "MaleBiodermArmor";
     else
         datablockName = armorSize + sex + race + "Armor";
-    auto findDataBlock = [&](const std::string& name) {
-        auto it = ScriptEngine::instance().objects.find(name);
-        if (it != ScriptEngine::instance().objects.end()) return it;
-        std::string wanted = name;
-        for (char& c : wanted) c = (char)tolower((unsigned char)c);
-        for (auto candidate = ScriptEngine::instance().objects.begin();
-             candidate != ScriptEngine::instance().objects.end(); ++candidate) {
-            std::string key = candidate->first;
-            for (char& c : key) c = (char)tolower((unsigned char)c);
-            if (key == wanted) return candidate;
-        }
-        return ScriptEngine::instance().objects.end();
-    };
-    if (findDataBlock(datablockName) == ScriptEngine::instance().objects.end()) {
+    if (!ScriptEngine::instance().findObject(datablockName.c_str())) {
         datablockName = ts->callFunction(
             "getArmorDatablock", {VMValue(resolverName), VMValue(armorSize)}).toString();
     }
-    ScriptEngine::instance().objects.erase(resolverName);
-    ScriptEngine::instance().forgetObject(resolver);
+    ScriptEngine::instance().removeObject(resolver);
     delete resolver;
 
-    auto datablock = findDataBlock(datablockName);
-    if (datablock == ScriptEngine::instance().objects.end() || !datablock->second) {
+    ScriptObject* datablock = ScriptEngine::instance().findObject(datablockName.c_str());
+    if (!datablock) {
         Console::instance().printf(LogLevel::Warn,
             "Player: PlayerData '%s' unavailable; using stock armor path", datablockName.c_str());
         const std::string size = armorSize == "Medium" || armorSize == "Heavy" ? armorSize : "Light";
@@ -924,26 +902,26 @@ void Player::loadModel() {
         }
         return;
     }
-    if (const auto* maxDamage = scriptField(datablock->second, "maxDamage"))
+    if (const auto* maxDamage = scriptField(datablock, "maxDamage"))
         setMaxHealth(maxDamage->toFloat());
-    if (const auto* maxEnergy = scriptField(datablock->second, "maxEnergy"))
+    if (const auto* maxEnergy = scriptField(datablock, "maxEnergy"))
         setMaxEnergy(maxEnergy->toFloat());
     // PlayerData owns the passive ShapeBase repair rate. Without loading this
     // authored field, repair stations and custom armor profiles can never
     // restore health even though the simulation tick applies the rate.
-    if (const auto* repair = scriptField(datablock->second, "repairRate"))
+    if (const auto* repair = scriptField(datablock, "repairRate"))
         setRepairRate(repair->toFloat());
-    auto shapeField = datablock->second->fields.find("shapeFile");
-    if (shapeField == datablock->second->fields.end()) {
-        for (auto it = datablock->second->fields.begin();
-             it != datablock->second->fields.end(); ++it) {
+    auto shapeField = datablock->fields.find("shapeFile");
+    if (shapeField == datablock->fields.end()) {
+        for (auto it = datablock->fields.begin();
+             it != datablock->fields.end(); ++it) {
             std::string fieldName = it->first;
             for (char& c : fieldName)
                 c = (char)tolower((unsigned char)c);
             if (fieldName == "shapefile") { shapeField = it; break; }
         }
     }
-    if (shapeField == datablock->second->fields.end() || shapeField->second.toString().empty()) {
+    if (shapeField == datablock->fields.end() || shapeField->second.toString().empty()) {
         Console::instance().printf(LogLevel::Error,
             "Player: resolved PlayerData has no shapeFile");
         return;
@@ -2724,18 +2702,7 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
              // Ammo datablocks use the smaller native fallback even when the
              // script datablock is unavailable entirely.
              item.amount = defaultItemPickupAmount(kind);
-              auto scriptIt = ScriptEngine::instance().objects.find(db);
-              if (scriptIt == ScriptEngine::instance().objects.end()) {
-                  for (auto candidate = ScriptEngine::instance().objects.begin();
-                       candidate != ScriptEngine::instance().objects.end(); ++candidate) {
-                      if (itemDatablockNameEquals(candidate->first, db)) {
-                          scriptIt = candidate;
-                          break;
-                      }
-                  }
-              }
-              if (scriptIt != ScriptEngine::instance().objects.end() && scriptIt->second) {
-                  auto* script = scriptIt->second;
+              if (ScriptObject* script = ScriptEngine::instance().findObject(db.c_str())) {
                   auto number = [&](const char* field, float fallback) {
                       // Torque datablock fields are case-insensitive.  Do not
                       // make custom ItemData spellings fall back to stock
