@@ -1789,8 +1789,14 @@ int main() {
         ts->callFunction("connect", {VMValue(address), VMValue(""), VMValue("Tester"), VMValue("Human Male"),
                                      VMValue("beagle"), VMValue("Male1")});
         DemoParser parser;
-        bool hello = false;
+        bool hello = false, streamBegun = false;
         assert(pump([&] {
+            // Game::startLiveClient: the reader follows the connection's
+            // connect sequence (the packet header's connect bit).
+            if (!streamBegun && clientConnection) {
+                parser.beginLiveStream(clientConnection->getConnectSequence());
+                streamBegun = true;
+            }
             for (const auto& packet : clientPackets) {
                 PacketData pd = parser.parsePacket(packet.data(), packet.size(), -1);
                 for (const auto& event : pd.events)
