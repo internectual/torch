@@ -12,6 +12,9 @@
 #include "sim/vehicle.h"
 #include "sim/path_manager.h"
 #include "sim/force_field.h"
+#include "sim/static_shapes.h"
+#include "fs/file_system.h"
+#include "fs/vl2_archive.h"
 #include "sim/projectile_aim.h"
 #include <map>
 #include <set>
@@ -1039,6 +1042,70 @@ int main() {
         assert(beaconGhost >= 0 && parser.getGhostTracker().getGhost(beaconGhost)->className == "BeaconObject");
         assert(shapeEntry->threads[0].valid && shapeEntry->threads[0].sequence == 3 &&
                shapeEntry->threads[0].state == ShapeBase::ScriptThread::Play && !shapeEntry->threads[0].forward);
+        {
+            // Turret: the script's selectTarget hands it a target; the barrel
+            // activates over activationMS, turns onto the target at
+            // degPerSecPhi and fires once within the fire tolerances. The
+            // ghost carries phi / 360 and the activation; the retail
+            // capacitor recharges per tick up to maxCapacitorEnergy. The
+            // stock shapes give the activate/elevate/turn sequences.
+            FileSystem shapesFs;
+            assert(shapesFs.init({"/home/methodown/t2-linux/base"}));
+            auto* shapes = new Vl2Archive;
+            assert(shapes->open("/home/methodown/t2-linux/base/shapes.vl2"));
+            shapesFs.addArchive(shapes);
+            Engine::instance().filesys = &shapesFs;
+            script.ts()->execute(
+                "datablock LinearProjectileData(TurretTestBolt) { dryVelocity = 200; lifetimeMS = 3000; };"
+                "datablock TurretData(TestTurretBase) { shapeFile = \"turret_base_large.dts\"; maxCapacitorEnergy = 50; };"
+                "datablock TurretImageData(TestTurretBarrel) { shapeFile = \"turret_mortar_large.dts\"; "
+                "  projectile = TurretTestBolt; activationMS = 320; attackRadius = 200; "
+                "  stateName[0] = \"Ready\"; stateTransitionOnTriggerDown[0] = \"Fire\"; "
+                "  stateName[1] = \"Fire\"; stateFire[1] = true; stateTransitionOnTriggerUp[1] = \"Ready\"; };"
+                "datablock PlayerData(TurretVictimArmor) { mass = 90; boxSize = \"1.2 1.2 2.3\"; };"
+                "function TestTurretBase::selectTarget(%this, %turret) { $turretSelects++; %turret.setTargetObject(TurretVictim.getId()); }"
+                "new Player(TurretVictim) { dataBlock = TurretVictimArmor; };"
+                "TurretVictim.setTransform(\"50 0 400 0 0 1 0\");"
+                "new Turret(TestTurret) { dataBlock = TestTurretBase; initialBarrel = TestTurretBarrel; position = \"0 0 399\"; };"
+                "TestTurret.setCapacitorRechargeRate(0.5);"
+                "TestTurret.scopeToClient(ThreadLinkClient);"
+                "$turretBarrel = TestTurret.getMountedImage(0).getName();");
+            assert(script.ts()->getGlobal("$turretBarrel").toString() == "TestTurretBarrel");
+            auto* turret = EngineObjects::get<TurretObject>("TestTurret");
+            assert(turret && turret->state == TurretObject::Dormant);
+            bool fired = false;
+            for (int i = 0; i < 60; ++i) {
+                turret->processMove(nullptr);
+                fired = fired || turret->getImageTriggerState(0);
+            }
+            assert(script.ts()->getGlobal("$turretSelects").toInt() > 0);
+            assert(turret->state == TurretObject::Active && turret->activationLevel == 1.0f);
+            assert(std::abs(turret->currPhi - 90.0f) < 1.0f);
+            assert(fired && turret->getImageTriggerState(0));
+            // The mount node follows the turn thread: the barrel faces +x.
+            const auto mount = turret->getMountTransform(0);
+            assert(mount[11] > 399.0f && mount[1] > 0.9f);
+            script.ts()->execute("$turretTarget = TestTurret.getTargetObject(); $victimId = TurretVictim.getId();"
+                                 "$capacitor = TestTurret.getCapacitorLevel();");
+            assert(script.ts()->getGlobal("$turretTarget").toInt() == script.ts()->getGlobal("$victimId").toInt());
+            assert(script.ts()->getGlobal("$capacitor").toInt() == 30);
+            script.ts()->execute("TestTurret.setCapacitorLevel(7.9); $capacitor = TestTurret.getCapacitorLevel();");
+            assert(script.ts()->getGlobal("$capacitor").toInt() == 7);
+            for (int i = 0; i < 6; ++i, now += 0.2) {
+                server->checkPacketSend(now);
+                client.checkPacketSend(now + 0.1);
+            }
+            assert(parser.getParseFault().empty());
+            const int turretGhost = server->ghostIndex(ScriptEngine::instance().objectKey(turret->script));
+            assert(turretGhost >= 0);
+            const GhostEntry* turretEntry = parser.getGhostTracker().getGhost(turretGhost);
+            assert(turretEntry && turretEntry->className == "Turret" && turretEntry->hasTurretAim);
+            assert(turretEntry->turretActivation == 1.0f && std::abs(turretEntry->turretPhi - 0.25f) < 0.005f);
+            script.ts()->execute("TestTurret.setAutoFire(false); $turretTarget = TestTurret.getTargetObject();");
+            assert(script.ts()->getGlobal("$turretTarget").toInt() == 0);
+            for (const char* name : {"TestTurret", "TurretVictim"}) ScriptEngine::instance().deleteScriptObject(name);
+            Engine::instance().filesys = nullptr;
+        }
     }
     {
         // ShapeBase::thinkAboutLocking: a seeker image locks onto a hot target

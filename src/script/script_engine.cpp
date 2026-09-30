@@ -6,6 +6,7 @@
 #include "sim/engine_object.h"
 #include "sim/projectile_aim.h"
 #include "sim/net_object.h"
+#include "sim/game_base.h"
 #include "game/material_property_map.h"
 #include <limits>
 #include "script/conversion_parity.h"
@@ -1631,6 +1632,7 @@ void ScriptEngine::objectAdded(ScriptObject* object) {
                 tsInstance->callObjectMethod(block, "onNewDataBlock", {self});
             if (!block.empty() && callsScriptOnAdd(cls))
                 tsInstance->callObjectMethod(block, "onAdd", {self});
+            if (auto* game = dynamic_cast<GameBase*>(object->engine.get())) game->onAdded();
             return;
         }
         const bool guiControl = cls.rfind("Gui", 0) == 0 || cls.rfind("Shell", 0) == 0 ||

@@ -1,5 +1,6 @@
 #pragma once
 #include "render/renderer.h"
+#include <utility>
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -38,6 +39,10 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name);
 // (0..1 of its duration): every node's world transform in shape space, the
 // bind pose where the sequence does not animate a node.
 std::vector<MatrixF> dtsSequencePose(const DTSLoadResult& shape, int sequence, float position);
+// The same for several non-blend threads (sequence, position) at once: a
+// node's rotation and translation come from the first listed thread whose
+// sequence animates them.
+std::vector<MatrixF> dtsThreadsPose(const DTSLoadResult& shape, const std::vector<std::pair<int, float>>& threads);
 // TSShape::importSequences: appends a DSQ's sequences, mapping its nodes to
 // `nodes` by name. A non-empty alias renames the last imported sequence, as
 // TSShapeConstructor does. Returns the number appended, or -1 on failure.

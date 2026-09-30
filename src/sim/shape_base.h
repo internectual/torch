@@ -217,8 +217,9 @@ public:
     const char* damageStateName() const;
 
     // Mounted images (shapeImage.cc).
-    bool mountImage(std::shared_ptr<const ShapeBaseImageData> image, uint32_t slot, bool loaded, uint32_t skinTag);
-    bool unmountImage(uint32_t slot);
+    // Virtual for Turret, which tracks its barrel (mCurrBarrel).
+    virtual bool mountImage(std::shared_ptr<const ShapeBaseImageData> image, uint32_t slot, bool loaded, uint32_t skinTag);
+    virtual bool unmountImage(uint32_t slot);
     const ShapeBaseImageData* getMountedImage(uint32_t slot) const { return images[slot].dataBlock.get(); }
     const ShapeBaseImageData* getPendingImage(uint32_t slot) const;
     bool isImageFiring(uint32_t slot) const;
@@ -243,12 +244,12 @@ public:
 
     // Transforms (row-major, translation in column 3). See shape_base.cpp
     // for where these approximate the engine's DTS node transforms.
-    std::array<float, 16> getMountTransform(uint32_t mountPoint) const;
+    virtual std::array<float, 16> getMountTransform(uint32_t mountPoint) const;
     Point3F getAIRepairPoint() const;
     std::array<float, 16> getImageTransform(uint32_t slot) const;
     std::array<float, 16> getMuzzleTransform(uint32_t slot) const;
     std::array<float, 16> getEyeTransform() const;
-    void getMuzzleVector(uint32_t slot, float vec[3]) const;
+    virtual void getMuzzleVector(uint32_t slot, float vec[3]) const;
     void getMuzzlePoint(uint32_t slot, float pos[3]) const;
 
     void processMove(const ClientMoveIn* move) override;
@@ -287,6 +288,8 @@ private:
                   bool ammo = false, bool triggerDown = false, bool target = false);
     void resetImageSlot(uint32_t slot);
     void scriptCallback(uint32_t slot, const std::string& function);
+
+protected:
     bool getCorrectedAim(const std::array<float, 16>& muzzle, float result[3]) const;
 };
 

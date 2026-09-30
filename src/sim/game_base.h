@@ -34,6 +34,8 @@ public:
     // GameBase::onNewDataBlock: the DataBlockMask; subclasses reset the state
     // their datablock sets.
     virtual bool onNewDataBlock() { setMaskBits(DataBlockMask); return true; }
+    // The rest of the class's onAdd, after the script's onAdd callback.
+    virtual void onAdded() {}
 
     // The connection controlling this object (its key), empty when none.
     std::string controllingClient;

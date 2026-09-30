@@ -2171,18 +2171,23 @@ int importDSQ(const uint8_t* data, size_t size, const std::vector<DTSShape::Node
 }
 
 std::vector<MatrixF> dtsSequencePose(const DTSLoadResult& shape, int sequence, float position) {
+    return dtsThreadsPose(shape, {{sequence, position}});
+}
+
+std::vector<MatrixF> dtsThreadsPose(const DTSLoadResult& shape, const std::vector<std::pair<int, float>>& threads) {
     const int32_t numNodes = (int32_t)shape.nodes.size();
     std::vector<MatrixF> world(numNodes);
     if (numNodes == 0 || shape.defaultLocalTransforms.size() < (size_t)numNodes) return world;
-    const DTSShape::Animation* anim =
-        sequence >= 0 && sequence < (int)shape.animations.size() ? &shape.animations[sequence] : nullptr;
-    const float t = anim ? std::clamp(position, 0.0f, 1.0f) * anim->duration : 0.0f;
     for (int32_t i = 0; i < numNodes; ++i) {
         const MatrixF& bind = shape.defaultLocalTransforms[i];
         QuatF rot = QuatF::fromMatrix(bind);
         Point3F trans{bind.m[0][3], bind.m[1][3], bind.m[2][3]};
-        bool animated = false;
-        if (anim) {
+        bool animated = false, rotSet = false, transSet = false;
+        for (const auto& [sequence, position] : threads) {
+            const DTSShape::Animation* anim =
+                sequence >= 0 && sequence < (int)shape.animations.size() ? &shape.animations[sequence] : nullptr;
+            if (!anim) continue;
+            const float t = std::clamp(position, 0.0f, 1.0f) * anim->duration;
             // The keyframes bracketing t for this node's rotation and translation.
             const DTSShape::Keyframe *r0 = nullptr, *r1 = nullptr, *t0 = nullptr, *t1 = nullptr;
             for (const auto& k : anim->keyframes) {
@@ -2196,13 +2201,13 @@ std::vector<MatrixF> dtsSequencePose(const DTSLoadResult& shape, int sequence, f
                     if (k.time >= t && (!t1 || k.time <= t1->time)) t1 = &k;
                 }
             }
-            if (r0) {
-                animated = true;
+            if (r0 && !rotSet) {
+                animated = rotSet = true;
                 rot = (!r1 || r1 == r0 || std::abs(r1->time - r0->time) < 0.0001f)
                     ? r0->rotation : Math::quatSlerp(r0->rotation, r1->rotation, (t - r0->time) / (r1->time - r0->time));
             }
-            if (t0) {
-                animated = true;
+            if (t0 && !transSet) {
+                animated = transSet = true;
                 if (!t1 || t1 == t0 || std::abs(t1->time - t0->time) < 0.0001f) {
                     trans = t0->translation;
                 } else {
