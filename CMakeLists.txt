@@ -65,6 +65,7 @@ add_executable(torch
     src/sim/projectile_aim.cpp
     src/sim/net_interface.cpp
     src/sim/game_connection.cpp
+    src/sim/path_manager.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
     src/sim/datablock_pack.cpp
@@ -177,6 +178,7 @@ add_executable(torch_server
     src/sim/projectile_aim.cpp
     src/sim/net_interface.cpp
     src/sim/game_connection.cpp
+    src/sim/path_manager.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
     src/sim/datablock_pack.cpp
@@ -462,6 +464,7 @@ add_executable(torch_parity_test
     src/sim/projectile_aim.cpp
     src/sim/net_interface.cpp
     src/sim/game_connection.cpp
+    src/sim/path_manager.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
     src/sim/datablock_pack.cpp
@@ -555,6 +558,7 @@ add_executable(torch_network_loopback_test
     src/sim/projectile_aim.cpp
     src/sim/net_interface.cpp
     src/sim/game_connection.cpp
+    src/sim/path_manager.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
     src/sim/datablock_pack.cpp
@@ -649,6 +653,7 @@ add_executable(torch_nav_graph_test
     src/sim/force_field.cpp
     src/sim/net_interface.cpp
     src/sim/game_connection.cpp
+    src/sim/path_manager.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
     src/sim/datablock_pack.cpp
@@ -744,6 +749,7 @@ add_executable(torch_target_manager_test
     src/sim/projectile_aim.cpp
     src/sim/net_interface.cpp
     src/sim/game_connection.cpp
+    src/sim/path_manager.cpp
     src/sim/net_object.cpp
     src/sim/scene_objects.cpp
     src/sim/datablock_pack.cpp

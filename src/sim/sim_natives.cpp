@@ -9,6 +9,7 @@
 #include "sim/force_field.h"
 #include "sim/nav_graph.h"
 #include "ai/ai_connection.h"
+#include "sim/path_manager.h"
 #include "sim/projectiles.h"
 #include "sim/target_manager.h"
 #include "sim/server_container.h"
@@ -40,6 +41,7 @@ void registerSimNatives(TorqueScript& ts) {
     registerForceFieldNatives(ts);
     registerNavGraphNatives(ts);
     registerAINatives(ts);
+    registerPathNatives(ts);
     registerTargetManagerNatives(ts);
     // The server's own static geometry and water (gServerContainer).
     serverCollision().triangles = ServerContainer::gatherTriangles;

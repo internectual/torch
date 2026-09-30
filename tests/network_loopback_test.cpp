@@ -10,6 +10,7 @@
 #include "sim/player.h"
 #include "sim/projectiles.h"
 #include "sim/vehicle.h"
+#include "sim/path_manager.h"
 #include "sim/force_field.h"
 #include "sim/projectile_aim.h"
 #include <map>
@@ -1032,6 +1033,20 @@ int main() {
         assert(cameraEntry && cameraEntry->className == "Camera");
         assert(shapeEntry->threads[0].valid && shapeEntry->threads[0].sequence == 3 &&
                shapeEntry->threads[0].state == ShapeBase::ScriptThread::Play && !shapeEntry->threads[0].forward);
+    }
+    {
+        // Path::finishPath: a Path's Markers in seqNum order; the total time
+        // leaves out the last marker's msToNext.
+        const size_t before = PathManager::paths().size();
+        script.ts()->execute("new SimGroup(MissionGroup) { new Path(TestPath) {"
+                             "  new Marker() { seqNum = 2; position = \"3 3 3\"; msToNext = 500; };"
+                             "  new Marker() { seqNum = 1; position = \"1 1 1\"; msToNext = 250; }; }; };"
+                             "pathOnMissionLoadDone();");
+        const auto& paths = PathManager::paths();
+        assert(paths.size() == before + 1);
+        const auto& path = paths.back();
+        assert(path.positions.size() == 2 && path.positions[0].x == 1.0f && path.positions[1].x == 3.0f);
+        assert(path.msToNext[0] == 250 && path.msToNext[1] == 500 && path.totalTime == 250);
     }
     {
         // math/mathTypes.cc: AngAxisF matrices as the engine builds them.

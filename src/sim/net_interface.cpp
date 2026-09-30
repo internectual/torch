@@ -547,6 +547,7 @@ void handleConnectAccept(const Address& address, V12BitStream& stream) {
     auto* connection = object ? dynamic_cast<GameConnection*>(object->engine.get()) : nullptr;
     if (!connection) return;
     connection->isServer = false;
+    connection->releaseVoiceId();
     connection->local = false;
     connection->address = addressToString(address);
     connection->setConnectSequence(clientConnectSequence ^ serverConnectSequence);

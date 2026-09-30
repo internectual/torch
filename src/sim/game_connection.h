@@ -54,7 +54,7 @@ struct ClientMoveIn {
 class GameConnection : public EngineObject {
 public:
     // Engine event class indices (NetEventClassFirst-relative).
-    enum EventClass { GhostingMessage = 4, Gravity = 5, NetString = 7, RemoteCommand = 9,
+    enum EventClass { GhostingMessage = 4, Gravity = 5, NetString = 7, PathManagerEvent = 8, RemoteCommand = 9,
                       SetMissionCRC = 13, Sim2DAudio = 17, Sim3DAudio = 18, SimDataBlock = 19,
                       SimpleMessage = 22 };
 
@@ -122,6 +122,7 @@ public:
     // server's acknowledgement (mLastMoveAck = mFirstMoveIndex).
     uint32_t lastMoveAck = 0;
     std::deque<ClientMoveIn> moves;
+    std::map<uint32_t, double> sendTimeInFlight; // packet sequence -> send time (ms)
     // GameConnection::getMoveList: called as the control object ticks; an
     // AIConnection makes its move here.
     virtual void getMoveList() {}
@@ -135,7 +136,31 @@ public:
         bool changed = false;
     };
     NetRate curRate, maxRate;
-    GameConnection() { checkMaxRate(); }
+    GameConnection();
+    ~GameConnection() override;
+
+    // NetConnection::mRoundTripTime (ms, a running average over the acks)
+    // and mPacketLoss (the dropped share of the last 32 notifies).
+    float roundTripTime = 0, packetLoss = 0;
+    uint32_t packetLossHistory = 0;
+    // The shipped build's vehicle teleport option (on by default).
+    bool vehicleTeleportEnabled = true;
+    // NetConnection::mMissionPathsSent: the client has the mission's paths.
+    bool missionPathsSent = false;
+
+    // Voice (gameConnection.cc): the connection's voice id (1..MaxClients),
+    // who it would listen to and who is talking to it.
+    enum { MaxClients = 126, MaxVoiceChannels = 3 };
+    int voiceId = 0;
+    std::array<bool, MaxClients + 1> wouldListenTo{}, listeningTo{};
+    int maxVoiceChannels = 0, curVoiceChannels = 0;
+    uint32_t voiceDecodingMask = 0;
+    int voiceEncodingLevel = -1;
+    bool canListen(const GameConnection& other) const;
+    void listenTo(int voice, bool listen);
+    void stopListening(int voice);
+    // A server connection (the client's own) has no voice id.
+    void releaseVoiceId();
     // NetConnection::checkMaxRate: mMaxRate from $pref::Net::PacketRateToClient
     // and $pref::Net::PacketSize.
     void checkMaxRate();

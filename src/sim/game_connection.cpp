@@ -11,6 +11,7 @@
 #include "script/script_engine.h"
 #include "script/torquescript.h"
 #include "core/console.h"
+#include "core/timer.h"
 #include <algorithm>
 
 namespace {
@@ -445,6 +446,7 @@ void GameConnection::checkPacketSend(double now) {
     }
     inFlight[protocol.lastSent()] = std::move(sent);
     ghostsInFlight[protocol.lastSent()] = std::move(refs);
+    sendTimeInFlight[protocol.lastSent()] = Timer::now() * 1000.0;
     deliver(w.data());
 }
 
@@ -454,6 +456,18 @@ void GameConnection::receivePacket(const uint8_t* data, size_t size) {
     if (!V12::readDnetHeader(stream, header)) return;
     const auto result = protocol.processReceived(header);
     for (const auto& ack : result.acknowledgements) {
+        // NetConnection::handleNotify (the shipped build): the round trip
+        // averages in each ack; the loss is the dropped share of the last 32.
+        if (auto it = sendTimeInFlight.find(ack.sequence); it != sendTimeInFlight.end()) {
+            if (ack.acknowledged) {
+                roundTripTime = (roundTripTime + (float)(Timer::now() * 1000.0 - it->second)) * 0.5f;
+                packetLossHistory <<= 1;
+            } else {
+                packetLossHistory = (packetLossHistory << 1) | 1;
+            }
+            packetLoss = (float)__builtin_popcount(packetLossHistory) * 0.03125f;
+            sendTimeInFlight.erase(it);
+        }
         if (auto it = inFlight.find(ack.sequence); it != inFlight.end()) {
             if (ack.acknowledged) packetReceived(it->second);
             else packetDropped(it->second);
@@ -851,6 +865,7 @@ void registerGameConnectionNatives(TorqueScript& ts) {
         auto* server = EngineObjects::get<GameConnection>(engine.objectKey(serverObject));
         if (!client || !server) return VMValue("");
         client->isServer = false;
+        client->releaseVoiceId();
         client->local = server->local = true;
         server->deliver = [client](const std::vector<uint8_t>& p) { client->receivePacket(p.data(), p.size()); };
         client->deliver = [server](const std::vector<uint8_t>& p) { server->receivePacket(p.data(), p.size()); };
@@ -942,6 +957,69 @@ void registerGameConnectionNatives(TorqueScript& ts) {
         c->play3D(profile, TorqueMath::matrix(pos, aa));
         return VMValue(1);
     });
+    auto conn = [](const Args& args, size_t i) -> GameConnection* {
+        return i < args.size() ? EngineObjects::get<GameConnection>(args[i].toString()) : nullptr;
+    };
+    ts.registerNative("NetConnection::getPing", [conn](const Args& args) -> VMValue {
+        auto* c = conn(args, 0);
+        return VMValue((int32_t)(c ? c->roundTripTime : 0.0f));
+    });
+    ts.registerNative("NetConnection::getPacketLoss", [conn](const Args& args) -> VMValue {
+        auto* c = conn(args, 0);
+        return VMValue((int32_t)(c ? 100.0f * c->packetLoss : 0.0f));
+    });
+    // The shipped GameConnection::getAuthInfo: the connection's WON account
+    // fields, "" when it has none (a -nologin LAN client).
+    ts.registerNative("GameConnection::getAuthInfo", [](const Args&) -> VMValue { return VMValue(""); });
+    ts.registerNative("GameConnection::setVehicleTeleportEnabled", [conn](const Args& args) -> VMValue {
+        if (auto* c = conn(args, 0)) c->vehicleTeleportEnabled = args.size() > 1 && args[1].toBool();
+        return VMValue("");
+    });
+    ts.registerNative("GameConnection::isVehicleTeleportEnabled", [conn](const Args& args) -> VMValue {
+        auto* c = conn(args, 0);
+        return VMValue(c && c->vehicleTeleportEnabled ? 1 : 0);
+    });
+    ts.registerNative("GameConnection::listenEnabled", [conn](const Args& args) -> VMValue {
+        auto* c = conn(args, 0);
+        return VMValue(c && c->maxVoiceChannels > 0 ? 1 : 0);
+    });
+    ts.registerNative("GameConnection::getListenState", [conn](const Args& args) -> VMValue {
+        auto* me = conn(args, 0);
+        auto* him = conn(args, 1);
+        return VMValue(me && him && me->wouldListenTo[him->voiceId] ? 1 : 0);
+    });
+    ts.registerNative("GameConnection::canListenTo", [conn](const Args& args) -> VMValue {
+        auto* me = conn(args, 0);
+        auto* him = conn(args, 1);
+        return VMValue(me && him && me->canListen(*him) ? 1 : 0);
+    });
+    ts.registerNative("GameConnection::listenTo", [conn](const Args& args) -> VMValue {
+        auto* me = conn(args, 0);
+        auto* him = conn(args, 1);
+        if (me && him) me->listenTo(him->voiceId, args.size() > 2 && args[2].toBool());
+        return VMValue("");
+    });
+    ts.registerNative("GameConnection::listenToAll", [conn](const Args& args) -> VMValue {
+        if (auto* c = conn(args, 0)) c->wouldListenTo.fill(true);
+        return VMValue("");
+    });
+    ts.registerNative("GameConnection::listenToNone", [conn](const Args& args) -> VMValue {
+        if (auto* c = conn(args, 0)) c->wouldListenTo.fill(false);
+        return VMValue("");
+    });
+    ts.registerNative("GameConnection::setVoiceChannels", [conn](const Args& args) -> VMValue {
+        if (auto* c = conn(args, 0))
+            c->maxVoiceChannels = std::clamp(args.size() > 1 ? args[1].toInt() : 0, 0, (int)GameConnection::MaxVoiceChannels);
+        return VMValue("");
+    });
+    ts.registerNative("GameConnection::setVoiceDecodingMask", [conn](const Args& args) -> VMValue {
+        if (auto* c = conn(args, 0)) c->voiceDecodingMask = args.size() > 1 ? (uint32_t)args[1].toInt() : 0;
+        return VMValue("");
+    });
+    ts.registerNative("GameConnection::setVoiceEncodingLevel", [conn](const Args& args) -> VMValue {
+        if (auto* c = conn(args, 0)) c->voiceEncodingLevel = args.size() > 1 ? args[1].toInt() : -1;
+        return VMValue("");
+    });
     // GameConnection::isAIControlled (mAIControlled: an AIConnection).
     ts.registerNative("GameConnection::isAIControlled", [](const Args& args) -> VMValue {
         ScriptObject* object = args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str());
@@ -1002,4 +1080,70 @@ void GameConnection::play3D(ScriptObject* profile, const std::array<float, 16>& 
         w.writeCompressedPoint({pos.x, pos.y, pos.z}, SoundPosAccuracy);
     };
     postEvent(event);
+}
+
+namespace {
+// GameConnection::smVoiceConnections: voice id -> connection.
+GameConnection* gVoiceConnections[GameConnection::MaxClients + 1] = {};
+}
+
+// GameConnection::onAdd / onRemove: a client's connection takes the first
+// free voice id and would listen to everyone.
+GameConnection::GameConnection() {
+    checkMaxRate();
+    wouldListenTo.fill(true);
+    for (int i = 1; i <= MaxClients; ++i)
+        if (!gVoiceConnections[i]) {
+            gVoiceConnections[i] = this;
+            voiceId = i;
+            break;
+        }
+}
+
+GameConnection::~GameConnection() { releaseVoiceId(); }
+
+void GameConnection::releaseVoiceId() {
+    if (voiceId > 0 && gVoiceConnections[voiceId] == this) gVoiceConnections[voiceId] = nullptr;
+    voiceId = 0;
+}
+
+bool GameConnection::canListen(const GameConnection& other) const {
+    // never allow a connection to listen to self
+    if (&other == this) return false;
+    // Can't listen if no channels are available:
+    if (maxVoiceChannels == 0) return false;
+    // make sure encoder/decoder's match
+    if (other.voiceEncodingLevel < 0) return false;
+    if (!(voiceDecodingMask & (1u << other.voiceEncodingLevel))) return false;
+    // check the listen mask for this group
+    const uint32_t listenMask = ServerTargets::sensorGroupListenMask(ServerTargets::connectionSensorGroup(*this));
+    return (listenMask & (1u << ServerTargets::connectionSensorGroup(other))) != 0;
+}
+
+void GameConnection::listenTo(int voice, bool listen) {
+    if (voice < 0 || voice > MaxClients) return;
+    if (listen) {
+        wouldListenTo[voice] = true;
+        return;
+    }
+    // terminate any existing stream
+    for (GameConnection* connection : gVoiceConnections)
+        if (connection && connection->isServer) connection->stopListening(voiceId);
+    // refuse any future request to talk to me
+    wouldListenTo[voice] = false;
+}
+
+void GameConnection::stopListening(int voice) {
+    if (voice < 0 || voice > MaxClients) return;
+    if (listeningTo[voice]) {
+        curVoiceChannels--;
+    } else if (wouldListenTo[voice] && gVoiceConnections[voice] && script) {
+        // notify client that someone quit talking
+        auto& engine = ScriptEngine::instance();
+        if (auto* ts = engine.ts())
+            ts->execute("commandToClient(" + engine.objectKey(script) + ", 'playerStoppedTalking', " +
+                        (gVoiceConnections[voice]->script ? engine.objectKey(gVoiceConnections[voice]->script) : "0") +
+                        ", 0);");
+    }
+    listeningTo[voice] = false;
 }

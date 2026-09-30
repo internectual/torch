@@ -2340,8 +2340,8 @@ VMValue TorqueScript::Impl::parsePrimary() {
                                 obj->className.find("Hud") == 0 ||
                                 obj->className == "VirtualScrollCtrl" ||
                                 obj->className == "VirtualScrollContentCtrl";
-            bool isContainer = isGuiControl || obj->className == "SimGroup" ||
-                               obj->className == "SimSet";
+            // Any SimSet (Path, AIObjectiveQ, ...) holds the objects declared in it.
+            bool isContainer = isGuiControl || EngineClasses::isA(obj->className, "SimSet");
 
             if (peekToken().type == TSTokenType::LBrace) {
                 nextToken();

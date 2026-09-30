@@ -1874,6 +1874,26 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
                     return false;
             }
         }
+    } else if (ev.classId == T2Demo::NetEventClassFirst + 8) { // PathManagerEvent
+        // pathManager.cc: NewPaths (every path) or ModifyPath (one), each a
+        // total time and its (position, msToNext) points.
+        auto readPath = [&bs]() {
+            bs.readU32(); // totalTime
+            const uint32_t points = bs.readU32();
+            if (points > 4096) { bs.fail(); return; }
+            for (uint32_t j = 0; j < points && !bs.isError(); ++j) {
+                bs.readF32(); bs.readF32(); bs.readF32();
+                bs.readU32();
+            }
+        };
+        if (bs.readFlag()) {
+            const uint32_t count = bs.readU32();
+            if (count > 4096) return false;
+            for (uint32_t i = 0; i < count && !bs.isError(); ++i) readPath();
+        } else {
+            bs.readU32(); // path id
+            readPath();
+        }
     } else if (ev.classId == T2Demo::NetEventClassFirst + 7) { // NetStringEvent
         const int id = bs.readInt(10);
         if (bs.readFlag()) {
