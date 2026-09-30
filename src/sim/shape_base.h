@@ -64,6 +64,11 @@ struct ShapeBaseImageData {
     float minEnergy = 2.0f;
     bool accuFire = false;
     bool isSeeker = false;
+    // Seeker locking (ShapeBaseImageData): the cone, lock time and heat, the
+    // minimum lock distance, and the projectile whose range bounds it.
+    float seekRadius = 0, maxSeekAngle = 0, seekTime = 0, minSeekHeat = 0.4f, targetingDist = 0;
+    bool useTargetAudio = true;
+    std::string projectile;
     int fireState = -1; // the first state marked stateFire
     StateData state[MaxStates];
 
@@ -154,9 +159,29 @@ public:
     void setDamageLevel(float level);
     // Server: the damage level's effect on the damage state (Player).
     virtual void updateDamageLevel() {}
+
+    // Seeker locks (ShapeBase::thinkAboutLocking): the shape or beacon point
+    // image 0's seeker is locked on, and whether it is still tracking one.
+    enum LockMode { NotLocked, LockObject, LockPosition };
+    int lockMode = NotLocked;
+    std::string lockTarget;
+    Point3F lockPosition{0, 0, 0};
+    bool tracking = false;
+    struct PotentialLock {
+        std::string key;
+        bool isTarget = false; // a beacon (the server target set), not a shape
+        uint32_t tag = 0, numTicks = 0;
+    };
+    std::vector<PotentialLock> potentialTargets; // newest first
+    void thinkAboutLocking();
+    void setLockedTarget(ShapeBase* target);
+    void setLockedTargetPosition(const Point3F& position);
+    int lockedTargetId() const;
     // ShapeBase::onNewDataBlock: the threads restart on the new shape; energy,
     // damage and the repair reserve start over, the shape Enabled.
     bool onNewDataBlock() override;
+    // ShapeBase::onAdd: the datablock's heat (ShapeBaseData heat, 1.0).
+    void readFields() override;
     // mWorldBox: the shape's DTS bounds through the transform.
     virtual bool worldBox(float lo[3], float hi[3]) const;
     // The world box of the shape's collision mesh (what rays and vehicles

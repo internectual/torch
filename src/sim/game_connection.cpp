@@ -6,6 +6,7 @@
 #include "sim/datablock_pack.h"
 #include "sim/shape_base.h"
 #include "sim/containers.h"
+#include "sim/player.h"
 #include "sim/torque_math.h"
 #include "net/remote_command.h"
 #include "net/v12_bitstream.h"
@@ -320,8 +321,34 @@ void GameConnection::writeControlObject(TorqueBitWriter& w, uint32_t& noteKey) {
             if (w.writeFlag(flash != 0)) w.writeFloat(flash, 7);
             if (w.writeFlag(whiteOut != 0)) w.writeFloat(whiteOut / 1.5f, 7);
         }
-        w.writeFlag(false); // lock / homing counts
-        w.writeFlag(false); // tracking / lock mode
+        // The lock and homing counts on the control object and its mount.
+        int lockCount = control->lockCount, homingCount = control->homingCount;
+        if (auto* mount = control->mount.empty() ? nullptr : EngineObjects::get<ShapeBase>(control->mount)) {
+            lockCount += mount->lockCount;
+            homingCount += mount->homingCount;
+        }
+        if (w.writeFlag(lockCount | homingCount)) {
+            w.writeFlag(lockCount > 0);
+            w.writeFlag(homingCount > 0);
+        }
+        // The seeker's lock, on what the control object drives. The shipped
+        // build follows the tracking flag with a position this port has not
+        // recovered, so tracking is not sent.
+        ShapeBase* co = control;
+        if (auto* player = dynamic_cast<PlayerObject*>(control); player && !player->controlObject.empty())
+            if (auto* driven = EngineObjects::get<ShapeBase>(player->controlObject)) co = driven;
+        if (w.writeFlag(co->lockMode != ShapeBase::NotLocked)) {
+            w.writeFlag(false); // tracking
+            w.writeRangedU32((uint32_t)co->lockMode, ShapeBase::NotLocked, ShapeBase::LockPosition);
+            if (co->lockMode == ShapeBase::LockObject) {
+                const int gi = co->lockTarget.empty() ? -1 : ghostIndex(co->lockTarget);
+                if (w.writeFlag(gi != -1)) w.writeRangedU32((uint32_t)gi, 0, 1023);
+            } else if (co->lockMode == ShapeBase::LockPosition) {
+                w.writeF32(co->lockPosition.x);
+                w.writeF32(co->lockPosition.y);
+                w.writeF32(co->lockPosition.z);
+            }
+        }
     } else {
         w.writeFlag(false);
         w.writeFlag(false);

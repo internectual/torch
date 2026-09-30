@@ -169,6 +169,8 @@ private:
     float mCurrentPitch = 0, mPreviousPitch = 0, mDesiredPitch = 0, mPitchIncrement = 0;
     std::string mProjectileName;
     int mProjectileCounter = 0, mEvadingCounter = 0;
+    std::string mEnemyProjectile; // the incoming projectile being evaded
+    Point3F mImpactLocation{0, 0, 0};
     bool mIsEvading = false;
     std::string mVictim, mCorpse;
     Point3F mCorpseLocation{0, 0, 0};

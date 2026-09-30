@@ -41,6 +41,9 @@ public:
     // setTransform(MatrixF(true) with the position).
     void setPosition(const Point3F& p);
     virtual Point3F getVelocity() const { return {0, 0, 0}; }
+    // Projectile::calculateImpact: where and when (seconds) the projectile
+    // will strike within simTime; false when it will not (the AI evades).
+    virtual bool calculateImpact(float simTime, Point3F& pointOfImpact, float& impactTime);
     ShapeBase* source() const;
     ShapeBase* vehicle() const;
     ScriptObject* sourceScript() const;
@@ -81,6 +84,7 @@ public:
     explicit LinearProjectileObject(const char* netClass = "LinearProjectile") : ProjectileObject(netClass) {}
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
     Point3F getVelocity() const override { return deriveExactVelocity(currTick); }
+    bool calculateImpact(float simTime, Point3F& pointOfImpact, float& impactTime) override;
 
     struct Segment {
         Point3F start{0, 0, 0}, end{0, 0, 0}, segmentVel{0, 0, 0};
@@ -119,12 +123,12 @@ public:
     explicit GrenadeProjectileObject(const char* netClass = "GrenadeProjectile") : ProjectileObject(netClass) {}
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
     Point3F getVelocity() const override { return velocity; }
+    bool calculateImpact(float simTime, Point3F& pointOfImpact, float& impactTime) override;
 
     Point3F velocity{0, 0, 0};
     Point3F explosionPosition{0, 0, 0}, explosionNormal{0, 0, 1};
     int64_t deleteTick = -1;
     uint32_t armTick = 0;
-    int lockCount = 0; // FlareProjectile: missiles decoyed by it
 
 protected:
     void onAddServer() override;
@@ -164,6 +168,7 @@ public:
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
     Point3F getVelocity() const override { return velocity; }
 
+    bool calculateImpact(float simTime, Point3F& pointOfImpact, float& impactTime) override;
     void setObjectTarget(ScriptObject* target);
     void setPositionTarget(const Point3F& p);
     void setNoTarget();
@@ -194,6 +199,13 @@ class BeamProjectileObject : public ProjectileObject {
 public:
     explicit BeamProjectileObject(const char* netClass) : ProjectileObject(netClass) {}
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
+    // SniperProjectile / TargetProjectile::calculateImpact: the beam's end
+    // when it was cut short.
+    bool calculateImpact(float, Point3F& pointOfImpact, float& impactTime) override {
+        impactTime = 0;
+        pointOfImpact = truncated ? endPoint : Point3F{0, 0, 0};
+        return truncated;
+    }
     Point3F endPoint{0, 0, 0};
     bool truncated = false, beamHitWater = false;
     float energyPercentage = 0.0f;
@@ -246,6 +258,7 @@ public:
     enum EPUpdateMasks : uint32_t { TargetMask = GameBase::NextFreeMask };
     ELFProjectileObject() : ProjectileObject("ELFProjectile") {}
     ~ELFProjectileObject() override;
+    bool calculateImpact(float, Point3F& pointOfImpact, float& impactTime) override;
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
     std::string targetKey;
 

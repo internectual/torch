@@ -628,6 +628,11 @@ GrenadeProjectileObject* flareOf(const std::string& key) {
     return object && EngineClasses::isA(object->className, "FlareProjectile")
         ? dynamic_cast<GrenadeProjectileObject*>(object->engine.get()) : nullptr;
 }
+// The missile's target (GameBase::incHomingCount / decHomingCount).
+GameBase* homingTargetOf(const std::string& key) {
+    ScriptObject* object = findScript(key);
+    return object ? dynamic_cast<GameBase*>(object->engine.get()) : nullptr;
+}
 } // namespace
 
 void SeekerProjectileObject::onAddServer() {
@@ -643,14 +648,14 @@ void SeekerProjectileObject::onAddServer() {
 
 void SeekerProjectileObject::setObjectTarget(ScriptObject* target) {
     if (!target || !dynamic_cast<GameBase*>(target->engine.get())) return;
-    if (auto* flare = flareOf(targetKey)) --flare->lockCount;
+    if (auto* target = homingTargetOf(targetKey)) target->decHomingCount();
     targetKey = originalTargetKey = keyOf(target);
     mode = ObjectTarget;
-    if (auto* flare = flareOf(targetKey)) ++flare->lockCount;
+    if (auto* target = homingTargetOf(targetKey)) target->incHomingCount();
 }
 
 void SeekerProjectileObject::setPositionTarget(const Point3F& p) {
-    if (auto* flare = flareOf(targetKey)) --flare->lockCount;
+    if (auto* target = homingTargetOf(targetKey)) target->decHomingCount();
     targetKey.clear();
     originalTargetKey.clear();
     targetPosition = p;
@@ -658,7 +663,7 @@ void SeekerProjectileObject::setPositionTarget(const Point3F& p) {
 }
 
 void SeekerProjectileObject::setNoTarget() {
-    if (auto* flare = flareOf(targetKey)) --flare->lockCount;
+    if (auto* target = homingTargetOf(targetKey)) target->decHomingCount();
     targetKey.clear();
     originalTargetKey.clear();
     mode = NoTarget;
@@ -670,7 +675,7 @@ int SeekerProjectileObject::targetObjectId() const {
 }
 
 void SeekerProjectileObject::clearTarget() {
-    if (auto* flare = flareOf(targetKey)) --flare->lockCount;
+    if (auto* target = homingTargetOf(targetKey)) target->decHomingCount();
     targetKey.clear();
 }
 
@@ -685,7 +690,7 @@ bool SeekerProjectileObject::getTarget(Point3F& out) {
     if (!findScript(targetKey)) {
         if (!findScript(originalTargetKey)) return false;
         targetKey = originalTargetKey;
-        if (auto* flare = flareOf(targetKey)) ++flare->lockCount;
+        if (auto* target = homingTargetOf(targetKey)) target->incHomingCount();
     }
     const SeekerData d = seekerData(*this);
     if (targetKey == originalTargetKey && d.flareDistance > 0.0f && d.flareAngle > 0.0f) {
@@ -695,7 +700,7 @@ bool SeekerProjectileObject::getTarget(Point3F& out) {
         for (auto& [key, object] : ScriptEngine::instance().objects) {
             if (!object || !EngineClasses::isA(object->className, "FlareProjectile")) continue;
             auto* flare = dynamic_cast<GrenadeProjectileObject*>(object->engine.get());
-            if (!flare || flare->lockCount != 0) continue;
+            if (!flare || flare->homingCount != 0) continue;
             const Point3F delta = sub(flare->getPosition(), pos);
             const float dist = len(delta);
             if (dist > d.flareDistance || dist > bestDist) continue;
@@ -706,7 +711,7 @@ bool SeekerProjectileObject::getTarget(Point3F& out) {
         if (best && keyOf(best) != targetKey) {
             clearTarget();
             targetKey = keyOf(best);
-            if (auto* flare = flareOf(targetKey)) ++flare->lockCount;
+            if (auto* target = homingTargetOf(targetKey)) target->incHomingCount();
             setMaskBits(TargetMask);
         }
     }
@@ -1172,4 +1177,105 @@ void registerProjectileNatives(TorqueScript& ts) {
                       hit ? ScriptEngine::instance().objectId(hit) : -1);
         return VMValue(buffer);
     });
+}
+
+bool ProjectileObject::calculateImpact(float, Point3F& pointOfImpact, float& impactTime) {
+    Console::instance().printf(LogLevel::Warn,
+        "Projectile::calculateImpact: this function is (essentially) pure virtual.  Should never be called");
+    impactTime = 0;
+    pointOfImpact = {0, 0, 0};
+    return false;
+}
+
+bool LinearProjectileObject::calculateImpact(float simTime, Point3F& pointOfImpact, float& impactTime) {
+    if (hidden) {
+        impactTime = 0;
+        pointOfImpact = {0, 0, 0};
+        return false;
+    }
+    const Point3F startPt = getPosition();
+    const uint32_t forwardTicks = (uint32_t)((simTime * 1000.0f) / TickMs);
+    if ((currTick + forwardTicks) * TickMs > segments[0].msEnd) {
+        // Hit a wall or the terrain...
+        const uint32_t currMS = currTick * TickMs;
+        impactTime = ((float)segments[0].msEnd - (float)currMS) / 1000.0f;
+        if (impactTime < 0.0f) impactTime = 0.0f;
+        pointOfImpact = segments[0].end;
+        return true;
+    }
+    const Point3F endPt = deriveExactPosition(currTick + forwardTicks);
+    RayInfo rayInfo;
+    if (!castRay(startPt, endPt, PlayerObjectType | TerrainObjectType | InteriorObjectType | WaterObjectType, rayInfo)) {
+        impactTime = 0;
+        pointOfImpact = {0, 0, 0};
+        return false;
+    }
+    const Point3F currVel = deriveExactVelocity(currTick);
+    pointOfImpact = rayInfo.point;
+    const float distToImpact = len(sub(pointOfImpact, startPt));
+    impactTime = distToImpact > 1.0f && len(currVel) > 0.0f ? distToImpact / len(currVel) : 0.0f;
+    return true;
+}
+
+bool GrenadeProjectileObject::calculateImpact(float simTime, Point3F& pointOfImpact, float& impactTime) {
+    if (hidden) {
+        impactTime = 0;
+        pointOfImpact = {0, 0, 0};
+        return false;
+    }
+    const float timeSlice = 0.25f;
+    Point3F currPos = getPosition(), currVel = velocity;
+    for (float currT = 0.0f; currT <= simTime; currT += timeSlice) {
+        const Point3F newVel = add(currVel, mul(Point3F{0, 0, -9.81f * gravityMod}, timeSlice));
+        const Point3F newPos = add(currPos, mul(newVel, timeSlice));
+        RayInfo rayInfo;
+        if (castRay(currPos, newPos,
+                    PlayerObjectType | TerrainObjectType | InteriorObjectType | WaterObjectType | ForceFieldObjectType,
+                    rayInfo)) {
+            pointOfImpact = rayInfo.point;
+            impactTime = currT + (len(sub(currPos, pointOfImpact)) / len(sub(currPos, newPos))) * timeSlice;
+            return true;
+        }
+        currPos = newPos;
+        currVel = newVel;
+    }
+    impactTime = 0;
+    pointOfImpact = {0, 0, 0};
+    return false;
+}
+
+bool SeekerProjectileObject::calculateImpact(float simTime, Point3F& pointOfImpact, float& impactTime) {
+    if (hidden) {
+        impactTime = 0;
+        pointOfImpact = {0, 0, 0};
+        return false;
+    }
+    const Point3F startPt = getPosition();
+    const float muzzleVelocity = data("muzzleVelocity", 50.0f);
+    if (mode == ObjectTarget && findScript(targetKey)) {
+        pointOfImpact = worldBoxCenter(findScript(targetKey));
+        impactTime = len(sub(pointOfImpact, startPt)) / muzzleVelocity;
+        return impactTime <= simTime;
+    }
+    // Ray cast forward just like a linear projectile...
+    const Point3F endPt = add(startPt, mul(velocity, simTime));
+    RayInfo rayInfo;
+    if (!castRay(startPt, endPt, PlayerObjectType | TerrainObjectType | InteriorObjectType | WaterObjectType, rayInfo)) {
+        impactTime = 0;
+        pointOfImpact = {0, 0, 0};
+        return false;
+    }
+    pointOfImpact = rayInfo.point;
+    impactTime = len(sub(pointOfImpact, startPt)) / muzzleVelocity;
+    return true;
+}
+
+bool ELFProjectileObject::calculateImpact(float, Point3F& pointOfImpact, float& impactTime) {
+    impactTime = 0;
+    if (ScriptObject* target = findScript(targetKey)) {
+        pointOfImpact = worldBoxCenter(target);
+        return true;
+    }
+    pointOfImpact = {0, 0, 0};
+    return false;
 }

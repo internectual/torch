@@ -38,6 +38,16 @@ public:
     // The connection controlling this object (its key), empty when none.
     std::string controllingClient;
     int targetId = -1;
+    // mLockCount (seekers locked on this object) and mHomingCount (missiles
+    // homing on it): the "locked" / "incoming" warnings of its controller.
+    int lockCount = 0, homingCount = 0;
+    void incLockCount() { lockCount++; }
+    void decLockCount() { if (lockCount) lockCount--; }
+    void incHomingCount() {
+        homingCount++;
+        if (lockCount > 0) decLockCount();
+    }
+    void decHomingCount() { if (homingCount) homingCount--; }
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
     // GameBase::writePacketData: the control object's state for its client.
     // Returns false when it has to be sent again soon.

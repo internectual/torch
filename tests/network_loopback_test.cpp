@@ -1041,6 +1041,39 @@ int main() {
                shapeEntry->threads[0].state == ShapeBase::ScriptThread::Play && !shapeEntry->threads[0].forward);
     }
     {
+        // ShapeBase::thinkAboutLocking: a seeker image locks onto a hot target
+        // in its cone after seekTime * (2 - heat), not onto a cold one.
+        script.ts()->execute("datablock PlayerData(LockArmor) { mass = 90; maxEnergy = 60; boxSize = \"1.2 1.2 2.3\"; };"
+                             "datablock ShapeBaseImageData(LockSeekImage) { isSeeker = true; seekRadius = 400; "
+                             "  maxSeekAngle = 8; seekTime = 0.5; };"
+                             "new Player(LockShooter) { dataBlock = LockArmor; };"
+                             "new Player(LockHot) { dataBlock = LockArmor; };"
+                             "LockShooter.setTransform(\"0 0 500 0 0 1 0\"); LockHot.setTransform(\"0 60 500 0 0 1 0\");"
+                             "LockShooter.mountImage(LockSeekImage, 0); LockHot.setHeat(1);");
+        auto* shooter = EngineObjects::get<PlayerObject>("LockShooter");
+        assert(shooter);
+        ClientMoveIn still;
+        still.exact = true;
+        auto* hot = EngineObjects::get<PlayerObject>("LockHot");
+        // Both fall together (no ground here), the target staying in the cone.
+        for (int i = 0; i < 40; ++i) {
+            shooter->processMove(&still);
+            hot->processMove(nullptr);
+        }
+        script.ts()->execute("$lockedOn = LockShooter.getLockedTarget(); $isLocked = LockShooter.isLocked();"
+                             "$hotId = LockHot.getId();");
+        assert(script.ts()->getGlobal("$isLocked").toInt() == 1);
+        assert(script.ts()->getGlobal("$lockedOn").toInt() == script.ts()->getGlobal("$hotId").toInt());
+        script.ts()->execute("LockHot.setHeat(0);");
+        for (int i = 0; i < 4; ++i) {
+            shooter->processMove(&still);
+            hot->processMove(nullptr);
+        }
+        script.ts()->execute("$isLocked = LockShooter.isLocked();");
+        assert(script.ts()->getGlobal("$isLocked").toInt() == 0);
+        for (const char* name : {"LockShooter", "LockHot"}) ScriptEngine::instance().deleteScriptObject(name);
+    }
+    {
         // Path::finishPath: a Path's Markers in seqNum order; the total time
         // leaves out the last marker's msToNext.
         const size_t before = PathManager::paths().size();

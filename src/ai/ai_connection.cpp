@@ -1,4 +1,5 @@
 #include "ai/ai_connection.h"
+#include "sim/projectiles.h"
 #include "ai/ai_step.h"
 #include "ai/ai_task.h"
 #include "sim/containers.h"
@@ -587,9 +588,10 @@ void AIConnection::scriptProcessEngagement() {
         targetType = "object";
         targetId = std::to_string(ScriptEngine::instance().objectId(object->script));
     }
-    // Not ported: the incoming projectile (Projectile::calculateImpact
-    // evasion); the argument is always -1.
-    callScript("AIProcessEngagement", {std::to_string(id()), targetId, targetType, "-1"});
+    std::string projectileId = "-1";
+    if (ScriptObject* projectile = mEnemyProjectile.empty() ? nullptr : ScriptEngine::instance().findObject(mEnemyProjectile.c_str()))
+        if (mEvadingCounter > 0 && mEvadingCounter < 45) projectileId = std::to_string(ScriptEngine::instance().objectId(projectile));
+    callScript("AIProcessEngagement", {std::to_string(id()), targetId, targetType, projectileId});
 }
 
 void AIConnection::scriptChooseEngageWeapon(float distToTarg) {
@@ -677,7 +679,33 @@ void AIConnection::processEngagement(PlayerObject* player) {
         if (same(targetLocation, {0, 0, 0})) targetLocation = worldBoxCenter(object->script);
         distToTarg = mDistToObject2D;
     }
+    //detect the projectiles from the target
     mProjectileCounter--;
+    if (engagingPlayer) {
+        const std::string incoming = engage && engage->script ? Fields::string(engage->script, "projectile") : std::string();
+        ScriptObject* projectileObject = incoming.empty() ? nullptr : ScriptEngine::instance().findObject(incoming.c_str());
+        auto* projectile = projectileObject ? dynamic_cast<ProjectileObject*>(projectileObject->engine.get()) : nullptr;
+        const std::string projectileKey = projectile ? ScriptEngine::instance().objectKey(projectileObject) : std::string();
+        //see if it's a new threat, or time to re-evaluate the current one
+        if (projectile && (projectileKey != mEnemyProjectile || mProjectileCounter <= 0)) {
+            //reset the projectile counter
+            mProjectileCounter = 15;
+            float timeToImpact;
+            ScriptObject* projData = ScriptEngine::instance().findObject(projectile->dataBlock().c_str());
+            if (projData && projectile->calculateImpact(4.0f, mImpactLocation, timeToImpact)) {
+                //see if the impact location is within range
+                const Point3F predictMyLocation = add(mLocation, mul(mVelocity, timeToImpact));
+                const float distToDanger = len(sub(predictMyLocation, mImpactLocation));
+                if (distToDanger < std::max(Fields::f32(projData, "damageRadius", 0.0f), 2.0f)) {
+                    setEvadeLocation(mImpactLocation);
+                    mEnemyProjectile = projectileKey;
+                    //set the evade counter - any value above 45 is simulated response time
+                    const int responseTime = (int)(30 * (1.0f - mSkillLevel));
+                    mEvadingCounter = 45 + responseTime;
+                }
+            }
+        }
+    }
     Point3F dummyPoint;
     if (mNavUsingJet && mJetting.shouldAimAt(dummyPoint)) return;
     if (engage) {
@@ -747,11 +775,34 @@ void AIConnection::processEngagement(PlayerObject* player) {
             mEngageState = ChooseWeapon;
             break;
         }
-        // Not ported: aiming at lazed targets (Sim::getServerTargetSet).
+        //should we go for center mass, or splash damage, or are we shooting at a lazed target
+        Point3F aimAtTargetPoint{0, 0, 0};
         mAimAtLazedTarget = false;
+        //only shoot at lazed targets if we're using a ballistic weapon
+        if (ballistic) {
+            // Sim::getServerTargetSet: the beacons (GameBase::setBeacon from
+            // the datablock's beacon flag) and their GameBase::getTarget.
+            for (auto& [key, object] : ScriptEngine::instance().objects) {
+                auto* target = object ? dynamic_cast<GameBase*>(object->engine.get()) : nullptr;
+                if (!target || !target->dataBool("beacon", false)) continue;
+                Point3F targetPoint;
+                if (auto* laser = dynamic_cast<TargetProjectileObject*>(target)) {
+                    if (!laser->truncated) continue;
+                    targetPoint = laser->endPoint;
+                } else {
+                    if (target->targetId < 0) continue;
+                    targetPoint = {target->transform[3], target->transform[7], target->transform[11]};
+                }
+                //see if the target is within 20m of what we're trying to shoot at...
+                if (len(sub(targetPoint, targetLocation)) < 10.0f) {
+                    aimAtTargetPoint = targetPoint;
+                    mAimAtLazedTarget = true;
+                }
+            }
+        }
         const bool splash = projectile && Fields::boolean(projectile, "hasDamageRadius", false) &&
                             Fields::f32(projectile, "damageRadius", 0) > 5.0f;
-        const Point3F aimAtTargetPoint = engagingPlayer && splash ? mTargLocation : targetLocation;
+        if (!mAimAtLazedTarget) aimAtTargetPoint = engagingPlayer && splash ? mTargLocation : targetLocation;
         if (projectile) {
             Point3F aimVectorMin, aimVectorMax;
             float timeMin, timeMax;
@@ -759,9 +810,8 @@ void AIConnection::processEngagement(PlayerObject* player) {
             if (engagingPlayer)
                 canShoot = ProjectileAim::calculateAim(projectile, aimAtTargetPoint, mTargVelocity, mMuzzlePosition,
                                                        mVelocity, &aimVectorMin, &timeMin, &aimVectorMax, &timeMax);
-            // Not ported: missile locks (the locked target id is none), so a
-            // MissileVehicle object is never shot at.
-            else if (mObjectMode != MissileVehicle)
+            else if (mObjectMode != MissileVehicle ||
+                     (object && player->lockedTargetId() == ScriptEngine::instance().objectId(object->script)))
                 canShoot = ProjectileAim::calculateAim(projectile, aimAtTargetPoint, {0, 0, 0}, mMuzzlePosition,
                                                        mVelocity, &aimVectorMin, &timeMin, &aimVectorMax, &timeMax);
             if (canShoot) {

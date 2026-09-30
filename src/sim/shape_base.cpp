@@ -13,6 +13,10 @@
 #include "sim/nav_graph.h"
 #include "sim/net_string_table.h"
 #include "sim/player.h"
+#include "sim/projectiles.h"
+#include "sim/force_field.h"
+#include "sim/target_manager.h"
+#include "sim/containers.h"
 #include "sim/torque_math.h"
 #include "script/script_engine.h"
 #include "script/torquescript.h"
@@ -33,6 +37,11 @@ float ShapeBase::getEnergyValue() const {
 
 void ShapeBase::setEnergyLevel(float level) {
     if (damageState == Enabled) energy = std::clamp(level, 0.0f, std::max(0.0f, maxEnergy()));
+}
+
+void ShapeBase::readFields() {
+    SceneObject::readFields();
+    heat = std::clamp(dataFloat("heat", 1.0f), 0.0f, 1.0f);
 }
 
 bool ShapeBase::onNewDataBlock() {
@@ -449,6 +458,13 @@ std::shared_ptr<const ShapeBaseImageData> ShapeBaseImageData::find(const std::st
     data->minEnergy = c.f32("minEnergy", 2.0f);
     data->accuFire = c.boolean("accuFire", false);
     data->isSeeker = c.boolean("isSeeker", false);
+    data->seekRadius = c.f32("seekRadius", 0.0f);
+    data->maxSeekAngle = c.f32("maxSeekAngle", 0.0f);
+    data->seekTime = c.f32("seekTime", 0.0f);
+    data->minSeekHeat = c.f32("minSeekHeat", 0.4f);
+    data->targetingDist = c.f32("targetingDist", 0.0f);
+    data->useTargetAudio = c.boolean("useTargetAudio", true);
+    data->projectile = c.str("projectile");
     for (int i = 0; i < MaxStates; ++i) data->state[i].name = c.str(indexed("stateName", i).c_str());
     for (int i = 0; i < MaxStates; ++i) {
         StateData& s = data->state[i];
@@ -1037,11 +1053,15 @@ void ShapeBase::processMove(const ClientMoveIn* move) {
     // update wet state
     setImageWetState(0, waterCoverage > 0.4f); // more than 40 percent covered
     if (waterCoverage < 0.4f && images[0].dataBlock && images[0].dataBlock->isSeeker && move) {
-        // thinkAboutLocking is not ported (no server container of heat
-        // sources): there are never potential targets, so the seeker is
-        // neither tracking nor locked.
+        thinkAboutLocking();
+        tracking = lockMode == NotLocked && !potentialTargets.empty();
         setImageWetState(0, false);
-        setImageTargetState(0, false);
+        // update the targeting for seeker images
+        setImageTargetState(0, tracking || lockMode == LockObject || lockMode == LockPosition);
+    } else {
+        tracking = false;
+        potentialTargets.clear();
+        setLockedTarget(nullptr);
     }
 
     // Advance images
@@ -1408,6 +1428,14 @@ void registerShapeBaseNatives(TorqueScript& ts) {
         return VMValue("");
     });
     method("getHeat", [](ShapeBase& s, const Args&) { return VMValue(s.heat); });
+    method("getLockedTarget", [](ShapeBase& s, const Args&) { return VMValue(s.lockedTargetId()); });
+    method("getLockedPosition", [](ShapeBase& s, const Args&) {
+        char buffer[128];
+        std::snprintf(buffer, sizeof(buffer), "%f %f %f", s.lockPosition.x, s.lockPosition.y, s.lockPosition.z);
+        return VMValue(buffer);
+    });
+    method("isLocked", [](ShapeBase& s, const Args&) { return VMValue(s.lockMode != ShapeBase::NotLocked ? 1 : 0); });
+    method("isTracking", [](ShapeBase& s, const Args&) { return VMValue(s.tracking ? 1 : 0); });
     method("hide", [arg](ShapeBase& s, const Args& a) { s.hidden = arg(a, 1).toBool(); return VMValue(""); });
     method("isHidden", [](ShapeBase& s, const Args&) { return VMValue(s.hidden ? 1 : 0); });
     method("getCameraFov", [](ShapeBase& s, const Args&) { return VMValue(s.cameraFov); });
@@ -1571,4 +1599,216 @@ void registerShapeBaseNatives(TorqueScript& ts) {
             });
         }
     }
+}
+
+namespace {
+
+Point3F boxCenter(const ShapeBase& shape) {
+    float lo[3], hi[3];
+    shape.worldBox(lo, hi);
+    return {(lo[0] + hi[0]) * 0.5f, (lo[1] + hi[1]) * 0.5f, (lo[2] + hi[2]) * 0.5f};
+}
+
+// GameBase::getTarget: a beacon's point (its position while it has a target;
+// a targeting beam's end once it struck something).
+bool beaconPoint(GameBase& beacon, Point3F& point) {
+    if (auto* laser = dynamic_cast<TargetProjectileObject*>(&beacon)) {
+        if (!laser->truncated) return false;
+        point = laser->endPoint;
+        return true;
+    }
+    if (beacon.targetId < 0) return false;
+    point = {beacon.transform[3], beacon.transform[7], beacon.transform[11]};
+    return true;
+}
+
+// GameBase::mBeaconType (enemy 0, friend 1, vehicle 2).
+int beaconTypeOf(GameBase& beacon) {
+    if (auto* object = dynamic_cast<BeaconObject*>(&beacon)) return object->beaconType;
+    const std::string type = beacon.script ? Fields::string(ScriptEngine::instance().findObject(beacon.dataBlock().c_str()), "beaconType") : "";
+    return strcasecmp(type.c_str(), "friend") == 0 ? 1 : strcasecmp(type.c_str(), "vehicle") == 0 ? 2 : 0;
+}
+
+float dot3(const Point3F& a, const Point3F& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+Point3F sub3(const Point3F& a, const Point3F& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+Point3F norm3(Point3F v) {
+    const float l = std::sqrt(dot3(v, v));
+    return l > 0 ? Point3F{v.x / l, v.y / l, v.z / l} : Point3F{0, 0, 1};
+}
+Point3F cross3(const Point3F& a, const Point3F& b) {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+} // namespace
+
+// ShapeBase::thinkAboutLocking: the seeker image's cone gathers heat
+// sources (and, for players, friendly beacons) held long enough, then
+// locks the one nearest the aim.
+void ShapeBase::thinkAboutLocking() {
+    const ShapeBaseImageData* image = getMountedImage(0);
+    if (!image || !image->isSeeker) return;
+    auto& engine = ScriptEngine::instance();
+    float mv[3], mp[3];
+    getMuzzleVector(0, mv);
+    getMuzzlePoint(0, mp);
+    const Point3F muzzleVector{mv[0], mv[1], mv[2]}, muzzlePoint{mp[0], mp[1], mp[2]};
+    Point3F coord0 = std::fabs(muzzleVector.z) < 0.9f ? cross3(muzzleVector, {0, 0, 1}) : cross3(muzzleVector, {0, 1, 0});
+    coord0 = norm3(coord0);
+    Point3F coord1 = norm3(cross3(muzzleVector, coord0));
+    const float seekAngle = image->maxSeekAngle / 2.0f;
+    const float sinSeekAngle = std::sin(seekAngle * (float)M_PI / 180.0f), cosSeekAngle = std::cos(seekAngle * (float)M_PI / 180.0f);
+    const Point3F end{muzzlePoint.x + muzzleVector.x * image->seekRadius, muzzlePoint.y + muzzleVector.y * image->seekRadius,
+                      muzzlePoint.z + muzzleVector.z * image->seekRadius};
+    const float r = image->seekRadius * sinSeekAngle;
+    coord0 = {coord0.x * r, coord0.y * r, coord0.z * r};
+    coord1 = {coord1.x * r, coord1.y * r, coord1.z * r};
+    Point3F lo = muzzlePoint, hi = muzzlePoint;
+    for (float s0 : {1.0f, -1.0f})
+        for (float s1 : {1.0f, -1.0f}) {
+            const Point3F c{end.x + s0 * coord0.x + s1 * coord1.x, end.y + s0 * coord0.y + s1 * coord1.y,
+                            end.z + s0 * coord0.z + s1 * coord1.z};
+            lo = {std::min(lo.x, c.x), std::min(lo.y, c.y), std::min(lo.z, c.z)};
+            hi = {std::max(hi.x, c.x), std::max(hi.y, c.y), std::max(hi.z, c.z)};
+        }
+    // range = lifetime * maxVelocity
+    float maxRange = -1.0f;
+    if (ScriptObject* projectile = engine.findObject(image->projectile.c_str()))
+        if (EngineClasses::isA(projectile->className, "SeekerProjectileData"))
+            maxRange = (Fields::f32(projectile, "lifetimeMS", 0) / 1000.0f) * Fields::f32(projectile, "maxVelocity", 0);
+    const bool isPlayer = dynamic_cast<PlayerObject*>(this) != nullptr;
+    const uint32_t mySensorGroup = sensorGroupOf(*this);
+    constexpr uint32_t losMask = SimContainer::TerrainObjectType | SimContainer::InteriorObjectType |
+                                 SimContainer::PlayerObjectType | SimContainer::VehicleObjectType;
+    auto addPotential = [&](const std::string& key, bool isTarget, uint32_t tag) {
+        for (auto& lock : potentialTargets)
+            if (lock.key == key) {
+                lock.tag = tag;
+                lock.numTicks++;
+                return;
+            }
+        potentialTargets.insert(potentialTargets.begin(), {key, isTarget, tag, 1});
+    };
+    static uint32_t sTag = 0;
+    sTag++;
+    const uint32_t mask = SimContainer::SensorObjectType | SimContainer::TurretObjectType |
+                          SimContainer::PlayerObjectType | SimContainer::VehicleObjectType;
+    for (ScriptObject* object : SimContainer::findObjects(lo, hi, mask)) {
+        auto* target = dynamic_cast<ShapeBase*>(object->engine.get());
+        if (!target || target == this) continue;
+        if (target->heat < image->minSeekHeat || target->damageState == Destroyed) continue;
+        // require that beacon objects be processed through targetSet
+        if (target->dataBool("beacon", false)) continue;
+        // players do not use the visible state of the target (heat only)
+        if ((!ServerTargets::isTargetVisible(target->targetId, mySensorGroup) && !isPlayer) ||
+            ServerTargets::isTargetFriendly(targetId, sensorGroupOf(*target)))
+            continue;
+        const Point3F centerBox = boxCenter(*target);
+        const float distance = std::sqrt(dot3(sub3(centerBox, muzzlePoint), sub3(centerBox, muzzlePoint)));
+        // must be within the targeting dist
+        if (distance <= image->targetingDist) continue;
+        if (maxRange >= 0.0f && distance > maxRange) continue;
+        // make sure there is an los to this object...
+        SimContainer::RayInfo info;
+        if (SimContainer::castRay(muzzlePoint, centerBox, losMask, info, {script, object})) continue;
+        if (dot3(norm3(sub3(centerBox, muzzlePoint)), muzzleVector) < cosSeekAngle) continue;
+        addPotential(engine.objectKey(object), false, sTag);
+    }
+    // grab all the beacon'd objects (probably just 'beacons' and target beams);
+    // only players allowed to fire on beacons/targets
+    if (isPlayer)
+        for (auto& [key, object] : engine.objects) {
+            auto* beacon = object ? dynamic_cast<GameBase*>(object->engine.get()) : nullptr;
+            if (!beacon || !beacon->dataBool("beacon", false)) continue;
+            // dont allow freind beacons to be locked (these are the marker ones)
+            if (beaconTypeOf(*beacon) == 1) continue;
+            // needs to be friendly
+            if (!ServerTargets::isTargetVisible(beacon->targetId, mySensorGroup) ||
+                !ServerTargets::isTargetFriendly(targetId, sensorGroupOf(*beacon)))
+                continue;
+            Point3F point;
+            if (!beaconPoint(*beacon, point)) continue;
+            const float distance = std::sqrt(dot3(sub3(point, muzzlePoint), sub3(point, muzzlePoint)));
+            if (distance <= image->targetingDist) continue;
+            if (maxRange >= 0.0f && distance > maxRange) continue;
+            if (dot3(norm3(sub3(point, muzzlePoint)), muzzleVector) < cosSeekAngle) continue;
+            addPotential(engine.objectKey(object), true, sTag);
+        }
+    // Choose best from potentialTargets...
+    float maxDp = -2.0f;
+    ShapeBase* best = nullptr;
+    GameBase* bestBeacon = nullptr;
+    Point3F bestPosition{0, 0, 0};
+    for (auto it = potentialTargets.begin(); it != potentialTargets.end();) {
+        auto* gameBase = EngineObjects::get<GameBase>(it->key);
+        if (!it->isTarget) {
+            auto* target = dynamic_cast<ShapeBase*>(gameBase);
+            if (!target || it->tag != sTag || target->heat < image->minSeekHeat) {
+                it = potentialTargets.erase(it);
+                continue;
+            }
+            if (it->numTicks * PlayerPrediction::TickSec >= (2.0f - target->heat) * image->seekTime) {
+                const Point3F centerBox = boxCenter(*target);
+                SimContainer::RayInfo info;
+                if (SimContainer::castRay(muzzlePoint, centerBox, losMask, info, {script, target->script})) {
+                    // it's occluded...
+                    it = potentialTargets.erase(it);
+                    continue;
+                }
+                const float dp = dot3(norm3(sub3(centerBox, muzzlePoint)), muzzleVector);
+                if (dp > maxDp) {
+                    maxDp = dp;
+                    best = target;
+                }
+            }
+        } else {
+            Point3F point;
+            if (!gameBase || it->tag != sTag || !beaconPoint(*gameBase, point)) {
+                it = potentialTargets.erase(it);
+                continue;
+            }
+            if (it->numTicks > 8) {
+                // (the shipped comparison is against the shapes' best, maxDp)
+                const float dp = dot3(norm3(sub3(point, muzzlePoint)), muzzleVector);
+                if (dp > maxDp) {
+                    bestBeacon = gameBase;
+                    bestPosition = point;
+                }
+            }
+        }
+        ++it;
+    }
+    if (best) {
+        if (lockedTargetId() != ScriptEngine::instance().objectId(best->script)) setLockedTarget(best);
+    } else if (bestBeacon) {
+        setLockedTargetPosition(bestPosition);
+    } else {
+        setLockedTarget(nullptr);
+    }
+}
+
+void ShapeBase::setLockedTarget(ShapeBase* target) {
+    const ShapeBaseImageData* image = getMountedImage(0);
+    const bool targetAudio = image && image->useTargetAudio;
+    auto* current = lockTarget.empty() ? nullptr : EngineObjects::get<ShapeBase>(lockTarget);
+    if (target) {
+        if (current && targetAudio) current->decLockCount();
+        lockTarget = ScriptEngine::instance().objectKey(target->script);
+        lockMode = LockObject;
+        if (targetAudio) target->incLockCount();
+    } else {
+        if (current && targetAudio) current->decLockCount();
+        lockTarget.clear();
+        lockMode = NotLocked;
+    }
+}
+
+void ShapeBase::setLockedTargetPosition(const Point3F& position) {
+    lockTarget.clear();
+    lockPosition = position;
+    lockMode = LockPosition;
+}
+
+int ShapeBase::lockedTargetId() const {
+    auto* target = lockTarget.empty() ? nullptr : EngineObjects::get<ShapeBase>(lockTarget);
+    return target && target->script ? ScriptEngine::instance().objectId(target->script) : 0;
 }

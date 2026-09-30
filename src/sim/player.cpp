@@ -53,6 +53,7 @@ PlayerObject::PlayerObject() { ghostable = true; }
 
 void PlayerObject::readFields() {
     ShapeBase::readFields();
+    heat = 0.0f; // Player::onAdd
     setTransform(transform);
 }
 
