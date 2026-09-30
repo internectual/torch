@@ -345,6 +345,8 @@ struct ShadowCaptureDraw {
 };
 
 struct TerrainBlock {
+    // load() reads only the heightfield (the server's collision copy).
+    bool collisionOnly = false;
     int32_t size{256};
     float heightScale{1.0f};
     float squareSize{8.0f};

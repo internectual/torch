@@ -368,6 +368,12 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
     }
 
     Console::instance().printf(LogLevel::Info, "Terrain: loaded .ter v%u, max height=%.1f", version, maxH);
+    // The server's container needs only the heightfield (and the empty
+    // squares set before load): no textures, render mesh or lightmap.
+    if (collisionOnly) {
+        loaded = true;
+        return true;
+    }
 
     // The region immediately after the heightfield is per-square flag data
     // (not a lightmap). It encodes terrain square attributes (e.g. empty/hole

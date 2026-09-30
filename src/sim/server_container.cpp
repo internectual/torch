@@ -108,6 +108,7 @@ void addTerrain(const ScriptObject* object) {
     terrain.object = object;
     terrain.block = std::make_unique<TerrainBlock>();
     auto& b = *terrain.block;
+    b.collisionOnly = true;
     b.squareSize = Fields::f32(object, "squareSize", b.squareSize);
     b.heightScale = Fields::f32(object, "heightScale", b.heightScale);
     b.setEmptySquareRuns(emptySquareRuns(Fields::string(object, "emptySquares")));
@@ -121,14 +122,26 @@ void addInterior(const ScriptObject* object, std::vector<PlayerPrediction::Trian
     std::string file = Fields::string(object, "interiorFile");
     for (char& c : file) if (c == '\\') c = '/';
     if (file.empty()) return;
-    std::vector<std::string> paths{file};
-    if (!lower(file).starts_with("interiors/")) paths.push_back("interiors/" + file);
-    const auto bytes = readAsset(paths);
-    if (bytes.empty()) {
-        Console::instance().printf(LogLevel::Warn, "Server container: interior '%s' not found", file.c_str());
-        return;
+    // Each file's hulls are read once (every instance of a bridge shares them).
+    struct Hulls { bool loaded = false; std::vector<float> hullCollisionVerts; std::vector<uint32_t> hullCollisionIndices; };
+    static std::unordered_map<std::string, Hulls> cache;
+    auto cached = cache.find(lower(file));
+    if (cached == cache.end()) {
+        Hulls hulls;
+        std::vector<std::string> paths{file};
+        if (!lower(file).starts_with("interiors/")) paths.push_back("interiors/" + file);
+        const auto bytes = readAsset(paths);
+        if (bytes.empty()) {
+            Console::instance().printf(LogLevel::Warn, "Server container: interior '%s' not found", file.c_str());
+        } else {
+            DIFLoadResult loaded = loadDIF(bytes.data(), bytes.size(), file.c_str(), true);
+            hulls.loaded = loaded.loaded;
+            hulls.hullCollisionVerts = std::move(loaded.hullCollisionVerts);
+            hulls.hullCollisionIndices = std::move(loaded.hullCollisionIndices);
+        }
+        cached = cache.emplace(lower(file), std::move(hulls)).first;
     }
-    const DIFLoadResult dif = loadDIF(bytes.data(), bytes.size(), file.c_str(), true);
+    const Hulls& dif = cached->second;
     if (!dif.loaded) return;
     auto* scene = dynamic_cast<SceneObject*>(object->engine.get());
     if (!scene) return;
