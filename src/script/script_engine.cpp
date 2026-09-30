@@ -4,6 +4,7 @@
 #include "sim/sim_state.h"
 #include "sim/sim_natives.h"
 #include "sim/engine_object.h"
+#include "sim/projectile_aim.h"
 #include "game/material_property_map.h"
 #include <limits>
 #include "script/conversion_parity.h"
@@ -3064,6 +3065,38 @@ bool ScriptEngine::init() {
         if (args.empty()) return VMValue(0.0);
         if (args.size() > 1) return VMValue(atan2(args[0].toDouble(), args[1].toDouble()));
         return VMValue(atan(args[0].toDouble()));
+    });
+    // math/mConsoleFunctions.cc: mRadToDeg / mDegToRad and the solvers
+    // ("<count> <roots...>", unsolved roots 0).
+    tsInstance->registerNative("mRadToDeg", [](const auto& args) -> VMValue {
+        return VMValue(args.empty() ? 0.0f : (float)args[0].toDouble() * (180.0f / (float)M_PI));
+    });
+    tsInstance->registerNative("mDegToRad", [](const auto& args) -> VMValue {
+        return VMValue(args.empty() ? 0.0f : (float)args[0].toDouble() * ((float)M_PI / 180.0f));
+    });
+    auto solverArg = [](const auto& args, size_t i) { return i < args.size() ? (float)args[i].toDouble() : 0.0f; };
+    tsInstance->registerNative("mSolveQuadratic", [solverArg](const auto& args) -> VMValue {
+        float x[2] = {0, 0};
+        const uint32_t n = ProjectileAim::solveQuadratic(solverArg(args, 0), solverArg(args, 1), solverArg(args, 2), x);
+        char buffer[256];
+        std::snprintf(buffer, sizeof(buffer), "%u %g %g", n, x[0], x[1]);
+        return VMValue(buffer);
+    });
+    tsInstance->registerNative("mSolveCubic", [solverArg](const auto& args) -> VMValue {
+        float x[3] = {0, 0, 0};
+        const uint32_t n = ProjectileAim::solveCubic(solverArg(args, 0), solverArg(args, 1), solverArg(args, 2),
+                                                     solverArg(args, 3), x);
+        char buffer[256];
+        std::snprintf(buffer, sizeof(buffer), "%u %g %g %g", n, x[0], x[1], x[2]);
+        return VMValue(buffer);
+    });
+    tsInstance->registerNative("mSolveQuartic", [solverArg](const auto& args) -> VMValue {
+        float x[4] = {0, 0, 0, 0};
+        const uint32_t n = ProjectileAim::solveQuartic(solverArg(args, 0), solverArg(args, 1), solverArg(args, 2),
+                                                       solverArg(args, 3), solverArg(args, 4), x);
+        char buffer[256];
+        std::snprintf(buffer, sizeof(buffer), "%u %g %g %g %g", n, x[0], x[1], x[2], x[3]);
+        return VMValue(buffer);
     });
     tsInstance->registerNative("mSqrt", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0.0);

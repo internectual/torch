@@ -84,7 +84,7 @@ uint32_t ForceFieldBareObject::packUpdate(GameConnection& connection, uint32_t m
 namespace ForceFields {
 
 void gather(const GameBase* mover, const Point3F& min, const Point3F& max,
-            std::vector<PlayerPrediction::Triangle>& out) {
+            std::vector<PlayerPrediction::Triangle>& out, std::vector<const ScriptObject*>* owners) {
     for (auto& [name, object] : ScriptEngine::instance().objects) {
         auto* field = object ? dynamic_cast<ForceFieldBareObject*>(object->engine.get()) : nullptr;
         if (!field) continue;
@@ -101,6 +101,7 @@ void gather(const GameBase* mover, const Point3F& min, const Point3F& max,
         for (int q = 0; q < 6; ++q) {
             out.push_back({c[quads[q][0]], c[quads[q][1]], c[quads[q][2]], normals[q]});
             out.push_back({c[quads[q][0]], c[quads[q][2]], c[quads[q][3]], normals[q]});
+            if (owners) owners->insert(owners->end(), 2, object);
         }
     }
 }

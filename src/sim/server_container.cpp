@@ -19,6 +19,7 @@ namespace {
 
 struct Terrain {
     std::unique_ptr<TerrainBlock> block; // Y-up heightfield (render/renderer.h)
+    const ScriptObject* object = nullptr;
 };
 
 struct Water {
@@ -30,6 +31,7 @@ struct Water {
 // Interior hull triangles on a uniform grid over x/y.
 struct Interiors {
     std::vector<PlayerPrediction::Triangle> triangles;
+    std::vector<const ScriptObject*> owners; // the InteriorInstance of each triangle
     float cell = 16.0f;
     float minX = 0, minY = 0;
     int resX = 0, resY = 0;
@@ -103,6 +105,7 @@ void addTerrain(const ScriptObject* object) {
         return;
     }
     Terrain terrain;
+    terrain.object = object;
     terrain.block = std::make_unique<TerrainBlock>();
     auto& b = *terrain.block;
     b.squareSize = Fields::f32(object, "squareSize", b.squareSize);
@@ -219,7 +222,10 @@ void rebuild() {
         else if (!strcasecmp(cls, "WaterBlock")) water.push_back(object);
     }
     for (auto* t : terrains) addTerrain(t);
-    for (auto* i : interiors) addInterior(i, s.interiors.triangles);
+    for (auto* i : interiors) {
+        addInterior(i, s.interiors.triangles);
+        s.interiors.owners.resize(s.interiors.triangles.size(), i);
+    }
     for (auto* w : water) addWater(w);
     buildGrid(s.interiors);
     if (!terrains.empty() || !interiors.empty())
@@ -239,7 +245,7 @@ void gatherTriangles(const Point3F& min, const Point3F& max, std::vector<PlayerP
 }
 
 void gatherGeometry(const Point3F& min, const Point3F& max, bool withTerrain, bool withInteriors,
-                    std::vector<PlayerPrediction::Triangle>& out) {
+                    std::vector<PlayerPrediction::Triangle>& out, std::vector<const ScriptObject*>* owners) {
     ensureBuilt();
     auto& s = state();
     // Terrain: the heightfield's Y-up rect, faces up.
@@ -256,6 +262,7 @@ void gatherGeometry(const Point3F& min, const Point3F& max, bool withTerrain, bo
             const float len = PlayerPrediction::length(n);
             if (len < 1e-12f) continue;
             out.push_back({a, b, c, PlayerPrediction::mul(n, 1.0f / len)});
+            if (owners) owners->push_back(terrain.object);
         }
     }
     // Interiors from the grid cells the box touches.
@@ -276,6 +283,7 @@ void gatherGeometry(const Point3F& min, const Point3F& max, bool withTerrain, bo
                         std::max({t.a.z, t.b.z, t.c.z}) < min.z || std::min({t.a.z, t.b.z, t.c.z}) > max.z)
                         continue;
                     out.push_back(t);
+                    if (owners) owners->push_back(in.owners[i]);
                 }
     }
 }

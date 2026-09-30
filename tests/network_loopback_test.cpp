@@ -1208,6 +1208,15 @@ int main() {
             out.push_back({{-1000, -1000, 0}, {1000, -1000, 0}, {1000, 1000, 0}, {0, 0, 1}});
             out.push_back({{-1000, -1000, 0}, {1000, 1000, 0}, {-1000, 1000, 0}, {0, 0, 1}});
         };
+        // The same flat ground as terrain for the container's rays.
+        auto savedGeometry = serverCollision().geometry;
+        serverCollision().geometry = [](const Point3F& lo, const Point3F& hi, bool terrain, bool,
+                                        std::vector<PlayerPrediction::Triangle>& out,
+                                        std::vector<const ScriptObject*>* owners) {
+            if (!terrain) return;
+            serverCollision().triangles(lo, hi, out);
+            if (owners) owners->resize(out.size(), nullptr);
+        };
         script.ts()->execute(
             "datablock PlayerData(ProjArmor) { maxForwardSpeed = 14; runForce = 4200; mass = 90; maxEnergy = 60; "
             "  boxSize = \"1.2 1.2 2.3\"; maxDamage = 1.0; };"
@@ -1370,6 +1379,7 @@ int main() {
             ScriptEngine::instance().deleteScriptObject(script.ts()->getGlobal(var).toString());
         assert(script.ts()->getGlobal("$projUnzap").toInt() == targetId);
         serverCollision().triangles = savedTriangles;
+        serverCollision().geometry = savedGeometry;
         serverCollision().water = savedWater;
     }
     {
@@ -1383,6 +1393,15 @@ int main() {
         serverCollision().triangles = [](const Point3F&, const Point3F&, std::vector<PlayerPrediction::Triangle>& out) {
             out.push_back({{-1000, -1000, 0}, {1000, -1000, 0}, {1000, 1000, 0}, {0, 0, 1}});
             out.push_back({{-1000, -1000, 0}, {1000, 1000, 0}, {-1000, 1000, 0}, {0, 0, 1}});
+        };
+        // The same flat ground as terrain for the container's rays.
+        auto savedGeometry = serverCollision().geometry;
+        serverCollision().geometry = [](const Point3F& lo, const Point3F& hi, bool terrain, bool,
+                                        std::vector<PlayerPrediction::Triangle>& out,
+                                        std::vector<const ScriptObject*>* owners) {
+            if (!terrain) return;
+            serverCollision().triangles(lo, hi, out);
+            if (owners) owners->resize(out.size(), nullptr);
         };
         script.ts()->execute(
             "datablock HoverVehicleData(TestHover) { mass = 400; dragForce = 25 / 45.0; mainThrustForce = 30; "
@@ -1446,6 +1465,7 @@ int main() {
         assert(parser.getGhostTracker().getGhost(flyerGhost)->className == "FlyingVehicle");
         for (const char* name : {"TestHoverV", "TestFlyerV"}) ScriptEngine::instance().deleteScriptObject(name);
         serverCollision().triangles = savedTriangles;
+        serverCollision().geometry = savedGeometry;
         serverCollision().water = savedWater;
     }
     {

@@ -73,6 +73,10 @@ struct PlayerContacts {
 struct ServerCollision {
     PlayerPrediction::GatherTriangles triangles;
     PlayerPrediction::WaterLevel water;
+    // The terrain and / or interior triangles with each one's object (the
+    // container's rays report what they hit).
+    std::function<void(const Point3F&, const Point3F&, bool terrain, bool interiors,
+                       std::vector<PlayerPrediction::Triangle>&, std::vector<const ScriptObject*>*)> geometry;
 };
 ServerCollision& serverCollision();
 

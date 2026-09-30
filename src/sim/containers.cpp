@@ -34,30 +34,23 @@ ScriptObject* firstOfClass(const char* cls) {
 }
 
 // The mission object a geometry hit is reported as (see containers.h).
-ScriptObject* geometryOwner(uint32_t mask) {
-    if (mask & TerrainObjectType)
-        if (auto* o = firstOfClass("TerrainBlock")) return o;
-    if (mask & InteriorObjectType)
-        if (auto* o = firstOfClass("InteriorInstance")) return o;
-    if (mask & ForceFieldObjectType)
-        if (auto* o = firstOfClass("ForceFieldBare")) return o;
-    if (auto* o = firstOfClass("TerrainBlock")) return o;
-    return firstOfClass("InteriorInstance");
-}
-
 // Moller-Trumbore over the gathered triangles.
-bool castGeometry(const Point3F& a, const Point3F& b, float& bestT, Point3F& normal, bool forceFields) {
-    const auto& world = serverCollision();
-    if (!world.triangles) return false;
-    std::vector<PlayerPrediction::Triangle> tris;
+bool castGeometry(const Point3F& a, const Point3F& b, float& bestT, Point3F& normal, uint32_t mask,
+                  const ScriptObject** owner) {
     const Point3F lo{std::min(a.x, b.x) - 0.1f, std::min(a.y, b.y) - 0.1f, std::min(a.z, b.z) - 0.1f};
     const Point3F hi{std::max(a.x, b.x) + 0.1f, std::max(a.y, b.y) + 0.1f, std::max(a.z, b.z) + 0.1f};
-    world.triangles(lo, hi, tris);
+    std::vector<PlayerPrediction::Triangle> tris;
+    std::vector<const ScriptObject*> owners;
+    // The static geometry the mask names (each piece is its object's type).
+    const bool terrain = (mask & TerrainObjectType) != 0, interiors = (mask & InteriorObjectType) != 0;
+    if ((terrain || interiors) && serverCollision().geometry)
+        serverCollision().geometry(lo, hi, terrain, interiors, tris, &owners);
     // ForceFieldBare::castRay: a field blocks unless it is open.
-    if (forceFields) ForceFields::gather(nullptr, lo, hi, tris);
+    if (mask & ForceFieldObjectType) ForceFields::gather(nullptr, lo, hi, tris, &owners);
     const Point3F d = sub(b, a);
     bool hit = false;
-    for (const auto& t : tris) {
+    for (size_t i = 0; i < tris.size(); ++i) {
+        const auto& t = tris[i];
         const Point3F e1 = sub(t.b, t.a), e2 = sub(t.c, t.a);
         const Point3F p = cross(d, e2);
         const float det = dot(e1, p);
@@ -70,6 +63,7 @@ bool castGeometry(const Point3F& a, const Point3F& b, float& bestT, Point3F& nor
         if (v < 0 || u + v > 1) continue;
         const float tt = dot(e2, q) / det;
         if (tt < 0 || tt > 1 || tt >= bestT) continue;
+        if (owner) *owner = i < owners.size() ? owners[i] : nullptr;
         bestT = tt;
         normal = t.n;
         hit = true;
@@ -228,14 +222,15 @@ bool castRay(const Point3F& a, const Point3F& b, uint32_t mask, RayInfo& info, c
     Point3F normal{0, 0, 1};
     ScriptObject* object = nullptr;
     uint32_t objectType = 0;
-    if (mask & StaticCollisionMask) {
+    if (mask & (TerrainObjectType | InteriorObjectType | ForceFieldObjectType)) {
         float t = best;
         Point3F n;
-        if (castGeometry(a, b, t, n, (mask & ForceFieldObjectType) != 0)) {
+        const ScriptObject* owner = nullptr;
+        if (castGeometry(a, b, t, n, mask, &owner)) {
             best = t;
             normal = n;
-            object = geometryOwner(mask);
-            objectType = object ? typeMask(object) : TerrainObjectType | StaticObjectType;
+            object = const_cast<ScriptObject*>(owner);
+            objectType = object ? typeMask(object) : 0;
             hit = true;
         }
     }

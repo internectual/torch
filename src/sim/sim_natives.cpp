@@ -43,6 +43,11 @@ void registerSimNatives(TorqueScript& ts) {
     registerTargetManagerNatives(ts);
     // The server's own static geometry and water (gServerContainer).
     serverCollision().triangles = ServerContainer::gatherTriangles;
+    serverCollision().geometry = [](const Point3F& min, const Point3F& max, bool terrain, bool interiors,
+                                    std::vector<PlayerPrediction::Triangle>& out,
+                                    std::vector<const ScriptObject*>* owners) {
+        ServerContainer::gatherGeometry(min, max, terrain, interiors, out, owners);
+    };
     serverCollision().water = ServerContainer::waterSurfaceAt;
     registerContainerNatives(ts);
     registerProjectileNatives(ts);

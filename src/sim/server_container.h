@@ -7,6 +7,8 @@
 #include "game/player_prediction.h"
 #include <vector>
 
+struct ScriptObject;
+
 namespace ServerContainer {
 
 // Triangles overlapping [min, max], normals toward free space.
@@ -26,9 +28,11 @@ void rebuild();
 // check gatherTriangles makes at most twice a second).
 void refresh();
 
-// gatherTriangles restricted to the terrain and / or the interiors.
+// gatherTriangles restricted to the terrain and / or the interiors; owners,
+// when given, gets each triangle's TerrainBlock or InteriorInstance.
 void gatherGeometry(const Point3F& min, const Point3F& max, bool terrain, bool interiors,
-                    std::vector<PlayerPrediction::Triangle>& out);
+                    std::vector<PlayerPrediction::Triangle>& out,
+                    std::vector<const ScriptObject*>* owners = nullptr);
 // The first TerrainBlock's origin (its position) and square size; false
 // when there is none.
 bool terrainBlock(Point3F& origin, float& squareSize);

@@ -31,7 +31,7 @@ namespace ForceFields {
 // The boxes (as triangles) of the fields that block `mover` (nullptr: a
 // ray, blocked by every field not open), overlapping [min, max].
 void gather(const GameBase* mover, const Point3F& min, const Point3F& max,
-            std::vector<PlayerPrediction::Triangle>& out);
+            std::vector<PlayerPrediction::Triangle>& out, std::vector<const ScriptObject*>* owners = nullptr);
 } // namespace ForceFields
 
 uint32_t sensorGroupOf(const GameBase& object);
