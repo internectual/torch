@@ -1,4 +1,5 @@
 #include "sim/containers.h"
+#include "core/engine.h"
 #include "sim/force_field.h"
 #include "sim/player.h"
 #include "sim/shape_base.h"
@@ -180,7 +181,14 @@ bool worldBox(ScriptObject* object, Point3F& min, Point3F& max) {
         max = {p.x + size[0] * 0.5f, p.y + size[1] * 0.5f, p.z + size[2]};
         return true;
     }
-    if (dynamic_cast<ShapeBase*>(engine)) {
+    if (auto* shape = dynamic_cast<ShapeBase*>(engine)) {
+        // SceneObject::getWorldBox: the shape's box through its transform.
+        float lo[3], hi[3];
+        if (shape->worldBox(lo, hi)) {
+            min = {lo[0], lo[1], lo[2]};
+            max = {hi[0], hi[1], hi[2]};
+            return true;
+        }
         min = {p.x - 0.5f, p.y - 0.5f, p.z};
         max = {p.x + 0.5f, p.y + 0.5f, p.z + 1.0f};
         return true;
@@ -237,11 +245,16 @@ bool castRay(const Point3F& a, const Point3F& b, uint32_t mask, RayInfo& info, c
         if (!(type & mask)) continue;
         // ShapeBase::castRay tests the shape's LOS/collision meshes: a shape
         // without them (a marker) stops no ray. Players hit by their box.
-        if (auto* shape = dynamic_cast<ShapeBase*>(candidate->engine.get());
-            shape && !dynamic_cast<PlayerObject*>(shape) && !shapeHasCollision(shapeFileOf(*shape)))
-            continue;
         Point3F lo, hi, n;
-        if (!worldBox(candidate, lo, hi)) continue;
+        if (auto* shape = dynamic_cast<ShapeBase*>(candidate->engine.get());
+            shape && !dynamic_cast<PlayerObject*>(shape) && Engine::instance().filesys) {
+            float clo[3], chi[3];
+            if (!shape->collisionBox(clo, chi)) continue;
+            lo = {clo[0], clo[1], clo[2]};
+            hi = {chi[0], chi[1], chi[2]};
+        } else if (!worldBox(candidate, lo, hi)) {
+            continue;
+        }
         float t = 0.0f;
         if (!castBox(a, b, lo, hi, t, n) || t >= best) continue;
         best = t;

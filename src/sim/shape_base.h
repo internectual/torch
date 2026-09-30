@@ -156,6 +156,9 @@ public:
     virtual void updateDamageLevel() {}
     // mWorldBox: the shape's DTS bounds through the transform.
     virtual bool worldBox(float lo[3], float hi[3]) const;
+    // The world box of the shape's collision mesh (what rays and vehicles
+    // strike); false when the shape has no collision detail.
+    bool collisionBox(float lo[3], float hi[3]) const;
     // queueCollision / notifyCollision: %data.onCollision(%obj, %col) on both
     // sides, at most once per CollisionTimeoutValue (250 ms) per pair.
     void queueCollision(const std::string& other);
@@ -259,5 +262,8 @@ void registerShapeBaseNatives(class TorqueScript& ts);
 // The datablock's shapeFile, and a shape's TSShape::bounds (shape space).
 std::string shapeFileOf(const ShapeBase& shape);
 bool shapeFileBounds(const std::string& shapeFile, float lo[3], float hi[3]);
+// The shape's first collision detail's vertices in object space, null when
+// it has none (a shape without collision).
+const std::vector<Point3F>* shapeCollisionHull(const std::string& shapeFile);
 // The shape has Collision-N or LOS-N details (ShapeBase::castRay's meshes).
 bool shapeHasCollision(const std::string& shapeFile);

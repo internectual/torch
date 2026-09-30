@@ -34,6 +34,10 @@ struct DTSLoadResult {
 };
 
 DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name);
+// TSShapeInstance::animate for one (non-blend) sequence at `position`
+// (0..1 of its duration): every node's world transform in shape space, the
+// bind pose where the sequence does not animate a node.
+std::vector<MatrixF> dtsSequencePose(const DTSLoadResult& shape, int sequence, float position);
 // TSShape::importSequences: appends a DSQ's sequences, mapping its nodes to
 // `nodes` by name. A non-empty alias renames the last imported sequence, as
 // TSShapeConstructor does. Returns the number appended, or -1 on failure.

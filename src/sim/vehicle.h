@@ -143,4 +143,38 @@ private:
     ThrustDirection thrustDirection = ThrustForward;
 };
 
+class WheeledVehicleObject : public VehicleObject {
+public:
+    enum { MaxWheels = 8 };
+    WheeledVehicleObject() : VehicleObject("WheeledVehicle") {}
+    void readFields() override;
+    void processMove(const ClientMoveIn* move) override;
+    uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
+    bool writePacketData(GameConnection& connection, TorqueBitWriter& w) override;
+
+    // WheeledVehicleData::Wheel, from the shape's ground%d nodes and their
+    // spring%d / turn%d sequences (WheeledVehicleData::preload).
+    struct WheelData {
+        enum Steering { None, Forward, Backward } steering = None;
+        int opposite = -1;
+        Point3F safePos, pos, spring;
+    };
+    struct Wheel {
+        float extension = 1, center = 1, k = 0, s = 0;
+        float avel = 0, Dy = 0, Dx = 0, torqueScale = 0;
+        bool contact = false;
+        Point3F surfacePos{0, 0, 0}, surfaceNormal{0, 0, 1};
+    };
+
+protected:
+    void updateMove(const ClientMoveIn* move) override;
+    void updateForces() override;
+
+private:
+    void updateWheels();
+    const std::vector<WheelData>* wheelData = nullptr;
+    Wheel wheels[MaxWheels];
+    bool braking = false, wheelContact = false;
+};
+
 void registerVehicleNatives(class TorqueScript& ts);

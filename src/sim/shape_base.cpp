@@ -236,6 +236,54 @@ const std::vector<SequenceInfo>& shapeSequences(const std::string& shapeFile) {
 }
 } // namespace
 
+// The shape's first collision detail (collisionDetails[0], "Collision-1"),
+// its vertices in object space.
+const std::vector<Point3F>* shapeCollisionHull(const std::string& shapeFile) {
+    static std::unordered_map<std::string, std::vector<Point3F>> cache;
+    if (shapeFile.empty() || !Engine::instance().filesys) return nullptr;
+    std::string key = shapeFile;
+    for (char& ch : key) ch = (char)std::tolower((unsigned char)ch);
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        std::vector<Point3F> points;
+        const auto bytes = Engine::instance().fs().read(("shapes/" + shapeFile).c_str());
+        if (!bytes.empty()) {
+            const DTSLoadResult shape = loadDTS(bytes.data(), bytes.size(), shapeFile.c_str());
+            const DTSLoadResult::UtilityDetail* detail = nullptr;
+            for (const auto& d : shape.utilityDetails)
+                if (strncasecmp(d.name.c_str(), "Collision-", 10) == 0 &&
+                    (!detail || std::atoi(d.name.c_str() + 10) < std::atoi(detail->name.c_str() + 10)))
+                    detail = &d;
+            if (detail)
+                for (int32_t mi : detail->meshIndices) {
+                    if (mi < 0 || mi >= (int)shape.meshes.size()) continue;
+                    const MeshData& mesh = shape.meshes[mi];
+                    const bool node = mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)shape.defaultTransforms.size();
+                    for (const auto& v : mesh.vertices) {
+                        const Point3F p = node ? shape.defaultTransforms[mesh.nodeIndex].transform(v.pos) : v.pos;
+                        // The loader's frame has height in y and forward in z.
+                        points.push_back({p.x, p.z, p.y});
+                    }
+                }
+        }
+        it = cache.emplace(key, std::move(points)).first;
+    }
+    return it->second.empty() ? nullptr : &it->second;
+}
+
+bool ShapeBase::collisionBox(float lo[3], float hi[3]) const {
+    const auto* points = shapeCollisionHull(objectShapeFile(*this));
+    if (!points) return false;
+    for (int i = 0; i < 3; ++i) { lo[i] = 1e30f; hi[i] = -1e30f; }
+    for (const auto& p : *points) {
+        const float o[3] = {p.x * scale[0], p.y * scale[1], p.z * scale[2]};
+        float w[3];
+        TorqueMath::mulP(transform, o, w);
+        for (int i = 0; i < 3; ++i) { lo[i] = std::min(lo[i], w[i]); hi[i] = std::max(hi[i], w[i]); }
+    }
+    return true;
+}
+
 bool shapeHasCollision(const std::string& shapeFile) {
     static std::unordered_map<std::string, bool> cache;
     if (shapeFile.empty() || !Engine::instance().filesys) return false;

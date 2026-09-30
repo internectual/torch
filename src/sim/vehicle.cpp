@@ -62,41 +62,6 @@ Matrix transpose3(const Matrix& m) {
     return t;
 }
 
-// The shape's first collision detail (collisionDetails[0], "Collision-1"),
-// its vertices in object space.
-const std::vector<Point3F>* collisionHull(const std::string& shapeFile) {
-    static std::unordered_map<std::string, std::vector<Point3F>> cache;
-    if (shapeFile.empty() || !Engine::instance().filesys) return nullptr;
-    std::string key = shapeFile;
-    for (char& ch : key) ch = (char)std::tolower((unsigned char)ch);
-    auto it = cache.find(key);
-    if (it == cache.end()) {
-        std::vector<Point3F> points;
-        const auto bytes = Engine::instance().fs().read(("shapes/" + shapeFile).c_str());
-        if (!bytes.empty()) {
-            const DTSLoadResult shape = loadDTS(bytes.data(), bytes.size(), shapeFile.c_str());
-            const DTSLoadResult::UtilityDetail* detail = nullptr;
-            for (const auto& d : shape.utilityDetails)
-                if (strncasecmp(d.name.c_str(), "Collision-", 10) == 0 &&
-                    (!detail || std::atoi(d.name.c_str() + 10) < std::atoi(detail->name.c_str() + 10)))
-                    detail = &d;
-            if (detail)
-                for (int32_t mi : detail->meshIndices) {
-                    if (mi < 0 || mi >= (int)shape.meshes.size()) continue;
-                    const MeshData& mesh = shape.meshes[mi];
-                    const bool node = mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)shape.defaultTransforms.size();
-                    for (const auto& v : mesh.vertices) {
-                        const Point3F p = node ? shape.defaultTransforms[mesh.nodeIndex].transform(v.pos) : v.pos;
-                        // The loader's frame has height in y and forward in z.
-                        points.push_back({p.x, p.z, p.y});
-                    }
-                }
-        }
-        it = cache.emplace(key, std::move(points)).first;
-    }
-    return it->second.empty() ? nullptr : &it->second;
-}
-
 std::string vec3(const Point3F& v) {
     char buffer[96];
     std::snprintf(buffer, sizeof(buffer), "%f %f %f", v.x, v.y, v.z);
@@ -215,7 +180,7 @@ void VehicleObject::readFields() {
     oneOverMass = mass != 0 ? 1 / mass : 1;
     const std::string shapeFile = shapeFileOf(*this);
     shapeFileBounds(shapeFile, objMin, objMax);
-    hull = collisionHull(shapeFile);
+    hull = shapeCollisionHull(shapeFile);
     rigid.state.setTransform(transform);
     rigid.mass = 1;
     rigid.oneOverMass = 1 / rigid.mass;
@@ -310,7 +275,14 @@ float VehicleObject::collide(const Matrix& mat, float tol, std::vector<Contact>*
         auto* shape = dynamic_cast<ShapeBase*>(object->engine.get());
         if (!shape || shape->hidden) continue;
         Box box;
-        if (!SimContainer::worldBox(object, box.min, box.max)) continue;
+        float clo[3], chi[3];
+        if (!dynamic_cast<PlayerObject*>(shape) && Engine::instance().filesys) {
+            if (!shape->collisionBox(clo, chi)) continue;
+            box.min = {clo[0], clo[1], clo[2]};
+            box.max = {chi[0], chi[1], chi[2]};
+        } else if (!SimContainer::worldBox(object, box.min, box.max)) {
+            continue;
+        }
         box.object = ScriptEngine::instance().objectKey(object);
         boxes.push_back(box);
     }
@@ -899,10 +871,311 @@ uint32_t FlyingVehicleObject::packUpdate(GameConnection& connection, uint32_t ma
 }
 
 //----------------------------------------------------------------------------
+// WheeledVehicle
+
+namespace {
+// WheeledVehicleData::preload's wheels: ground%d's position with spring%d
+// at 0 (spring) and 1 (pos), mirrored across x for a wheel opposite
+// another (mirrorWheel).
+const std::vector<WheeledVehicleObject::WheelData>* shapeWheels(const std::string& shapeFile, float tireRadius) {
+    static std::unordered_map<std::string, std::vector<WheeledVehicleObject::WheelData>> cache;
+    if (shapeFile.empty() || !Engine::instance().filesys) return nullptr;
+    std::string key = shapeFile;
+    for (char& ch : key) ch = (char)std::tolower((unsigned char)ch);
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        std::vector<WheeledVehicleObject::WheelData> wheels;
+        const auto bytes = Engine::instance().fs().read(("shapes/" + shapeFile).c_str());
+        if (!bytes.empty()) {
+            const DTSLoadResult shape = loadDTS(bytes.data(), bytes.size(), shapeFile.c_str());
+            auto find = [&](const std::string& name, bool node) {
+                if (node) {
+                    for (size_t n = 0; n < shape.nodes.size(); ++n)
+                        if (strcasecmp(shape.nodes[n].name.c_str(), name.c_str()) == 0) return (int)n;
+                } else {
+                    for (size_t a = 0; a < shape.animations.size(); ++a)
+                        if (strcasecmp(shape.animations[a].name.c_str(), name.c_str()) == 0) return (int)a;
+                }
+                return -1;
+            };
+            // The loader's frame has height in y and forward in z.
+            auto nodePos = [](const MatrixF& m) { return Point3F{m.m[0][3], m.m[2][3], m.m[1][3]}; };
+            for (int i = 0; i < WheeledVehicleObject::MaxWheels; ++i) {
+                const int node = find("ground" + std::to_string(i), true);
+                const int seq = find("spring" + std::to_string(i), false);
+                if (node == -1 || seq == -1) continue;
+                WheeledVehicleObject::WheelData w;
+                w.spring = nodePos(dtsSequencePose(shape, seq, 0)[node]);
+                w.pos = nodePos(dtsSequencePose(shape, seq, 1)[node]);
+                w.safePos = {w.pos.x, w.pos.y, w.pos.z + tireRadius};
+                bool mirrored = false;
+                for (size_t o = 0; o < wheels.size() && !mirrored; ++o)
+                    if (std::fabs(wheels[o].pos.y - w.pos.y) < 0.5f) {
+                        w.pos = {-wheels[o].pos.x, wheels[o].pos.y, wheels[o].pos.z};
+                        w.spring = wheels[o].spring;
+                        w.opposite = (int)o;
+                        wheels[o].opposite = (int)wheels.size();
+                        mirrored = true;
+                    }
+                if (!mirrored) {
+                    w.spring.x = w.spring.y = 0;
+                    w.spring.z -= w.pos.z;
+                }
+                w.steering = find("turn" + std::to_string(i), false) != -1 ? WheeledVehicleObject::WheelData::Forward
+                                                                            : WheeledVehicleObject::WheelData::None;
+                wheels.push_back(w);
+            }
+        }
+        it = cache.emplace(key, std::move(wheels)).first;
+    }
+    return &it->second;
+}
+
+// sClientCollisionMask & ~PlayerObjectType (wheeledVehicle.cc).
+constexpr uint32_t WheelCollisionMask = TerrainObjectType | InteriorObjectType | StaticShapeObjectType |
+                                        VehicleObjectType | VehicleBlockerObjectType | ForceFieldObjectType |
+                                        StaticTSObjectType;
+constexpr float WheeledGravity = -20;     // sWheeledVehicleGravity
+constexpr float BreakZeroEpsilon = 0.02f; // sBreakZeroEpsilon (m/s)
+} // namespace
+
+// WheeledVehicle::onNewDataBlock: the springs at their datablock rate.
+void WheeledVehicleObject::readFields() {
+    VehicleObject::readFields();
+    wheelData = shapeWheels(shapeFileOf(*this), data("tireRadius", 0.6f));
+    for (auto& w : wheels) {
+        w = Wheel{};
+        w.k = data("springForce", 0.6f);
+        w.s = data("springDamping", 0);
+    }
+}
+
+void WheeledVehicleObject::processMove(const ClientMoveIn* m) {
+    VehicleObject::processMove(m);
+    if (waterCoverage > 0.5f) {
+        char pos[96];
+        std::snprintf(pos, sizeof(pos), "%f %f %f", rigid.state.linPosition.x, rigid.state.linPosition.y,
+                      rigid.state.linPosition.z);
+        callDataBlock("damageObject", {"0", pos, "1000", std::to_string(intGlobal("$DamageType::Water"))});
+    }
+}
+
+void WheeledVehicleObject::updateMove(const ClientMoveIn* m) {
+    VehicleObject::updateMove(m);
+    const size_t count = wheelData ? wheelData->size() : 0;
+    // Breaking
+    float wvel = 0;
+    for (size_t i = 0; i < count; ++i) wvel += wheels[i].avel;
+    if (std::fabs(wvel * data("tireRadius", 0.6f)) < BreakZeroEpsilon) wvel = 0;
+    if (braking) {
+        // No throttle, or throttle the way the wheels turn: no longer breaking.
+        if (!wvel || !throttle || (throttle > 0 && wvel > 0) || (throttle < 0 && wvel < 0)) braking = false;
+    } else if ((throttle > 0 && wvel < 0) || (throttle < 0 && wvel > 0)) {
+        braking = true;
+    }
+    updateWheels();
+    if (wheelContact) steering[1] = 0;
+}
+
+// WheeledVehicle::updateWheels. APPROXIMATION: the tire box's sweep along
+// the spring is a ray through the bottom of the tire.
+void WheeledVehicleObject::updateWheels() {
+    wheelContact = false;
+    const Matrix currMatrix = rigid.state.getTransform();
+    const auto exempt = collisionExempt();
+    for (size_t i = 0; wheelData && i < wheelData->size(); ++i) {
+        const WheelData& wd = (*wheelData)[i];
+        Wheel& w = wheels[i];
+        w.extension = 1;
+        const Point3F sp = mulP(currMatrix, wd.pos), vec = mulV(currMatrix, wd.spring);
+        const Point3F hp = sub(sp, mul(vec, w.extension)), ep = add(sp, mul(vec, w.extension));
+        RayInfo info;
+        if (castRay(hp, ep, WheelCollisionMask, info, exempt)) {
+            w.extension = info.t > 0.5f ? w.extension * (info.t - 0.5f) * 2.0f : 0;
+            w.contact = true;
+            w.surfacePos = add(sp, mul(vec, w.extension));
+            w.surfaceNormal = info.normal;
+            wheelContact = true;
+        } else {
+            // Make sure that we haven't sunk into the ground...
+            if (castRay(mulP(currMatrix, wd.safePos), sp, WheelCollisionMask, info, exempt)) {
+                w.extension = 0;
+                w.surfaceNormal = info.normal;
+                w.surfacePos = info.point;
+                w.contact = true;
+                wheelContact = true;
+            } else {
+                w.contact = false;
+            }
+        }
+    }
+}
+
+void WheeledVehicleObject::updateForces() {
+    const float dt = TickSec;
+    const Matrix currMatrix = rigid.state.getTransform();
+    const size_t count = wheelData ? wheelData->size() : 0;
+    const float tireRadius = data("tireRadius", 0.6f);
+    const float oneOverSprungMass = 1 / (mass * 0.8f);
+    const float maxAvel = data("maxWheelSpeed", 40) / tireRadius;
+    const float aMomentum = count ? mass / count : mass;
+    rigid.state.force = {0, 0, 0};
+    rigid.state.torque = {0, 0, 0};
+    // Drag
+    rigid.state.force = sub(rigid.state.force, mul(rigid.state.linVelocity, data("minDrag", 0) * oneOverMass));
+    rigid.state.torque = sub(rigid.state.torque, mul(rigid.state.angMomentum, data("antiRockForce", 0) * oneOverMass));
+    // Body & Steering Vectors
+    const Point3F bx = column(currMatrix, 0), by = column(currMatrix, 1), bz = column(currMatrix, 2);
+    const Point3F worldY = by;
+    const float quadraticSteering = -(steering[0] * std::fabs(steering[0]));
+    const float sinSteering = std::sin(quadraticSteering), cosSteering = std::cos(quadraticSteering);
+    // Center of mass in world space (the origin: massCenter is zero)
+    const Point3F massCenter = mulP(currMatrix, {0, 0, 0});
+    Point3F wheelForce[MaxWheels];
+    // Vertical load for friction ("a hack", TimG)
+    uint32_t contactCount = 0;
+    for (size_t j = 0; j < count; ++j) if (wheels[j].contact) ++contactCount;
+    const float verticalLoad = contactCount ? data("staticLoadScale", 1) * (mass * -WheeledGravity) / contactCount : 0;
+    // Engine and break torque
+    float engineTorque, breakTorque, maxBreakVel;
+    if (braking) {
+        breakTorque = data("breakTorque", 1) * std::fabs(throttle);
+        maxBreakVel = (breakTorque / aMomentum) * dt;
+        engineTorque = 0;
+    } else if (throttle) {
+        engineTorque = data("engineTorque", 1) * throttle;
+        maxBreakVel = breakTorque = 0;
+        // Double the engineTorque to help out the jets
+        if (throttle > 0 && jetting) engineTorque += data("engineTorque", 1);
+    } else {
+        // Engine break.
+        breakTorque = data("engineTorque", 1);
+        maxBreakVel = (breakTorque / aMomentum) * dt;
+        engineTorque = 0;
+    }
+    Point3F force{0, 0, WheeledGravity};
+    // Jet Force
+    if (jetting) force = add(force, mul(worldY, data("jetForce", 500) * oneOverMass));
+    const float friction = data("tireFriction", 0.3f);
+    const float lateralForce = data("tireLateralForce", 1000), lateralDamping = data("tireLateralDamping", 100),
+                lateralRelaxation = data("tireLateralRelaxation", 1);
+    const float longForce = data("tireLongitudinalForce", 1000), longDamping = data("tireLongitudinalDamping", 100),
+                longRelaxation = data("tireLogitudinalRelaxation", 1); // the engine's field name, misspelled
+    for (size_t j = 0; j < count; ++j) {
+        Wheel& wheel = wheels[j];
+        const WheelData& wheelData_ = (*wheelData)[j];
+        Point3F& forceVector = wheelForce[j];
+        forceVector = {0, 0, 0};
+        if (wheel.contact) {
+            const Point3F pos = mulP(currMatrix, wheelData_.pos);
+            const Point3F localVel = rigid.state.getVelocity(sub(pos, massCenter));
+            // Spring force and damping along the body's z at the contact
+            const float spring = wheel.k * (wheel.center - wheel.extension);
+            const float damping = std::max(0.0f, wheel.s * -dot(bz, localVel));
+            // Anti-sway force based on difference in suspension extension
+            float antiSway = 0;
+            if (wheelData_.opposite != -1) {
+                const Wheel& opposite = wheels[wheelData_.opposite];
+                if (opposite.contact) antiSway = (opposite.extension - wheel.extension) * data("antiSwayForce", 1);
+                if (antiSway < 0) antiSway = 0;
+            }
+            forceVector = add(forceVector, mul(bz, (spring + damping + antiSway) * oneOverSprungMass));
+            // Tire direction vectors perpendicular to surface normal
+            Point3F wheelXVec = bx;
+            if (wheelData_.steering == WheelData::Forward)
+                wheelXVec = add(mul(bx, cosSteering), mul(by, sinSteering));
+            else if (wheelData_.steering == WheelData::Backward)
+                wheelXVec = sub(mul(bx, cosSteering), mul(by, sinSteering));
+            const Point3F tireY = normalize(cross(wheel.surfaceNormal, wheelXVec));
+            const Point3F tireX = normalize(cross(tireY, wheel.surfaceNormal));
+            // Velocity of wheel at surface contact
+            const Point3F wheelVelocity = rigid.state.getVelocity(sub(wheel.surfacePos, massCenter));
+            const float xVelocity = dot(tireX, wheelVelocity), yVelocity = dot(tireY, wheelVelocity);
+            // Longitudinal deformation force
+            const float ddy = (wheel.avel * tireRadius) - yVelocity - longRelaxation * std::fabs(wheel.avel) * wheel.Dy;
+            wheel.Dy += ddy * dt;
+            float Fy = longForce * wheel.Dy + longDamping * ddy;
+            // Lateral deformation force
+            const float ddx = xVelocity - lateralRelaxation * std::fabs(wheel.avel) * wheel.Dx;
+            wheel.Dx += ddx * dt;
+            float Fx = -(lateralForce * wheel.Dx + lateralDamping * ddx);
+            // Reduce forces based on friction limit
+            const float Fz = verticalLoad;
+            const float sN = wheel.surfaceNormal.z;
+            if (sN > 0) {
+                const float muS = Fz * friction * sN, muS2 = muS * muS;
+                const float Fn = (Fz * Fz) * muS2, Ff = (Fx * Fx + Fy * Fy) * muS2;
+                if (Ff > Fn) {
+                    const float K = std::sqrt(Fn / Ff);
+                    Fy *= K;
+                    Fx *= K;
+                    wheel.Dy *= K;
+                    wheel.Dx *= K;
+                }
+            } else {
+                Fy = Fx = 0;
+            }
+            // Apply forces to wheel ground contact point
+            forceVector = add(forceVector, add(mul(tireX, Fx * oneOverMass), mul(tireY, Fy * oneOverMass)));
+            // Wheel angular acceleration from engine torque and tire deformation force
+            wheel.torqueScale = std::fabs(wheel.avel) > maxAvel ? 0 : 1 - std::fabs(wheel.avel) / maxAvel;
+            wheel.avel += (((wheel.torqueScale * engineTorque) - Fy * tireRadius) / aMomentum) * dt;
+            // Wheel angular acceleration from break torque
+            if (maxBreakVel > std::fabs(wheel.avel)) wheel.avel = 0;
+            else wheel.avel += wheel.avel > 0 ? -maxBreakVel : maxBreakVel;
+        } else {
+            wheel.torqueScale = 0;
+            wheel.Dy += (-longRelaxation * std::fabs(wheel.avel) * wheel.Dy) * dt;
+            wheel.Dx += (-lateralRelaxation * std::fabs(wheel.avel) * wheel.Dx) * dt;
+        }
+    }
+    // Sum up the torques and forces
+    Point3F torque{0, 0, 0};
+    for (size_t j = 0; j < count; ++j) {
+        const Point3F r = sub(mulP(currMatrix, (*wheelData)[j].pos), massCenter);
+        torque = add(torque, cross(r, wheelForce[j]));
+        force = add(force, wheelForce[j]);
+    }
+    // Container buoyancy & drag
+    force = add(force, {0, 0, -buoyancy * WheeledGravity});
+    force = sub(force, mul(rigid.state.linVelocity, drag));
+    torque = sub(torque, mul(rigid.state.angMomentum, drag));
+    rigid.state.force = add(rigid.state.force, force);
+    rigid.state.torque = add(rigid.state.torque, torque);
+}
+
+bool WheeledVehicleObject::writePacketData(GameConnection& connection, TorqueBitWriter& w) {
+    const bool ret = VehicleObject::writePacketData(connection, w);
+    w.writeFlag(braking);
+    for (size_t i = 0; wheelData && i < wheelData->size(); ++i) {
+        w.writeF32(wheels[i].avel);
+        w.writeF32(wheels[i].Dy);
+        w.writeF32(wheels[i].Dx);
+    }
+    return ret;
+}
+
+uint32_t WheeledVehicleObject::packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) {
+    const uint32_t ret = VehicleObject::packUpdate(connection, mask, w);
+    // The rest is part of the control object's packet data for its client.
+    const std::string self = script ? ScriptEngine::instance().objectKey(script) : std::string();
+    if (connection.controlObject() == self && !(mask & InitialUpdateMask)) return ret;
+    w.writeFlag(braking);
+    if (w.writeFlag(mask & PositionMask))
+        for (size_t i = 0; wheelData && i < wheelData->size(); ++i) {
+            w.writeF32(wheels[i].avel);
+            w.writeF32(wheels[i].Dy);
+            w.writeF32(wheels[i].Dx);
+        }
+    return ret;
+}
+
+//----------------------------------------------------------------------------
 
 void registerVehicleNatives(TorqueScript& ts) {
     EngineObjects::registerClass("HoverVehicle", [] { return std::make_shared<HoverVehicleObject>(); });
     EngineObjects::registerClass("FlyingVehicle", [] { return std::make_shared<FlyingVehicleObject>(); });
+    EngineObjects::registerClass("WheeledVehicle", [] { return std::make_shared<WheeledVehicleObject>(); });
     using Args = std::vector<VMValue>;
     auto vehicle = [](const Args& args) -> VehicleObject* {
         return args.empty() ? nullptr : EngineObjects::get<VehicleObject>(args[0].toString());

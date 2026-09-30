@@ -9,9 +9,9 @@
 // for those) as the object, since the soup carries no owner. Water is the
 // serverCollision().water surface. Objects collide by an axis-aligned box:
 // a Player by its PlayerData boxSize (centred in x/y, feet at the origin, as
-// Player::onNewDataBlock builds mObjBox), any other ShapeBase by a 1 m box
-// standing on its origin (the DTS bounds are not loaded on the server), and
-// everything else as a point (no collision).
+// Player::onNewDataBlock builds mObjBox), any other ShapeBase by its DTS
+// bounds through its transform (a 1 m box on its origin when the shape
+// cannot be read), and everything else as a point (no collision).
 #include "core/math.h"
 #include <cmath>
 #include <cstdint>

@@ -2169,3 +2169,60 @@ int importDSQ(const uint8_t* data, size_t size, const std::vector<DTSShape::Node
     if (!alias.empty()) out.back().name = alias;
     return (int)(out.size() - first);
 }
+
+std::vector<MatrixF> dtsSequencePose(const DTSLoadResult& shape, int sequence, float position) {
+    const int32_t numNodes = (int32_t)shape.nodes.size();
+    std::vector<MatrixF> world(numNodes);
+    if (numNodes == 0 || shape.defaultLocalTransforms.size() < (size_t)numNodes) return world;
+    const DTSShape::Animation* anim =
+        sequence >= 0 && sequence < (int)shape.animations.size() ? &shape.animations[sequence] : nullptr;
+    const float t = anim ? std::clamp(position, 0.0f, 1.0f) * anim->duration : 0.0f;
+    for (int32_t i = 0; i < numNodes; ++i) {
+        const MatrixF& bind = shape.defaultLocalTransforms[i];
+        QuatF rot = QuatF::fromMatrix(bind);
+        Point3F trans{bind.m[0][3], bind.m[1][3], bind.m[2][3]};
+        bool animated = false;
+        if (anim) {
+            // The keyframes bracketing t for this node's rotation and translation.
+            const DTSShape::Keyframe *r0 = nullptr, *r1 = nullptr, *t0 = nullptr, *t1 = nullptr;
+            for (const auto& k : anim->keyframes) {
+                if (k.nodeIndex != i) continue;
+                if (k.hasRotation) {
+                    if (k.time <= t && (!r0 || k.time >= r0->time)) r0 = &k;
+                    if (k.time >= t && (!r1 || k.time <= r1->time)) r1 = &k;
+                }
+                if (k.hasTranslation) {
+                    if (k.time <= t && (!t0 || k.time >= t0->time)) t0 = &k;
+                    if (k.time >= t && (!t1 || k.time <= t1->time)) t1 = &k;
+                }
+            }
+            if (r0) {
+                animated = true;
+                rot = (!r1 || r1 == r0 || std::abs(r1->time - r0->time) < 0.0001f)
+                    ? r0->rotation : Math::quatSlerp(r0->rotation, r1->rotation, (t - r0->time) / (r1->time - r0->time));
+            }
+            if (t0) {
+                animated = true;
+                if (!t1 || t1 == t0 || std::abs(t1->time - t0->time) < 0.0001f) {
+                    trans = t0->translation;
+                } else {
+                    const float a = (t - t0->time) / (t1->time - t0->time);
+                    trans = {t0->translation.x + a * (t1->translation.x - t0->translation.x),
+                             t0->translation.y + a * (t1->translation.y - t0->translation.y),
+                             t0->translation.z + a * (t1->translation.z - t0->translation.z)};
+                }
+            }
+        }
+        MatrixF local = bind;
+        if (animated) {
+            local = rot.toMatrix();
+            local.m[0][3] = trans.x;
+            local.m[1][3] = trans.y;
+            local.m[2][3] = trans.z;
+            local.m[3][3] = 1.0f;
+        }
+        const int32_t parent = shape.nodes[i].parentIndex;
+        world[i] = parent >= 0 && parent < i ? world[parent] * local : local;
+    }
+    return world;
+}
