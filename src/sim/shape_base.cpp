@@ -190,7 +190,7 @@ const std::unordered_map<std::string, std::array<float, 3>>* shapeNodes(const st
     return &it->second;
 }
 
-// The shape's bounds (TSShape::bounds, shape space as stored).
+// The shape's bounds (TSShape::bounds, shape space).
 bool shapeBounds(const std::string& shapeFile, float lo[3], float hi[3]) {
     static std::unordered_map<std::string, std::array<float, 6>> cache;
     if (shapeFile.empty() || !Engine::instance().filesys) return false;
@@ -202,9 +202,10 @@ bool shapeBounds(const std::string& shapeFile, float lo[3], float hi[3]) {
         const auto bytes = Engine::instance().fs().read(("shapes/" + shapeFile).c_str());
         if (!bytes.empty()) {
             const DTSLoadResult shape = loadDTS(bytes.data(), bytes.size(), shapeFile.c_str());
+            // The loader's frame has height in y and forward in z.
             if (shape.hasBounds)
-                box = {shape.boundsMin.x, shape.boundsMin.y, shape.boundsMin.z,
-                       shape.boundsMax.x, shape.boundsMax.y, shape.boundsMax.z};
+                box = {shape.boundsMin.x, shape.boundsMin.z, shape.boundsMin.y,
+                       shape.boundsMax.x, shape.boundsMax.z, shape.boundsMax.y};
         }
         it = cache.emplace(key, box).first;
     }
@@ -1327,6 +1328,43 @@ void registerShapeBaseNatives(TorqueScript& ts) {
         const bool blocked = SimContainer::polysInBox(mat, blo, bhi,
                                                       SimContainer::InteriorObjectType | SimContainer::StaticShapeObjectType);
         return VMValue(blocked ? 0 : 1);
+    });
+    // The retail ShapeBaseData::checkDeployPurchase(xform, radius[, mask]):
+    // eight rays through the deploy plane (0.2 above to 0.2 below it) on a
+    // circle of the radius must all hit the mask (default interiors) no
+    // further than 0.13 of the radius off the plane.
+    ts.registerNative("ShapeBaseData::checkDeployPurchase", [](const Args& args) -> VMValue {
+        ScriptObject* data = args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str());
+        float lo[3], hi[3];
+        const std::string shapeFile = data ? Fields::string(data, "shapeFile") : std::string();
+        if (shapeFile.empty() || !shapeFileBounds(shapeFile, lo, hi)) return VMValue(0);
+        float pos[3] = {0, 0, 0};
+        TorqueMath::AngAxis aa{0, 0, 1, 0};
+        std::sscanf(args.size() > 1 ? args[1].toString().c_str() : "", "%f %f %f %f %f %f %f", &pos[0], &pos[1], &pos[2],
+                    &aa.x, &aa.y, &aa.z, &aa.angle);
+        const auto mat = TorqueMath::matrix(pos, aa);
+        const float radius = args.size() > 2 ? args[2].toFloat() : 0.0f;
+        const uint32_t mask = args.size() > 3 ? (uint32_t)args[3].toInt() : SimContainer::InteriorObjectType;
+        if (radius < 0.01f) return VMValue(1);
+        const float up[3] = {0, 0, 1};
+        float normal[3];
+        TorqueMath::mulV(mat, up, normal);
+        for (uint32_t i = 0; i < 8; ++i) {
+            const float angle = (float)(i * 0.78539816339744830962);
+            const float c = std::cos(angle) * radius, s = std::sin(angle) * radius;
+            const float a[3] = {c, s, 0.2f}, b[3] = {c, s, -0.2f};
+            float start[3], end[3];
+            TorqueMath::mulP(mat, a, start);
+            TorqueMath::mulP(mat, b, end);
+            SimContainer::RayInfo info;
+            if (!SimContainer::castRay({start[0], start[1], start[2]}, {end[0], end[1], end[2]}, mask, info))
+                return VMValue(0);
+            const float inv = 1.0f / radius;
+            const float v[3] = {(info.point.x - pos[0]) * inv, (info.point.y - pos[1]) * inv,
+                                (info.point.z - pos[2]) * inv};
+            if (!(std::fabs(v[0] * normal[0] + v[1] * normal[1] + v[2] * normal[2]) <= 0.13f)) return VMValue(0);
+        }
+        return VMValue(1);
     });
     // GameBase::setDataBlock (gameBase.cc cSetDataBlock).
     ts.registerNative("GameBase::setDataBlock", [](const Args& args) -> VMValue {

@@ -2678,14 +2678,12 @@ VMValue TorqueScript::executeNested(const std::string& source, const std::string
 
 void TorqueScript::Impl::parseArgumentList(std::vector<VMValue>& args) {
     if (peekToken().type != TSTokenType::RParen) {
-        // Bare identifiers (not followed by '(' or '[' or '::') are string literals in TorqueScript
-        // e.g. schedule(100, 0, checkGGIntroDone) passes "checkGGIntroDone" as a string
+        // A bare identifier that is the whole argument is a string literal
+        // (schedule(100, 0, checkGGIntroDone) passes "checkGGIntroDone"); one
+        // inside an expression is a constant operand (isObject(a/b) divides).
         auto isBareIdent = [&]() {
             return peekToken().type == TSTokenType::Ident &&
-                   peekToken(1).type != TSTokenType::LParen &&
-                   peekToken(1).type != TSTokenType::LBracket &&
-                   peekToken(1).type != TSTokenType::Colon &&
-                   peekToken(1).type != TSTokenType::Dot;
+                   (peekToken(1).type == TSTokenType::Comma || peekToken(1).type == TSTokenType::RParen);
         };
         if (isBareIdent()) {
             args.push_back(VMValue(nextToken().text));

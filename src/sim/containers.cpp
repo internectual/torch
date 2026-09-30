@@ -4,6 +4,8 @@
 #include "sim/player.h"
 #include "sim/shape_base.h"
 #include "sim/camera.h"
+#include "sim/server_container.h"
+#include <strings.h>
 #include "sim/engine_classes.h"
 #include "sim/net_object.h"
 #include "script/script_engine.h"
@@ -179,6 +181,8 @@ bool worldBox(ScriptObject* object, Point3F& min, Point3F& max) {
     min = max = p;
     auto* engine = object ? object->engine.get() : nullptr;
     if (!engine || dynamic_cast<Camera*>(engine)) return false;
+    if (strcasecmp(object->className.c_str(), "InteriorInstance") == 0)
+        return ServerContainer::interiorWorldBox(object, min, max);
     if (dynamic_cast<PlayerObject*>(engine)) {
         const std::string block = ScriptEngine::instance().objectDataBlock(object);
         const auto size = Fields::point(ScriptEngine::instance().findObject(block.c_str()), "boxSize", {1, 1, 2});

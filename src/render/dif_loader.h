@@ -15,6 +15,8 @@ struct DIFLoadResult {
     bool loaded = false;
     // Interior::mHasAlarmState of the highest detail (an alarm lightmap set).
     bool hasAlarmState = false;
+    // Interior::mBoundingBox of the highest detail (interior space).
+    float boundsMin[3] = {0, 0, 0}, boundsMax[3] = {0, 0, 0};
     // Collision triangles extracted from hull surfaces
     std::vector<float> hullCollisionVerts;
     std::vector<uint32_t> hullCollisionIndices;

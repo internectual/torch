@@ -41,6 +41,9 @@ bool terrainBlock(Point3F& origin, float& squareSize);
 // relative to that block's origin: the block repeats, and an empty square
 // has no height. The normal is left unnormalized unless asked.
 bool terrainHeight(const Point2F& pos, float* height, Point3F* normal = nullptr, bool normalize = true);
+// An InteriorInstance's world box: its interior's mBoundingBox, scaled,
+// through its transform; false when the interior is not loaded.
+bool interiorWorldBox(const ScriptObject* object, Point3F& min, Point3F& max);
 // Interior::mHasAlarmState of a loaded interior file (setAlarmMode needs it).
 bool interiorHasAlarmState(const std::string& interiorFile);
 

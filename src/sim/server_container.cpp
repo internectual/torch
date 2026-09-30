@@ -122,6 +122,7 @@ void addTerrain(const ScriptObject* object) {
 // a bridge shares them).
 struct Hulls {
     bool loaded = false, hasAlarmState = false;
+    float boundsMin[3] = {0, 0, 0}, boundsMax[3] = {0, 0, 0};
     std::vector<float> hullCollisionVerts;
     std::vector<uint32_t> hullCollisionIndices;
 };
@@ -130,10 +131,10 @@ std::unordered_map<std::string, Hulls>& interiorCache() {
     return cache;
 }
 
-void addInterior(const ScriptObject* object, std::vector<PlayerPrediction::Triangle>& out) {
+const Hulls* interiorHulls(const ScriptObject* object) {
     std::string file = Fields::string(object, "interiorFile");
     for (char& c : file) if (c == '\\') c = '/';
-    if (file.empty()) return;
+    if (file.empty()) return nullptr;
     auto& cache = interiorCache();
     auto cached = cache.find(lower(file));
     if (cached == cache.end()) {
@@ -147,13 +148,22 @@ void addInterior(const ScriptObject* object, std::vector<PlayerPrediction::Trian
             DIFLoadResult loaded = loadDIF(bytes.data(), bytes.size(), file.c_str(), true);
             hulls.loaded = loaded.loaded;
             hulls.hasAlarmState = loaded.hasAlarmState;
+            for (int i = 0; i < 3; ++i) {
+                hulls.boundsMin[i] = loaded.boundsMin[i];
+                hulls.boundsMax[i] = loaded.boundsMax[i];
+            }
             hulls.hullCollisionVerts = std::move(loaded.hullCollisionVerts);
             hulls.hullCollisionIndices = std::move(loaded.hullCollisionIndices);
         }
         cached = cache.emplace(lower(file), std::move(hulls)).first;
     }
-    const Hulls& dif = cached->second;
-    if (!dif.loaded) return;
+    return &cached->second;
+}
+
+void addInterior(const ScriptObject* object, std::vector<PlayerPrediction::Triangle>& out) {
+    const Hulls* hulls = interiorHulls(object);
+    if (!hulls || !hulls->loaded) return;
+    const Hulls& dif = *hulls;
     auto* scene = dynamic_cast<SceneObject*>(object->engine.get());
     if (!scene) return;
     const auto& m = scene->transform;
@@ -404,6 +414,27 @@ float waterSurfaceAt(float x, float y) {
             y <= std::max(w.y0, w.y1) && !(w.level <= best))
             best = w.level;
     return best;
+}
+
+bool interiorWorldBox(const ScriptObject* object, Point3F& min, Point3F& max) {
+    const Hulls* dif = interiorHulls(object);
+    auto* scene = object ? dynamic_cast<SceneObject*>(object->engine.get()) : nullptr;
+    if (!dif || !dif->loaded || !scene) return false;
+    // SceneObject::resetWorldBox: the scaled object box through the transform.
+    const auto& m = scene->transform;
+    const float* sc = scene->scale;
+    min = {1e30f, 1e30f, 1e30f};
+    max = {-1e30f, -1e30f, -1e30f};
+    for (int k = 0; k < 8; ++k) {
+        const float x = ((k & 1) ? dif->boundsMax[0] : dif->boundsMin[0]) * sc[0];
+        const float y = ((k & 2) ? dif->boundsMax[1] : dif->boundsMin[1]) * sc[1];
+        const float z = ((k & 4) ? dif->boundsMax[2] : dif->boundsMin[2]) * sc[2];
+        const Point3F w{m[0] * x + m[1] * y + m[2] * z + m[3], m[4] * x + m[5] * y + m[6] * z + m[7],
+                        m[8] * x + m[9] * y + m[10] * z + m[11]};
+        min = {std::min(min.x, w.x), std::min(min.y, w.y), std::min(min.z, w.z)};
+        max = {std::max(max.x, w.x), std::max(max.y, w.y), std::max(max.z, w.z)};
+    }
+    return true;
 }
 
 bool interiorHasAlarmState(const std::string& interiorFile) {

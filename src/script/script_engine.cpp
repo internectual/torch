@@ -9353,9 +9353,10 @@ ScriptObject* ScriptEngine::findObject(const char* name) {
         }
         return current;
     }
-    int id = 0;
-    if (parseObjectId(name, id)) {
-        auto byId = objectsById.find(id);
+    // A reference starting with a digit is an id: dAtoi of the whole
+    // string, so a raycast result ("<id> x y z nx ny nz") names its object.
+    if (*name >= '0' && *name <= '9') {
+        auto byId = objectsById.find(std::atoi(name));
         return byId != objectsById.end() ? byId->second : nullptr;
     }
     return findObjectByName(name);

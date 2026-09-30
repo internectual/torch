@@ -60,6 +60,11 @@ int main() {
     assert(utilityScript->callFunction("getWindVelocity", {}).toString() == windBeforeInvalid);
     assert(utilityScript->callFunction("setWindVelocity", {VMValue("0 0 0")}).toInt() == 1);
     assert(utilityScript->callFunction("VectorCross", {VMValue("1 0 0"), VMValue("0 1 0")}).toString() == "0 0 1");
+    // A bare identifier is a constant operand inside an argument
+    // expression, a string literal only as the whole argument.
+    utilityScript->execute("$bareDiv = isObject(NoSuchGroup/NoChild); $bareCat = strlen(abc @ def); $bareArg = strlen(abc);");
+    assert(utilityScript->getGlobal("$bareDiv").toInt() == 0 && utilityScript->getGlobal("$bareCat").toInt() == 6 &&
+           utilityScript->getGlobal("$bareArg").toInt() == 3);
     utilityScript->callFunction("setRandomSeed", {VMValue(7)});
     const int firstRandom = utilityScript->callFunction("getRandom", {VMValue(-3), VMValue(3)}).toInt();
     assert(firstRandom >= -3 && firstRandom <= 3);
@@ -1085,6 +1090,13 @@ int main() {
             // The mount node follows the turn thread: the barrel faces +x.
             const auto mount = turret->getMountTransform(0);
             assert(mount[11] > 399.0f && mount[1] > 0.9f);
+            {
+                // TSShape::bounds in shape space (z up): the floor turret
+                // stands on its origin.
+                float lo[3], hi[3];
+                assert(shapeFileBounds("turret_indoor_deployf.dts", lo, hi));
+                assert(lo[2] > -0.05f && hi[2] > 0.8f && lo[1] < -0.4f);
+            }
             script.ts()->execute("$turretTarget = TestTurret.getTargetObject(); $victimId = TurretVictim.getId();"
                                  "$capacitor = TestTurret.getCapacitorLevel();");
             assert(script.ts()->getGlobal("$turretTarget").toInt() == script.ts()->getGlobal("$victimId").toInt());
