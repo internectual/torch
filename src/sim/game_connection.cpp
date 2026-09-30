@@ -5,6 +5,7 @@
 #include "sim/net_object.h"
 #include "sim/datablock_pack.h"
 #include "sim/shape_base.h"
+#include "sim/torque_math.h"
 #include "net/remote_command.h"
 #include "net/v12_bitstream.h"
 #include "script/script_engine.h"
@@ -920,6 +921,27 @@ void registerGameConnectionNatives(TorqueScript& ts) {
         if (auto* c = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString())) c->checkMaxRate();
         return VMValue("");
     });
+    // GameConnection::play2D / play3D: a Sim2DAudioEvent / Sim3DAudioEvent,
+    // a 3D one only within the description's maxDistance of the control
+    // object (GameConnection::play3D).
+    ts.registerNative("GameConnection::play2D", [](const Args& args) -> VMValue {
+        auto* c = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString());
+        ScriptObject* profile = args.size() > 1 ? ScriptEngine::instance().findObject(args[1].toString().c_str()) : nullptr;
+        if (!c || !profile) return VMValue(0);
+        c->play2D(ScriptEngine::instance().objectId(profile));
+        return VMValue(1);
+    });
+    ts.registerNative("GameConnection::play3D", [](const Args& args) -> VMValue {
+        auto* c = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString());
+        ScriptObject* profile = args.size() > 1 ? ScriptEngine::instance().findObject(args[1].toString().c_str()) : nullptr;
+        if (!c || !profile || args.size() < 3) return VMValue(0);
+        float pos[3] = {0, 0, 0};
+        TorqueMath::AngAxis aa{0, 0, 1, 0};
+        std::sscanf(args[2].toString().c_str(), "%f %f %f %f %f %f %f", &pos[0], &pos[1], &pos[2], &aa.x, &aa.y,
+                    &aa.z, &aa.angle);
+        c->play3D(profile, TorqueMath::matrix(pos, aa));
+        return VMValue(1);
+    });
     // GameConnection::isAIControlled (mAIControlled: an AIConnection).
     ts.registerNative("GameConnection::isAIControlled", [](const Args& args) -> VMValue {
         ScriptObject* object = args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str());
@@ -933,4 +955,51 @@ void registerGameConnectionNatives(TorqueScript& ts) {
         if (auto* c = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString())) c->resetGhosting();
         return VMValue("");
     });
+}
+
+namespace {
+constexpr int DataBlockObjectIdBitSize = 11;
+}
+
+void GameConnection::play2D(int profileId) {
+    auto event = std::make_shared<NetEventOut>();
+    event->classIndex = Sim2DAudio;
+    event->pack = [profileId](TorqueBitWriter& w) { w.writeInt(profileId - (int)DataBlockPack::ObjectIdFirst, DataBlockObjectIdBitSize); };
+    postEvent(event);
+}
+
+void GameConnection::play3D(ScriptObject* profile, const std::array<float, 16>& transform) {
+    auto& engine = ScriptEngine::instance();
+    const int profileId = engine.objectId(profile);
+    ScriptObject* description = engine.findObject(Fields::string(profile, "description").c_str());
+    const Point3F pos{transform[3], transform[7], transform[11]};
+    if (auto* control = EngineObjects::get<SceneObject>(controlObject())) {
+        // Only post the event if it's within audible range of the control object.
+        const float dx = control->transform[3] - pos.x, dy = control->transform[7] - pos.y,
+                    dz = control->transform[11] - pos.z;
+        float maxDistance = description ? Fields::f32(description, "maxDistance", 100.0f) : 100.0f;
+        if (description && Fields::boolean(description, "is3D", false)) {
+            const float minDistance = std::max(0.0f, Fields::f32(description, "minDistance", 1.0f));
+            if (maxDistance <= minDistance) maxDistance = minDistance + 0.01f;
+        }
+        if (std::sqrt(dx * dx + dy * dy + dz * dz) >= maxDistance) return;
+    }
+    const bool cone = description && (Fields::s32(description, "coneInsideAngle", 360) ||
+                                      Fields::s32(description, "coneOutsideAngle", 360));
+    const TorqueMath::Quat q = TorqueMath::normalize(TorqueMath::quat(transform));
+    auto event = std::make_shared<NetEventOut>();
+    event->classIndex = Sim3DAudio;
+    event->pack = [profileId, cone, q, pos](TorqueBitWriter& w) {
+        w.writeInt(profileId - (int)DataBlockPack::ObjectIdFirst, DataBlockObjectIdBitSize);
+        if (w.writeFlag(cone)) {
+            constexpr int SoundRotBits = 8;
+            w.writeFloat(q.x, SoundRotBits);
+            w.writeFloat(q.y, SoundRotBits);
+            w.writeFloat(q.z, SoundRotBits);
+            w.writeFlag(q.w < 0.0f);
+        }
+        constexpr float SoundPosAccuracy = 0.5f;
+        w.writeCompressedPoint({pos.x, pos.y, pos.z}, SoundPosAccuracy);
+    };
+    postEvent(event);
 }

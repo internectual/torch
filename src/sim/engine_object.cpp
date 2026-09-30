@@ -77,6 +77,7 @@ void advanceServer(double now) {
                 ? EngineObjects::get<GameConnection>(base->controllingClient) : nullptr;
             if (connection && object.script &&
                 connection->controlObject() == ScriptEngine::instance().objectKey(object.script)) {
+                connection->getMoveList();
                 while (!connection->moves.empty() && !base->controllingClient.empty()) {
                     const ClientMoveIn move = connection->moves.front();
                     connection->moves.pop_front();

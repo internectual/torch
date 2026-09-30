@@ -50,6 +50,11 @@ add_executable(torch
     src/ai/graph_math.cpp
     src/ai/graph_path.cpp
     src/ai/graph_search.cpp
+    src/ai/ai_task.cpp
+    src/ai/ai_step.cpp
+    src/ai/ai_jetting.cpp
+    src/ai/ai_connection.cpp
+    src/ai/ai_console.cpp
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
@@ -157,6 +162,11 @@ add_executable(torch_server
     src/ai/graph_math.cpp
     src/ai/graph_path.cpp
     src/ai/graph_search.cpp
+    src/ai/ai_task.cpp
+    src/ai/ai_step.cpp
+    src/ai/ai_jetting.cpp
+    src/ai/ai_connection.cpp
+    src/ai/ai_console.cpp
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
@@ -437,6 +447,11 @@ add_executable(torch_parity_test
     src/ai/graph_math.cpp
     src/ai/graph_path.cpp
     src/ai/graph_search.cpp
+    src/ai/ai_task.cpp
+    src/ai/ai_step.cpp
+    src/ai/ai_jetting.cpp
+    src/ai/ai_connection.cpp
+    src/ai/ai_console.cpp
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
@@ -525,6 +540,11 @@ add_executable(torch_network_loopback_test
     src/ai/graph_math.cpp
     src/ai/graph_path.cpp
     src/ai/graph_search.cpp
+    src/ai/ai_task.cpp
+    src/ai/ai_step.cpp
+    src/ai/ai_jetting.cpp
+    src/ai/ai_connection.cpp
+    src/ai/ai_console.cpp
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
@@ -614,6 +634,12 @@ add_executable(torch_nav_graph_test
     src/ai/graph_math.cpp
     src/ai/graph_path.cpp
     src/ai/graph_search.cpp
+    src/ai/ai_task.cpp
+    src/ai/ai_step.cpp
+    src/ai/ai_jetting.cpp
+    src/ai/ai_connection.cpp
+    src/ai/ai_console.cpp
+    src/sim/projectile_aim.cpp
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
@@ -703,6 +729,11 @@ add_executable(torch_target_manager_test
     src/ai/graph_math.cpp
     src/ai/graph_path.cpp
     src/ai/graph_search.cpp
+    src/ai/ai_task.cpp
+    src/ai/ai_step.cpp
+    src/ai/ai_jetting.cpp
+    src/ai/ai_connection.cpp
+    src/ai/ai_console.cpp
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp

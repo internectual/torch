@@ -2014,112 +2014,6 @@ bool ScriptEngine::init() {
             return setMissionObjectEnabled(args, false);
         });
     }
-    auto objectiveName = [](const std::vector<VMValue>& args) {
-        return args.empty() ? std::string{} : args[0].toString();
-    };
-    auto objectiveActive = [objectiveName](const auto& args, bool active) -> VMValue {
-        return VMValue(Engine::instance().game().world().setObjectiveActive(
-            objectiveName(args), active) ? 1 : 0);
-    };
-    auto objectiveState = [objectiveName](const auto& args, int state) -> VMValue {
-        return VMValue(Engine::instance().game().world().setObjectiveState(
-            objectiveName(args), state) ? 1 : 0);
-    };
-    auto objectiveTarget = [objectiveName](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        return VMValue(Engine::instance().game().world().setObjectiveTarget(
-            objectiveName(args), args[1].toString(), args.size() > 2 ? args[2].toInt() : -1) ? 1 : 0);
-    };
-    auto objectiveWeight = [objectiveName](const auto& args) -> VMValue {
-        if (args.size() < 3) return VMValue(0);
-        const int level = args[1].toInt();
-        const int index = level >= 1 && level <= 4 ? level - 1 : level;
-        return VMValue(Engine::instance().game().world().setObjectiveWeight(
-            objectiveName(args), index, args[2].toFloat()) ? 1 : 0);
-    };
-    auto objectiveScore = [objectiveName](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        return VMValue(Engine::instance().game().world().setObjectiveScore(
-            objectiveName(args), args[1].toFloat()) ? 1 : 0);
-    };
-    auto objectiveTeam = [objectiveName](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        return VMValue(Engine::instance().game().world().setObjectiveTeam(
-            objectiveName(args), args[1].toInt()) ? 1 : 0);
-    };
-    auto setTaskInfo = [](const auto& args) -> VMValue {
-        if (args.size() < 5) return VMValue(0);
-        auto* taskList = ScriptEngine::instance().findObject(args[0].toString().c_str());
-        if (!taskList || taskList->name != "TaskList") return VMValue(0);
-        taskList->fields["currentTaskClient"] = args[1];
-        taskList->fields["currentAIObjective"] = args[2];
-        taskList->fields["currentTaskIsTeam"] = args[3];
-        taskList->fields["currentTaskDescription"] = args[4];
-        return VMValue(1);
-    };
-    auto clearTaskInfo = [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        auto* taskList = ScriptEngine::instance().findObject(args[0].toString().c_str());
-        if (!taskList || taskList->name != "TaskList") return VMValue(0);
-        taskList->fields["currentTaskClient"] = VMValue("");
-        taskList->fields["currentAIObjective"] = VMValue("");
-        taskList->fields["currentTaskIsTeam"] = VMValue("0");
-        taskList->fields["currentTaskDescription"] = VMValue("");
-        return VMValue(1);
-    };
-    auto registerObjectiveCommands = [&](auto* vm) {
-        vm->registerNativeFunction("AIObjective::activate", [objectiveActive](const auto& a) {
-            return objectiveActive(a, true);
-        });
-        vm->registerNativeFunction("AIObjective::deactivate", [objectiveActive](const auto& a) {
-            return objectiveActive(a, false);
-        });
-        vm->registerNativeFunction("AIObjective::setState", [objectiveState](const auto& a) {
-            return objectiveState(a, a.size() > 1 ? a[1].toInt() : -1);
-        });
-        vm->registerNativeFunction("AIObjective::setObjectiveState", [objectiveState](const auto& a) {
-            return objectiveState(a, a.size() > 1 ? a[1].toInt() : -1);
-        });
-        vm->registerNativeFunction("AIObjective::setTargetObject", objectiveTarget);
-        vm->registerNativeFunction("AIObjective::setWeight", objectiveWeight);
-        vm->registerNativeFunction("AIObjective::setWeightLevel", objectiveWeight);
-        vm->registerNativeFunction("AIObjective::setScore", objectiveScore);
-        vm->registerNativeFunction("AIObjective::setTeam", objectiveTeam);
-        vm->registerNativeFunction("AIObjective::complete", [objectiveState](const auto& a) {
-            return objectiveState(a, 2);
-        });
-        vm->registerNativeFunction("AIObjective::fail", [objectiveState](const auto& a) {
-            return objectiveState(a, 3);
-        });
-        vm->registerNativeFunction("TaskList::setTaskInfo", setTaskInfo);
-        vm->registerNativeFunction("TaskList::clearTaskInfo", clearTaskInfo);
-    };
-    tsInstance->registerNative("AIObjective::activate", [objectiveActive](const auto& a) {
-        return objectiveActive(a, true);
-    });
-    tsInstance->registerNative("AIObjective::deactivate", [objectiveActive](const auto& a) {
-        return objectiveActive(a, false);
-    });
-    tsInstance->registerNative("AIObjective::setState", [objectiveState](const auto& a) {
-        return objectiveState(a, a.size() > 1 ? a[1].toInt() : -1);
-    });
-    tsInstance->registerNative("AIObjective::setObjectiveState", [objectiveState](const auto& a) {
-        return objectiveState(a, a.size() > 1 ? a[1].toInt() : -1);
-    });
-    tsInstance->registerNative("AIObjective::setTargetObject", objectiveTarget);
-    tsInstance->registerNative("AIObjective::setWeight", objectiveWeight);
-    tsInstance->registerNative("AIObjective::setWeightLevel", objectiveWeight);
-    tsInstance->registerNative("AIObjective::setScore", objectiveScore);
-    tsInstance->registerNative("AIObjective::setTeam", objectiveTeam);
-    tsInstance->registerNative("AIObjective::complete", [objectiveState](const auto& a) {
-        return objectiveState(a, 2);
-    });
-    tsInstance->registerNative("AIObjective::fail", [objectiveState](const auto& a) {
-        return objectiveState(a, 3);
-    });
-    tsInstance->registerNative("TaskList::setTaskInfo", setTaskInfo);
-    tsInstance->registerNative("TaskList::clearTaskInfo", clearTaskInfo);
-    registerObjectiveCommands(vmInstance);
     tsInstance->registerNative("setWaterLevel", setScriptWaterLevel);
     tsInstance->registerNative("setWaterType", setScriptWaterType);
     tsInstance->registerNative("setLiquidType", setScriptWaterType);
@@ -3297,6 +3191,16 @@ bool ScriptEngine::init() {
         auto v = parseVec(args[0].toString());
         double s = args[1].toDouble();
         return VMValue(fmtVec(v[0]*s, v[1]*s, v[2]*s));
+    });
+    // getBoxCenter (math/mathTypes.cc): "minx miny minz maxx maxy maxz".
+    tsInstance->registerNative("getBoxCenter", [](const auto& args) -> VMValue {
+        float b[6] = {0, 0, 0, 0, 0, 0};
+        if (!args.empty())
+            std::sscanf(args[0].toString().c_str(), "%f %f %f %f %f %f", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+        char buffer[256];
+        std::snprintf(buffer, sizeof(buffer), "%g %g %g", (b[0] + b[3]) * 0.5f, (b[1] + b[4]) * 0.5f,
+                      (b[2] + b[5]) * 0.5f);
+        return VMValue(buffer);
     });
     tsInstance->registerNative("VectorAdd", [parseVec, fmtVec](const auto& args) -> VMValue {
         if (args.size() < 2) return args.empty() ? VMValue("0 0 0") : args[0];
@@ -5961,7 +5865,10 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("delete", [](const auto& args) -> VMValue {
         if (!args.empty()) {
              const std::string objName = args[0].toString();
-             const auto missionOrder = ScriptEngine::instance().missionDeletionOrder(objName);
+             // An object the mission created is deleted as itself (the mission
+             // file's records stand in only where the mission did not run).
+             const auto missionOrder = ScriptEngine::instance().findObject(objName.c_str())
+                 ? std::vector<std::string>{} : ScriptEngine::instance().missionDeletionOrder(objName);
              if (!missionOrder.empty()) {
                  for (const auto& name : missionOrder) {
                      auto it = std::find_if(ScriptEngine::instance().missionObjects().begin(),
@@ -8833,6 +8740,10 @@ bool ScriptEngine::init() {
 
     auto missionObject = [](const std::string& value) -> const ScriptMissionObject* {
         auto& objects = ScriptEngine::instance().missionObjects();
+        if (objects.empty()) return nullptr;
+        // The mission file's records stand in only where the mission did not
+        // run as script: an object the mission created answers for itself.
+        if (ScriptEngine::instance().findObject(value.c_str())) return nullptr;
         char* end = nullptr;
         const long id = std::strtol(value.c_str(), &end, 10);
         for (const auto& object : objects) {

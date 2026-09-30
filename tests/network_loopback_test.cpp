@@ -88,29 +88,6 @@ int main() {
     assert(!providerEngine.mutateThread(7, 0, 1, "run"));
 
     World objectiveWorld;
-    World::WorldObject objective;
-    objective.className = "AIObjective";
-    objective.objectName = "ObjectiveA";
-    objective.missionObjective = true;
-    objectiveWorld.addObject(objective);
-    assert(objectiveWorld.setObjectiveActive("ObjectiveA", false));
-    assert(!objectiveWorld.objects().front().objectiveActive);
-    assert(objectiveWorld.setObjectiveState("ObjectiveA", 0));
-    assert(!objectiveWorld.objects().front().objectiveActive &&
-           objectiveWorld.objects().front().objectiveState == 0);
-    assert(objectiveWorld.setObjectiveState("ObjectiveA", 1));
-    assert(objectiveWorld.setObjectiveTarget("ObjectiveA", "Generator", 12));
-    assert(objectiveWorld.setObjectiveWeight("ObjectiveA", 2, 7.5f));
-    assert(objectiveWorld.setObjectiveScore("ObjectiveA", 4.0f));
-    assert(objectiveWorld.setObjectiveTeam("ObjectiveA", 2));
-    assert(!objectiveWorld.setObjectiveState("ObjectiveA", 4));
-    assert(!objectiveWorld.setObjectiveTeam("ObjectiveA", -1));
-    const auto& objectiveState = objectiveWorld.objects().front();
-    assert(objectiveState.objectiveActive && objectiveState.objectiveState == 1);
-    assert(objectiveState.objectiveTarget == "Generator" && objectiveState.objectiveTargetId == 12);
-    assert(objectiveState.objectiveWeights[2] == 7.5f && objectiveState.objectiveScore == 4.0f);
-    assert(objectiveState.teamId == 2);
-
     World::WorldObject transformable;
     transformable.className = "StaticShape";
     transformable.objectName = "Transformable";
@@ -462,15 +439,6 @@ int main() {
     assert(script.ts()->getGlobal("$missionRemovalTrace").toString() == "MissionChild;MissionRoot;");
     script.clearMissionObjects();
 
-    std::vector<std::string> objectiveCallbacks;
-    script.ts()->registerNative("AIObjective::onComplete", [&](const auto& args) {
-        objectiveCallbacks.push_back("complete:" + args[0].toString());
-        return VMValue(1);
-    });
-    script.ts()->registerNative("AIObjective::onFail", [&](const auto& args) {
-        objectiveCallbacks.push_back("fail:" + args[0].toString());
-        return VMValue(1);
-    });
     std::vector<std::string> damageCallbacks;
     script.ts()->registerNative("Player::onDamage", [&](const auto& args) {
         damageCallbacks.push_back("damage:" + args[0].toString());
@@ -480,9 +448,6 @@ int main() {
         damageCallbacks.push_back("repair:" + args[0].toString());
         return VMValue(1);
     });
-    assert(objectiveWorld.setObjectiveState("ObjectiveA", 2));
-    assert(objectiveWorld.setObjectiveState("ObjectiveA", 3));
-    assert((objectiveCallbacks == std::vector<std::string>{"complete:ObjectiveA", "fail:ObjectiveA"}));
     script.setDemoStateProvider([] { return false; });
     script.setDemoModeProvider([] { return false; });
     const auto& natives = script.ts()->getNatives();

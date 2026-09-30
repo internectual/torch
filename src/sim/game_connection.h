@@ -55,7 +55,8 @@ class GameConnection : public EngineObject {
 public:
     // Engine event class indices (NetEventClassFirst-relative).
     enum EventClass { GhostingMessage = 4, Gravity = 5, NetString = 7, RemoteCommand = 9,
-                      SetMissionCRC = 13, SimDataBlock = 19, SimpleMessage = 22 };
+                      SetMissionCRC = 13, Sim2DAudio = 17, Sim3DAudio = 18, SimDataBlock = 19,
+                      SimpleMessage = 22 };
 
     // NetConnection role: a client's connection on the server (ClientGroup),
     // or the client's ServerConnection.
@@ -68,6 +69,9 @@ public:
     // sendRemoteCommand: tags among argv get their NetStringEvent first.
     void sendRemoteCommand(const std::vector<std::string>& argv);
     void setMissionCRC(uint32_t crc);
+    // GameConnection::play2D / play3D (Sim2DAudioEvent / Sim3DAudioEvent).
+    void play2D(int profileId);
+    void play3D(ScriptObject* profile, const std::array<float, 16>& transform);
 
     // GameConnection::transmitDataBlocks(seq): DataBlockQueueCount
     // SimDataBlockEvents in flight, each delivery posting the next; the
@@ -118,6 +122,9 @@ public:
     // server's acknowledgement (mLastMoveAck = mFirstMoveIndex).
     uint32_t lastMoveAck = 0;
     std::deque<ClientMoveIn> moves;
+    // GameConnection::getMoveList: called as the control object ticks; an
+    // AIConnection makes its move here.
+    virtual void getMoveList() {}
     bool firstPerson = true;
 
     // NetConnection::mCurRate / mMaxRate: the packet interval (ms) and the

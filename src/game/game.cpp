@@ -2362,9 +2362,6 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                   for (int i = 0; i < 4; ++i) objective.objectiveWeights[i] = authored.weight[i];
                   objective.objectiveOffense = authored.offense;
                   objective.objectiveDefense = authored.defense;
-                  // AI objectives are activated by mission script callbacks.
-                  objective.objectiveActive = false;
-                  objective.objectiveState = 0;
                   objective.collidable = false;
                  objective.visible = authoredVisible(obj);
                  addObject(objective);
@@ -4674,84 +4671,6 @@ void World::addObject(const WorldObject& obj) {
     worldObjects.push_back(std::move(stored));
     const auto& added = worldObjects.back();
     dispatchMissionLifecycle(added, "onAdd");
-}
-
-namespace {
-World::WorldObject* findObjective(std::vector<World::WorldObject>& objects,
-                                   const std::string& name) {
-    for (auto& object : objects)
-        if (object.missionObjective && object.objectName == name) return &object;
-    return nullptr;
-}
-
-void dispatchObjectiveLifecycle(const World::WorldObject& objective, const char* callback) {
-    if (!ScriptEngine::exists()) return;
-    auto* ts = ScriptEngine::instance().ts();
-    if (!ts || objective.objectName.empty()) return;
-    const std::string function = std::string("AIObjective::") + callback;
-    // callFunction also resolves native callbacks, which stock compatibility
-    // hooks use when no TorqueScript definition was loaded.
-    ts->callFunction(function, {VMValue(objective.objectName), VMValue(objective.objectiveState)});
-}
-}
-
-bool World::setObjectiveActive(const std::string& name, bool active) {
-    auto* objective = findObjective(worldObjects, name);
-    if (!objective) return false;
-    if (objective->objectiveActive == active) return true;
-    objective->objectiveActive = active;
-    objective->objectiveState = active ? 1 : 0;
-    dispatchObjectiveLifecycle(*objective, active ? "onActivate" : "onDeactivate");
-    return true;
-}
-
-bool World::setObjectiveState(const std::string& name, int state) {
-    if (state < 0 || state > 3) return false;
-    auto* objective = findObjective(worldObjects, name);
-    if (!objective) return false;
-    if (objective->objectiveState == state) return true;
-    objective->objectiveState = state;
-    // State zero is the native inactive/deactivated state.  Keep the boolean
-    // view consistent with setObjectiveActive(), which also maps false to 0.
-    objective->objectiveActive = state == 1;
-    if (state == 1) dispatchObjectiveLifecycle(*objective, "onActivate");
-    else if (state == 2) dispatchObjectiveLifecycle(*objective, "onComplete");
-    else if (state == 3) dispatchObjectiveLifecycle(*objective, "onFail");
-    else dispatchObjectiveLifecycle(*objective, "onDeactivate");
-    return true;
-}
-
-bool World::setObjectiveTarget(const std::string& name, const std::string& target, int targetId) {
-    auto* objective = findObjective(worldObjects, name);
-    if (!objective || (target.empty() && targetId < 0)) return false;
-    objective->objectiveTarget = target;
-    objective->objectiveTargetId = targetId;
-    return true;
-}
-
-bool World::setObjectiveWeight(const std::string& name, int level, float weight) {
-    if (level < 0 || level >= 4 || !std::isfinite(weight)) return false;
-    auto* objective = findObjective(worldObjects, name);
-    if (!objective) return false;
-    objective->objectiveWeights[level] = weight;
-    if (level == 0) objective->objectiveWeight = weight;
-    return true;
-}
-
-bool World::setObjectiveScore(const std::string& name, float score) {
-    if (!std::isfinite(score)) return false;
-    auto* objective = findObjective(worldObjects, name);
-    if (!objective) return false;
-    objective->objectiveScore = score;
-    return true;
-}
-
-bool World::setObjectiveTeam(const std::string& name, int team) {
-    if (team < 0) return false;
-    auto* objective = findObjective(worldObjects, name);
-    if (!objective) return false;
-    objective->teamId = team;
-    return true;
 }
 
 void World::resetTriggerTracking() {

@@ -368,9 +368,6 @@ public:
         float objectiveWeight = 0.0f;
         bool objectiveOffense = false;
         bool objectiveDefense = false;
-        bool objectiveActive = true;
-        int objectiveState = 0;
-        float objectiveScore = 0.0f;
         float objectiveWeights[4]{};
     };
 
@@ -392,12 +389,6 @@ public:
     bool deleteMissionObject(const std::string& name);
     const std::vector<WorldObject>& objects() const { return worldObjects; }
     const std::vector<AuthoredMissionObjective>& objectives() const { return missionObjectives; }
-    bool setObjectiveActive(const std::string& name, bool active);
-    bool setObjectiveState(const std::string& name, int state);
-    bool setObjectiveTarget(const std::string& name, const std::string& target, int targetId);
-    bool setObjectiveWeight(const std::string& name, int level, float weight);
-    bool setObjectiveScore(const std::string& name, float score);
-    bool setObjectiveTeam(const std::string& name, int team);
     const AuthoredNavigationGraph& navigationGraph() const { return navGraph; }
     const std::vector<ObserverCamera>& observerCameras() const { return cameras; }
 
