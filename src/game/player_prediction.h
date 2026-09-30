@@ -431,19 +431,27 @@ inline void updateMove(State& s, const Data& d, float gravity, Collision& collis
     s.energy = std::max(0.0f, s.energy);
 }
 
-inline void updatePos(State& s, const Data& d, Collision& collision, const Point3F& initial) {
-    float time = TickSec, maxStep = d.maxStepHeight;
+// Player::updatePos: true when the player moved at least a thousandth of
+// its speed (false: blocked).
+inline bool updatePos(State& s, const Data& d, Collision& collision, const Point3F& initial,
+                      float travelTime = TickSec) {
+    float time = travelTime, maxStep = d.maxStepHeight;
+    const float initialSpeed = length(s.velocity);
+    float totalMotion = 0;
     Point3F firstNormal{0, 0, 0};
     for (int retry = 0; retry < 5; ++retry) {
         const float speed = length(s.velocity);
-        if (speed == 0) return;
+        if (speed == 0) return totalMotion >= 0.001f * initialSpeed;
         const Point3F travel = mul(s.velocity, time);
         if (!collision.sweep(s.position, d.boxSize, travel)) {
             s.position = add(s.position, travel);
-            return;
+            totalMotion += speed * time;
+            return totalMotion >= 0.001f * initialSpeed;
         }
         const float dt = time * collision.hitTime;
-        s.position = add(s.position, mul(s.velocity, dt - std::min(0.01f / speed, dt)));
+        const float backOff = std::min(0.01f / speed, dt);
+        s.position = add(s.position, mul(s.velocity, dt - backOff));
+        totalMotion += speed * (dt - backOff);
         time -= dt;
         s.falling = false;
         const Point3F normal = collision.hitNormal;
@@ -475,6 +483,7 @@ inline void updatePos(State& s, const Data& d, Collision& collision, const Point
     }
     s.position = initial;
     s.velocity = {0, 0, 0};
+    return totalMotion >= 0.001f * initialSpeed;
 }
 
 // Player::processTick. `move` is the controlling client's move for this

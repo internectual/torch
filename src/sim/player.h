@@ -54,6 +54,12 @@ public:
     // tank jets for, and the jump speed; returns the ticks the current
     // energy jets for (the bots' jet ratings, JetManager::calcJetRatings).
     float getJetAbility(float& thrust, float& duration, float& jumpSpeed) const;
+    // Player::getMomentum / setMomentum / displaceObject: a vehicle pushes
+    // the player out of its way (Vehicle::advanceToCollision).
+    float mass() const { return dataFloat("mass", 1.0f); }
+    Point3F getMomentum() const;
+    void setMomentum(const Point3F& momentum);
+    bool displaceObject(const Point3F& displacement);
 
 private:
     const PlayerPrediction::Data* physics();

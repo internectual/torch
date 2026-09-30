@@ -1530,6 +1530,27 @@ int main() {
         assert(ghost && ghost->className == "HoverVehicle");
         assert(std::abs(ghost->position.z - hover->transform[11]) < 0.05f);
         assert(parser.getGhostTracker().getGhost(flyerGhost)->className == "FlyingVehicle");
+        {
+            // Vehicle::advanceToCollision: a player in the hover's way is
+            // pushed along (Player::displaceObject), not run into.
+            script.ts()->execute("datablock PlayerData(PushArmor) { mass = 90; maxEnergy = 60; boxSize = \"1.2 1.2 2.3\"; };"
+                                 "new Player(PushPlayer) { dataBlock = PushArmor; };");
+            auto* pushed = EngineObjects::get<PlayerObject>("PushPlayer");
+            assert(pushed);
+            const float startX = hover->transform[3] + 5.0f;
+            pushed->setTransform({1, 0, 0, startX, 0, 1, 0, hover->transform[7], 0, 0, 1, 0, 0, 0, 0, 1});
+            for (int i = 0; i < 10; ++i) pushed->processMove(nullptr);
+            const float groundX = pushed->transform[3];
+            hover->applyImpulse({hover->transform[3], hover->transform[7], hover->transform[11]}, {400.0f * 15.0f, 0, 0});
+            float maxX = groundX;
+            for (int i = 0; i < 40; ++i) {
+                hover->processMove(nullptr);
+                pushed->processMove(nullptr);
+                maxX = std::max(maxX, pushed->transform[3]);
+            }
+            assert(maxX > groundX + 1.0f);
+            ScriptEngine::instance().deleteScriptObject("PushPlayer");
+        }
         for (const char* name : {"TestHoverV", "TestFlyerV"}) ScriptEngine::instance().deleteScriptObject(name);
         serverCollision().triangles = savedTriangles;
         serverCollision().geometry = savedGeometry;

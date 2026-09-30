@@ -134,6 +134,45 @@ void PlayerObject::setVelocity(const Point3F& velocity) {
     setMaskBits(MoveMask);
 }
 
+Point3F PlayerObject::getMomentum() const {
+    const float m = mass();
+    return {state.velocity.x * m, state.velocity.y * m, state.velocity.z * m};
+}
+
+void PlayerObject::setMomentum(const Point3F& momentum) {
+    const float m = mass();
+    state.velocity = {momentum.x / m, momentum.y / m, momentum.z / m};
+    setMaskBits(MoveMask);
+}
+
+bool PlayerObject::displaceObject(const Point3F& displacement) {
+    // LH_HACK (the Training crash): displacement recursion is bounded.
+    static uint32_t sBalance = 0;
+    const float vellen = PlayerPrediction::length(state.velocity);
+    if (vellen < 0.001f || sBalance > 16) {
+        state.velocity = {0, 0, 0};
+        return false;
+    }
+    const PlayerPrediction::Data* data = physics();
+    if (!data) return false;
+    const float dt = PlayerPrediction::length(displacement) / vellen;
+    sBalance++;
+    const ServerCollision& world = serverCollision();
+    const PlayerPrediction::GatherTriangles gather = [&](const Point3F& min, const Point3F& max,
+                                                         std::vector<PlayerPrediction::Triangle>& out) {
+        if (world.triangles) world.triangles(min, max, out);
+        ForceFields::gather(this, min, max, out);
+    };
+    const Point3F initial = state.position;
+    collision.prepare(gather, state.position, data->boxSize, PlayerPrediction::mul(state.velocity, dt),
+                      data->maxStepHeight);
+    const bool result = PlayerPrediction::updatePos(state, *data, collision, initial, dt);
+    sBalance--;
+    syncTransform();
+    setMaskBits(MoveMask);
+    return result;
+}
+
 void PlayerObject::applyImpulse(const Point3F& impulse) {
     const float mass = dataFloat("mass", 1.0f);
     if (mass <= 0) return;

@@ -76,8 +76,10 @@ protected:
     // within `tol` (1e7 when nothing is; negative while penetrating), and
     // the contacts within `tol`; the hull crossing a surface since `from`
     // reads as the deepest penetration.
+    // closestObject: the shape the closest contact is with ("" for static
+    // geometry), the object findClosestStateBounded's state names.
     float collide(const TorqueMath::Matrix& mat, float tol, std::vector<Contact>* contacts,
-                  const TorqueMath::Matrix* from = nullptr);
+                  const TorqueMath::Matrix* from = nullptr, std::string* closestObject = nullptr);
     std::vector<ScriptObject*> collisionExempt() const;
 
     Rigid rigid;

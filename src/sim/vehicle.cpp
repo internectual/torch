@@ -232,7 +232,8 @@ std::vector<ScriptObject*> VehicleObject::collisionExempt() const {
 // contact; a vertex that crossed a face since `from` intersects. The
 // closest distance is negative while penetrating (so a step that backs out
 // is taken), contacts carry it clamped at 0 as GJK reports an overlap.
-float VehicleObject::collide(const Matrix& mat, float tol, std::vector<Contact>* contacts, const Matrix* from) {
+float VehicleObject::collide(const Matrix& mat, float tol, std::vector<Contact>* contacts, const Matrix* from,
+                             std::string* closestObject) {
     auto hullPoints = [&](const Matrix& m) {
         std::vector<Point3F> points;
         if (hull) {
@@ -299,7 +300,11 @@ float VehicleObject::collide(const Matrix& mat, float tol, std::vector<Contact>*
             bool over = true;
             for (int k = 0; k < 6 && over; ++k) if (k / 2 != face / 2 && gaps[k] > tol) over = false;
             if (!over) continue;
-            closest = std::min(closest, std::max(d, -MaxPenetration));
+            const float value = std::max(d, -MaxPenetration);
+            if (value < closest) {
+                closest = value;
+                if (closestObject) *closestObject = b.object;
+            }
             if (contacts) contacts->push_back({p, normals[face], std::max(d, 0.0f), b.object});
         }
         for (const auto& t : tris) {
@@ -315,14 +320,62 @@ float VehicleObject::collide(const Matrix& mat, float tol, std::vector<Contact>*
             const float d = dot(sub(p, t.a), t.n);
             if (from) {
                 const float d0 = dot(sub(prev[i], t.a), t.n);
-                if (d0 >= 0 && d < 0 && over(add(prev[i], mul(sub(p, prev[i]), d0 / (d0 - d)))))
+                if (d0 >= 0 && d < 0 && over(add(prev[i], mul(sub(p, prev[i]), d0 / (d0 - d))))) {
                     closest = -MaxPenetration;
+                    if (closestObject) closestObject->clear();
+                }
             }
             if (d >= tol || d <= -MaxPenetration || !over(sub(p, mul(t.n, d)))) continue;
-            closest = std::min(closest, d);
+            if (d < closest) {
+                closest = d;
+                if (closestObject) closestObject->clear();
+            }
             if (contacts) contacts->push_back({p, t.n, std::max(d, 0.0f), {}});
         }
     }
+    // The other way round: a shape's box corners inside the hull's bounds
+    // (a player is smaller than a vehicle, so no hull vertex enters its
+    // box). Each is a contact on the hull face it is least deep behind,
+    // pushing the vehicle off the corner.
+    Point3F llo{1e30f, 1e30f, 1e30f}, lhi{-1e30f, -1e30f, -1e30f};
+    if (hull) {
+        for (const auto& p : *hull) {
+            const Point3F q{p.x * scale[0], p.y * scale[1], p.z * scale[2]};
+            llo = {std::min(llo.x, q.x), std::min(llo.y, q.y), std::min(llo.z, q.z)};
+            lhi = {std::max(lhi.x, q.x), std::max(lhi.y, q.y), std::max(lhi.z, q.z)};
+        }
+    } else {
+        llo = {objMin[0] * scale[0], objMin[1] * scale[1], objMin[2] * scale[2]};
+        lhi = {objMax[0] * scale[0], objMax[1] * scale[1], objMax[2] * scale[2]};
+    }
+    if (llo.x <= lhi.x)
+        for (const auto& b : boxes)
+            for (int c = 0; c < 8; ++c) {
+                const Point3F w{(c & 1) ? b.max.x : b.min.x, (c & 2) ? b.max.y : b.min.y, (c & 4) ? b.max.z : b.min.z};
+                const float dx = w.x - mat[3], dy = w.y - mat[7], dz = w.z - mat[11];
+                const Point3F l{mat[0] * dx + mat[4] * dy + mat[8] * dz, mat[1] * dx + mat[5] * dy + mat[9] * dz,
+                                mat[2] * dx + mat[6] * dy + mat[10] * dz};
+                const float gaps[6] = {llo.x - l.x, l.x - lhi.x, llo.y - l.y, l.y - lhi.y, llo.z - l.z, l.z - lhi.z};
+                static const Point3F faceNormals[6] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+                int face = 0;
+                for (int k = 1; k < 6; ++k) if (gaps[k] > gaps[face]) face = k;
+                const float d = gaps[face];
+                if (d >= tol) continue;
+                bool over = true;
+                for (int k = 0; k < 6 && over; ++k) if (k / 2 != face / 2 && gaps[k] > tol) over = false;
+                if (!over) continue;
+                const float value = std::max(d, -MaxPenetration);
+                if (value < closest) {
+                    closest = value;
+                    if (closestObject) *closestObject = b.object;
+                }
+                if (contacts) {
+                    const Point3F& n = faceNormals[face];
+                    const Point3F nw{mat[0] * n.x + mat[1] * n.y + mat[2] * n.z, mat[4] * n.x + mat[5] * n.y + mat[6] * n.z,
+                                     mat[8] * n.x + mat[9] * n.y + mat[10] * n.z};
+                    contacts->push_back({w, mul(nw, -1.0f), std::max(d, 0.0f), b.object});
+                }
+            }
     return closest;
 }
 
@@ -398,17 +451,18 @@ void VehicleObject::updateMove(const ClientMoveIn* m) {
 
 void VehicleObject::updatePos(float dt) { advanceToCollision(dt); }
 
-// Vehicle::advanceToCollision. Displaceable shapes are not pushed aside
-// (Player::displaceObject is not ported): they collide as their boxes.
+// Vehicle::advanceToCollision: a displaceable shape (a player) the vehicle
+// runs into is pushed out of the way before the vehicle collides with it.
 bool VehicleObject::advanceToCollision(float time) {
     float ct = 0, dt = time;
     Rigid::State ns = rigid.state;
     Matrix mat = rigid.state.getTransform();
-    float dist = collide(mat, CollisionTol, nullptr);
+    std::string closestObject;
+    float dist = collide(mat, CollisionTol, nullptr, nullptr, &closestObject);
     std::vector<Contact> info;
     const float mt = time / 2.0f;
     dt = mt;
-    bool collided = false;
+    bool collided = false, displaced = false;
     bool success = true;
     const Point3F origVelocityStart = rigid.state.linVelocity;
     Point3F origVelocity = origVelocityStart;
@@ -416,6 +470,33 @@ bool VehicleObject::advanceToCollision(float time) {
         const float prevDist = dist;
         info.clear();
         if (dist < CollisionTol) {
+            // Try to displace the object by the amount we're trying to move
+            if (auto* player = closestObject.empty() ? nullptr : EngineObjects::get<PlayerObject>(closestObject)) {
+                const float objMass = player->mass();
+                Point3F objNewMom = mul(ns.linVelocity, objMass * 1.1f);
+                Point3F objOldMom = player->getMomentum();
+                Point3F objNewVel = mul(objNewMom, 1.0f / objMass);
+                float mlo[3], mhi[3], tlo[3], thi[3];
+                worldBox(mlo, mhi);
+                player->worldBox(tlo, thi);
+                const Point3F myCenter{(mlo[0] + mhi[0]) * 0.5f, (mlo[1] + mhi[1]) * 0.5f, (mlo[2] + mhi[2]) * 0.5f};
+                const Point3F theirCenter{(tlo[0] + thi[0]) * 0.5f, (tlo[1] + thi[1]) * 0.5f, (tlo[2] + thi[2]) * 0.5f};
+                if (dot(sub(myCenter, theirCenter), objNewMom) >= 0.0f || len(objNewVel) < 0.01f) {
+                    objNewMom = mul(normalize(sub(theirCenter, myCenter)), 1.0f * objMass);
+                    objNewVel = mul(objNewMom, 1.0f / objMass);
+                }
+                player->setMomentum(objNewMom);
+                if (player->displaceObject(mul(objNewVel, 1.1f * mt))) {
+                    // Determine the speed at which we will damage this object
+                    const float speed = len(sub(mul(objOldMom, 1.0f / objMass), mul(objNewMom, 1.0f / objMass)));
+                    if (std::none_of(struck.begin(), struck.end(), [&](const Struck& s) { return s.object == closestObject; }))
+                        struck.push_back({closestObject, speed, true});
+                    dist = 1e7f;
+                    closestObject.clear();
+                    displaced = true;
+                    continue;
+                }
+            }
             collide(mat, CollisionTol * 1.25f, &info);
             collided |= resolveCollision(ns, info);
             resolveContacts(ns, info, dt);
@@ -427,7 +508,8 @@ bool VehicleObject::advanceToCollision(float time) {
         rigid.integrate(ns, dt);
         const Matrix before = mat;
         mat = ns.getTransform();
-        dist = collide(mat, CollisionTol, nullptr, &before);
+        closestObject.clear();
+        dist = collide(mat, CollisionTol, nullptr, &before, &closestObject);
         if (dist <= IntersectionTol && dist <= prevDist) {
             if ((dt *= 0.25f) < 0.0001f) {
                 // Make sure we check the collision damage...
@@ -448,7 +530,7 @@ bool VehicleObject::advanceToCollision(float time) {
         if (dt > time - ct) dt = time - ct;
     } while (ct < time);
 
-    if (collided) {
+    if (collided || displaced) {
         const float collVel = len(sub(origVelocity, rigid.state.linVelocity));
         if (origVelocity.x != 0 || origVelocity.y != 0 || origVelocity.z != 0)
             origVelocity = normalize(origVelocity);
