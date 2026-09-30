@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 // The engine's UDP network interface (game/netDispatch.cc, sim/netConnection.cc
 // timeouts, game/serverQuery.cc server answers): Net::openPort through
 // setNetPort, the connect handshake on both sides (challenge, connect
@@ -11,3 +12,6 @@ void registerNetInterfaceNatives(TorqueScript& ts);
 // TribesGame::processPacketReceiveEvent for every waiting datagram, then
 // dispatchCheckTimeouts.
 void netInterfaceProcess(double now);
+
+// BanList::isBanned (game/banList.cc): whether a unique id is banned.
+bool banListIsBanned(int32_t uniqueId);

@@ -28,6 +28,75 @@
 #include <string>
 #include <strings.h>
 #include <vector>
+#include <ctime>
+#include <cstdio>
+#include <filesystem>
+
+namespace {
+
+// game/banList.cc (the shipped BanList matches it): bans keyed by the
+// unique id; the transport address is kept (an IP's port wildcarded) and
+// exported but never compared.
+struct BanInfo {
+    int32_t uniqueId = 0;
+    std::string transportAddress;
+    int32_t bannedUntil = 0; // Platform::getTime seconds, 0 = forever
+};
+std::vector<BanInfo>& banList() {
+    static std::vector<BanInfo> list;
+    return list;
+}
+int32_t platformTime() { return (int32_t)std::time(nullptr); }
+
+void banListAdd(int32_t uniqueId, const std::string& ta, int32_t banTime) {
+    if (banTime != 0 && banTime < platformTime()) return;
+    // make sure this bastard isn't already banned on this server
+    for (BanInfo& b : banList())
+        if (b.uniqueId == uniqueId) {
+            b.bannedUntil = banTime;
+            return;
+        }
+    BanInfo b;
+    b.transportAddress = ta.substr(0, 127);
+    b.uniqueId = uniqueId;
+    b.bannedUntil = banTime;
+    if (strncasecmp(b.transportAddress.c_str(), "ip:", 3) == 0) {
+        const size_t colon = b.transportAddress.find(':', 3);
+        if (colon != std::string::npos) b.transportAddress = b.transportAddress.substr(0, colon + 1) + "*";
+    }
+    banList().push_back(b);
+}
+
+void banListAddRelative(int32_t uniqueId, const std::string& ta, int32_t numSeconds) {
+    banListAdd(uniqueId, ta, numSeconds != -1 ? platformTime() + numSeconds : 0);
+}
+
+void banListRemove(int32_t uniqueId) {
+    auto& list = banList();
+    for (auto it = list.begin(); it != list.end(); ++it)
+        if (it->uniqueId == uniqueId) {
+            list.erase(it);
+            return;
+        }
+}
+
+} // namespace
+
+// BanList::isBanned: expired bans drop out as the list is walked.
+bool banListIsBanned(int32_t uniqueId) {
+    const int32_t now = platformTime();
+    auto& list = banList();
+    for (auto it = list.begin(); it != list.end();) {
+        if (it->bannedUntil != 0 && it->bannedUntil < now) {
+            it = list.erase(it);
+            continue;
+        }
+        if (it->uniqueId == uniqueId) return true;
+        ++it;
+    }
+    return false;
+}
+
 
 namespace {
 
@@ -474,9 +543,14 @@ void handleConnectRequest(const Address& address, V12BitStream& stream) {
     // Check the peer auth (no authentication).
     if (stream.readFlag()) rejectString = "CR_INVALID_CONNECT_PACKET";
 
-    // gBanList.isBanned(0, addr): Torch keeps no ban list.
-    if (rejectString.empty() && globalInt("$HostGamePlayerCount") >= globalInt("$Host::MaxPlayers"))
-        rejectString = "CR_SERVERFULL";
+    // The shipped build passes the authenticated id; without
+    // authentication every client's is 0.
+    if (rejectString.empty()) {
+        if (banListIsBanned(0))
+            rejectString = "CR_YOUAREBANNED";
+        else if (globalInt("$HostGamePlayerCount") >= globalInt("$Host::MaxPlayers"))
+            rejectString = "CR_SERVERFULL";
+    }
 
     // Erase the request from the pending list.
     gPendingConnects[i] = gPendingConnects.back();
@@ -804,6 +878,42 @@ void netInterfaceProcess(double) {
 }
 
 void registerNetInterfaceNatives(TorqueScript& ts) {
+    ts.registerNative("BanList::add", [](const std::vector<VMValue>& args) -> VMValue {
+        banListAddRelative(args.size() > 0 ? std::atoi(args[0].toString().c_str()) : 0,
+                           args.size() > 1 ? args[1].toString() : std::string(),
+                           args.size() > 2 ? std::atoi(args[2].toString().c_str()) : 0);
+        return VMValue("");
+    });
+    ts.registerNative("BanList::addAbsolute", [](const std::vector<VMValue>& args) -> VMValue {
+        banListAdd(args.size() > 0 ? std::atoi(args[0].toString().c_str()) : 0,
+                   args.size() > 1 ? args[1].toString() : std::string(),
+                   args.size() > 2 ? std::atoi(args[2].toString().c_str()) : 0);
+        return VMValue("");
+    });
+    ts.registerNative("BanList::removeBan", [](const std::vector<VMValue>& args) -> VMValue {
+        banListRemove(args.size() > 0 ? std::atoi(args[0].toString().c_str()) : 0);
+        return VMValue("");
+    });
+    ts.registerNative("BanList::isBanned", [](const std::vector<VMValue>& args) -> VMValue {
+        return VMValue(banListIsBanned(args.size() > 0 ? std::atoi(args[0].toString().c_str()) : 0) ? 1 : 0);
+    });
+    // BanList::export(filename): written where export() writes (the
+    // output folder's mod), one addAbsolute line per ban.
+    ts.registerNative("BanList::export", [](const std::vector<VMValue>& args) -> VMValue {
+        const std::string outDir = Console::instance().getStringVariable("outputDir", "");
+        if (outDir.empty() || args.empty()) return VMValue("");
+        const std::string modPath = Console::instance().getStringVariable("modPath", "base");
+        const std::filesystem::path path = std::filesystem::path(outDir) / modPath / args[0].toString();
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        if (FILE* f = std::fopen(path.string().c_str(), "wb")) {
+            for (const BanInfo& b : banList())
+                std::fprintf(f, "BanList::addAbsolute(%d, \"%s\", %d);\r\n", b.uniqueId, b.transportAddress.c_str(),
+                             b.bannedUntil);
+            std::fclose(f);
+        }
+        return VMValue("");
+    });
     using Args = std::vector<VMValue>;
     // main.cc cSetNetPort: Net::openPort(port) closes the port and binds
     // the new one on every interface.

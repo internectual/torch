@@ -60,6 +60,14 @@ int main() {
     assert(utilityScript->callFunction("getWindVelocity", {}).toString() == windBeforeInvalid);
     assert(utilityScript->callFunction("setWindVelocity", {VMValue("0 0 0")}).toInt() == 1);
     assert(utilityScript->callFunction("VectorCross", {VMValue("1 0 0"), VMValue("0 1 0")}).toString() == "0 0 1");
+    // game/banList.cc: bans by unique id; an absolute time already past is
+    // not added.
+    utilityScript->execute("BanList::add(5, \"IP:1.2.3.4:28000\", 60); $ban5 = BanList::isBanned(5, \"\");"
+                           "$ban6 = BanList::isBanned(6, \"IP:1.2.3.4:28000\"); BanList::removeBan(5, \"\");"
+                           "$ban5after = BanList::isBanned(5, \"\"); BanList::addAbsolute(7, \"IP:1.2.3.4:1\", 1);"
+                           "$ban7 = BanList::isBanned(7, \"\");");
+    assert(utilityScript->getGlobal("$ban5").toInt() == 1 && utilityScript->getGlobal("$ban6").toInt() == 0 &&
+           utilityScript->getGlobal("$ban5after").toInt() == 0 && utilityScript->getGlobal("$ban7").toInt() == 0);
     // A bare identifier is a constant operand inside an argument
     // expression, a string literal only as the whole argument.
     utilityScript->execute("$bareDiv = isObject(NoSuchGroup/NoChild); $bareCat = strlen(abc @ def); $bareArg = strlen(abc);");
