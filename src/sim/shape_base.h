@@ -130,6 +130,7 @@ public:
     float energy = 0.0f;
     DamageState damageState = Enabled;
     float damageFlash = 0.0f;
+    Point3F shieldNormal{0, 0, 1}; // mShieldNormal: where the shield was struck
     float whiteOut = 0.0f;
     float invincibleTime = 0.0f, invincibleSpeed = 0.0f;
     bool cloaked = false;

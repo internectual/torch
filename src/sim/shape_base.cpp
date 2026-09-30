@@ -1239,7 +1239,7 @@ uint32_t ShapeBase::packUpdate(GameConnection& connection, uint32_t mask, Torque
         }
         if (w.writeFlag(mask & ShieldMask)) {
             w.writeFlag(false);
-            w.writeNormalVector({0, 0, 1}, 8);
+            w.writeNormalVector({shieldNormal.x, shieldNormal.y, shieldNormal.z}, 8);
             w.writeFloat(getEnergyValue(), 5);
         }
         if (w.writeFlag(mask & InvincibleMask)) {
@@ -1436,6 +1436,16 @@ void registerShapeBaseNatives(TorqueScript& ts) {
     });
     method("isLocked", [](ShapeBase& s, const Args&) { return VMValue(s.lockMode != ShapeBase::NotLocked ? 1 : 0); });
     method("isTracking", [](ShapeBase& s, const Args&) { return VMValue(s.tracking ? 1 : 0); });
+    // ShapeBase::playShieldEffect: the clients play the shield hit toward
+    // the (normalized) vector.
+    method("playShieldEffect", [arg](ShapeBase& s, const Args& a) {
+        Point3F n{0, 0, 0};
+        std::sscanf(arg(a, 1).toString().c_str(), "%f %f %f", &n.x, &n.y, &n.z);
+        const float l = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        s.shieldNormal = l > 0 ? Point3F{n.x / l, n.y / l, n.z / l} : Point3F{0, 0, 1};
+        s.setMaskBits(ShapeBase::ShieldMask);
+        return VMValue("");
+    });
     method("hide", [arg](ShapeBase& s, const Args& a) { s.hidden = arg(a, 1).toBool(); return VMValue(""); });
     method("isHidden", [](ShapeBase& s, const Args&) { return VMValue(s.hidden ? 1 : 0); });
     method("getCameraFov", [](ShapeBase& s, const Args&) { return VMValue(s.cameraFov); });
