@@ -1,4 +1,5 @@
 #include "sim/shape_base.h"
+#include "sim/server_container.h"
 #include "sim/vehicle.h"
 #include "sim/static_shapes.h"
 #include "sim/trigger.h"
@@ -1026,6 +1027,23 @@ void ShapeBase::startFade(float time, float delay, bool out) {
     fadeTime = std::max(0.0f, time);
     fadeOut = out;
     fadeVal = out ? 1.0f : 0.0f;
+}
+
+void ShapeBase::updateContainer() {
+    drag = 0;
+    buoyancy = 0;
+    gravityMod = 1;
+    appliedForce = {0, 0, 0};
+    float lo[3], hi[3];
+    worldBox(lo, hi);
+    ServerContainer::WaterInfo water;
+    waterCoverage = ServerContainer::waterFind({lo[0], lo[1], lo[2]}, {hi[0], hi[1], hi[2]}, water)
+        ? std::clamp(water.coverage, 0.0f, 1.0f) : 0.0f;
+    liquidType = water.liquidType;
+    if (waterCoverage >= 0.1f) {
+        drag = dataFloat("drag", defaultDrag()) * water.viscosity * waterCoverage;
+        buoyancy = (water.density / dataFloat("density", defaultDensity())) * waterCoverage;
+    }
 }
 
 void ShapeBase::processShapeTick() {

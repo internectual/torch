@@ -95,7 +95,9 @@ void ItemObject::updateVelocity(float dt) {
         const float k = (1.0f - maxVelocity / len) * 0.1f;
         for (float& v : velocity) v -= v * k;
     }
-    // Container buoyancy and drag: the item's water coverage is not tracked.
+    // Container buoyancy & drag
+    velocity[2] -= buoyancy * (SimState::server().gravity * gravityMod * this->gravityMod) * dt;
+    for (float& v : velocity) v -= v * drag * dt;
 }
 
 // Item::updatePos. The engine casts from the box top centre (start) to the
@@ -162,6 +164,7 @@ void ItemObject::updatePos(float dt) {
     transform[3] = pos[0];
     transform[7] = pos[1];
     transform[11] = pos[2];
+    updateContainer();
     if (contact) {
         const float speed = std::sqrt(velocity[0] * velocity[0] + velocity[1] * velocity[1] + velocity[2] * velocity[2]);
         if (speed < 0.15f) {

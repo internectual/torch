@@ -262,30 +262,13 @@ std::vector<ScriptObject*> VehicleObject::collisionExempt() const {
     return exempt;
 }
 
-// ShapeBase::updateContainer: water drag and buoyancy over the world box.
-void VehicleObject::updateContainer() {
-    drag = 0;
-    buoyancy = 0;
-    gravityMod = 1;
-    appliedForce = {0, 0, 0};
-    float lo[3], hi[3];
-    worldBox(lo, hi);
-    ServerContainer::WaterInfo water;
-    waterCoverage = ServerContainer::waterFind({lo[0], lo[1], lo[2]}, {hi[0], hi[1], hi[2]}, water)
-        ? std::clamp(water.coverage, 0.0f, 1.0f) : 0.0f;
-    liquidType = water.liquidType;
-    if (waterCoverage >= 0.1f) {
-        drag = data("drag", 0.7f) * water.viscosity * waterCoverage;
-        buoyancy = (water.density / data("density", 4.0f)) * waterCoverage;
-    }
-}
-
 // APPROXIMATION of Convex::getCollisionInfo / findClosestStateBounded: the
 // collision hull's vertices against the world triangles and the boxes of
 // the shapes in the collision mask. A vertex within `tol` of a face it
 // projects onto (and not deeper than MaxPenetration behind it) is a
-// contact; a vertex that crossed a face since `from`, or entered a box,
-// intersects (distance 0, as GJK reports overlapping convexes).
+// contact; a vertex that crossed a face since `from` intersects. The
+// closest distance is negative while penetrating (so a step that backs out
+// is taken), contacts carry it clamped at 0 as GJK reports an overlap.
 float VehicleObject::collide(const Matrix& mat, float tol, std::vector<Contact>* contacts, const Matrix* from) {
     auto hullPoints = [&](const Matrix& m) {
         std::vector<Point3F> points;
@@ -346,7 +329,7 @@ float VehicleObject::collide(const Matrix& mat, float tol, std::vector<Contact>*
             bool over = true;
             for (int k = 0; k < 6 && over; ++k) if (k / 2 != face / 2 && gaps[k] > tol) over = false;
             if (!over) continue;
-            closest = std::min(closest, std::max(d, 0.0f));
+            closest = std::min(closest, std::max(d, -MaxPenetration));
             if (contacts) contacts->push_back({p, normals[face], std::max(d, 0.0f), b.object});
         }
         for (const auto& t : tris) {
@@ -362,10 +345,11 @@ float VehicleObject::collide(const Matrix& mat, float tol, std::vector<Contact>*
             const float d = dot(sub(p, t.a), t.n);
             if (from) {
                 const float d0 = dot(sub(prev[i], t.a), t.n);
-                if (d0 >= 0 && d < 0 && over(add(prev[i], mul(sub(p, prev[i]), d0 / (d0 - d))))) closest = 0;
+                if (d0 >= 0 && d < 0 && over(add(prev[i], mul(sub(p, prev[i]), d0 / (d0 - d)))))
+                    closest = -MaxPenetration;
             }
             if (d >= tol || d <= -MaxPenetration || !over(sub(p, mul(t.n, d)))) continue;
-            closest = std::min(closest, std::max(d, 0.0f));
+            closest = std::min(closest, d);
             if (contacts) contacts->push_back({p, t.n, std::max(d, 0.0f), {}});
         }
     }

@@ -73,11 +73,11 @@ protected:
     virtual void updateForces() {}
     virtual uint32_t collisionMask() const;
     // The closest distance of the collision hull at `mat` to anything
-    // within `tol` (1e7 when nothing is), and the contacts within `tol`;
-    // 0 when the hull passed through a surface since `from`.
+    // within `tol` (1e7 when nothing is; negative while penetrating), and
+    // the contacts within `tol`; the hull crossing a surface since `from`
+    // reads as the deepest penetration.
     float collide(const TorqueMath::Matrix& mat, float tol, std::vector<Contact>* contacts,
                   const TorqueMath::Matrix* from = nullptr);
-    void updateContainer();
     std::vector<ScriptObject*> collisionExempt() const;
 
     Rigid rigid;
@@ -86,11 +86,11 @@ protected:
     float steering[2] = {0, 0};
     float throttle = 0;
     bool jetting = false, frozen = false, inLiquid = false;
-    int liquidType = 0; // mLiquidType
     int stuckTimer = 0;
-    // ShapeBase container state (updateContainer).
-    float mass = 1, oneOverMass = 1, drag = 0, buoyancy = 0, gravityMod = 1;
-    Point3F appliedForce{0, 0, 0};
+    float mass = 1, oneOverMass = 1;
+    // VehicleData's drag and density defaults.
+    float defaultDrag() const override { return 0.7f; }
+    float defaultDensity() const override { return 4.0f; }
     float objMin[3] = {-1, -1, 0}, objMax[3] = {1, 1, 2}; // mObjBox
 
     float data(const char* field, float fallback) const { return dataFloat(field, fallback); }

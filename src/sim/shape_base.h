@@ -3,6 +3,7 @@
 // and its mounted images (shapeImage.cc): the ShapeBaseImageData state
 // machine as the server runs it.
 #include "sim/game_base.h"
+#include "core/math.h"
 #include <string>
 #include <vector>
 #include <map>
@@ -133,6 +134,15 @@ public:
     float cameraFov = 90.0f;
     bool trigger[MaxTriggerKeys]{}; // mTrigger: the last move's trigger states
     float waterCoverage = 0.0f;     // mWaterCoverage (0..1 of the object's box)
+    // ShapeBase::updateContainer: water drag and buoyancy over the world
+    // box (PhysicalZones are not ported: no gravity mod or applied force).
+    void updateContainer();
+    float drag = 0, buoyancy = 0, gravityMod = 1;
+    Point3F appliedForce{0, 0, 0};
+    int liquidType = 0; // mLiquidType
+    // ShapeBaseData's drag and density defaults (the class's constructor).
+    virtual float defaultDrag() const { return 0.0f; }
+    virtual float defaultDensity() const { return 1.0f; }
 
     float maxDamage() const { return dataFloat("maxDamage", 1.0f); }
     float maxEnergy() const { return dataFloat("maxEnergy", 0.0f); }
