@@ -1,4 +1,5 @@
 #include "sim/containers.h"
+#include "sim/force_field.h"
 #include "sim/player.h"
 #include "sim/shape_base.h"
 #include "sim/camera.h"
@@ -44,12 +45,15 @@ ScriptObject* geometryOwner(uint32_t mask) {
 }
 
 // Moller-Trumbore over the gathered triangles.
-bool castGeometry(const Point3F& a, const Point3F& b, float& bestT, Point3F& normal) {
+bool castGeometry(const Point3F& a, const Point3F& b, float& bestT, Point3F& normal, bool forceFields) {
     const auto& world = serverCollision();
     if (!world.triangles) return false;
     std::vector<PlayerPrediction::Triangle> tris;
-    world.triangles({std::min(a.x, b.x) - 0.1f, std::min(a.y, b.y) - 0.1f, std::min(a.z, b.z) - 0.1f},
-                    {std::max(a.x, b.x) + 0.1f, std::max(a.y, b.y) + 0.1f, std::max(a.z, b.z) + 0.1f}, tris);
+    const Point3F lo{std::min(a.x, b.x) - 0.1f, std::min(a.y, b.y) - 0.1f, std::min(a.z, b.z) - 0.1f};
+    const Point3F hi{std::max(a.x, b.x) + 0.1f, std::max(a.y, b.y) + 0.1f, std::max(a.z, b.z) + 0.1f};
+    world.triangles(lo, hi, tris);
+    // ForceFieldBare::castRay: a field blocks unless it is open.
+    if (forceFields) ForceFields::gather(nullptr, lo, hi, tris);
     const Point3F d = sub(b, a);
     bool hit = false;
     for (const auto& t : tris) {
@@ -208,7 +212,7 @@ bool castRay(const Point3F& a, const Point3F& b, uint32_t mask, RayInfo& info, c
     if (mask & StaticCollisionMask) {
         float t = best;
         Point3F n;
-        if (castGeometry(a, b, t, n)) {
+        if (castGeometry(a, b, t, n, (mask & ForceFieldObjectType) != 0)) {
             best = t;
             normal = n;
             object = geometryOwner(mask);

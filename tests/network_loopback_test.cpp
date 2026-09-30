@@ -10,6 +10,7 @@
 #include "sim/player.h"
 #include "sim/projectiles.h"
 #include "sim/vehicle.h"
+#include "sim/force_field.h"
 #include <map>
 #include <set>
 #include "sim/sim_state.h"
@@ -1478,6 +1479,32 @@ int main() {
         for (const char* name : {"TestHoverV", "TestFlyerV"}) ScriptEngine::instance().deleteScriptObject(name);
         serverCollision().triangles = savedTriangles;
         serverCollision().water = savedWater;
+    }
+    {
+        // ForceFieldBare: closed, its box blocks every mover (and rays);
+        // open() fades it over fadeMS and then it blocks only vehicles.
+        script.ts()->execute(
+            "datablock ForceFieldBareData(TestField) { fadeMS = 64; teamPermiable = true; };"
+            "new ForceFieldBare(TestFieldF) { dataBlock = TestField; position = \"0 0 0\"; scale = \"4 0.25 4\"; };"
+            "new Player(TestFieldP) { dataBlock = ProjArmor; };");
+        auto* field = EngineObjects::get<ForceFieldBareObject>("TestFieldF");
+        auto* walker = EngineObjects::get<PlayerObject>("TestFieldP");
+        assert(field && walker && field->state == ForceFieldBareObject::Closed);
+        std::vector<PlayerPrediction::Triangle> tris;
+        ForceFields::gather(nullptr, {-1, -1, -1}, {1, 1, 1}, tris);
+        assert(tris.size() == 12);
+        // Same sensor group (no targets: 0) and teamPermiable: the player passes.
+        tris.clear();
+        ForceFields::gather(walker, {-1, -1, -1}, {1, 1, 1}, tris);
+        assert(tris.empty());
+        script.ts()->execute("TestFieldF.open();");
+        assert(field->state == ForceFieldBareObject::Opening);
+        for (int i = 0; i < 3; ++i) field->processMove(nullptr);
+        assert(field->isOpen());
+        tris.clear();
+        ForceFields::gather(nullptr, {-1, -1, -1}, {1, 1, 1}, tris);
+        assert(tris.empty());
+        for (const char* name : {"TestFieldF", "TestFieldP"}) ScriptEngine::instance().deleteScriptObject(name);
     }
     {
         // netDispatch.cc over real loopback UDP: setNetPort opens the

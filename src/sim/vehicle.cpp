@@ -1,4 +1,5 @@
 #include "sim/vehicle.h"
+#include "sim/force_field.h"
 #include "sim/containers.h"
 #include "sim/player.h"
 #include "sim/server_container.h"
@@ -313,8 +314,9 @@ float VehicleObject::collide(const Matrix& mat, float tol, std::vector<Contact>*
 
     std::vector<PlayerPrediction::Triangle> tris;
     const uint32_t mask = collisionMask();
-    if ((mask & (TerrainObjectType | InteriorObjectType | ForceFieldObjectType)) && serverCollision().triangles)
+    if ((mask & (TerrainObjectType | InteriorObjectType)) && serverCollision().triangles)
         serverCollision().triangles(lo, hi, tris);
+    if (mask & ForceFieldObjectType) ForceFields::gather(this, lo, hi, tris);
     // Shapes collide as their world boxes: a hull vertex within `tol` of a
     // box touches the face it is least deep behind (the closest feature).
     struct Box { Point3F min, max; std::string object; };

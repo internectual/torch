@@ -6,6 +6,7 @@
 #include "sim/static_shapes.h"
 #include "sim/trigger.h"
 #include "sim/vehicle.h"
+#include "sim/force_field.h"
 #include "sim/nav_graph.h"
 #include "sim/projectiles.h"
 #include "sim/target_manager.h"
@@ -35,6 +36,7 @@ void registerSimNatives(TorqueScript& ts) {
     registerStaticShapeNatives(ts);
     registerTriggerNatives(ts);
     registerVehicleNatives(ts);
+    registerForceFieldNatives(ts);
     registerNavGraphNatives(ts);
     registerTargetManagerNatives(ts);
     // The server's own static geometry and water (gServerContainer).
@@ -118,8 +120,10 @@ void registerSimNatives(TorqueScript& ts) {
         const auto& world = serverCollision();
         if (!world.triangles) return false;
         std::vector<PlayerPrediction::Triangle> tris;
-        world.triangles({std::min(a.x, b.x) - 0.1f, std::min(a.y, b.y) - 0.1f, std::min(a.z, b.z) - 0.1f},
-                        {std::max(a.x, b.x) + 0.1f, std::max(a.y, b.y) + 0.1f, std::max(a.z, b.z) + 0.1f}, tris);
+        const Point3F lo{std::min(a.x, b.x) - 0.1f, std::min(a.y, b.y) - 0.1f, std::min(a.z, b.z) - 0.1f};
+        const Point3F hi{std::max(a.x, b.x) + 0.1f, std::max(a.y, b.y) + 0.1f, std::max(a.z, b.z) + 0.1f};
+        world.triangles(lo, hi, tris);
+        ForceFields::gather(nullptr, lo, hi, tris);
         const Point3F d{b.x - a.x, b.y - a.y, b.z - a.z};
         float best = 2.0f;
         for (const auto& t : tris) {
@@ -159,6 +163,7 @@ void registerSimNatives(TorqueScript& ts) {
         if ((mask & geometry) && serverCollision().triangles) {
             std::vector<PlayerPrediction::Triangle> tris;
             serverCollision().triangles(lo, hi, tris);
+            if (mask & (1 << 8)) ForceFields::gather(nullptr, lo, hi, tris);
             const PlayerPrediction::Box box{lo, hi};
             for (const auto& t : tris)
                 if (PlayerPrediction::boxIntersectsTriangle(box, t)) return VMValue(0);

@@ -1,4 +1,5 @@
 #include "sim/player.h"
+#include "sim/force_field.h"
 #include "sim/datablock_pack.h"
 #include "game/player_animation.h"
 #include "render/dts_loader.h"
@@ -262,7 +263,13 @@ void PlayerObject::processMove(const ClientMoveIn* move) {
     const Point3F before = state.position;
     const float yawBefore = state.yaw;
     const ServerCollision& world = serverCollision();
-    PlayerPrediction::processTick(state, *data, SimState::server().gravity, &m, 0.0f, collision, world.triangles, world.water);
+    // The static world and the force fields not permeable to this player.
+    const PlayerPrediction::GatherTriangles gather = [&](const Point3F& min, const Point3F& max,
+                                                         std::vector<PlayerPrediction::Triangle>& out) {
+        if (world.triangles) world.triangles(min, max, out);
+        ForceFields::gather(this, min, max, out);
+    };
+    PlayerPrediction::processTick(state, *data, SimState::server().gravity, &m, 0.0f, collision, gather, world.water);
     energy = state.energy;
     syncTransform();
     // The items and corpses the player touches: onCollision both ways.
