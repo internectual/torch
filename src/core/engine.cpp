@@ -1525,7 +1525,9 @@ bool Engine::init(int argc, char* argv[]) {
                         ++it;
                 }
             }
-            s_actionBinds[{objName, device, keyName}] = {command, "", false};
+            ActionBinding bound;
+            if (!makeActionBind(args, start, bound)) return VMValue(0);
+            s_actionBinds[{objName, device, keyName}] = bound;
             if (objName == "moveMap" || objName == "GlobalActionMap") {
                 const char* action = nullptr;
                 if (command == "moveforward") action = "forward";

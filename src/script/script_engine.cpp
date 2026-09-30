@@ -7938,8 +7938,10 @@ bool ScriptEngine::init() {
                 ++it;
         }
         // Store binding
+        ActionBinding bound;
+        if (!makeActionBind(args, start, bound)) return VMValue(0);
         auto key = std::make_tuple(objName, device, keyName);
-        s_actionBinds[key] = {command, "", false};
+        s_actionBinds[key] = bound;
         if (objName == "moveMap" || objName == "GlobalActionMap") {
             const char* action = nullptr;
             if (command == "moveforward") action = "forward";
@@ -7973,6 +7975,39 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
+    // ActionMap::isInverted / getDeadZone / getScale (device, action).
+    auto findBind = [&s_actionBinds, parseDevice](const auto& args) -> const ActionBinding* {
+        if (args.size() < 3) return nullptr;
+        const std::string map = args[0].toString();
+        const int device = parseDevice(args[1].toString());
+        const std::string action = args[2].toString();
+        ScriptObject* mapObject = ScriptEngine::instance().findObject(map.c_str());
+        for (const auto& [key, bind] : s_actionBinds) {
+            const auto& [bindMap, bindDevice, bindName] = key;
+            if (bindDevice != device || strcasecmp(bindName.c_str(), action.c_str()) != 0) continue;
+            ScriptObject* bindObject = ScriptEngine::instance().findObject(bindMap.c_str());
+            if (bindObject == mapObject || strcasecmp(bindMap.c_str(), map.c_str()) == 0) return &bind;
+        }
+        Console::instance().printf(LogLevel::Error, "The input event specified by %s %s is not in this action map!",
+                                   args[1].toString().c_str(), action.c_str());
+        return nullptr;
+    };
+    tsInstance->registerNative("ActionMap::isInverted", [findBind](const auto& args) -> VMValue {
+        const ActionBinding* bind = findBind(args);
+        return VMValue(bind && (bind->flags & ActionBinding::Inverted) ? 1 : 0);
+    });
+    tsInstance->registerNative("ActionMap::getScale", [findBind](const auto& args) -> VMValue {
+        const ActionBinding* bind = findBind(args);
+        return VMValue(bind && (bind->flags & ActionBinding::HasScale) ? bind->scaleFactor : 1.0f);
+    });
+    tsInstance->registerNative("ActionMap::getDeadZone", [findBind](const auto& args) -> VMValue {
+        const ActionBinding* bind = findBind(args);
+        if (!bind) return VMValue("");
+        if (!(bind->flags & ActionBinding::HasDeadZone)) return VMValue("0 0");
+        char buffer[64];
+        std::snprintf(buffer, sizeof(buffer), "%f %f", bind->deadZoneBegin, bind->deadZoneEnd);
+        return VMValue(buffer);
+    });
     tsInstance->registerNative("bindcmd", [&s_actionBinds, parseDevice](const auto& args) -> VMValue {
         size_t start = 0;
         std::string objName;
@@ -9278,4 +9313,35 @@ void ScriptEngine::executeFile(const char* path) {
     } else {
         Console::instance().executeFile(path);
     }
+}
+
+bool makeActionBind(const std::vector<VMValue>& args, size_t start, ActionBinding& bind) {
+    bind = ActionBinding{};
+    bind.cmdOn = args.back().toString();
+    const size_t argc = args.size() - start;
+    if (argc == 3) return true;
+    // We have the following: "[DSIR]" [deadZone] [scale]
+    const std::string spec = args[start + 2].toString();
+    for (char c : spec) {
+        switch (c) {
+        case 'r': case 'R': case 's': case 'S': bind.flags |= ActionBinding::HasScale; break;
+        case 'd': case 'D': bind.flags |= ActionBinding::HasDeadZone; break;
+        case 'i': case 'I': bind.flags |= ActionBinding::Inverted; break;
+        default: break;
+        }
+    }
+    size_t cur = 3;
+    if (bind.flags & ActionBinding::HasDeadZone) {
+        if (cur < argc) std::sscanf(args[start + cur].toString().c_str(), "%f %f", &bind.deadZoneBegin, &bind.deadZoneEnd);
+        cur++;
+    }
+    if (bind.flags & ActionBinding::HasScale) {
+        if (cur < argc) bind.scaleFactor = (float)std::atof(args[start + cur].toString().c_str());
+        cur++;
+    }
+    if (cur != argc - 1) {
+        Console::instance().printf(LogLevel::Info, "Improperly specified bind for key: %s", spec.c_str());
+        return false;
+    }
+    return true;
 }

@@ -171,7 +171,14 @@ struct ActionBinding {
     std::string cmdOn;
     std::string cmdOff;
     bool isCmd = false;
+    // ActionMap::Node: HasScale (1 << 1), HasDeadZone (1 << 2), Inverted (1 << 3).
+    enum Flags : uint32_t { HasScale = 1u << 1, HasDeadZone = 1u << 2, Inverted = 1u << 3 };
+    uint32_t flags = 0;
+    float deadZoneBegin = 0, deadZoneEnd = 0, scaleFactor = 1;
 };
+// ActionMap::processBind: bind(device, action, ["[DSIR]" [deadZone] [scale]], command)
+// as a binding; false for an improperly specified bind.
+bool makeActionBind(const std::vector<VMValue>& args, size_t start, ActionBinding& bind);
 inline std::map<std::tuple<std::string, int, std::string>, ActionBinding>& actionBindingStore() {
     static std::map<std::tuple<std::string, int, std::string>, ActionBinding> s_binds;
     return s_binds;
