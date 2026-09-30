@@ -13,6 +13,8 @@ struct DIFLoadResult {
     std::vector<std::string> materialNames;
     std::vector<DTSShape::DetailLevel> details;
     bool loaded = false;
+    // Interior::mHasAlarmState of the highest detail (an alarm lightmap set).
+    bool hasAlarmState = false;
     // Collision triangles extracted from hull surfaces
     std::vector<float> hullCollisionVerts;
     std::vector<uint32_t> hullCollisionIndices;

@@ -131,6 +131,8 @@ public:
     DamageState damageState = Enabled;
     float damageFlash = 0.0f;
     Point3F shieldNormal{0, 0, 1}; // mShieldNormal: where the shield was struck
+    bool blowApart = false;          // blowup(): the destruction scatters it
+    Point3F damageDir{0, 0, 1};      // setMomentumVector: the damage direction
     float whiteOut = 0.0f;
     float invincibleTime = 0.0f, invincibleSpeed = 0.0f;
     bool cloaked = false;

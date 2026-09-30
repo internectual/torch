@@ -3,6 +3,8 @@
 // reader), fields and defaults from the engine's initPersistFields.
 #include "sim/net_object.h"
 #include "sim/engine_crc.h"
+#include "sim/server_container.h"
+#include "script/torquescript.h"
 #include "core/engine.h"
 #include "script/script_engine.h"
 #include <algorithm>
@@ -144,12 +146,27 @@ public:
 // interiorInstance.cc
 class InteriorInstanceObject : public SceneObject {
 public:
+    enum InteriorMasks : uint32_t { AlarmMask = 1u << 1 };
     InteriorInstanceObject() { scopeAlways = true; }
     const char* netClassName() const override { return "InteriorInstance"; }
     uint32_t crc = 0;
+    bool alarmState = false; // mAlarmState
     void readFields() override {
         SceneObject::readFields();
         crc = fileCrc("interiors/" + Fields::string(script, "interiorFile"));
+    }
+    // InteriorInstance::setAlarmMode: only an interior with alarm lighting.
+    void setAlarmMode(bool alarm) {
+        if (!ServerContainer::interiorHasAlarmState(Fields::string(script, "interiorFile"))) return;
+        if (alarmState == alarm) return;
+        alarmState = alarm;
+        setMaskBits(AlarmMask);
+    }
+    // The audioProfile / audioEnvironment datablock, if any.
+    static void writeDataBlockRef(TorqueBitWriter& w, const std::string& name) {
+        ScriptObject* data = name.empty() ? nullptr : ScriptEngine::instance().findObject(name.c_str());
+        const int id = data ? ScriptEngine::instance().objectId(data) : 0;
+        if (w.writeFlag(id >= 3 && id <= 2050)) w.writeRangedU32((uint32_t)id, 3, 2050);
     }
     uint32_t packUpdate(GameConnection&, uint32_t mask, TorqueBitWriter& w) override {
         if (w.writeFlag(mask & InitMask)) {
@@ -158,13 +175,17 @@ public:
             w.writeFlag(Fields::boolean(script, "showTerrainInside", false));
             writeTransform(w);
             writeScale(w);
-            w.writeFlag(false); // alarm state
+            w.writeFlag(alarmState);
             w.writeString(Fields::string(script, "skinBase"));
-            w.writeFlag(false); // audio profile
-            w.writeFlag(false); // audio environment
+            writeDataBlockRef(w, Fields::string(script, "audioProfile"));
+            writeDataBlockRef(w, Fields::string(script, "audioEnvironment"));
         } else {
+            // The shipped layout (the client's reader): transform, the alarm
+            // state, then skin and audio changes.
             w.writeFlag(false); // transform
-            w.writeFlag(false); // alarm state
+            w.writeFlag(alarmState);
+            w.writeFlag(false); // skin
+            w.writeFlag(false); // audio
         }
         return 0;
     }
@@ -230,6 +251,15 @@ public:
 };
 
 } // namespace
+
+// InteriorInstance::setAlarmMode("On" | anything else).
+void registerSceneObjectNatives(TorqueScript& ts) {
+    ts.registerNative("InteriorInstance::setAlarmMode", [](const std::vector<VMValue>& args) -> VMValue {
+        auto* interior = args.empty() ? nullptr : EngineObjects::get<InteriorInstanceObject>(args[0].toString());
+        if (interior) interior->setAlarmMode(args.size() > 1 && strcasecmp(args[1].toString().c_str(), "On") == 0);
+        return VMValue("");
+    });
+}
 
 void registerSceneObjectClasses() {
     EngineObjects::registerClass("TerrainBlock", [] { return std::make_shared<TerrainBlockObject>(); });

@@ -5,6 +5,7 @@
 // Torque space (Z up).
 #include "core/math.h"
 #include "game/player_prediction.h"
+#include <string>
 #include <vector>
 
 struct ScriptObject;
@@ -40,5 +41,7 @@ bool terrainBlock(Point3F& origin, float& squareSize);
 // relative to that block's origin: the block repeats, and an empty square
 // has no height. The normal is left unnormalized unless asked.
 bool terrainHeight(const Point2F& pos, float* height, Point3F* normal = nullptr, bool normalize = true);
+// Interior::mHasAlarmState of a loaded interior file (setAlarmMode needs it).
+bool interiorHasAlarmState(const std::string& interiorFile);
 
 } // namespace ServerContainer

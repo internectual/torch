@@ -1,4 +1,5 @@
 #include "sim/player.h"
+#include "sim/containers.h"
 #include "sim/force_field.h"
 #include "sim/datablock_pack.h"
 #include "game/player_animation.h"
@@ -532,6 +533,28 @@ void registerPlayerNatives(TorqueScript& ts) {
         const bool hold = args.size() > 2 && args[2].toBool();
         const bool fsp = args.size() > 3 ? args[3].toBool() : true;
         return VMValue(p->setActionThread(args[1].toString(), hold, fsp) ? 1 : 0);
+    });
+    // Player::checkDismountPosition: a clear line from the old point and no
+    // collision polygon inside the player's box at the new one.
+    ts.registerNative("Player::checkDismountPoint", [player](const Args& args) -> VMValue {
+        auto* p = player(args);
+        if (!p) return VMValue(0);
+        Point3F oldPos{0, 0, 0}, pos{0, 0, 0};
+        std::sscanf(args.size() > 1 ? args[1].toString().c_str() : "", "%f %f %f", &oldPos.x, &oldPos.y, &oldPos.z);
+        std::sscanf(args.size() > 2 ? args[2].toString().c_str() : "", "%f %f %f", &pos.x, &pos.y, &pos.z);
+        std::vector<ScriptObject*> exempt{p->script};
+        if (ScriptObject* mount = p->mount.empty() ? nullptr : ScriptEngine::instance().findObject(p->mount.c_str()))
+            exempt.push_back(mount);
+        using namespace SimContainer;
+        constexpr uint32_t moveMask = TerrainObjectType | InteriorObjectType | WaterObjectType | PlayerObjectType |
+                                      StaticShapeObjectType | VehicleObjectType | ForceFieldObjectType | StaticTSObjectType;
+        RayInfo info;
+        if (castRay(oldPos, pos, moveMask, info, exempt)) return VMValue(0);
+        const auto size = Fields::point(ScriptEngine::instance().findObject(p->dataBlock().c_str()), "boxSize", {1, 1, 2.3f});
+        const std::array<float, 16> frame{1, 0, 0, pos.x, 0, 1, 0, pos.y, 0, 0, 1, pos.z, 0, 0, 0, 1};
+        if (polysInBox(frame, {-size[0] * 0.5f, -size[1] * 0.5f, 0}, {size[0] * 0.5f, size[1] * 0.5f, size[2]}, moveMask, exempt))
+            return VMValue(0);
+        return VMValue(1);
     });
     ts.registerNative("Player::applyImpulse", [player](const Args& args) -> VMValue {
         auto* p = player(args);

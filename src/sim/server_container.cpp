@@ -118,13 +118,23 @@ void addTerrain(const ScriptObject* object) {
     state().terrains.push_back(std::move(terrain));
 }
 
+// Each interior file's hulls and alarm flag, read once (every instance of
+// a bridge shares them).
+struct Hulls {
+    bool loaded = false, hasAlarmState = false;
+    std::vector<float> hullCollisionVerts;
+    std::vector<uint32_t> hullCollisionIndices;
+};
+std::unordered_map<std::string, Hulls>& interiorCache() {
+    static std::unordered_map<std::string, Hulls> cache;
+    return cache;
+}
+
 void addInterior(const ScriptObject* object, std::vector<PlayerPrediction::Triangle>& out) {
     std::string file = Fields::string(object, "interiorFile");
     for (char& c : file) if (c == '\\') c = '/';
     if (file.empty()) return;
-    // Each file's hulls are read once (every instance of a bridge shares them).
-    struct Hulls { bool loaded = false; std::vector<float> hullCollisionVerts; std::vector<uint32_t> hullCollisionIndices; };
-    static std::unordered_map<std::string, Hulls> cache;
+    auto& cache = interiorCache();
     auto cached = cache.find(lower(file));
     if (cached == cache.end()) {
         Hulls hulls;
@@ -136,6 +146,7 @@ void addInterior(const ScriptObject* object, std::vector<PlayerPrediction::Trian
         } else {
             DIFLoadResult loaded = loadDIF(bytes.data(), bytes.size(), file.c_str(), true);
             hulls.loaded = loaded.loaded;
+            hulls.hasAlarmState = loaded.hasAlarmState;
             hulls.hullCollisionVerts = std::move(loaded.hullCollisionVerts);
             hulls.hullCollisionIndices = std::move(loaded.hullCollisionIndices);
         }
@@ -393,6 +404,15 @@ float waterSurfaceAt(float x, float y) {
             y <= std::max(w.y0, w.y1) && !(w.level <= best))
             best = w.level;
     return best;
+}
+
+bool interiorHasAlarmState(const std::string& interiorFile) {
+    ensureBuilt();
+    std::string file = interiorFile;
+    for (char& c : file) if (c == '\\') c = '/';
+    auto& cache = interiorCache();
+    auto it = cache.find(lower(file));
+    return it != cache.end() && it->second.hasAlarmState;
 }
 
 } // namespace ServerContainer

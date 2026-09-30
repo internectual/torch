@@ -5,6 +5,7 @@
 #include "sim/sim_natives.h"
 #include "sim/engine_object.h"
 #include "sim/projectile_aim.h"
+#include "sim/net_object.h"
 #include "game/material_property_map.h"
 #include <limits>
 #include "script/conversion_parity.h"
@@ -3899,6 +3900,65 @@ bool ScriptEngine::init() {
     // %obj.schedule(time, method, args...): SimObject::schedule.
     // The shipped SimObject::setPersistent(bool): the object's "persistent"
     // flag (0x200 in mFlags, the mission saver's), set from dAtob.
+    // SimSet::isMember / bringToFront / pushToBack (console/simBase.cc).
+    auto setMembers = [](ScriptObject* set) {
+        std::vector<VMValue> members;
+        const int count = set->internals["__childCount"].toInt();
+        for (int i = 0; i < count; ++i) members.push_back(set->internals["__child" + std::to_string(i)]);
+        return members;
+    };
+    auto storeMembers = [](ScriptObject* set, const std::vector<VMValue>& members) {
+        for (size_t i = 0; i < members.size(); ++i) set->internals["__child" + std::to_string(i)] = members[i];
+    };
+    tsInstance->registerNative("SimSet::isMember", [setMembers](const auto& args) -> VMValue {
+        auto& engine = ScriptEngine::instance();
+        ScriptObject* set = args.empty() ? nullptr : engine.findObject(args[0].toString().c_str());
+        ScriptObject* test = args.size() > 1 ? engine.findObject(args[1].toString().c_str()) : nullptr;
+        if (!test) {
+            Console::instance().printf(LogLevel::Info, "SimSet::isMember: %s is not an object.",
+                                       args.size() > 1 ? args[1].toString().c_str() : "");
+            return VMValue(0);
+        }
+        if (!set) return VMValue(0);
+        for (const auto& member : setMembers(set))
+            if (engine.findObject(member.toString().c_str()) == test) return VMValue(1);
+        return VMValue(0);
+    });
+    auto moveMember = [setMembers, storeMembers](const auto& args, bool toFront) -> VMValue {
+        auto& engine = ScriptEngine::instance();
+        ScriptObject* set = args.empty() ? nullptr : engine.findObject(args[0].toString().c_str());
+        ScriptObject* object = args.size() > 1 ? engine.findObject(args[1].toString().c_str()) : nullptr;
+        if (!set || !object) return VMValue("");
+        auto members = setMembers(set);
+        for (size_t i = 0; i < members.size(); ++i)
+            if (engine.findObject(members[i].toString().c_str()) == object) {
+                const VMValue key = members[i];
+                members.erase(members.begin() + (long)i);
+                if (toFront) members.insert(members.begin(), key);
+                else members.push_back(key);
+                storeMembers(set, members);
+                break;
+            }
+        return VMValue("");
+    };
+    tsInstance->registerNative("SimSet::bringToFront", [moveMember](const auto& args) { return moveMember(args, true); });
+    tsInstance->registerNative("SimSet::pushToBack", [moveMember](const auto& args) { return moveMember(args, false); });
+    // SimObject::setName: assignName.
+    tsInstance->registerNative("SimObject::setName", [](const auto& args) -> VMValue {
+        auto& engine = ScriptEngine::instance();
+        if (ScriptObject* object = args.empty() ? nullptr : engine.findObject(args[0].toString().c_str()))
+            engine.setObjectName(object, args.size() > 1 ? args[1].toString() : std::string());
+        return VMValue("");
+    });
+    // SceneObject::getForwardVector: the transform's y column.
+    tsInstance->registerNative("SceneObject::getForwardVector", [](const auto& args) -> VMValue {
+        ScriptObject* object = args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str());
+        auto* scene = object ? dynamic_cast<SceneObject*>(object->engine.get()) : nullptr;
+        if (!scene) return VMValue("0 1 0");
+        char buffer[256];
+        std::snprintf(buffer, sizeof(buffer), "%g %g %g", scene->transform[1], scene->transform[5], scene->transform[9]);
+        return VMValue(buffer);
+    });
     tsInstance->registerNative("SimObject::setPersistent", [](const auto& args) -> VMValue {
         if (ScriptObject* object = args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str()))
             object->internals["__persistent"] = VMValue(args.size() > 1 && args[1].toBool() ? 1 : 0);

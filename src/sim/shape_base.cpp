@@ -1185,8 +1185,8 @@ uint32_t ShapeBase::packUpdate(GameConnection& connection, uint32_t mask, Torque
         const float max = maxDamage();
         w.writeFloat(std::clamp(max > 0.0f ? damage / max : 0.0f, 0.0f, 1.0f), 6);
         w.writeInt((int32_t)damageState, 2);
-        w.writeFlag(false); // blowApart
-        w.writeNormalVector({0, 0, 1}, 8); // damageDir
+        w.writeFlag(blowApart);
+        w.writeNormalVector({damageDir.x, damageDir.y, damageDir.z}, 8);
     }
     // The shipped order (ShapeBase::unpackUpdate, FUN_005ef0e0): sounds, then
     // threads as sequence, state, direction and end flags (V12 has threads
@@ -1274,6 +1274,23 @@ bool ShapeBase::writePacketData(GameConnection& connection, TorqueBitWriter& w) 
     return ret;
 }
 
+// cSetDeployRotation / cGetDeployTransform: z along the surface normal, x
+// across it (from +y when the normal is mostly vertical, else +z).
+static std::array<float, 16> deployTransform(const std::string& position, const std::string& normalText) {
+    Point3F pos{0, 0, 0}, n{0, 0, 0};
+    std::sscanf(position.c_str(), "%f %f %f", &pos.x, &pos.y, &pos.z);
+    std::sscanf(normalText.c_str(), "%f %f %f", &n.x, &n.y, &n.z);
+    const float nl = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+    n = nl > 0 ? Point3F{n.x / nl, n.y / nl, n.z / nl} : Point3F{0, 0, 1};
+    auto cross = [](const Point3F& a, const Point3F& b) {
+        return Point3F{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+    };
+    const Point3F x = std::fabs(n.z) > std::fabs(n.x) && std::fabs(n.z) > std::fabs(n.y) ? cross({0, 1, 0}, n)
+                                                                                          : cross({0, 0, 1}, n);
+    const Point3F y = cross(n, x);
+    return {x.x, y.x, n.x, pos.x, x.y, y.y, n.y, pos.y, x.z, y.z, n.z, pos.z, 0, 0, 0, 1};
+}
+
 void registerShapeBaseNatives(TorqueScript& ts) {
     EngineObjects::registerClass("ShapeBase", [] { return std::make_shared<ShapeBase>(); });
     using Args = std::vector<VMValue>;
@@ -1281,6 +1298,36 @@ void registerShapeBaseNatives(TorqueScript& ts) {
         return args.empty() ? nullptr : EngineObjects::get<ShapeBase>(args[0].toString());
     };
     auto arg = [](const Args& args, size_t i) { return i < args.size() ? args[i] : VMValue(""); };
+    // ShapeBaseData::getDeployTransform(position, normal): "pos axis angle".
+    ts.registerNative("ShapeBaseData::getDeployTransform", [](const Args& args) -> VMValue {
+        const auto m = deployTransform(args.size() > 1 ? args[1].toString() : "", args.size() > 2 ? args[2].toString() : "");
+        const TorqueMath::AngAxis aa = TorqueMath::angAxis(TorqueMath::quat(m));
+        char buffer[256];
+        std::snprintf(buffer, sizeof(buffer), "%g %g %g %g %g %g %g", m[3], m[7], m[11], aa.x, aa.y, aa.z, aa.angle);
+        return VMValue(buffer);
+    });
+    // ShapeBaseData::checkDeployPos(transform): no interior or static shape
+    // polygon inside the shape's bounds shrunk to 90% there.
+    ts.registerNative("ShapeBaseData::checkDeployPos", [](const Args& args) -> VMValue {
+        ScriptObject* data = args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str());
+        float lo[3], hi[3];
+        const std::string shapeFile = data ? Fields::string(data, "shapeFile") : std::string();
+        if (shapeFile.empty() || !shapeFileBounds(shapeFile, lo, hi)) return VMValue(0);
+        float pos[3] = {0, 0, 0};
+        TorqueMath::AngAxis aa{0, 0, 1, 0};
+        std::sscanf(args.size() > 1 ? args[1].toString().c_str() : "", "%f %f %f %f %f %f %f", &pos[0], &pos[1], &pos[2],
+                    &aa.x, &aa.y, &aa.z, &aa.angle);
+        const auto mat = TorqueMath::matrix(pos, aa);
+        Point3F blo{0, 0, 0}, bhi{0, 0, 0};
+        for (int i = 0; i < 3; ++i) {
+            const float c = (lo[i] + hi[i]) * 0.5f;
+            (&blo.x)[i] = c + (lo[i] - c) * 0.9f;
+            (&bhi.x)[i] = c + (hi[i] - c) * 0.9f;
+        }
+        const bool blocked = SimContainer::polysInBox(mat, blo, bhi,
+                                                      SimContainer::InteriorObjectType | SimContainer::StaticShapeObjectType);
+        return VMValue(blocked ? 0 : 1);
+    });
     // GameBase::setDataBlock (gameBase.cc cSetDataBlock).
     ts.registerNative("GameBase::setDataBlock", [](const Args& args) -> VMValue {
         auto* object = args.empty() ? nullptr : EngineObjects::get<GameBase>(args[0].toString());
@@ -1436,6 +1483,43 @@ void registerShapeBaseNatives(TorqueScript& ts) {
     });
     method("isLocked", [](ShapeBase& s, const Args&) { return VMValue(s.lockMode != ShapeBase::NotLocked ? 1 : 0); });
     method("isTracking", [](ShapeBase& s, const Args&) { return VMValue(s.tracking ? 1 : 0); });
+    // ShapeBase::applyImpulse: the shape's own response (Player, Vehicle and
+    // Item override it); a plain shape ignores it.
+    method("applyImpulse", [](ShapeBase&, const Args&) { return VMValue(1); });
+    method("blowup", [](ShapeBase& s, const Args&) {
+        s.blowApart = true;
+        return VMValue("");
+    });
+    method("setMomentumVector", [arg](ShapeBase& s, const Args& a) {
+        Point3F n{0, 0, 0};
+        std::sscanf(arg(a, 1).toString().c_str(), "%f %f %f", &n.x, &n.y, &n.z);
+        const float l = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        s.damageDir = l > 0 ? Point3F{n.x / l, n.y / l, n.z / l} : Point3F{0, 0, 1};
+        return VMValue("");
+    });
+    // ShapeBase::canCloak: "jammed" while an enemy sensor jams its target.
+    method("canCloak", [](ShapeBase& s, const Args&) {
+        const ServerTargets::Target* target = ServerTargets::serverTarget(s.targetId);
+        if (target && (target->sensorFlags & ServerTargets::EnemySensorJammed)) return VMValue("jammed");
+        return VMValue("true");
+    });
+    method("getAIRepairPoint", [](ShapeBase& s, const Args&) {
+        const Point3F p = s.getAIRepairPoint();
+        char buffer[200];
+        std::snprintf(buffer, sizeof(buffer), "%g %g %g", p.x, p.y, p.z);
+        return VMValue(buffer);
+    });
+    // ShapeBase::setDeployRotation(position, normal): stood on the surface.
+    method("setDeployRotation", [arg](ShapeBase& s, const Args& a) {
+        const auto m = deployTransform(arg(a, 1).toString(), arg(a, 2).toString());
+        if (auto* player = dynamic_cast<PlayerObject*>(&s)) {
+            player->setTransform(m);
+        } else {
+            s.transform = m;
+            s.setMaskBits(0xFFFFFFFFu & ~1u);
+        }
+        return VMValue("");
+    });
     // ShapeBase::playShieldEffect: the clients play the shield hit toward
     // the (normalized) vector.
     method("playShieldEffect", [arg](ShapeBase& s, const Args& a) {

@@ -197,6 +197,7 @@ void registerSimNatives(TorqueScript& ts) {
     registerGameConnectionNatives(ts);
     registerNetInterfaceNatives(ts);
     registerSceneObjectClasses();
+    registerSceneObjectNatives(ts);
 
     // math/mathTypes.cc console functions.
     {

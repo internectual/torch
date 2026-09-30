@@ -1082,6 +1082,7 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
 
 
     if (interiors.empty()) return result;
+    result.hasAlarmState = interiors[0].hasAlarmState;
 
 
     if (!interiorToMeshes(interiors[0],

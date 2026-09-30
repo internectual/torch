@@ -53,3 +53,4 @@ bool present(const ScriptObject* object, const char* name);
 } // namespace Fields
 
 void registerSceneObjectClasses();
+void registerSceneObjectNatives(class TorqueScript& ts);

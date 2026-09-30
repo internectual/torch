@@ -96,6 +96,12 @@ bool castRay(const Point3F& a, const Point3F& b, uint32_t mask, RayInfo& info,
              const std::vector<ScriptObject*>& exempt = {});
 // Container::findObjects: objects of `mask` whose world box overlaps.
 std::vector<ScriptObject*> findObjects(const Point3F& min, const Point3F& max, uint32_t mask);
+// Container::buildPolyList into an EarlyOutPolyList: whether any polygon of
+// the mask's objects (terrain, interiors and force fields as triangles,
+// shapes as their collision boxes) falls inside the box [lo, hi] in the
+// frame `frame` (rotation + position, row-major like transforms).
+bool polysInBox(const std::array<float, 16>& frame, const Point3F& lo, const Point3F& hi, uint32_t mask,
+                const std::vector<ScriptObject*>& exempt = {});
 // WaterBlock::isPointSubmergedSimple over the server's water surface.
 bool pointInWater(const Point3F& point, float* surfaceHeight = nullptr);
 

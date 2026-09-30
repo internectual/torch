@@ -278,6 +278,81 @@ bool castRay(const Point3F& a, const Point3F& b, uint32_t mask, RayInfo& info, c
     return true;
 }
 
+namespace {
+// A convex polygon clipped to local box [lo, hi]: non-empty when it enters.
+bool polygonEntersBox(std::vector<Point3F> poly, const Point3F& lo, const Point3F& hi) {
+    for (int axis = 0; axis < 3 && !poly.empty(); ++axis)
+        for (int side = 0; side < 2 && !poly.empty(); ++side) {
+            auto coord = [axis](const Point3F& p) { return axis == 0 ? p.x : axis == 1 ? p.y : p.z; };
+            const float bound = side == 0 ? (axis == 0 ? lo.x : axis == 1 ? lo.y : lo.z)
+                                          : (axis == 0 ? hi.x : axis == 1 ? hi.y : hi.z);
+            auto inside = [&](const Point3F& p) { return side == 0 ? coord(p) >= bound : coord(p) <= bound; };
+            std::vector<Point3F> out;
+            for (size_t i = 0; i < poly.size(); ++i) {
+                const Point3F& a = poly[i];
+                const Point3F& b = poly[(i + 1) % poly.size()];
+                const bool ia = inside(a), ib = inside(b);
+                if (ia) out.push_back(a);
+                if (ia != ib) {
+                    const float t = (bound - coord(a)) / (coord(b) - coord(a));
+                    out.push_back({a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t});
+                }
+            }
+            poly.swap(out);
+        }
+    return !poly.empty();
+}
+} // namespace
+
+bool polysInBox(const std::array<float, 16>& m, const Point3F& lo, const Point3F& hi, uint32_t mask,
+                const std::vector<ScriptObject*>& exempt) {
+    auto toWorld = [&](const Point3F& p) {
+        return Point3F{m[0] * p.x + m[1] * p.y + m[2] * p.z + m[3], m[4] * p.x + m[5] * p.y + m[6] * p.z + m[7],
+                       m[8] * p.x + m[9] * p.y + m[10] * p.z + m[11]};
+    };
+    auto toLocal = [&](const Point3F& p) {
+        const float dx = p.x - m[3], dy = p.y - m[7], dz = p.z - m[11];
+        return Point3F{m[0] * dx + m[4] * dy + m[8] * dz, m[1] * dx + m[5] * dy + m[9] * dz,
+                       m[2] * dx + m[6] * dy + m[10] * dz};
+    };
+    Point3F wlo{1e30f, 1e30f, 1e30f}, whi{-1e30f, -1e30f, -1e30f};
+    for (int c = 0; c < 8; ++c) {
+        const Point3F w = toWorld({(c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z});
+        wlo = {std::min(wlo.x, w.x), std::min(wlo.y, w.y), std::min(wlo.z, w.z)};
+        whi = {std::max(whi.x, w.x), std::max(whi.y, w.y), std::max(whi.z, w.z)};
+    }
+    std::vector<PlayerPrediction::Triangle> tris;
+    const bool terrain = (mask & TerrainObjectType) != 0, interiors = (mask & InteriorObjectType) != 0;
+    if ((terrain || interiors) && serverCollision().geometry)
+        serverCollision().geometry(wlo, whi, terrain, interiors, tris, nullptr);
+    if (mask & ForceFieldObjectType) ForceFields::gather(nullptr, wlo, whi, tris);
+    for (const auto& t : tris)
+        if (polygonEntersBox({toLocal(t.a), toLocal(t.b), toLocal(t.c)}, lo, hi)) return true;
+    // Shapes: their collision box's faces.
+    const uint32_t shapeMask = mask & ~(TerrainObjectType | InteriorObjectType | WaterObjectType | ForceFieldObjectType);
+    for (ScriptObject* object : findObjects(wlo, whi, shapeMask)) {
+        if (std::find(exempt.begin(), exempt.end(), object) != exempt.end()) continue;
+        auto* shape = dynamic_cast<ShapeBase*>(object->engine.get());
+        if (!shape || shape->hidden) continue;
+        float blo[3], bhi[3];
+        if (!dynamic_cast<PlayerObject*>(shape) && Engine::instance().filesys) {
+            if (!shape->collisionBox(blo, bhi)) continue;
+        } else {
+            Point3F a, b;
+            if (!worldBox(object, a, b)) continue;
+            blo[0] = a.x; blo[1] = a.y; blo[2] = a.z;
+            bhi[0] = b.x; bhi[1] = b.y; bhi[2] = b.z;
+        }
+        Point3F c[8];
+        for (int k = 0; k < 8; ++k)
+            c[k] = toLocal({(k & 1) ? bhi[0] : blo[0], (k & 2) ? bhi[1] : blo[1], (k & 4) ? bhi[2] : blo[2]});
+        static const int faces[6][4] = {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 4, 6, 2}, {1, 3, 7, 5}};
+        for (const auto& f : faces)
+            if (polygonEntersBox({c[f[0]], c[f[1]], c[f[2]], c[f[3]]}, lo, hi)) return true;
+    }
+    return false;
+}
+
 std::vector<ScriptObject*> findObjects(const Point3F& min, const Point3F& max, uint32_t mask) {
     std::vector<ScriptObject*> out;
     for (auto& [key, object] : ScriptEngine::instance().objects) {
