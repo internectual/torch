@@ -227,11 +227,24 @@ void rebuild() {
                                    s.terrains.size(), s.interiors.triangles.size(), s.water.size());
 }
 
+void refresh() {
+    auto& s = state();
+    s.lastCheck = Timer::now();
+    if (currentSignature() != s.signature) rebuild();
+}
+
 void gatherTriangles(const Point3F& min, const Point3F& max, std::vector<PlayerPrediction::Triangle>& out) {
+    ensureBuilt();
+    gatherGeometry(min, max, true, true, out);
+}
+
+void gatherGeometry(const Point3F& min, const Point3F& max, bool withTerrain, bool withInteriors,
+                    std::vector<PlayerPrediction::Triangle>& out) {
     ensureBuilt();
     auto& s = state();
     // Terrain: the heightfield's Y-up rect, faces up.
     for (const auto& terrain : s.terrains) {
+        if (!withTerrain) break;
         std::vector<Point3F> tris;
         terrain.block->appendTrianglesInRect(min.x, -max.y, max.x, -min.y, tris);
         for (size_t i = 0; i + 2 < tris.size(); i += 3) {
@@ -247,7 +260,7 @@ void gatherTriangles(const Point3F& min, const Point3F& max, std::vector<PlayerP
     }
     // Interiors from the grid cells the box touches.
     const auto& in = s.interiors;
-    if (in.resX > 0) {
+    if (withInteriors && in.resX > 0) {
         auto cellOf = [&](float v, float lo, int res) { return std::clamp((int)std::floor((v - lo) / in.cell), 0, res - 1); };
         const int x0 = cellOf(min.x, in.minX, in.resX), x1 = cellOf(max.x, in.minX, in.resX);
         const int y0 = cellOf(min.y, in.minY, in.resY), y1 = cellOf(max.y, in.minY, in.resY);
@@ -265,6 +278,73 @@ void gatherTriangles(const Point3F& min, const Point3F& max, std::vector<PlayerP
                     out.push_back(t);
                 }
     }
+}
+
+bool terrainBlock(Point3F& origin, float& squareSize) {
+    ensureBuilt();
+    const auto& s = state();
+    if (s.terrains.empty()) return false;
+    const TerrainBlock& b = *s.terrains.front().block;
+    origin = {b.worldOffset.x, -b.worldOffset.z, b.worldOffset.y};
+    squareSize = b.squareSize;
+    return true;
+}
+
+bool terrainHeight(const Point2F& pos, float* height, Point3F* normal, bool normalize) {
+    ensureBuilt();
+    const auto& s = state();
+    if (s.terrains.empty()) return false;
+    const TerrainBlock& b = *s.terrains.front().block;
+    if (b.heights.empty() || b.size < 2 || b.squareSize <= 0.0f) return false;
+    const int mask = b.size - 1;   // BlockMask
+    const float invSquareSize = 1.0f / b.squareSize;
+    float xp = pos.x * invSquareSize;
+    float yp = pos.y * invSquareSize;
+    int x = (int)std::floor(xp);
+    int y = (int)std::floor(yp);
+    xp -= (float)x;
+    yp -= (float)y;
+    x &= mask;
+    y &= mask;
+    // Grid rows run along Torque +y (the Y-up heightfield's -z).
+    if (!b.emptySquares.empty() && b.emptySquares[(size_t)y * b.size + x]) return false;
+    auto h = [&](int hx, int hy) { return b.heights[(size_t)(hy & mask) * b.size + (hx & mask)] * b.heightScale; };
+    const float zBottomLeft = h(x, y), zBottomRight = h(x + 1, y);
+    const float zTopLeft = h(x, y + 1), zTopRight = h(x + 1, y + 1);
+    const float sq = b.squareSize;
+    Point3F n;
+    float z;
+    if (((x ^ y) & 1) == 0) {   // Split45
+        if (xp > yp) {
+            n = {zBottomLeft - zBottomRight, zBottomRight - zTopRight, sq};
+            z = zBottomLeft + xp * (zBottomRight - zBottomLeft) + yp * (zTopRight - zBottomRight);
+        } else {
+            n = {zTopLeft - zTopRight, zBottomLeft - zTopLeft, sq};
+            z = zBottomLeft + xp * (zTopRight - zTopLeft) + yp * (zTopLeft - zBottomLeft);
+        }
+    } else {
+        if (1.0f - xp > yp) {
+            n = {zBottomLeft - zBottomRight, zBottomLeft - zTopLeft, sq};
+            z = zBottomRight + (1.0f - xp) * (zBottomLeft - zBottomRight) + yp * (zTopLeft - zBottomLeft);
+        } else {
+            n = {zTopLeft - zTopRight, zBottomRight - zTopRight, sq};
+            z = zBottomRight + (1.0f - xp) * (zTopLeft - zTopRight) + yp * (zTopRight - zBottomRight);
+        }
+    }
+    if (height) *height = z;
+    if (normal) {
+        if (normalize) {
+            const float l2 = n.x * n.x + n.y * n.y + n.z * n.z;
+            if (l2 != 0.0f) {
+                const float f = 1.0f / std::sqrt(l2);
+                n = {n.x * f, n.y * f, n.z * f};
+            } else {
+                n = {0, 0, 1};
+            }
+        }
+        *normal = n;
+    }
+    return true;
 }
 
 bool waterFind(const Point3F& min, const Point3F& max, WaterInfo& out) {

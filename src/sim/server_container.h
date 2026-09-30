@@ -22,5 +22,19 @@ struct WaterInfo {
 bool waterFind(const Point3F& min, const Point3F& max, WaterInfo& out);
 // Rebuild from the current mission objects now.
 void rebuild();
+// Rebuild now if the mission's terrain, interiors or water changed (the
+// check gatherTriangles makes at most twice a second).
+void refresh();
+
+// gatherTriangles restricted to the terrain and / or the interiors.
+void gatherGeometry(const Point3F& min, const Point3F& max, bool terrain, bool interiors,
+                    std::vector<PlayerPrediction::Triangle>& out);
+// The first TerrainBlock's origin (its position) and square size; false
+// when there is none.
+bool terrainBlock(Point3F& origin, float& squareSize);
+// TerrainBlock::getHeight / getNormal (terrain/terrData.cc) at a position
+// relative to that block's origin: the block repeats, and an empty square
+// has no height. The normal is left unnormalized unless asked.
+bool terrainHeight(const Point2F& pos, float* height, Point3F* normal = nullptr, bool normalize = true);
 
 } // namespace ServerContainer

@@ -45,6 +45,11 @@ add_executable(torch
     src/sim/player.cpp
     src/sim/static_shapes.cpp
     src/sim/nav_graph.cpp
+    src/ai/graph.cpp
+    src/ai/graph_data.cpp
+    src/ai/graph_math.cpp
+    src/ai/graph_path.cpp
+    src/ai/graph_search.cpp
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
@@ -147,6 +152,11 @@ add_executable(torch_server
     src/sim/player.cpp
     src/sim/static_shapes.cpp
     src/sim/nav_graph.cpp
+    src/ai/graph.cpp
+    src/ai/graph_data.cpp
+    src/ai/graph_math.cpp
+    src/ai/graph_path.cpp
+    src/ai/graph_search.cpp
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
@@ -422,6 +432,11 @@ add_executable(torch_parity_test
     src/sim/player.cpp
     src/sim/static_shapes.cpp
     src/sim/nav_graph.cpp
+    src/ai/graph.cpp
+    src/ai/graph_data.cpp
+    src/ai/graph_math.cpp
+    src/ai/graph_path.cpp
+    src/ai/graph_search.cpp
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
@@ -505,6 +520,11 @@ add_executable(torch_network_loopback_test
     src/sim/player.cpp
     src/sim/static_shapes.cpp
     src/sim/nav_graph.cpp
+    src/ai/graph.cpp
+    src/ai/graph_data.cpp
+    src/ai/graph_math.cpp
+    src/ai/graph_path.cpp
+    src/ai/graph_search.cpp
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
@@ -562,6 +582,94 @@ target_link_libraries(torch_network_loopback_test PRIVATE
 target_compile_definitions(torch_network_loopback_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_network_loopback_test PRIVATE -UNDEBUG)
 add_test(NAME torch_network_loopback COMMAND torch_network_loopback_test)
+
+add_executable(torch_nav_graph_test
+    tests/nav_graph_test.cpp
+    src/stb_image_impl.cpp
+    src/stb_image_write_impl.cpp
+    src/core/engine.cpp
+    src/core/platform.cpp
+    src/core/console.cpp
+    src/core/math.cpp
+    src/core/timer.cpp
+    src/core/string_table.cpp
+    src/fs/file_system.cpp
+    src/fs/asset_policy.cpp
+    src/fs/path_policy.cpp
+    src/fs/vol_archive.cpp
+    src/fs/vl2_archive.cpp
+    src/script/dso_reader.cpp
+    src/script/script_engine.cpp
+    src/sim/sim_natives.cpp
+    src/sim/net_string_table.cpp
+    src/sim/engine_object.cpp
+    src/sim/game_base.cpp
+    src/sim/shape_base.cpp
+    src/sim/camera.cpp
+    src/sim/player.cpp
+    src/sim/static_shapes.cpp
+    src/sim/nav_graph.cpp
+    src/ai/graph.cpp
+    src/ai/graph_data.cpp
+    src/ai/graph_math.cpp
+    src/ai/graph_path.cpp
+    src/ai/graph_search.cpp
+    src/sim/target_manager.cpp
+    src/sim/containers.cpp
+    src/sim/projectiles.cpp
+    src/sim/server_container.cpp
+    src/sim/trigger.cpp
+    src/sim/vehicle.cpp
+    src/sim/force_field.cpp
+    src/sim/net_interface.cpp
+    src/sim/game_connection.cpp
+    src/sim/net_object.cpp
+    src/sim/scene_objects.cpp
+    src/sim/datablock_pack.cpp
+    src/sim/datablocks/shapes.cpp
+    src/sim/datablocks/projectiles.cpp
+    src/sim/datablocks/effects.cpp
+    src/sim/datablocks/misc.cpp
+    src/script/torquescript.cpp
+    src/render/renderer.cpp
+    src/render/shader.cpp
+    src/render/texture.cpp
+    src/render/mesh.cpp
+    src/render/terrain.cpp
+    src/render/terrain_holes.cpp
+    src/render/font.cpp
+    src/render/sky.cpp
+    src/render/dts_loader.cpp
+    src/render/dif_loader.cpp
+    src/render/gui_renderer.cpp
+    src/audio/audio_system.cpp
+    src/net/network.cpp
+    src/net/master_query.cpp
+    src/net/v12_bitstream.cpp
+    src/net/v12_protocol.cpp
+    src/net/v12_registry.cpp
+    src/net/v12_events.cpp
+    src/net/v12_datablocks.cpp
+    src/net/v12_ghosts.cpp
+    src/net/v12_ghost_packet.cpp
+    src/game/world.cpp
+    src/game/player.cpp
+    src/game/physics.cpp
+    src/game/collision.cpp
+    src/game/weapon.cpp
+    src/game/game.cpp
+    src/render/projected_shadows.cpp
+    src/game/hud.cpp
+    src/game/menu.cpp
+    src/game/demo.cpp
+)
+target_include_directories(torch_nav_graph_test PRIVATE src)
+target_link_libraries(torch_nav_graph_test PRIVATE
+    OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis m dl)
+target_compile_definitions(torch_nav_graph_test PRIVATE GLEW_STATIC)
+target_compile_options(torch_nav_graph_test PRIVATE -UNDEBUG)
+add_test(NAME torch_nav_graph COMMAND torch_nav_graph_test)
 set_tests_properties(torch_network_loopback PROPERTIES TIMEOUT 10)
 
 add_executable(torch_target_manager_test
@@ -590,6 +698,11 @@ add_executable(torch_target_manager_test
     src/sim/player.cpp
     src/sim/static_shapes.cpp
     src/sim/nav_graph.cpp
+    src/ai/graph.cpp
+    src/ai/graph_data.cpp
+    src/ai/graph_math.cpp
+    src/ai/graph_path.cpp
+    src/ai/graph_search.cpp
     src/sim/target_manager.cpp
     src/sim/containers.cpp
     src/sim/projectiles.cpp
