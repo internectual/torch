@@ -235,6 +235,11 @@ bool castRay(const Point3F& a, const Point3F& b, uint32_t mask, RayInfo& info, c
         if (std::find(exempt.begin(), exempt.end(), candidate) != exempt.end()) continue;
         const uint32_t type = typeMask(candidate);
         if (!(type & mask)) continue;
+        // ShapeBase::castRay tests the shape's LOS/collision meshes: a shape
+        // without them (a marker) stops no ray. Players hit by their box.
+        if (auto* shape = dynamic_cast<ShapeBase*>(candidate->engine.get());
+            shape && !dynamic_cast<PlayerObject*>(shape) && !shapeHasCollision(shapeFileOf(*shape)))
+            continue;
         Point3F lo, hi, n;
         if (!worldBox(candidate, lo, hi)) continue;
         float t = 0.0f;

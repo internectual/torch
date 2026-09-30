@@ -1,4 +1,8 @@
 #include "sim/target_manager.h"
+#include "sim/containers.h"
+#include "sim/static_shapes.h"
+#include "sim/vehicle.h"
+#include "sim/player.h"
 #include "sim/engine_classes.h"
 #include "sim/game_base.h"
 #include "sim/game_connection.h"
@@ -44,6 +48,9 @@ struct Manager {
     uint32_t sensorGroupCount = 0;
     uint32_t alwaysVisMask[32]{}, neverVisMask[32]{}, friendlyMask[32]{}, listenMask[32]{};
     Color groupColor[32][32];
+    // SensorInfo::targetPingMask: the targets each sensor group sees.
+    uint32_t pingMask[32][TargetFreeMaskSize]{};
+    uint32_t lastSensedObject = 0;
     Manager() { reset(); }
     void reset();
 };
@@ -52,6 +59,7 @@ void Manager::reset() {
     freeCount = MaxTargets;
     sensorGroupCount = 0;
     for (auto& mask : freeMask) mask = 0;
+    for (auto& group : pingMask) for (auto& mask : group) mask = 0;
     for (auto& target : targets) target.clear();
     // Team targets are reserved.
     freeCount -= 32;
@@ -434,6 +442,7 @@ void freeTarget(int target) {
     Manager& m = manager();
     m.targets[target].clear(false);
     const uint32_t index = (uint32_t)target >> 5, bit = (uint32_t)target & 31;
+    for (auto& group : m.pingMask) group[index] &= ~(1u << bit);
     if (!(m.freeMask[index] & (1u << bit))) return;
     m.freeMask[index] &= ~(1u << bit);
     ++m.freeCount;
@@ -488,6 +497,215 @@ bool receivedDataBlocks(const GameConnection& connection) { return stateOf(conne
 
 void setReceivedDataBlocks(GameConnection& connection, bool received) {
     stateOf(connection).receivedDataBlocks = received;
+}
+
+const uint32_t* sensorGroupPingMask(uint32_t sensorGroup) {
+    return manager().pingMask[sensorGroup & 31];
+}
+
+namespace {
+
+// The target's GameBase (TargetInfo::targetObject).
+ShapeBase* targetShape(const Target& t) {
+    if (!t.targetObject) return nullptr;
+    ScriptObject* object = ScriptEngine::instance().findObject(std::to_string(t.targetObject).c_str());
+    return object ? dynamic_cast<ShapeBase*>(object->engine.get()) : nullptr;
+}
+
+// A player's eye, anything else its box centre.
+Point3F sensePosition(ShapeBase& shape) {
+    if (dynamic_cast<PlayerObject*>(&shape)) {
+        const auto eye = shape.getEyeTransform();
+        return {eye[3], eye[7], eye[11]};
+    }
+    return SimContainer::worldBoxCenter(shape.script);
+}
+
+Point3F velocityOf(ShapeBase& shape) {
+    if (auto* p = dynamic_cast<PlayerObject*>(&shape)) return p->state.velocity;
+    if (auto* v = dynamic_cast<VehicleObject*>(&shape)) return v->getVelocity();
+    if (auto* i = dynamic_cast<ItemObject*>(&shape)) return {i->velocity[0], i->velocity[1], i->velocity[2]};
+    return {0, 0, 0};
+}
+
+bool testLOS(ShapeBase& sensor, const Point3F& sensorPos, ShapeBase& target, const Point3F& targetPos) {
+    std::vector<ScriptObject*> exempt{sensor.script, target.script};
+    if (!target.mount.empty())
+        if (ScriptObject* mount = ScriptEngine::instance().findObject(target.mount.c_str())) exempt.push_back(mount);
+    SimContainer::RayInfo info;
+    return !SimContainer::castRay(sensorPos, targetPos, SimContainer::TerrainObjectType | SimContainer::InteriorObjectType |
+                                                            SimContainer::ShapeBaseObjectType, info, exempt);
+}
+
+// SensorData, with the values SensorData::onAdd derives.
+struct Sensor {
+    bool detects, detectsUsingLOS, detectsPassiveJammed, detectsActiveJammed, detectsCloaked, detectionPings;
+    bool detectsFOVOnly, useObjectFOV, jams, jamsOnlyGroup, jamsUsingLOS;
+    float detectRSquared, detectMinVSquared, halfFovCos, detectFOVPercent, jamRSquared;
+    explicit Sensor(ScriptObject* d) {
+        detects = Fields::boolean(d, "detects", true);
+        detectsUsingLOS = Fields::boolean(d, "detectsUsingLOS", true);
+        detectsPassiveJammed = Fields::boolean(d, "detectsPassiveJammed", false);
+        detectsActiveJammed = Fields::boolean(d, "detectsActiveJammed", false);
+        detectsCloaked = Fields::boolean(d, "detectsCloaked", false);
+        detectionPings = Fields::boolean(d, "detectionPings", true);
+        detectsFOVOnly = Fields::boolean(d, "detectsFOVOnly", false);
+        useObjectFOV = Fields::boolean(d, "useObjectFOV", false);
+        jams = Fields::boolean(d, "jams", false);
+        jamsOnlyGroup = Fields::boolean(d, "jamsOnlyGroup", false);
+        jamsUsingLOS = Fields::boolean(d, "jamsUsingLOS", false);
+        const float r = Fields::f32(d, "detectRadius", 250), v = Fields::f32(d, "detectMinVelocity", 0),
+                    j = Fields::f32(d, "jamRadius", 0);
+        detectRSquared = r * r;
+        detectMinVSquared = v * v;
+        jamRSquared = j * j;
+        halfFovCos = std::cos(Fields::f32(d, "detectFOV", 90.0f) / 2.0f * (float)M_PI / 180.0f);
+        detectFOVPercent = Fields::f32(d, "detectFOVPercent", 0);
+    }
+};
+
+} // namespace
+
+// TargetManager::tickSensorState: one 32nd of the targets a tick, each
+// against every sensor: what can detect it (per jam/cloak class), whether
+// it is jammed or pinged, and so which sensor groups see it.
+void tickSensorState() {
+    Manager& m = manager();
+    const uint32_t totalCount = MaxTargets - m.freeCount;
+    const uint32_t pingCount = (totalCount >> 5) + 1; // ping everything once a second
+    uint32_t objectCount = 0, lastSensed = m.lastSensedObject;
+    std::map<int, std::unique_ptr<Sensor>> sensors;
+    auto sensorOf = [&](int id) -> Sensor* {
+        auto it = sensors.find(id);
+        if (it == sensors.end()) {
+            ScriptObject* data = id ? ScriptEngine::instance().findObject(std::to_string(id).c_str()) : nullptr;
+            it = sensors.emplace(id, data ? std::make_unique<Sensor>(data) : nullptr).first;
+        }
+        return it->second.get();
+    };
+    for (uint32_t i = m.lastSensedObject + 1; i - m.lastSensedObject < MaxTargets; ++i) {
+        const uint32_t index = i & (MaxTargets - 1);
+        if (!(m.freeMask[index >> 5] & (1u << (index & 31)))) continue;
+        Target& targetInfo = m.targets[index];
+        ShapeBase* target = targetShape(targetInfo);
+        if (!target) continue;
+        uint32_t baseVisMask = 0, activeJamVisMask = 0, passiveJamVisMask = 0, cloakVisMask = 0;
+        bool pinged = false, jammed = false, enemyJammed = false;
+        const Point3F targetPos = sensePosition(*target);
+        for (uint32_t sens = 0; sens < MaxTargets; ++sens) {
+            if (!(m.freeMask[sens >> 5] & (1u << (sens & 31)))) continue;
+            const Target& sensorInfo = m.targets[sens];
+            ShapeBase* sensor = targetShape(sensorInfo);
+            const Sensor* data = sensor ? sensorOf(sensorInfo.sensorData) : nullptr;
+            if (!sensor || !data) continue;
+            // can't detect its own bad self, but can jam...
+            if (sens == index) {
+                if (data->jams) jammed = true;
+                continue;
+            }
+            if (sensor->damageState != ShapeBase::Enabled) continue;
+            bool testedLOS = false, hasLOS = false;
+            const uint32_t sensorMask = 1u << sensorInfo.sensorGroup;
+            bool noDetect = false;
+            // jams? and is/not always visible?
+            if ((targetInfo.sensorAlwaysVisMask | targetInfo.sensorNeverVisMask) & sensorMask) {
+                if (!data->jams) continue;
+                noDetect = true;
+            }
+            const Point3F sensorPos = sensePosition(*sensor);
+            Point3F targetVec = SimContainer::sub(targetPos, sensorPos);
+            if (!noDetect && data->detects) {
+                uint32_t* mask = data->detectsActiveJammed ? &activeJamVisMask
+                               : data->detectsCloaked ? &cloakVisMask
+                               : data->detectsPassiveJammed ? &passiveJamVisMask : &baseVisMask;
+                do {
+                    // see if we can skip this one:
+                    if ((*mask & sensorMask) && pinged == data->detectionPings) break;
+                    if (targetVec.x == 0 && targetVec.y == 0 && targetVec.z == 0) break;
+                    // uncapped cylinder
+                    if (targetVec.x * targetVec.x + targetVec.y * targetVec.y > data->detectRSquared) break;
+                    if (data->detectMinVSquared != 0.f) {
+                        const Point3F v = velocityOf(*target);
+                        if (SimContainer::dot(v, v) < data->detectMinVSquared) break;
+                    }
+                    if (data->detectsFOVOnly) {
+                        const auto cam = sensor->getEyeTransform();
+                        const Point3F camDir{cam[1], cam[5], cam[9]};
+                        const float d = std::clamp(SimContainer::dot(SimContainer::normalize(targetVec), camDir), -1.f, 1.f);
+                        if (data->useObjectFOV) {
+                            const float objectFov = sensor->cameraFov * (float)M_PI / 180.0f;
+                            if (d < std::cos(objectFov / 2.f)) break;
+                            if (data->detectFOVPercent != 0.f) {
+                                Point3F lo, hi;
+                                SimContainer::worldBox(target->script, lo, hi);
+                                const float objRadius = SimContainer::len(SimContainer::sub(hi, lo)) * 0.5f;
+                                const float projRadius = SimContainer::len(targetVec) * std::tan(objectFov / 2.f);
+                                if ((objRadius / projRadius) * 100.f < data->detectFOVPercent) break;
+                            }
+                        } else if (d < data->halfFovCos) {
+                            break;
+                        }
+                    }
+                    if (data->detectsUsingLOS) {
+                        testedLOS = true;
+                        hasLOS = testLOS(*sensor, sensorPos, *target, targetPos);
+                        if (!hasLOS) break;
+                    }
+                    // it's detected
+                    *mask |= sensorMask;
+                    // friendly do not ping
+                    if (data->detectionPings && !(sensorInfo.sensorFriendlyMask & (1u << targetInfo.sensorGroup)))
+                        pinged = true;
+                } while (false);
+            }
+            // early out?
+            if (!data->jams || (jammed && enemyJammed)) continue;
+            if (sensorInfo.sensorGroup == targetInfo.sensorGroup) {
+                if (jammed) continue;
+            } else if (enemyJammed && data->jamsOnlyGroup) {
+                continue;
+            }
+            if (SimContainer::dot(targetVec, targetVec) > data->jamRSquared) continue;
+            if (data->jamsUsingLOS) {
+                if (!testedLOS) hasLOS = testLOS(*sensor, sensorPos, *target, targetPos);
+                if (!hasLOS) continue;
+            }
+            // set the jammed state
+            if (sensorInfo.sensorGroup == targetInfo.sensorGroup) {
+                jammed = true;
+            } else {
+                jammed = !data->jamsOnlyGroup;
+                enemyJammed = true;
+            }
+        }
+        // check what could detect it: active->cloaked->passive->base
+        uint32_t visMask;
+        if (jammed) visMask = activeJamVisMask;
+        else if (target->cloaked) visMask = activeJamVisMask | cloakVisMask;
+        else if (target->passiveJammed) visMask = activeJamVisMask | cloakVisMask | passiveJamVisMask;
+        else visMask = activeJamVisMask | cloakVisMask | passiveJamVisMask | baseVisMask;
+        visMask |= targetInfo.sensorAlwaysVisMask;
+        visMask &= ~targetInfo.sensorNeverVisMask;
+        targetInfo.sensorVisMask = visMask;
+        targetInfo.sensorFlags = 0;
+        if (pinged) targetInfo.sensorFlags |= SensorPinged;
+        if (jammed || enemyJammed) {
+            if (jammed) targetInfo.sensorFlags |= SensorJammed;
+            if (enemyJammed) {
+                targetInfo.sensorFlags |= EnemySensorJammed;
+                // ShapeBase::forceUncloak
+                if (target->cloaked) target->callDataBlock("onForceUncloak", {"jammed"});
+            }
+        }
+        for (uint32_t j = 0; j < m.sensorGroupCount && j < 32; ++j, visMask >>= 1) {
+            if (visMask & 1) m.pingMask[j][index >> 5] |= 1u << (index & 31);
+            else m.pingMask[j][index >> 5] &= ~(1u << (index & 31));
+        }
+        ++objectCount;
+        lastSensed = i;
+        if (objectCount >= pingCount) break;
+    }
+    m.lastSensedObject = lastSensed;
 }
 
 } // namespace ServerTargets

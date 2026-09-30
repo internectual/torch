@@ -235,6 +235,26 @@ const std::vector<SequenceInfo>& shapeSequences(const std::string& shapeFile) {
 }
 } // namespace
 
+bool shapeHasCollision(const std::string& shapeFile) {
+    static std::unordered_map<std::string, bool> cache;
+    if (shapeFile.empty() || !Engine::instance().filesys) return false;
+    std::string key = shapeFile;
+    for (char& ch : key) ch = (char)std::tolower((unsigned char)ch);
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        bool any = false;
+        const auto bytes = Engine::instance().fs().read(("shapes/" + shapeFile).c_str());
+        if (!bytes.empty()) {
+            const DTSLoadResult shape = loadDTS(bytes.data(), bytes.size(), shapeFile.c_str());
+            for (const auto& d : shape.utilityDetails)
+                if (strncasecmp(d.name.c_str(), "Collision-", 10) == 0 || strncasecmp(d.name.c_str(), "LOS-", 4) == 0)
+                    any = true;
+        }
+        it = cache.emplace(key, any).first;
+    }
+    return it->second;
+}
+
 int ShapeBase::findSequence(const std::string& name) const {
     const auto& list = shapeSequences(objectShapeFile(*this));
     for (size_t i = 0; i < list.size(); ++i)
@@ -1162,6 +1182,10 @@ void registerShapeBaseNatives(TorqueScript& ts) {
         });
     };
     (void)self;
+    method("scopeWhenSensorVisible", [arg](ShapeBase& s, const Args& a) {
+        s.scopeWhenSensorVisible = arg(a, 1).toBool();
+        return VMValue("");
+    });
     // playThread(slot [, sequence]), stopThread, pauseThread, setThreadDir.
     method("playThread", [arg](ShapeBase& s, const Args& a) {
         const int slot = arg(a, 1).toInt();

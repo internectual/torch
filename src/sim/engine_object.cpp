@@ -5,6 +5,7 @@
 #include "sim/net_object.h"
 #include "script/script_engine.h"
 #include "sim/sim_state.h"
+#include "sim/target_manager.h"
 #include <algorithm>
 #include <unordered_map>
 
@@ -67,6 +68,7 @@ void advanceServer(double now) {
     static double lastTick = -1.0;
     if (lastTick < 0.0 || now < lastTick) lastTick = now;
     while (now - lastTick >= TickSeconds) {
+        ServerTargets::tickSensorState();
         EngineObjects::forEachTicking([](EngineObject& object) {
             // ProcessList::advanceObjects: an object its client controls
             // ticks once for each pending move.

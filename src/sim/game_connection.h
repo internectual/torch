@@ -12,6 +12,7 @@
 #include <bitset>
 #include <deque>
 #include <functional>
+#include <array>
 #include <map>
 #include <memory>
 #include <string>
@@ -149,6 +150,10 @@ private:
     std::map<uint32_t, uint32_t> controlKeyInFlight; // packet -> modify key written
     // PacketNotify::rateChanged / maxRateChanged: resent when dropped.
     std::map<uint32_t, std::pair<bool, bool>> rateInFlight;
+    // mTargetVisibleMask: the sensor-visible targets the client has, and
+    // each packet's change (re-applied when the packet drops).
+    uint32_t targetVisibleMask[16]{};
+    std::map<uint32_t, std::array<uint32_t, 16>> visibleXorInFlight;
     void writeRates(TorqueBitWriter& w);
     void readRates(V12BitStream& stream);
     size_t packetBudgetBits() const { return (size_t)curRate.packetSize * 8; }

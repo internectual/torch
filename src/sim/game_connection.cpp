@@ -1,4 +1,5 @@
 #include "sim/game_connection.h"
+#include "sim/target_manager.h"
 #include "sim/net_string_table.h"
 #include "sim/net_object.h"
 #include "sim/datablock_pack.h"
@@ -282,7 +283,23 @@ void GameConnection::writePacket(TorqueBitWriter& w, std::vector<std::shared_ptr
     uint32_t noteKey = 0;
     writeControlObject(w, noteKey);
     if (noteKey) controlKeyInFlight[protocol.lastSent()] = noteKey;
-    w.writeFlag(false); // visible target masks unchanged
+    // The visible target mask: the words of the client's sensor group's
+    // ping mask that changed since the last packet.
+    {
+        const uint32_t* ping = ServerTargets::sensorGroupPingMask(ServerTargets::connectionSensorGroup(*this));
+        std::array<uint32_t, 16> changed{};
+        for (uint32_t i = 0; i < 16; ++i) {
+            changed[i] = ping[i] ^ targetVisibleMask[i];
+            targetVisibleMask[i] = ping[i];
+            if (changed[i]) {
+                w.writeFlag(true);
+                w.writeInt((int32_t)i, 4);
+                w.writeInt((int32_t)changed[i], 32);
+            }
+        }
+        w.writeFlag(false);
+        visibleXorInFlight[protocol.lastSent()] = changed;
+    }
     w.writeFlag(false); // camera fov
     writeEvents(w, sent);
 }
@@ -439,6 +456,11 @@ void GameConnection::receivePacket(const uint8_t* data, size_t size) {
             if (ack.acknowledged) packetReceived(it->second);
             else packetDropped(it->second);
             inFlight.erase(it);
+        }
+        if (auto it = visibleXorInFlight.find(ack.sequence); it != visibleXorInFlight.end()) {
+            if (!ack.acknowledged)
+                for (uint32_t i = 0; i < 16; ++i) targetVisibleMask[i] ^= it->second[i];
+            visibleXorInFlight.erase(it);
         }
         if (auto it = rateInFlight.find(ack.sequence); it != rateInFlight.end()) {
             if (it->second.first && !ack.acknowledged) curRate.changed = true;
@@ -684,6 +706,20 @@ void GameConnection::scopeScene() {
             if (dx * dx + dy * dy + dz * dz <= visible * visible) inRange.push_back(engine.objectKey(object));
         }
         for (const auto& key : inRange) objectInScope(key);
+    }
+    // GameConnection::doneScopingScene: the sensor-visible set.
+    {
+        const uint32_t group = ServerTargets::connectionSensorGroup(*this);
+        std::vector<std::string> visible;
+        auto& engine = ScriptEngine::instance();
+        for (auto& [name, object] : engine.objects) {
+            auto* shape = object ? dynamic_cast<ShapeBase*>(object->engine.get()) : nullptr;
+            if (!shape || !shape->scopeWhenSensorVisible || shape->hidden || shape->targetId == -1 ||
+                !shape->ghostable || shape->netClassId() < 0)
+                continue;
+            if (ServerTargets::isTargetVisible(shape->targetId, group)) visible.push_back(engine.objectKey(object));
+        }
+        for (const auto& key : visible) objectInScope(key);
     }
     for (auto& ghost : ghosts)
         if (ghost.index >= 0 && !(ghost.flags & (GhostInfo::InScope | GhostInfo::ScopeAlways |

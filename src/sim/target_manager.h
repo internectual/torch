@@ -45,6 +45,9 @@ enum EventClass {
     TargetToEvent = 25,
 };
 
+// TargetInfo::sensorFlags.
+enum SensorFlags : uint32_t { SensorPinged = 1u << 1, SensorJammed = 1u << 2, EnemySensorJammed = 1u << 3 };
+
 // TargetInfo, server fields.
 struct Target {
     uint32_t nameTag = 0, skinTag = 0, skinPrefTag = 0, voiceTag = 0, typeTag = 0;
@@ -73,6 +76,10 @@ void freeTarget(int target);
 // A target by id (0..511), or nullptr when out of range.
 const Target* serverTarget(int target);
 bool isTargetVisible(int target, uint32_t sensorGroup);
+// TargetManager::tickSensorState, once per server tick.
+void tickSensorState();
+// SensorInfo::targetPingMask of a sensor group (TargetFreeMaskSize words).
+const uint32_t* sensorGroupPingMask(uint32_t sensorGroup);
 bool isTargetFriendly(int target, uint32_t sensorGroup);
 uint32_t sensorGroupListenMask(uint32_t sensorGroup);
 // RGBA of colour group `colorGroup` as seen by `sensorGroup`.

@@ -211,6 +211,8 @@ public:
     // mControllingObject: the Player whose control object this is. Such an
     // object ticks inside that player's processTick (setProcessTick(false)).
     std::string controllingObject;
+    // scopeWhenSensorVisible: in a client's scope while its sensor group sees it.
+    bool scopeWhenSensorVisible = false;
     bool processesTicks() const override { return controllingObject.empty(); }
 
     // Script threads (mScriptThread): a sequence of the shape played,
@@ -247,3 +249,5 @@ void registerShapeBaseNatives(class TorqueScript& ts);
 // The datablock's shapeFile, and a shape's TSShape::bounds (shape space).
 std::string shapeFileOf(const ShapeBase& shape);
 bool shapeFileBounds(const std::string& shapeFile, float lo[3], float hi[3]);
+// The shape has Collision-N or LOS-N details (ShapeBase::castRay's meshes).
+bool shapeHasCollision(const std::string& shapeFile);
