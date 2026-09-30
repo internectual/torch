@@ -180,11 +180,37 @@ void ItemObject::updatePos(float dt) {
     if (stickyNotify) callDataBlock("onStickyCollision");
 }
 
+uint32_t BeaconObject::packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) {
+    const uint32_t ret = StaticShapeObject::packUpdate(connection, mask, w);
+    if (w.writeFlag(mask & BeaconMask)) w.writeInt(beaconType, 2);
+    return ret;
+}
+
 void registerStaticShapeNatives(TorqueScript& ts) {
     EngineObjects::registerClass("StaticShape", [] { return std::make_shared<StaticShapeObject>(); });
     EngineObjects::registerClass("ScopeAlwaysShape",
                                  [] { return std::make_shared<StaticShapeObject>("ScopeAlwaysShape", true); });
     EngineObjects::registerClass("Turret", [] { return std::make_shared<TurretObject>(); });
+    EngineObjects::registerClass("BeaconObject", [] { return std::make_shared<BeaconObject>(); });
+    static const char* const beaconTypes[] = {"enemy", "friend", "vehicle"};
+    ts.registerNative("BeaconObject::setBeaconType", [](const std::vector<VMValue>& args) -> VMValue {
+        auto* beacon = args.empty() ? nullptr : EngineObjects::get<BeaconObject>(args[0].toString());
+        const std::string type = args.size() > 1 ? args[1].toString() : std::string();
+        for (int i = 0; i < 3; ++i)
+            if (strcasecmp(type.c_str(), beaconTypes[i]) == 0) {
+                if (beacon) {
+                    beacon->beaconType = i;
+                    beacon->setMaskBits(BeaconObject::BeaconMask);
+                }
+                return VMValue("");
+            }
+        Console::instance().printf(LogLevel::Error, "BeaconObject::cGetBeaconType: invalid beacon type [%s]", type.c_str());
+        return VMValue("");
+    });
+    ts.registerNative("BeaconObject::getBeaconType", [](const std::vector<VMValue>& args) -> VMValue {
+        auto* beacon = args.empty() ? nullptr : EngineObjects::get<BeaconObject>(args[0].toString());
+        return VMValue(beacon ? beaconTypes[std::clamp(beacon->beaconType, 0, 2)] : "");
+    });
     EngineObjects::registerClass("Item", [] { return std::make_shared<ItemObject>(); });
     using Args = std::vector<VMValue>;
     auto item = [](const Args& args) -> ItemObject* {

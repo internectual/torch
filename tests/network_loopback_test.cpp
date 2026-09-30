@@ -989,7 +989,10 @@ int main() {
         script.ts()->execute("datablock StaticShapeData(ThreadStation) { maxDamage = 1.0; };"
                              "new GameConnection(ThreadLinkClient);"
                              "new StaticShape(ThreadLinkShape) { dataBlock = ThreadStation; position = \"1 2 3\"; };"
-                             "new Camera(ThreadLinkCamera) { position = \"4 5 6\"; };");
+                             "new Camera(ThreadLinkCamera) { position = \"4 5 6\"; };"
+                             "new BeaconObject(ThreadLinkBeacon) { dataBlock = ThreadStation; position = \"7 8 9\"; };"
+                             "ThreadLinkBeacon.setBeaconType(friend); $beaconType = ThreadLinkBeacon.getBeaconType();");
+        assert(script.ts()->getGlobal("$beaconType").toString() == "friend");
         auto* server = EngineObjects::get<GameConnection>("ThreadLinkClient");
         auto* shape = EngineObjects::get<ShapeBase>("ThreadLinkShape");
         assert(server && shape);
@@ -1017,7 +1020,8 @@ int main() {
             client.checkPacketSend(now + 0.5);
         }
         assert(server->isGhosting());
-        script.ts()->execute("ThreadLinkShape.scopeToClient(ThreadLinkClient); ThreadLinkCamera.scopeToClient(ThreadLinkClient);");
+        script.ts()->execute("ThreadLinkShape.scopeToClient(ThreadLinkClient); ThreadLinkBeacon.scopeToClient(ThreadLinkClient);"
+                             "ThreadLinkCamera.scopeToClient(ThreadLinkClient);");
         for (int i = 0; i < 6; ++i, now += 0.2) {
             server->checkPacketSend(now);
             client.checkPacketSend(now + 0.1);
@@ -1031,6 +1035,8 @@ int main() {
         const GhostEntry* cameraEntry = parser.getGhostTracker().getGhost(cameraGhost);
         assert(shapeEntry && shapeEntry->className == "StaticShape");
         assert(cameraEntry && cameraEntry->className == "Camera");
+        const int beaconGhost = server->ghostIndex(engine.objectKey(engine.findObject("ThreadLinkBeacon")));
+        assert(beaconGhost >= 0 && parser.getGhostTracker().getGhost(beaconGhost)->className == "BeaconObject");
         assert(shapeEntry->threads[0].valid && shapeEntry->threads[0].sequence == 3 &&
                shapeEntry->threads[0].state == ShapeBase::ScriptThread::Play && !shapeEntry->threads[0].forward);
     }

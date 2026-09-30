@@ -24,6 +24,16 @@ public:
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
 };
 
+// The shipped BeaconObject: a StaticShape with a beacon type (enemy,
+// friend, vehicle) the clients receive.
+class BeaconObject : public StaticShapeObject {
+public:
+    enum BeaconMasks : uint32_t { BeaconMask = StaticShapeObject::NextFreeMask };
+    BeaconObject() : StaticShapeObject("BeaconObject") {}
+    int beaconType = 0;
+    uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
+};
+
 class ItemObject : public ShapeBase {
 public:
     enum ItemMasks : uint32_t {

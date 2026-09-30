@@ -40,6 +40,8 @@
 #include <fnmatch.h>
 #include <chrono>
 
+static bool parseObjectId(const std::string& handle, int& id);
+
 namespace {
 std::string lowerName(const std::string& name) {
     std::string lower = name;
@@ -1599,7 +1601,12 @@ std::string ScriptEngine::objectDataBlock(ScriptObject* object) {
     if (!object) return {};
     for (const auto& [field, value] : object->fields)
         if (strcasecmp(field.c_str(), "dataBlock") == 0) {
-            ScriptObject* block = findObject(value.toString().c_str());
+            // TypeGameBaseDataPtr: the field names a datablock (an object
+            // sharing its name, such as an Item "Nexus" of ItemData Nexus,
+            // is not one).
+            const std::string ref = value.toString();
+            int id = 0;
+            ScriptObject* block = parseObjectId(ref, id) ? findObject(ref.c_str()) : findDataBlock(ref);
             return block ? std::to_string(objectId(block)) : std::string();
         }
     return {};
@@ -3890,6 +3897,13 @@ bool ScriptEngine::init() {
         return VMValue(0);
     });
     // %obj.schedule(time, method, args...): SimObject::schedule.
+    // The shipped SimObject::setPersistent(bool): the object's "persistent"
+    // flag (0x200 in mFlags, the mission saver's), set from dAtob.
+    tsInstance->registerNative("SimObject::setPersistent", [](const auto& args) -> VMValue {
+        if (ScriptObject* object = args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str()))
+            object->internals["__persistent"] = VMValue(args.size() > 1 && args[1].toBool() ? 1 : 0);
+        return VMValue("");
+    });
     tsInstance->registerNative("SimObject::schedule", [](const auto& args) -> VMValue {
         if (args.size() >= 3) {
             double delay = args[1].toDouble() / 1000.0;
@@ -5147,11 +5161,10 @@ bool ScriptEngine::init() {
             if (ScriptEngine::instance().objectState((int)id, state))
                 return VMValue(state.datablockId);
         }
+        // GameBase::getDataBlock: the datablock's id.
         if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
-            auto field = object->fields.find("dataBlock");
-            if (field != object->fields.end()) return field->second;
-            field = object->fields.find("datablock");
-            if (field != object->fields.end()) return field->second;
+            const std::string block = ScriptEngine::instance().objectDataBlock(object);
+            if (!block.empty()) return VMValue(std::atoi(block.c_str()));
         }
         return VMValue(0);
     });

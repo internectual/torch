@@ -206,6 +206,7 @@ inline const std::unordered_map<std::string, std::string, CaseHash, CaseEqual>& 
         {"Splash", "GameBase"},
         {"SplashData", "GameBaseData"},
         {"StaticShape", "ShapeBase"},
+        {"BeaconObject", "StaticShape"},
         {"StaticShapeData", "ShapeBaseData"},
         {"StationFXPersonal", "GameBase"},
         {"StationFXPersonalData", "GameBaseData"},
