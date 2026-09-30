@@ -48,6 +48,13 @@ public:
     std::string controlObject;
     bool pilot = false;
 
+    bool canJump() const;
+    bool haveContact() const { return !state.contactTimer; }
+    // Player::getJetAbility: jet acceleration per tick, the ticks a full
+    // tank jets for, and the jump speed; returns the ticks the current
+    // energy jets for (the bots' jet ratings, JetManager::calcJetRatings).
+    float getJetAbility(float& thrust, float& duration, float& jumpSpeed) const;
+
 private:
     const PlayerPrediction::Data* physics();
     void syncTransform();

@@ -791,6 +791,15 @@ void ShapeBase::updateImageState(uint32_t slot, float dt) {
 // eyeHeight() for a Player (so weapon muzzles sit near the eye, not the
 // feet); the engine's fallback when the shape has no mount node is the
 // object transform itself.
+// ShapeBase::getAIRepairPoint: the shape's AIRepairNode, (0,0,0) without one.
+Point3F ShapeBase::getAIRepairPoint() const {
+    float node[3];
+    if (!shapeNode(objectShapeFile(*this), "airepairnode", node)) return {0, 0, 0};
+    float w[3];
+    TorqueMath::mulP(transform, node, w);
+    return {w[0], w[1], w[2]};
+}
+
 std::array<float, 16> ShapeBase::getMountTransform(uint32_t mountPoint) const {
     // The shape's "mount<n>" node (bind pose) when the shape has one.
     float node[3];

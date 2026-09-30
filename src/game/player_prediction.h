@@ -18,6 +18,7 @@ constexpr int MaxPredictionTicks = 30;
 constexpr float MinWarpTicks = 0.5f;
 constexpr int MaxWarpTicks = 3;
 constexpr int MoveState = 1, RecoverState = 2;
+constexpr int JumpSkipContactsMax = 8;
 
 inline Point3F add(const Point3F& a, const Point3F& b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 inline Point3F sub(const Point3F& a, const Point3F& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
@@ -396,7 +397,7 @@ inline void updateMove(State& s, const Data& d, float gravity, Collision& collis
         acceleration = add(acceleration, mul(requested, dt / mass));
     }
     if (move.trigger[2] && moving && !s.jumpDelay && s.energy >= d.minJumpEnergy &&
-        s.jumpSurfaceLastContact < 8 && s.velocity.z <= d.maxJumpSpeed) {
+        s.jumpSurfaceLastContact < JumpSkipContactsMax && s.velocity.z <= d.maxJumpSpeed) {
         const float scale = s.velocity.z <= d.minJumpSpeed ? 1.0f
             : 1.0f - (s.velocity.z - d.minJumpSpeed) / (d.maxJumpSpeed - d.minJumpSpeed);
         const Point3F dir = normalize(moveVec);

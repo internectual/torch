@@ -9175,6 +9175,10 @@ std::vector<std::string> ScriptEngine::objectNamespaces(ScriptObject* object) {
         spaces.push_back(space);
     };
     if (!scriptObjectName(object).empty()) add(object->name);
+    // An engine object linked under a name it is not registered by (an
+    // AITask: every bot's task of a kind shares the kind's namespace).
+    if (const auto linked = object->internals.find("__namespace"); linked != object->internals.end())
+        add(linked->second.toString());
     const auto marker = object->internals.find("__datablock");
     const bool datablock = marker != object->internals.end() && marker->second.toBool();
     if (datablock) {

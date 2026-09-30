@@ -31,6 +31,14 @@ uint32_t dataBlockId(const std::string& handle) {
 PlayerPrediction::Move unclamp(const ClientMoveIn& m) {
     bool triggers[6];
     for (int i = 0; i < 6; ++i) triggers[i] = m.trigger[i];
+    if (m.exact) {
+        PlayerPrediction::Move move;
+        move.x = m.fx; move.y = m.fy; move.z = m.fz;
+        move.yaw = m.fyaw; move.pitch = m.fpitch; move.roll = m.froll;
+        move.freeLook = m.freeLook;
+        for (int i = 0; i < 6; ++i) move.trigger[i] = triggers[i];
+        return move;
+    }
     return PlayerPrediction::unclampMove(m.x, m.y, m.z, (uint16_t)m.yaw, (uint16_t)m.pitch, (uint16_t)m.roll,
                                          m.freeLook, triggers);
 }
@@ -49,6 +57,22 @@ void PlayerObject::readFields() {
 }
 
 // The PlayerData as the client decodes it (packData, then the reader).
+bool PlayerObject::canJump() const {
+    return state.actionState == PlayerPrediction::MoveState && damageState == ShapeBase::Enabled && mount.empty() &&
+           !state.jumpDelay && energy >= dataFloat("minJumpEnergy", 0) &&
+           state.jumpSurfaceLastContact < PlayerPrediction::JumpSkipContactsMax;
+}
+
+float PlayerObject::getJetAbility(float& thrust, float& duration, float& jumpSpeed) const {
+    const float mass = dataFloat("mass", 1.0f);
+    thrust = dataFloat("jetForce", 0) * PlayerPrediction::TickSec / mass;
+    const float drain = waterCoverage < 0.9f ? dataFloat("jetEnergyDrain", 0) : dataFloat("underwaterJetEnergyDrain", 0);
+    const float net = std::max(drain - rechargeRate, 0.01f);
+    duration = maxEnergy() / net;
+    jumpSpeed = dataFloat("jumpForce", 0) / mass;
+    return energy / net;
+}
+
 const PlayerPrediction::Data* PlayerObject::physics() {
     const std::string block = dataBlock();
     if (block.empty()) return nullptr;

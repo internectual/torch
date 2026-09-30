@@ -33,8 +33,6 @@ constexpr float SpringDamping = 2;     // sD
 constexpr float MaxPenetration = 0.1f;
 
 // sCollisionMoveMask (hoverVehicle.cc, flyingVehicle.cc).
-constexpr uint32_t StaticShapeObjectType = 1u << 13, VehicleBlockerObjectType = 1u << 17,
-                   StaticTSObjectType = 1u << 24;
 constexpr uint32_t CollisionMoveMask = TerrainObjectType | InteriorObjectType | WaterObjectType |
                                        PlayerObjectType | StaticShapeObjectType | VehicleObjectType |
                                        VehicleBlockerObjectType | ForceFieldObjectType | StaticTSObjectType;
@@ -346,9 +344,17 @@ void VehicleObject::processMove(const ClientMoveIn* m) {
 }
 
 void VehicleObject::updateMove(const ClientMoveIn* m) {
-    move = m ? PlayerPrediction::unclampMove(m->x, m->y, m->z, (uint16_t)m->yaw, (uint16_t)m->pitch,
+    if (m && m->exact) {
+        move = {};
+        move.x = m->fx; move.y = m->fy; move.z = m->fz;
+        move.yaw = m->fyaw; move.pitch = m->fpitch; move.roll = m->froll;
+        move.freeLook = m->freeLook;
+        for (int i = 0; i < 6; ++i) move.trigger[i] = m->trigger[i];
+    } else {
+        move = m ? PlayerPrediction::unclampMove(m->x, m->y, m->z, (uint16_t)m->yaw, (uint16_t)m->pitch,
                                              (uint16_t)m->roll, m->freeLook, m->trigger)
              : PlayerPrediction::Move{};
+    }
     packedMove = m ? *m : ClientMoveIn{};
     // Image Triggers
     if (damageState == Enabled) {

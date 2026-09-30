@@ -146,20 +146,20 @@ uint32_t typeMask(ScriptObject* object) {
     uint32_t mask = 0;
     if (is(cls, "GameBase")) mask |= GameBaseObjectType;
     if (is(cls, "ShapeBase")) mask |= ShapeBaseObjectType;
-    if (is(cls, "Camera")) mask |= 1u << 12;
-    if (is(cls, "StaticShape")) mask |= 1u << 13;
+    if (is(cls, "Camera")) mask |= CameraObjectType;
+    if (is(cls, "StaticShape")) mask |= StaticShapeObjectType;
     if (is(cls, "Player")) mask |= PlayerObjectType;
-    if (is(cls, "Item")) mask |= 1u << 15;
+    if (is(cls, "Item")) mask |= ItemObjectType;
     if (is(cls, "Vehicle")) mask |= VehicleObjectType;
     if (is(cls, "Projectile")) mask |= ProjectileObjectType;
     if (is(cls, "Turret")) mask |= TurretObjectType;
     if (is(cls, "TerrainBlock")) mask |= TerrainObjectType | StaticObjectType;
     if (is(cls, "InteriorInstance")) mask |= InteriorObjectType | StaticObjectType;
     if (is(cls, "WaterBlock")) mask |= WaterObjectType;
-    if (is(cls, "Trigger")) mask |= 1u << 5;
+    if (is(cls, "Trigger")) mask |= TriggerObjectType;
     if (is(cls, "ForceFieldBare")) mask |= ForceFieldObjectType;
-    if (is(cls, "TSStatic")) mask |= (1u << 24) | StaticObjectType;
-    if (is(cls, "MissionMarker")) mask |= 1u << 6;
+    if (is(cls, "TSStatic")) mask |= StaticTSObjectType | StaticObjectType;
+    if (is(cls, "MissionMarker")) mask |= MarkerObjectType;
     // ShapeBase::onNewDataBlock: mTypeMask |= mDataBlock->dynamicTypeField.
     if (is(cls, "ShapeBase")) {
         const std::string block = ScriptEngine::instance().objectDataBlock(object);

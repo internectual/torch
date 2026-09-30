@@ -1,4 +1,5 @@
 #include "sim/game_connection.h"
+#include "sim/engine_classes.h"
 #include "sim/target_manager.h"
 #include "sim/net_string_table.h"
 #include "sim/net_object.h"
@@ -919,7 +920,11 @@ void registerGameConnectionNatives(TorqueScript& ts) {
         if (auto* c = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString())) c->checkMaxRate();
         return VMValue("");
     });
-    ts.registerNative("GameConnection::isAIControlled", [](const Args&) -> VMValue { return VMValue(0); });
+    // GameConnection::isAIControlled (mAIControlled: an AIConnection).
+    ts.registerNative("GameConnection::isAIControlled", [](const Args& args) -> VMValue {
+        ScriptObject* object = args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str());
+        return VMValue(object && EngineClasses::isA(object->className, "AIConnection") ? 1 : 0);
+    });
     ts.registerNative("GameConnection::activateGhosting", [](const Args& args) -> VMValue {
         if (auto* c = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString())) c->activateGhosting();
         return VMValue("");

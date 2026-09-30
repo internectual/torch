@@ -213,6 +213,7 @@ public:
     // Transforms (row-major, translation in column 3). See shape_base.cpp
     // for where these approximate the engine's DTS node transforms.
     std::array<float, 16> getMountTransform(uint32_t mountPoint) const;
+    Point3F getAIRepairPoint() const;
     std::array<float, 16> getImageTransform(uint32_t slot) const;
     std::array<float, 16> getMuzzleTransform(uint32_t slot) const;
     std::array<float, 16> getEyeTransform() const;

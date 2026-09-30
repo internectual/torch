@@ -52,6 +52,7 @@ add_executable(torch
     src/sim/trigger.cpp
     src/sim/vehicle.cpp
     src/sim/force_field.cpp
+    src/sim/projectile_aim.cpp
     src/sim/net_interface.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
@@ -153,6 +154,7 @@ add_executable(torch_server
     src/sim/trigger.cpp
     src/sim/vehicle.cpp
     src/sim/force_field.cpp
+    src/sim/projectile_aim.cpp
     src/sim/net_interface.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
@@ -427,6 +429,7 @@ add_executable(torch_parity_test
     src/sim/trigger.cpp
     src/sim/vehicle.cpp
     src/sim/force_field.cpp
+    src/sim/projectile_aim.cpp
     src/sim/net_interface.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
@@ -509,6 +512,7 @@ add_executable(torch_network_loopback_test
     src/sim/trigger.cpp
     src/sim/vehicle.cpp
     src/sim/force_field.cpp
+    src/sim/projectile_aim.cpp
     src/sim/net_interface.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
@@ -593,6 +597,7 @@ add_executable(torch_target_manager_test
     src/sim/trigger.cpp
     src/sim/vehicle.cpp
     src/sim/force_field.cpp
+    src/sim/projectile_aim.cpp
     src/sim/net_interface.cpp
     src/sim/game_connection.cpp
     src/sim/net_object.cpp
@@ -931,6 +936,11 @@ add_test(NAME torch_script_object_semantics
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/script_object_semantics_test.sh
         $<TARGET_FILE:torch>)
 set_tests_properties(torch_script_object_semantics PROPERTIES TIMEOUT 45)
+# The engine holds a single-instance lock: tests that launch it run one at a time.
+set_tests_properties(torch_runtime_lifecycle torch_launch_matrix torch_help_output
+    torch_script_path_precedence torch_script_dependency torch_script_compile_failure
+    torch_script_dso_roundtrip torch_mouse_device torch_script_word_range
+    torch_script_object_semantics PROPERTIES RESOURCE_LOCK torch_instance)
 
 add_executable(torch_shadow_projection_test tests/shadow_projection_test.cpp src/core/math.cpp)
 target_include_directories(torch_shadow_projection_test PRIVATE src)

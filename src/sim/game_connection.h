@@ -45,6 +45,10 @@ struct ClientMoveIn {
     bool freeLook = false;
     bool trigger[6]{};
     int sendCount = 0; // client: packets that carried this move
+    // An AIConnection's move is never clamped: its floats reach the control
+    // object as they are (the packed fields above are for packing it).
+    bool exact = false;
+    float fx = 0, fy = 0, fz = 0, fyaw = 0, fpitch = 0, froll = 0;
 };
 
 class GameConnection : public EngineObject {

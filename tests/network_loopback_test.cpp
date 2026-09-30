@@ -11,6 +11,7 @@
 #include "sim/projectiles.h"
 #include "sim/vehicle.h"
 #include "sim/force_field.h"
+#include "sim/projectile_aim.h"
 #include <map>
 #include <set>
 #include "sim/sim_state.h"
@@ -1479,6 +1480,29 @@ int main() {
         for (const char* name : {"TestHoverV", "TestFlyerV"}) ScriptEngine::instance().deleteScriptObject(name);
         serverCollision().triangles = savedTriangles;
         serverCollision().water = savedWater;
+    }
+    {
+        // ProjectileData::calculateAim: a linear shot at a still target goes
+        // straight at it; a grenade's arc lands on it (the quartic solver);
+        // a sniper shot past maxRifleRange cannot be aimed.
+        script.ts()->execute(
+            "datablock LinearProjectileData(AimDisc) { dryVelocity = 90; velInheritFactor = 0.5; lifetimeMS = 5000; };"
+            "datablock GrenadeProjectileData(AimGren) { muzzleVelocity = 47; velInheritFactor = 0.5; gravityMod = 1.0; "
+            "  lifetimeMS = 5000; };"
+            "datablock SniperProjectileData(AimSnipe) { maxRifleRange = 1000; };");
+        Point3F vMin, vMax;
+        float tMin, tMax;
+        auto* disc = ScriptEngine::instance().findObject("AimDisc");
+        assert(ProjectileAim::calculateAim(disc, {0, 90, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, &vMin, &tMin, &vMax, &tMax));
+        assert(std::abs(vMin.y - 1.0f) < 1e-4f && std::abs(tMin - 1.0f) < 1e-3f);
+        auto* gren = ScriptEngine::instance().findObject("AimGren");
+        assert(ProjectileAim::calculateAim(gren, {0, 60, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, &vMin, &tMin, &vMax, &tMax));
+        // Fired along vMin at 47 m/s under 9.81 m/s^2, it lands at (0, 60, 0).
+        const float x = vMin.y * 47 * tMin, z = vMin.z * 47 * tMin - 0.5f * 9.81f * tMin * tMin;
+        assert(std::abs(x - 60.0f) < 0.05f && std::abs(z) < 0.05f && vMin.z > 0);
+        auto* snipe = ScriptEngine::instance().findObject("AimSnipe");
+        assert(!ProjectileAim::calculateAim(snipe, {0, 1500, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, &vMin, &tMin, &vMax, &tMax));
+        assert(ProjectileAim::calculateAim(snipe, {0, 500, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, &vMin, &tMin, &vMax, &tMax));
     }
     {
         // ForceFieldBare: closed, its box blocks every mover (and rays);
