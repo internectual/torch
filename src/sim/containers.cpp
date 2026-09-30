@@ -357,6 +357,15 @@ bool polysInBox(const std::array<float, 16>& m, const Point3F& lo, const Point3F
     return false;
 }
 
+ScriptObject* forceFieldInBox(const Point3F& lo, const Point3F& hi) {
+    std::vector<PlayerPrediction::Triangle> tris;
+    std::vector<const ScriptObject*> owners;
+    ForceFields::gather(nullptr, lo, hi, tris, &owners);
+    for (size_t i = 0; i < tris.size() && i < owners.size(); ++i)
+        if (polygonEntersBox({tris[i].a, tris[i].b, tris[i].c}, lo, hi)) return const_cast<ScriptObject*>(owners[i]);
+    return nullptr;
+}
+
 std::vector<ScriptObject*> findObjects(const Point3F& min, const Point3F& max, uint32_t mask) {
     std::vector<ScriptObject*> out;
     for (auto& [key, object] : ScriptEngine::instance().objects) {

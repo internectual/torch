@@ -138,6 +138,9 @@ public:
     bool cloaked = false;
     bool passiveJammed = false;
     float heat = 0.0f;
+    // setJammerFX: the next ShieldMask update carries the jammer effect
+    // flag (and the server's effect state, never started) instead of a hit.
+    bool jammerFX = false;
     bool hidden = false;
     float cameraFov = 90.0f;
     bool trigger[MaxTriggerKeys]{}; // mTrigger: the last move's trigger states

@@ -102,6 +102,9 @@ std::vector<ScriptObject*> findObjects(const Point3F& min, const Point3F& max, u
 // frame `frame` (rotation + position, row-major like transforms).
 bool polysInBox(const std::array<float, 16>& frame, const Point3F& lo, const Point3F& hi, uint32_t mask,
                 const std::vector<ScriptObject*>& exempt = {});
+// The first force field with a polygon inside the box [lo, hi] (world
+// axes), nullptr when none.
+ScriptObject* forceFieldInBox(const Point3F& lo, const Point3F& hi);
 // WaterBlock::isPointSubmergedSimple over the server's water surface.
 bool pointInWater(const Point3F& point, float* surfaceHeight = nullptr);
 

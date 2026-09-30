@@ -3116,6 +3116,12 @@ bool ScriptEngine::init() {
         if (args.empty()) return VMValue(0.0);
         return VMValue(fabs(args[0].toDouble()));
     });
+    // The retail mMod(num, div): dAtoi(num) % dAtoi(div).
+    tsInstance->registerNative("mMod", [](const auto& args) -> VMValue {
+        const int num = args.size() > 0 ? std::atoi(args[0].toString().c_str()) : 0;
+        const int div = args.size() > 1 ? std::atoi(args[1].toString().c_str()) : 0;
+        return VMValue(div != 0 ? num % div : 0);
+    });
     tsInstance->registerNative("mFloor", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0.0);
         return VMValue(floor(args[0].toDouble()));

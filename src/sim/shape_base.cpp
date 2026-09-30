@@ -1239,9 +1239,13 @@ uint32_t ShapeBase::packUpdate(GameConnection& connection, uint32_t mask, Torque
             }
         }
         if (w.writeFlag(mask & ShieldMask)) {
-            w.writeFlag(false);
-            w.writeNormalVector({shieldNormal.x, shieldNormal.y, shieldNormal.z}, 8);
-            w.writeFloat(getEnergyValue(), 5);
+            if (w.writeFlag(jammerFX)) {
+                jammerFX = false;
+                w.writeFlag(false);
+            } else {
+                w.writeNormalVector({shieldNormal.x, shieldNormal.y, shieldNormal.z}, 8);
+                w.writeFloat(getEnergyValue(), 5);
+            }
         }
         if (w.writeFlag(mask & InvincibleMask)) {
             w.writeF32(invincibleTime);
@@ -1513,6 +1517,19 @@ void registerShapeBaseNatives(TorqueScript& ts) {
         return VMValue("");
     });
     method("getHeat", [](ShapeBase& s, const Args&) { return VMValue(s.heat); });
+    // The retail setJammerFX ignores its argument.
+    method("setJammerFX", [](ShapeBase& s, const Args&) {
+        s.jammerFX = true;
+        s.setMaskBits(ShapeBase::ShieldMask);
+        return VMValue("");
+    });
+    // The force field whose polygons reach into the world box, else 0.
+    method("isInForceField", [](ShapeBase& s, const Args&) {
+        float lo[3], hi[3];
+        s.worldBox(lo, hi);
+        ScriptObject* field = SimContainer::forceFieldInBox({lo[0], lo[1], lo[2]}, {hi[0], hi[1], hi[2]});
+        return VMValue(field ? ScriptEngine::instance().objectId(field) : 0);
+    });
     method("getLockedTarget", [](ShapeBase& s, const Args&) { return VMValue(s.lockedTargetId()); });
     method("getLockedPosition", [](ShapeBase& s, const Args&) {
         char buffer[128];

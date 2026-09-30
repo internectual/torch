@@ -1714,6 +1714,15 @@ int main() {
         tris.clear();
         ForceFields::gather(walker, {-1, -1, -1}, {1, 1, 1}, tris);
         assert(tris.empty());
+        // ShapeBase::isInForceField: the closed field reaching into the
+        // player's box; none once the player stands clear.
+        walker->setTransform({1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
+        script.ts()->execute("$inField = TestFieldP.isInForceField(); $fieldId = TestFieldF.getId();"
+                             "TestFieldP.setTransform(\"1 20 0 0 0 1 0\"); $outField = TestFieldP.isInForceField();"
+                             "$mod = mMod(-7, 3) SPC mMod(7.9, 3);");
+        assert(script.ts()->getGlobal("$inField").toInt() == script.ts()->getGlobal("$fieldId").toInt());
+        assert(script.ts()->getGlobal("$outField").toInt() == 0);
+        assert(script.ts()->getGlobal("$mod").toString() == "-1 1");
         script.ts()->execute("TestFieldF.open();");
         assert(field->state == ForceFieldBareObject::Opening);
         for (int i = 0; i < 3; ++i) field->processMove(nullptr);
