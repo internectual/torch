@@ -158,6 +158,7 @@ uint32_t classTypeMask(const std::string& cls) {
     if (is(cls, "ForceFieldBare")) mask |= ForceFieldObjectType;
     if (is(cls, "TSStatic")) mask |= StaticTSObjectType | StaticObjectType;
     if (is(cls, "MissionMarker")) mask |= MarkerObjectType;
+    if (is(cls, "VehicleBlocker")) mask |= VehicleBlockerObjectType;
     cache.emplace(cls, mask);
     return mask;
 }

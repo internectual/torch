@@ -1701,6 +1701,26 @@ int main() {
             assert(maxX > groundX + 1.0f);
             ScriptEngine::instance().deleteScriptObject("PushPlayer");
         }
+        {
+            // VehicleBlocker (a flag's): a box only vehicles collide with.
+            float lo[3], hi[3];
+            hover->worldBox(lo, hi);
+            const float wall = hi[0] + 4.0f;
+            char buffer[256];
+            std::snprintf(buffer, sizeof(buffer),
+                          "new VehicleBlocker(TestBlocker) { position = \"%g %g 0\"; dimensions = \"2 6 20\"; };",
+                          wall + 2.0f, hover->transform[7]);
+            script.ts()->execute(buffer);
+            hover->applyImpulse({hover->transform[3], hover->transform[7], hover->transform[11]}, {400.0f * 15.0f, 0, 0});
+            float maxFront = hi[0];
+            for (int i = 0; i < 60; ++i) {
+                hover->processMove(nullptr);
+                hover->worldBox(lo, hi);
+                maxFront = std::max(maxFront, hi[0]);
+            }
+            assert(maxFront < wall + 0.5f);
+            ScriptEngine::instance().deleteScriptObject("TestBlocker");
+        }
         for (const char* name : {"TestHoverV", "TestFlyerV"}) ScriptEngine::instance().deleteScriptObject(name);
         serverCollision().triangles = savedTriangles;
         serverCollision().geometry = savedGeometry;

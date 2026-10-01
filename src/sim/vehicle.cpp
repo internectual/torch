@@ -272,10 +272,16 @@ float VehicleObject::collide(const Matrix& mat, float tol, std::vector<Contact>*
     for (ScriptObject* object : findObjects(lo, hi, mask & ~(TerrainObjectType | InteriorObjectType | WaterObjectType))) {
         if (std::find(exempt.begin(), exempt.end(), object) != exempt.end()) continue;
         auto* shape = dynamic_cast<ShapeBase*>(object->engine.get());
-        if (!shape || shape->hidden) continue;
         Box box;
         float clo[3], chi[3];
-        if (!dynamic_cast<PlayerObject*>(shape) && Engine::instance().filesys) {
+        if (!shape) {
+            // A VehicleBlocker's box convex.
+            if (!(SimContainer::typeMask(object) & VehicleBlockerObjectType) ||
+                !SimContainer::worldBox(object, box.min, box.max))
+                continue;
+        } else if (shape->hidden) {
+            continue;
+        } else if (!dynamic_cast<PlayerObject*>(shape) && Engine::instance().filesys) {
             if (!shape->collisionBox(clo, chi)) continue;
             box.min = {clo[0], clo[1], clo[2]};
             box.max = {chi[0], chi[1], chi[2]};
@@ -597,8 +603,8 @@ bool VehicleObject::resolveCollision(Rigid::State& ns, const std::vector<Contact
             if (dot(v, c.normal) < -ContactTol) {
                 rigid.resolveCollision(ns, c.point, c.normal);
                 colliding = collided = true;
-                // Track collisions
-                if (!c.object.empty() &&
+                // Track collisions (shapes only: a VehicleBlocker is not one)
+                if (!c.object.empty() && EngineObjects::get<ShapeBase>(c.object) &&
                     std::none_of(struck.begin(), struck.end(), [&](const Struck& s) { return s.object == c.object; }))
                     struck.push_back({c.object, 0, false});
             }

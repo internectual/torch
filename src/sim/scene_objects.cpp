@@ -411,6 +411,27 @@ public:
     }
 };
 
+// vehicles/vehicleBlocker.cc: a box (x and y half extents, height from
+// the base) only vehicles collide with; flags carry one.
+class VehicleBlockerObject : public SceneObject {
+public:
+    VehicleBlockerObject() { scopeAlways = true; }
+    const char* netClassName() const override { return "VehicleBlocker"; }
+    bool objectBox(float lo[3], float hi[3]) const override {
+        const auto d = Fields::point(script, "dimensions", {0, 0, 0});
+        lo[0] = -d[0]; lo[1] = -d[1]; lo[2] = 0;
+        hi[0] = d[0]; hi[1] = d[1]; hi[2] = d[2];
+        return true;
+    }
+    uint32_t packUpdate(GameConnection&, uint32_t, TorqueBitWriter& w) override {
+        writeTransform(w);
+        writeScale(w);
+        const auto d = Fields::point(script, "dimensions", {0, 0, 0});
+        w.writePoint({d[0], d[1], d[2]});
+        return 0;
+    }
+};
+
 // waterBlock.cc
 class WaterBlockObject : public SceneObject {
 public:
@@ -482,5 +503,6 @@ void registerSceneObjectClasses() {
     EngineObjects::registerClass("WaterBlock", [] { return std::make_shared<WaterBlockObject>(); });
     EngineObjects::registerClass("ParticleEmissionDummy", [] { return std::make_shared<ParticleEmissionDummyObject>(); });
     EngineObjects::registerClass("FireballAtmosphere", [] { return std::make_shared<FireballAtmosphereObject>(); });
+    EngineObjects::registerClass("VehicleBlocker", [] { return std::make_shared<VehicleBlockerObject>(); });
     EngineObjects::registerClass("AudioEmitter", [] { return std::make_shared<AudioEmitterObject>(); });
 }
