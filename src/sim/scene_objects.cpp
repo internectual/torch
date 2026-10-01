@@ -2,6 +2,7 @@
 // ScopeAlways): packUpdate as the retail Tribes 2 client reads it (the demo
 // reader), fields and defaults from the engine's initPersistFields.
 #include "sim/net_object.h"
+#include "sim/sim_state.h"
 #include "sim/game_connection.h"
 #include "sim/engine_classes.h"
 #include "sim/game_base.h"
@@ -66,8 +67,18 @@ public:
 // sky.cc (retail layout: the demo reader's readSkyData)
 class SkyObject : public SceneObject {
 public:
+    enum SkyMasks : uint32_t {
+        VisibilityMask = 1u << 1, StormCloudMask = 1u << 2, StormFogMask = 1u << 3, StormRealFogMask = 1u << 4,
+        WindMask = 1u << 5, StormCloudsOnMask = 1u << 6, StormFogOnMask = 1u << 7,
+    };
+    enum StormState { isDone = 0, comingIn = 1, goingOut = 2 };
     SkyObject() { scopeAlways = true; }
     const char* netClassName() const override { return "Sky"; }
+    void readFields() override {
+        SceneObject::readFields();
+        const auto w = Fields::point(script, "windVelocity", {1, 0, 0});
+        wind = {w[0], w[1], w[2]};
+    }
     uint32_t packUpdate(GameConnection&, uint32_t mask, TorqueBitWriter& w) override {
         if (w.writeFlag(mask & InitMask)) {
             w.writeString(Fields::string(script, "materialList"));
@@ -95,23 +106,92 @@ public:
                            Fields::f32(script, ("cloudHeightPer[" + std::to_string(i) + "]").c_str(), 0)));
                 w.writeF32(Fields::f32(script, ("cloudSpeed" + std::to_string(i + 1)).c_str(), 0));
             }
-            const auto wind = Fields::point(script, "windVelocity", {0, 0, 0});
-            w.writePoint({wind[0], wind[1], wind[2]});
-            w.writeF32(-1.0f);   // mFogVolume
-            w.writeFlag(false);  // no storm fog in progress
+            w.writePoint({wind.x, wind.y, wind.z});
+            w.writeU32((uint32_t)fogVolume);
+            // A storm fog in progress.
+            const uint32_t stormTimeDiff = currentTimeMS() - fogStartTime;
+            if (w.writeFlag((float)stormTimeDiff / 1000.0f < fogTime)) {
+                w.writeF32(fogPercentage);
+                w.writeF32(fogTime);
+                w.writeU32((uint32_t)fogState);
+                w.writeU32(stormTimeDiff);
+                w.writeF32(fogEndPercentage);
+            }
         }
-        w.writeFlag(false); // StormCloudsOnMask
-        w.writeFlag(false); // StormFogOnMask
-        if (w.writeFlag(mask & InitMask)) { // VisibilityMask
+        if (w.writeFlag(mask & StormCloudsOnMask)) w.writeInt(stormCloudsOn ? 1 : 0, 8);
+        if (w.writeFlag((mask & StormFogOnMask) && !(mask & InitMask))) w.writeInt(stormFogOn ? 1 : 0, 8);
+        if (w.writeFlag(mask & VisibilityMask)) {
             w.writeF32(Fields::f32(script, "visibleDistance", 0));
             w.writeF32(Fields::f32(script, "fogDistance", 0));
         }
-        w.writeFlag(false); // StormCloudMask
-        w.writeFlag(false); // StormFogMask
-        w.writeFlag(false); // StormRealFogMask
-        w.writeFlag(false); // WindMask
+        if (w.writeFlag(mask & StormCloudMask)) {
+            w.writeU32((uint32_t)cloudState);
+            w.writeF32(cloudTime);
+        }
+        if (w.writeFlag((mask & StormFogMask) && !(mask & InitMask))) {
+            w.writeF32(fogEndPercentage);
+            w.writeF32(fogTime);
+            w.writeU32((uint32_t)fogVolume);
+            fogStartTime = currentTimeMS();
+        }
+        if (w.writeFlag(mask & StormRealFogMask)) {
+            w.writeU32((uint32_t)realFog);
+            w.writeF32(realFogMax);
+            w.writeF32(realFogMin);
+            w.writeF32(realFogSpeed);
+        }
+        if (w.writeFlag(mask & WindMask)) w.writePoint({wind.x, wind.y, wind.z});
         return 0;
     }
+
+    void stormCloudsShow(bool show) {
+        stormCloudsOn = show;
+        setMaskBits(StormCloudsOnMask);
+    }
+    void stormFogShow(bool show) {
+        stormFogOn = show;
+        setMaskBits(StormFogOnMask);
+    }
+    void stormClouds(int32_t state, float time) {
+        cloudState = state ? comingIn : goingOut;
+        cloudTime = time;
+        setMaskBits(StormCloudMask);
+    }
+    void stormFog(float percentage, float time) {
+        fogTime = time;
+        if (fogEndPercentage >= 0.0f) {
+            fogState = fogEndPercentage > percentage ? goingOut : comingIn;
+            fogPercentage = fogEndPercentage;
+        } else {
+            fogState = fogPercentage > percentage ? goingOut : comingIn;
+        }
+        fogEndPercentage = percentage;
+        setMaskBits(StormFogMask);
+    }
+    void stormRealFog(int32_t value, float max, float min, float speed) {
+        realFog = value;
+        realFogMax = max;
+        realFogMin = min;
+        realFogSpeed = speed;
+        setMaskBits(StormRealFogMask);
+    }
+    void setWindVelocity(const Point3F& velocity) {
+        wind = velocity;
+        setMaskBits(WindMask);
+    }
+    Point3F wind{1, 0, 0};
+
+private:
+    static uint32_t currentTimeMS() { return (uint32_t)(SimState::simTime() * 1000.0); }
+    bool stormCloudsOn = true, stormFogOn = false;
+    int32_t cloudState = isDone;
+    float cloudTime = 0.0f;
+    // mFogPercentage is never set on the engine's server before a storm.
+    float fogPercentage = 0.0f, fogTime = 0.0f, fogEndPercentage = -1.0f;
+    int32_t fogState = isDone, fogVolume = -1;
+    uint32_t fogStartTime = 0;
+    int32_t realFog = 0;
+    float realFogMax = 0.0f, realFogMin = 0.0f, realFogSpeed = 0.0f;
 };
 
 // sun.cc (retail: textures, then 19 floats with the lens flare values)
@@ -522,6 +602,46 @@ public:
 
 // InteriorInstance::setAlarmMode("On" | anything else).
 void registerSceneObjectNatives(TorqueScript& ts) {
+    auto sky = [](const std::vector<VMValue>& args) -> SkyObject* {
+        return args.empty() ? nullptr : EngineObjects::get<SkyObject>(args[0].toString());
+    };
+    auto boolArg = [](const std::vector<VMValue>& args, size_t i) {
+        // dAtob: "true" or a non-zero number.
+        const std::string v = i < args.size() ? args[i].toString() : std::string();
+        return strcasecmp(v.c_str(), "true") == 0 || std::atof(v.c_str()) != 0.0;
+    };
+    auto f = [](const std::vector<VMValue>& args, size_t i) { return i < args.size() ? (float)std::atof(args[i].toString().c_str()) : 0.0f; };
+    auto n = [](const std::vector<VMValue>& args, size_t i) { return i < args.size() ? std::atoi(args[i].toString().c_str()) : 0; };
+    ts.registerNative("Sky::stormCloudsShow", [sky, boolArg](const std::vector<VMValue>& args) -> VMValue {
+        if (auto* s = sky(args)) s->stormCloudsShow(boolArg(args, 1));
+        return VMValue("");
+    });
+    ts.registerNative("Sky::stormFogShow", [sky, boolArg](const std::vector<VMValue>& args) -> VMValue {
+        if (auto* s = sky(args)) s->stormFogShow(boolArg(args, 1));
+        return VMValue("");
+    });
+    ts.registerNative("Sky::stormClouds", [sky, f, n](const std::vector<VMValue>& args) -> VMValue {
+        if (auto* s = sky(args)) s->stormClouds(n(args, 1), f(args, 2));
+        return VMValue("");
+    });
+    ts.registerNative("Sky::stormFog", [sky, f](const std::vector<VMValue>& args) -> VMValue {
+        if (auto* s = sky(args)) s->stormFog(f(args, 1), f(args, 2));
+        return VMValue("");
+    });
+    ts.registerNative("Sky::realFog", [sky, f, n](const std::vector<VMValue>& args) -> VMValue {
+        if (auto* s = sky(args)) s->stormRealFog(n(args, 1), f(args, 2), f(args, 3), f(args, 4));
+        return VMValue("");
+    });
+    ts.registerNative("Sky::setWindVelocity", [sky, f](const std::vector<VMValue>& args) -> VMValue {
+        if (auto* s = sky(args)) s->setWindVelocity({f(args, 1), f(args, 2), f(args, 3)});
+        return VMValue("");
+    });
+    ts.registerNative("Sky::getWindVelocity", [sky](const std::vector<VMValue>& args) -> VMValue {
+        const Point3F w = sky(args) ? sky(args)->wind : Point3F{0, 0, 0};
+        char buffer[128];
+        std::snprintf(buffer, sizeof(buffer), "%f %f %f", w.x, w.y, w.z);
+        return VMValue(buffer);
+    });
     ts.registerNative("InteriorInstance::setAlarmMode", [](const std::vector<VMValue>& args) -> VMValue {
         auto* interior = args.empty() ? nullptr : EngineObjects::get<InteriorInstanceObject>(args[0].toString());
         if (interior) interior->setAlarmMode(args.size() > 1 && strcasecmp(args[1].toString().c_str(), "On") == 0);
