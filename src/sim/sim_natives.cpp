@@ -4,6 +4,7 @@
 #include "sim/camera.h"
 #include "sim/player.h"
 #include "sim/static_shapes.h"
+#include "sim/lightning.h"
 #include "sim/trigger.h"
 #include "sim/vehicle.h"
 #include "sim/force_field.h"
@@ -36,6 +37,7 @@ void registerSimNatives(TorqueScript& ts) {
     registerCameraNatives(ts);
     registerPlayerNatives(ts);
     registerStaticShapeNatives(ts);
+    registerLightningNatives(ts);
     registerTriggerNatives(ts);
     registerVehicleNatives(ts);
     registerForceFieldNatives(ts);
