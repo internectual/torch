@@ -2,6 +2,8 @@
 // ScopeAlways): packUpdate as the retail Tribes 2 client reads it (the demo
 // reader), fields and defaults from the engine's initPersistFields.
 #include "sim/net_object.h"
+#include "sim/game_connection.h"
+#include "sim/engine_classes.h"
 #include "sim/game_base.h"
 #include "sim/engine_crc.h"
 #include "sim/server_container.h"
@@ -432,6 +434,61 @@ public:
     }
 };
 
+// stationFXPersonal.cc / stationFXVehicle.cc: the station effect, placed
+// at its station, the station's ghost sent once, deleted after the
+// datablock's lifetime.
+class StationFXObject : public GameBase {
+public:
+    StationFXObject(const char* netClass, float boxLo[3], float boxHi[3], float defaultLifetime)
+        : netClass(netClass), defaultLifetime(defaultLifetime) {
+        ghostable = true;
+        for (int i = 0; i < 3; ++i) {
+            lo[i] = boxLo[i];
+            hi[i] = boxHi[i];
+        }
+    }
+    const char* netClassName() const override { return netClass; }
+    bool objectBox(float outLo[3], float outHi[3]) const override {
+        for (int i = 0; i < 3; ++i) {
+            outLo[i] = lo[i];
+            outHi[i] = hi[i];
+        }
+        return true;
+    }
+    void onAdded() override {
+        const int id = Fields::s32(script, "stationObject", -1);
+        ScriptObject* object = id != -1 ? ScriptEngine::instance().findObject(std::to_string(id).c_str()) : nullptr;
+        auto* shape = object ? dynamic_cast<SceneObject*>(object->engine.get()) : nullptr;
+        if (shape && EngineClasses::isA(object->className, "ShapeBase")) {
+            station = ScriptEngine::instance().objectKey(object);
+            transform = shape->transform;
+        }
+    }
+    void processMove(const ClientMoveIn* move) override {
+        GameBase::processMove(move);
+        currMS += 32;
+        if (currMS >= dataFloat("lifetime", defaultLifetime) * 1000.0f) {
+            ScriptEngine::instance().deleteScriptObject(ScriptEngine::instance().objectKey(script));
+            return;
+        }
+    }
+    uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override {
+        const uint32_t ret = GameBase::packUpdate(connection, mask, w);
+        if (w.writeFlag(mask & InitialUpdateMask)) {
+            const int ghost = station.empty() || !EngineObjects::find(station) ? -1 : connection.ghostIndex(station);
+            if (w.writeFlag(ghost != -1)) w.writeRangedU32((uint32_t)ghost, 0, 1024);
+        }
+        return ret;
+    }
+
+private:
+    const char* netClass;
+    float defaultLifetime;
+    float lo[3], hi[3];
+    std::string station;
+    uint32_t currMS = 0;
+};
+
 // waterBlock.cc
 class WaterBlockObject : public SceneObject {
 public:
@@ -504,5 +561,13 @@ void registerSceneObjectClasses() {
     EngineObjects::registerClass("ParticleEmissionDummy", [] { return std::make_shared<ParticleEmissionDummyObject>(); });
     EngineObjects::registerClass("FireballAtmosphere", [] { return std::make_shared<FireballAtmosphereObject>(); });
     EngineObjects::registerClass("VehicleBlocker", [] { return std::make_shared<VehicleBlockerObject>(); });
+    EngineObjects::registerClass("StationFXPersonal", [] {
+        float lo[3] = {-3, -3, -3}, hi[3] = {3, 3, 3};
+        return std::make_shared<StationFXObject>("StationFXPersonal", lo, hi, 2.0f);
+    });
+    EngineObjects::registerClass("StationFXVehicle", [] {
+        float lo[3] = {-12, -12, 0}, hi[3] = {12, 12, 12};
+        return std::make_shared<StationFXObject>("StationFXVehicle", lo, hi, 6.0f);
+    });
     EngineObjects::registerClass("AudioEmitter", [] { return std::make_shared<AudioEmitterObject>(); });
 }
