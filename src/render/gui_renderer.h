@@ -214,6 +214,13 @@ public:
     void clearDialogs();
     bool makeFirstResponder(const std::string& name, bool focus);
     std::vector<GuiControl*>& dialogStackForDebug() { return dialogStack; }
+    // GuiCanvas cursor state: cursorOn/cursorOff, showCursor/hideCursor,
+    // setCursor (the default GuiCursor), updateCursorState.
+    void setCursorOn(bool on) { cursorOn_ = on; }
+    bool isCursorOn() const { return cursorOn_; }
+    void setShowCursor(bool show) { showCursor_ = show; }
+    void setDefaultCursor(const std::string& cursor) { defaultCursor_ = cursor; }
+    void updateCursorState();
 
     // Last instance pushed under each dialog name. A popped dialog leaves
     // the stack but stays alive; re-pushing it must reuse THAT object (with
@@ -246,6 +253,8 @@ private:
     GuiControl* pressedCtrl = nullptr;
     GuiControl* selectedList = nullptr;
     std::vector<GuiControl*> dialogStack;
+    bool cursorOn_ = true, showCursor_ = true;
+    std::string defaultCursor_;
 
     // Scheduler
     struct ScheduledEvent {

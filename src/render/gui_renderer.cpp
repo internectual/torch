@@ -466,6 +466,8 @@ void GuiRenderer::refresh() {
 
 
 
+static Texture* t2Bitmap(Renderer& r, const std::string& name);
+
 void GuiRenderer::render() {
     if (!canvas) return;
     auto& r = Engine::instance().renderer();
@@ -541,6 +543,26 @@ void GuiRenderer::render() {
             else drawLaunchPopupList(r, pc, px, py);
         }
         s_openPopups.clear();
+    }
+
+    // GuiCanvas::renderFrame: the mouse cursor last, the GuiCursor's bitmap
+    // at the pointer less its hot spot (a 2x2 red mark when there is none).
+    r.flushSpriteBatch();
+    const bool softwareCursor = cursorOn_ && showCursor_ && !plat.isRelativeMouse();
+    plat.setSoftwareCursor(softwareCursor);
+    if (softwareCursor) {
+        int mx = 0, my = 0;
+        mapMouse(plat.input().mouseX, plat.input().mouseY, mx, my);
+        ScriptObject* cursor = defaultCursor_.empty() ? nullptr : ScriptEngine::instance().findObject(defaultCursor_.c_str());
+        Texture* tex = cursor ? t2Bitmap(r, Fields::string(cursor, "bitmapName")) : nullptr;
+        if (tex) {
+            int hx = 0, hy = 0;
+            std::sscanf(Fields::string(cursor, "hotSpot", "0 0").c_str(), "%d %d", &hx, &hy);
+            const float x0 = (float)(mx - hx), y0 = (float)(my - hy);
+            r.drawTexturedRect({x0, y0, 0}, {x0 + (float)tex->width, y0 + (float)tex->height, 0}, tex->id);
+        } else {
+            r.drawRectFill({(float)mx, (float)my, 0}, {(float)mx + 2, (float)my + 2, 0}, {1, 0, 0, 1});
+        }
     }
 
     // Flush remaining sprite batch before restoring projection
@@ -5418,6 +5440,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
         } else {
         Console::instance().printf(LogLevel::Warn, "GUI: pushDialog '%s' not found", name.c_str());
     }
+    updateCursorState();
 }
 
 void GuiRenderer::popDialog(const std::string& name) {
@@ -5478,6 +5501,7 @@ void GuiRenderer::popDialog(const std::string& name) {
     }
     Console::instance().printf(LogLevel::Debug,
         "GUI: popDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
+    updateCursorState();
 }
 
 void GuiRenderer::clearDialogs() {
@@ -5661,6 +5685,7 @@ void GuiRenderer::setContentImmediate(const std::string& name) {
             ts->callFunction(name + "::onWake", {VMValue(name)});
     }
     callGuiChildLifecycle(ctl, "::onWake");
+    updateCursorState();
 }
 
 bool GuiRenderer::isDialogActive(const std::string& name) {
@@ -5747,4 +5772,21 @@ bool GuiRenderer::removeControl(const std::string& name) {
     if (selectedList && ctl->owns(selectedList)) selectedList = nullptr;
     destroy(ctl);
     return true;
+}
+
+// GuiCanvas::updateCursorState (the shipped build): the topmost dialog
+// that does not bypass it decides, the cursor on unless it hides it.
+void GuiRenderer::updateCursorState() {
+    for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it) {
+        GuiControl* ctl = *it;
+        if (!ctl) continue;
+        auto field = [&](const char* name) {
+            auto f = ctl->fields.find(name);
+            return f != ctl->fields.end() && (f->second == "1" || strcasecmp(f->second.c_str(), "true") == 0);
+        };
+        if (field("bypassHideCursor")) continue;
+        cursorOn_ = !field("hideCursor");
+        return;
+    }
+    cursorOn_ = true;
 }

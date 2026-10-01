@@ -3782,13 +3782,67 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     // Console history
-    tsInstance->registerNative("showCursor", [](const auto&) -> VMValue {
-        Engine::instance().platform().showMouse(true);
-        return VMValue(1);
+    // GuiCanvas cursor commands (the shipped GuiCanvas): showCursor /
+    // hideCursor draw or hide the software cursor, cursorOn / cursorOff turn
+    // it on, setCursor names the default GuiCursor.
+    auto canvasGui = []() -> GuiRenderer* {
+        return Engine::instance().hasGuiRenderer() ? &Engine::instance().guiRenderer() : nullptr;
+    };
+    tsInstance->registerNative("showCursor", [canvasGui](const auto&) -> VMValue {
+        if (auto* gui = canvasGui()) gui->setShowCursor(true);
+        return VMValue("");
     });
-    tsInstance->registerNative("hideCursor", [](const auto&) -> VMValue {
-        Engine::instance().platform().showMouse(false);
-        return VMValue(1);
+    tsInstance->registerNative("hideCursor", [canvasGui](const auto&) -> VMValue {
+        if (auto* gui = canvasGui()) gui->setShowCursor(false);
+        return VMValue("");
+    });
+    tsInstance->registerNative("GuiCanvas::cursorOn", [canvasGui](const auto&) -> VMValue {
+        if (auto* gui = canvasGui()) gui->setCursorOn(true);
+        return VMValue("");
+    });
+    tsInstance->registerNative("GuiCanvas::cursorOff", [canvasGui](const auto&) -> VMValue {
+        if (auto* gui = canvasGui()) gui->setCursorOn(false);
+        return VMValue("");
+    });
+    tsInstance->registerNative("GuiCanvas::isCursorOn", [canvasGui](const auto&) -> VMValue {
+        auto* gui = canvasGui();
+        return VMValue(gui && gui->isCursorOn() ? 1 : 0);
+    });
+    tsInstance->registerNative("GuiCanvas::updateCursorState", [canvasGui](const auto&) -> VMValue {
+        if (auto* gui = canvasGui()) gui->updateCursorState();
+        return VMValue("");
+    });
+    tsInstance->registerNative("GuiCanvas::setCursor", [canvasGui](const auto& args) -> VMValue {
+        const std::string name = args.size() > 1 ? args[1].toString() : std::string();
+        std::string key;
+        if (!name.empty()) {
+            ScriptObject* cursor = ScriptEngine::instance().findObject(name.c_str());
+            if (!cursor || !EngineClasses::isA(cursor->className, "GuiCursor")) {
+                Console::instance().printf(LogLevel::Info, "%s is not a valid cursor.", name.c_str());
+                return VMValue("");
+            }
+            key = ScriptEngine::instance().objectKey(cursor);
+        }
+        if (auto* gui = canvasGui()) gui->setDefaultCursor(key);
+        return VMValue("");
+    });
+    tsInstance->registerNative("GuiCanvas::getCursorPos", [](const auto&) -> VMValue {
+        if (!Engine::instance().hasGuiRenderer()) return VMValue("0 0");
+        auto& plat = Engine::instance().platform();
+        int x = 0, y = 0;
+        Engine::instance().guiRenderer().mapMouse(plat.input().mouseX, plat.input().mouseY, x, y);
+        return VMValue(std::to_string(x) + " " + std::to_string(y));
+    });
+    tsInstance->registerNative("GuiCanvas::setCursorPos", [](const auto& args) -> VMValue {
+        int x = 0, y = 0;
+        if (args.size() > 2) {
+            x = std::atoi(args[1].toString().c_str());
+            y = std::atoi(args[2].toString().c_str());
+        } else if (args.size() > 1) {
+            std::sscanf(args[1].toString().c_str(), "%d %d", &x, &y);
+        }
+        Engine::instance().platform().setMousePos(x, y);
+        return VMValue("");
     });
     tsInstance->registerNative("enableMouse", [](const auto&) -> VMValue {
         return VMValue(Engine::instance().platform().enableMouse() ? 1 : 0);

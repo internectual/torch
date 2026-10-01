@@ -95,10 +95,14 @@ public:
     void setTitle(const char* title);
     bool setVideoMode(int32_t width, int32_t height, bool fullscreen, bool vsync);
     void showMouse(bool show);
+    // While the GUI draws its software cursor the OS cursor stays hidden;
+    // showMouse records what is wanted otherwise.
+    void setSoftwareCursor(bool on);
     bool enableMouse();
     bool disableMouse();
     void setMousePos(int32_t x, int32_t y);
     void setRelativeMouse(bool relative);
+    bool isRelativeMouse() const;
 
     void startTextInput();
     void stopTextInput();
@@ -115,4 +119,5 @@ private:
     InputState inputState;
     bool running = false;
     bool mouseEnabled = true;
+    bool mouseWanted = true, softwareCursor = false;
 };

@@ -199,7 +199,16 @@ bool Platform::setVideoMode(int32_t width, int32_t height, bool fullscreen, bool
         impl->resizeCb(drawableWidth(), drawableHeight());
     return true;
 }
-void Platform::showMouse(bool show) { if (show) SDL_ShowCursor(); else SDL_HideCursor(); }
+void Platform::showMouse(bool show) {
+    mouseWanted = show;
+    if (show && !softwareCursor) SDL_ShowCursor();
+    else SDL_HideCursor();
+}
+void Platform::setSoftwareCursor(bool on) {
+    if (on == softwareCursor) return;
+    softwareCursor = on;
+    showMouse(mouseWanted);
+}
 bool Platform::enableMouse() {
     if (!impl->window) return false;
     mouseEnabled = true;
@@ -215,8 +224,14 @@ bool Platform::disableMouse() {
     inputState.mouseWheel = 0;
     return true;
 }
-void Platform::setMousePos(int32_t x, int32_t y) { SDL_WarpMouseInWindow(impl->window, x, y); }
+void Platform::setMousePos(int32_t x, int32_t y) {
+    SDL_WarpMouseInWindow(impl->window, x, y);
+    // The pointer is there now, before the warp's motion event arrives.
+    inputState.mouseX = x;
+    inputState.mouseY = y;
+}
 void Platform::setRelativeMouse(bool relative) { SDL_SetWindowRelativeMouseMode(impl->window, relative); }
+bool Platform::isRelativeMouse() const { return impl->window && SDL_GetWindowRelativeMouseMode(impl->window); }
 
 void* Platform::nativeWindow() { return impl->window; }
 void* Platform::nativeGLContext() { return impl->glContext; }
