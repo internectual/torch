@@ -89,6 +89,8 @@ add_executable(torch
     src/render/dts_loader.cpp
     src/render/dif_loader.cpp
     src/render/gui_renderer.cpp
+    src/render/commander_map.cpp
+    src/render/commander_tree.cpp
     src/audio/audio_system.cpp
     src/audio/mp3_decoder.cpp
     src/net/network.cpp
@@ -206,6 +208,8 @@ add_executable(torch_server
     src/render/dts_loader.cpp
     src/render/dif_loader.cpp
     src/render/gui_renderer.cpp
+    src/render/commander_map.cpp
+    src/render/commander_tree.cpp
     src/audio/audio_system.cpp
     src/audio/mp3_decoder.cpp
     src/net/network.cpp
@@ -500,6 +504,8 @@ add_executable(torch_parity_test
     src/render/dts_loader.cpp
     src/render/dif_loader.cpp
     src/render/gui_renderer.cpp
+    src/render/commander_map.cpp
+    src/render/commander_tree.cpp
     src/audio/audio_system.cpp
     src/audio/mp3_decoder.cpp
     src/game/demo.cpp
@@ -600,6 +606,8 @@ add_executable(torch_network_loopback_test
     src/render/dts_loader.cpp
     src/render/dif_loader.cpp
     src/render/gui_renderer.cpp
+    src/render/commander_map.cpp
+    src/render/commander_tree.cpp
     src/audio/audio_system.cpp
     src/audio/mp3_decoder.cpp
     src/net/network.cpp
@@ -699,6 +707,8 @@ add_executable(torch_nav_graph_test
     src/render/dts_loader.cpp
     src/render/dif_loader.cpp
     src/render/gui_renderer.cpp
+    src/render/commander_map.cpp
+    src/render/commander_tree.cpp
     src/audio/audio_system.cpp
     src/audio/mp3_decoder.cpp
     src/net/network.cpp
@@ -799,6 +809,8 @@ add_executable(torch_target_manager_test
     src/render/dts_loader.cpp
     src/render/dif_loader.cpp
     src/render/gui_renderer.cpp
+    src/render/commander_map.cpp
+    src/render/commander_tree.cpp
     src/audio/audio_system.cpp
     src/audio/mp3_decoder.cpp
     src/net/network.cpp

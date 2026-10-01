@@ -197,6 +197,13 @@ public:
     void cleanupMission();
     void update(float dt);
     void render(const Point3F& cameraPos, float dt = 1.0f / 60.0f);
+    // GuiCommanderMap::renderWorld's scene pass: terrain, interiors and
+    // water only, unfogged, through the current view and projection.
+    void renderCommanderScene(const Point3F& cameraPos) {
+        commanderPass = true;
+        render(cameraPos, 0.0f);
+        commanderPass = false;
+    }
     void updateRendererLights(Renderer& renderer) const;
 
     TerrainBlock* terrain() { return &terrainBlock; }
@@ -469,6 +476,7 @@ public:
     void removeProjectileTrail(int ownerId);
 
 private:
+    bool commanderPass = false;
     TerrainBlock terrainBlock;
     Sky skyBox;
     CollisionMesh interiorCollision;
@@ -931,6 +939,10 @@ public:
         return serverPlayerGhostSynced ? (int)serverPlayerGhostIndex : -1;
     }
     int getSpectateGhostIndex() const { return spectateGhostIndex; }
+    // The world-box centre (Torque space) of the ghost that owns a target.
+    bool targetBoxCenter(int targetId, float out[3]) const;
+    // The world-box centre (Torque space) of a live ghost as last drawn.
+    bool ghostBoxCenter(int ghostIndex, float out[3]) const;
     // Each demo ghost's mount-node frames as last drawn (world, Y-up).
     struct MountFrames { MatrixF frame[32]; uint32_t valid = 0; };
     std::unordered_map<int, MountFrames> demoMountFrames;
@@ -1158,8 +1170,6 @@ private:
     void pumpLiveClient();
     bool startLiveWorld();
     void forwardLiveEvents(const PacketData& pd);
-    // The world-box centre (Torque space) of the ghost that owns a target.
-    bool targetBoxCenter(int targetId, float out[3]) const;
     bool gamePaused = false;
     bool demoPaused = false;
     bool demoStepRequest = false;

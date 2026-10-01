@@ -1,4 +1,5 @@
 #include "script/script_engine.h"
+#include "render/commander_map.h"
 #include "sim/game_connection.h"
 #include "sim/engine_classes.h"
 #include "sim/sim_state.h"
@@ -3809,6 +3810,7 @@ bool ScriptEngine::init() {
         auto* gui = canvasGui();
         return VMValue(gui && gui->isCursorOn() ? 1 : 0);
     });
+    registerCommanderNatives(*tsInstance);
     tsInstance->registerNative("GuiCanvas::updateCursorState", [canvasGui](const auto&) -> VMValue {
         if (auto* gui = canvasGui()) gui->updateCursorState();
         return VMValue("");
@@ -6577,42 +6579,6 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
-    tsInstance->registerNative("cameraMove", [getListCtrl](const auto& args) -> VMValue {
-        if (args.size() < 3) return VMValue(0);
-        if (auto* ctl = getListCtrl(args[0].toString())) {
-            ctl->fields["cameraMove::" + args[1].toString()] = args[2].toBool() ? "1" : "0";
-            return VMValue(1);
-        }
-        return VMValue(0);
-    });
-    tsInstance->registerNative("resetCamera", [getListCtrl](const auto& args) -> VMValue {
-        if (!args.empty()) if (auto* ctl = getListCtrl(args[0].toString())) {
-            ctl->fields["cameraMove::left"] = "0";
-            ctl->fields["cameraMove::right"] = "0";
-            ctl->fields["cameraMove::up"] = "0";
-            ctl->fields["cameraMove::down"] = "0";
-            ctl->fields["cameraMove::in"] = "0";
-            ctl->fields["cameraMove::out"] = "0";
-            ctl->fields["mouseMode"] = "0";
-            ctl->fields.erase("mapCenterX");
-            ctl->fields.erase("mapCenterZ");
-            ctl->fields["mapZoom"] = "1";
-        }
-        return VMValue(1);
-    });
-    tsInstance->registerNative("setMouseMode", [getListCtrl](const auto& args) -> VMValue {
-        if (args.size() >= 2) if (auto* ctl = getListCtrl(args[0].toString()))
-            ctl->fields["mouseMode"] = args[1].toString();
-        return VMValue(1);
-    });
-    tsInstance->registerNative("getMouseMode", [getListCtrl](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        if (auto* ctl = getListCtrl(args[0].toString()))
-            return VMValue(atoi(ctl->fields["mouseMode"].c_str()));
-        return VMValue(0);
-    });
-    for (const char* name : {"openAllCategories", "selectControlObject", "followLastSelected"})
-        tsInstance->registerNative(name, [](const auto&) -> VMValue { return VMValue(1); });
     auto messageVectorCount = [](ScriptObject* vector) {
         return vector ? vector->internals["__lineCount"].toInt() : 0;
     };

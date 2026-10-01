@@ -72,6 +72,8 @@ void update(uint32_t newTime, const std::function<bool(int targetId, float out[3
 } // namespace HUDTargetList
 
 namespace ClientTargets {
+// new ClientTarget(-1, targetId, pos) registered in the server connection.
+ClientTargetObject* create(int targetId, const float pos[3]);
 // TargetToEvent::process: a task from the server.
 void targetTo(int targetId, const float pos[3], bool assign);
 // RemoveClientTargetTypeEvent / ResetClientTargetsEvent.

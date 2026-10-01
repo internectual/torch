@@ -119,7 +119,7 @@ int main() {
         assert(std::abs(alice.targetVoicePitch - 1.25f) < 0.02f);
         const NetEventInfo& bob = *infos.at(t1);
         assert(bob.targetName == "Bob" && bob.targetSensorGroup == 4);
-        assert(bob.targetDataBlockId == -2); // present, none
+        assert(bob.targetDataBlockId == 0); // present, none (-2: not in the update)
         assert(infos.at(7)->targetSensorGroup == 7 && infos.at(7)->targetName.empty());
     }
 

@@ -3982,7 +3982,10 @@ void World::render(const Point3F& cameraPos, float dt) {
     currentSceneState.interiorVisibleZones.clear();
     currentSceneState.interiorVisibilityComputed.clear();
 
-    // Render sky first (behind everything, depth writes off)
+    // Render sky first (behind everything, depth writes off); the commander
+    // map's pass (renderScene(TerrainObjectType | InteriorObjectType |
+    // WaterObjectType)) has none.
+    if (!commanderPass) {
     glDepthMask(GL_FALSE);
     skyBox.fogColor = fog.color;
     skyBox.visibleDistance = visibleDistance;
@@ -3992,6 +3995,7 @@ void World::render(const Point3F& cameraPos, float dt) {
                                      volume.maxHeight, volume.percentage});
     skyBox.render(r.view, r.projection, cameraPos.y);
     glDepthMask(GL_TRUE);
+    }
 
     // Haze runs from the Sky's fogDistance to visibleDistance; fog volumes add
     // their own band fog in the shader.
@@ -4002,7 +4006,7 @@ void World::render(const Point3F& cameraPos, float dt) {
     if (terrainBlock.loaded) {
         ShaderManager::getTerrainShader()->bind();
         Point3F terrainLight = sunLightDirUsed ? sunLightDir : Point3F{0.5f, 0.7f, 0.5f};
-        bool mapperNoFog = Engine::instance().game().isMapperMode();
+        bool mapperNoFog = Engine::instance().game().isMapperMode() || commanderPass;
         terrainBlock.render(cameraPos, fog.enabled && !mapperNoFog, fog.color, fog.density, &terrainLight,
                             sunColorUsed ? &sunColor : nullptr, &sunAmbient, effectiveFogStart, effectiveFogEnd);
     }
@@ -4013,7 +4017,7 @@ void World::render(const Point3F& cameraPos, float dt) {
     defShader->setUniform("uCamPos", cameraPos);
     for (int i = 0; i < 3; ++i) {
         ColorF packed{};
-        if (i < (int)fogVolumes.size() && fogVolumes[i].visibleDistance > 0.0f) {
+        if (!commanderPass && i < (int)fogVolumes.size() && fogVolumes[i].visibleDistance > 0.0f) {
             const auto& volume = fogVolumes[i];
             packed = {1.0f / volume.visibleDistance, volume.minHeight,
                        volume.maxHeight, volume.percentage};
@@ -4033,7 +4037,7 @@ void World::render(const Point3F& cameraPos, float dt) {
     defShader->setUniform("uFogRowStep", fogRowStep);
 
     // Apply fog
-    const bool mapperNoFog = Engine::instance().game().isMapperMode();
+    const bool mapperNoFog = Engine::instance().game().isMapperMode() || commanderPass;
     defShader->setUniform("uFogEnabled", (int32_t)(fog.enabled && !mapperNoFog ? 1 : 0));
     if (fog.enabled) {
         defShader->setUniform("uFogColor", Point3F{fog.color.r, fog.color.g, fog.color.b});
@@ -4075,6 +4079,10 @@ void World::render(const Point3F& cameraPos, float dt) {
         // geometry is drawn outside the normal shape branch below, so the
         // later shape visibility check cannot suppress it.
         if (!obj.visible) continue;
+        if (commanderPass) {
+            if (obj.shape && obj.shape->isInterior) renderQueue.push_back(&obj);
+            continue;
+        }
         if (Engine::instance().game().isMapperMode() || obj.boundsRadius <= 0.0f) {
             renderQueue.push_back(&obj);
             continue;
@@ -4420,6 +4428,13 @@ void World::render(const Point3F& cameraPos, float dt) {
                                : ColorF{1.0f, 1.0f, 0.2f, 0.9f});
             }
         }
+    }
+    if (commanderPass) {
+        if (!waterRendered) {
+            r.flushSpriteBatch();
+            renderWater();
+        }
+        return;
     }
 
         // Render mission area boundary (grid lines) in mapper mode
@@ -8045,8 +8060,11 @@ void Game::render(float dt) {
     r.setCamera(finalCam, camTarget, {0, 1, 0});
     r.config().fov = savedFov; // restore for HUD rendering
 
-    // Shadow pass and scene rendering — skip in shape viewer / test shape mode
-    if (!shapeViewerActive && !testShapeLoaded) {
+    // Shadow pass and scene rendering — skip in shape viewer / test shape
+    // mode, and when no GameTSCtrl is on the canvas (the commander screen
+    // replaces PlayGui).
+    const bool worldShown = mapperMode || !eng.hasGuiRenderer() || eng.guiRenderer().contentShowsWorld();
+    if (!shapeViewerActive && !testShapeLoaded && worldShown) {
         const char* dynShadows = Console::instance().getStringVariable("enableDynamicShadows", "1");
         r.shadowsActive = false;
         if (r.shadowEnabled() && (!dynShadows || atoi(dynShadows) != 0)) {
@@ -8169,7 +8187,7 @@ void Game::render(float dt) {
     if (pl && !freeCamActive && !demoPlaying && !testShapeLoaded) pl->render();
     } // end if (!shapeViewerActive && !testShapeLoaded)
 
-    if (mapperMode || gameState == Playing) {
+    if (worldShown && (mapperMode || gameState == Playing)) {
         auto* font = r.getFont();
         if (font) {
             for (const auto& obj : w->objects()) {
@@ -11765,16 +11783,23 @@ bool Game::targetBoxCenter(int targetId, float out[3]) const {
     for (int index : tracker.getAllIndices()) {
         const GhostEntry* ghost = tracker.getGhost(index);
         if (!ghost || ghost->targetId != targetId) continue;
-        auto drawn = demoBoxCenters.find(index);
-        if (drawn != demoBoxCenters.end()) {
-            const Point3F p = Math::czUpToYUp().inverse().transform(drawn->second);
-            out[0] = p.x, out[1] = p.y, out[2] = p.z;
-        } else {
-            out[0] = ghost->position.x, out[1] = ghost->position.y, out[2] = ghost->position.z;
-        }
-        return true;
+        return ghostBoxCenter(index, out);
     }
     return false;
+}
+
+bool Game::ghostBoxCenter(int ghostIndex, float out[3]) const {
+    if (!demoParser) return false;
+    const GhostEntry* ghost = demoParser->getGhostTracker().getGhost(ghostIndex);
+    if (!ghost) return false;
+    auto drawn = demoBoxCenters.find(ghostIndex);
+    if (drawn != demoBoxCenters.end()) {
+        const Point3F p = Math::czUpToYUp().inverse().transform(drawn->second);
+        out[0] = p.x, out[1] = p.y, out[2] = p.z;
+    } else {
+        out[0] = ghost->position.x, out[1] = ghost->position.y, out[2] = ghost->position.z;
+    }
+    return true;
 }
 
 void Game::forwardLiveEvents(const PacketData& pd) {

@@ -5,6 +5,7 @@
 #include "render/shader.h"
 #include "core/console.h"
 #include "core/engine.h"
+#include "core/timer.h"
 #include "core/gui_input.h"
 #include "core/gui_geometry.h"
 #include "game/hud_parity.h"
@@ -239,6 +240,17 @@ int GuiRenderer::keyNameToScancode(const std::string& name) {
 
 // The viewport of the frame being drawn; GUI clip rects are logical units.
 static GuiViewport s_renderViewport;
+namespace {
+// Behaviour controls drawn this frame / awake (GuiControl::mAwake).
+std::set<GuiControl*> s_behaviorsRendered, s_behaviorsAwake;
+// GuiCanvas mouse state.
+GuiControl* s_mouseCaptured = nullptr;
+GuiControl* s_mouseControl = nullptr;
+bool s_mouseLeftDown = false, s_mouseRightDown = false, s_leftMouseLast = false;
+int s_mouseLastX = -1, s_mouseLastY = -1;
+int s_lastClickCount = 0;
+uint32_t s_lastMouseDownTime = 0;
+} // namespace
 static int s_renderDrawableHeight = 1;
 
 // GuiScrollCtrl hScrollBar/vScrollBar: "alwaysOn", "alwaysOff" or
@@ -524,11 +536,23 @@ void GuiRenderer::render() {
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
 
+    s_behaviorsRendered.clear();
     // Render dialogs in stack order (front to back) so later-pushed dialogs
     // appear on top of earlier ones (e.g. NewWarriorDlg over GameGui).
     for (auto* dlg : dialogStack) {
         renderControl(dlg);
         r.flushSpriteBatch();
+    }
+    // GuiControl::sleep: a woken engine control that left the screen.
+    for (auto it = s_behaviorsAwake.begin(); it != s_behaviorsAwake.end();) {
+        GuiControl* ctl = *it;
+        if (s_behaviorsRendered.count(ctl)) { ++it; continue; }
+        if (ctl->behavior->awake) ctl->behavior->onSleep(*ctl);
+        ctl->behavior->awake = false;
+        ctl->behavior->wakeFailed = false;
+        if (s_mouseCaptured == ctl) s_mouseCaptured = nullptr;
+        if (s_mouseControl == ctl) s_mouseControl = nullptr;
+        it = s_behaviorsAwake.erase(it);
     }
 
     // Open popup dropdowns render LAST (top-most): sibling and overlay
@@ -863,6 +887,110 @@ static Texture* t2Bitmap(Renderer& r, const std::string& name) {
     if (name.empty()) return nullptr;
     Texture* t = r.loadTexture(("textures/" + name).c_str());
     return t && t->loaded ? t : nullptr;
+}
+
+// --- Engine GUI classes (GuiControlBehavior) --------------------------------
+
+namespace {
+std::map<std::string, GuiBehaviors::Factory>& behaviorFactories() {
+    static std::map<std::string, GuiBehaviors::Factory> factories;
+    return factories;
+}
+} // namespace
+
+void GuiBehaviors::registerClass(const std::string& className, Factory factory) {
+    behaviorFactories()[className] = std::move(factory);
+}
+
+std::shared_ptr<GuiControlBehavior> GuiBehaviors::create(const std::string& className) {
+    auto it = behaviorFactories().find(className);
+    return it == behaviorFactories().end() ? nullptr : it->second();
+}
+
+Texture* GuiShared::bitmap(const std::string& name) {
+    return t2Bitmap(Engine::instance().renderer(), name);
+}
+
+void GuiShared::mouseLock(GuiControl* ctl) { s_mouseCaptured = ctl; }
+void GuiShared::mouseUnlock(GuiControl* ctl) {
+    if (s_mouseCaptured == ctl) s_mouseCaptured = nullptr;
+}
+
+void GuiShared::setCanvasCursor(const std::string& cursor) {
+    if (Engine::instance().hasGuiRenderer()) Engine::instance().guiRenderer().setDefaultCursor(cursor);
+}
+
+Font* GuiShared::profileFont(const std::string& profile) { return getProfileFont(getProfile(profile)); }
+
+Font* GuiShared::font(const std::string& face, int size) {
+    Font* f = Engine::instance().renderer().getFont(face.c_str(), size);
+    return f ? f : Engine::instance().renderer().getFont();
+}
+
+ColorF GuiShared::profileFontColor(const std::string& profile, int index) {
+    ColorF color{0, 0, 0, 1};
+    ScriptObject* prof = getProfile(profile);
+    if (!prof || index < 0 || index > 9) return color;
+    static const char* named[4] = {"fontColor", "fontColorHL", "fontColorNA", "fontColorSEL"};
+    auto it = prof->fields.find("fontColors[" + std::to_string(index) + "]");
+    if (it == prof->fields.end() && index < 4) it = prof->fields.find(named[index]);
+    if (it != prof->fields.end()) parseColor(it->second.toString(), color);
+    return color;
+}
+
+void GuiShared::canvasToWindow(float x, float y, float w, float h, int out[4]) {
+    guiLogicalToScissor(s_renderViewport, s_renderDrawableHeight, x, y, w, h, out[0], out[1], out[2], out[3]);
+}
+
+std::vector<std::array<int, 4>> GuiShared::createBitmapArray(Texture* tex, int numStates, int numBitmaps) {
+    std::vector<std::array<int, 4>> rects;
+    if (!tex || !tex->loaded || tex->width <= 0 || tex->height <= 0) return rects;
+    const int w = tex->width, h = tex->height;
+    std::vector<uint8_t> px((size_t)w * h * 4);
+    glBindTexture(GL_TEXTURE_2D, tex->id);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    auto color = [&](int x, int y) {
+        const uint8_t* p = &px[((size_t)y * w + x) * 4];
+        return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+    };
+    const uint32_t sep = color(0, 0);
+    int yOffset = 0;
+    rects.resize((size_t)numStates * numBitmaps);
+    for (int i = 0; i < numBitmaps; ++i) {
+        if (yOffset >= h) return {};
+        int bmpWidth = 0;
+        for (; bmpWidth < w; bmpWidth++)
+            if (color(bmpWidth, yOffset) != sep) break;
+        yOffset += 1;
+        int bmpHeight = 0;
+        for (; bmpHeight + yOffset < h; bmpHeight++)
+            if (color(0, bmpHeight + yOffset) == sep) break;
+        for (int j = 0; j < numStates; ++j) {
+            rects[(size_t)numStates * i + j] = {j * bmpWidth + 1, yOffset + 1, bmpWidth - 2, bmpHeight - 2};
+            if (j * bmpWidth + bmpWidth > w + 1) return {};
+        }
+        yOffset += bmpHeight;
+    }
+    if (yOffset > h + 1) return {};
+    return rects;
+}
+
+void GuiShared::canvasPosition(const GuiControl& ctl, float& x, float& y) {
+    x = ctl.posX;
+    y = ctl.posY;
+    for (auto* p = ctl.parent; p && p->className != "GuiCanvas"; p = p->parent) {
+        x += p->posX;
+        y += p->posY;
+    }
+}
+
+std::string GuiShared::field(const GuiControl& ctl, const char* name, const std::string& fallback) {
+    if (ScriptObject* object = ctl.name.empty() ? nullptr : ScriptEngine::instance().findObject(ctl.name.c_str())) {
+        auto it = object->fields.find(name);
+        if (it != object->fields.end()) return it->second.toString();
+    }
+    auto it = ctl.fields.find(name);
+    return it == ctl.fields.end() ? fallback : it->second;
 }
 
 // Shell texture cache - resolve only the original bitmap resources.
@@ -1395,6 +1523,25 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
          ctl->extentX > 16384 || ctl->extentY > 16384))
         return;
 
+
+    // An engine GUI class: woken on its first frame up, pre-rendered and
+    // rendered through its virtuals, then its children.
+    if (!ctl->behavior) ctl->behavior = GuiBehaviors::create(cn);
+    if (ctl->behavior) {
+        s_behaviorsRendered.insert(ctl);
+        if (!ctl->behavior->awake && !ctl->behavior->wakeFailed) {
+            ctl->behavior->awake = ctl->behavior->onWake(*ctl);
+            ctl->behavior->wakeFailed = !ctl->behavior->awake;
+            s_behaviorsAwake.insert(ctl);
+        }
+        if (!ctl->behavior->awake) return;
+        r.flushSpriteBatch();
+        ctl->behavior->onPreRender(*ctl);
+        ctl->behavior->onRender(*ctl, x, y);
+        r.flushSpriteBatch();
+        for (auto* child : ctl->children) renderControlRec(gr, child, canvas, scrollOfsX, scrollOfsY, clip);
+        return;
+    }
 
     // For GuiCanvas, just use full screen
     if (cn == "GuiCanvas") {
@@ -3551,134 +3698,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 hf->render(displayText.c_str(), tx, ty, tc, 1.0f);
             }
         }
-    } else if (cn == "GuiCommanderTree") {
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0},
-                       {0.03f, 0.05f, 0.07f, 0.94f});
-        ctl->commanderTreeEntries.clear();
-        const auto isCommanderEntry = [](const GhostEntry* ghost) {
-            if (!ghost) return false;
-            std::string className = ghost->className;
-            std::string shapeName = ghost->shapeName;
-            for (char& c : className) c = (char)std::tolower((unsigned char)c);
-            for (char& c : shapeName) c = (char)std::tolower((unsigned char)c);
-            const auto matches = [](const std::string& value) {
-                return value.find("player") != std::string::npos ||
-                       value.find("vehicle") != std::string::npos ||
-                       value.find("flag") != std::string::npos ||
-                       value.find("beacon") != std::string::npos ||
-                       value.find("objective") != std::string::npos ||
-                       value.find("missionmarker") != std::string::npos;
-            };
-            return matches(className) || matches(shapeName);
-        };
-        if (font) {
-            float rowY = y + 5.0f;
-            int selectedTarget = -1;
-            if (auto* map = gr->findControl("CommanderMap"))
-                selectedTarget = atoi(map->fields["selectedTarget"].c_str());
-            auto drawGhost = [&](int index, const GhostEntry* ghost) {
-                if (!ghost || rowY > y + ctl->extentY - 16) return;
-                ctl->commanderTreeEntries.push_back(index);
-                if (index == selectedTarget)
-                    r.drawRectFill({x, rowY - 2, 0}, {x + ctl->extentX, rowY + font->charHeight + 2, 0},
-                                   {0.2f, 0.35f, 0.55f, 0.8f});
-                const bool friendUnit = ghost->teamId >= 0 &&
-                    ghost->teamId == Engine::instance().game().player().team();
-                const ColorF color = friendUnit ? ColorF{0.35f, 1.0f, 0.45f, 1.0f}
-                                                 : ColorF{1.0f, 0.35f, 0.35f, 1.0f};
-                const std::string label = !ghost->playerName.empty() ? ghost->playerName :
-                    (!ghost->shapeName.empty() ? ghost->shapeName : ghost->className);
-                font->render(label.c_str(), x + 8.0f, rowY, color, 0.9f);
-                rowY += (float)font->charHeight + 3.0f;
-            };
-            if (Engine::instance().game().isDemoPlaying()) {
-                if (auto* parser = Engine::instance().game().getDemoParser())
-                    for (int index : parser->getGhostTracker().getAllIndices()) {
-                        const auto* ghost = parser->getGhostTracker().getGhost(index);
-                        if (isCommanderEntry(ghost)) drawGhost(index, ghost);
-                    }
-            } else {
-                for (int index : Engine::instance().game().getLiveGhostIndices()) {
-                    const auto* ghost = Engine::instance().game().getLiveGhost(index);
-                        if (isCommanderEntry(ghost)) drawGhost(index, ghost);
-                }
-            }
-        }
-    } else if (cn == "GuiCommanderMap") {
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0},
-                       {0.02f, 0.05f, 0.06f, 0.96f});
-        auto* terrain = Engine::instance().game().world().terrain();
-        if (terrain && terrain->loaded && terrain->size > 1) {
-            const float worldW = terrain->size * terrain->squareSize;
-            const float fullMinX = terrain->worldOffset.x;
-            const float fullMaxZ = terrain->worldOffset.z;
-            auto mapValue = [&](const char* name, float fallback) {
-                auto it = ctl->fields.find(name);
-                if (it == ctl->fields.end() || it->second.empty()) return fallback;
-                return (float)std::atof(it->second.c_str());
-            };
-            const float zoom = std::max(0.25f, mapValue("mapZoom", 1.0f));
-            const float viewW = worldW / zoom;
-            const float minX = mapValue("mapCenterX", fullMinX + worldW * 0.5f) - viewW * 0.5f;
-            const float maxZ = mapValue("mapCenterZ", fullMaxZ - worldW * 0.5f) + viewW * 0.5f;
-            const int cells = 32;
-            const float cellW = ctl->extentX / cells;
-            const float cellH = ctl->extentY / cells;
-            for (int row = 0; row < cells; ++row) {
-                for (int col = 0; col < cells; ++col) {
-                    const float wx = minX + (col + 0.5f) * viewW / cells;
-                    const float wz = maxZ - (row + 0.5f) * viewW / cells;
-                    const float h = std::clamp(terrain->sampleHeight(wx, wz) / 256.0f, 0.0f, 1.0f);
-                    r.drawRectFill({x + col * cellW, y + row * cellH, 0},
-                                   {x + (col + 1) * cellW, y + (row + 1) * cellH, 0},
-                                   {0.04f + h * 0.12f, 0.16f + h * 0.32f,
-                                    0.18f + h * 0.25f, 1.0f});
-                }
-            }
-            const int selectedTarget = atoi(ctl->fields["selectedTarget"].c_str());
-            auto drawMapMarker = [&](const Point3F& pos, const ColorF& color, float size, int index = -1) {
-                const float nx = (pos.x - minX) / viewW;
-                const float nz = (maxZ - pos.z) / viewW;
-                if (nx < 0 || nx > 1 || nz < 0 || nz > 1) return;
-                const float px = x + nx * ctl->extentX;
-                const float py = y + nz * ctl->extentY;
-                if (index >= 0 && index == selectedTarget)
-                    r.drawRectFill({px - size - 2, py - size - 2, 0},
-                                   {px + size + 2, py + size + 2, 0},
-                                   {1.0f, 1.0f, 0.2f, 0.9f});
-                r.drawRectFill({px - size, py - size, 0}, {px + size, py + size, 0}, color);
-            };
-            drawMapMarker(Engine::instance().game().player().position(),
-                          {0.2f, 1.0f, 0.3f, 1.0f}, 4.0f);
-            if (Engine::instance().game().isDemoPlaying()) {
-                if (auto* parser = Engine::instance().game().getDemoParser()) {
-                    for (int index : parser->getGhostTracker().getAllIndices()) {
-                        const auto* ghost = parser->getGhostTracker().getGhost(index);
-                        if (!ghost) continue;
-                        const auto isCommanderMarker = [](const std::string& value) {
-                            std::string lower = value;
-                            for (char& c : lower)
-                                c = (char)std::tolower((unsigned char)c);
-                            return lower.find("player") != std::string::npos ||
-                                   lower.find("vehicle") != std::string::npos ||
-                                   lower.find("flag") != std::string::npos ||
-                                   lower.find("beacon") != std::string::npos ||
-                                   lower.find("objective") != std::string::npos ||
-                                   lower.find("missionmarker") != std::string::npos;
-                        };
-                        if (!isCommanderMarker(ghost->className) &&
-                            !isCommanderMarker(ghost->shapeName)) continue;
-                        const Vec3& p = ghost->hasRendered ? ghost->renderPos : ghost->position;
-                        const bool friendUnit = ghost->teamId >= 0 &&
-                            ghost->teamId == Engine::instance().game().player().team();
-                        drawMapMarker({p.x, p.y, p.z},
-                                      friendUnit ? ColorF{0.2f,1,0.3f,1} : ColorF{1,0.2f,0.2f,1},
-                                      3.0f, index);
-                    }
-                }
-            }
-        }
-        if (font) font->render("COMMAND MAP", x + 8, y + 8, {0.7f, 1.0f, 0.9f, 0.9f}, 0.9f);
     } else if (cn == "GuiPlayerView") {
         // Dark background
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.08f, 0.08f, 0.12f, 1});
@@ -3904,29 +3923,6 @@ void GuiRenderer::update(float dt) {
     };
     for (auto* dialog : dialogStack) advanceModelAnimations(dialog);
     if (canvas) advanceModelAnimations(canvas);
-    if (auto* map = findControl("CommanderMap")) {
-        auto value = [&](const char* name, float fallback) {
-            auto it = map->fields.find(name);
-            if (it == map->fields.end() || it->second.empty()) return fallback;
-            return (float)std::atof(it->second.c_str());
-        };
-        const auto* terrain = Engine::instance().game().world().terrain();
-        const float worldW = terrain && terrain->loaded && terrain->size > 1
-            ? terrain->size * terrain->squareSize : 0.0f;
-        float centerX = value("mapCenterX", terrain ? terrain->worldOffset.x + worldW * 0.5f : 0.0f);
-        float centerZ = value("mapCenterZ", terrain ? terrain->worldOffset.z - worldW * 0.5f : 0.0f);
-        float zoom = std::max(0.25f, value("mapZoom", 1.0f));
-        const float speed = 300.0f / zoom;
-        if (value("cameraMove::left", 0)) centerX -= speed * dt;
-        if (value("cameraMove::right", 0)) centerX += speed * dt;
-        if (value("cameraMove::up", 0)) centerZ += speed * dt;
-        if (value("cameraMove::down", 0)) centerZ -= speed * dt;
-        if (value("cameraMove::in", 0)) zoom = std::min(8.0f, zoom * std::pow(1.0f + dt, 2.0f));
-        if (value("cameraMove::out", 0)) zoom = std::max(0.25f, zoom / std::pow(1.0f + dt, 2.0f));
-        map->fields["mapCenterX"] = std::to_string(centerX);
-        map->fields["mapCenterZ"] = std::to_string(centerZ);
-        map->fields["mapZoom"] = std::to_string(zoom);
-    }
     // Clear hover states each frame
     std::function<void(GuiControl*)> clearHover = [&](GuiControl* ctl) {
         ctl->previousHovered = ctl->hovered;
@@ -4300,15 +4296,6 @@ bool GuiRenderer::handleScroll(int x, int y, int wheelDelta) {
     // made scroll controls attached to the canvas ignore the wheel entirely.
     GuiControl* hit = hitTestTop(x, y);
     if (!hit) return false;
-    if (hit->className == "GuiCommanderMap") {
-        auto zoomIt = hit->fields.find("mapZoom");
-        float zoom = zoomIt == hit->fields.end() || zoomIt->second.empty()
-            ? 1.0f : (float)std::atof(zoomIt->second.c_str());
-        if (zoom <= 0) zoom = 1.0f;
-        zoom *= wheelDelta > 0 ? 1.15f : 0.87f;
-        hit->fields["mapZoom"] = std::to_string(std::clamp(zoom, 0.25f, 8.0f));
-        return true;
-    }
     GuiControl* scrollCtrl = hit;
     while (scrollCtrl) {
         if (scrollCtrl->className == "GuiScrollCtrl") {
@@ -4430,73 +4417,6 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         hit->lastDragY = y;
         return true;
     }
-    if (hit->className == "GuiCommanderMap") {
-        const auto mode = hit->fields.find("mouseMode");
-        if (mode == hit->fields.end() || mode->second == "select") {
-            auto* terrain = Engine::instance().game().world().terrain();
-            int selected = -1;
-            std::string selectedName, selectedType;
-            float bestDistance = 14.0f * 14.0f;
-            if (terrain && terrain->loaded && terrain->size > 1) {
-                const float worldW = terrain->size * terrain->squareSize;
-                const float minX = terrain->worldOffset.x;
-                const float maxZ = terrain->worldOffset.z;
-                auto fieldValue = [&](const char* name, float fallback) {
-                    auto it = hit->fields.find(name);
-                    return it == hit->fields.end() || it->second.empty()
-                        ? fallback : (float)std::atof(it->second.c_str());
-                };
-                const float zoom = std::max(0.25f, fieldValue("mapZoom", 1.0f));
-                const float viewW = worldW / zoom;
-                const float centerX = fieldValue("mapCenterX", minX + worldW * 0.5f);
-                const float centerZ = fieldValue("mapCenterZ", maxZ - worldW * 0.5f);
-                const float viewMinX = centerX - viewW * 0.5f;
-                const float viewMaxZ = centerZ + viewW * 0.5f;
-                float mapX = hit->posX, mapY = hit->posY;
-                for (auto* parent = hit->parent; parent && parent != canvas; parent = parent->parent) {
-                    mapX += parent->posX;
-                    mapY += parent->posY;
-                }
-                auto consider = [&](int index, const GhostEntry* ghost) {
-                    if (!ghost) return;
-                    const Vec3& p = (Engine::instance().game().isDemoPlaying() && ghost->hasRendered)
-                        ? ghost->renderPos : ghost->position;
-                    const float px = mapX + (p.x - viewMinX) / viewW * hit->extentX;
-                    const float py = mapY + (viewMaxZ - p.z) / viewW * hit->extentY;
-                    const float dx = px - x, dy = py - y;
-                    const float distance = dx * dx + dy * dy;
-                    if (distance < bestDistance) {
-                        bestDistance = distance;
-                        selected = index;
-                        selectedName = ghost->playerName.empty() ? ghost->className : ghost->playerName;
-                        selectedType = ghost->className;
-                    }
-                };
-                if (Engine::instance().game().isDemoPlaying()) {
-                    if (auto* parser = Engine::instance().game().getDemoParser())
-                        for (int index : parser->getGhostTracker().getAllIndices())
-                            consider(index, parser->getGhostTracker().getGhost(index));
-                } else {
-                    for (int index : Engine::instance().game().getLiveGhostIndices())
-                        consider(index, Engine::instance().game().getLiveGhost(index));
-                }
-            }
-            if (auto* map = findControl("CommanderMap"))
-                map->fields["selectedTarget"] = std::to_string(selected);
-            if (auto* ts = Engine::instance().script().ts()) {
-                const std::string callback = "GuiCommanderMap::onSelect";
-                if (ts->hasFunction(callback))
-                    ts->callFunction(callback, {VMValue("CommanderMap"), VMValue(selected),
-                                                VMValue(selectedName), VMValue(selectedType),
-                                                VMValue(selected >= 0 ? 1 : 0)});
-            }
-            return true;
-        }
-        hit->commanderMapDragging = true;
-        hit->commanderMapLastX = x;
-        hit->commanderMapLastY = y;
-        return true;
-    }
     // GuiServerBrowser: row selection + column header sort
     if (hit->className == "GuiServerBrowser") {
         // Compute absolute position of the control
@@ -4556,35 +4476,6 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
                 ts->callFunction(selName, {VMValue(hit->name), VMValue(id), VMValue(hit->listRows[row])});
             if (hit->name == "OP_RemapList" && ts && ts->hasFunction(hit->name + "::doRemap"))
                 ts->callFunction(hit->name + "::doRemap", {VMValue(hit->name)});
-        }
-        return true;
-    }
-    if (hit->className == "GuiCommanderTree") {
-        float ay = hit->posY;
-        for (auto* p = hit->parent; p && p != canvas; p = p->parent) ay += p->posY;
-        const float rowHeight = Engine::instance().renderer().getFont()
-            ? Engine::instance().renderer().getFont()->charHeight + 3.0f : 16.0f;
-        const int row = (int)((y - ay - 5.0f) / rowHeight);
-        if (row >= 0 && row < (int)hit->commanderTreeEntries.size()) {
-            const int index = hit->commanderTreeEntries[row];
-            const GhostEntry* ghost = nullptr;
-            if (Engine::instance().game().isDemoPlaying()) {
-                if (auto* parser = Engine::instance().game().getDemoParser())
-                    ghost = parser->getGhostTracker().getGhost(index);
-            } else {
-                ghost = Engine::instance().game().getLiveGhost(index);
-            }
-            if (ghost) {
-                const std::string name = ghost->playerName.empty() ? ghost->className : ghost->playerName;
-                if (auto* map = findControl("CommanderMap"))
-                    map->fields["selectedTarget"] = std::to_string(index);
-                if (auto* ts = Engine::instance().script().ts()) {
-                    const std::string callback = "GuiCommanderMap::onSelect";
-                    if (ts->hasFunction(callback))
-                        ts->callFunction(callback, {VMValue("CommanderMap"), VMValue(index),
-                                                    VMValue(name), VMValue(ghost->className), VMValue(1)});
-                }
-            }
         }
         return true;
     }
@@ -4881,42 +4772,6 @@ bool GuiRenderer::handleDrag(int x, int y) {
             if (zoom(*it)) return true;
         if (zoom(canvas)) return true;
     }
-    {
-        std::function<bool(GuiControl*)> pan = [&](GuiControl* c) -> bool {
-            if (!c) return false;
-            if (c->commanderMapDragging && c->commanderMapLastX >= 0) {
-                const float dx = (float)(x - c->commanderMapLastX);
-                const float dy = (float)(y - c->commanderMapLastY);
-                auto fieldValue = [&](const char* name, float fallback) {
-                    auto it = c->fields.find(name);
-                    return it == c->fields.end() ? fallback : (float)std::atof(it->second.c_str());
-                };
-                float centerX = 0.0f;
-                float centerZ = 0.0f;
-                if (auto* terrain = Engine::instance().game().world().terrain();
-                    terrain && terrain->loaded && terrain->size > 1) {
-                    const float worldW = terrain->size * terrain->squareSize;
-                    centerX = terrain->worldOffset.x + worldW * 0.5f;
-                    centerZ = terrain->worldOffset.z - worldW * 0.5f;
-                }
-                const float zoom = std::max(0.25f, fieldValue("mapZoom", 1.0f));
-                centerX = fieldValue("mapCenterX", centerX);
-                centerZ = fieldValue("mapCenterZ", centerZ);
-                centerX -= dx * 8.0f / zoom;
-                centerZ += dy * 8.0f / zoom;
-                c->fields["mapCenterX"] = std::to_string(centerX);
-                c->fields["mapCenterZ"] = std::to_string(centerZ);
-                c->commanderMapLastX = x;
-                c->commanderMapLastY = y;
-                return true;
-            }
-            for (auto* child : c->children) if (pan(child)) return true;
-            return false;
-        };
-        for (auto it = dialogStack.rbegin(); it != dialogStack.rend(); ++it)
-            if (pan(*it)) return true;
-        if (pan(canvas)) return true;
-    }
     // Find any control that is being dragged
     std::function<bool(GuiControl*)> findDrag = [&](GuiControl* ctl) -> bool {
         if (!ctl) return false;
@@ -5042,9 +4897,6 @@ void GuiRenderer::handleDragRelease() {
         ctl->windowDragging = false;
         ctl->modelRotating = false;
         ctl->modelZooming = false;
-        ctl->commanderMapDragging = false;
-        ctl->commanderMapLastX = -1;
-        ctl->commanderMapLastY = -1;
         ctl->vThumbDragging = false;
         ctl->hThumbDragging = false;
         ctl->lastDragX = -1;
@@ -5524,8 +5376,6 @@ void GuiRenderer::clearDialogs() {
         ctl->windowDragging = false;
         ctl->modelRotating = false;
         ctl->modelZooming = false;
-        ctl->commanderMapDragging = false;
-        ctl->commanderMapLastX = ctl->commanderMapLastY = -1;
         ctl->vThumbDragging = false;
         ctl->hThumbDragging = false;
         ctl->lastDragX = ctl->lastDragY = -1;
@@ -5659,8 +5509,6 @@ void GuiRenderer::setContentImmediate(const std::string& name) {
         if (!current) return;
         current->sliderDragging = current->windowDragging = false;
         current->modelRotating = current->modelZooming = false;
-        current->commanderMapDragging = false;
-        current->commanderMapLastX = current->commanderMapLastY = -1;
         current->vThumbDragging = current->hThumbDragging = false;
         current->lastDragX = current->lastDragY = -1;
         for (auto* child : current->children) clearDrag(child);
@@ -5745,6 +5593,13 @@ bool GuiRenderer::removeControl(const std::string& name) {
         createdControls().erase(lowerKey(current->name));
         lastPushed.erase(current->name);
         onAddCalled.erase(current->name);
+        if (s_behaviorsAwake.erase(current) && current->behavior && current->behavior->awake) {
+            current->behavior->awake = false;
+            current->behavior->onSleep(*current);
+        }
+        s_behaviorsRendered.erase(current);
+        if (s_mouseCaptured == current) s_mouseCaptured = nullptr;
+        if (s_mouseControl == current) s_mouseControl = nullptr;
         delete current;
     };
     // Remove every raw pointer into the subtree before freeing it. A child can
@@ -5788,4 +5643,84 @@ void GuiRenderer::updateCursorState() {
         return;
     }
     cursorOn_ = true;
+}
+
+// GuiCanvas::processMouseEvent / rootMouseDown .. rootRightMouseDragged for
+// the engine GUI classes: the captured control gets everything, otherwise
+// the control under the mouse (with enter/leave as it changes).
+bool GuiRenderer::dispatchBehaviorMouse(int x, int y, bool left, bool right, uint8_t modifier) {
+    GuiEvent ev;
+    ev.x = x;
+    ev.y = y;
+    ev.modifier = modifier;
+    ev.clickCount = s_lastClickCount;
+    auto awake = [](GuiControl* ctl) {
+        return ctl && ctl->behavior && ctl->behavior->awake && s_behaviorsAwake.count(ctl);
+    };
+    if (s_mouseCaptured && !awake(s_mouseCaptured)) s_mouseCaptured = nullptr;
+    if (s_mouseControl && !awake(s_mouseControl)) s_mouseControl = nullptr;
+    // findMouseControl.
+    auto findMouseControl = [&]() {
+        GuiControl* hit = hitTestTop(x, y);
+        GuiControl* over = awake(hit) ? hit : nullptr;
+        if (over != s_mouseControl) {
+            if (s_mouseControl) s_mouseControl->behavior->onMouseLeave(*s_mouseControl, ev);
+            s_mouseControl = over;
+            if (over) over->behavior->onMouseEnter(*over, ev);
+        }
+        return over;
+    };
+    const bool moved = x != s_mouseLastX || y != s_mouseLastY;
+    s_mouseLastX = x;
+    s_mouseLastY = y;
+    bool handled = false;
+    auto target = [&]() -> GuiControl* { return s_mouseCaptured ? s_mouseCaptured : findMouseControl(); };
+    if (moved) {
+        if (GuiControl* t = target()) {
+            if (s_mouseLeftDown) t->behavior->onMouseDragged(*t, ev);
+            else if (s_mouseRightDown) t->behavior->onRightMouseDragged(*t, ev);
+            else t->behavior->onMouseMove(*t, ev);
+            handled = true;
+        }
+    }
+    const uint32_t now = (uint32_t)(uint64_t)(Timer::now() * 1000.0); // Platform::getVirtualMilliseconds
+    if (left != s_mouseLeftDown) {
+        s_mouseLeftDown = left;
+        if (left) {
+            s_lastClickCount = s_leftMouseLast && now - s_lastMouseDownTime <= 500 ? s_lastClickCount + 1 : 1;
+            s_leftMouseLast = true;
+            s_lastMouseDownTime = now;
+            ev.clickCount = s_lastClickCount;
+            if (GuiControl* t = target()) { t->behavior->onMouseDown(*t, ev); handled = true; }
+        } else if (GuiControl* t = target()) {
+            t->behavior->onMouseUp(*t, ev);
+            handled = true;
+        }
+    }
+    if (right != s_mouseRightDown) {
+        s_mouseRightDown = right;
+        if (right) {
+            s_lastClickCount = !s_leftMouseLast && now - s_lastMouseDownTime <= 50 ? s_lastClickCount + 1 : 1;
+            s_leftMouseLast = false;
+            s_lastMouseDownTime = now;
+            ev.clickCount = s_lastClickCount;
+            if (GuiControl* t = target()) { t->behavior->onRightMouseDown(*t, ev); handled = true; }
+        } else if (GuiControl* t = target()) {
+            t->behavior->onRightMouseUp(*t, ev);
+            handled = true;
+        }
+    }
+    return handled || s_mouseCaptured != nullptr;
+}
+
+bool GuiRenderer::contentShowsWorld() const {
+    if (dialogStack.empty()) return true;
+    std::function<bool(const GuiControl*)> has = [&](const GuiControl* ctl) {
+        if (!ctl || !ctl->visible) return false;
+        if (ctl->className == "GameTSCtrl") return true;
+        for (const auto* child : ctl->children)
+            if (has(child)) return true;
+        return false;
+    };
+    return has(dialogStack.front());
 }

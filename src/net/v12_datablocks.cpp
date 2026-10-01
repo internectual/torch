@@ -405,19 +405,38 @@ void shapeBase(Stream& s) {
     }
     const std::string debrisShape = s.readString();
     if (activeDecoded) activeDecoded->debrisShape = debrisShape;
-    if (s.readFlag()) { s.readUnsigned(10); u32s(s, 1); }
+    // sensorRadius (an integer) and sensorColor.
+    if (s.readFlag()) {
+        const int32_t radius = (int32_t)s.readUnsigned(10);
+        std::array<uint8_t, 4> color{};
+        for (auto& c : color) c = (uint8_t)s.readUnsigned(8);
+        if (activeDecoded) {
+            activeDecoded->sensorRadius = radius;
+            activeDecoded->sensorColor = color;
+        }
+    }
     if (s.readFlag()) s.readF32();
     // cmdCategory, cmdMiniIconName.
-    if (activeDecoded) activeDecoded->cmdCategory = s.readString();
-    else s.readString();
-    s.readString();
+    const std::string category = s.readString();
+    const std::string miniIcon = s.readString();
+    if (activeDecoded) {
+        activeDecoded->cmdCategory = category;
+        activeDecoded->cmdMiniIconName = miniIcon;
+    }
     // canControl, canObserve, observeThroughObject, emap, isInvincible,
     // renderWhenDestroyed.
     for (int i = 0; i < 6; ++i) {
         const bool flag = s.readFlag();
         if (i == 3 && activeDecoded) activeDecoded->shapeEmap = flag;
+        if (i == 4 && activeDecoded) activeDecoded->shapeIsInvincible = flag;
+        if (i == 0 && activeDecoded) activeDecoded->shapeCanControl = flag;
     }
-    refs(s, 4);
+    // cmdIcon, explosion, underwaterExplosion, debris.
+    if (s.readFlag()) {
+        const uint32_t icon = s.readUnsigned(11);
+        if (activeDecoded) activeDecoded->cmdIconRef = icon;
+    }
+    refs(s, 3);
     for (int i = 0; i < 3; ++i) s.readFlag();
     s.readUnsigned(32);
     if (s.readFlag()) f32s(s, 3);
@@ -716,7 +735,12 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
       case 6:
           // CannedChatItem: retail uses SimDataBlock::packData (no bits).
           break;
-      case 7: strings(s,5); break;
+      case 7: // CommanderIconData::packData: the five image descriptions.
+          for (int image = 0; image < 5; ++image) {
+              std::string desc = s.readString();
+              if (activeDecoded) activeDecoded->commanderImages[image] = std::move(desc);
+          }
+          break;
      case 8: debrisData(s); break;
      case 9: (classId >= 128 ? legacyDecal : decal)(s); break; case 10: { // ELFProjectileData
         projectile(s);

@@ -2307,7 +2307,17 @@ void Engine::run() {
             static bool prevPressed = false;
             bool secondaryPressed = plat->input().mouseButtons[3] != 0;
             static bool prevSecondaryPressed = false;
-            if (pressed && !prevPressed) {
+            // Engine GUI classes (GuiCommanderMap, GuiCommanderTree) take the
+            // canvas mouse events first.
+            const auto& keys = plat->input().keysDown;
+            const uint8_t modifier = (uint8_t)(((keys[SCANCODE_LSHIFT] || keys[SCANCODE_RSHIFT]) ? 0x3 : 0) |
+                                               ((keys[SCANCODE_LCTRL] || keys[SCANCODE_RCTRL]) ? 0xc : 0));
+            if (gui->dispatchBehaviorMouse(mx, my, pressed, secondaryPressed, modifier)) {
+                if (pressed) plat->input().consumedMouse[1] = true;
+                if (secondaryPressed) plat->input().consumedMouse[3] = true;
+                prevPressed = pressed;
+                prevSecondaryPressed = secondaryPressed;
+            } else if (pressed && !prevPressed) {
                 if (gui->handleInput(mx, my, true))
                     plat->input().consumedMouse[1] = true;
             } else if (pressed) {

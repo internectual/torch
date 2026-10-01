@@ -418,6 +418,8 @@ struct DemoTargetState {
     int sensorGroup = -1;
     int renderFlags = 0;
     bool hasRenderFlags = false;
+    int dataBlockId = 0;   // TargetInfo::shapeBaseData (0 none)
+    uint32_t changes = 0;  // TargetManagerNotify::targetChanged count
 };
 
 struct TargetEntry {
@@ -524,7 +526,7 @@ struct NetEventInfo {
     std::string targetName, targetSkin, targetSkinPreference;
     std::string targetVoice, targetType;
     int targetSensorGroup = -1; // -1: not in this update
-    int targetDataBlockId = -2;
+    int targetDataBlockId = -2; // -2: not in this update
     int targetRenderFlags = 0;
     bool hasTargetRenderFlags = false;
     float targetVoicePitch = 1.0f;
@@ -953,6 +955,7 @@ struct DemoParserSnapshot {
     std::map<std::string, std::string> skinToPlayer;
     std::map<int, DemoTargetState> targets;
     std::array<uint32_t, 16> targetVisible{};
+    int clientSensorGroup = 0;
     WeaponsHudState weaponsHud;
     BackpackHudState backpackHud;
     InventoryHudState inventoryHud;
@@ -974,6 +977,16 @@ public:
     const DemoHeader& getHeader() const { return header; }
     const InitialBlockData& getInitialBlock() const { return initialBlock; }
     const GhostTracker& getGhostTracker() const { return ghostTracker; }
+    const std::map<int, DemoTargetState>& getTargets() const { return targets_; }
+    // The client's sensor group (SetSensorGroupEvent).
+    int clientSensorGroup() const { return clientSensorGroup_; }
+    // TargetManager::getSensorGroupColor(viewer, target) as RGBA bytes:
+    // SensorInfo::smDefaultColor (255, 0, 0, 255) until the server sets it.
+    uint32_t sensorGroupColor(int viewer, int target) const {
+        if (target < 0 || target >= 32) return 0xff0000ffu;
+        auto it = sensorGroupColors_.find({viewer, uint32_t(1) << target});
+        return it == sensorGroupColors_.end() ? 0xff0000ffu : it->second;
+    }
     // TargetInfo::VisibleToSensor of a client target.
     bool isTargetVisibleToSensor(int targetId) const {
         return targetId >= 0 && targetId < 512 && (targetVisible_[targetId >> 5] >> (targetId & 31) & 1u) != 0;
@@ -1102,6 +1115,7 @@ private:
     // TargetInfo::VisibleToSensor per client target, as the game state's
     // toggle words flip it.
     std::array<uint32_t, 16> targetVisible_{};
+    int clientSensorGroup_ = 0;
     void applyTarget(GhostEntry& ghost) const;
     std::vector<int> moveTicksBefore_;
     uint32_t packetsParsed{};

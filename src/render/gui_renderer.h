@@ -7,8 +7,78 @@
 #include <unordered_map>
 #include <functional>
 #include <set>
+#include <array>
+#include <memory>
 
 struct ScriptObject;
+struct GuiControl;
+struct Font;
+struct Texture;
+
+// GuiEvent: the canvas mouse point (logical canvas coordinates), the
+// modifier keys (SI_SHIFT 0x3, SI_CTRL 0xc) and the click count.
+struct GuiEvent {
+    int x = 0, y = 0;
+    uint8_t modifier = 0;
+    int clickCount = 1;
+};
+
+// The C++ side of an engine GUI class (its GuiControl virtuals). A control
+// whose class has one gets wake/sleep, pre-render, render and the canvas's
+// mouse events (with mouse lock and enter/leave) through it.
+class GuiControlBehavior {
+public:
+    virtual ~GuiControlBehavior() = default;
+    virtual bool onWake(GuiControl&) { return true; }
+    virtual void onSleep(GuiControl&) {}
+    virtual void onPreRender(GuiControl&) {}
+    // x, y: the control's canvas position.
+    virtual void onRender(GuiControl&, float x, float y) {}
+    virtual void onMouseDown(GuiControl&, const GuiEvent&) {}
+    virtual void onMouseUp(GuiControl&, const GuiEvent&) {}
+    virtual void onMouseMove(GuiControl&, const GuiEvent&) {}
+    virtual void onMouseDragged(GuiControl&, const GuiEvent&) {}
+    virtual void onMouseEnter(GuiControl&, const GuiEvent&) {}
+    virtual void onMouseLeave(GuiControl&, const GuiEvent&) {}
+    virtual void onRightMouseDown(GuiControl&, const GuiEvent&) {}
+    virtual void onRightMouseUp(GuiControl&, const GuiEvent&) {}
+    virtual void onRightMouseDragged(GuiControl&, const GuiEvent&) {}
+    bool awake = false;
+    // GuiControl::awaken ran and onWake failed: not tried again until the
+    // control leaves the screen.
+    bool wakeFailed = false;
+};
+
+namespace GuiBehaviors {
+using Factory = std::function<std::shared_ptr<GuiControlBehavior>()>;
+void registerClass(const std::string& className, Factory factory);
+std::shared_ptr<GuiControlBehavior> create(const std::string& className);
+} // namespace GuiBehaviors
+
+// Shared GUI resources (dgl / GuiControlProfile helpers).
+namespace GuiShared {
+// TextureHandle(name): textures/<name>.
+Texture* bitmap(const std::string& name);
+Font* profileFont(const std::string& profile);
+Font* font(const std::string& face, int size);
+// GuiControlProfile::mFontColors[index] (fontColor, fontColorHL, fontColorNA,
+// fontColorSEL, fontColors[4..9]); black when unset.
+ColorF profileFontColor(const std::string& profile, int index);
+// The control's field (its script object's, else its .gui value).
+std::string field(const GuiControl& ctl, const char* name, const std::string& fallback = std::string());
+// The logical canvas rectangle as GL window pixels (x, y from the bottom).
+void canvasToWindow(float x, float y, float w, float h, int out[4]);
+// GuiControl::createBitmapArray: numStates x numBitmaps rects (x, y, w, h),
+// empty when the bitmap does not split.
+std::vector<std::array<int, 4>> createBitmapArray(Texture* texture, int numStates, int numBitmaps);
+// GuiCanvas::mouseLock / mouseUnlock.
+void mouseLock(GuiControl* ctl);
+void mouseUnlock(GuiControl* ctl);
+// Canvas->mCursor = the named GuiCursor.
+void setCanvasCursor(const std::string& cursor);
+// GuiControl::localToGlobalCoord (the control's canvas position).
+void canvasPosition(const GuiControl& ctl, float& x, float& y);
+} // namespace GuiShared
 
 struct GuiControl {
     std::string name;
@@ -119,9 +189,6 @@ struct GuiControl {
     // ShellWindowCtrl fields
     bool windowDragging = false;
     float dragOffsetX = 0, dragOffsetY = 0;
-    bool commanderMapDragging = false;
-    int commanderMapLastX = -1, commanderMapLastY = -1;
-    std::vector<int> commanderTreeEntries;
 
     // Scrollbar thumb drag state
     bool vThumbDragging = false;
@@ -152,6 +219,9 @@ struct GuiControl {
     float modelZoom = 1.0f;
     int modelSequence = -1;
     float modelAnimTime = 0.0f;
+
+    // The engine class behind the control, if it has one.
+    std::shared_ptr<GuiControlBehavior> behavior;
 
     GuiControl* findChild(const std::string& name);
     void addChild(GuiControl* child);
@@ -221,6 +291,12 @@ public:
     void setShowCursor(bool show) { showCursor_ = show; }
     void setDefaultCursor(const std::string& cursor) { defaultCursor_ = cursor; }
     void updateCursorState();
+    // GuiCanvas mouse dispatch to behaviour controls: true when such a
+    // control took the event (or holds the mouse lock).
+    bool dispatchBehaviorMouse(int x, int y, bool left, bool right, uint8_t modifier);
+    // A visible GameTSCtrl (PlayGui) in the canvas content: the 3D world
+    // is drawn only through one.
+    bool contentShowsWorld() const;
 
     // Last instance pushed under each dialog name. A popped dialog leaves
     // the stack but stays alive; re-pushing it must reuse THAT object (with

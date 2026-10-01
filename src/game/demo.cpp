@@ -1390,6 +1390,7 @@ DemoParserSnapshot DemoParser::captureSnapshot() const {
     snapshot.skinToPlayer = skinToPlayer_;
     snapshot.targets = targets_;
     snapshot.targetVisible = targetVisible_;
+    snapshot.clientSensorGroup = clientSensorGroup_;
     snapshot.weaponsHud = weaponsHud_;
     snapshot.backpackHud = backpackHud_;
     snapshot.inventoryHud = inventoryHud_;
@@ -1435,6 +1436,7 @@ bool DemoParser::restoreSnapshot(const DemoParserSnapshot& snapshot) {
     skinToPlayer_ = snapshot.skinToPlayer;
     targets_ = snapshot.targets;
     targetVisible_ = snapshot.targetVisible;
+    clientSensorGroup_ = snapshot.clientSensorGroup;
     weaponsHud_ = snapshot.weaponsHud;
     backpackHud_ = snapshot.backpackHud;
     inventoryHud_ = snapshot.inventoryHud;
@@ -1976,7 +1978,8 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
         bs.readRangedU32(0, 1023);
         bs.readRangedU32(0, 8);
     } else if (ev.classId == T2Demo::NetEventClassFirst + 15) { // SetSensorGroupEvent
-        bs.readInt(5);
+        const int group = bs.readInt(5);
+        if (applyEffects) clientSensorGroup_ = group;
     } else if (ev.classId == T2Demo::NetEventClassFirst + 16) { // SetServerTargetEvent
         if (bs.readFlag()) bs.readInt(9);
         bs.readF32(); bs.readF32(); bs.readF32();
@@ -1998,7 +2001,7 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
         readTag(ev.targetVoice);
         readTag(ev.targetType);
         if (bs.readFlag()) ev.targetSensorGroup = bs.readInt(5);
-        if (bs.readFlag()) ev.targetDataBlockId = bs.readFlag() ? bs.readInt(11) : -2;
+        if (bs.readFlag()) ev.targetDataBlockId = bs.readFlag() ? bs.readInt(11) : 0;
         if (bs.readFlag()) {
             ev.targetRenderFlags = bs.readInt(9);
             ev.hasTargetRenderFlags = true;
@@ -2026,10 +2029,12 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
         if (!ev.targetSkin.empty()) target.skin = ev.targetSkin;
         if (!ev.targetType.empty()) target.type = ev.targetType;
         if (ev.targetSensorGroup >= 0) target.sensorGroup = ev.targetSensorGroup;
+        if (ev.targetDataBlockId != -2) target.dataBlockId = ev.targetDataBlockId;
         if (ev.hasTargetRenderFlags) {
             target.renderFlags = ev.targetRenderFlags;
             target.hasRenderFlags = true;
         }
+        target.changes++;
         // Apply to every ghost that owns this target slot.
         for (int index : ghostTracker.getAllIndices()) {
             GhostEntry* ghost = ghostTracker.getMutableGhost(index);

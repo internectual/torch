@@ -196,6 +196,14 @@ struct DecodedDataBlock {
     bool hasMountPoint{};
     std::string debrisShape;
     std::string cmdCategory;      // ShapeBaseData::cmdCategory
+    std::string cmdMiniIconName;  // ShapeBaseData::cmdMiniIconName
+    uint32_t cmdIconRef = 0;      // ShapeBaseData::cmdIcon (CommanderIconData)
+    int32_t sensorRadius = 0;     // ShapeBaseData::sensorRadius (sent as an integer)
+    std::array<uint8_t, 4> sensorColor{255, 0, 0, 200};
+    bool shapeIsInvincible = false;
+    bool shapeCanControl = false;  // ShapeBaseData::canControl
+    // CommanderIconData::mImageDesc: base, active, inactive, select, hilight.
+    std::array<std::string, 5> commanderImages;
     bool shapeEmap = false;       // ShapeBaseData::emap
     // TurretData elevation limits (degrees); t2-mapper clamps and defaults
     // them to [0, 90] / [90, 180] and 45 / 135.

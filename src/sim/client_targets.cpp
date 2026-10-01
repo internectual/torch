@@ -272,6 +272,10 @@ void update(uint32_t newTime, const std::function<bool(int, float[3])>& center) 
 
 namespace ClientTargets {
 
+ClientTargetObject* create(int targetId, const float pos[3]) {
+    return ScriptEngine::exists() ? newClientTarget(-1, targetId, pos) : nullptr;
+}
+
 void targetTo(int targetId, const float pos[3], bool assign) {
     if (!ScriptEngine::exists()) return;
     ClientTargetObject* target = newClientTarget(-1, targetId, pos);
