@@ -909,6 +909,39 @@ std::string& beaconNameSlot(int type) {
 
 const std::string& beaconName(int type) { return beaconNameSlot(type); }
 
+void MissionMarkerObject::readFields() {
+    ShapeBase::readFields();
+    ghostable = !dataBlock().empty();
+}
+
+uint32_t MissionMarkerObject::packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) {
+    const uint32_t ret = ShapeBase::packUpdate(connection, mask, w);
+    if (w.writeFlag(mask & PositionMask)) {
+        writeAffineTransform(w);
+        writeScale(w);
+    }
+    return ret;
+}
+
+uint32_t WayPointObject::packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) {
+    const uint32_t ret = MissionMarkerObject::packUpdate(connection, mask, w);
+    if (w.writeFlag(mask & UpdateNameMask)) w.writeString(Fields::string(script, "name"));
+    if (w.writeFlag(mask & UpdateTeamMask)) w.writeU32((uint32_t)Fields::s32(script, "team", 0));
+    if (w.writeFlag(mask & UpdateHiddenMask)) w.writeFlag(hidden);
+    return ret;
+}
+
+uint32_t SpawnSphereObject::packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) {
+    const uint32_t ret = MissionMarkerObject::packUpdate(connection, mask, w);
+    if (w.writeFlag(mask & UpdateSphereMask)) {
+        w.writeF32(Fields::f32(script, "radius", 100.0f));
+        w.writeF32(Fields::f32(script, "sphereWeight", 100.0f));
+        w.writeF32(Fields::f32(script, "indoorWeight", 100.0f));
+        w.writeF32(Fields::f32(script, "outdoorWeight", 100.0f));
+    }
+    return ret;
+}
+
 uint32_t BeaconObject::packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) {
     const uint32_t ret = StaticShapeObject::packUpdate(connection, mask, w);
     if (w.writeFlag(mask & BeaconMask)) w.writeInt(beaconType, 2);
@@ -970,6 +1003,10 @@ void registerStaticShapeNatives(TorqueScript& ts) {
         return VMValue(t ? (int)t->capacitorLevel : 0);
     });
     EngineObjects::registerClass("BeaconObject", [] { return std::make_shared<BeaconObject>(); });
+    EngineObjects::registerClass("MissionMarker", [] { return std::make_shared<MissionMarkerObject>(); });
+    EngineObjects::registerClass("WayPoint", [] { return std::make_shared<WayPointObject>(); });
+    EngineObjects::registerClass("SpawnSphere", [] { return std::make_shared<SpawnSphereObject>(); });
+    EngineObjects::registerClass("AIObjective", [] { return std::make_shared<AIObjectiveObject>(); });
     // The retail setPowerAudioProfiles keeps the two AudioProfiles (power up,
     // power down) and nothing in the shipped client plays them.
     ts.registerNative("setPowerAudioProfiles", [](const std::vector<VMValue>& args) -> VMValue {

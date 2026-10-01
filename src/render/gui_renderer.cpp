@@ -3356,12 +3356,12 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 }
                 auto isMarkerClass = [](const std::string& className) {
                     // Vehicle classes end in "Vehicle"; VehicleBlocker is not one.
+                    // Mission markers (AIObjective, SpawnSphere, WayPoint)
+                    // have no target and are never marked.
                     return className.find("Player") != std::string::npos ||
                            ObserverParity::isVehicleClass(className) ||
                            className.find("Beacon") != std::string::npos ||
-                           className.find("Flag") != std::string::npos ||
-                           className.find("Objective") != std::string::npos ||
-                           className.find("MissionMarker") != std::string::npos;
+                           className.find("Flag") != std::string::npos;
                 };
                  auto drawMarker = [&](const GhostEntry* ghost) {
                      if (!ghost) return;

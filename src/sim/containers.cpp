@@ -369,7 +369,8 @@ ScriptObject* forceFieldInBox(const Point3F& lo, const Point3F& hi) {
 std::vector<ScriptObject*> findObjects(const Point3F& min, const Point3F& max, uint32_t mask) {
     std::vector<ScriptObject*> out;
     for (auto& [key, object] : ScriptEngine::instance().objects) {
-        if (!object || !dynamic_cast<SceneObject*>(object->engine.get())) continue;
+        auto* scene = object ? dynamic_cast<SceneObject*>(object->engine.get()) : nullptr;
+        if (!scene || !scene->inContainer()) continue;
         if (!(typeMask(object) & mask)) continue;
         Point3F lo, hi;
         worldBox(object, lo, hi);

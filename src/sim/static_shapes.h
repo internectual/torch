@@ -113,6 +113,58 @@ public:
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
 };
 
+// game/missionMarker.cc: markers ghost (scope always) their transform and
+// scale; outside the editor they stay out of the scene container.
+class MissionMarkerObject : public ShapeBase {
+public:
+    enum MarkerMasks : uint32_t { PositionMask = ShapeBase::NextFreeMask, NextFreeMask = PositionMask << 1 };
+    explicit MissionMarkerObject(const char* netClass = "MissionMarker") : netClass(netClass) {
+        ghostable = true;
+        scopeAlways = true;
+    }
+    const char* netClassName() const override { return netClass; }
+    bool inContainer() const override { return false; }
+    // MissionMarker::onAdd fails without a datablock: such a marker never
+    // reaches the clients.
+    void readFields() override;
+    uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
+
+private:
+    const char* netClass;
+};
+
+// AIObjective (ai/aiObjective.cc): a marker with an empty sphere update.
+class AIObjectiveObject : public MissionMarkerObject {
+public:
+    enum AIObjectiveMasks : uint32_t { UpdateSphereMask = MissionMarkerObject::NextFreeMask };
+    AIObjectiveObject() : MissionMarkerObject("AIObjective") {}
+    uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override {
+        const uint32_t ret = MissionMarkerObject::packUpdate(connection, mask, w);
+        w.writeFlag(mask & UpdateSphereMask);
+        return ret;
+    }
+};
+
+// WayPoint: its name, team and hidden state for the clients' HUD.
+class WayPointObject : public MissionMarkerObject {
+public:
+    enum WayPointMasks : uint32_t {
+        UpdateNameMask = MissionMarkerObject::NextFreeMask,
+        UpdateTeamMask = UpdateNameMask << 1,
+        UpdateHiddenMask = UpdateTeamMask << 1,
+    };
+    WayPointObject() : MissionMarkerObject("WayPoint") {}
+    uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
+};
+
+// SpawnSphere: its radius and weights.
+class SpawnSphereObject : public MissionMarkerObject {
+public:
+    enum SpawnSphereMasks : uint32_t { UpdateSphereMask = MissionMarkerObject::NextFreeMask };
+    SpawnSphereObject() : MissionMarkerObject("SpawnSphere") {}
+    uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
+};
+
 class ItemObject : public ShapeBase {
 public:
     enum ItemMasks : uint32_t {

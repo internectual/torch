@@ -29,6 +29,9 @@ public:
 
 class SceneObject : public NetObject {
 public:
+    // In the scene container (searches, rays, collision); a MissionMarker
+    // only joins it while the mission is edited.
+    virtual bool inContainer() const { return true; }
     std::array<float, 16> transform{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}; // row-major
     float scale[3] = {1, 1, 1};
     void readFields() override;
