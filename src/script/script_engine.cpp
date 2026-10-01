@@ -6755,6 +6755,17 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
+    // ShellFancyArray::clearColumns (LobbyPlayerList is a ShellFancyTextList):
+    // the columns go; initColumns adds them
+    // again (LobbyPlayerList).
+    tsInstance->registerNative("clearColumns", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
+        if (ctl) {
+            ctl->listColumns.clear();
+            ctl->sbColumns.clear();
+        }
+        return VMValue(1);
+    });
     tsInstance->registerNative("setSortColumn", [getListCtrl](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
         if (ctl && args.size() >= 2) {
