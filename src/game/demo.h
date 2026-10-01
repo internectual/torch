@@ -700,6 +700,7 @@ struct GhostEntry {
     int teamId{-1};
     int sensorGroup{-1};
     std::string targetType;
+    int beaconType = -1; // BeaconObject: enemy, friend, vehicle
     int targetRenderFlags = 0;
     bool isFlag = false;
     int flagTeamId = 0;

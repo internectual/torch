@@ -142,3 +142,8 @@ private:
 };
 
 void registerStaticShapeNatives(class TorqueScript& ts);
+
+// The client's beacon labels by beacon type (enemy/target, friend/marker,
+// vehicle): setBeaconNames, "Target Beacon" / "Marker Beacon" / "Bomb
+// Target" until the server sends its own.
+const std::string& beaconName(int type);

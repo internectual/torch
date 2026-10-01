@@ -2408,7 +2408,10 @@ static void readStaticShapeData(BitStream& bs, bool isInitial, const Vec3& cp, G
 
 static void readBeaconObjectData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
     readStaticShapeData(bs, isInitial, cp, entry);
-    if (bs.readFlag()) bs.readInt(2); // beacon type
+    if (bs.readFlag()) {
+        const int type = bs.readInt(2);
+        if (entry) entry->beaconType = type;
+    }
 }
 
 static void readItemData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {

@@ -79,6 +79,12 @@ int main() {
         blackOut.setBlackOut(false, 0);
         assert(blackOut.getBlackOut() == 0.0f);
     }
+    // setBeaconNames: the HUD's beacon labels by type, shipped defaults
+    // until the server sends its own.
+    assert(beaconName(2) == "Bomb Target");
+    utilityScript->execute("setBeaconNames(\"T\", \"M\", \"V\");");
+    assert(beaconName(0) == "T" && beaconName(1) == "M" && beaconName(2) == "V");
+    utilityScript->execute("setBeaconNames(\"Target Beacon\", \"Marker Beacon\", \"Bomb Target\");");
     // MissionArea::getArea / setArea.
     utilityScript->execute("new MissionArea(TestArea) { area = \"-512 -256 1024 768\"; };"
                            "$areaBefore = TestArea.getArea(); TestArea.setArea(1, 2, 3, 4); $areaAfter = TestArea.getArea();"

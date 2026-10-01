@@ -900,6 +900,15 @@ void ItemObject::updatePos(float dt) {
     if (stickyNotify) callDataBlock("onStickyCollision");
 }
 
+namespace {
+std::string& beaconNameSlot(int type) {
+    static std::string names[3] = {"Target Beacon", "Marker Beacon", "Bomb Target"};
+    return names[std::clamp(type, 0, 2)];
+}
+} // namespace
+
+const std::string& beaconName(int type) { return beaconNameSlot(type); }
+
 uint32_t BeaconObject::packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) {
     const uint32_t ret = StaticShapeObject::packUpdate(connection, mask, w);
     if (w.writeFlag(mask & BeaconMask)) w.writeInt(beaconType, 2);
@@ -961,6 +970,22 @@ void registerStaticShapeNatives(TorqueScript& ts) {
         return VMValue(t ? (int)t->capacitorLevel : 0);
     });
     EngineObjects::registerClass("BeaconObject", [] { return std::make_shared<BeaconObject>(); });
+    // The retail setPowerAudioProfiles keeps the two AudioProfiles (power up,
+    // power down) and nothing in the shipped client plays them.
+    ts.registerNative("setPowerAudioProfiles", [](const std::vector<VMValue>& args) -> VMValue {
+        static std::string profiles[2];
+        for (int i = 0; i < 2; ++i) {
+            ScriptObject* profile =
+                i < (int)args.size() ? ScriptEngine::instance().findObject(args[i].toString().c_str()) : nullptr;
+            profiles[i] = profile && EngineClasses::isA(profile->className, "AudioProfile")
+                ? ScriptEngine::instance().objectKey(profile) : std::string();
+        }
+        return VMValue("");
+    });
+    ts.registerNative("setBeaconNames", [](const std::vector<VMValue>& args) -> VMValue {
+        for (int i = 0; i < 3; ++i) beaconNameSlot(i) = i < (int)args.size() ? args[i].toString() : std::string();
+        return VMValue("");
+    });
     static const char* const beaconTypes[] = {"enemy", "friend", "vehicle"};
     ts.registerNative("BeaconObject::setBeaconType", [](const std::vector<VMValue>& args) -> VMValue {
         auto* beacon = args.empty() ? nullptr : EngineObjects::get<BeaconObject>(args[0].toString());
