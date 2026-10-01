@@ -87,6 +87,10 @@ struct SoundSource {
     float occlusion = 0.0f;
     float referenceDistance = 1.0f;
     float maxDistance = 100.0f;
+    // The distances the description asked for (alxDisableOuterFalloffs
+    // restores them on loopers).
+    float descReferenceDistance = 1.0f;
+    float descMaxDistance = 100.0f;
     float rolloffFactor = 1.0f;
     float offsetSeconds = 0.0f;
     uint32_t auxiliarySend = 0;
@@ -202,6 +206,13 @@ public:
 
     SoundBuffer* loadSound(const char* path);
     SoundSource* createSource(bool persistent = false, int priority = 0);
+    // audio.cc alxDisableOuterFalloffs / alxSetInnerFalloffScale: forced
+    // outer falloffs (FORCED_OUTER_FALLOFF) and scaled inner ones for 3D
+    // sources, for hardware providers.
+    void disableOuterFalloffs(bool disable);
+    void setInnerFalloffScale(float scale);
+    static bool outerFalloffsDisabled();
+    static float innerFalloffScale();
     void releaseSource(SoundSource* source);
     bool isSourceAlive(const SoundSource* source) const;
     bool isBufferAlive(const SoundBuffer* buffer) const;

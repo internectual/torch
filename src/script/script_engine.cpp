@@ -6972,6 +6972,21 @@ bool ScriptEngine::init() {
         // Voice capture gain — no capture support in this build, accept and ignore.
         return VMValue(1);
     });
+    // audio.cc: forced outer falloffs and the inner falloff scale.
+    tsInstance->registerNative("alxDisableOuterFalloffs", [](const auto& args) -> VMValue {
+        const std::string value = args.empty() ? std::string() : args[0].toString();
+        // dAtob: "true" or a non-zero number.
+        Engine::instance().audio().disableOuterFalloffs(strcasecmp(value.c_str(), "true") == 0 ||
+                                                        std::atof(value.c_str()) != 0.0);
+        return VMValue("");
+    });
+    tsInstance->registerNative("alxSetInnerFalloffScale", [](const auto& args) -> VMValue {
+        Engine::instance().audio().setInnerFalloffScale(args.empty() ? 1.0f : args[0].toFloat());
+        return VMValue("");
+    });
+    tsInstance->registerNative("alxGetInnerFalloffScale", [](const auto&) -> VMValue {
+        return VMValue(AudioSystem::innerFalloffScale());
+    });
     tsInstance->registerNative("alxSetChannelVolume", [](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(1);
         std::string channel = args[0].toString();

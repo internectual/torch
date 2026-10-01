@@ -658,6 +658,8 @@ void SoundSource::setRelative(bool value) {
     relative = value;
     positional = !value;
     alSourcei(source, AL_SOURCE_RELATIVE, value ? AL_TRUE : AL_FALSE);
+    // A source that becomes 3D takes the forced falloffs.
+    if (AudioSystem::outerFalloffsDisabled()) setDistance(descReferenceDistance, descMaxDistance);
 }
 
 void SoundSource::setAuxiliarySend(uint32_t slot, int sendIndex, uint32_t filter) {
@@ -682,10 +684,47 @@ void SoundSource::setEnvironmentSend(uint32_t slot, bool enabled) {
     }
 }
 
+namespace {
+constexpr float ForcedOuterFalloff = 10000.0f; // FORCED_OUTER_FALLOFF
+bool sDisableOuterFalloffs = false;
+float sInnerFalloffScale = 1.0f;
+} // namespace
+
+bool AudioSystem::outerFalloffsDisabled() { return sDisableOuterFalloffs; }
+float AudioSystem::innerFalloffScale() { return sInnerFalloffScale; }
+
+void AudioSystem::setInnerFalloffScale(float scale) { sInnerFalloffScale = std::clamp(scale, 0.1f, 10.0f); }
+
+// The playing 3D sources follow (non-loopers cannot be reset after this).
+void AudioSystem::disableOuterFalloffs(bool disable) {
+    if (disable == sDisableOuterFalloffs) return;
+    for (auto* src : impl->sources) {
+        if (!src || !src->positional) continue;
+        if (disable) {
+            src->referenceDistance *= sInnerFalloffScale;
+            src->maxDistance = ForcedOuterFalloff;
+        } else if (src->looping) {
+            src->referenceDistance = src->descReferenceDistance;
+            src->maxDistance = src->descMaxDistance;
+        } else {
+            continue;
+        }
+        alSourcef(src->source, AL_REFERENCE_DISTANCE, src->referenceDistance);
+        alSourcef(src->source, AL_MAX_DISTANCE, src->maxDistance);
+    }
+    sDisableOuterFalloffs = disable;
+}
+
 void SoundSource::setDistance(float reference, float maxDistance) {
-    referenceDistance = std::max(0.001f, std::isfinite(reference) ? reference : 1.0f);
-    this->maxDistance = std::max(referenceDistance,
-                                 std::isfinite(maxDistance) ? maxDistance : referenceDistance);
+    descReferenceDistance = std::max(0.001f, std::isfinite(reference) ? reference : 1.0f);
+    descMaxDistance = std::max(descReferenceDistance, std::isfinite(maxDistance) ? maxDistance : descReferenceDistance);
+    referenceDistance = descReferenceDistance;
+    this->maxDistance = descMaxDistance;
+    // forcing different falloffs?
+    if (sDisableOuterFalloffs && positional) {
+        referenceDistance = sInnerFalloffScale * descReferenceDistance;
+        this->maxDistance = ForcedOuterFalloff;
+    }
     alSourcef(source, AL_REFERENCE_DISTANCE, referenceDistance);
     alSourcef(source, AL_MAX_DISTANCE, this->maxDistance);
 }
