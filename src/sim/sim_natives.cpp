@@ -5,6 +5,7 @@
 #include "sim/player.h"
 #include "sim/static_shapes.h"
 #include "sim/weather.h"
+#include "sim/client_targets.h"
 #include "sim/trigger.h"
 #include "sim/vehicle.h"
 #include "sim/force_field.h"
@@ -39,6 +40,7 @@ void registerSimNatives(TorqueScript& ts) {
     registerStaticShapeNatives(ts);
     registerLightningNatives(ts);
     registerPrecipitationNatives(ts);
+    registerClientTargetNatives(ts);
     registerTriggerNatives(ts);
     registerVehicleNatives(ts);
     registerForceFieldNatives(ts);

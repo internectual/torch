@@ -499,6 +499,12 @@ void setReceivedDataBlocks(GameConnection& connection, bool received) {
     stateOf(connection).receivedDataBlocks = received;
 }
 
+void setServerTarget(GameConnection& connection, int targetId, const float pos[3]) {
+    ConnectionState& state = stateOf(connection);
+    state.targetId = targetId;
+    std::copy(pos, pos + 3, state.targetPos);
+}
+
 const uint32_t* sensorGroupPingMask(uint32_t sensorGroup) {
     return manager().pingMask[sensorGroup & 31];
 }

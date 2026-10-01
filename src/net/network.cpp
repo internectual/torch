@@ -75,7 +75,7 @@ struct Connection::Impl {
     std::map<int, int> nativeClientTeams;
     std::map<int, std::string> nativeClientNames;
     std::map<std::pair<int, uint32_t>, uint32_t> nativeSensorGroupColors;
-    std::map<int, uint32_t> nativeSensorGroupListenMasks;
+    std::array<uint32_t, 16> nativeTargetVisible{};
     V12Vec3 nativeCompressionPoint{};
     uint16_t nativeControlGhost = 0;
     bool nativeControlAssigned = false;
@@ -127,7 +127,7 @@ struct Connection::Impl {
         nativeClientTeams.clear();
         nativeClientNames.clear();
         nativeSensorGroupColors.clear();
-        nativeSensorGroupListenMasks.clear();
+        nativeTargetVisible.fill(0);
         nativeCompressionPoint = {};
         nativeControlGhost = 0;
         nativeControlAssigned = false;
@@ -307,7 +307,7 @@ Connection::ObserverSnapshot Connection::observerSnapshot() const {
     snapshot.clientTeams = impl->nativeClientTeams;
     snapshot.clientNames = impl->nativeClientNames;
     snapshot.sensorGroupColors = impl->nativeSensorGroupColors;
-    snapshot.sensorGroupListenMasks = impl->nativeSensorGroupListenMasks;
+    snapshot.targetVisible = impl->nativeTargetVisible;
     // The packet state is folded into the observer snapshot by the game
     // callback; keep the map available for snapshot/seek users as well.
     return snapshot;
@@ -373,7 +373,7 @@ bool Connection::seedObserverSnapshot(const ObserverSnapshot& snapshot) {
     impl->nativeClientTeams = snapshot.clientTeams;
     impl->nativeClientNames = snapshot.clientNames;
     impl->nativeSensorGroupColors = snapshot.sensorGroupColors;
-    impl->nativeSensorGroupListenMasks = snapshot.sensorGroupListenMasks;
+    impl->nativeTargetVisible = snapshot.targetVisible;
     impl->nativeProjectileImpacts.clear();
     impl->sentNativeEventPackets.clear();
     impl->pendingNativeEvents.clear();
@@ -625,8 +625,8 @@ void Connection::update() {
                               impl->nativeHasCameraFov = true;
                               impl->nativeCameraFov = gameState.cameraFov;
                           }
-                         if (!gameState.sensorGroupListenMasks.empty())
-                             impl->nativeSensorGroupListenMasks = gameState.sensorGroupListenMasks;
+                         for (const auto& [index, mask] : gameState.targetVisibleToggles)
+                             impl->nativeTargetVisible[index & 15] ^= mask;
                         if (gameState.controlPresent && !gameState.controlDirty)
                             impl->nativeControlGhost = gameState.controlGhost;
                         if (stateCb) stateCb(gameState);
@@ -867,7 +867,7 @@ void Connection::update() {
                                 impl->nativeClientTeams.clear();
                                 impl->nativeClientNames.clear();
                                  impl->nativeSensorGroupColors.clear();
-                                 impl->nativeSensorGroupListenMasks.clear();
+                                 impl->nativeTargetVisible.fill(0);
                                  impl->nativeLoadInfoLines.clear();
                                 impl->nativeMatchStarted = false;
                                 impl->nativeMatchEnded = false;

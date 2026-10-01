@@ -1,6 +1,7 @@
 #pragma once
 #include "net/v12_protocol.h"
 #include "net/v12_ghost_packet.h"
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -136,7 +137,7 @@ public:
         std::map<int, int> clientTeams;
          std::map<int, std::string> clientNames;
         std::map<std::pair<int, uint32_t>, uint32_t> sensorGroupColors;
-        std::map<int, uint32_t> sensorGroupListenMasks;
+        std::array<uint32_t, 16> targetVisible{}; // VisibleToSensor, one bit per target
      };
     ObserverSnapshot observerSnapshot() const;
     bool seedObserverSnapshot(const ObserverSnapshot& snapshot);

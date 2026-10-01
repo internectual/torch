@@ -18,6 +18,8 @@ public:
     // GameBase objects run once per 32 ms server tick (gServerProcessList).
     virtual bool processesTicks() const { return false; }
     virtual void processTick() {}
+    // SimObject::onRemove: the object is being deleted.
+    virtual void onRemove() {}
 };
 
 namespace EngineObjects {

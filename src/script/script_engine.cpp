@@ -1827,6 +1827,7 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
             }
         }
     }
+    if (object->engine) object->engine->onRemove();
     const auto listeners = object->deleteNotifyListeners;
     for (const auto& listenerName : listeners) {
         ScriptObject* listener = findObject(listenerName.c_str());

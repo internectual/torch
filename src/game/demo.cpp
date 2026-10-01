@@ -881,6 +881,7 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
     initialPlayerInfo_.clear();
     skinToPlayer_.clear();
     targets_.clear();
+    targetVisible_.fill(0);
     initialTargets_.clear();
     missionChanges_.clear();
     missionCrcChanges_.clear();
@@ -1036,6 +1037,7 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
     // Start-block ghosts carry target ids; resolve them against the initial
     // TargetManager state.
     targets_ = initialTargets_;
+    targetVisible_.fill(0);
     for (GhostTracker* tracker : {&ibGhostTracker, &ghostTracker}) {
         for (int index : tracker->getAllIndices())
             if (GhostEntry* ghost = tracker->getMutableGhost(index))
@@ -1163,6 +1165,7 @@ void DemoParser::beginLiveStream(uint32_t sequence) {
     initialPlayerInfo_.clear();
     skinToPlayer_.clear();
     targets_.clear();
+    targetVisible_.fill(0);
     initialTargets_.clear();
     missionChanges_.clear();
     missionCrcChanges_.clear();
@@ -1217,6 +1220,7 @@ void DemoParser::reset() {
     initialBlock.taggedStrings = initialTaggedStrings_;
     playerInfo_ = initialPlayerInfo_;
     targets_ = initialTargets_;
+    targetVisible_.fill(0);
     currentMissionCrc_ = initialBlock.missionCRC;
     currentMission_ = missionChanges_.empty() ? "" : missionChanges_[0].second;
     nextChangeIdx_ = 0;
@@ -1385,6 +1389,7 @@ DemoParserSnapshot DemoParser::captureSnapshot() const {
     snapshot.playerInfo = playerInfo_;
     snapshot.skinToPlayer = skinToPlayer_;
     snapshot.targets = targets_;
+    snapshot.targetVisible = targetVisible_;
     snapshot.weaponsHud = weaponsHud_;
     snapshot.backpackHud = backpackHud_;
     snapshot.inventoryHud = inventoryHud_;
@@ -1429,6 +1434,7 @@ bool DemoParser::restoreSnapshot(const DemoParserSnapshot& snapshot) {
     playerInfo_ = snapshot.playerInfo;
     skinToPlayer_ = snapshot.skinToPlayer;
     targets_ = snapshot.targets;
+    targetVisible_ = snapshot.targetVisible;
     weaponsHud_ = snapshot.weaponsHud;
     backpackHud_ = snapshot.backpackHud;
     inventoryHud_ = snapshot.inventoryHud;
@@ -2030,11 +2036,15 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
             if (ghost && ghost->targetId == ev.targetId) applyTarget(*ghost);
         }
     } else if (ev.classId == T2Demo::NetEventClassFirst + 25) { // TargetToEvent
-        if (bs.readFlag()) bs.readInt(9);
+        ev.hasTargetTo = true;
+        if (bs.readFlag()) ev.targetToId = bs.readInt(9);
         if (bs.readFlag()) {
-            bs.readF32(); bs.readF32(); bs.readF32();
+            ev.targetToHasPosition = true;
+            ev.targetToPosition.x = bs.readF32();
+            ev.targetToPosition.y = bs.readF32();
+            ev.targetToPosition.z = bs.readF32();
         }
-        bs.readFlag();
+        ev.targetToAssign = bs.readFlag();
     } else if (ev.classId == T2Demo::NetEventClassFirst + 23) { // TargetFreeEvent
         ev.hasTargetFree = true;
         ev.targetId = bs.readInt(9);
@@ -2042,16 +2052,22 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
         // Target ids are not ghost indices; ghosts are removed only by the
         // ghost section's delete records.
         targets_.erase(ev.targetId);
+        // TargetInfo::clear.
+        targetVisible_[(ev.targetId >> 5) & 15] &= ~(1u << (ev.targetId & 31));
         playerInfo_.erase(std::remove_if(playerInfo_.begin(), playerInfo_.end(),
             [&](const DemoPlayerInfo& player) { return player.clientId == ev.targetId; }),
             playerInfo_.end());
     } else if (ev.classId == T2Demo::NetEventClassFirst + 10) { // RemoveClientTargetTypeEvent
-        bs.readRangedU32(0, 3); // ClientTarget type (HUD task list only)
+        ev.removeClientTargetType = (int)bs.readRangedU32(0, 3);
     } else if (ev.classId == T2Demo::NetEventClassFirst + 11) { // ResetClientTargetsEvent
         // TargetManager::resetClient clears every client target; tasks-only
         // clears just the HUD task list.
         const bool clientTargetsOnly = bs.readFlag();
-        if (applyEffects && !clientTargetsOnly) targets_.clear();
+        ev.resetClientTargets = clientTargetsOnly ? 1 : 0;
+        if (applyEffects && !clientTargetsOnly) {
+            targets_.clear();
+            targetVisible_.fill(0);
+        }
     } else if (ev.classId == T2Demo::NetEventClassFirst + 13) { // SetMissionCRCEvent
         ev.hasMissionCrc = true;
         ev.missionCrc = bs.readU32();
@@ -3543,6 +3559,8 @@ PacketData DemoParser::parsePacket(const uint8_t* data, size_t size, int blockIn
     bs.setStringBufferEnabled(true);
     pd.gameState = readGameState(bs);
     compressionPoint = pd.gameState.compressionPoint;
+    for (const auto& [index, mask] : pd.gameState.targetVisibility)
+        targetVisible_[index & 15] ^= (uint32_t)mask;
     if (bs.isError()) {
         Console::instance().printf(LogLevel::Error,
             "Demo: malformed packet seq=%d at game state bit=%d/%d (block=%d)",

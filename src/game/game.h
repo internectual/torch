@@ -1037,11 +1037,14 @@ public:
         auto it = sensorGroupListenMasks.find(group);
         return it == sensorGroupListenMasks.end() ? 0xffffffffu : it->second;
     }
+    // TargetInfo::VisibleToSensor of a client target, as the game packets
+    // toggle it.
+    bool isClientTargetVisible(int targetId) const {
+        if (demoParser && (demoLive || demoPlaying)) return demoParser->isTargetVisibleToSensor(targetId);
+        return targetId >= 0 && targetId < 512 && (liveTargetVisible[targetId >> 5] >> (targetId & 31) & 1u) != 0;
+    }
     bool isSensorGroupTargetVisible(int listenerGroup, int targetGroup) const {
         if (!HudParity::sensorGroupInRange(targetGroup, sensorGroupCount)) return false;
-        auto native = liveSensorGroupListenMasks.find(listenerGroup);
-        if (native != liveSensorGroupListenMasks.end())
-            return (native->second & (uint32_t(1) << targetGroup)) != 0;
         auto it = sensorGroupListenMasks.find(listenerGroup);
         return it == sensorGroupListenMasks.end() ||
             (targetGroup < 32 && (it->second & (uint32_t(1) << targetGroup)) != 0);
@@ -1155,6 +1158,8 @@ private:
     void pumpLiveClient();
     bool startLiveWorld();
     void forwardLiveEvents(const PacketData& pd);
+    // The world-box centre (Torque space) of the ghost that owns a target.
+    bool targetBoxCenter(int targetId, float out[3]) const;
     bool gamePaused = false;
     bool demoPaused = false;
     bool demoStepRequest = false;
@@ -1242,7 +1247,7 @@ private:
      std::map<int, uint32_t> sensorGroupListenMasks;
      std::map<std::pair<int, uint32_t>, ColorF> sensorGroupColors;
      std::map<int, uint32_t> sensorGroupFriendlyMasks;
-     std::map<int, uint32_t> liveSensorGroupListenMasks;
+     std::array<uint32_t, 16> liveTargetVisible{};
     uint32_t liveMissionCrc = 0;
     std::map<int, LiveTeamScore> liveTeamScores;
     std::map<int, int> livePlayerScores;

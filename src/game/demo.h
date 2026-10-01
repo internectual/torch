@@ -4,6 +4,7 @@
 #include "game/weapon_image_state.h"
 #include "game/vehicle_jets.h"
 #include "game/flare_spikes.h"
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <cmath>
@@ -507,6 +508,18 @@ struct NetEventInfo {
     bool hasAudioPosition = false;
     bool hasTargetInfo = false;
     bool hasTargetFree = false;
+    // TargetToEvent: a task target (id, or -1) and position, assigned or
+    // potential; the position is the target object's world box centre when
+    // the event carries none.
+    bool hasTargetTo = false;
+    int targetToId = -1;
+    bool targetToHasPosition = false;
+    Vec3 targetToPosition{};
+    bool targetToAssign = false;
+    // RemoveClientTargetTypeEvent: the ClientTarget type (-1 when not one).
+    int removeClientTargetType = -1;
+    // ResetClientTargetsEvent: 0 every client target, 1 the HUD list only.
+    int resetClientTargets = -1;
     bool hasMissionCrc = false;
     std::string targetName, targetSkin, targetSkinPreference;
     std::string targetVoice, targetType;
@@ -939,6 +952,7 @@ struct DemoParserSnapshot {
     std::vector<DemoPlayerInfo> playerInfo;
     std::map<std::string, std::string> skinToPlayer;
     std::map<int, DemoTargetState> targets;
+    std::array<uint32_t, 16> targetVisible{};
     WeaponsHudState weaponsHud;
     BackpackHudState backpackHud;
     InventoryHudState inventoryHud;
@@ -960,6 +974,10 @@ public:
     const DemoHeader& getHeader() const { return header; }
     const InitialBlockData& getInitialBlock() const { return initialBlock; }
     const GhostTracker& getGhostTracker() const { return ghostTracker; }
+    // TargetInfo::VisibleToSensor of a client target.
+    bool isTargetVisibleToSensor(int targetId) const {
+        return targetId >= 0 && targetId < 512 && (targetVisible_[targetId >> 5] >> (targetId & 31) & 1u) != 0;
+    }
     GhostTracker& getMutableGhostTracker() { return ghostTracker; }
 
     int getBlockCount();
@@ -1081,6 +1099,9 @@ private:
     bool connectionEstablished{};
     uint32_t nextRecvEventSeq{};
     std::map<int, DemoTargetState> targets_, initialTargets_;
+    // TargetInfo::VisibleToSensor per client target, as the game state's
+    // toggle words flip it.
+    std::array<uint32_t, 16> targetVisible_{};
     void applyTarget(GhostEntry& ghost) const;
     std::vector<int> moveTicksBefore_;
     uint32_t packetsParsed{};

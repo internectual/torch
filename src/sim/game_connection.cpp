@@ -566,6 +566,11 @@ void GameConnection::receivePacket(const uint8_t* data, size_t size) {
     for (const auto& event : events) {
         if (event.classId == GhostingMessage && event.hasGhostingMessage)
             handleGhostMessage(event.ghostMessage, event.ghostSequence);
+        if (event.hasServerTarget) {
+            const float pos[3] = {event.serverTargetPosition.x, event.serverTargetPosition.y,
+                                  event.serverTargetPosition.z};
+            ServerTargets::setServerTarget(*this, event.serverTargetId, pos);
+        }
         if (event.classId != RemoteCommand || event.rawArguments.empty()) continue;
         // RemoteCommandEvent::process on the server: serverCmd<name>(%client, ...).
         std::vector<std::string> args = RemoteCommand::scriptArguments(event.rawArguments, event.taggedArguments);

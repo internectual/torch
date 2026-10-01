@@ -89,6 +89,8 @@ std::array<uint8_t, 4> sensorGroupColor(uint32_t sensorGroup, uint32_t colorGrou
 uint32_t connectionSensorGroup(const GameConnection& connection);
 void setConnectionSensorGroup(GameConnection& connection, uint32_t group);
 bool receivedDataBlocks(const GameConnection& connection);
+// GameConnection::setServerTarget (SetServerTargetEvent::process).
+void setServerTarget(GameConnection& connection, int targetId, const float pos[3]);
 void setReceivedDataBlocks(GameConnection& connection, bool received);
 
 } // namespace ServerTargets

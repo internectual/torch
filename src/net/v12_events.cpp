@@ -139,10 +139,10 @@ bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
             stream.readRange(0, 1023);
             stream.readRange(0, 8);
         } else if (header.classId == 16) {
-            if (stream.readFlag()) stream.readUnsigned(9);
-            stream.readF32();
-            stream.readF32();
-            stream.readF32();
+            // SetServerTargetEvent: the client's task target.
+            event.hasServerTarget = true;
+            if (stream.readFlag()) event.serverTargetId = (int)stream.readUnsigned(9);
+            event.serverTargetPosition = {stream.readF32(), stream.readF32(), stream.readF32()};
         } else if (header.classId == 19) {
             event.datablockProcess = stream.readFlag();
             if (!event.datablockProcess) {
@@ -320,9 +320,9 @@ bool readServerPacketEvents(V12BitStream& stream, NetStringTable& strings,
         }
     }
     while (stream.readFlag()) {
-        const int group = (int)stream.readUnsigned(4);
+        const int index = (int)stream.readUnsigned(4);
         const uint32_t mask = stream.readU32();
-        if (state) state->sensorGroupListenMasks[group] = mask;
+        if (state) state->targetVisibleToggles.push_back({index, mask});
     }
     if (stream.readFlag()) {
         const uint8_t fov = (uint8_t)stream.readUnsigned(8);

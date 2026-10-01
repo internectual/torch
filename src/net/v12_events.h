@@ -71,6 +71,9 @@ struct ServerEvent {
     bool hasTargetInfo = false;
     bool hasTargetFree = false;
     uint16_t targetFreeId = 0;
+    bool hasServerTarget = false;
+    int serverTargetId = -1;
+    V12Vec3 serverTargetPosition{};
     bool hasTargetTo = false;
     bool targetToHasTarget = false;
     uint16_t targetToId = 0;
@@ -108,7 +111,9 @@ struct ServerGameState {
     bool hasCompressionPoint = false;
     bool hasCameraFov = false;
     uint8_t cameraFov = 0;
-    std::map<int, uint32_t> sensorGroupListenMasks;
+    // The VisibleToSensor toggles: a 32-target word index (4 bits) and the
+    // targets in it whose visibility changed.
+    std::vector<std::pair<int, uint32_t>> targetVisibleToggles;
 };
 
 // Event packets contain two lists: unguaranteed events first, then guaranteed

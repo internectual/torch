@@ -1930,7 +1930,8 @@ static void testSparseScreenEffectParity() {
     assert(V12::readServerPacketEvents(input, strings, events, &live));
     assert(live.hasDamageFlash && !live.hasWhiteOut && live.damageFlash > 0.49f &&
            live.damageFlash < 0.51f);
-    assert(live.sensorGroupListenMasks.at(3) == ((1u << 2) | (1u << 7)));
+    assert(live.targetVisibleToggles.size() == 1 && live.targetVisibleToggles[0].first == 3 &&
+           live.targetVisibleToggles[0].second == ((1u << 2) | (1u << 7)));
 
     // Demo and live packet defaults must be distinguishable from an explicit
     // zero, otherwise sparse packets erase an effect before client decay.

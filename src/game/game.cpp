@@ -1,5 +1,7 @@
 #include "sim/engine_classes.h"
 #include "game/game.h"
+#include "sim/client_targets.h"
+#include "sim/sim_state.h"
 #include "game/player_animation.h"
 #include "game/shape_lighting.h"
 #include "game/collision.h"
@@ -7619,9 +7621,7 @@ void Game::update(float dt) {
              auto isSpectatable = [this](int index) {
                  const GhostEntry* ghost = liveGhosts.getGhost(index);
                  if (!ghost) return false;
-                 const auto observer = activeConn->observerSnapshot();
-                  const bool sensorVisible = isSensorGroupTargetVisible(
-                      observer.playerSensorGroup, ghost->sensorGroup);
+                  const bool sensorVisible = isClientTargetVisible(ghost->targetId);
                   return ObserverParity::isSpectatableTarget(
                       ghost->className, ghost->damageState, sensorVisible);
              };
@@ -10563,8 +10563,8 @@ void Game::connectToServer(const char* host, uint16_t port) {
             dispatchClientCommand(raw, tagged);
         });
          activeConn->setStateCallback([this](const V12::ServerGameState& state) {
-             if (!state.sensorGroupListenMasks.empty())
-                 liveSensorGroupListenMasks = state.sensorGroupListenMasks;
+             for (const auto& [index, mask] : state.targetVisibleToggles)
+                 liveTargetVisible[index & 15] ^= mask;
             if (state.controlPresent && !state.controlDirty) {
                 serverPlayerGhostIndex = state.controlGhost;
                 serverPlayerGhostSynced = true;
@@ -11751,13 +11751,46 @@ void Game::tickLiveClient(float dt) {
         }
     }
     if (!demoPlaying) pumpLiveClient();
+    // GameProcess::advanceTime: the HUD targets follow their objects.
+    HUDTargetList::update((uint32_t)(SimState::simTime() * 1000.0), [this](int targetId, float out[3]) {
+        return isClientTargetVisible(targetId) && targetBoxCenter(targetId, out);
+    });
 }
 
 // NetConnection::handleGhostMessage and GhostAlwaysObjectEvent::process on
 // the client.
+bool Game::targetBoxCenter(int targetId, float out[3]) const {
+    if (!demoParser || targetId < 0) return false;
+    const GhostTracker& tracker = demoParser->getGhostTracker();
+    for (int index : tracker.getAllIndices()) {
+        const GhostEntry* ghost = tracker.getGhost(index);
+        if (!ghost || ghost->targetId != targetId) continue;
+        auto drawn = demoBoxCenters.find(index);
+        if (drawn != demoBoxCenters.end()) {
+            const Point3F p = Math::czUpToYUp().inverse().transform(drawn->second);
+            out[0] = p.x, out[1] = p.y, out[2] = p.z;
+        } else {
+            out[0] = ghost->position.x, out[1] = ghost->position.y, out[2] = ghost->position.z;
+        }
+        return true;
+    }
+    return false;
+}
+
 void Game::forwardLiveEvents(const PacketData& pd) {
     if (!liveConnection) return;
     for (const auto& ev : pd.events) {
+        // The client targets (targetManager.cc): tasks, removals, resets.
+        if (ev.hasTargetTo) {
+            float pos[3] = {ev.targetToPosition.x, ev.targetToPosition.y, ev.targetToPosition.z};
+            // TargetToEvent::unpack: without a position, the target object's
+            // world box centre.
+            if (!ev.targetToHasPosition && !targetBoxCenter(ev.targetToId, pos)) pos[0] = pos[1] = pos[2] = 0;
+            ClientTargets::targetTo(ev.targetToId, pos, ev.targetToAssign);
+        }
+        if (ev.removeClientTargetType >= 0) ClientTargets::removeTargetsOfType((uint32_t)ev.removeClientTargetType);
+        if (ev.resetClientTargets >= 0) ClientTargets::reset(ev.resetClientTargets == 1);
+        if (ev.hasTargetFree) HUDTargetList::targetRemoved((uint32_t)ev.targetId);
         if (ev.ghostMessage >= 0)
             liveConnection->clientGhostMessage(ev.ghostMessage, ev.ghostSequence, (uint32_t)ev.ghostCount);
         if (ev.classId == T2Demo::NetEventClassFirst + 3)
@@ -12343,7 +12376,7 @@ void Game::disconnectedCleanup() {
     nativeDatablockShapes.clear();
     nativeDatablocks.clear();
     liveTargets.clear();
-    liveSensorGroupListenMasks.clear();
+    liveTargetVisible.fill(0);
     liveMissionCrc = 0;
     liveTeamScores.clear();
     livePlayerScores.clear();
@@ -12385,7 +12418,7 @@ void Game::resetLiveMissionState() {
     nativeDatablockShapes.clear();
     nativeDatablocks.clear();
     liveTargets.clear();
-    liveSensorGroupListenMasks.clear();
+    liveTargetVisible.fill(0);
     liveMissionCrc = 0;
     liveTeamScores.clear();
     livePlayerScores.clear();

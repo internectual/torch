@@ -3389,9 +3389,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                      if (!ghost) return;
                      if (!Engine::instance().game().isDemoPlaying() &&
                          Engine::instance().game().activeConnection()) {
-                         const auto observer = Engine::instance().game().activeConnection()->observerSnapshot();
-                         if (!Engine::instance().game().isSensorGroupTargetVisible(
-                                 observer.playerSensorGroup, ghost->sensorGroup)) return;
+                         // Only targets visible to the client's sensor group.
+                         if (!Engine::instance().game().isClientTargetVisible(ghost->targetId)) return;
                      }
                     const Vec3& markerPos = (Engine::instance().game().isDemoPlaying() &&
                                              ghost->hasRendered) ? ghost->renderPos : ghost->position;
