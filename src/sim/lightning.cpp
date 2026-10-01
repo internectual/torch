@@ -3,7 +3,7 @@
 // seconds at a random point of the volume (the highest damageable object
 // under it, struck with chanceToHitTarget, takes the datablock's
 // applyDamage), and the LightningStrikeEvent every client receives.
-#include "sim/lightning.h"
+#include "sim/weather.h"
 #include "sim/containers.h"
 #include "sim/engine_object.h"
 #include "sim/game_base.h"

@@ -45,6 +45,7 @@ add_executable(torch
     src/sim/player.cpp
     src/sim/static_shapes.cpp
     src/sim/lightning.cpp
+    src/sim/precipitation.cpp
     src/sim/nav_graph.cpp
     src/ai/graph.cpp
     src/ai/graph_data.cpp
@@ -159,6 +160,7 @@ add_executable(torch_server
     src/sim/player.cpp
     src/sim/static_shapes.cpp
     src/sim/lightning.cpp
+    src/sim/precipitation.cpp
     src/sim/nav_graph.cpp
     src/ai/graph.cpp
     src/ai/graph_data.cpp
@@ -446,6 +448,7 @@ add_executable(torch_parity_test
     src/sim/player.cpp
     src/sim/static_shapes.cpp
     src/sim/lightning.cpp
+    src/sim/precipitation.cpp
     src/sim/nav_graph.cpp
     src/ai/graph.cpp
     src/ai/graph_data.cpp
@@ -541,6 +544,7 @@ add_executable(torch_network_loopback_test
     src/sim/player.cpp
     src/sim/static_shapes.cpp
     src/sim/lightning.cpp
+    src/sim/precipitation.cpp
     src/sim/nav_graph.cpp
     src/ai/graph.cpp
     src/ai/graph_data.cpp
@@ -637,6 +641,7 @@ add_executable(torch_nav_graph_test
     src/sim/player.cpp
     src/sim/static_shapes.cpp
     src/sim/lightning.cpp
+    src/sim/precipitation.cpp
     src/sim/nav_graph.cpp
     src/ai/graph.cpp
     src/ai/graph_data.cpp
@@ -734,6 +739,7 @@ add_executable(torch_target_manager_test
     src/sim/player.cpp
     src/sim/static_shapes.cpp
     src/sim/lightning.cpp
+    src/sim/precipitation.cpp
     src/sim/nav_graph.cpp
     src/ai/graph.cpp
     src/ai/graph_data.cpp
