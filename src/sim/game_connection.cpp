@@ -1,4 +1,5 @@
 #include "sim/game_connection.h"
+#include "sim/sim_state.h"
 #include "sim/engine_classes.h"
 #include "sim/target_manager.h"
 #include "sim/net_string_table.h"
@@ -1225,4 +1226,26 @@ void GameConnection::stopListening(int voice) {
                         ", 0);");
     }
     listeningTo[voice] = false;
+}
+
+static int64_t simCurrentTimeMS() { return (int64_t)(SimState::simTime() * 1000.0); }
+
+void GameConnection::setBlackOut(bool fade, int32_t timeMS) {
+    fadeToBlack = fade;
+    blackOutStartMS = simCurrentTimeMS();
+    blackOutTimeMS = timeMS;
+    // if timeMS <= 0 set the value instantly
+    if (blackOutTimeMS <= 0) blackOut = fadeToBlack ? 1.0f : 0.0f;
+}
+
+float GameConnection::getBlackOut() {
+    const int64_t curTime = simCurrentTimeMS();
+    // see if we're in the middle of a black out
+    if (curTime < blackOutStartMS + blackOutTimeMS) {
+        const float timePercent = (float)(curTime - blackOutStartMS) / (float)blackOutTimeMS;
+        blackOut = fadeToBlack ? timePercent : 1.0f - timePercent;
+    } else {
+        blackOut = fadeToBlack ? 1.0f : 0.0f;
+    }
+    return blackOut;
 }

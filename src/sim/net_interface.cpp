@@ -955,6 +955,14 @@ void registerNetInterfaceNatives(TorqueScript& ts) {
         deleteConnection(ScriptEngine::instance().findObject(args[0].toString().c_str()));
         return VMValue("");
     });
+    ts.registerNative("GameConnection::setBlackOut", [](const Args& args) -> VMValue {
+        auto* connection = args.empty() ? nullptr : EngineObjects::get<GameConnection>(args[0].toString());
+        const std::string fade = args.size() > 1 ? args[1].toString() : std::string();
+        // dAtob: "true" or a non-zero number.
+        const bool toBlack = strcasecmp(fade.c_str(), "true") == 0 || std::atof(fade.c_str()) != 0.0;
+        if (connection) connection->setBlackOut(toBlack, args.size() > 2 ? std::atoi(args[2].toString().c_str()) : 0);
+        return VMValue("");
+    });
     ts.registerNative("GameConnection::setDisconnectReason", [](const Args& args) -> VMValue {
         ScriptObject* object = args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str());
         if (object && dynamic_cast<GameConnection*>(object->engine.get()))

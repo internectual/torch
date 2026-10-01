@@ -62,6 +62,14 @@ public:
     // or the client's ServerConnection.
     bool isServer = true;
     bool local = false;
+    // GameConnection::setBlackOut / getBlackOut (the local connection's
+    // fade to or from black, drawn by GameRenderFilters).
+    bool fadeToBlack = false;
+    int64_t blackOutStartMS = 0;
+    int32_t blackOutTimeMS = 0;
+    float blackOut = 0.0f;
+    void setBlackOut(bool fade, int32_t timeMS);
+    float getBlackOut();
     std::string address = "Local";
     std::function<void(const std::vector<uint8_t>&)> deliver;
 

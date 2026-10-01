@@ -8,6 +8,8 @@
 #include "core/engine.h"
 #include "script/script_engine.h"
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <strings.h>
 
@@ -257,6 +259,27 @@ void registerSceneObjectNatives(TorqueScript& ts) {
     ts.registerNative("InteriorInstance::setAlarmMode", [](const std::vector<VMValue>& args) -> VMValue {
         auto* interior = args.empty() ? nullptr : EngineObjects::get<InteriorInstanceObject>(args[0].toString());
         if (interior) interior->setAlarmMode(args.size() > 1 && strcasecmp(args[1].toString().c_str(), "On") == 0);
+        return VMValue("");
+    });
+    // MissionArea::getArea: "x y width height" (768 768 512 512 unset).
+    ts.registerNative("MissionArea::getArea", [](const std::vector<VMValue>& args) -> VMValue {
+        auto* area = args.empty() ? nullptr : EngineObjects::get<NetObject>(args[0].toString());
+        auto rect = area ? Fields::s32Vector(area->script, "area") : std::vector<int32_t>{};
+        if (rect.size() < 4) rect = {768, 768, 512, 512};
+        char buffer[48];
+        std::snprintf(buffer, sizeof(buffer), "%d %d %d %d", rect[0], rect[1], rect[2], rect[3]);
+        return VMValue(buffer);
+    });
+    // MissionArea::setArea(x, y, width, height): the clients get it again.
+    ts.registerNative("MissionArea::setArea", [](const std::vector<VMValue>& args) -> VMValue {
+        auto* area = args.empty() ? nullptr : EngineObjects::get<NetObject>(args[0].toString());
+        if (!area || args.size() < 5) return VMValue("");
+        char buffer[48];
+        std::snprintf(buffer, sizeof(buffer), "%d %d %d %d", std::atoi(args[1].toString().c_str()),
+                      std::atoi(args[2].toString().c_str()), std::atoi(args[3].toString().c_str()),
+                      std::atoi(args[4].toString().c_str()));
+        ScriptEngine::instance().setObjectField(area->script, "area", VMValue(buffer));
+        area->setMaskBits(InitMask);
         return VMValue("");
     });
 }

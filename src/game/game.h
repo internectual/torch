@@ -962,6 +962,8 @@ public:
     void selectSpectateTarget(int ghostIndex);
     float getDamageFlash() const { return damageFlash; }
     float getWhiteOut() const { return whiteOut; }
+    // GameConnection::getBlackOut of the connection to the server.
+    float getBlackOut() const;
     void recordDamageFlash(float amount);
     bool isUnderwater() const {
         if (!w) return false;

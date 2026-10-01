@@ -68,6 +68,23 @@ int main() {
                            "$ban7 = BanList::isBanned(7, \"\");");
     assert(utilityScript->getGlobal("$ban5").toInt() == 1 && utilityScript->getGlobal("$ban6").toInt() == 0 &&
            utilityScript->getGlobal("$ban5after").toInt() == 0 && utilityScript->getGlobal("$ban7").toInt() == 0);
+    // GameConnection::setBlackOut: no time sets the level at once; a timed
+    // fade starts from the other extreme.
+    {
+        GameConnection blackOut;
+        blackOut.setBlackOut(true, 0);
+        assert(blackOut.getBlackOut() == 1.0f);
+        blackOut.setBlackOut(false, 4000);
+        assert(blackOut.getBlackOut() > 0.9f);
+        blackOut.setBlackOut(false, 0);
+        assert(blackOut.getBlackOut() == 0.0f);
+    }
+    // MissionArea::getArea / setArea.
+    utilityScript->execute("new MissionArea(TestArea) { area = \"-512 -256 1024 768\"; };"
+                           "$areaBefore = TestArea.getArea(); TestArea.setArea(1, 2, 3, 4); $areaAfter = TestArea.getArea();"
+                           "TestArea.delete();");
+    assert(utilityScript->getGlobal("$areaBefore").toString() == "-512 -256 1024 768");
+    assert(utilityScript->getGlobal("$areaAfter").toString() == "1 2 3 4");
     // A bare identifier is a constant operand inside an argument
     // expression, a string literal only as the whole argument.
     utilityScript->execute("$bareDiv = isObject(NoSuchGroup/NoChild); $bareCat = strlen(abc @ def); $bareArg = strlen(abc);");

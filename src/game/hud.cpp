@@ -110,12 +110,13 @@ void HUD::render(Game* game) {
     // snapshots. They are intentionally drawn before the HUD controls.
     const float damageFlash = game->getDamageFlash();
     const float whiteOut = game->getWhiteOut();
+    const float blackOut = game->getBlackOut();
     if (damageFlash > 0.0f)
-        r.drawBox({{0, 0, 0}, {(float)w, (float)h, 0}},
-                  {0.8f, 0, 0, std::min(damageFlash * 0.5f, 0.6f)});
+        r.drawBox({{0, 0, 0}, {(float)w, (float)h, 0}}, {1, 0, 0, std::min(damageFlash, 0.76f)});
     if (whiteOut > 0.0f)
-        r.drawBox({{0, 0, 0}, {(float)w, (float)h, 0}},
-                  {1, 1, 1, std::min(whiteOut * 0.5f, 0.8f)});
+        r.drawBox({{0, 0, 0}, {(float)w, (float)h, 0}}, {1.0f, 1.0f, 0.92f, std::min(whiteOut, 1.0f)});
+    if (blackOut > 0.0f)
+        r.drawBox({{0, 0, 0}, {(float)w, (float)h, 0}}, {0, 0, 0, std::min(blackOut, 1.0f)});
 
     char buf[128];
     if (!dead && !liveObserver) {

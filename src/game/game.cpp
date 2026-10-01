@@ -1289,6 +1289,8 @@ void Player::applyDamage(float amount) {
     }
 }
 
+float Game::getBlackOut() const { return liveConnection ? liveConnection->getBlackOut() : 0.0f; }
+
 void Game::recordDamageFlash(float amount) {
     damageFlash = std::max(damageFlash, damageFlashForAmount(amount, pl->maxHealth()));
 }
@@ -7004,8 +7006,9 @@ void Game::update(float dt) {
     const float simulationDt = GameTime::scaledDelta(dt, timeScale);
     time += demoPlaying ? std::max(0.0f, dt) : simulationDt;
     const float feedbackDt = demoPlaying ? std::max(0.0f, dt) : simulationDt;
-    if (damageFlash > 0.0f) damageFlash = std::max(0.0f, damageFlash - feedbackDt * 3.0f);
-    if (whiteOut > 0.0f) whiteOut = std::max(0.0f, whiteOut - feedbackDt * 2.0f);
+    // ShapeBase::processTick: SB::DFDec and SB::WODec (0.007) per 32 ms tick.
+    if (damageFlash > 0.0f) damageFlash = std::max(0.0f, damageFlash - feedbackDt * (0.007f / 0.032f));
+    if (whiteOut > 0.0f) whiteOut = std::max(0.0f, whiteOut - feedbackDt * (0.007f / 0.032f));
 
     if (gameState == Playing) {
         // ─── Demo playback ──────────────────────────────────────
