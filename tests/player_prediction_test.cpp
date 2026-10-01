@@ -66,5 +66,30 @@ int main() {
     s.velocity = {0, 5, 0};
     for (int i = 0; i < 5; ++i) processTick(s, d, -20.0f, nullptr, 0, collision, floorGather, nullptr);
     assert(s.position.y > still.y && s.position.y < still.y + 5 * 5 * TickSec + 0.01f);
+    {
+        // Player::updatePos: a physical zone's face the swept box meets
+        // scales the velocity (velocityMod); the free move covers the travel.
+        Collision zoned;
+        Zone zone;
+        zone.velocityMod = 0.1f;
+        // The zone's -x face at x = 0 (outward normal -x).
+        zone.triangles.push_back({{0, -5, -5}, {0, 5, 5}, {0, 5, -5}, {-1, 0, 0}});
+        zone.triangles.push_back({{0, -5, -5}, {0, -5, 5}, {0, 5, 5}, {-1, 0, 0}});
+        zoned.gatherZones = [&](const Point3F&, const Point3F&, std::vector<Zone>& out) { out.push_back(zone); };
+        State z;
+        z.initialized = true;
+        z.position = {-0.7f, 0, 0};
+        z.velocity = {10, 0, 0};
+        zoned.prepare(nullptr, z.position, d.boxSize, mul(z.velocity, TickSec), d.maxStepHeight);
+        updatePos(z, d, zoned, z.position);
+        assert(near(z.velocity.x, 1.0f, 1e-4f));
+        assert(near(z.position.x, -0.7f + 10 * TickSec, 1e-4f));
+        // Moving away from the face (a back face) leaves the velocity alone.
+        z.position = {-0.7f, 0, 0};
+        z.velocity = {-10, 0, 0};
+        zoned.prepare(nullptr, z.position, d.boxSize, mul(z.velocity, TickSec), d.maxStepHeight);
+        updatePos(z, d, zoned, z.position);
+        assert(near(z.velocity.x, -10.0f, 1e-4f));
+    }
     return 0;
 }

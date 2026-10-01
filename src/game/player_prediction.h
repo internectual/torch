@@ -125,8 +125,19 @@ inline bool boxIntersectsTriangle(const Box& box, const Triangle& t) {
     return true;
 }
 
+// A PhysicalZone near the player: its faces (outward normals) and the
+// factor its faces apply to the velocity of a box that meets them.
+struct Zone {
+    std::vector<Triangle> triangles;
+    float velocityMod = 1.0f;
+};
+using GatherZones = std::function<void(const Point3F& min, const Point3F& max, std::vector<Zone>& out)>;
+
 struct Collision {
     std::vector<Triangle> triangles;
+    // The active physical zones (the server's; empty without them).
+    std::vector<Zone> zones;
+    GatherZones gatherZones;
     float hitTime = 1.0f;
     float hitHeight = -std::numeric_limits<float>::infinity();
     Point3F hitNormal{0, 0, 1};
@@ -141,6 +152,8 @@ struct Collision {
         box.max = add(box.max, {grow, grow, grow + maxStep});
         triangles.clear();
         if (gather) gather(box.min, box.max, triangles);
+        zones.clear();
+        if (gatherZones) gatherZones(box.min, box.max, zones);
     }
 
     bool findContact(const Point3F& position, const Point3F& size, Point3F& out) const {
@@ -443,15 +456,23 @@ inline bool updatePos(State& s, const Data& d, Collision& collision, const Point
         const float speed = length(s.velocity);
         if (speed == 0) return totalMotion >= 0.001f * initialSpeed;
         const Point3F travel = mul(s.velocity, time);
+        // The physical zones' faces the swept box meets (a separate poly
+        // list) scale the velocity; a free move still covers the travel.
+        for (const auto& zone : collision.zones) {
+            Collision faces;
+            faces.triangles = zone.triangles;
+            if (faces.sweep(s.position, d.boxSize, travel)) s.velocity = mul(s.velocity, zone.velocityMod);
+        }
         if (!collision.sweep(s.position, d.boxSize, travel)) {
             s.position = add(s.position, travel);
             totalMotion += speed * time;
             return totalMotion >= 0.001f * initialSpeed;
         }
+        const float velLen = length(s.velocity);
         const float dt = time * collision.hitTime;
-        const float backOff = std::min(0.01f / speed, dt);
+        const float backOff = velLen > 0.0f ? std::min(0.01f / velLen, dt) : 0.0f;
         s.position = add(s.position, mul(s.velocity, dt - backOff));
-        totalMotion += speed * (dt - backOff);
+        totalMotion += velLen * (dt - backOff);
         time -= dt;
         s.falling = false;
         const Point3F normal = collision.hitNormal;

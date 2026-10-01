@@ -13,6 +13,7 @@
 #include "sim/path_manager.h"
 #include "sim/force_field.h"
 #include "sim/static_shapes.h"
+#include "sim/trigger.h"
 #include "fs/file_system.h"
 #include "fs/vl2_archive.h"
 #include "sim/projectile_aim.h"
@@ -1745,6 +1746,25 @@ int main() {
         tris.clear();
         ForceFields::gather(walker, {-1, -1, -1}, {1, 1, 1}, tris);
         assert(tris.empty());
+        // PhysicalZone (forceField.cs puts one in every field): the
+        // polyhedron's twelve outward triangles while active, none after
+        // deactivate().
+        script.ts()->execute("new PhysicalZone(TestFieldZone) { position = \"0 0 0\"; scale = \"4 0.25 4\";"
+                             "  polyhedron = \"0 1 0 1 0 0 0 -1 0 0 0 1\"; velocityMod = 0.1; };");
+        {
+            std::vector<PlayerPrediction::Zone> zones;
+            PhysicalZones::gather({-1, -1, -1}, {1, 1, 1}, zones);
+            assert(zones.size() == 1 && zones[0].triangles.size() == 12 && zones[0].velocityMod == 0.1f);
+            for (const auto& t : zones[0].triangles) {
+                const Point3F c{2.0f, 0.125f, 2.0f};
+                assert(PlayerPrediction::dot(t.n, PlayerPrediction::sub(t.a, c)) > 0);
+            }
+            script.ts()->execute("TestFieldZone.deactivate();");
+            zones.clear();
+            PhysicalZones::gather({-1, -1, -1}, {1, 1, 1}, zones);
+            assert(zones.empty());
+            ScriptEngine::instance().deleteScriptObject("TestFieldZone");
+        }
         // ShapeBase::isInForceField: the closed field reaching into the
         // player's box; none once the player stands clear.
         walker->setTransform({1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});

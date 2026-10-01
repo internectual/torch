@@ -1,4 +1,5 @@
 #include "sim/player.h"
+#include "sim/trigger.h"
 #include "sim/containers.h"
 #include "sim/force_field.h"
 #include "sim/datablock_pack.h"
@@ -166,6 +167,7 @@ bool PlayerObject::displaceObject(const Point3F& displacement) {
         ForceFields::gather(this, min, max, out);
     };
     const Point3F initial = state.position;
+    collision.gatherZones = PhysicalZones::gather;
     collision.prepare(gather, state.position, data->boxSize, PlayerPrediction::mul(state.velocity, dt),
                       data->maxStepHeight);
     const bool result = PlayerPrediction::updatePos(state, *data, collision, initial, dt);
@@ -334,6 +336,7 @@ void PlayerObject::processMove(const ClientMoveIn* move) {
         if (world.triangles) world.triangles(min, max, out);
         ForceFields::gather(this, min, max, out);
     };
+    collision.gatherZones = PhysicalZones::gather;
     PlayerPrediction::processTick(state, *data, SimState::server().gravity, &m, 0.0f, collision, gather, world.water);
     energy = state.energy;
     syncTransform();

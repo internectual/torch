@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <array>
 
 namespace {
 
@@ -133,6 +134,15 @@ void triggersPotentialEnter(const std::string& object, const float lo[3], const 
 
 void registerTriggerNatives(TorqueScript& ts) {
     EngineObjects::registerClass("Trigger", [] { return std::make_shared<TriggerObject>(); });
+    EngineObjects::registerClass("PhysicalZone", [] { return std::make_shared<PhysicalZoneObject>(); });
+    ts.registerNative("PhysicalZone::activate", [](const std::vector<VMValue>& args) -> VMValue {
+        if (auto* z = args.empty() ? nullptr : EngineObjects::get<PhysicalZoneObject>(args[0].toString())) z->activate();
+        return VMValue("");
+    });
+    ts.registerNative("PhysicalZone::deactivate", [](const std::vector<VMValue>& args) -> VMValue {
+        if (auto* z = args.empty() ? nullptr : EngineObjects::get<PhysicalZoneObject>(args[0].toString())) z->deactivate();
+        return VMValue("");
+    });
     using Args = std::vector<VMValue>;
     auto trigger = [](const Args& args) -> TriggerObject* {
         return args.empty() ? nullptr : EngineObjects::get<TriggerObject>(args[0].toString());
@@ -190,3 +200,132 @@ void registerTriggerNatives(TorqueScript& ts) {
         return VMValue("");
     });
 }
+
+// TypeTriggerPolyhedron as setDataTypeTriggerPolyhedron builds it: the
+// eight corners, six planes (normals from the edge vectors), twelve edges.
+void PhysicalZoneObject::readFields() {
+    SceneObject::readFields();
+    const std::string text = Fields::string(script, "polyhedron");
+    float v[12];
+    hasPolyhedron = !text.empty() &&
+                    std::sscanf(text.c_str(), "%f %f %f %f %f %f %f %f %f %f %f %f", &v[0], &v[1], &v[2], &v[3], &v[4],
+                                &v[5], &v[6], &v[7], &v[8], &v[9], &v[10], &v[11]) == 12;
+    if (!text.empty() && !hasPolyhedron) Console::instance().printf(LogLevel::Info, "Bad polyhedron!");
+    if (!hasPolyhedron) return;
+    const float* o = v;
+    const float* a = v + 3;
+    const float* b = v + 6;
+    const float* c = v + 9;
+    auto set = [&](int i, int ka, int kb, int kc) {
+        for (int k = 0; k < 3; ++k) points[i][k] = o[k] + (ka ? a[k] : 0) + (kb ? b[k] : 0) + (kc ? c[k] : 0);
+    };
+    set(0, 0, 0, 0);
+    set(1, 1, 0, 0);
+    set(2, 0, 1, 0);
+    set(3, 0, 0, 1);
+    set(4, 1, 1, 0);
+    set(5, 1, 0, 1);
+    set(6, 0, 1, 1);
+    set(7, 1, 1, 1);
+    auto plane = [&](int i, const float* p, const float* x, const float* y) {
+        // PlaneF::set(p, mCross(x, y)): the normal normalized.
+        float n[3] = {x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]};
+        const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (len > 0) for (float& k : n) k /= len;
+        for (int k = 0; k < 3; ++k) planes[i][k] = n[k];
+        planes[i][3] = -(p[0] * n[0] + p[1] * n[1] + p[2] * n[2]);
+    };
+    plane(0, o, c, a);
+    plane(1, o, a, b);
+    plane(2, o, b, c);
+    plane(3, points[7], b, a);
+    plane(4, points[7], c, b);
+    plane(5, points[7], a, c);
+}
+
+float PhysicalZoneObject::velocityMod() const { return Fields::f32(script, "velocityMod", 1.0f); }
+
+uint32_t PhysicalZoneObject::packUpdate(GameConnection&, uint32_t mask, TorqueBitWriter& w) {
+    static const uint32_t edges[12][4] = {
+        // face[0], face[1], vertex[0], vertex[1]
+        {0, 1, 0, 1}, {0, 4, 1, 5}, {0, 3, 5, 3}, {0, 2, 3, 0}, {3, 2, 3, 6}, {2, 5, 6, 2},
+        {2, 1, 2, 0}, {4, 1, 1, 4}, {1, 5, 4, 2}, {4, 5, 4, 7}, {3, 4, 5, 7}, {3, 5, 7, 6}};
+    if (w.writeFlag(mask & InitialUpdateMask)) {
+        writeTransform(w);
+        writeScale(w);
+        const uint32_t count = hasPolyhedron ? 8 : 0;
+        w.writeU32(count);
+        for (uint32_t i = 0; i < count; ++i) w.writePoint({points[i][0], points[i][1], points[i][2]});
+        w.writeU32(hasPolyhedron ? 6 : 0);
+        for (uint32_t i = 0; i < (hasPolyhedron ? 6u : 0u); ++i)
+            for (int k = 0; k < 4; ++k) w.writeF32(planes[i][k]);
+        w.writeU32(hasPolyhedron ? 12 : 0);
+        for (uint32_t i = 0; i < (hasPolyhedron ? 12u : 0u); ++i)
+            for (int k = 0; k < 4; ++k) w.writeU32(edges[i][k]);
+        w.writeF32(velocityMod());
+        w.writeF32(Fields::f32(script, "gravityMod", 1.0f));
+        const auto force = Fields::point(script, "appliedForce", {0, 0, 0});
+        w.writePoint({force[0], force[1], force[2]});
+        w.writeFlag(active);
+    } else {
+        w.writeFlag(active);
+    }
+    return 0;
+}
+
+void PhysicalZoneObject::activate() {
+    if (!active) setMaskBits(ActiveMask);
+    active = true;
+}
+
+void PhysicalZoneObject::deactivate() {
+    if (active) setMaskBits(ActiveMask);
+    active = false;
+}
+
+void PhysicalZoneObject::faces(std::vector<PlayerPrediction::Triangle>& out) const {
+    if (!hasPolyhedron) return;
+    float world[8][3];
+    for (int i = 0; i < 8; ++i) toWorld(*this, points[i], world[i]);
+    Point3F centre{0, 0, 0};
+    for (auto& p : world) centre = {centre.x + p[0] / 8, centre.y + p[1] / 8, centre.z + p[2] / 8};
+    // The six faces as quads of the setDataTypeTriggerPolyhedron corners.
+    static const int quads[6][4] = {{0, 1, 4, 2}, {3, 5, 7, 6}, {0, 1, 5, 3}, {2, 4, 7, 6}, {0, 2, 6, 3}, {1, 4, 7, 5}};
+    auto pt = [&](int i) { return Point3F{world[i][0], world[i][1], world[i][2]}; };
+    for (const auto& q : quads) {
+        for (const auto& tri : {std::array<int, 3>{q[0], q[1], q[2]}, std::array<int, 3>{q[0], q[2], q[3]}}) {
+            PlayerPrediction::Triangle t{pt(tri[0]), pt(tri[1]), pt(tri[2]), {}};
+            Point3F n = PlayerPrediction::cross(PlayerPrediction::sub(t.b, t.a), PlayerPrediction::sub(t.c, t.a));
+            const float len = PlayerPrediction::length(n);
+            if (len < 1e-12f) continue;
+            n = PlayerPrediction::mul(n, 1.0f / len);
+            // Outward: away from the centre.
+            if (PlayerPrediction::dot(n, PlayerPrediction::sub(t.a, centre)) < 0) {
+                std::swap(t.b, t.c);
+                n = PlayerPrediction::mul(n, -1.0f);
+            }
+            t.n = n;
+            out.push_back(t);
+        }
+    }
+}
+
+namespace PhysicalZones {
+void gather(const Point3F& min, const Point3F& max, std::vector<PlayerPrediction::Zone>& out) {
+    for (auto& [key, object] : ScriptEngine::instance().objects) {
+        auto* zone = object ? dynamic_cast<PhysicalZoneObject*>(object->engine.get()) : nullptr;
+        if (!zone || !zone->active || !zone->hasPolyhedron) continue;
+        PlayerPrediction::Zone z;
+        zone->faces(z.triangles);
+        Point3F lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+        for (const auto& t : z.triangles)
+            for (const Point3F* p : {&t.a, &t.b, &t.c}) {
+                lo = {std::min(lo.x, p->x), std::min(lo.y, p->y), std::min(lo.z, p->z)};
+                hi = {std::max(hi.x, p->x), std::max(hi.y, p->y), std::max(hi.z, p->z)};
+            }
+        if (hi.x < min.x || lo.x > max.x || hi.y < min.y || lo.y > max.y || hi.z < min.z || lo.z > max.z) continue;
+        z.velocityMod = zone->velocityMod();
+        out.push_back(std::move(z));
+    }
+}
+} // namespace PhysicalZones
