@@ -834,6 +834,15 @@ static Texture* generateShellTexture(Renderer& r, const char* name) {
 }
 #endif
 
+// TextureManager::loadBitmapInstance as shipped: a script's bitmap name is
+// relative to textures/ ("gui/ret_blaster"); the file system tries the
+// extensions (.jpg, .png, .gif, .bmp, .bm8) after the name as given.
+static Texture* t2Bitmap(Renderer& r, const std::string& name) {
+    if (name.empty()) return nullptr;
+    Texture* t = r.loadTexture(("textures/" + name).c_str());
+    return t && t->loaded ? t : nullptr;
+}
+
 // Shell texture cache - resolve only the original bitmap resources.
 static Texture* getShellTex(Renderer& r, const char* name) {
     std::string base = std::string("textures/gui/") + name;
@@ -1158,14 +1167,7 @@ void GuiRenderer::tabLayoutParams(const GuiControl* grp, float& maxTabW, float& 
 // 32-pitch band grid) atlas. Those buttons render compact — sized to their
 // label plus the state-dot zone — instead of full maxTabWidth.
 static Texture* loadGuiTexLoose(const std::string& base) {
-    Renderer& r = Engine::instance().renderer();
-    const std::string paths[] = { base + ".png", "textures/" + base + ".png", "textures/gui/" + base + ".png" };
-    Texture* tex = nullptr;
-    for (auto& p : paths) {
-        tex = r.loadTexture(p.c_str());
-        if (tex && tex->loaded) break;
-    }
-    return tex && tex->loaded ? tex : nullptr;
+    return t2Bitmap(Engine::instance().renderer(), base);
 }
 
 bool GuiRenderer::launchStyleTabs(const GuiControl* grp) {
@@ -1408,17 +1410,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         // Check profile bitmap
         auto loadProfileBmp = [&](const std::string& base, const std::string& ext) -> Texture* {
-            std::string p1 = base + ext;
-            Texture* tt = r.loadTexture(p1.c_str());
-            if (!tt) {
-                std::string p2 = "textures/" + base + ext;
-                tt = r.loadTexture(p2.c_str());
-            }
-            if (!tt && base.find("textures/") != 0) {
-                std::string p3 = "textures/gui/" + base + ext;
-                tt = r.loadTexture(p3.c_str());
-            }
-            return tt;
+            return t2Bitmap(r, base + ext);
         };
         Texture* btnTex = nullptr;
         std::string bmpBase;
@@ -1437,11 +1429,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // For ShellLaunchMenu: load bitmapBase with state suffixes (_rol, _act)
         Texture* launchTex = nullptr;
         if (cn == "ShellLaunchMenu" && !bmpBase.empty()) {
-            auto tryLaunch = [&](const std::string& suffix) -> Texture* {
-                std::string paths[] = { bmpBase + suffix + ".png", "textures/" + bmpBase + suffix + ".png", "textures/gui/" + bmpBase + suffix + ".png" };
-                for (auto& p : paths) { Texture* t = r.loadTexture(p.c_str()); if (t && t->loaded) return t; }
-                return nullptr;
-            };
+            auto tryLaunch = [&](const std::string& suffix) -> Texture* { return t2Bitmap(r, bmpBase + suffix); };
             if (ctl->hovered) launchTex = tryLaunch("_rol");
             if (!launchTex && ctl->menuOpen) launchTex = tryLaunch("_act");
             if (!launchTex) launchTex = tryLaunch("");  // base texture (normal state)
@@ -1497,17 +1485,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         } // end else (no launchTex)
         if (!ctl->bitmap.empty()) {
-            Texture* tex = r.loadTexture(ctl->bitmap.c_str());
-            if (!tex) {
-                std::string tryPath = "textures/gui/" + ctl->bitmap;
-                tex = r.loadTexture(tryPath.c_str());
-                if (!tex) {
-                    auto slash = ctl->bitmap.rfind('/');
-                    std::string fname = (slash != std::string::npos) ? ctl->bitmap.substr(slash + 1) : ctl->bitmap;
-                    if (!fname.empty()) fname[0] = (char)toupper(fname[0]);
-                    tex = r.loadTexture(("textures/gui/" + fname).c_str());
-                }
-            }
+            Texture* tex = t2Bitmap(r, ctl->bitmap);
             if (tex && tex->loaded)
                 r.drawTexturedRect({x+2,y+2,0}, {x+ctl->extentX-2,y+ctl->extentY-2,0}, tex->id);
         }
@@ -1825,27 +1803,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (bmpPath.empty() && cn == "GuiChunkedBitmapCtrl") {
             r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.08f, 0.08f, 0.12f, 1});
         } else if (!bmpPath.empty()) {
-            // bmpPath may already have an extension (e.g. "gui/bg_Demo.png") — don't double-append .png
-            auto hasExt = [](const std::string& s) {
-                auto dot = s.rfind('.');
-                auto sl = s.rfind('/');
-                return dot != std::string::npos && (sl == std::string::npos || dot > sl);
-            };
-            auto tryLoad = [&](const std::string& p) -> Texture* {
-                Texture* t = r.loadTexture(p.c_str());
-                if (!t) { std::string c = p; if (!c.empty()) { c[0] = (char)toupper(c[0]); t = r.loadTexture(c.c_str()); } }
-                return t;
-            };
-            Texture* tex = nullptr;
-            if (hasExt(bmpPath)) {
-                tex = tryLoad(bmpPath);
-                if (!tex) tex = tryLoad("textures/" + bmpPath);
-                if (!tex) tex = tryLoad("textures/gui/" + bmpPath);
-            } else {
-                tex = tryLoad(bmpPath + ".png");
-                if (!tex) tex = tryLoad("textures/" + bmpPath + ".png");
-                if (!tex) tex = tryLoad("textures/gui/" + bmpPath + ".png");
-            }
+            Texture* tex = t2Bitmap(r, bmpPath);
             if (tex && tex->loaded)
                 r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, tex->id);
             else
@@ -1875,7 +1833,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto bi = prof->fields.find("bitmap"); if (bi != prof->fields.end()) bmp = bi->second.toString();
         }
         Texture* fieldTex = nullptr;
-        if (!bmp.empty()) { fieldTex = r.loadTexture((bmp + ".png").c_str()); if (!fieldTex) fieldTex = r.loadTexture(("textures/" + bmp + ".png").c_str()); }
+        if (!bmp.empty()) fieldTex = t2Bitmap(r, bmp);
         // Shell entry field: T2 bitmap array (pieces as rows: left cap /
         // center / right cap; states as columns). Caps natural size, center
         // stretched — same recipe as the original ShellTextEditCtrl.
@@ -2421,12 +2379,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto toi = prof->fields.find("textOffset"); if (toi != prof->fields.end()) sscanf(toi->second.toString().c_str(), "%f %f", &textOfsX, &textOfsY);
         }
         Texture* tabTex = nullptr;
-        auto loadTex = [&](const std::string& p) {
-            if (p.empty()) return;
-            tabTex = r.loadTexture((p + ".png").c_str());
-            if (!tabTex) tabTex = r.loadTexture(("textures/" + p + ".png").c_str());
-            if (!tabTex) tabTex = r.loadTexture(("textures/gui/" + p + ".png").c_str());
-        };
+        auto loadTex = [&](const std::string& p) { tabTex = t2Bitmap(r, p); };
         if (!bmpBase.empty()) loadTex(bmpBase);
         if (!bmp.empty() && !tabTex) loadTex(bmp);
         if (cn == "ShellTabButton") {
@@ -2451,18 +2404,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             // Try to load bitmapBase with state suffixes (_rol for hover, _act for pressed)
             Texture* stateTex = nullptr;
             if (!bmpBase.empty()) {
-                auto tryBmpBase = [&](const std::string& suffix) -> Texture* {
-                    std::string paths[] = {
-                        bmpBase + suffix + ".png",
-                        "textures/" + bmpBase + suffix + ".png",
-                        "textures/gui/" + bmpBase + suffix + ".png"
-                    };
-                    for (auto& p : paths) {
-                        Texture* t = r.loadTexture(p.c_str());
-                        if (t && t->loaded) return t;
-                    }
-                    return nullptr;
-                };
+                auto tryBmpBase = [&](const std::string& suffix) -> Texture* { return t2Bitmap(r, bmpBase + suffix); };
                 if (ctl->hovered) stateTex = tryBmpBase("_rol");
                 if (!stateTex && ctl->menuOpen) stateTex = tryBmpBase("_act");
                 if (!stateTex) stateTex = tabTex; // fallback to base texture
@@ -2956,17 +2898,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto sit = ctl->tabSets.find(setId);
             if (sit != ctl->tabSets.end() && !sit->second.empty()) base = sit->second;
             Texture* tex = nullptr;
-            if (!base.empty()) {
-                std::string paths[] = {
-                    base + ".png",
-                    "textures/" + base + ".png",
-                    "textures/gui/" + base + ".png"
-                };
-                for (auto& p : paths) {
-                    tex = r.loadTexture(p.c_str());
-                    if (tex && tex->loaded) break;
-                }
-            }
+            if (!base.empty()) tex = t2Bitmap(r, base);
             tabTexCache[setId] = tex;
             return tex && tex->loaded ? tex : nullptr;
         };
@@ -3209,11 +3141,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         } else if (cn == "HudPulsingBitmap" || cn == "HudBitmapCtrl" ||
                    cn == "HudCrosshair") {
             Texture* tex = nullptr;
-            if (!ctl->bitmap.empty()) {
-                tex = r.loadTexture(ctl->bitmap.c_str());
-                if (!tex || !tex->loaded)
-                    tex = r.loadTexture(("textures/gui/" + ctl->bitmap).c_str());
-            }
+            if (!ctl->bitmap.empty()) tex = t2Bitmap(r, ctl->bitmap);
             ColorF tint{1, 1, 1, 1};
             auto colorIt = ctl->fields.find("color");
             if (colorIt != ctl->fields.end()) parseColor(colorIt->second, tint);
@@ -3314,14 +3242,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0},
                            {0.02f, 0.03f, 0.04f, 0.45f});
             // HUD bitmap names are relative to textures/ ("gui/hud_disc").
-            auto hudTexture = [&](const std::string& name) -> Texture* {
-                if (name.empty()) return nullptr;
-                for (const std::string& candidate : {name, "textures/" + name, "textures/gui/" + name}) {
-                    Texture* texture = r.loadTexture(candidate.c_str());
-                    if (texture && texture->loaded) return texture;
-                }
-                return nullptr;
-            };
+            auto hudTexture = [&](const std::string& name) -> Texture* { return t2Bitmap(r, name); };
             auto loadHudBitmap = [&](const char* field) -> Texture* {
                 auto it = ctl->fields.find(field);
                 return it == ctl->fields.end() ? nullptr : hudTexture(it->second);
