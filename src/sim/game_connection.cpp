@@ -747,7 +747,18 @@ void GameConnection::scopeScene() {
             if (!net || !net->ghostable || net->scopeAlways || net->netClassId() < 0) continue;
             // A hidden shape is out of the scene.
             if (auto* shape = dynamic_cast<ShapeBase*>(net); shape && shape->hidden) continue;
-            const float dx = net->transform[3] - x, dy = net->transform[7] - y, dz = net->transform[11] - z;
+            // An object with its own box is in range when the box is (the
+            // scene traversal reaches what the box overlaps).
+            float lo[3], hi[3];
+            float dx = net->transform[3] - x, dy = net->transform[7] - y, dz = net->transform[11] - z;
+            if (net->objectBox(lo, hi)) {
+                Point3F wlo, whi;
+                if (SimContainer::worldBox(object, wlo, whi)) {
+                    dx = x < wlo.x ? wlo.x - x : x > whi.x ? x - whi.x : 0.0f;
+                    dy = y < wlo.y ? wlo.y - y : y > whi.y ? y - whi.y : 0.0f;
+                    dz = z < wlo.z ? wlo.z - z : z > whi.z ? z - whi.z : 0.0f;
+                }
+            }
             if (dx * dx + dy * dy + dz * dz <= visible * visible) inRange.push_back(engine.objectKey(object));
         }
         for (const auto& key : inRange) objectInScope(key);

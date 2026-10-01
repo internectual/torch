@@ -32,6 +32,9 @@ public:
     // In the scene container (searches, rays, collision); a MissionMarker
     // only joins it while the mission is edited.
     virtual bool inContainer() const { return true; }
+    // mObjBox when the class sets one of its own (object space), for the
+    // world box; false for the default point.
+    virtual bool objectBox(float lo[3], float hi[3]) const { (void)lo; (void)hi; return false; }
     std::array<float, 16> transform{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}; // row-major
     float scale[3] = {1, 1, 1};
     void readFields() override;

@@ -2,6 +2,7 @@
 // ScopeAlways): packUpdate as the retail Tribes 2 client reads it (the demo
 // reader), fields and defaults from the engine's initPersistFields.
 #include "sim/net_object.h"
+#include "sim/game_base.h"
 #include "sim/engine_crc.h"
 #include "sim/server_container.h"
 #include "sim/datablock_pack.h"
@@ -349,6 +350,67 @@ private:
     enum { TransformMask = 1u << 1 };
 };
 
+// particleEmitter.cc ParticleEmissionDummy: the transform, scale and the
+// emitter datablock (no emitter: onAdd fails and it never ghosts).
+class ParticleEmissionDummyObject : public GameBase {
+public:
+    ParticleEmissionDummyObject() { ghostable = true; }
+    const char* netClassName() const override { return "ParticleEmissionDummy"; }
+    void readFields() override {
+        GameBase::readFields();
+        ghostable = emitterId() != 0 && !dataBlock().empty();
+    }
+    uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override {
+        const uint32_t ret = GameBase::packUpdate(connection, mask, w);
+        writeTransform(w);
+        writeScale(w);
+        const uint32_t emitter = emitterId();
+        if (w.writeFlag(emitter != 0)) w.writeRangedU32(emitter, DataBlockPack::ObjectIdFirst, DataBlockPack::ObjectIdLast);
+        return ret;
+    }
+
+private:
+    uint32_t emitterId() const {
+        const std::string name = Fields::string(script, "emitter");
+        ScriptObject* block = name.empty() ? nullptr : ScriptEngine::instance().findDataBlock(name);
+        return block ? (uint32_t)ScriptEngine::instance().objectId(block) : 0u;
+    }
+};
+
+// fireballAtmosphere.cc: the drop parameters (the client drops the
+// fireballs); its box covers the world.
+class FireballAtmosphereObject : public GameBase {
+public:
+    FireballAtmosphereObject() { ghostable = true; }
+    const char* netClassName() const override { return "FireballAtmosphere"; }
+    bool objectBox(float lo[3], float hi[3]) const override {
+        for (int i = 0; i < 3; ++i) {
+            lo[i] = -1e6f;
+            hi[i] = 1e6f;
+        }
+        return true;
+    }
+    uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override {
+        const uint32_t ret = GameBase::packUpdate(connection, mask, w);
+        if (w.writeFlag(mask & InitialUpdateMask)) {
+            w.writeF32(Fields::f32(script, "dropRadius", 600.0f));
+            w.writeF32(Fields::f32(script, "dropsPerMinute", 3.0f));
+            w.writeF32(Fields::f32(script, "maxDropAngle", 30.0f));
+            w.writeF32(Fields::f32(script, "minDropAngle", 0.0f));
+            w.writeF32(Fields::f32(script, "startVelocity", 20.0f));
+            w.writeF32(Fields::f32(script, "dropHeight", 500.0f));
+            // onAdd normalizes the drop direction.
+            auto dir = Fields::point(script, "dropDir", {0.5f, 0.5f, -0.5f});
+            const float len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+            if (len > 0.0f) for (float& c : dir) c /= len;
+            w.writeF32(dir[0]);
+            w.writeF32(dir[1]);
+            w.writeF32(dir[2]);
+        }
+        return ret;
+    }
+};
+
 // waterBlock.cc
 class WaterBlockObject : public SceneObject {
 public:
@@ -418,5 +480,7 @@ void registerSceneObjectClasses() {
     EngineObjects::registerClass("TSStatic", [] { return std::make_shared<TSStaticObject>(); });
     EngineObjects::registerClass("MissionArea", [] { return std::make_shared<MissionAreaObject>(); });
     EngineObjects::registerClass("WaterBlock", [] { return std::make_shared<WaterBlockObject>(); });
+    EngineObjects::registerClass("ParticleEmissionDummy", [] { return std::make_shared<ParticleEmissionDummyObject>(); });
+    EngineObjects::registerClass("FireballAtmosphere", [] { return std::make_shared<FireballAtmosphereObject>(); });
     EngineObjects::registerClass("AudioEmitter", [] { return std::make_shared<AudioEmitterObject>(); });
 }

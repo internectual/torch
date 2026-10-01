@@ -1,3 +1,4 @@
+#include "sim/engine_classes.h"
 #include "game/game.h"
 #include "game/player_animation.h"
 #include "game/shape_lighting.h"
@@ -11398,8 +11399,12 @@ void Game::importShapeSequences(DTSShape& shape, const std::string& shapePath,
 
 DTSShape* Game::getOrLoadDemoShape(const std::string& className, const std::string& skinName,
                                    const std::string& datablockInstance) {
-    if (className == "Camera" || className == "AIObjective" ||
-        className == "StationFXPersonal")
+    if (className == "Camera" || className == "StationFXPersonal")
+        return nullptr;
+    // Only shapes render one; a MissionMarker (AIObjective, SpawnSphere,
+    // WayPoint) joins the client scene only in the mission editor.
+    if (EngineClasses::isEngineClass(className) &&
+        (!EngineClasses::isA(className, "ShapeBase") || EngineClasses::isA(className, "MissionMarker")))
         return nullptr;
 
     // Datablock and skin references determine identity. Do not infer an asset

@@ -3326,6 +3326,20 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
         }
     }
     else if (cn == "TSStatic") readTSStaticData(bs, isInitial, cp, entry);
+    else if (cn == "FireballAtmosphere") {
+        // FireballAtmosphere::unpackUpdate.
+        readGameBaseData(bs, isInitial, entry);
+        if (bs.readFlag()) {
+            setSceneProp(entry, "dropRadius", sceneFloats({bs.readF32()}));
+            setSceneProp(entry, "dropsPerMinute", sceneFloats({bs.readF32()}));
+            setSceneProp(entry, "maxDropAngle", sceneFloats({bs.readF32()}));
+            setSceneProp(entry, "minDropAngle", sceneFloats({bs.readF32()}));
+            setSceneProp(entry, "startVelocity", sceneFloats({bs.readF32()}));
+            setSceneProp(entry, "dropHeight", sceneFloats({bs.readF32()}));
+            const float x = bs.readF32(), y = bs.readF32(), z = bs.readF32();
+            setSceneProp(entry, "dropDir", sceneFloats({x, y, z}));
+        }
+    }
     else if (cn == "AudioEmitter") readAudioEmitterData(bs, entry);
     else if (cn == "VehicleBlocker") readVehicleBlockerData(bs);
     else if (cn == "AIObjective") {

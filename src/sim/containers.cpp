@@ -202,6 +202,24 @@ bool worldBox(ScriptObject* object, Point3F& min, Point3F& max) {
         max = {p.x + 0.5f, p.y + 0.5f, p.z + 1.0f};
         return true;
     }
+    if (auto* scene = dynamic_cast<SceneObject*>(engine)) {
+        // SceneObject::resetWorldBox: the scaled object box through the
+        // transform.
+        float lo[3], hi[3];
+        if (!scene->objectBox(lo, hi)) return false;
+        const auto& m = scene->transform;
+        min = {1e30f, 1e30f, 1e30f};
+        max = {-1e30f, -1e30f, -1e30f};
+        for (int k = 0; k < 8; ++k) {
+            const float x = ((k & 1) ? hi[0] : lo[0]) * scene->scale[0], y = ((k & 2) ? hi[1] : lo[1]) * scene->scale[1],
+                        z = ((k & 4) ? hi[2] : lo[2]) * scene->scale[2];
+            const Point3F w{m[0] * x + m[1] * y + m[2] * z + m[3], m[4] * x + m[5] * y + m[6] * z + m[7],
+                            m[8] * x + m[9] * y + m[10] * z + m[11]};
+            min = {std::min(min.x, w.x), std::min(min.y, w.y), std::min(min.z, w.z)};
+            max = {std::max(max.x, w.x), std::max(max.y, w.y), std::max(max.z, w.z)};
+        }
+        return true;
+    }
     return false;
 }
 
