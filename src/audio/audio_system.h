@@ -213,6 +213,19 @@ public:
     void setInnerFalloffScale(float scale);
     static bool outerFalloffsDisabled();
     static float innerFalloffScale();
+    // audio.cc's channel volumes by Audio::AudioTypes, clamped 0..1; the
+    // effect channel is the sound-effect volume, the music one the stream's.
+    enum AudioType { DefaultAudioType, ChatAudioType, GuiAudioType, EffectAudioType, VoiceAudioType,
+                     MusicAudioType, NumAudioTypes };
+    bool setChannelVolume(int type, float volume);
+    float channelVolume(int type) const;
+    // alxPlayMusicStream / alxStopMusicStream: one streamed MP3 track; its end
+    // (or a stop) reaches onMusicFinished(stopped) from advance(), as
+    // alxStreamUpdate calls finishedMusicStream.
+    bool playMusic(const std::string& path);
+    void stopMusic();
+    std::function<void(bool stopped)> onMusicFinished;
+    void updateStreams();
     void releaseSource(SoundSource* source);
     bool isSourceAlive(const SoundSource* source) const;
     bool isBufferAlive(const SoundBuffer* buffer) const;

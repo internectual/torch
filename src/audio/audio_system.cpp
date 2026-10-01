@@ -2,6 +2,8 @@
 #include "core/console.h"
 #include "core/engine.h"
 #include "fs/file_system.h"
+#include "audio/mp3_decoder.h"
+#include <memory>
 #include <AL/al.h>
 #include <AL/alc.h>
 #include <AL/efx.h>
@@ -39,6 +41,15 @@ struct AudioSystem::Impl {
     std::unordered_map<std::string, SoundBuffer*> buffers;
     std::vector<SoundSource*> sources;
     uint64_t nextSourceSerial = 1;
+    float typeVolume[AudioSystem::NumAudioTypes] = {1, 1, 1, 1, 1, 1};
+    // The music stream.
+    struct Music {
+        std::unique_ptr<Mp3Decoder> decoder;
+        ALuint source = 0;
+        ALuint buffers[4] = {};
+        float sourceVolume = 1.0f; // mSourceVolume: the music channel's volume at play
+    } music;
+    bool musicFinished = false, musicFinishedStopped = false;
     ALuint underwaterFilter{};
     bool hasEfx = false;
     GenFiltersFn genFilters{};
@@ -217,10 +228,124 @@ void AudioSystem::update(const Point3F& listenerPos, const Point3F& listenerVel,
     }
 }
 
+namespace {
+constexpr size_t MusicChunkSamples = 32768;
+
+// Decodes the next chunk into an OpenAL buffer; false at the stream's end.
+bool fillMusicBuffer(Mp3Decoder& decoder, ALuint buffer) {
+    std::vector<int16_t> pcm(MusicChunkSamples);
+    const size_t samples = decoder.read(pcm.data(), pcm.size());
+    if (samples == 0) return false;
+    alBufferData(buffer, decoder.channels() == 2 ? AL_FORMAT_STEREO16 : AL_FORMAT_MONO16, pcm.data(),
+                 (ALsizei)(samples * sizeof(int16_t)), (ALsizei)decoder.rate());
+    return true;
+}
+} // namespace
+
+bool AudioSystem::setChannelVolume(int type, float volume) {
+    if (type < 0 || type >= NumAudioTypes) return false;
+    volume = std::clamp(volume, 0.0f, 1.0f);
+    impl->typeVolume[type] = volume;
+    if (type == EffectAudioType) cfg.sfxVolume = volume;
+    if (type == MusicAudioType) {
+        cfg.musicVolume = volume;
+        // alxUpdateTypeGain: the source's volume times its channel's.
+        if (impl->music.source)
+            alSourcef(impl->music.source, AL_GAIN, impl->music.sourceVolume * volume * cfg.masterVolume);
+    }
+    return true;
+}
+
+float AudioSystem::channelVolume(int type) const {
+    return type >= 0 && type < NumAudioTypes ? impl->typeVolume[type] : 0.0f;
+}
+
+bool AudioSystem::playMusic(const std::string& path) {
+    if (!initialized) return false;
+    stopMusic();
+    std::vector<uint8_t> data;
+    if (!Engine::instance().fs().readFile(path.c_str(), data) || data.empty()) {
+        Console::instance().printf(LogLevel::Error, "alxStartStream: could not open %s", path.c_str());
+        return false;
+    }
+    auto decoder = std::make_unique<Mp3Decoder>();
+    if (!decoder->open(std::move(data))) {
+        Console::instance().printf(LogLevel::Error, "alxStartStream: %s is not MPEG audio", path.c_str());
+        return false;
+    }
+    auto& m = impl->music;
+    alGenSources(1, &m.source);
+    alGenBuffers(4, m.buffers);
+    alSourcei(m.source, AL_SOURCE_RELATIVE, AL_TRUE);
+    alSource3f(m.source, AL_POSITION, 0.0f, 0.0f, 0.0f);
+    m.sourceVolume = impl->typeVolume[MusicAudioType];
+    alSourcef(m.source, AL_GAIN, m.sourceVolume * cfg.masterVolume);
+    int queued = 0;
+    for (ALuint buffer : m.buffers) {
+        if (!fillMusicBuffer(*decoder, buffer)) break;
+        alSourceQueueBuffers(m.source, 1, &buffer);
+        ++queued;
+    }
+    m.decoder = std::move(decoder);
+    if (queued == 0) {
+        stopMusic();
+        return false;
+    }
+    alSourcePlay(m.source);
+    return true;
+}
+
+void AudioSystem::stopMusic() {
+    auto& m = impl->music;
+    if (!m.source) return;
+    alSourceStop(m.source);
+    alSourcei(m.source, AL_BUFFER, 0);
+    alDeleteSources(1, &m.source);
+    alDeleteBuffers(4, m.buffers);
+    m = Impl::Music{};
+    // The stream's callback with stopped set.
+    impl->musicFinished = true;
+    impl->musicFinishedStopped = true;
+}
+
 void AudioSystem::advance(float seconds) {
     if (!initialized || !std::isfinite(seconds) || seconds <= 0.0f) return;
     for (auto* source : impl->sources)
         if (source) source->advance(seconds);
+}
+
+// alxStreamUpdate (every frame of the main loop): the music stream's
+// buffers refilled, and its end reported.
+void AudioSystem::updateStreams() {
+    if (!initialized) return;
+    auto& m = impl->music;
+    if (m.source && m.decoder) {
+        ALint processed = 0;
+        alGetSourcei(m.source, AL_BUFFERS_PROCESSED, &processed);
+        while (processed-- > 0) {
+            ALuint buffer = 0;
+            alSourceUnqueueBuffers(m.source, 1, &buffer);
+            if (fillMusicBuffer(*m.decoder, buffer)) alSourceQueueBuffers(m.source, 1, &buffer);
+        }
+        ALint queued = 0, state = 0;
+        alGetSourcei(m.source, AL_BUFFERS_QUEUED, &queued);
+        alGetSourcei(m.source, AL_SOURCE_STATE, &state);
+        if (queued == 0) {
+            // The end of the track.
+            alDeleteSources(1, &m.source);
+            alDeleteBuffers(4, m.buffers);
+            m = Impl::Music{};
+            impl->musicFinished = true;
+            impl->musicFinishedStopped = false;
+        } else if (state != AL_PLAYING) {
+            alSourcePlay(m.source); // an underrun
+        }
+    }
+    // alxStreamUpdate: the end reaches the console in the main loop.
+    if (impl->musicFinished) {
+        impl->musicFinished = false;
+        if (onMusicFinished) onMusicFinished(impl->musicFinishedStopped);
+    }
 }
 
 void AudioSystem::setListenerPosition(const Point3F& position) {

@@ -13,6 +13,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
 pkg_check_modules(GLEW REQUIRED IMPORTED_TARGET glew)
 pkg_check_modules(OpenAL REQUIRED IMPORTED_TARGET openal)
+pkg_check_modules(MPG123 REQUIRED IMPORTED_TARGET libmpg123)
 pkg_check_modules(GLU REQUIRED IMPORTED_TARGET glu)
 
 find_package(OpenGL REQUIRED)
@@ -88,6 +89,7 @@ add_executable(torch
     src/render/dif_loader.cpp
     src/render/gui_renderer.cpp
     src/audio/audio_system.cpp
+    src/audio/mp3_decoder.cpp
     src/net/network.cpp
     src/net/master_query.cpp
     src/net/v12_bitstream.cpp
@@ -121,7 +123,7 @@ target_link_libraries(torch PRIVATE
     PkgConfig::OpenAL
     PkgConfig::GLU
     CURL::libcurl
-    vorbisfile vorbis
+    vorbisfile vorbis PkgConfig::MPG123
     m
     dl
 )
@@ -203,6 +205,7 @@ add_executable(torch_server
     src/render/dif_loader.cpp
     src/render/gui_renderer.cpp
     src/audio/audio_system.cpp
+    src/audio/mp3_decoder.cpp
     src/net/network.cpp
     src/net/master_query.cpp
     src/net/v12_bitstream.cpp
@@ -234,7 +237,7 @@ target_link_libraries(torch_server PRIVATE
     PkgConfig::OpenAL
     PkgConfig::GLU
     CURL::libcurl
-    vorbisfile vorbis
+    vorbisfile vorbis PkgConfig::MPG123
     m
     dl
 )
@@ -282,6 +285,12 @@ add_executable(torch_transform_test
 target_include_directories(torch_transform_test PRIVATE src)
 target_compile_options(torch_transform_test PRIVATE -UNDEBUG)
 add_test(NAME torch_transform COMMAND torch_transform_test)
+
+add_executable(torch_mp3_decoder_test tests/mp3_decoder_test.cpp src/audio/mp3_decoder.cpp)
+target_include_directories(torch_mp3_decoder_test PRIVATE src)
+target_compile_options(torch_mp3_decoder_test PRIVATE -UNDEBUG)
+target_link_libraries(torch_mp3_decoder_test PRIVATE PkgConfig::MPG123)
+add_test(NAME torch_mp3_decoder COMMAND torch_mp3_decoder_test)
 
 add_executable(torch_collision_bounds_test
     tests/collision_bounds_test.cpp
@@ -489,6 +498,7 @@ add_executable(torch_parity_test
     src/render/dif_loader.cpp
     src/render/gui_renderer.cpp
     src/audio/audio_system.cpp
+    src/audio/mp3_decoder.cpp
     src/game/demo.cpp
     src/game/game.cpp
     src/render/projected_shadows.cpp
@@ -512,7 +522,7 @@ add_executable(torch_parity_test
 target_include_directories(torch_parity_test PRIVATE src)
 target_link_libraries(torch_parity_test PRIVATE
     OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
-    PkgConfig::GLU CURL::libcurl vorbisfile vorbis m dl)
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 m dl)
 target_compile_definitions(torch_parity_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_parity_test PRIVATE -UNDEBUG -ffunction-sections -fdata-sections)
 target_link_options(torch_parity_test PRIVATE -Wl,--gc-sections)
@@ -587,6 +597,7 @@ add_executable(torch_network_loopback_test
     src/render/dif_loader.cpp
     src/render/gui_renderer.cpp
     src/audio/audio_system.cpp
+    src/audio/mp3_decoder.cpp
     src/net/network.cpp
     src/net/master_query.cpp
     src/net/v12_bitstream.cpp
@@ -610,7 +621,7 @@ add_executable(torch_network_loopback_test
 target_include_directories(torch_network_loopback_test PRIVATE src)
 target_link_libraries(torch_network_loopback_test PRIVATE
     OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
-    PkgConfig::GLU CURL::libcurl vorbisfile vorbis m dl)
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 m dl)
 target_compile_definitions(torch_network_loopback_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_network_loopback_test PRIVATE -UNDEBUG)
 add_test(NAME torch_network_loopback COMMAND torch_network_loopback_test)
@@ -684,6 +695,7 @@ add_executable(torch_nav_graph_test
     src/render/dif_loader.cpp
     src/render/gui_renderer.cpp
     src/audio/audio_system.cpp
+    src/audio/mp3_decoder.cpp
     src/net/network.cpp
     src/net/master_query.cpp
     src/net/v12_bitstream.cpp
@@ -707,7 +719,7 @@ add_executable(torch_nav_graph_test
 target_include_directories(torch_nav_graph_test PRIVATE src)
 target_link_libraries(torch_nav_graph_test PRIVATE
     OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
-    PkgConfig::GLU CURL::libcurl vorbisfile vorbis m dl)
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 m dl)
 target_compile_definitions(torch_nav_graph_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_nav_graph_test PRIVATE -UNDEBUG)
 add_test(NAME torch_nav_graph COMMAND torch_nav_graph_test)
@@ -782,6 +794,7 @@ add_executable(torch_target_manager_test
     src/render/dif_loader.cpp
     src/render/gui_renderer.cpp
     src/audio/audio_system.cpp
+    src/audio/mp3_decoder.cpp
     src/net/network.cpp
     src/net/master_query.cpp
     src/net/v12_bitstream.cpp
@@ -805,7 +818,7 @@ add_executable(torch_target_manager_test
 target_include_directories(torch_target_manager_test PRIVATE src)
 target_link_libraries(torch_target_manager_test PRIVATE
     OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
-    PkgConfig::GLU CURL::libcurl vorbisfile vorbis m dl)
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 m dl)
 target_compile_definitions(torch_target_manager_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_target_manager_test PRIVATE -UNDEBUG)
 add_test(NAME torch_target_manager COMMAND torch_target_manager_test)

@@ -1975,6 +1975,7 @@ void Engine::run() {
 
         // Process events
         if (!plat->processEvents()) break;
+        if (aud) aud->updateStreams();
         if (plat->input().focusLost) {
             g->resetInputState();
             // SDL may omit button-up events when focus changes. Release GUI

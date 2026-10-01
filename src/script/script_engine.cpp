@@ -6998,15 +6998,39 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("alxGetInnerFalloffScale", [](const auto&) -> VMValue {
         return VMValue(AudioSystem::innerFalloffScale());
     });
+    // alxSetChannelVolume(channel, volume) / alxGetChannelVolume(channel):
+    // the channel is an Audio::AudioTypes value ($MusicAudioType...).
     tsInstance->registerNative("alxSetChannelVolume", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(1);
-        std::string channel = args[0].toString();
-        float vol = (float)args[1].toDouble();
-        auto& cfg = Engine::instance().audio().config();
-        if (channel == "Master") cfg.masterVolume = vol;
-        else if (channel == "SFX" || channel == "SoundEffects") cfg.sfxVolume = vol;
-        else if (channel == "Music") cfg.musicVolume = vol;
-        return VMValue(1);
+        if (args.size() < 2) return VMValue("");
+        const int type = std::atoi(args[0].toString().c_str());
+        if (!Engine::instance().audio().setChannelVolume(type, (float)std::atof(args[1].toString().c_str())))
+            Console::instance().printf(LogLevel::Error, "cAudio_alxSetChannelVolume: invalid channel '%d'", type);
+        return VMValue("");
+    });
+    tsInstance->registerNative("alxGetChannelVolume", [](const auto& args) -> VMValue {
+        const int type = args.empty() ? 0 : std::atoi(args[0].toString().c_str());
+        if (type < 0 || type >= AudioSystem::NumAudioTypes) {
+            Console::instance().printf(LogLevel::Error, "cAudio_alxGetChannelVolume: invalid channel '%d'", type);
+            return VMValue(0.0f);
+        }
+        return VMValue(Engine::instance().audio().channelVolume(type));
+    });
+    // alxPlayMusic(file): the shipped client streams the file (a game
+    // directory path, "base\\music\\lush.mp3"); finishedMusicStream(stopped)
+    // follows its end or a stop.
+    tsInstance->registerNative("alxPlayMusic", [this](const auto& args) -> VMValue {
+        std::string path = args.empty() ? std::string() : args[0].toString();
+        for (char& c : path) if (c == '\\') c = '/';
+        auto& audio = Engine::instance().audio();
+        audio.onMusicFinished = [this](bool stopped) {
+            if (tsInstance) tsInstance->callFunction("finishedMusicStream", {VMValue(stopped ? "true" : "false")});
+        };
+        audio.playMusic(path);
+        return VMValue("");
+    });
+    tsInstance->registerNative("alxStopMusic", [](const auto&) -> VMValue {
+        Engine::instance().audio().stopMusic();
+        return VMValue("");
     });
     tsInstance->registerNative("alxCreateSource", [audioProfilePath, audioProfileSettings](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue(0);
