@@ -4,6 +4,7 @@
 #include "sim/net_object.h"
 #include "sim/engine_crc.h"
 #include "sim/server_container.h"
+#include "sim/datablock_pack.h"
 #include "script/torquescript.h"
 #include "core/engine.h"
 #include "script/script_engine.h"
@@ -223,6 +224,131 @@ public:
     }
 };
 
+// audioEmitter.cc: the emitter's sound for the clients, everything in the
+// initial update with what matches the default description (or a
+// datablock description) left out, as AudioEmitter::packData leaves it.
+class AudioEmitterObject : public SceneObject {
+public:
+    AudioEmitterObject() { scopeAlways = true; }
+    const char* netClassName() const override { return "AudioEmitter"; }
+    uint32_t packUpdate(GameConnection&, uint32_t mask, TorqueBitWriter& w) override {
+        enum Dirty {
+            Profile = 1u << 0, Description = 1u << 1, Filename = 1u << 2, UseProfileDescription = 1u << 3,
+            Volume = 1u << 4, IsLooping = 1u << 5, Is3D = 1u << 6, MinDistance = 1u << 7, MaxDistance = 1u << 8,
+            ConeInsideAngle = 1u << 9, ConeOutsideAngle = 1u << 10, ConeOutsideVolume = 1u << 11,
+            ConeVector = 1u << 12, LoopCount = 1u << 13, MinLoopGap = 1u << 14, MaxLoopGap = 1u << 15,
+            AudioType = 1u << 16, OutsideAmbient = 1u << 17, AllDirtyMask = (1u << 19) - 1,
+            LoopingMask = LoopCount | MinLoopGap | MaxLoopGap,
+            Is3DMask = MinDistance | MaxDistance | ConeInsideAngle | ConeOutsideAngle | ConeOutsideVolume | ConeVector,
+            UseProfileDescriptionMask = Volume | LoopingMask | Is3DMask | IsLooping | Is3D | AudioType,
+        };
+        auto& engine = ScriptEngine::instance();
+        auto datablockId = [&](const char* field) {
+            const std::string name = Fields::string(script, field);
+            ScriptObject* block = name.empty() ? nullptr : engine.findDataBlock(name);
+            return block ? (uint32_t)engine.objectId(block) : 0u;
+        };
+        const uint32_t profile = datablockId("profile"), description = datablockId("description");
+        const std::string fileName = Fields::string(script, "fileName");
+        bool useProfileDescription = Fields::boolean(script, "useProfileDescription", false);
+        const bool outsideAmbient = Fields::boolean(script, "outsideAmbient", true);
+        const float volume = Fields::f32(script, "volume", 1.0f);
+        const bool isLooping = Fields::boolean(script, "isLooping", true);
+        const bool is3D = Fields::boolean(script, "is3D", true);
+        const float minDistance = Fields::f32(script, "minDistance", 1.0f);
+        const float maxDistance = Fields::f32(script, "maxDistance", 100.0f);
+        const int32_t coneInside = Fields::s32(script, "coneInsideAngle", 360);
+        const int32_t coneOutside = Fields::s32(script, "coneOutsideAngle", 360);
+        const float coneOutsideVolume = Fields::f32(script, "coneOutsideVolume", 1.0f);
+        const auto coneVector = Fields::point(script, "coneVector", {0, 0, 1});
+        const int32_t loopCount = Fields::s32(script, "loopCount", -1);
+        const int32_t minLoopGap = Fields::s32(script, "minLoopGap", 0);
+        const int32_t maxLoopGap = Fields::s32(script, "maxLoopGap", 0);
+
+        uint32_t dirty = 0;
+        // initial update
+        if (w.writeFlag(mask & InitMask)) {
+            mask |= TransformMask;
+            dirty = AllDirtyMask;
+            if (!profile) dirty &= ~Profile;
+            if (!description) dirty &= ~Description;
+            if (fileName.empty()) dirty &= ~Filename;
+            if (!useProfileDescription) dirty &= ~UseProfileDescription;
+            if (outsideAmbient) dirty &= ~OutsideAmbient;
+        }
+        if (w.writeFlag(mask & TransformMask)) writeAffineTransform(w);
+        if (w.writeFlag(dirty & Profile))
+            if (w.writeFlag(profile != 0)) w.writeRangedU32(profile, DataBlockPack::ObjectIdFirst, DataBlockPack::ObjectIdLast);
+        if (w.writeFlag(dirty & Description))
+            if (w.writeFlag(description != 0))
+                w.writeRangedU32(description, DataBlockPack::ObjectIdFirst, DataBlockPack::ObjectIdLast);
+        if (w.writeFlag(dirty & Filename)) w.writeString(fileName);
+        if (w.writeFlag(dirty & UseProfileDescription)) {
+            if (useProfileDescription) {
+                if (!profile) useProfileDescription = false;
+                else dirty &= ~UseProfileDescriptionMask;
+            }
+            if (!useProfileDescription) dirty |= UseProfileDescriptionMask;
+            w.writeFlag(useProfileDescription);
+        }
+        if (description && !useProfileDescription) dirty &= ~UseProfileDescriptionMask;
+        // check initial update against the default description
+        if ((mask & InitMask) && !useProfileDescription) {
+            if (volume == 1.0f) dirty &= ~Volume;
+            if (!isLooping) {
+                dirty &= ~LoopingMask;
+            } else {
+                dirty &= ~IsLooping;
+                if (loopCount == -1) dirty &= ~LoopCount;
+                if (minLoopGap == 0) dirty &= ~MinLoopGap;
+                if (maxLoopGap == 0) dirty &= ~MaxLoopGap;
+            }
+            if (!is3D) {
+                dirty &= ~Is3DMask;
+            } else {
+                dirty &= ~Is3D;
+                if (minDistance == 1.0f) dirty &= ~MinDistance;
+                if (maxDistance == 100.0f) dirty &= ~MaxDistance;
+                if (coneInside == 360) dirty &= ~ConeInsideAngle;
+                if (coneOutside == 360) dirty &= ~ConeOutsideAngle;
+                if (coneOutsideVolume == 1.0f) dirty &= ~ConeOutsideVolume;
+                if (coneVector[0] == 0 && coneVector[1] == 0 && coneVector[2] == 1) dirty &= ~ConeVector;
+            }
+            dirty &= ~AudioType;
+        }
+        if (w.writeFlag(dirty & Volume)) w.writeF32(volume);
+        if (w.writeFlag(dirty & IsLooping)) {
+            if (isLooping) dirty |= LoopingMask;
+            else dirty &= ~LoopingMask;
+            w.writeFlag(isLooping);
+        }
+        if (w.writeFlag(dirty & Is3D)) {
+            if (is3D) dirty |= Is3DMask;
+            else dirty &= ~Is3DMask;
+            w.writeFlag(is3D);
+        }
+        if (w.writeFlag(dirty & MinDistance)) w.writeF32(minDistance);
+        if (w.writeFlag(dirty & MaxDistance)) w.writeF32(maxDistance);
+        if (w.writeFlag(dirty & ConeInsideAngle)) w.writeU32((uint32_t)coneInside);
+        if (w.writeFlag(dirty & ConeOutsideAngle)) w.writeU32((uint32_t)coneOutside);
+        if (w.writeFlag(dirty & ConeOutsideVolume)) w.writeF32(coneOutsideVolume);
+        if (w.writeFlag(dirty & ConeVector)) {
+            w.writeF32(coneVector[0]);
+            w.writeF32(coneVector[1]);
+            w.writeF32(coneVector[2]);
+        }
+        if (w.writeFlag(dirty & LoopCount)) w.writeU32((uint32_t)loopCount);
+        if (w.writeFlag(dirty & MinLoopGap)) w.writeU32((uint32_t)minLoopGap);
+        if (w.writeFlag(dirty & MaxLoopGap)) w.writeU32((uint32_t)maxLoopGap);
+        if (w.writeFlag(dirty & AudioType)) w.writeU32(3); // EffectAudioType: never sent (always cleared)
+        if (w.writeFlag(dirty & OutsideAmbient)) w.writeFlag(outsideAmbient);
+        return 0;
+    }
+
+private:
+    enum { TransformMask = 1u << 1 };
+};
+
 // waterBlock.cc
 class WaterBlockObject : public SceneObject {
 public:
@@ -292,4 +418,5 @@ void registerSceneObjectClasses() {
     EngineObjects::registerClass("TSStatic", [] { return std::make_shared<TSStaticObject>(); });
     EngineObjects::registerClass("MissionArea", [] { return std::make_shared<MissionAreaObject>(); });
     EngineObjects::registerClass("WaterBlock", [] { return std::make_shared<WaterBlockObject>(); });
+    EngineObjects::registerClass("AudioEmitter", [] { return std::make_shared<AudioEmitterObject>(); });
 }
