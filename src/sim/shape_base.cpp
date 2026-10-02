@@ -44,6 +44,13 @@ void ShapeBase::readFields() {
     heat = std::clamp(dataFloat("heat", 1.0f), 0.0f, 1.0f);
 }
 
+void ShapeBase::onRemove() {
+    if (auto* driver = controllingObject.empty() ? nullptr : EngineObjects::get<PlayerObject>(controllingObject))
+        driver->setControlObject({});
+    controllingObject.clear();
+    GameBase::onRemove();
+}
+
 bool ShapeBase::onNewDataBlock() {
     if (!GameBase::onNewDataBlock()) return false;
     setMaskBits(DamageMask);
@@ -1136,6 +1143,9 @@ void ShapeBase::updateContainer() {
         drag = dataFloat("drag", defaultDrag()) * water.viscosity * waterCoverage;
         buoyancy = (water.density / dataFloat("density", defaultDensity())) * waterCoverage;
     }
+    const auto zones = PhysicalZones::effects(lo, hi);
+    gravityMod = zones.gravityMod;
+    appliedForce = zones.appliedForce;
 }
 
 void ShapeBase::processShapeTick() {

@@ -5,6 +5,7 @@
 #include "sim/sim_state.h"
 #include "sim/sim_natives.h"
 #include "sim/engine_object.h"
+#include "sim/path_manager.h"
 #include "sim/projectile_aim.h"
 #include "sim/net_object.h"
 #include "sim/game_base.h"
@@ -1744,7 +1745,10 @@ bool ScriptEngine::addToSet(ScriptObject* set, ScriptObject* object) {
     if (isSimGroup(set)) {
         if (auto it = object->internals.find("__parent"); it != object->internals.end()) {
             if (it->second.toString() == setKey) return true;
-            if (auto* old = findObject(it->second.toString().c_str())) removeSimGroupChild(old, key);
+            if (auto* old = findObject(it->second.toString().c_str())) {
+                removeSimGroupChild(old, key);
+                PathManager::membershipChanged(old, object);
+            }
         }
         object->internals["__parent"] = VMValue(setKey);
         // A GuiControl's parent is its group: the declared link moves too.
@@ -1759,6 +1763,7 @@ bool ScriptEngine::addToSet(ScriptObject* set, ScriptObject* object) {
     const int count = set->internals["__childCount"].toInt();
     set->internals["__child" + std::to_string(count)] = VMValue(key);
     set->internals["__childCount"] = VMValue(count + 1);
+    PathManager::membershipChanged(set, object);
     return true;
 }
 
@@ -1774,6 +1779,7 @@ bool ScriptEngine::removeFromSet(ScriptObject* set, ScriptObject* object) {
     auto sets = memberSets(object);
     sets.erase(std::remove(sets.begin(), sets.end(), setKey), sets.end());
     storeMemberSets(object, sets);
+    PathManager::membershipChanged(set, object);
     return true;
 }
 
@@ -1832,6 +1838,12 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
     const auto listeners = object->deleteNotifyListeners;
     for (const auto& listenerName : listeners) {
         ScriptObject* listener = findObject(listenerName.c_str());
+        if (listener && listener->engine) {
+            auto state = listener->engine;
+            state->onDeleteNotify(object);
+            // The native notification may delete its listener through script.
+            listener = findObject(listenerName.c_str());
+        }
         if (listener && tsInstance) {
             const std::string callback = listener->className + "::onDeleteNotify";
             if (tsInstance->hasFunction(callback))
@@ -1846,8 +1858,10 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
     }
     // SimObject::unregisterObject leaves its group and every set.
     if (auto parent = object->internals.find("__parent"); parent != object->internals.end())
-        if (auto* group = findObject(parent->second.toString().c_str()))
+        if (auto* group = findObject(parent->second.toString().c_str())) {
             removeSimGroupChild(group, objectName);
+            PathManager::membershipChanged(group, object);
+        }
     for (const auto& setKey : memberSets(object))
         if (auto* set = findObject(setKey.c_str())) removeSimGroupChild(set, objectName);
     removeObject(object);
@@ -7000,9 +7014,32 @@ bool ScriptEngine::init() {
         else if (which == "ALC_SPEAKER") s_audioSpeaker = val;
         return VMValue(1);
     });
-    tsInstance->registerNative("alxSetCaptureGainScale", [](const auto&) -> VMValue {
-        // Voice capture gain — no capture support in this build, accept and ignore.
-        return VMValue(1);
+    tsInstance->registerNative("alxSetCaptureGainScale", [](const auto& args) -> VMValue {
+        if (!args.empty())
+            Engine::instance().audio().setCaptureGainScale(args[0].toFloat());
+        return VMValue("");
+    });
+    tsInstance->registerNative("alxGetCaptureGainScale", [](const auto&) -> VMValue {
+        return VMValue(Engine::instance().audio().captureGainScale());
+    });
+    tsInstance->registerNative("alxCaptureInit", [](const auto&) -> VMValue {
+        return VMValue(Engine::instance().audio().initCapture() ? 1 : 0);
+    });
+    tsInstance->registerNative("alxCaptureDestroy", [](const auto&) -> VMValue {
+        Engine::instance().game().stopVoiceCapture();
+        Engine::instance().audio().destroyCapture();
+        return VMValue("");
+    });
+    tsInstance->registerNative("alxCaptureStart", [](const auto& args) -> VMValue {
+        const bool local = !args.empty() && args[0].toBool();
+        return VMValue(Engine::instance().game().startVoiceCapture(local) ? 1 : 0);
+    });
+    tsInstance->registerNative("alxCaptureStop", [](const auto&) -> VMValue {
+        Engine::instance().game().stopVoiceCapture();
+        return VMValue("");
+    });
+    tsInstance->registerNative("alxIsCapturing", [](const auto&) -> VMValue {
+        return VMValue(Engine::instance().audio().isCapturing() ? 1 : 0);
     });
     // audio.cc: forced outer falloffs and the inner falloff scale.
     tsInstance->registerNative("alxDisableOuterFalloffs", [](const auto& args) -> VMValue {

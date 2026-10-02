@@ -1,4 +1,5 @@
 #include "sim/game_base.h"
+#include "sim/game_connection.h"
 #include "script/script_engine.h"
 #include "script/torquescript.h"
 #include <cstdlib>
@@ -6,6 +7,15 @@
 
 std::string GameBase::handle() const {
     return script ? std::to_string(ScriptEngine::instance().objectId(script)) : std::string();
+}
+
+void GameBase::onRemove() {
+    if (auto* connection = controllingClient.empty() ? nullptr : EngineObjects::get<GameConnection>(controllingClient)) {
+        if (connection->controlObject() == ScriptEngine::instance().objectKey(script))
+            connection->setControlObject({});
+    }
+    controllingClient.clear();
+    SceneObject::onRemove();
 }
 
 std::string GameBase::dataBlock() const {

@@ -188,6 +188,7 @@ public:
     bool onNewDataBlock() override;
     // ShapeBase::onAdd: the datablock's heat (ShapeBaseData heat, 1.0).
     void readFields() override;
+    void onRemove() override;
     // mWorldBox: the shape's DTS bounds through the transform.
     virtual bool worldBox(float lo[3], float hi[3]) const;
     // The world box of the shape's collision mesh (what rays and vehicles

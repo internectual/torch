@@ -40,13 +40,18 @@ EngineObject* find(const std::string& handle) {
 
 void forEachTicking(const std::function<void(EngineObject&)>& visit) {
     if (!ScriptEngine::exists()) return;
-    std::vector<ScriptObject*> ticking;
+    std::vector<int> ticking;
     for (auto& [name, object] : ScriptEngine::instance().objects)
-        if (object && object->engine && object->engine->processesTicks()) ticking.push_back(object);
-    std::sort(ticking.begin(), ticking.end(),
-              [](const ScriptObject* a, const ScriptObject* b) { return a->id < b->id; });
-    for (auto* object : ticking)
-        if (object->engine) visit(*object->engine);
+        if (object && object->engine && object->engine->processesTicks()) ticking.push_back(object->id);
+    std::sort(ticking.begin(), ticking.end());
+    // Callbacks can delete, rename or create objects. Resolve the original id
+    // for each visit, and keep its engine state alive through the callback.
+    for (int id : ticking) {
+        auto* object = ScriptEngine::instance().findObject(std::to_string(id).c_str());
+        if (!object || !object->engine) continue;
+        auto state = object->engine;
+        visit(*state);
+    }
 }
 
 } // namespace EngineObjects
@@ -77,8 +82,20 @@ void advanceServer(double now) {
                 ? EngineObjects::get<GameConnection>(base->controllingClient) : nullptr;
             if (connection && object.script &&
                 connection->controlObject() == ScriptEngine::instance().objectKey(object.script)) {
+                auto& engine = ScriptEngine::instance();
+                const std::string objectId = std::to_string(object.script->id);
+                const std::string connectionId = std::to_string(connection->script->id);
+                auto connectionState = connection->script->engine;
                 connection->getMoveList();
-                while (!connection->moves.empty() && !base->controllingClient.empty()) {
+                // Move generation and processMove can delete either endpoint
+                // or transfer control. Do not dispatch further moves afterward.
+                auto stillControlled = [&] {
+                    auto* actor = engine.findObject(objectId.c_str());
+                    auto* client = engine.findObject(connectionId.c_str());
+                    return actor && actor->engine.get() == base && client && client->engine.get() == connection &&
+                           !base->controllingClient.empty() && connection->controlObject() == engine.objectKey(actor);
+                };
+                while (stillControlled() && !connection->moves.empty()) {
                     const ClientMoveIn move = connection->moves.front();
                     connection->moves.pop_front();
                     base->processMove(&move);

@@ -212,6 +212,7 @@ struct ClientEvent {
     uint8_t sequence = 0;
     uint8_t classId = 0;
     std::function<void(V12BitWriter&)> write;
+    bool guaranteed = true;
 };
 
 struct ClientPacketOptions {
@@ -241,6 +242,9 @@ ClientEvent makeNetStringEvent(uint16_t id, const std::string& value);
 ClientEvent makeGhostingMessageEvent(uint32_t sequence, uint8_t message,
                                       uint16_t ghostCount);
 ClientEvent makeMissionCrcEvent(uint32_t missionCrc);
+ClientEvent makeVoiceStreamEvent(uint8_t sequence, uint8_t codec, uint8_t stream,
+                                 bool endOfStream,
+                                 const std::vector<std::array<uint8_t, 33>>& frames);
 std::vector<ClientEvent> buildRemoteCommandEvents(NetStringTable& strings,
                                                    const std::string& command,
                                                    const std::vector<std::string>& args = {});

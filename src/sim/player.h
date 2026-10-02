@@ -45,6 +45,7 @@ public:
     // Player::setControlObject: the object (a vehicle or turret) the player's
     // moves drive; empty or the player itself clears it.
     void setControlObject(const std::string& object);
+    void onRemove() override;
     std::string controlObject;
     bool pilot = false;
 

@@ -2,6 +2,7 @@
 #include "core/math.h"
 #include "core/input_parity.h"
 #include "audio/audio_system.h"
+#include "audio/gsm_codec.h"
 #include "render/renderer.h"
 #include "game/collision.h"
 #include "game/shape_lighting.h"
@@ -23,6 +24,7 @@
 #include <deque>
 #include <unordered_map>
 #include <unordered_set>
+#include <memory>
 #include <map>
 
 class Menu;
@@ -850,6 +852,8 @@ public:
     // made. Until the scene ghosts are in, the packets are read here; the
     // world then loads from them and playback continues at the live edge.
     void startLiveClient(class GameConnection& connection);
+    bool startVoiceCapture(bool local = false);
+    void stopVoiceCapture();
     // Every frame, in menus too: the client's move ticks, and before the
     // world the stream's packets.
     void tickLiveClient(float dt);
@@ -1104,6 +1108,7 @@ public:
     bool isShapeViewerActive() const { return shapeViewerActive; }
 
 private:
+    struct VoicePlayback;
     GameConfig cfg;
     Player* pl{};
     World* w{};
@@ -1121,6 +1126,15 @@ private:
     std::unordered_map<uint64_t, SoundSource*> shapeBaseSoundSources;
     std::unordered_map<int, SoundSource*> demoJetSoundSources; // ghost -> looping jetSound
     std::unordered_map<uint16_t, SoundSource*> projectileSoundSources;
+    std::unordered_map<uint64_t, std::unique_ptr<VoicePlayback>> voicePlaybacks;
+    struct VoiceCapture {
+        TorchGsm::Encoder encoder;
+        std::vector<int16_t> pcm;
+        uint8_t stream = 0;
+        uint8_t sequence = 0;
+        bool local = false;
+    } voiceCapture;
+    void processVoiceCapture();
     std::unordered_set<uint64_t> demoAudioEventsPlayed;
     int32_t weatherType = 0; // 0=dry, 1=cold, 2=wet
     InputMove currentInput;

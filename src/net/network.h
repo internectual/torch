@@ -72,6 +72,9 @@ public:
     void sendCommandPacket(const char* command);
     void sendRemoteCommand(const std::string& command,
                            const std::vector<std::string>& args);
+    void sendVoiceEvent(uint8_t sequence, uint8_t codec, uint8_t stream,
+                        bool endOfStream,
+                        const std::vector<std::array<uint8_t, 33>>& frames);
 
     using CommandCallback = std::function<void(const std::string&)>;
     void setCommandCallback(CommandCallback cb) { commandCb = cb; }

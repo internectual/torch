@@ -1,5 +1,6 @@
 #include "sim/trigger.h"
 #include "sim/shape_base.h"
+#include "game/trigger.h"
 #include "script/script_engine.h"
 #include "script/torquescript.h"
 #include "core/console.h"
@@ -17,18 +18,40 @@ void toWorld(const SceneObject& o, const float p[3], float out[3]) {
     for (int i = 0; i < 3; ++i) out[i] = m[i * 4] * s[0] + m[i * 4 + 1] * s[1] + m[i * 4 + 2] * s[2] + m[i * 4 + 3];
 }
 
-// World -> object space (the transform is rigid, then the scale).
-void toObject(const SceneObject& o, const float w[3], float out[3]) {
-    const auto& m = o.transform;
-    const float d[3] = {w[0] - m[3], w[1] - m[7], w[2] - m[11]};
-    for (int i = 0; i < 3; ++i) {
-        out[i] = m[i] * d[0] + m[4 + i] * d[1] + m[8 + i] * d[2];
-        if (o.scale[i] != 0) out[i] /= o.scale[i];
+bool overlapsAabb(const Point3F vertices[8], const float lo[3], const float hi[3]) {
+    const Point3F center{(lo[0] + hi[0]) * 0.5f, (lo[1] + hi[1]) * 0.5f, (lo[2] + hi[2]) * 0.5f};
+    const Point3F half{(hi[0] - lo[0]) * 0.5f, (hi[1] - lo[1]) * 0.5f, (hi[2] - lo[2]) * 0.5f};
+    const Point3F edge[3] = {
+        {vertices[1].x - vertices[0].x, vertices[1].y - vertices[0].y, vertices[1].z - vertices[0].z},
+        {vertices[2].x - vertices[0].x, vertices[2].y - vertices[0].y, vertices[2].z - vertices[0].z},
+        {vertices[3].x - vertices[0].x, vertices[3].y - vertices[0].y, vertices[3].z - vertices[0].z}};
+    const Point3F boxAxes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    std::array<Point3F, 15> axes{};
+    size_t axisCount = 0;
+    for (const auto& axis : boxAxes) axes[axisCount++] = axis;
+    for (int e = 0; e < 3; ++e) {
+        const auto& a = edge[e];
+        const auto& b = edge[(e + 1) % 3];
+        axes[axisCount++] = {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
     }
-}
-
-float det3(const float a[3], const float b[3], const float c[3]) {
-    return a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+    for (const auto& e : edge)
+        for (const auto& b : boxAxes)
+            axes[axisCount++] = {e.y * b.z - e.z * b.y, e.z * b.x - e.x * b.z, e.x * b.y - e.y * b.x};
+    for (const auto& axis : axes) {
+        const float length2 = axis.x * axis.x + axis.y * axis.y + axis.z * axis.z;
+        if (length2 < 1e-12f) continue;
+        float polyMin = vertices[0].x * axis.x + vertices[0].y * axis.y + vertices[0].z * axis.z;
+        float polyMax = polyMin;
+        for (int i = 1; i < 8; ++i) {
+            const float projection = vertices[i].x * axis.x + vertices[i].y * axis.y + vertices[i].z * axis.z;
+            polyMin = std::min(polyMin, projection);
+            polyMax = std::max(polyMax, projection);
+        }
+        const float boxCenter = center.x * axis.x + center.y * axis.y + center.z * axis.z;
+        const float boxRadius = half.x * std::fabs(axis.x) + half.y * std::fabs(axis.y) + half.z * std::fabs(axis.z);
+        if (polyMax < boxCenter - boxRadius || boxCenter + boxRadius < polyMin) return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -61,57 +84,77 @@ void TriggerObject::worldBox(float lo[3], float hi[3]) const {
     }
 }
 
-// Trigger::testObject: the object's polys clipped by the polyhedron are not
-// empty. APPROXIMATION: the object's world box against the parallelepiped
-// (a box corner or centre inside it, or its centre inside the box).
+// Trigger::testObject: separating-axis overlap between the trigger's authored
+// parallelepiped and the actor's world-box proxy. The retail engine clips the
+// actor's collision poly list; this keeps the proxy test robust for slanted
+// triggers whose volume crosses a box without containing sampled corners.
 bool TriggerObject::testObject(const std::string& object) const {
     if (!hasPolyhedron) return false;
     auto* shape = EngineObjects::get<ShapeBase>(object);
     if (!shape) return false;
     float lo[3], hi[3];
     shape->worldBox(lo, hi);
-    const float d = det3(vecs[0], vecs[1], vecs[2]);
-    if (std::fabs(d) < 1e-9f) return false;
-    auto inside = [&](const float w[3]) {
-        float o[3];
-        toObject(*this, w, o);
-        const float r[3] = {o[0] - origin[0], o[1] - origin[1], o[2] - origin[2]};
-        // Cramer's rule for r = a*v0 + b*v1 + c*v2.
-        const float a = det3(r, vecs[1], vecs[2]) / d, b = det3(vecs[0], r, vecs[2]) / d,
-                    c = det3(vecs[0], vecs[1], r) / d;
-        return a >= 0 && a <= 1 && b >= 0 && b <= 1 && c >= 0 && c <= 1;
-    };
-    for (int c = 0; c < 9; ++c) {
-        float w[3];
-        for (int i = 0; i < 3; ++i) w[i] = c == 8 ? (lo[i] + hi[i]) * 0.5f : ((c >> i) & 1) ? hi[i] : lo[i];
-        if (inside(w)) return true;
+    float worldBase[3];
+    toWorld(*this, origin, worldBase);
+    const Point3F base{worldBase[0], worldBase[1], worldBase[2]};
+    Point3F edge[3];
+    for (int e = 0; e < 3; ++e) {
+        float local[3] = {origin[0] + vecs[e][0], origin[1] + vecs[e][1], origin[2] + vecs[e][2]};
+        float worldEnd[3];
+        toWorld(*this, local, worldEnd);
+        edge[e] = {worldEnd[0] - base.x, worldEnd[1] - base.y, worldEnd[2] - base.z};
     }
-    float centre[3], p[3];
-    for (int i = 0; i < 3; ++i) p[i] = origin[i] + (vecs[0][i] + vecs[1][i] + vecs[2][i]) * 0.5f;
-    toWorld(*this, p, centre);
-    return centre[0] >= lo[0] && centre[0] <= hi[0] && centre[1] >= lo[1] && centre[1] <= hi[1] &&
-           centre[2] >= lo[2] && centre[2] <= hi[2];
+    Point3F vertices[8];
+    for (int c = 0; c < 8; ++c) {
+        vertices[c] = base;
+        for (int e = 0; e < 3; ++e)
+            if (c & (1 << e)) {
+                vertices[c].x += edge[e].x;
+                vertices[c].y += edge[e].y;
+                vertices[c].z += edge[e].z;
+            }
+    }
+    return overlapsAabb(vertices, lo, hi);
 }
 
 void TriggerObject::potentialEnterObject(const std::string& object) {
     if (std::find(objects.begin(), objects.end(), object) != objects.end()) return;
     if (!testObject(object)) return;
     objects.push_back(object);
+    ScriptEngine::instance().addDeleteNotify(script, ScriptEngine::instance().findObject(object.c_str()));
     callDataBlock("onEnterTrigger", {object});
 }
 
+void TriggerObject::onDeleteNotify(ScriptObject* object) {
+    if (!object) return;
+    const std::string id = std::to_string(object->id);
+    auto it = std::find_if(objects.begin(), objects.end(), [&](const std::string& member) {
+        return ScriptEngine::instance().findObject(member.c_str()) == object;
+    });
+    if (it == objects.end()) return;
+    objects.erase(it);
+    callDataBlock("onLeaveTrigger", {id});
+}
+
 void TriggerObject::processTick() {
+    const std::string self = handle();
     GameBase::processTick();
     if (objects.empty()) return;
     const int period = (int)dataFloat("tickPeriodMS", 100.0f);
     if (lastThink + period < currTick) {
         currTick = 0;
         lastThink = 0;
-        for (int i = (int)objects.size() - 1; i >= 0; --i) {
-            if (!EngineObjects::get<ShapeBase>(objects[i]) || !testObject(objects[i])) {
-                const std::string gone = objects[i];
-                objects.erase(objects.begin() + i);
+        // A leave callback can delete another occupant, notifying us at once.
+        const auto occupants = objects;
+        for (auto member = occupants.rbegin(); member != occupants.rend(); ++member) {
+            auto current = std::find(objects.begin(), objects.end(), *member);
+            if (current == objects.end()) continue;
+            if (!EngineObjects::get<ShapeBase>(*member) || !testObject(*member)) {
+                const std::string gone = *member;
+                objects.erase(current);
+                ScriptEngine::instance().clearDeleteNotify(script, ScriptEngine::instance().findObject(gone.c_str()));
                 callDataBlock("onLeaveTrigger", {gone});
+                if (EngineObjects::get<TriggerObject>(self) != this) return;
             }
         }
         if (!objects.empty()) callDataBlock("onTickTrigger");
@@ -121,10 +164,18 @@ void TriggerObject::processTick() {
 }
 
 void triggersPotentialEnter(const std::string& object, const float lo[3], const float hi[3]) {
-    std::vector<TriggerObject*> triggers;
+    std::vector<int> triggers;
     for (auto& [name, o] : ScriptEngine::instance().objects)
-        if (auto* t = o ? dynamic_cast<TriggerObject*>(o->engine.get()) : nullptr) triggers.push_back(t);
-    for (auto* t : triggers) {
+        if (o && dynamic_cast<TriggerObject*>(o->engine.get())) triggers.push_back(o->id);
+    for (int id : triggers) {
+        // Enter callbacks can delete the subject, this trigger, or a later
+        // candidate. Resolve each id anew and retain state during the callback.
+        if (!EngineObjects::get<ShapeBase>(object)) return;
+        auto* candidate = ScriptEngine::instance().findObject(std::to_string(id).c_str());
+        if (!candidate) continue;
+        auto state = candidate->engine;
+        auto* t = dynamic_cast<TriggerObject*>(state.get());
+        if (!t) continue;
         float tlo[3], thi[3];
         t->worldBox(tlo, thi);
         if (tlo[0] <= hi[0] && thi[0] >= lo[0] && tlo[1] <= hi[1] && thi[1] >= lo[1] && tlo[2] <= hi[2] && thi[2] >= lo[2])
@@ -243,7 +294,20 @@ void PhysicalZoneObject::readFields() {
     plane(5, points[7], a, c);
 }
 
-float PhysicalZoneObject::velocityMod() const { return Fields::f32(script, "velocityMod", 1.0f); }
+float PhysicalZoneObject::velocityMod() const {
+    return physicalZoneModifier(Fields::f32(script, "velocityMod", 1.0f));
+}
+
+bool PhysicalZoneObject::overlapsBox(const float lo[3], const float hi[3]) const {
+    if (!hasPolyhedron) return false;
+    Point3F world[8];
+    for (int i = 0; i < 8; ++i) {
+        float p[3];
+        toWorld(*this, points[i], p);
+        world[i] = {p[0], p[1], p[2]};
+    }
+    return overlapsAabb(world, lo, hi);
+}
 
 uint32_t PhysicalZoneObject::packUpdate(GameConnection&, uint32_t mask, TorqueBitWriter& w) {
     static const uint32_t edges[12][4] = {
@@ -263,9 +327,10 @@ uint32_t PhysicalZoneObject::packUpdate(GameConnection&, uint32_t mask, TorqueBi
         for (uint32_t i = 0; i < (hasPolyhedron ? 12u : 0u); ++i)
             for (int k = 0; k < 4; ++k) w.writeU32(edges[i][k]);
         w.writeF32(velocityMod());
-        w.writeF32(Fields::f32(script, "gravityMod", 1.0f));
+        w.writeF32(physicalZoneModifier(Fields::f32(script, "gravityMod", 1.0f)));
         const auto force = Fields::point(script, "appliedForce", {0, 0, 0});
-        w.writePoint({force[0], force[1], force[2]});
+        const auto clampedForce = physicalZoneAppliedForce({force[0], force[1], force[2]});
+        w.writePoint({clampedForce.x, clampedForce.y, clampedForce.z});
         w.writeFlag(active);
     } else {
         w.writeFlag(active);
@@ -311,6 +376,20 @@ void PhysicalZoneObject::faces(std::vector<PlayerPrediction::Triangle>& out) con
 }
 
 namespace PhysicalZones {
+Effects effects(const float lo[3], const float hi[3]) {
+    Effects result;
+    for (auto& [key, object] : ScriptEngine::instance().objects) {
+        auto* zone = object ? dynamic_cast<PhysicalZoneObject*>(object->engine.get()) : nullptr;
+        if (!zone || !zone->active || !zone->overlapsBox(lo, hi)) continue;
+        result.gravityMod *= physicalZoneModifier(Fields::f32(zone->script, "gravityMod", 1.0f));
+        const auto force = Fields::point(zone->script, "appliedForce", {0, 0, 0});
+        const auto clamped = physicalZoneAppliedForce({force[0], force[1], force[2]});
+        result.appliedForce = {result.appliedForce.x + clamped.x, result.appliedForce.y + clamped.y,
+                               result.appliedForce.z + clamped.z};
+    }
+    return result;
+}
+
 void gather(const Point3F& min, const Point3F& max, std::vector<PlayerPrediction::Zone>& out) {
     for (auto& [key, object] : ScriptEngine::instance().objects) {
         auto* zone = object ? dynamic_cast<PhysicalZoneObject*>(object->engine.get()) : nullptr;

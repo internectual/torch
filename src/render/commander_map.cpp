@@ -348,6 +348,9 @@ void CommanderMap::resetEntry(Entry& e) {
     e.flags = 0;
     e.sensorGroup = 0;
     e.icon = nullptr;
+    e.ghost = -1;
+    e.clientTarget = nullptr;
+    e.hasObject = false;
     e.typeTag = 0;
     e.alpha = 1.0f;
     e.scale = 1.0f;
@@ -357,6 +360,7 @@ void CommanderMap::resetEntry(Entry& e) {
     e.prev = e.next = -1;
     e.fanValid = false;
     e.fan.clear();
+    e.targetChanges = 0;
 }
 
 void CommanderMap::insert(int index, bool atTail) {
@@ -625,7 +629,7 @@ bool CommanderMap::project(Entry& e) {
     const CommanderIcons::Image* img = e.icon && e.icon->images[CommanderIcons::Base] ? e.icon->images[CommanderIcons::Base]
                                        : defaultIcon_ ? defaultIcon_->images[CommanderIcons::Base] : nullptr;
     int w = 0, h = 0;
-    if (!img || !img->getFrameSize(w, h, 0)) return true;
+    if (!img || !img->getFrameSize(w, h, 0)) return false;
     const float dx = e.pos[0] - camPos_[0], dy = e.pos[1] - camPos_[1], dz = e.pos[2] - camPos_[2];
     const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
     const int maxDim = std::max(w, h);
@@ -636,7 +640,7 @@ bool CommanderMap::project(Entry& e) {
     const int minIcon = fieldI("minIconSize", 8), maxIcon = fieldI("maxIconSize", 40);
     const float scale = px < minIcon ? minIcon / (float)maxDim : px > maxIcon ? maxIcon / (float)maxDim : px / (float)maxDim;
     const int iw = (int)(w * scale), ih = (int)(h * scale);
-    e.rect[0] = e.sx - iw / 2, e.rect[1] = e.sy - ih / 2, e.rect[2] = iw, e.rect[3] = ih;
+    e.rect[0] = e.sx - (iw + 1) / 2, e.rect[1] = e.sy - (ih + 1) / 2, e.rect[2] = iw, e.rect[3] = ih;
     e.flags |= ProjectedFlag;
     e.scale = scale;
     const float r = iconProjLen / W;
@@ -1102,18 +1106,22 @@ void CommanderMap::renderSensors() {
                            frameAlpha / 255.0f};
         const ColorF fill{frame.r, frame.g, frame.b, fillAlpha / 255.0f};
         glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
         glDisable(GL_DEPTH_TEST);
         // drawSensorCircle: 62 segments at the eye's disc height.
         {
             const float step = 0.10134170204401016f;
-            float a = step;
+            Point3F first{};
             Point3F prev{};
-            for (int k = 0; k <= 62; ++k, a += step) {
+            for (int k = 0; k < 62; ++k) {
+                const float a = k * step;
                 const float p[3] = {std::cos(a) * radius + c[0], std::sin(a) * radius + c[1], c[2]};
                 const Point3F q = yUp(p);
-                if (k) r.drawLine(prev, q, frame);
+                if (k == 0) first = q;
+                else r.drawLine(prev, q, frame);
                 prev = q;
             }
+            r.drawLine(prev, first, frame);
         }
         // drawSensorFan: the fill (additive), then its rim.
         const float uv[3][2] = {{0, 0}, {0, 0}, {0, 0}};
@@ -1128,6 +1136,7 @@ void CommanderMap::renderSensors() {
             r.drawLine(yUp(&e.fan[(size_t)k * 3]), yUp(&e.fan[(size_t)(k == detail ? 1 : k + 1) * 3]), frame);
         r.flushSpriteBatch();
         glEnable(GL_DEPTH_TEST);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     }
 }
 

@@ -10,6 +10,7 @@ class TriggerObject : public GameBase {
 public:
     void readFields() override;
     void processTick() override;
+    void onDeleteNotify(ScriptObject* object) override;
     // Trigger::potentialEnterObject: enter when inside, once.
     void potentialEnterObject(const std::string& object);
     // The trigger's world bounding box.
@@ -41,6 +42,7 @@ public:
     void deactivate();
     bool active = true;
     bool hasPolyhedron = false;
+    bool overlapsBox(const float lo[3], const float hi[3]) const;
     float points[8][3] = {};   // Polyhedron::pointList (object space)
     float planes[6][4] = {};   // planeList: normal, d
     float velocityMod() const;
@@ -49,6 +51,11 @@ public:
 };
 
 namespace PhysicalZones {
+struct Effects {
+    float gravityMod = 1.0f;
+    Point3F appliedForce{};
+};
+Effects effects(const float lo[3], const float hi[3]);
 // The active zones whose world box overlaps [min, max].
 void gather(const Point3F& min, const Point3F& max, std::vector<PlayerPrediction::Zone>& out);
 } // namespace PhysicalZones

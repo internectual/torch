@@ -20,6 +20,7 @@ public:
     virtual void processTick() {}
     // SimObject::onRemove: the object is being deleted.
     virtual void onRemove() {}
+    virtual void onDeleteNotify(ScriptObject* object) { (void)object; }
 };
 
 namespace EngineObjects {

@@ -8,6 +8,10 @@
 #include "sim/shape_base.h"
 #include "sim/containers.h"
 #include "sim/player.h"
+#include "sim/projectiles.h"
+#include "sim/vehicle.h"
+#include "sim/static_shapes.h"
+#include "sim/ghost_priority.h"
 #include "sim/torque_math.h"
 #include "net/remote_command.h"
 #include "net/v12_bitstream.h"
@@ -17,8 +21,11 @@
 #include "core/timer.h"
 #include <algorithm>
 
+static NetObject* netObjectFor(const std::string& key);
+
 namespace {
 constexpr int NetEventClassBits = 6;
+GameConnection* gVoiceConnections[GameConnection::MaxClients + 1] = {};
 // NetConnection.cc's gPacketUpdateDelayToServer (1024 / PacketRateToServer).
 uint32_t gPacketUpdateDelayToServer = 32;
 
@@ -27,6 +34,65 @@ uint32_t netPref(const char* name, uint32_t fallback) {
     auto* ts = ScriptEngine::instance().ts();
     const VMValue value = ts ? ts->getGlobal(name) : VMValue();
     return value.toString().empty() ? fallback : (uint32_t)std::max(0, value.toInt());
+}
+
+Point3F gameBaseVelocity(const GameBase& object) {
+    if (const auto* projectile = dynamic_cast<const ProjectileObject*>(&object)) return projectile->getVelocity();
+    if (const auto* vehicle = dynamic_cast<const VehicleObject*>(&object)) return vehicle->getVelocity();
+    if (const auto* player = dynamic_cast<const PlayerObject*>(&object)) return player->state.velocity;
+    if (const auto* item = dynamic_cast<const ItemObject*>(&object))
+        return {item->velocity[0], item->velocity[1], item->velocity[2]};
+    return {};
+}
+
+GhostPriority::Scope ghostScope(GameConnection& connection, std::string& cameraKey) {
+    GhostPriority::Scope scope;
+    cameraKey = connection.controlObject();
+    auto* camera = cameraKey.empty() ? nullptr : EngineObjects::get<ShapeBase>(cameraKey);
+    while (auto* player = dynamic_cast<PlayerObject*>(camera)) {
+        if (player->controlObject.empty()) break;
+        cameraKey = player->controlObject;
+        camera = EngineObjects::get<ShapeBase>(cameraKey);
+    }
+    if (camera) {
+        const auto eye = camera->getEyeTransform();
+        scope.position = {eye[3], eye[7], eye[11]};
+        scope.forward = {eye[1], eye[5], eye[9]};
+        scope.cosFov = std::cos(camera->cameraFov * (float)M_PI / 360.0f);
+    }
+    if (camera) {
+        auto& engine = ScriptEngine::instance();
+        for (auto& [name, object] : engine.objects)
+            if (object && object->className == "Sky") {
+                scope.visibleDistance = Fields::f32(object, "visibleDistance", 1000.0f);
+                break;
+            }
+    }
+    return scope;
+}
+
+float ghostUpdatePriority(const GhostInfo& ghost,
+                          const GhostPriority::Scope& scope, const std::string& cameraKey) {
+    if (ghost.flags & GhostInfo::KillGhost) return 10000.0f;
+    NetObject* net = netObjectFor(ghost.object);
+    if (!net) return ghost.updateSkipCount * 0.1f;
+    auto* base = dynamic_cast<GameBase*>(net);
+    if (!base) return ghost.updateSkipCount * 0.1f;
+    if (dynamic_cast<SniperProjectileObject*>(base) && (ghost.updateMask & GameBase::InitialUpdateMask))
+        return 9.9f;
+
+    Point3F center{base->transform[3], base->transform[7], base->transform[11]};
+    Point3F lo, hi;
+    if (base->script && SimContainer::worldBox(base->script, lo, hi))
+        center = {(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+    const uint32_t type = base->script ? SimContainer::typeMask(base->script) : 0;
+    GhostPriority::Interest interest;
+    interest.player = (type & SimContainer::PlayerObjectType) != 0;
+    interest.projectile = (type & SimContainer::ProjectileObjectType) != 0;
+    interest.item = (type & SimContainer::ItemObjectType) != 0;
+    if (const auto* projectile = dynamic_cast<const ProjectileObject*>(base))
+        interest.ownedProjectile = projectile->sourceKey == cameraKey || projectile->vehicleKey == cameraKey;
+    return GhostPriority::score(center, gameBaseVelocity(*base), scope, interest, ghost.updateSkipCount);
 }
 }
 
@@ -381,6 +447,9 @@ void GameConnection::setControlObject(const std::string& object) {
     if (auto* old = controlObject_.empty() ? nullptr : EngineObjects::get<GameBase>(controlObject_))
         old->controllingClient.clear();
     if (auto* next = object.empty() ? nullptr : EngineObjects::get<GameBase>(object)) {
+        if (auto* shape = dynamic_cast<ShapeBase*>(next))
+            if (auto* driver = EngineObjects::get<PlayerObject>(shape->controllingObject))
+                driver->setControlObject({});
         if (!next->controllingClient.empty() && next->controllingClient != self)
             if (auto* other = EngineObjects::get<GameConnection>(next->controllingClient))
                 other->setControlObject({});
@@ -389,6 +458,11 @@ void GameConnection::setControlObject(const std::string& object) {
     controlObject_ = object;
     // setScopeObject: the scope object is always in scope.
     if (!object.empty()) objectInScope(object);
+}
+
+void GameConnection::onRemove() {
+    setControlObject({});
+    EngineObject::onRemove();
 }
 
 // GameConnection::writePacket, client half (Tribes 2: first-person flag and
@@ -560,10 +634,41 @@ void GameConnection::receivePacket(const uint8_t* data, size_t size) {
     if (stream.failed()) return;
     stream.setStringBuffer(true);
     std::vector<V12::ServerEvent> events;
-    if (!V12::readServerEvents(stream, remoteStrings, events)) return;
+    const uint32_t clientId = script ? (uint32_t)ScriptEngine::instance().objectId(script) : 0;
+    if (!V12::readServerEvents(stream, remoteStrings, events, {}, false, clientId)) return;
     auto* ts = ScriptEngine::instance().ts();
     if (!ts) return;
     for (const auto& event : events) {
+        if (event.hasVoiceStream && event.voiceCodec == 3 && event.voiceFrames.size() <= 6) {
+            if (voiceEncodingLevel == event.voiceCodec) {
+                for (GameConnection* listener : gVoiceConnections) {
+                    if (!listener || !listener->isServer || listener == this) continue;
+                    const bool active = listener->listeningTo[voiceId];
+                    if (event.voiceSequence == 0 && !active && listener->canListen(*this))
+                        listener->startListening(voiceId);
+                    if (listener->listeningTo[voiceId]) {
+                        auto relay = std::make_shared<NetEventOut>();
+                        relay->guarantee = NetEventOut::Unguaranteed;
+                        relay->classIndex = 21;
+                        const auto copy = event;
+                        relay->pack = [copy](TorqueBitWriter& out) {
+                            out.writeInt(copy.voiceSequence, 7);
+                            out.writeInt(copy.voiceCodec, 2);
+                            out.writeInt(copy.voiceStream, 2);
+                            out.writeU32(copy.voiceClientId);
+                            const bool countPresent = copy.voiceEndOfStream || copy.voiceFrames.size() != 1;
+                            out.writeFlag(countPresent);
+                            if (countPresent) out.writeInt((int32_t)copy.voiceFrames.size(), 5);
+                            for (const auto& frame : copy.voiceFrames)
+                                for (uint8_t byte : frame) out.writeInt(byte, 8);
+                        };
+                        listener->postEvent(relay);
+                    }
+                    if (event.voiceEndOfStream) listener->stopListening(voiceId);
+                }
+            }
+            continue;
+        }
         if (event.classId == GhostingMessage && event.hasGhostingMessage)
             handleGhostMessage(event.ghostMessage, event.ghostSequence);
         if (event.hasServerTarget) {
@@ -738,7 +843,7 @@ void GameConnection::scopeScene() {
     auto* scope = controlObject_.empty() ? nullptr : EngineObjects::get<SceneObject>(controlObject_);
     if (scope) {
         objectInScope(controlObject_);
-        float visible = 0.0f;
+        float visible = 1000.0f;
         auto& engine = ScriptEngine::instance();
         for (auto& [name, object] : engine.objects)
             if (object && object->className == "Sky") {
@@ -807,12 +912,15 @@ void GameConnection::scopeScene() {
 
 void GameConnection::writeGhosts(TorqueBitWriter& w, std::vector<GhostRef>& refs) {
     if (!w.writeFlag(ghosting)) return;
+    for (auto& ghost : ghosts)
+        if (ghost.index >= 0) ++ghost.updateSkipCount;
     if (scoping) scopeScene();
     // Dirty state set on the objects since the last packet.
     int maxIndex = 0;
     std::vector<GhostInfo*> updates;
     for (auto& ghost : ghosts) {
         if (ghost.index < 0) continue;
+        maxIndex = std::max(maxIndex, ghost.index);
         if (NetObject* net = netObjectFor(ghost.object)) {
             if (net->pendingMask && !(ghost.flags & GhostInfo::NotYetGhosted)) ghost.updateMask |= net->pendingMask;
         } else if (!(ghost.flags & (GhostInfo::KillGhost | GhostInfo::KillingGhost))) {
@@ -820,9 +928,18 @@ void GameConnection::writeGhosts(TorqueBitWriter& w, std::vector<GhostRef>& refs
             ghost.updateMask = 0xFFFFFFFFu;
         }
         if (!ghost.updateMask || (ghost.flags & (GhostInfo::KillingGhost | GhostInfo::Ghosting))) continue;
-        maxIndex = std::max(maxIndex, ghost.index);
         updates.push_back(&ghost);
     }
+    std::string cameraKey;
+    const auto scope = ghostScope(*this, cameraKey);
+    std::vector<std::pair<float, GhostInfo*>> prioritized;
+    prioritized.reserve(updates.size());
+    for (GhostInfo* ghost : updates)
+        prioritized.emplace_back(ghostUpdatePriority(*ghost, scope, cameraKey), ghost);
+    std::stable_sort(prioritized.begin(), prioritized.end(), [](const auto& a, const auto& b) {
+        return a.first > b.first;
+    });
+    for (size_t i = 0; i < prioritized.size(); ++i) updates[i] = prioritized[i].second;
     int sendSize = 1;
     for (int m = maxIndex; m >>= 1;) ++sendSize;
     if (sendSize < 3) sendSize = 3;
@@ -1178,11 +1295,6 @@ void GameConnection::play3D(ScriptObject* profile, const std::array<float, 16>& 
     postEvent(event);
 }
 
-namespace {
-// GameConnection::smVoiceConnections: voice id -> connection.
-GameConnection* gVoiceConnections[GameConnection::MaxClients + 1] = {};
-}
-
 // GameConnection::onAdd / onRemove: a client's connection takes the first
 // free voice id and would listen to everyone.
 GameConnection::GameConnection() {
@@ -1209,11 +1321,23 @@ bool GameConnection::canListen(const GameConnection& other) const {
     // Can't listen if no channels are available:
     if (maxVoiceChannels == 0) return false;
     // make sure encoder/decoder's match
-    if (other.voiceEncodingLevel < 0) return false;
+    if (other.voiceEncodingLevel < 0 || other.voiceEncodingLevel >= 32) return false;
     if (!(voiceDecodingMask & (1u << other.voiceEncodingLevel))) return false;
     // check the listen mask for this group
     const uint32_t listenMask = ServerTargets::sensorGroupListenMask(ServerTargets::connectionSensorGroup(*this));
     return (listenMask & (1u << ServerTargets::connectionSensorGroup(other))) != 0;
+}
+
+bool GameConnection::startListening(int voice) {
+    if (voice <= 0 || voice > MaxClients || curVoiceChannels >= maxVoiceChannels ||
+        !wouldListenTo[voice])
+        return false;
+    if (listeningTo[voice]) return true;
+    GameConnection* speaker = gVoiceConnections[voice];
+    if (!speaker || !canListen(*speaker)) return false;
+    listeningTo[voice] = true;
+    ++curVoiceChannels;
+    return true;
 }
 
 void GameConnection::listenTo(int voice, bool listen) {

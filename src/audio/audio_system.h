@@ -62,6 +62,7 @@ struct SoundBuffer {
     bool loaded = false;
     uint32_t durationMs = 0;
     bool load(const uint8_t* data, size_t size);
+    bool loadPcm16(const int16_t* samples, size_t count, int sampleRate = 8000);
     bool loadWav(const uint8_t* data, size_t size);
     bool loadOgg(const uint8_t* data, size_t size);
     void destroy();
@@ -205,6 +206,8 @@ public:
     static constexpr float clampEnvironmentValue(float value) { return AudioEnvironmentState::clamp(value); }
 
     SoundBuffer* loadSound(const char* path);
+    SoundSource* playPcm16(const int16_t* samples, size_t count, int sampleRate = 8000,
+                           float volume = 1.0f);
     SoundSource* createSource(bool persistent = false, int priority = 0);
     // audio.cc alxDisableOuterFalloffs / alxSetInnerFalloffScale: forced
     // outer falloffs (FORCED_OUTER_FALLOFF) and scaled inner ones for 3D
@@ -226,6 +229,14 @@ public:
     void stopMusic();
     std::function<void(bool stopped)> onMusicFinished;
     void updateStreams();
+    bool initCapture(int sampleRate = 8000, int bufferSamples = 1024);
+    void destroyCapture();
+    bool startCapture();
+    void stopCapture();
+    size_t captureSamples(int16_t* samples, size_t count);
+    bool isCapturing() const;
+    void setCaptureGainScale(float scale);
+    float captureGainScale() const;
     void releaseSource(SoundSource* source);
     bool isSourceAlive(const SoundSource* source) const;
     bool isBufferAlive(const SoundBuffer* buffer) const;

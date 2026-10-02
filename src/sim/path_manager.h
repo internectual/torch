@@ -8,6 +8,7 @@
 
 class GameConnection;
 class TorqueScript;
+struct ScriptObject;
 
 namespace PathManager {
 
@@ -21,6 +22,8 @@ struct PathEntry {
 const std::vector<PathEntry>& paths();
 // PathManager::transmitPaths: every path to one connection (NewPaths).
 void transmitPaths(GameConnection& connection);
+// Path::addObject/removeObject rebuild an already finished path for Markers.
+void membershipChanged(ScriptObject* group, ScriptObject* member);
 
 } // namespace PathManager
 

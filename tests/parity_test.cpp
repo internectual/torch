@@ -366,9 +366,24 @@ static void testPhysicalZoneInvalidValues() {
     assert(physicalZoneModifier(nan) == 1.0f);
     assert(physicalZoneModifier(100.0f) == 40.0f);
     assert(physicalZoneModifier(-100.0f) == -40.0f);
+    const Point3F clampedForce = physicalZoneAppliedForce({50000.0f, -50000.0f, nan});
+    assert(clampedForce.x == 40000.0f && clampedForce.y == -40000.0f && clampedForce.z == 0.0f);
 
     const Point3F force = physicalZoneForceToYUp({nan, 2.0f, nan}, {}, 0.0f);
     assert(force.x == 0.0f && force.y == 0.0f && force.z == -2.0f);
+
+    PlayerPrediction::State state;
+    state.initialized = true;
+    state.position = {0, 0, 100};
+    state.predictionCount = 10;
+    PlayerPrediction::Data data;
+    data.mass = 90.0f;
+    data.boxSize = {1.2f, 1.2f, 2.3f};
+    PlayerPrediction::Collision collision;
+    PlayerPrediction::processTick(state, data, -20.0f, nullptr, 0.0f, collision, {}, {},
+                                  0.5f, {0, 0, 3.0f});
+    assert(std::abs(state.velocity.z - (-20.0f * 0.5f * PlayerPrediction::TickSec +
+                                        3.0f / 90.0f * PlayerPrediction::TickSec)) < 1e-5f);
 }
 
 static void testDamageLevelUsesAuthoredHealthCap() {

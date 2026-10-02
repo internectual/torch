@@ -216,6 +216,15 @@ void Connection::resetProtocolEpoch() {
     ++epoch;
 }
 
+void Connection::sendVoiceEvent(uint8_t sequence, uint8_t codec, uint8_t stream,
+                                bool endOfStream,
+                                const std::vector<std::array<uint8_t, 33>>& frames) {
+    if (!isConnected() || codec != 3 || frames.size() > 6) return;
+    impl->pendingNativeEvents.push_back(
+        V12::makeVoiceStreamEvent(sequence, codec, stream, endOfStream, frames));
+    impl->flushNativeMove();
+}
+
 bool Connection::connect(const char* host, uint16_t port) {
     if (impl->sock >= 0) {
         close(impl->sock);
@@ -770,8 +779,8 @@ void Connection::update() {
                                 serverMessageCb({"ChatMessage", event.message});
                             if (event.hasTargetInfo && targetCb)
                                 targetCb(&event.targetInfo, event.targetInfo.targetId);
-                            if (event.hasAudio && audioCb)
-                                audioCb(event);
+                             if ((event.hasAudio || event.hasVoiceStream) && audioCb)
+                                 audioCb(event);
                              if (event.hasTargetInfo) {
                                 auto& target = impl->nativeTargets[event.targetInfo.targetId];
                                 target.targetId = event.targetInfo.targetId;

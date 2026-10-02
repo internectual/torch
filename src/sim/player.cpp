@@ -287,6 +287,11 @@ void PlayerObject::setControlObject(const std::string& object) {
     shape->controllingClient = controllingClient;
 }
 
+void PlayerObject::onRemove() {
+    setControlObject({});
+    ShapeBase::onRemove();
+}
+
 void PlayerObject::processMove(const ClientMoveIn* move) {
     // The control object gets the move, less the jump trigger while mounted
     // and the view while free-looking; the player keeps those.
@@ -337,7 +342,11 @@ void PlayerObject::processMove(const ClientMoveIn* move) {
         ForceFields::gather(this, min, max, out);
     };
     collision.gatherZones = PhysicalZones::gather;
-    PlayerPrediction::processTick(state, *data, SimState::server().gravity, &m, 0.0f, collision, gather, world.water);
+    float zoneLo[3], zoneHi[3];
+    worldBox(zoneLo, zoneHi);
+    const auto zoneEffects = PhysicalZones::effects(zoneLo, zoneHi);
+    PlayerPrediction::processTick(state, *data, SimState::server().gravity, &m, 0.0f, collision, gather,
+                                  world.water, zoneEffects.gravityMod, zoneEffects.appliedForce);
     energy = state.energy;
     syncTransform();
     // The items and corpses the player touches: onCollision both ways.

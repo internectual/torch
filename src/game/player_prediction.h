@@ -323,7 +323,8 @@ inline bool isRunSurface(const Data& d, const Point3F& contactNormal) {
     return contactNormal.z > std::cos(d.runSurfaceAngle * 3.14159265358979f / 180.0f);
 }
 
-inline void updateMove(State& s, const Data& d, float gravity, Collision& collision, const WaterLevel& water) {
+inline void updateMove(State& s, const Data& d, float gravity, Collision& collision, const WaterLevel& water,
+                       float gravityMod, const Point3F& appliedForce) {
     const Move& move = s.move;
     const float dt = TickSec, mass = d.mass > 0 ? d.mass : 1.0f;
     if (!s.damageState) {
@@ -355,7 +356,8 @@ inline void updateMove(State& s, const Data& d, float gravity, Collision& collis
     const float backward = underwater ? d.maxUnderwaterBackwardSpeed : d.maxBackwardSpeed;
     const float side = underwater ? d.maxUnderwaterSideSpeed : d.maxSideSpeed;
     const float moveSpeed = std::max((y > 0 ? forward : backward) * std::fabs(y), side * std::fabs(x));
-    Point3F acceleration{0, 0, gravity * dt};
+    Point3F acceleration{appliedForce.x / mass * dt, appliedForce.y / mass * dt,
+                         gravity * gravityMod * dt + appliedForce.z / mass * dt};
     Point3F contactNormal{0, 0, 0};
     const bool contacted = collision.findContact(s.position, d.boxSize, contactNormal);
     const bool run = contacted && isRunSurface(d, contactNormal);
@@ -437,7 +439,7 @@ inline void updateMove(State& s, const Data& d, float gravity, Collision& collis
         s.velocity.z -= d.upResistFactor * dt * (s.velocity.z - d.upResistSpeed);
     }
     if (buoyancy != 0 && (buoyancy > 1 || dot(s.velocity, s.velocity) > 0.0001f || !run))
-        s.velocity.z -= buoyancy * gravity * dt;
+        s.velocity.z -= buoyancy * gravity * gravityMod * dt;
     s.velocity = mul(s.velocity, 1.0f - drag * dt);
     if (s.disableMove) s.velocity.x = s.velocity.y = 0;
     s.falling = !run && s.velocity.z < -10.0f;
@@ -511,7 +513,8 @@ inline bool updatePos(State& s, const Data& d, Collision& collision, const Point
 // tick, else null: other ghosts keep predicting their last move for up to
 // MaxPredictionTicks.
 inline void processTick(State& s, const Data& d, float gravity, const Move* move, float rechargeRate,
-                        Collision& collision, const GatherTriangles& gather, const WaterLevel& water) {
+                        Collision& collision, const GatherTriangles& gather, const WaterLevel& water,
+                        float gravityMod = 1.0f, const Point3F& appliedForce = {}) {
     s.posVec = {0, 0, 0};
     s.rotVec = 0;
     if (!s.initialized) return;
@@ -535,7 +538,7 @@ inline void processTick(State& s, const Data& d, float gravity, const Move* move
         s.actionState = MoveState;
     const Point3F initial = s.position;
     collision.prepare(gather, s.position, d.boxSize, mul(s.velocity, TickSec), d.maxStepHeight);
-    updateMove(s, d, gravity, collision, water);
+    updateMove(s, d, gravity, collision, water, gravityMod, appliedForce);
     updatePos(s, d, collision, initial);
     s.posVec = sub(initial, s.position);
 }

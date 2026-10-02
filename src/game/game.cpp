@@ -1,5 +1,6 @@
 #include "sim/engine_classes.h"
 #include "game/game.h"
+#include "audio/gsm_codec.h"
 #include "sim/client_targets.h"
 #include "sim/sim_state.h"
 #include "game/player_animation.h"
@@ -72,6 +73,11 @@
 #include <fstream>
 #include <cstdlib>
 #include <utility>
+
+struct Game::VoicePlayback {
+    TorchGsm::Decoder decoder;
+    std::vector<int16_t> pcm;
+};
 
 static constexpr int kMaxPrecipitationDrops = 65536;
 
@@ -7014,8 +7020,71 @@ static SoundSource* playNativeAudioProfile(AudioSystem& audio,
     return source;
 }
 
+bool Game::startVoiceCapture(bool local) {
+    stopVoiceCapture();
+    auto& audio = Engine::instance().audio();
+    if (!audio.initCapture(8000, 1024) || !audio.startCapture()) return false;
+    voiceCapture.local = local;
+    voiceCapture.stream = (uint8_t)((voiceCapture.stream + 1) & 3);
+    voiceCapture.sequence = 0;
+    voiceCapture.pcm.clear();
+    return true;
+}
+
+void Game::stopVoiceCapture() {
+    auto& audio = Engine::instance().audio();
+    if (!audio.isCapturing()) return;
+    std::array<int16_t, 2048> samples{};
+    while (const size_t count = audio.captureSamples(samples.data(), samples.size())) {
+        const float gain = audio.captureGainScale();
+        for (size_t i = 0; i < count; ++i) {
+            const int value = (int)std::trunc(samples[i] * gain);
+            samples[i] = (int16_t)std::clamp(value, -32768, 32767);
+        }
+        voiceCapture.pcm.insert(voiceCapture.pcm.end(), samples.begin(), samples.begin() + count);
+    }
+    audio.stopCapture();
+    if (voiceCapture.local) {
+        if (!voiceCapture.pcm.empty())
+            audio.playPcm16(voiceCapture.pcm.data(), voiceCapture.pcm.size(), 8000,
+                            audio.config().masterVolume);
+    } else if (activeConn && activeConn->isConnected()) {
+        activeConn->sendVoiceEvent(voiceCapture.sequence++ & 0x7f, 3,
+                                   voiceCapture.stream, true, {});
+    }
+    voiceCapture.pcm.clear();
+}
+
+void Game::processVoiceCapture() {
+    auto& capture = voiceCapture;
+    if (capture.local) return;
+    auto* connection = activeConnection();
+    if (!connection || !connection->isConnected()) return;
+    while (capture.pcm.size() >= TorchGsm::SamplesPerFrame) {
+        std::array<uint8_t, TorchGsm::EncodedBytesPerFrame> frame{};
+        if (!capture.encoder.encode(capture.pcm.data(), frame)) break;
+        connection->sendVoiceEvent(capture.sequence++ & 0x7f, 3, capture.stream,
+                                   false, {frame});
+        capture.pcm.erase(capture.pcm.begin(),
+                          capture.pcm.begin() + TorchGsm::SamplesPerFrame);
+    }
+}
+
 void Game::update(float dt) {
     Engine::instance().audio().advance(dt);
+    if (Engine::instance().audio().isCapturing()) {
+        std::array<int16_t, 2048> samples{};
+        while (const size_t count = Engine::instance().audio().captureSamples(
+                   samples.data(), samples.size())) {
+            const float gain = Engine::instance().audio().captureGainScale();
+            for (size_t i = 0; i < count; ++i) {
+                const int value = (int)std::trunc(samples[i] * gain);
+                samples[i] = (int16_t)std::clamp(value, -32768, 32767);
+            }
+            voiceCapture.pcm.insert(voiceCapture.pcm.end(), samples.begin(), samples.begin() + count);
+        }
+        processVoiceCapture();
+    }
     // Pause is a simulation boundary, not just a presentation flag.  Keep
     // audio/UI processing alive, but do not advance clocks, damage flashes,
     // physics, projectiles, or respawn timers while the local game is paused.
@@ -11184,10 +11253,36 @@ void Game::connectToServer(const char* host, uint16_t port) {
                      }
                  }
              });
-          activeConn->setAudioCallback([this](const V12::ServerEvent& event) {
-             auto& audio = Engine::instance().audio();
-             if (!audio.config().enabled || audio.config().sfxVolume <= 0)
-                 return;
+           activeConn->setAudioCallback([this](const V12::ServerEvent& event) {
+              auto& audio = Engine::instance().audio();
+              if (event.hasVoiceStream) {
+                  if (event.voiceCodec != 3) return;
+                  const uint64_t key = (static_cast<uint64_t>(event.voiceClientId) << 16) |
+                                       (static_cast<uint64_t>(event.voiceStream) << 8) |
+                                       event.voiceCodec;
+                  if (event.voiceSequence == 0)
+                      voicePlaybacks[key] = std::make_unique<VoicePlayback>();
+                  auto it = voicePlaybacks.find(key);
+                  if (it == voicePlaybacks.end()) return;
+                  std::array<int16_t, TorchGsm::SamplesPerFrame> decoded{};
+                  for (const auto& frame : event.voiceFrames) {
+                      if (!it->second->decoder.decode(frame.data(), decoded)) {
+                          voicePlaybacks.erase(it);
+                          return;
+                      }
+                      it->second->pcm.insert(it->second->pcm.end(), decoded.begin(), decoded.end());
+                  }
+                  if (event.voiceEndOfStream) {
+                      if (!it->second->pcm.empty() && audio.config().enabled &&
+                          audio.config().masterVolume > 0.0f)
+                          audio.playPcm16(it->second->pcm.data(), it->second->pcm.size(),
+                                          8000, audio.config().masterVolume);
+                      voicePlaybacks.erase(it);
+                  }
+                  return;
+              }
+              if (!audio.config().enabled || audio.config().sfxVolume <= 0)
+                  return;
               // Audio profiles are the server's AudioProfile datablocks.
               const Point3F position = event.audioHasPosition
                   ? Math::torquePointToYUp({event.audioPosition.x,

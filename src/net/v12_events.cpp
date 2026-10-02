@@ -43,7 +43,9 @@ void writeEventHeader(V12BitWriter& writer, bool guaranteedPhase,
 
 bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
                       std::vector<ServerEvent>& events,
-                      const V12Vec3& compressionPoint) {
+                      const V12Vec3& compressionPoint,
+                      bool includesVoiceClientId,
+                      uint32_t defaultVoiceClientId) {
     bool guaranteedPhase = false;
     int previousSequence = -1;
     bool more = stream.readFlag();
@@ -228,6 +230,22 @@ bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
                 event.audioHasPosition = true;
             }
             stream.readFlag(); // update sound
+        } else if (header.classId == 21) {
+            // SimVoiceStreamEvent. GSM 06.10 (codec 3) frames are 33 bytes
+            // and represent 20 ms of 8 kHz mono PCM.
+            event.hasVoiceStream = true;
+            event.voiceSequence = (uint8_t)stream.readUnsigned(7);
+            event.voiceCodec = (uint8_t)stream.readUnsigned(2);
+            event.voiceStream = (uint8_t)stream.readUnsigned(2);
+             event.voiceClientId = includesVoiceClientId ? stream.readU32() : defaultVoiceClientId;
+            event.voiceEndOfStream = stream.readFlag();
+            const uint32_t frameCount = event.voiceEndOfStream ? stream.readUnsigned(5) : 1;
+            if (event.voiceCodec != 3 || frameCount > 6 ||
+                stream.remainingBits() < frameCount * 33u * 8u)
+                return false;
+            event.voiceFrames.resize(frameCount);
+            for (auto& frame : event.voiceFrames)
+                for (uint8_t& byte : frame) byte = stream.readU8();
         } else if (header.classId == 10) {
             stream.readRange(0, 3); // RemoveClientTargetTypeEvent
         } else if (header.classId == 11) {

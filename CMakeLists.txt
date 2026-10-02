@@ -19,6 +19,8 @@ pkg_check_modules(GLU REQUIRED IMPORTED_TARGET glu)
 find_package(OpenGL REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(CURL REQUIRED)
+find_path(GSM_INCLUDE_DIR NAMES gsm/gsm.h REQUIRED)
+find_library(GSM_LIBRARY NAMES gsm REQUIRED)
 
 add_executable(torch
     src/main.cpp
@@ -93,6 +95,7 @@ add_executable(torch
     src/render/commander_tree.cpp
     src/audio/audio_system.cpp
     src/audio/mp3_decoder.cpp
+    src/audio/gsm_codec.cpp
     src/net/network.cpp
     src/net/master_query.cpp
     src/net/v12_bitstream.cpp
@@ -117,6 +120,7 @@ add_executable(torch
 )
 
 target_include_directories(torch PRIVATE src)
+target_include_directories(torch PRIVATE ${GSM_INCLUDE_DIR})
 
 target_link_libraries(torch PRIVATE
     OpenGL::GL
@@ -127,6 +131,7 @@ target_link_libraries(torch PRIVATE
     PkgConfig::GLU
     CURL::libcurl
     vorbisfile vorbis PkgConfig::MPG123
+    ${GSM_LIBRARY}
     m
     dl
 )
@@ -212,6 +217,7 @@ add_executable(torch_server
     src/render/commander_tree.cpp
     src/audio/audio_system.cpp
     src/audio/mp3_decoder.cpp
+    src/audio/gsm_codec.cpp
     src/net/network.cpp
     src/net/master_query.cpp
     src/net/v12_bitstream.cpp
@@ -244,6 +250,7 @@ target_link_libraries(torch_server PRIVATE
     PkgConfig::GLU
     CURL::libcurl
     vorbisfile vorbis PkgConfig::MPG123
+    ${GSM_LIBRARY}
     m
     dl
 )
@@ -297,6 +304,22 @@ target_include_directories(torch_mp3_decoder_test PRIVATE src)
 target_compile_options(torch_mp3_decoder_test PRIVATE -UNDEBUG)
 target_link_libraries(torch_mp3_decoder_test PRIVATE PkgConfig::MPG123)
 add_test(NAME torch_mp3_decoder COMMAND torch_mp3_decoder_test)
+
+add_executable(torch_gsm_codec_test tests/gsm_codec_test.cpp src/audio/gsm_codec.cpp)
+target_include_directories(torch_gsm_codec_test PRIVATE src ${GSM_INCLUDE_DIR})
+target_compile_options(torch_gsm_codec_test PRIVATE -UNDEBUG)
+target_link_libraries(torch_gsm_codec_test PRIVATE ${GSM_LIBRARY})
+add_test(NAME torch_gsm_codec COMMAND torch_gsm_codec_test)
+
+add_executable(torch_voice_event_test
+    tests/voice_event_test.cpp
+    src/net/v12_bitstream.cpp
+    src/net/v12_events.cpp
+    src/net/v12_registry.cpp
+    src/net/v12_datablocks.cpp)
+target_include_directories(torch_voice_event_test PRIVATE src)
+target_compile_options(torch_voice_event_test PRIVATE -UNDEBUG)
+add_test(NAME torch_voice_event COMMAND torch_voice_event_test)
 
 add_executable(torch_collision_bounds_test
     tests/collision_bounds_test.cpp
@@ -508,6 +531,7 @@ add_executable(torch_parity_test
     src/render/commander_tree.cpp
     src/audio/audio_system.cpp
     src/audio/mp3_decoder.cpp
+    src/audio/gsm_codec.cpp
     src/game/demo.cpp
     src/game/game.cpp
     src/render/projected_shadows.cpp
@@ -528,10 +552,10 @@ add_executable(torch_parity_test
     src/render/terrain_holes.cpp
     src/render/terrain.cpp
 )
-target_include_directories(torch_parity_test PRIVATE src)
+target_include_directories(torch_parity_test PRIVATE src ${GSM_INCLUDE_DIR})
 target_link_libraries(torch_parity_test PRIVATE
     OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
-    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 m dl)
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 ${GSM_LIBRARY} m dl)
 target_compile_definitions(torch_parity_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_parity_test PRIVATE -UNDEBUG -ffunction-sections -fdata-sections)
 target_link_options(torch_parity_test PRIVATE -Wl,--gc-sections)
@@ -610,6 +634,7 @@ add_executable(torch_network_loopback_test
     src/render/commander_tree.cpp
     src/audio/audio_system.cpp
     src/audio/mp3_decoder.cpp
+    src/audio/gsm_codec.cpp
     src/net/network.cpp
     src/net/master_query.cpp
     src/net/v12_bitstream.cpp
@@ -630,10 +655,10 @@ add_executable(torch_network_loopback_test
     src/game/menu.cpp
     src/game/demo.cpp
 )
-target_include_directories(torch_network_loopback_test PRIVATE src)
+target_include_directories(torch_network_loopback_test PRIVATE src ${GSM_INCLUDE_DIR})
 target_link_libraries(torch_network_loopback_test PRIVATE
     OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
-    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 m dl)
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 ${GSM_LIBRARY} m dl)
 target_compile_definitions(torch_network_loopback_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_network_loopback_test PRIVATE -UNDEBUG)
 add_test(NAME torch_network_loopback COMMAND torch_network_loopback_test)
@@ -711,6 +736,7 @@ add_executable(torch_nav_graph_test
     src/render/commander_tree.cpp
     src/audio/audio_system.cpp
     src/audio/mp3_decoder.cpp
+    src/audio/gsm_codec.cpp
     src/net/network.cpp
     src/net/master_query.cpp
     src/net/v12_bitstream.cpp
@@ -731,10 +757,10 @@ add_executable(torch_nav_graph_test
     src/game/menu.cpp
     src/game/demo.cpp
 )
-target_include_directories(torch_nav_graph_test PRIVATE src)
+target_include_directories(torch_nav_graph_test PRIVATE src ${GSM_INCLUDE_DIR})
 target_link_libraries(torch_nav_graph_test PRIVATE
     OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
-    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 m dl)
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 ${GSM_LIBRARY} m dl)
 target_compile_definitions(torch_nav_graph_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_nav_graph_test PRIVATE -UNDEBUG)
 add_test(NAME torch_nav_graph COMMAND torch_nav_graph_test)
@@ -813,6 +839,7 @@ add_executable(torch_target_manager_test
     src/render/commander_tree.cpp
     src/audio/audio_system.cpp
     src/audio/mp3_decoder.cpp
+    src/audio/gsm_codec.cpp
     src/net/network.cpp
     src/net/master_query.cpp
     src/net/v12_bitstream.cpp
@@ -833,10 +860,10 @@ add_executable(torch_target_manager_test
     src/game/menu.cpp
     src/game/demo.cpp
 )
-target_include_directories(torch_target_manager_test PRIVATE src)
+target_include_directories(torch_target_manager_test PRIVATE src ${GSM_INCLUDE_DIR})
 target_link_libraries(torch_target_manager_test PRIVATE
     OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
-    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 m dl)
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 ${GSM_LIBRARY} m dl)
 target_compile_definitions(torch_target_manager_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_target_manager_test PRIVATE -UNDEBUG)
 add_test(NAME torch_target_manager COMMAND torch_target_manager_test)

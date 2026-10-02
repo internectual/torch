@@ -100,6 +100,12 @@ inline float physicalZoneModifier(float value) {
     return std::isfinite(value) ? std::clamp(value, -40.0f, 40.0f) : 1.0f;
 }
 
+inline Point3F physicalZoneAppliedForce(const Point3F& force) {
+    return {std::isfinite(force.x) ? std::clamp(force.x, -40000.0f, 40000.0f) : 0.0f,
+            std::isfinite(force.y) ? std::clamp(force.y, -40000.0f, 40000.0f) : 0.0f,
+            std::isfinite(force.z) ? std::clamp(force.z, -40000.0f, 40000.0f) : 0.0f};
+}
+
 // PhysicalZone::appliedForce is authored in the zone's local Torque frame.
 // Apply the same axis-angle transform as the volume before converting the
 // vector to Torch's world frame.

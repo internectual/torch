@@ -11,6 +11,9 @@ build/
 CMakeUserPresets.json
 glb/
 snapshot.png
+preview_*.png
+screenshot.png
+shape_preview.png
 *.ter_cache
 fuzz/check_v23
 fuzz/crash_test

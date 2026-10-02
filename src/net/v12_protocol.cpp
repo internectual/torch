@@ -439,17 +439,24 @@ std::vector<uint8_t> ProtocolState::buildClientPacket(const ClientPacketOptions&
     for (size_t i = 0; i < options.moves.size() && i < 31; ++i)
         writeClientMove(writer, options.moves[i]);
     writer.writeFlag(false); // FOV unchanged
-    writer.writeFlag(false); // end unguaranteed events
-    for (const ClientEvent& event : options.events) {
+    const auto writeEvents = [&](bool guaranteed) {
+      for (const ClientEvent& event : options.events) {
+        if (event.guaranteed != guaranteed) continue;
         V12BitWriter encodedEvent;
         encodedEvent.writeFlag(true);
-        encodedEvent.writeFlag(false); // explicit event sequence
-        encodedEvent.writeUnsigned(event.sequence & 0x7f, 7);
+        if (guaranteed) {
+            encodedEvent.writeFlag(false); // explicit event sequence
+            encodedEvent.writeUnsigned(event.sequence & 0x7f, 7);
+        }
         encodedEvent.writeUnsigned(event.classId, EventClassBits);
         if (event.write) event.write(encodedEvent);
         if (writer.sizeBits() + encodedEvent.sizeBits() + 1 > 450 * 8) break;
         writer.writeBits(encodedEvent.data().data(), encodedEvent.sizeBits());
-    }
+      }
+    };
+    writeEvents(false);
+    writer.writeFlag(false); // end unguaranteed events
+    writeEvents(true);
     writer.writeFlag(false); // end guaranteed events
     return writer.data();
 }
@@ -560,6 +567,22 @@ ClientEvent makeMissionCrcEvent(uint32_t missionCrc) {
     return {0, 13, [missionCrc](V12BitWriter& writer) {
         writer.writeUnsigned(missionCrc, 32);
     }};
+}
+
+ClientEvent makeVoiceStreamEvent(uint8_t sequence, uint8_t codec, uint8_t stream,
+                                 bool endOfStream,
+                                 const std::vector<std::array<uint8_t, 33>>& frames) {
+    const size_t count = std::min<size_t>(frames.size(), 6);
+    return {0, 21, [sequence, codec, stream, endOfStream, frames, count](V12BitWriter& writer) {
+        writer.writeUnsigned(sequence & 0x7f, 7);
+        writer.writeUnsigned(codec & 3, 2);
+        writer.writeUnsigned(stream & 3, 2);
+        const bool countPresent = endOfStream || count != 1;
+        writer.writeFlag(countPresent);
+        if (countPresent) writer.writeUnsigned((uint32_t)count, 5);
+        for (size_t i = 0; i < count; ++i)
+            for (uint8_t byte : frames[i]) writer.writeUnsigned(byte, 8);
+    }, false};
 }
 
 std::vector<ClientEvent> buildRemoteCommandEvents(NetStringTable& strings,

@@ -146,6 +146,7 @@ public:
     NetRate curRate, maxRate;
     GameConnection();
     ~GameConnection() override;
+    void onRemove() override;
 
     // NetConnection::mRoundTripTime (ms, a running average over the acks)
     // and mPacketLoss (the dropped share of the last 32 notifies).
@@ -167,6 +168,7 @@ public:
     uint32_t voiceDecodingMask = 0;
     int voiceEncodingLevel = -1;
     bool canListen(const GameConnection& other) const;
+    bool startListening(int voice);
     void listenTo(int voice, bool listen);
     void stopListening(int voice);
     // A server connection (the client's own) has no voice id.

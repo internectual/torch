@@ -11,6 +11,7 @@
 #include "sim/projectiles.h"
 #include "sim/vehicle.h"
 #include "sim/path_manager.h"
+#include "sim/ghost_priority.h"
 #include "sim/force_field.h"
 #include "sim/static_shapes.h"
 #include "sim/trigger.h"
@@ -39,8 +40,35 @@
 #include <thread>
 
 int main() {
+    {
+        GhostPriority::Scope scope;
+        scope.position = {0, 0, 0};
+        scope.forward = {0, 1, 0};
+        scope.visibleDistance = 100.0f;
+        scope.cosFov = 0.7071f;
+        const GhostPriority::Interest ordinary{};
+        const float inFront = GhostPriority::score({0, 10, 0}, {}, scope, ordinary, 0);
+        const float behind = GhostPriority::score({0, -10, 0}, {}, scope, ordinary, 0);
+        assert(inFront > behind);
+        assert(GhostPriority::score({0, 10, 0}, {}, scope, ordinary, 5) == inFront + 0.5f);
+        assert(GhostPriority::score({0, 10, 0}, {}, scope, ordinary, 5, false) == 0.5f);
+        GhostPriority::Interest player;
+        player.player = true;
+        assert(GhostPriority::score({0, 10, 0}, {}, scope, player, 0) == inFront + 0.15f);
+        GhostPriority::Interest ownedProjectile;
+        ownedProjectile.projectile = true;
+        ownedProjectile.ownedProjectile = true;
+        assert(GhostPriority::score({0, 10, 0}, {0, -10, 0}, scope, ownedProjectile, 0) > inFront + 0.29f);
+    }
     ScriptEngine providerEngine;
     assert(providerEngine.init());
+    {
+        GameConnection listener;
+        listener.maxVoiceChannels = 1;
+        listener.wouldListenTo[1] = false;
+        assert(!listener.startListening(1));
+        assert(listener.curVoiceChannels == 0 && !listener.listeningTo[1]);
+    }
     auto* testFileSystem = new FileSystem;
     assert(testFileSystem->init({"/home/methodown/t2-linux"}));
     Engine::instance().filesys = testFileSystem;
@@ -104,6 +132,250 @@ int main() {
     const int realTime = utilityScript->callFunction("getRealTime", {}).toInt();
     assert(realTime != 0);
     assert(utilityScript->callFunction("getSimTime", {}).toInt() >= 0);
+    {
+        // A tick callback may delete a later object or create a replacement.
+        // New objects start ticking on the next pass, even if a name is reused.
+        struct TickProbe : EngineObject {
+            bool processesTicks() const override { return true; }
+        };
+        utilityScript->execute("new SimObject(TickFirst); new SimObject(TickDeleted);"
+                               "new SimObject(TickRenamed);");
+        for (const char* name : {"TickFirst", "TickDeleted", "TickRenamed"}) {
+            auto* object = providerEngine.findObject(name);
+            assert(object);
+            object->engine = std::make_shared<TickProbe>();
+            object->engine->script = object;
+        }
+        const int firstId = providerEngine.findObject("TickFirst")->id;
+        const int deletedId = providerEngine.findObject("TickDeleted")->id;
+        const int renamedId = providerEngine.findObject("TickRenamed")->id;
+        std::vector<int> visited;
+        EngineObjects::forEachTicking([&](EngineObject& object) {
+            visited.push_back(object.script->id);
+            if (object.script->id != firstId) return;
+            assert(providerEngine.deleteScriptObject("TickDeleted"));
+            utilityScript->execute("new SimObject(TickDeleted); TickRenamed.setName(TickMoved);");
+            auto* replacement = providerEngine.findObject("TickDeleted");
+            replacement->engine = std::make_shared<TickProbe>();
+            replacement->engine->script = replacement;
+        });
+        assert((visited == std::vector<int>{firstId, renamedId}));
+        const int replacementId = providerEngine.findObject("TickDeleted")->id;
+        assert(replacementId != deletedId);
+        visited.clear();
+        EngineObjects::forEachTicking([&](EngineObject& object) {
+            visited.push_back(object.script->id);
+        });
+        assert((visited == std::vector<int>{firstId, renamedId, replacementId}));
+        for (const char* name : {"TickFirst", "TickDeleted", "TickMoved"})
+            assert(providerEngine.deleteScriptObject(name));
+    }
+    {
+        struct MoveProbe : GameBase {
+            int processed = 0;
+            std::function<void()> onMove;
+            void processMove(const ClientMoveIn*) override {
+                ++processed;
+                if (onMove) onMove();
+            }
+        };
+        struct MoveConnection : GameConnection {
+            std::function<void()> onGetMoves;
+            void getMoveList() override { if (onGetMoves) onGetMoves(); }
+        };
+        utilityScript->execute("new SimObject(TickControlled); new GameConnection(TickConnection);");
+        auto* actorScript = providerEngine.findObject("TickControlled");
+        auto actor = std::make_shared<MoveProbe>();
+        actorScript->engine = actor;
+        actor->script = actorScript;
+        auto* connectionScript = providerEngine.findObject("TickConnection");
+        auto connection = std::make_shared<MoveConnection>();
+        connectionScript->engine = connection;
+        connection->script = connectionScript;
+        connection->setControlObject(providerEngine.objectKey(actorScript));
+        connection->moves.push_back(ClientMoveIn{});
+        connection->onGetMoves = [&] { assert(providerEngine.deleteScriptObject("TickControlled")); };
+        SimState::advanceServer(0.0);
+        SimState::advanceServer(0.033);
+        assert(actor->processed == 0 && connection->moves.size() == 1);
+
+        // Deleting the connection during a move must not consume more moves.
+        utilityScript->execute("new SimObject(TickControlled);");
+        actorScript = providerEngine.findObject("TickControlled");
+        actor = std::make_shared<MoveProbe>();
+        actorScript->engine = actor;
+        actor->script = actorScript;
+        connection->onGetMoves = nullptr;
+        connection->setControlObject({});
+        connection->setControlObject(providerEngine.objectKey(actorScript));
+        connection->moves.push_back(ClientMoveIn{});
+        actor->onMove = [&] { assert(providerEngine.deleteScriptObject("TickConnection")); };
+        SimState::advanceServer(0.065);
+        assert(actor->processed == 1 && connection->moves.size() == 1);
+        assert(providerEngine.deleteScriptObject("TickControlled"));
+    }
+    {
+        // A trigger callback can delete both itself and another overlapping
+        // trigger. The remaining candidate list must not contain live pointers.
+        utilityScript->execute("datablock TriggerData(DeleteTriggerData) {};"
+                               "function DeleteTriggerData::onEnterTrigger(%data, %trigger, %object) {"
+                               "  $deleteTriggerCalls++; FirstDeleteTrigger.delete(); SecondDeleteTrigger.delete(); }"
+                               "new Trigger(FirstDeleteTrigger) { dataBlock = DeleteTriggerData;"
+                               "  polyhedron = \"-2 -2 -2 4 0 0 0 4 0 0 0 4\"; };"
+                               "new Trigger(SecondDeleteTrigger) { dataBlock = DeleteTriggerData;"
+                               "  polyhedron = \"-2 -2 -2 4 0 0 0 4 0 0 0 4\"; };"
+                               "new StaticShape(DeleteTriggerSubject); $deleteTriggerCalls = 0;");
+        auto* subject = EngineObjects::get<ShapeBase>("DeleteTriggerSubject");
+        assert(subject);
+        float lo[3], hi[3];
+        subject->worldBox(lo, hi);
+        triggersPotentialEnter(subject->handle(), lo, hi);
+        assert(utilityScript->getGlobal("$deleteTriggerCalls").toInt() == 1);
+        assert(!providerEngine.findObject("FirstDeleteTrigger"));
+        assert(!providerEngine.findObject("SecondDeleteTrigger"));
+        assert(providerEngine.deleteScriptObject("DeleteTriggerSubject"));
+        utilityScript->execute("datablock TriggerData(LeaveDeleteTriggerData) { tickPeriodMS = 0; };"
+                               "function LeaveDeleteTriggerData::onEnterTrigger(%data, %trigger, %object) {}"
+                               "function LeaveDeleteTriggerData::onLeaveTrigger(%data, %trigger, %object) {"
+                               "  $leaveDeleteCalls++; %trigger.delete(); }"
+                               "function LeaveDeleteTriggerData::onTickTrigger(%data, %trigger) { $afterLeaveTicks++; }"
+                               "new Trigger(LeaveDeleteTrigger) { dataBlock = LeaveDeleteTriggerData;"
+                               "  polyhedron = \"-2 -2 -2 4 0 0 0 4 0 0 0 4\"; };"
+                               "new StaticShape(LeaveDeleteFirst); new StaticShape(LeaveDeleteSecond);"
+                               "$leaveDeleteCalls = 0; $afterLeaveTicks = 0;");
+        auto* triggerScript = providerEngine.findObject("LeaveDeleteTrigger");
+        auto triggerState = triggerScript->engine;
+        auto* trigger = dynamic_cast<TriggerObject*>(triggerState.get());
+        assert(trigger);
+        trigger->potentialEnterObject(EngineObjects::get<ShapeBase>("LeaveDeleteFirst")->handle());
+        trigger->potentialEnterObject(EngineObjects::get<ShapeBase>("LeaveDeleteSecond")->handle());
+        assert(trigger->objects.size() == 2);
+        auto* leaving = EngineObjects::get<ShapeBase>("LeaveDeleteSecond");
+        leaving->transform[3] = leaving->transform[7] = leaving->transform[11] = 100.0f;
+        trigger->processTick();
+        trigger->processTick();
+        assert(utilityScript->getGlobal("$leaveDeleteCalls").toInt() == 1);
+        assert(utilityScript->getGlobal("$afterLeaveTicks").toInt() == 0);
+        assert(!providerEngine.findObject("LeaveDeleteTrigger"));
+        for (const char* name : {"LeaveDeleteFirst", "LeaveDeleteSecond"})
+            assert(providerEngine.deleteScriptObject(name));
+    }
+    {
+        // Control links are object relationships, not names that can be
+        // inherited by a replacement after either endpoint is deleted.
+        utilityScript->execute("new Camera(RemovedControl); new GameConnection(RemovedController);");
+        auto* actor = EngineObjects::get<GameBase>("RemovedControl");
+        auto* connection = EngineObjects::get<GameConnection>("RemovedController");
+        assert(actor && connection);
+        connection->setControlObject(providerEngine.objectKey(actor->script));
+        assert(!actor->controllingClient.empty());
+        assert(providerEngine.deleteScriptObject("RemovedControl"));
+        assert(connection->controlObject().empty());
+        utilityScript->execute("new Camera(RemovedControl);");
+        actor = EngineObjects::get<GameBase>("RemovedControl");
+        connection->setControlObject(providerEngine.objectKey(actor->script));
+        assert(!actor->controllingClient.empty());
+        assert(providerEngine.deleteScriptObject("RemovedController"));
+        assert(actor->controllingClient.empty());
+        assert(providerEngine.deleteScriptObject("RemovedControl"));
+    }
+    {
+        // Net GameConnection::setControlObject detaches an object from the
+        // Player driving it before assigning the new client's control link.
+        utilityScript->execute("new Player(TransferDriver); new Turret(TransferControl);");
+        auto* driver = EngineObjects::get<PlayerObject>("TransferDriver");
+        auto* controlled = EngineObjects::get<ShapeBase>("TransferControl");
+        assert(driver && controlled);
+        driver->setControlObject(providerEngine.objectKey(controlled->script));
+        assert(driver->controlObject == providerEngine.objectKey(controlled->script));
+        utilityScript->execute("new GameConnection(TransferConnection);");
+        auto* connection = EngineObjects::get<GameConnection>("TransferConnection");
+        assert(connection);
+        connection->setControlObject(providerEngine.objectKey(controlled->script));
+        assert(driver->controlObject.empty());
+        assert(connection->controlObject() == providerEngine.objectKey(controlled->script));
+        assert(controlled->controllingObject.empty());
+        assert(providerEngine.deleteScriptObject("TransferConnection"));
+        for (const char* name : {"TransferDriver", "TransferControl"})
+            assert(providerEngine.deleteScriptObject(name));
+    }
+    {
+        utilityScript->execute("new Player(DeleteDriver); new Turret(DeleteDrivenObject);");
+        auto* driver = EngineObjects::get<PlayerObject>("DeleteDriver");
+        auto* driven = EngineObjects::get<ShapeBase>("DeleteDrivenObject");
+        assert(driver && driven);
+        driver->setControlObject(providerEngine.objectKey(driven->script));
+        assert(providerEngine.deleteScriptObject("DeleteDriver"));
+        assert(driven->controllingObject.empty() && driven->controllingClient.empty());
+        utilityScript->execute("new Player(DeleteDriver); DeleteDriver.setControlObject(DeleteDrivenObject);");
+        driver = EngineObjects::get<PlayerObject>("DeleteDriver");
+        assert(driver && !driver->controlObject.empty());
+        assert(providerEngine.deleteScriptObject("DeleteDrivenObject"));
+        assert(driver->controlObject.empty());
+        assert(providerEngine.deleteScriptObject("DeleteDriver"));
+    }
+    {
+        utilityScript->execute("datablock TriggerData(NotifyTriggerData) { tickPeriodMS = 0; };"
+                               "function NotifyTriggerData::onEnterTrigger(%data, %trigger, %object) {}"
+                               "function NotifyTriggerData::onLeaveTrigger(%data, %trigger, %object) {"
+                               "  $notifyLeaves++; $notifyGone = %object; }"
+                               "new Trigger(NotifyTrigger) { dataBlock = NotifyTriggerData;"
+                               "  polyhedron = \"-2 -2 -2 4 0 0 0 4 0 0 0 4\"; };"
+                               "new StaticShape(NotifyOccupant); $notifyLeaves = 0;");
+        auto* trigger = EngineObjects::get<TriggerObject>("NotifyTrigger");
+        auto* occupant = EngineObjects::get<ShapeBase>("NotifyOccupant");
+        assert(trigger && occupant);
+        const int occupantId = occupant->script->id;
+        trigger->potentialEnterObject(occupant->handle());
+        assert(trigger->objects.size() == 1);
+        assert(providerEngine.deleteScriptObject("NotifyOccupant"));
+        assert(trigger->objects.empty());
+        assert(utilityScript->getGlobal("$notifyLeaves").toInt() == 1);
+        assert(utilityScript->getGlobal("$notifyGone").toInt() == occupantId);
+        utilityScript->execute("new StaticShape(NotifyOccupant);");
+        occupant = EngineObjects::get<ShapeBase>("NotifyOccupant");
+        trigger->potentialEnterObject(occupant->handle());
+        occupant->transform[3] = 100.0f;
+        trigger->processTick();
+        trigger->processTick();
+        assert(trigger->objects.empty());
+        assert(utilityScript->getGlobal("$notifyLeaves").toInt() == 2);
+        assert(providerEngine.deleteScriptObject("NotifyOccupant"));
+        assert(utilityScript->getGlobal("$notifyLeaves").toInt() == 2); // notification cleared on exit
+
+        // Deleting another occupant inside a leave callback changes the list
+        // reentrantly; each occupant must leave exactly once.
+        utilityScript->execute("function NotifyTriggerData::onLeaveTrigger(%data, %trigger, %object) {"
+                               "  $notifyLeaves++; NotifyFirst.delete(); }"
+                               "new StaticShape(NotifyFirst); new StaticShape(NotifySecond);"
+                               "$notifyLeaves = 0;");
+        trigger->potentialEnterObject(EngineObjects::get<ShapeBase>("NotifyFirst")->handle());
+        occupant = EngineObjects::get<ShapeBase>("NotifySecond");
+        trigger->potentialEnterObject(occupant->handle());
+        occupant->transform[3] = 100.0f;
+        trigger->processTick();
+        trigger->processTick();
+        assert(trigger->objects.empty());
+        assert(utilityScript->getGlobal("$notifyLeaves").toInt() == 2);
+        assert(providerEngine.deleteScriptObject("NotifySecond"));
+        assert(providerEngine.deleteScriptObject("NotifyTrigger"));
+    }
+    {
+        // A thin slanted trigger crosses the player's world box, while its
+        // centre and all sampled box corners are outside the trigger volume.
+        utilityScript->execute("datablock PlayerData(SlantTriggerArmor) { maxEnergy = 60; boxSize = \"1.2 1.2 2.3\"; };"
+                               "datablock TriggerData(SlantTriggerData) {};"
+                               "new Player(SlantTriggerActor) { dataBlock = SlantTriggerArmor; position = \"0 1.76 0\"; };"
+                               "new Trigger(SlantTrigger) { dataBlock = SlantTriggerData;"
+                               " polyhedron = \"-6 -0.76 -1 8 4 0 0.08 -0.16 0 0 0 4\"; };");
+        auto* actor = EngineObjects::get<ShapeBase>("SlantTriggerActor");
+        auto* trigger = EngineObjects::get<TriggerObject>("SlantTrigger");
+        assert(actor && trigger);
+        trigger->potentialEnterObject(actor->handle());
+        assert(trigger->objects.size() == 1);
+        assert(providerEngine.deleteScriptObject("SlantTrigger"));
+        assert(providerEngine.deleteScriptObject("SlantTriggerActor"));
+    }
     int velocityId = 0;
     Point3F velocity{};
     providerEngine.setVelocityMutationProvider([&](int id, const Point3F& value) {
@@ -825,6 +1097,46 @@ int main() {
         assert(again.events.empty());
     }
     {
+        // V12 ShapeBase::onCameraScopeQuery falls back to 1000m visible
+        // distance when a mission has no Sky object.
+        script.ts()->execute("new GameConnection(NoSkyScopeConnection);"
+                             "new Camera(NoSkyScopeCamera);"
+                             "new Camera(NoSkyScopeTarget) { position = \"0 500 0\"; };");
+        auto* server = EngineObjects::get<GameConnection>("NoSkyScopeConnection");
+        assert(server);
+        GameConnection client;
+        client.isServer = false;
+        DemoParser parser;
+        int packetIndex = 0;
+        server->deliver = [&](const std::vector<uint8_t>& packet) { client.receivePacket(packet.data(), packet.size()); };
+        client.onServerPacket = [&](const std::vector<uint8_t>& packet) {
+            PacketData data = parser.parsePacket(packet.data(), packet.size(), packetIndex++);
+            for (const auto& event : data.events)
+                if (event.ghostMessage >= 0)
+                    client.clientGhostMessage(event.ghostMessage, event.ghostSequence,
+                                              (uint32_t)event.ghostCount);
+        };
+        client.deliver = [&](const std::vector<uint8_t>& packet) {
+            parser.onSendPacketTrigger();
+            server->receivePacket(packet.data(), packet.size());
+        };
+        server->activateGhosting();
+        double now = 50.0;
+        for (int i = 0; i < 20 && !server->isGhosting(); ++i, now += 1.0) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.5);
+        }
+        assert(server->isGhosting());
+        server->setControlObject("NoSkyScopeCamera");
+        for (int i = 0; i < 8; ++i, now += 0.2) {
+            server->checkPacketSend(now);
+            client.checkPacketSend(now + 0.1);
+        }
+        const std::string farTarget = ScriptEngine::instance().objectKey(
+            ScriptEngine::instance().findObject("NoSkyScopeTarget"));
+        assert(server->ghostIndex(farTarget) >= 0);
+    }
+    {
         // activateGhosting sends the ScopeAlways scene as GhostAlwaysObject
         // events the demo reader turns into ghosts with their scene fields.
         script.ts()->execute(
@@ -1185,18 +1497,82 @@ int main() {
         for (const char* name : {"LockShooter", "LockHot"}) ScriptEngine::instance().deleteScriptObject(name);
     }
     {
-        // Path::finishPath: a Path's Markers in seqNum order; the total time
-        // leaves out the last marker's msToNext.
+        // V12 Path::finishPath leaves out the final marker's duration.
         const size_t before = PathManager::paths().size();
         script.ts()->execute("new SimGroup(MissionGroup) { new Path(TestPath) {"
                              "  new Marker() { seqNum = 2; position = \"3 3 3\"; msToNext = 500; };"
-                             "  new Marker() { seqNum = 1; position = \"1 1 1\"; msToNext = 250; }; }; };"
+                             "  new Marker(PathFirstMarker) { seqNum = 1; position = \"1 1 1\"; msToNext = 250; }; }; };"
                              "pathOnMissionLoadDone();");
         const auto& paths = PathManager::paths();
         assert(paths.size() == before + 1);
         const auto& path = paths.back();
         assert(path.positions.size() == 2 && path.positions[0].x == 1.0f && path.positions[1].x == 3.0f);
         assert(path.msToNext[0] == 250 && path.msToNext[1] == 500 && path.totalTime == 250);
+        // V12 PathManagerEvent::pack reads the current state at send time,
+        // including for events queued before a marker was edited.
+        GameConnection pathConnection;
+        pathConnection.curRate.packetSize = 4096;
+        PathManager::transmitPaths(pathConnection);
+        script.ts()->execute("PathFirstMarker.msToNext = 100; pathOnMissionLoadDone();");
+        PathManager::transmitPaths(pathConnection);
+        int revisions = 0;
+        pathConnection.deliver = [&](const std::vector<uint8_t>& packet) {
+            V12BitStream stream(packet.data(), packet.size());
+            V12::DnetHeader header;
+            assert(V12::readDnetHeader(stream, header));
+            assert(!stream.readFlag() && !stream.readFlag()); // unchanged rates
+            assert(stream.readU32() == 0); // move acknowledgement
+            for (int i = 0; i < 6; ++i) assert(!stream.readFlag()); // no control object
+            while (stream.readFlag()) { stream.readUnsigned(4); stream.readUnsigned(32); }
+            assert(!stream.readFlag()); // no camera FOV update
+            assert(!stream.readFlag()); // no unordered events
+            while (stream.readFlag()) {
+                if (!stream.readFlag()) stream.readUnsigned(7); // ordered sequence
+                assert(stream.readUnsigned(6) == GameConnection::PathManagerEvent);
+                assert(stream.readFlag()); // NewPaths
+                const uint32_t count = stream.readU32();
+                assert(count == before + 1);
+                for (uint32_t i = 0; i < count; ++i) {
+                    const uint32_t total = stream.readU32();
+                    const uint32_t points = stream.readU32();
+                    if (i == before) {
+                        assert(points == 2);
+                        assert(total == 100u);
+                    }
+                    for (uint32_t j = 0; j < points; ++j) {
+                        stream.readF32(); stream.readF32(); stream.readF32();
+                        const uint32_t duration = stream.readU32();
+                        if (i == before && j == 0)
+                            assert(duration == 100u);
+                    }
+                }
+                ++revisions;
+            }
+            assert(!stream.failed());
+        };
+        pathConnection.checkPacketSend(0.0);
+        assert(revisions == 2);
+        // Finished paths rebuild on Marker membership changes without another
+        // pathOnMissionLoadDone, including deletion and group-to-group moves.
+        script.ts()->execute("new Marker(AddedPathMarker) { seqNum = 3; position = \"5 5 5\"; msToNext = 400; };"
+                             "TestPath.add(AddedPathMarker);");
+        assert(PathManager::paths()[before].positions.size() == 3);
+        assert(PathManager::paths()[before].totalTime == 600);
+        script.ts()->execute("TestPath.remove(AddedPathMarker);");
+        assert(PathManager::paths()[before].positions.size() == 2);
+        assert(PathManager::paths()[before].totalTime == 100);
+        script.ts()->execute("TestPath.add(AddedPathMarker); AddedPathMarker.delete();");
+        assert(PathManager::paths()[before].positions.size() == 2);
+        assert(PathManager::paths()[before].totalTime == 100);
+        script.ts()->execute("new Path(OtherTestPath); MissionGroup.add(OtherTestPath); pathOnMissionLoadDone();"
+                             "OtherTestPath.add(PathFirstMarker);");
+        assert(PathManager::paths().size() == before + 2);
+        assert(PathManager::paths()[before].positions.size() == 1);
+        assert(PathManager::paths()[before].positions[0].x == 3.0f);
+        assert(PathManager::paths()[before].totalTime == 0);
+        assert(PathManager::paths()[before + 1].positions.size() == 1);
+        assert(PathManager::paths()[before + 1].positions[0].x == 1.0f);
+        assert(PathManager::paths()[before + 1].totalTime == 0);
     }
     {
         // math/mathTypes.cc: AngAxisF matrices as the engine builds them.
@@ -1770,16 +2146,23 @@ int main() {
         // polyhedron's twelve outward triangles while active, none after
         // deactivate().
         script.ts()->execute("new PhysicalZone(TestFieldZone) { position = \"0 0 0\"; scale = \"4 0.25 4\";"
-                             "  polyhedron = \"0 1 0 1 0 0 0 -1 0 0 0 1\"; velocityMod = 0.1; };");
+                             "  polyhedron = \"0 1 0 1 0 0 0 -1 0 0 0 100\"; velocityMod = 0.1;"
+                             "  gravityMod = 0.5; appliedForce = \"1 2 3\"; };");
         {
+            const float effectLo[3] = {-1, -1, -1}, effectHi[3] = {1, 1, 1};
+            const auto effect = PhysicalZones::effects(effectLo, effectHi);
+            assert(effect.gravityMod == 0.5f && effect.appliedForce.x == 1.0f &&
+                   effect.appliedForce.y == 2.0f && effect.appliedForce.z == 3.0f);
             std::vector<PlayerPrediction::Zone> zones;
             PhysicalZones::gather({-1, -1, -1}, {1, 1, 1}, zones);
             assert(zones.size() == 1 && zones[0].triangles.size() == 12 && zones[0].velocityMod == 0.1f);
             for (const auto& t : zones[0].triangles) {
-                const Point3F c{2.0f, 0.125f, 2.0f};
+                const Point3F c{2.0f, 0.125f, 200.0f};
                 assert(PlayerPrediction::dot(t.n, PlayerPrediction::sub(t.a, c)) > 0);
             }
             script.ts()->execute("TestFieldZone.deactivate();");
+            const auto inactiveEffect = PhysicalZones::effects(effectLo, effectHi);
+            assert(inactiveEffect.gravityMod == 1.0f && inactiveEffect.appliedForce.x == 0.0f);
             zones.clear();
             PhysicalZones::gather({-1, -1, -1}, {1, 1, 1}, zones);
             assert(zones.empty());

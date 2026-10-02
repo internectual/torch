@@ -14,6 +14,7 @@
 #include <vector>
 #include <cstring>
 #include <limits>
+#include <string>
 
 namespace {
 Point3F safeUnit(Point3F value, Point3F fallback) {
@@ -37,6 +38,9 @@ struct AudioSystem::Impl {
     using SlotiFn = void (*)(ALuint, ALenum, ALint);
     using SlotfFn = void (*)(ALuint, ALenum, ALfloat);
     ALCdevice* device{};
+    ALCdevice* captureDevice{};
+    bool captureRunning = false;
+    float captureGainScale = 1.0f;
     ALCcontext* context{};
     std::unordered_map<std::string, SoundBuffer*> buffers;
     std::vector<SoundSource*> sources;
@@ -155,6 +159,7 @@ bool AudioSystem::init() {
 }
 
 void AudioSystem::shutdown() {
+    destroyCapture();
     for (auto* source : impl->sources) {
         if (!source) continue;
         source->stop();
@@ -219,9 +224,26 @@ void AudioSystem::update(const Point3F& listenerPos, const Point3F& listenerVel,
     for (auto it = impl->sources.begin(); it != impl->sources.end(); ) {
         SoundSource* src = *it;
         if (src && !src->persistent && !src->looping && !src->paused && !src->isPlaying()) {
+            SoundBuffer* transient = src->scheduledBuffer;
             src->destroy();
             delete src;
             it = impl->sources.erase(it);
+            if (transient) {
+                const bool inUse = std::any_of(impl->sources.begin(), impl->sources.end(),
+                    [transient](const SoundSource* other) {
+                        return other && other->scheduledBuffer == transient;
+                    });
+                if (!inUse && transient->durationMs == 0) {
+                    for (auto mapIt = impl->buffers.begin(); mapIt != impl->buffers.end(); ++mapIt) {
+                        if (mapIt->second == transient) {
+                            impl->buffers.erase(mapIt);
+                            break;
+                        }
+                    }
+                    transient->destroy();
+                    delete transient;
+                }
+            }
         } else {
             ++it;
         }
@@ -348,6 +370,55 @@ void AudioSystem::updateStreams() {
     }
 }
 
+bool AudioSystem::initCapture(int sampleRate, int bufferSamples) {
+    if (!initialized || sampleRate <= 0 || bufferSamples <= 0) return false;
+    destroyCapture();
+    impl->captureDevice = alcCaptureOpenDevice(nullptr, (ALCuint)sampleRate,
+                                                AL_FORMAT_MONO16, (ALCsizei)bufferSamples);
+    return impl->captureDevice != nullptr;
+}
+
+void AudioSystem::destroyCapture() {
+    if (!impl->captureDevice) return;
+    alcCaptureStop(impl->captureDevice);
+    alcCaptureCloseDevice(impl->captureDevice);
+    impl->captureDevice = nullptr;
+    impl->captureRunning = false;
+}
+
+bool AudioSystem::startCapture() {
+    if (!impl->captureDevice) return false;
+    alcCaptureStart(impl->captureDevice);
+    impl->captureRunning = true;
+    return true;
+}
+
+void AudioSystem::stopCapture() {
+    if (impl->captureDevice) alcCaptureStop(impl->captureDevice);
+    impl->captureRunning = false;
+}
+
+size_t AudioSystem::captureSamples(int16_t* samples, size_t count) {
+    if (!impl->captureDevice || !samples || count == 0) return 0;
+    ALCint available = 0;
+    alcGetIntegerv(impl->captureDevice, ALC_CAPTURE_SAMPLES, 1, &available);
+    const size_t take = std::min(count, available > 0 ? (size_t)available : 0u);
+    if (take) alcCaptureSamples(impl->captureDevice, samples, (ALCsizei)take);
+    return take;
+}
+
+void AudioSystem::setCaptureGainScale(float scale) {
+    impl->captureGainScale = std::clamp(std::isfinite(scale) ? scale : 1.0f, 0.1f, 5.0f);
+}
+
+float AudioSystem::captureGainScale() const {
+    return impl->captureGainScale;
+}
+
+bool AudioSystem::isCapturing() const {
+    return impl->captureRunning;
+}
+
 void AudioSystem::setListenerPosition(const Point3F& position) {
     if (!initialized || !std::isfinite(position.x) || !std::isfinite(position.y) ||
         !std::isfinite(position.z)) return;
@@ -469,6 +540,31 @@ SoundBuffer* AudioSystem::loadSound(const char* path) {
     return buf;
 }
 
+SoundSource* AudioSystem::playPcm16(const int16_t* samples, size_t count,
+                                    int sampleRate, float volume) {
+    if (!initialized || !samples || count == 0 || sampleRate <= 0 ||
+        count > static_cast<size_t>(std::numeric_limits<ALsizei>::max()) / sizeof(int16_t))
+        return nullptr;
+    auto* buffer = new SoundBuffer;
+    if (!buffer->loadPcm16(samples, count, sampleRate)) {
+        delete buffer;
+        return nullptr;
+    }
+    auto* source = createSource(false, 2);
+    if (!source) {
+        buffer->destroy();
+        delete buffer;
+        return nullptr;
+    }
+    // A zero duration marks this buffer as transient; normal authored buffers
+    // are owned by the path cache and always retain their decoded duration.
+    buffer->durationMs = 0;
+    source->setVolume(std::max(0.0f, volume) * channelVolume(VoiceAudioType));
+    source->play(buffer);
+    impl->buffers.emplace("__voice_" + std::to_string(source->serial), buffer);
+    return source;
+}
+
 SoundSource* AudioSystem::createSource(bool persistent, int priority) {
     if (!initialized || cfg.maxSources <= 0)
         return nullptr;
@@ -514,10 +610,21 @@ void AudioSystem::releaseSource(SoundSource* source) {
     // Sources can be auto-reclaimed between frames. Callers keep raw handles
     // for mission/ghost ownership, so never dereference an already retired one.
     if (it == impl->sources.end()) return;
+    SoundBuffer* transient = source->scheduledBuffer;
     source->stop();
     source->destroy();
     impl->sources.erase(it);
     delete source;
+    if (transient && transient->durationMs == 0) {
+        for (auto mapIt = impl->buffers.begin(); mapIt != impl->buffers.end(); ++mapIt) {
+            if (mapIt->second == transient) {
+                impl->buffers.erase(mapIt);
+                break;
+            }
+        }
+        transient->destroy();
+        delete transient;
+    }
 }
 
 void AudioSystem::stopAll() {
@@ -547,6 +654,18 @@ bool SoundBuffer::load(const uint8_t* data, size_t size) {
     if (memcmp(data, "RIFF", 4) == 0) return loadWav(data, size);
     if (size > 4 && data[0] == 'O' && data[1] == 'g' && data[2] == 'g') return loadOgg(data, size);
     return loadWav(data, size);
+}
+
+bool SoundBuffer::loadPcm16(const int16_t* samples, size_t count, int sampleRate) {
+    if (!samples || count == 0 || sampleRate <= 0 ||
+        count > static_cast<size_t>(std::numeric_limits<ALsizei>::max()) / sizeof(int16_t))
+        return false;
+    alGenBuffers(1, &buffer);
+    alBufferData(buffer, AL_FORMAT_MONO16, samples,
+                 static_cast<ALsizei>(count * sizeof(int16_t)), sampleRate);
+    durationMs = static_cast<uint32_t>(count * 1000 / static_cast<size_t>(sampleRate));
+    loaded = alGetError() == AL_NO_ERROR;
+    return loaded;
 }
 
 bool SoundBuffer::loadWav(const uint8_t* data, size_t size) {

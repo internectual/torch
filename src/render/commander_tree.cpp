@@ -402,7 +402,8 @@ public:
                     }
                 }
                 if ((e->flags & (DamageFlag | ControllableFlag)) && obj) {
-                    e->damage = 1.0f - obj->health / 100.0f;
+                    const float maximum = obj->maxHealth > 0.0f ? obj->maxHealth : 100.0f;
+                    e->damage = std::clamp(1.0f - obj->health / maximum, 0.0f, 1.0f);
                     e->flags &= ~ControlledFlag;
                 }
                 e->flags |= CountedFlag;

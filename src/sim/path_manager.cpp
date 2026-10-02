@@ -30,6 +30,7 @@ void writePath(TorqueBitWriter& w, const PathEntry& path) {
 void postPathEvent(GameConnection& connection, bool newPaths, uint32_t modified) {
     auto event = std::make_shared<NetEventOut>();
     event->classIndex = GameConnection::PathManagerEvent;
+    // V12 PathManagerEvent::pack reads the current server paths at send time.
     event->pack = [newPaths, modified](TorqueBitWriter& w) {
         const auto& paths = serverPaths();
         if (w.writeFlag(newPaths)) {
@@ -93,7 +94,7 @@ void finishPath(ScriptObject* path) {
         entry.positions.push_back({p[0], p[1], p[2]});
         entry.msToNext.push_back((uint32_t)Fields::s32(marker, "msToNext", 1000));
     }
-    // DMMTODO: Looping paths.
+    // V12 leaves out the last marker's duration; looping paths were not wired.
     for (size_t i = 0; i + 1 < entry.msToNext.size(); ++i) entry.totalTime += entry.msToNext[i];
     paths[id] = std::move(entry);
     transmitPath(id);
@@ -104,6 +105,12 @@ void finishPath(ScriptObject* path) {
 const std::vector<PathEntry>& paths() { return serverPaths(); }
 
 void transmitPaths(GameConnection& connection) { postPathEvent(connection, true, 0); }
+
+void membershipChanged(ScriptObject* group, ScriptObject* member) {
+    if (group && member && EngineClasses::isA(group->className, "Path") &&
+        EngineClasses::isA(member->className, "Marker") && group->internals.count("__pathIndex"))
+        finishPath(group);
+}
 
 } // namespace PathManager
 

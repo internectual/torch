@@ -85,6 +85,13 @@ struct ServerEvent {
     int audioProfileId = -1;
     uint16_t audioTargetId = 0;
     V12Vec3 audioPosition{};
+    bool hasVoiceStream = false;
+    uint8_t voiceSequence = 0;
+    uint8_t voiceCodec = 0;
+    uint8_t voiceStream = 0;
+    uint32_t voiceClientId = 0;
+    bool voiceEndOfStream = false;
+    std::vector<std::array<uint8_t, 33>> voiceFrames;
     bool hasMissionCrc = false;
     uint32_t missionCrc = 0;
     std::vector<std::string> arguments;      // tags expanded to text
@@ -137,7 +144,9 @@ private:
 
 bool readServerEvents(V12BitStream& stream, NetStringTable& strings,
                       std::vector<ServerEvent>& events,
-                      const V12Vec3& compressionPoint = {});
+                      const V12Vec3& compressionPoint = {},
+                      bool includesVoiceClientId = true,
+                      uint32_t defaultVoiceClientId = 0);
 bool readServerPacketEvents(V12BitStream& stream, NetStringTable& strings,
                             std::vector<ServerEvent>& events,
                             ServerGameState* state = nullptr,
