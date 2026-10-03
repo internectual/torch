@@ -54,6 +54,15 @@ bool overlapsAabb(const Point3F vertices[8], const float lo[3], const float hi[3
     return true;
 }
 
+Point3F physicalZoneForce(const PhysicalZoneObject& zone) {
+    const auto value = Fields::point(zone.script, "appliedForce", {0, 0, 0});
+    const Point3F force = physicalZoneAppliedForce({value[0], value[1], value[2]});
+    const auto& m = zone.transform;
+    return physicalZoneAppliedForce({m[0] * force.x + m[1] * force.y + m[2] * force.z,
+                                     m[4] * force.x + m[5] * force.y + m[6] * force.z,
+                                     m[8] * force.x + m[9] * force.y + m[10] * force.z});
+}
+
 } // namespace
 
 // TypeTriggerPolyhedron: "ox oy oz  ax ay az  bx by bz  cx cy cz", an
@@ -382,8 +391,7 @@ Effects effects(const float lo[3], const float hi[3]) {
         auto* zone = object ? dynamic_cast<PhysicalZoneObject*>(object->engine.get()) : nullptr;
         if (!zone || !zone->active || !zone->overlapsBox(lo, hi)) continue;
         result.gravityMod *= physicalZoneModifier(Fields::f32(zone->script, "gravityMod", 1.0f));
-        const auto force = Fields::point(zone->script, "appliedForce", {0, 0, 0});
-        const auto clamped = physicalZoneAppliedForce({force[0], force[1], force[2]});
+        const auto clamped = physicalZoneForce(*zone);
         result.appliedForce = {result.appliedForce.x + clamped.x, result.appliedForce.y + clamped.y,
                                result.appliedForce.z + clamped.z};
     }

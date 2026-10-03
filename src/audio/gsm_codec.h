@@ -16,6 +16,7 @@ public:
     Encoder(const Encoder&) = delete;
     Encoder& operator=(const Encoder&) = delete;
 
+    bool reset();
     bool encode(const int16_t* pcm, std::array<uint8_t, EncodedBytesPerFrame>& frame);
 
 private:

@@ -7,6 +7,12 @@
 #include <cmath>
 
 int main() {
+    assert(GuiBitmapStatePolicy::horizontalStateCount("gui/shll_menuclose", 105, 29) == 3);
+    assert(GuiBitmapStatePolicy::horizontalStateCount("gui/shll_soundbutton", 104, 27) == 4);
+    const auto closeHoverSlice = GuiBitmapStatePolicy::horizontalSlice(105, 3, 1);
+    assert(std::abs(closeHoverSlice.x - 35.5f) < 0.001f);
+    assert(std::abs(closeHoverSlice.width - 34.0f) < 0.001f);
+
     assert(nextGuiFocus(0, 3, false) == 1);
     assert(nextGuiFocus(0, 3, true) == 2);
     assert(nextGuiFocus(2, 3, false) == 0);

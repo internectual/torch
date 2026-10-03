@@ -3,6 +3,11 @@
 #include <vector>
 
 int main() {
+    assert(AudioPcmStreamPolicy::canQueue(0, false));
+    assert(AudioPcmStreamPolicy::canQueue(AudioPcmStreamPolicy::MaxQueuedBuffers - 1, false));
+    assert(!AudioPcmStreamPolicy::canQueue(AudioPcmStreamPolicy::MaxQueuedBuffers, false));
+    assert(!AudioPcmStreamPolicy::canQueue(0, true));
+
     using AudioSourcePolicy::Candidate;
     std::vector<Candidate> candidates = {
         {1, false, false, 10},

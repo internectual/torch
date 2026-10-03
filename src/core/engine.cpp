@@ -2940,14 +2940,16 @@ void Engine::run() {
                         // Gather all named objects
                         std::vector<std::string> allNames;
                         for (auto& kv : scr->objects)
-                            if (!kv.second->name.empty()) allNames.push_back(kv.first);
+                            if (kv.second && !kv.second->name.empty()) allNames.push_back(kv.first);
                         // Also collect unnamed objects
                         for (auto& kv : scr->objects) {
+                            if (!kv.second) continue;
                             // If the object has a parent, link it
                             auto it = kv.second->internals.find("parent");
                             if (it != kv.second->internals.end() && !it->second.toString().empty()) {
                                 std::string parentName = it->second.toString();
-                                if (scr->objects.count(parentName))
+                                auto parent = scr->objects.find(parentName);
+                                if (parent != scr->objects.end() && parent->second)
                                     treeChildren[parentName].push_back(kv.first);
                             } else {
                                 // No parent, check if it's a SimGroup or root-level object
@@ -2958,9 +2960,13 @@ void Engine::run() {
                         // Roots that weren't caught: any named object not a child of something else
                         for (auto& n : allNames) {
                             auto it = scr->objects.find(n);
-                            if (it == scr->objects.end()) continue;
+                            if (it == scr->objects.end() || !it->second) continue;
                             auto pit = it->second->internals.find("parent");
-                            bool hasParent = (pit != it->second->internals.end() && !pit->second.toString().empty() && scr->objects.count(pit->second.toString()));
+                            bool hasParent = false;
+                            if (pit != it->second->internals.end() && !pit->second.toString().empty()) {
+                                auto parent = scr->objects.find(pit->second.toString());
+                                hasParent = parent != scr->objects.end() && parent->second;
+                            }
                             if (!hasParent && std::find(treeRoots.begin(), treeRoots.end(), n) == treeRoots.end())
                                 treeRoots.push_back(n);
                         }
@@ -2988,7 +2994,7 @@ void Engine::run() {
                         if ((int)displayList.size() >= treeScroll + maxItems) return;
                         if (depth > 10) return; // safety
                         auto it = scr->objects.find(nodeName);
-                        if (it == scr->objects.end()) return;
+                        if (it == scr->objects.end() || !it->second) return;
                         displayList.push_back({nodeName, depth});
 
                         bool isSimGroup = (it->second->className == "SimGroup");
@@ -2996,6 +3002,7 @@ void Engine::run() {
                         if (!hasChildren && isSimGroup) {
                             // Check if any unnamed objects have this as parent
                             for (auto& kv : scr->objects) {
+                                if (!kv.second) continue;
                                 if (kv.second->name.empty()) continue;
                                 auto pit = kv.second->internals.find("parent");
                                 if (pit != kv.second->internals.end() && pit->second.toString() == nodeName) {
@@ -3013,6 +3020,7 @@ void Engine::run() {
                             }
                             // Also show SimGroup children via parent field
                             for (auto& kv : scr->objects) {
+                                if (!kv.second) continue;
                                 if (kv.second->name.empty() || kv.first == nodeName) continue;
                                 auto pit = kv.second->internals.find("parent");
                                 if (pit != kv.second->internals.end() && pit->second.toString() == nodeName) {
@@ -3037,7 +3045,6 @@ void Engine::run() {
                             int idx = (int)(my - treeY) / itemH;
                             if (mx >= rightX && idx >= 0 && idx + treeScroll < (int)displayList.size() && idx < maxItems) {
                                 auto& entry = displayList[idx + treeScroll];
-                                auto* obj = scr->objects[entry.first]; (void)obj;
                                 int ex = rightX + entry.second * treeIndent;
                                 if (mx >= ex - 12 && mx < ex) {
                                     if (expandedNodes.count(entry.first))
@@ -3079,6 +3086,7 @@ void Engine::run() {
                         bool hasKids = (treeChildren.count(entry.first) && !treeChildren[entry.first].empty());
                         if (!hasKids && obj->className == "SimGroup") {
                             for (auto& kv : scr->objects) {
+                                if (!kv.second) continue;
                                 if (kv.second->name.empty()) continue;
                                 auto pit = kv.second->internals.find("parent");
                                 if (pit != kv.second->internals.end() && pit->second.toString() == entry.first) {
@@ -3445,6 +3453,9 @@ void Engine::run() {
                                     auto it = scr->objects.find(sel);
                                     if (it == scr->objects.end()) {
                                         std::string msg = "Object not found: " + sel;
+                                        overlayFont->render(msg.c_str(), 6, contentY + 2, {1,0.3f,0.3f,0.9f}, 1.0f);
+                                    } else if (!it->second) {
+                                        std::string msg = "Object unavailable: " + sel;
                                         overlayFont->render(msg.c_str(), 6, contentY + 2, {1,0.3f,0.3f,0.9f}, 1.0f);
                                     } else {
                                         auto* obj = it->second;

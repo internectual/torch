@@ -239,7 +239,7 @@ add_executable(torch_server
     src/game/demo.cpp
 )
 
-target_include_directories(torch_server PRIVATE src)
+target_include_directories(torch_server PRIVATE src ${GSM_INCLUDE_DIR})
 
 target_link_libraries(torch_server PRIVATE
     OpenGL::GL
@@ -315,6 +315,7 @@ add_executable(torch_voice_event_test
     tests/voice_event_test.cpp
     src/net/v12_bitstream.cpp
     src/net/v12_events.cpp
+    src/net/v12_protocol.cpp
     src/net/v12_registry.cpp
     src/net/v12_datablocks.cpp)
 target_include_directories(torch_voice_event_test PRIVATE src)

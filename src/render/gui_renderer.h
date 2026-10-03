@@ -1,6 +1,7 @@
 #pragma once
 #include "render/renderer.h"
 #include "net/network.h"
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <map>
@@ -79,6 +80,34 @@ void setCanvasCursor(const std::string& cursor);
 // GuiControl::localToGlobalCoord (the control's canvas position).
 void canvasPosition(const GuiControl& ctl, float& x, float& y);
 } // namespace GuiShared
+
+namespace GuiBitmapStatePolicy {
+struct HorizontalSlice { float x = 0.0f, width = 0.0f; };
+
+inline int horizontalStateCount(const std::string& bitmap, int width, int height) {
+    if (width <= 0 || height <= 0 || width <= height * 2) return 1;
+    const size_t slash = bitmap.find_last_of("/\\");
+    std::string name = bitmap.substr(slash == std::string::npos ? 0 : slash + 1);
+    const size_t dot = name.find_last_of('.');
+    if (dot != std::string::npos) name.resize(dot);
+    for (char& c : name)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    // The close control has three 35x29 cells; a height-ratio estimate
+    // rounds its 105x29 strip up to four and cuts across adjacent icons.
+    if (name == "shll_menuclose") return 3;
+    return std::max(1, (width + height / 2) / height);
+}
+
+inline HorizontalSlice horizontalSlice(int width, int states, int state) {
+    if (width <= 0 || states <= 0) return {};
+    if (state < 0) state = 0;
+    if (state >= states) state = states - 1;
+    const float cellWidth = static_cast<float>(width) / states;
+    // Keep linear filtering inside the selected atlas cell; sampling exactly
+    // at a state boundary blends its edge with the neighboring close icon.
+    return {state * cellWidth + 0.5f, cellWidth - 1.0f};
+}
+} // namespace GuiBitmapStatePolicy
 
 struct GuiControl {
     std::string name;

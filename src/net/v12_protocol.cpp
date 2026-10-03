@@ -577,9 +577,8 @@ ClientEvent makeVoiceStreamEvent(uint8_t sequence, uint8_t codec, uint8_t stream
         writer.writeUnsigned(sequence & 0x7f, 7);
         writer.writeUnsigned(codec & 3, 2);
         writer.writeUnsigned(stream & 3, 2);
-        const bool countPresent = endOfStream || count != 1;
-        writer.writeFlag(countPresent);
-        if (countPresent) writer.writeUnsigned((uint32_t)count, 5);
+        writer.writeFlag(endOfStream);
+        if (endOfStream) writer.writeUnsigned((uint32_t)count, 5);
         for (size_t i = 0; i < count; ++i)
             for (uint8_t byte : frames[i]) writer.writeUnsigned(byte, 8);
     }, false};

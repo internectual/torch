@@ -27,5 +27,13 @@ int main() {
     }
     assert(error > 0);
     assert(error < 300000);
+
+    std::array<uint8_t, TorchGsm::EncodedBytesPerFrame> afterReset{};
+    std::array<uint8_t, TorchGsm::EncodedBytesPerFrame> freshFrame{};
+    assert(encoder.reset());
+    assert(encoder.encode(source.data(), afterReset));
+    TorchGsm::Encoder freshEncoder;
+    assert(freshEncoder.encode(source.data(), freshFrame));
+    assert(afterReset == freshFrame);
     return 0;
 }

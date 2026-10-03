@@ -1132,9 +1132,11 @@ private:
         std::vector<int16_t> pcm;
         uint8_t stream = 0;
         uint8_t sequence = 0;
+        size_t samplesCaptured = 0;
         bool local = false;
     } voiceCapture;
     void processVoiceCapture();
+    void clearVoicePlaybacks();
     std::unordered_set<uint64_t> demoAudioEventsPlayed;
     int32_t weatherType = 0; // 0=dry, 1=cold, 2=wet
     InputMove currentInput;

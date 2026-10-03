@@ -49,6 +49,13 @@ inline uint32_t nextLoopGapMs(uint32_t& state, int32_t minimum, int32_t maximum)
 }
 }
 
+namespace AudioPcmStreamPolicy {
+constexpr size_t MaxQueuedBuffers = 64;
+inline bool canQueue(size_t queuedBuffers, bool finished) {
+    return !finished && queuedBuffers < MaxQueuedBuffers;
+}
+} // namespace AudioPcmStreamPolicy
+
 // OpenAL listener state must never receive a non-finite camera sample. Invalid
 // network/demo transforms are ignored rather than poisoning spatial audio.
 inline Point3F sanitizeListenerVector(const Point3F& value) {
@@ -98,6 +105,10 @@ struct SoundSource {
     int auxiliarySendIndex = 0;
     uint32_t auxiliaryFilter = 0;
     uint32_t environmentSend = 0;
+    std::vector<uint32_t> queuedPcmBuffers;
+    bool pcmStream = false;
+    bool pcmStreamFinished = false;
+    bool pcmStreamDrained = false;
     SoundBuffer* scheduledBuffer = nullptr;
     bool loopScheduleActive = false;
     int32_t loopRepeatsRemaining = 0;
@@ -208,6 +219,12 @@ public:
     SoundBuffer* loadSound(const char* path);
     SoundSource* playPcm16(const int16_t* samples, size_t count, int sampleRate = 8000,
                            float volume = 1.0f);
+    SoundSource* createPcmStream(float volume = 1.0f, int priority = 3);
+    bool queuePcm16(SoundSource* stream, const int16_t* samples, size_t count,
+                    int sampleRate = 8000);
+    void finishPcmStream(SoundSource* stream);
+    bool pcmStreamDrained(SoundSource* stream);
+    void releasePcmStream(SoundSource* stream);
     SoundSource* createSource(bool persistent = false, int priority = 0);
     // audio.cc alxDisableOuterFalloffs / alxSetInnerFalloffScale: forced
     // outer falloffs (FORCED_OUTER_FALLOFF) and scaled inner ones for 3D
@@ -262,4 +279,5 @@ private:
     AudioEnvironmentState environment_;
 
     void applyEnvironment();
+    void updatePcmStream(SoundSource* stream);
 };

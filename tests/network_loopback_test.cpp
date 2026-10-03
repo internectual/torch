@@ -32,6 +32,7 @@
 #include <limits>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -40,6 +41,7 @@
 #include <thread>
 
 int main() {
+    setenv("ALSOFT_DRIVERS", "null", 1);
     {
         GhostPriority::Scope scope;
         scope.position = {0, 0, 0};
@@ -63,6 +65,33 @@ int main() {
     ScriptEngine providerEngine;
     assert(providerEngine.init());
     {
+        AudioSystem audio;
+        assert(audio.init());
+        auto* stream = audio.createPcmStream(1.0f, 20);
+        assert(stream);
+        std::array<int16_t, 160> frame{};
+        for (int i = 0; i < (int)frame.size(); ++i)
+            frame[i] = static_cast<int16_t>(std::sin(i * 0.1f) * 6000.0f);
+        assert(audio.queuePcm16(stream, frame.data(), frame.size()));
+        audio.pauseAll();
+        assert(stream->paused);
+        assert(audio.queuePcm16(stream, frame.data(), frame.size()));
+        audio.updateStreams();
+        assert(stream->paused);
+        audio.resumeAll();
+        audio.finishPcmStream(stream);
+        for (int i = 0; i < 1000 && !audio.pcmStreamDrained(stream); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        assert(audio.pcmStreamDrained(stream));
+        audio.releasePcmStream(stream);
+        assert(!audio.isSourceAlive(stream));
+
+        auto* cancelled = audio.createPcmStream(1.0f, 20);
+        assert(cancelled && audio.queuePcm16(cancelled, frame.data(), frame.size()));
+        audio.releasePcmStream(cancelled);
+        audio.shutdown();
+    }
+    {
         GameConnection listener;
         listener.maxVoiceChannels = 1;
         listener.wouldListenTo[1] = false;
@@ -71,9 +100,35 @@ int main() {
     }
     auto* testFileSystem = new FileSystem;
     assert(testFileSystem->init({"/home/methodown/t2-linux"}));
+    Vl2Archive scriptsArchive;
+    assert(scriptsArchive.open("/home/methodown/t2-linux/base/scripts.vl2"));
+    std::vector<uint8_t> gameGuiData;
+    assert(scriptsArchive.readFile("gui/GameGui.gui", gameGuiData) && !gameGuiData.empty());
     Engine::instance().filesys = testFileSystem;
     Engine::instance().scr = &providerEngine;
     TorqueScript* utilityScript = providerEngine.ts();
+    utilityScript->execute("new GuiCanvas(TestExtentCanvas) { extent = \"800 600\"; };"
+                           "new GuiButtonCtrl(TestCloseButton) { position = \"758 7\"; extent = \"35 22\"; };"
+                           "new ShellRadioButton(TestRadioLight) { extent = \"80 30\"; };"
+                           "new ShellRadioButton(TestRadioMedium) { extent = \"80 30\"; };"
+                           "new ShellRadioButton(TestRadioHeavy) { extent = \"80 30\"; };"
+                           "TestExtentCanvas.add(TestCloseButton); TestExtentCanvas.add(TestRadioLight);"
+                           "TestExtentCanvas.add(TestRadioMedium); TestExtentCanvas.add(TestRadioHeavy);");
+    {
+        GuiRenderer gui;
+        gui.refresh();
+        const auto* close = gui.findControl("TestCloseButton");
+        assert(close && close->extentX == 35.0f && close->extentY == 22.0f);
+        const auto* radioParent = gui.findControl("TestExtentCanvas");
+        assert(radioParent && radioParent->children.size() == 4);
+        assert(radioParent->children[1]->name == "TestRadioLight");
+        assert(radioParent->children[2]->name == "TestRadioMedium");
+        assert(radioParent->children[3]->name == "TestRadioHeavy");
+        assert(gui.soToGui("TestExtentCanvas", nullptr) == gui.findControl("TestExtentCanvas"));
+    }
+    for (const char* name : {"TestRadioLight", "TestRadioMedium", "TestRadioHeavy",
+                             "TestCloseButton", "TestExtentCanvas"})
+        assert(providerEngine.deleteScriptObject(name));
     assert(std::abs(utilityScript->callFunction("mAtan", {VMValue(1.0), VMValue(0.0)}).toFloat() -
                     1.5707963f) < 1e-5f);
     assert(utilityScript->callFunction("mRound", {VMValue(-1.5)}).toInt() == -2);
@@ -2147,17 +2202,17 @@ int main() {
         // deactivate().
         script.ts()->execute("new PhysicalZone(TestFieldZone) { position = \"0 0 0\"; scale = \"4 0.25 4\";"
                              "  polyhedron = \"0 1 0 1 0 0 0 -1 0 0 0 100\"; velocityMod = 0.1;"
-                             "  gravityMod = 0.5; appliedForce = \"1 2 3\"; };");
+                             "  gravityMod = 0.5; appliedForce = \"1 2 3\"; rotation = \"0 0 1 90\"; };");
         {
             const float effectLo[3] = {-1, -1, -1}, effectHi[3] = {1, 1, 1};
             const auto effect = PhysicalZones::effects(effectLo, effectHi);
-            assert(effect.gravityMod == 0.5f && effect.appliedForce.x == 1.0f &&
-                   effect.appliedForce.y == 2.0f && effect.appliedForce.z == 3.0f);
+            assert(effect.gravityMod == 0.5f && std::fabs(effect.appliedForce.x - 2.0f) < 1e-5f &&
+                   std::fabs(effect.appliedForce.y + 1.0f) < 1e-5f && effect.appliedForce.z == 3.0f);
             std::vector<PlayerPrediction::Zone> zones;
             PhysicalZones::gather({-1, -1, -1}, {1, 1, 1}, zones);
             assert(zones.size() == 1 && zones[0].triangles.size() == 12 && zones[0].velocityMod == 0.1f);
             for (const auto& t : zones[0].triangles) {
-                const Point3F c{2.0f, 0.125f, 200.0f};
+                const Point3F c{0.125f, -2.0f, 200.0f};
                 assert(PlayerPrediction::dot(t.n, PlayerPrediction::sub(t.a, c)) > 0);
             }
             script.ts()->execute("TestFieldZone.deactivate();");
@@ -2324,6 +2379,31 @@ int main() {
 
         ts->callFunction("allowConnections", {VMValue(0)});
         gLocalClientStarted = savedStarted;
+    }
+    {
+        const std::string guiSource(reinterpret_cast<const char*>(gameGuiData.data()), gameGuiData.size());
+        utilityScript->registerNative("loadGameGuiLayoutForTest", [&](const auto&) -> VMValue {
+            utilityScript->executeNested(guiSource, "gui/GameGui.gui");
+            return VMValue(1);
+        });
+        utilityScript->execute("loadGameGuiLayoutForTest();");
+        GuiRenderer gui;
+        gui.refresh();
+        auto* playerView = gui.findControl("GMW_PlayerModel");
+        auto* light = gui.findControl("GMW_LightRdo");
+        auto* medium = gui.findControl("GMW_MediumRdo");
+        auto* heavy = gui.findControl("GMW_HeavyRdo");
+        assert(playerView && light && medium && heavy);
+        assert(light->visible && medium->visible && heavy->visible);
+        assert(light->posY == 209.0f && medium->posY == 239.0f && heavy->posY == 269.0f);
+        assert(playerView->parent && playerView->parent == light->parent &&
+               light->parent == medium->parent && medium->parent == heavy->parent);
+        const auto& siblings = playerView->parent->children;
+        const auto playerIt = std::find(siblings.begin(), siblings.end(), playerView);
+        const auto lightIt = std::find(siblings.begin(), siblings.end(), light);
+        const auto mediumIt = std::find(siblings.begin(), siblings.end(), medium);
+        const auto heavyIt = std::find(siblings.begin(), siblings.end(), heavy);
+        assert(playerIt < lightIt && lightIt < mediumIt && mediumIt < heavyIt);
     }
     return 0;
 }

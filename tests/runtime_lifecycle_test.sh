@@ -13,6 +13,7 @@ cleanup() {
     rm -rf "$log_dir"
 }
 trap cleanup EXIT
+source_dir=$(cd "$(dirname "$0")/.." && pwd)
 
 Xvfb "$display" -screen 0 1024x768x24 -ac >"$log_dir/xvfb.log" 2>&1 &
 xvfb_pid=$!
@@ -55,7 +56,9 @@ run_client_expect_failure() {
 }
 
 for iteration in 1 2 3; do
-    run_client "client-$iteration" -nologin -quit-after-frames 2
+    # Let the always-rendered dev-panel object tree visit the full retail
+    # script object registry; sparse startup frames miss null registry slots.
+    run_client "client-$iteration" -nologin -quit-after-frames 8
 done
 
 run_client_expect_failure invalid-frames -quit-after-frames not-a-number
@@ -99,7 +102,6 @@ fi
 # source tree it reads torch.cfg (the Tribes 2 dataDir and init script),
 # hosts the mission, opens its UDP port and takes TorqueScript on stdin.
 # Without an install it stops at the missing init script.
-source_dir=$(cd "$(dirname "$0")/.." && pwd)
 install=$(sed -n 's/^dataDir = //p' "$source_dir/torch.cfg" 2>/dev/null)
 install=${install/#\~/$HOME}
 if ! (cd "$source_dir" && (sleep 8; printf 'quit();\n') | timeout --kill-after=3s 30s \

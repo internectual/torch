@@ -34,16 +34,71 @@ static bool nameEqual(const std::string& a, const std::string& b) {
 // creation order, by GUI key (name, or id when unnamed).
 static std::vector<std::string> guiChildren(ScriptObject* parent) {
     auto& engine = ScriptEngine::instance();
+    std::vector<std::string> names;
+    auto addChild = [&](ScriptObject* child) {
+        if (!child) return;
+        const auto& cls = child->className;
+        if (cls.find("Gui") != 0 && cls.find("Shell") != 0 && cls.find("Hud") != 0 &&
+            cls != "GameTSCtrl" && cls != "VirtualScrollCtrl" && cls != "VirtualScrollContentCtrl")
+            return;
+        names.push_back(engine.nameOrId(std::to_string(child->id)));
+    };
+    auto count = parent->internals.find("__childCount");
+    if (count != parent->internals.end()) {
+        const int childCount = std::max(0, count->second.toInt());
+        for (int i = 0; i < childCount; ++i) {
+            auto child = parent->internals.find("__child" + std::to_string(i));
+            if (child != parent->internals.end())
+                addChild(engine.findObject(child->second.toString().c_str()));
+        }
+        return names;
+    }
+
+    // Older GUI objects may only have a parent back-link and no SimGroup
+    // child list; keep the fallback deterministic while honoring that link.
     std::vector<ScriptObject*> kids;
     for (auto& [key, obj] : engine.objects) {
+        if (!obj) continue;
         auto pit = obj->internals.find("parent");
         if (pit != obj->internals.end() && engine.findObject(pit->second.toString().c_str()) == parent)
             kids.push_back(obj);
     }
     std::sort(kids.begin(), kids.end(), [](const ScriptObject* a, const ScriptObject* b) { return a->id < b->id; });
-    std::vector<std::string> names;
-    for (auto* kid : kids) names.push_back(engine.nameOrId(std::to_string(kid->id)));
+    for (auto* kid : kids) addChild(kid);
     return names;
+}
+
+static void orderGuiChildren(const std::vector<std::pair<std::string, ScriptObject*>>& objects,
+                             GuiRenderer& renderer) {
+    for (const auto& [key, object] : objects) {
+        if (!object) continue;
+        const std::string parentName = object->name.empty() ? key : object->name;
+        GuiControl* parent = renderer.findControl(parentName);
+        if (!parent) continue;
+        std::vector<GuiControl*> ordered;
+        std::unordered_set<GuiControl*> included;
+        for (const auto& childName : guiChildren(object)) {
+            GuiControl* child = renderer.findControl(childName);
+            if (!child || child == parent || !included.insert(child).second) continue;
+            child->parent = parent;
+            ordered.push_back(child);
+        }
+        for (GuiControl* child : parent->children)
+            if (child && included.insert(child).second) ordered.push_back(child);
+        parent->children = std::move(ordered);
+    }
+}
+
+static std::vector<std::pair<std::string, ScriptObject*>> guiObjectsInCreationOrder(
+        const std::unordered_map<std::string, ScriptObject*>& objects) {
+    std::vector<std::pair<std::string, ScriptObject*>> ordered;
+    ordered.reserve(objects.size());
+    for (const auto& [key, object] : objects)
+        if (object) ordered.emplace_back(key, object);
+    std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
+        return a.second->id == b.second->id ? a.first < b.first : a.second->id < b.second->id;
+    });
+    return ordered;
 }
 
 GuiControl* GuiControl::findChild(const std::string& name) {
@@ -283,8 +338,9 @@ void GuiRenderer::init() {
     // left its class metadata incomplete.
     bool hasCanvas = false;
     for (auto& [objKey, object] : objs) {
+        if (!object) continue;
         const std::string name = object->name.empty() ? objKey : object->name;
-        if (object && lowerKey(name) == "canvas") {
+        if (lowerKey(name) == "canvas") {
             object->className = "GuiCanvas";
             hasCanvas = true;
             break;
@@ -301,7 +357,8 @@ void GuiRenderer::init() {
 
     // First pass: create/adopt GuiControl objects for all GUI-related ScriptObjects
     std::unordered_map<std::string, GuiControl*> controlMap;
-    for (auto& [objKey, obj] : objs) {
+    const auto orderedObjects = guiObjectsInCreationOrder(objs);
+    for (const auto& [objKey, obj] : orderedObjects) {
         const std::string name = obj->name.empty() ? objKey : obj->name;
         if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
@@ -374,13 +431,12 @@ void GuiRenderer::init() {
             }
         }
     }
-
     if (!canvas)
         Console::instance().printf(LogLevel::Error,
             "GUI: stock GuiCanvas was not created by TorqueScript");
 
     // Second pass: link parent-child relationships
-    for (auto& [objKey, obj] : objs) {
+    for (const auto& [objKey, obj] : orderedObjects) {
         const std::string name = obj->name.empty() ? objKey : obj->name;
         if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
@@ -408,11 +464,13 @@ void GuiRenderer::init() {
             lastPushed[name] = ctl->second;
         }
     }
+    orderGuiChildren(orderedObjects, *this);
 }
 
 void GuiRenderer::refresh() {
     auto& objs = ScriptEngine::instance().objects;
-    for (auto& [objKey, obj] : objs) {
+    const auto orderedObjects = guiObjectsInCreationOrder(objs);
+    for (const auto& [objKey, obj] : orderedObjects) {
         const std::string name = obj->name.empty() ? objKey : obj->name;
             if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
@@ -449,19 +507,13 @@ void GuiRenderer::refresh() {
                 GuiControl* parent = findControl(pname);
                 if (parent) parent->addChild(ctl);
             } else if (ctl != canvas && canvas) { canvas->addChild(ctl); }
-            if (canvas) {
-                bool smallX = ctl->extentX <= 100;
-                bool smallY = ctl->extentY <= 30;
-                ctl->extentX = smallX && smallY ? canvas->extentX : ctl->extentX;
-                ctl->extentY = smallX && smallY ? canvas->extentY : ctl->extentY;
-            }
         }
     }
 
     // Link pass #2: map iteration order is arbitrary, so a child can be
     // processed before its parent and skipped. Re-link any control that still
     // has no parent.
-    for (auto& [objKey, obj] : objs) {
+    for (const auto& [objKey, obj] : orderedObjects) {
         const std::string name = obj->name.empty() ? objKey : obj->name;
         if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
@@ -474,6 +526,7 @@ void GuiRenderer::refresh() {
             } else if (ctl != canvas && canvas) { canvas->addChild(ctl); }
         }
     }
+    orderGuiChildren(orderedObjects, *this);
 }
 
 
@@ -1582,11 +1635,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             return t2Bitmap(r, base + ext);
         };
         Texture* btnTex = nullptr;
+        std::string btnBitmapPath;
         std::string bmpBase;
         if (prof) {
             auto bmi = prof->fields.find("bitmap");
             if (bmi != prof->fields.end()) {
                 std::string base = bmi->second.toString();
+                btnBitmapPath = base;
                 for (auto& ext : {".png", ".bm8", ".jpg"}) {
                     btnTex = loadProfileBmp(base, ext);
                     if (btnTex) break;
@@ -1642,12 +1697,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         } else if (!launchTex && btnTex && btnTex->loaded && btnTex->width > btnTex->height * 2) {
             // Horizontal multi-state strip (e.g. gui/shll_soundbutton 104x27 = 4 states):
             // [normal, hover/rollover, pressed, disabled]
-            int n = (btnTex->width + btnTex->height / 2) / btnTex->height;
-            if (n < 1) n = 1;
-            float cw = (float)btnTex->width / n;
+            const int n = GuiBitmapStatePolicy::horizontalStateCount(
+                btnBitmapPath, btnTex->width, btnTex->height);
             int st = ctl->hovered ? 1 : 0;
-            if (st >= n) st = 0;
-            drawTexRegion(r, btnTex, st * cw, 0, cw, (float)btnTex->height,
+            const auto slice = GuiBitmapStatePolicy::horizontalSlice(btnTex->width, n, st);
+            drawTexRegion(r, btnTex, slice.x, 0, slice.width, (float)btnTex->height,
                           x, y, ctl->extentX, ctl->extentY);
         } else if (!launchTex && btnTex && btnTex->loaded) {
             r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, btnTex->id);
@@ -2187,9 +2241,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         float sz = 16;
         bool drewAtlas = false;
-        Texture* cbTex = getShellTex(r, cn == "GuiCheckBoxCtrl" ? "shll_checkbox.png" : "shll_radio.png");
-        if (cn == "GuiCheckBoxCtrl" && (!cbTex || !cbTex->loaded))
-            cbTex = getShellTex(r, "shll_radio.png");
+        // T2 ships a radio texture but no textures/gui/shll_checkbox bitmap.
+        // Draw the ordinary checkbox geometry below instead of probing a
+        // nonexistent resource (and logging a warning on every checkbox).
+        Texture* cbTex = cn == "GuiRadioCtrl" ? getShellTex(r, "shll_radio.png") : nullptr;
         if ((cn == "GuiRadioCtrl" || cn == "GuiCheckBoxCtrl") && cbTex && cbTex->loaded &&
             cbTex->height % 30 == 0 && cbTex->height >= 60) {
             // shll_radio atlas (29x150): five 29x30 cells — [0]=unchecked,
@@ -2207,7 +2262,24 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             drewAtlas = true;
         }
         if (!drewAtlas) {
-            if (cbTex && cbTex->loaded) {
+            if (cn == "GuiCheckBoxCtrl") {
+                sz = std::min({16.0f, ctl->extentX, ctl->extentY});
+                const float boxY = y + (ctl->extentY - sz) * 0.5f;
+                const ColorF border = ctl->hovered ? ColorF{0.2f, 0.65f, 0.6f, 1}
+                                                    : ColorF{0.35f, 0.42f, 0.46f, 1};
+                r.drawRectFill({x, boxY, 0}, {x + sz, boxY + sz, 0}, border);
+                r.drawRectFill({x + 1, boxY + 1, 0},
+                               {x + sz - 1, boxY + sz - 1, 0},
+                               {0.08f, 0.11f, 0.14f, 1});
+                if (ctl->checked) {
+                    const ColorF mark{0.35f, 0.9f, 0.82f, 1};
+                    r.drawLine({x + 3, boxY + sz * 0.55f, 0},
+                               {x + sz * 0.43f, boxY + sz - 3, 0}, mark);
+                    r.drawLine({x + sz * 0.43f, boxY + sz - 3, 0},
+                               {x + sz - 2, boxY + 3, 0}, mark);
+                }
+                drewAtlas = true;
+            } else if (cbTex && cbTex->loaded) {
                 r.drawTexturedRect({x, y, 0}, {x + sz, y + sz, 0}, cbTex->id);
                 if (ctl->checked)
                     r.drawRectFill({x + 4, y + 4, 0}, {x + sz - 4, y + sz - 4, 0}, {0.3f,0.5f,0.8f,0.8f});

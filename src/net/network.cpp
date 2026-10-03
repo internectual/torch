@@ -219,7 +219,8 @@ void Connection::resetProtocolEpoch() {
 void Connection::sendVoiceEvent(uint8_t sequence, uint8_t codec, uint8_t stream,
                                 bool endOfStream,
                                 const std::vector<std::array<uint8_t, 33>>& frames) {
-    if (!isConnected() || codec != 3 || frames.size() > 6) return;
+    if (!isConnected() || codec != 3 || frames.size() > 6 ||
+        (!endOfStream && frames.size() != 1)) return;
     impl->pendingNativeEvents.push_back(
         V12::makeVoiceStreamEvent(sequence, codec, stream, endOfStream, frames));
     impl->flushNativeMove();

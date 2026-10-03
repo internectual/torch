@@ -1,5 +1,6 @@
 #include "sim/engine_classes.h"
 #include "game/game.h"
+#include "game/voice_stream.h"
 #include "audio/gsm_codec.h"
 #include "sim/client_targets.h"
 #include "sim/sim_state.h"
@@ -72,11 +73,15 @@
 #include <sstream>
 #include <fstream>
 #include <cstdlib>
+#include <chrono>
 #include <utility>
 
 struct Game::VoicePlayback {
     TorchGsm::Decoder decoder;
-    std::vector<int16_t> pcm;
+    SoundSource* source = nullptr;
+    int lastSequence = -1;
+    std::chrono::steady_clock::time_point lastReceived = std::chrono::steady_clock::now();
+    bool finished = false;
 };
 
 static constexpr int kMaxPrecipitationDrops = 65536;
@@ -6674,6 +6679,7 @@ Game::Game() : pl(new Player), w(new World) {
     hud = new HUD;
 }
 Game::~Game() {
+    clearVoicePlaybacks();
     clearProjectileAudio();
     if (pl) { pl->modelShape.destroy(); pl->weaponShape.destroy(); }
     testShape.destroy();
@@ -6686,6 +6692,13 @@ void Game::clearProjectileAudio() {
     auto& audio = Engine::instance().audio();
     for (auto& [index, source] : projectileSoundSources) audio.releaseSource(source);
     projectileSoundSources.clear();
+}
+
+void Game::clearVoicePlaybacks() {
+    auto& audio = Engine::instance().audio();
+    for (auto& [key, playback] : voicePlaybacks)
+        if (playback && playback->source) audio.releasePcmStream(playback->source);
+    voicePlaybacks.clear();
 }
 
 bool Game::init() {
@@ -7023,11 +7036,16 @@ static SoundSource* playNativeAudioProfile(AudioSystem& audio,
 bool Game::startVoiceCapture(bool local) {
     stopVoiceCapture();
     auto& audio = Engine::instance().audio();
-    if (!audio.initCapture(8000, 1024) || !audio.startCapture()) return false;
+    if (!voiceCapture.encoder.reset() || !audio.initCapture(8000, 1024)) return false;
+    if (!audio.startCapture()) {
+        audio.destroyCapture();
+        return false;
+    }
     voiceCapture.local = local;
     voiceCapture.stream = (uint8_t)((voiceCapture.stream + 1) & 3);
     voiceCapture.sequence = 0;
     voiceCapture.pcm.clear();
+    voiceCapture.samplesCaptured = 0;
     return true;
 }
 
@@ -7037,11 +7055,13 @@ void Game::stopVoiceCapture() {
     std::array<int16_t, 2048> samples{};
     while (const size_t count = audio.captureSamples(samples.data(), samples.size())) {
         const float gain = audio.captureGainScale();
-        for (size_t i = 0; i < count; ++i) {
+        const size_t accepted = VoiceStream::acceptedCaptureSamples(voiceCapture.samplesCaptured, count);
+        for (size_t i = 0; i < accepted; ++i) {
             const int value = (int)std::trunc(samples[i] * gain);
             samples[i] = (int16_t)std::clamp(value, -32768, 32767);
         }
-        voiceCapture.pcm.insert(voiceCapture.pcm.end(), samples.begin(), samples.begin() + count);
+        voiceCapture.pcm.insert(voiceCapture.pcm.end(), samples.begin(), samples.begin() + accepted);
+        voiceCapture.samplesCaptured += accepted;
     }
     audio.stopCapture();
     if (voiceCapture.local) {
@@ -7071,19 +7091,38 @@ void Game::processVoiceCapture() {
 }
 
 void Game::update(float dt) {
-    Engine::instance().audio().advance(dt);
-    if (Engine::instance().audio().isCapturing()) {
+    auto& audio = Engine::instance().audio();
+    audio.advance(dt);
+    const auto voiceNow = std::chrono::steady_clock::now();
+    for (auto it = voicePlaybacks.begin(); it != voicePlaybacks.end();) {
+        auto& playback = *it->second;
+        if (!playback.finished && voiceNow - playback.lastReceived > std::chrono::seconds(2)) {
+            playback.finished = true;
+            if (playback.source) audio.finishPcmStream(playback.source);
+        }
+        if (playback.finished && (!playback.source || audio.pcmStreamDrained(playback.source))) {
+            if (playback.source) audio.releasePcmStream(playback.source);
+            it = voicePlaybacks.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (audio.isCapturing()) {
+        auto& capture = voiceCapture;
         std::array<int16_t, 2048> samples{};
-        while (const size_t count = Engine::instance().audio().captureSamples(
-                   samples.data(), samples.size())) {
-            const float gain = Engine::instance().audio().captureGainScale();
-            for (size_t i = 0; i < count; ++i) {
+        while (const size_t count = audio.captureSamples(samples.data(), samples.size())) {
+            const float gain = audio.captureGainScale();
+            const size_t accepted = VoiceStream::acceptedCaptureSamples(capture.samplesCaptured, count);
+            for (size_t i = 0; i < accepted; ++i) {
                 const int value = (int)std::trunc(samples[i] * gain);
                 samples[i] = (int16_t)std::clamp(value, -32768, 32767);
             }
-            voiceCapture.pcm.insert(voiceCapture.pcm.end(), samples.begin(), samples.begin() + count);
+            voiceCapture.pcm.insert(voiceCapture.pcm.end(), samples.begin(), samples.begin() + accepted);
+            capture.samplesCaptured += accepted;
         }
         processVoiceCapture();
+        if (capture.samplesCaptured >= VoiceStream::MaxCaptureSamples)
+            stopVoiceCapture();
     }
     // Pause is a simulation boundary, not just a presentation flag.  Keep
     // audio/UI processing alive, but do not advance clocks, damage flashes,
@@ -10583,6 +10622,7 @@ void Game::connectToServer(const char* host, uint16_t port) {
         Console::instance().printf(LogLevel::Warn, "Invalid server address");
         return;
     }
+    clearVoicePlaybacks();
     if (!allowDemoConnection(isDemoBuildMode(Engine::instance().demoMode,
                                              config().dedicated), true,
                              Console::instance().getBoolVariable("demoAllowConnect", false),
@@ -11260,24 +11300,45 @@ void Game::connectToServer(const char* host, uint16_t port) {
                   const uint64_t key = (static_cast<uint64_t>(event.voiceClientId) << 16) |
                                        (static_cast<uint64_t>(event.voiceStream) << 8) |
                                        event.voiceCodec;
-                  if (event.voiceSequence == 0)
-                      voicePlaybacks[key] = std::make_unique<VoicePlayback>();
                   auto it = voicePlaybacks.find(key);
+                  if (it != voicePlaybacks.end() && it->second->finished &&
+                      event.voiceSequence != 0)
+                      return;
+                  // Sequence numbers restart at zero for each talk burst and
+                  // wrap every 128 packets within a long burst. Preserve the
+                  // decoder across a normal wrap, but reset it for a new burst.
+                  if (VoiceStream::startsNewBurst(
+                          it != voicePlaybacks.end(), event.voiceSequence,
+                          it != voicePlaybacks.end() ? it->second->lastSequence : -1,
+                          it != voicePlaybacks.end() && it->second->finished)) {
+                      if (it != voicePlaybacks.end() && it->second->source)
+                          audio.releasePcmStream(it->second->source);
+                      auto playback = std::make_unique<VoicePlayback>();
+                      if (audio.config().enabled && audio.config().masterVolume > 0.0f)
+                          playback->source = audio.createPcmStream(audio.config().masterVolume);
+                      voicePlaybacks[key] = std::move(playback);
+                  }
+                  it = voicePlaybacks.find(key);
                   if (it == voicePlaybacks.end()) return;
                   std::array<int16_t, TorchGsm::SamplesPerFrame> decoded{};
                   for (const auto& frame : event.voiceFrames) {
                       if (!it->second->decoder.decode(frame.data(), decoded)) {
+                          if (it->second->source)
+                              audio.releasePcmStream(it->second->source);
                           voicePlaybacks.erase(it);
                           return;
                       }
-                      it->second->pcm.insert(it->second->pcm.end(), decoded.begin(), decoded.end());
-                  }
-                  if (event.voiceEndOfStream) {
-                      if (!it->second->pcm.empty() && audio.config().enabled &&
+                      if (!it->second->source && audio.config().enabled &&
                           audio.config().masterVolume > 0.0f)
-                          audio.playPcm16(it->second->pcm.data(), it->second->pcm.size(),
-                                          8000, audio.config().masterVolume);
-                      voicePlaybacks.erase(it);
+                          it->second->source = audio.createPcmStream(audio.config().masterVolume);
+                      if (it->second->source)
+                          audio.queuePcm16(it->second->source, decoded.data(), decoded.size(), 8000);
+                  }
+                  it->second->lastSequence = event.voiceSequence;
+                  it->second->lastReceived = std::chrono::steady_clock::now();
+                  if (event.voiceEndOfStream) {
+                      if (it->second->source) audio.finishPcmStream(it->second->source);
+                      it->second->finished = true;
                   }
                   return;
               }
@@ -12488,6 +12549,7 @@ void Game::disconnectedCleanup() {
     ScriptEngine::instance().cancelMissionEvents();
     if (activeConn) activeConn->disconnect();
     auto& audio = Engine::instance().audio();
+    clearVoicePlaybacks();
     if (w) w->cleanupMission();
     audio.stopAll();
     clearProjectileAudio();

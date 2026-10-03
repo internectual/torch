@@ -12,6 +12,12 @@ Encoder::~Encoder() {
     if (state_) gsm_destroy(static_cast<gsm>(state_));
 }
 
+bool Encoder::reset() {
+    if (state_) gsm_destroy(static_cast<gsm>(state_));
+    state_ = gsm_create();
+    return state_ != nullptr;
+}
+
 bool Encoder::encode(const int16_t* pcm, std::array<uint8_t, EncodedBytesPerFrame>& frame) {
     if (!state_ || !pcm) return false;
     gsm_signal samples[SamplesPerFrame];

@@ -160,13 +160,7 @@ bool AudioSystem::init() {
 
 void AudioSystem::shutdown() {
     destroyCapture();
-    for (auto* source : impl->sources) {
-        if (!source) continue;
-        source->stop();
-        source->destroy();
-        delete source;
-    }
-    impl->sources.clear();
+    while (!impl->sources.empty()) releaseSource(impl->sources.back());
     for (auto& [k, v] : impl->buffers) delete v;
     impl->buffers.clear();
 
@@ -363,6 +357,8 @@ void AudioSystem::updateStreams() {
             alSourcePlay(m.source); // an underrun
         }
     }
+    for (auto* source : impl->sources)
+        if (source && source->pcmStream) updatePcmStream(source);
     // alxStreamUpdate: the end reaches the console in the main loop.
     if (impl->musicFinished) {
         impl->musicFinished = false;
@@ -565,6 +561,86 @@ SoundSource* AudioSystem::playPcm16(const int16_t* samples, size_t count,
     return source;
 }
 
+SoundSource* AudioSystem::createPcmStream(float volume, int priority) {
+    auto* source = createSource(true, priority);
+    if (!source) return nullptr;
+    source->pcmStream = true;
+    source->setVolume(std::max(0.0f, volume) * channelVolume(VoiceAudioType));
+    return source;
+}
+
+bool AudioSystem::queuePcm16(SoundSource* stream, const int16_t* samples,
+                             size_t count, int sampleRate) {
+    if (!initialized || !stream || !samples || !count || sampleRate <= 0 ||
+        count > static_cast<size_t>(std::numeric_limits<ALsizei>::max()) / sizeof(int16_t) ||
+        !isSourceAlive(stream) || !stream->pcmStream)
+        return false;
+    updatePcmStream(stream);
+    if (!AudioPcmStreamPolicy::canQueue(stream->queuedPcmBuffers.size(),
+                                        stream->pcmStreamFinished)) return false;
+
+    ALuint buffer = 0;
+    (void)alGetError();
+    alGenBuffers(1, &buffer);
+    if (alGetError() != AL_NO_ERROR || !buffer) return false;
+    alBufferData(buffer, AL_FORMAT_MONO16, samples,
+                 static_cast<ALsizei>(count * sizeof(int16_t)), sampleRate);
+    if (alGetError() != AL_NO_ERROR) {
+        alDeleteBuffers(1, &buffer);
+        return false;
+    }
+    alSourceQueueBuffers(stream->source, 1, &buffer);
+    if (alGetError() != AL_NO_ERROR) {
+        alDeleteBuffers(1, &buffer);
+        return false;
+    }
+    stream->queuedPcmBuffers.push_back(buffer);
+    stream->pcmStreamDrained = false;
+    ALint state = 0;
+    alGetSourcei(stream->source, AL_SOURCE_STATE, &state);
+    if (state != AL_PLAYING && !stream->paused) alSourcePlay(stream->source);
+    return alGetError() == AL_NO_ERROR;
+}
+
+void AudioSystem::updatePcmStream(SoundSource* stream) {
+    if (!initialized || !isSourceAlive(stream) || !stream->pcmStream) return;
+    ALint processed = 0;
+    alGetSourcei(stream->source, AL_BUFFERS_PROCESSED, &processed);
+    while (processed-- > 0) {
+        ALuint buffer = 0;
+        alSourceUnqueueBuffers(stream->source, 1, &buffer);
+        if (alGetError() != AL_NO_ERROR || !buffer) break;
+        auto it = std::find(stream->queuedPcmBuffers.begin(),
+                            stream->queuedPcmBuffers.end(), buffer);
+        if (it != stream->queuedPcmBuffers.end()) stream->queuedPcmBuffers.erase(it);
+        alDeleteBuffers(1, &buffer);
+    }
+    ALint queued = 0, state = 0;
+    alGetSourcei(stream->source, AL_BUFFERS_QUEUED, &queued);
+    alGetSourcei(stream->source, AL_SOURCE_STATE, &state);
+    if (queued <= 0) {
+        if (stream->pcmStreamFinished) stream->pcmStreamDrained = true;
+    } else if (state != AL_PLAYING && !stream->paused) {
+        alSourcePlay(stream->source);
+    }
+}
+
+void AudioSystem::finishPcmStream(SoundSource* stream) {
+    if (!isSourceAlive(stream) || !stream->pcmStream) return;
+    stream->pcmStreamFinished = true;
+    updatePcmStream(stream);
+}
+
+bool AudioSystem::pcmStreamDrained(SoundSource* stream) {
+    if (!isSourceAlive(stream) || !stream->pcmStream) return true;
+    updatePcmStream(stream);
+    return stream->pcmStreamDrained;
+}
+
+void AudioSystem::releasePcmStream(SoundSource* stream) {
+    if (isSourceAlive(stream) && stream->pcmStream) releaseSource(stream);
+}
+
 SoundSource* AudioSystem::createSource(bool persistent, int priority) {
     if (!initialized || cfg.maxSources <= 0)
         return nullptr;
@@ -612,6 +688,16 @@ void AudioSystem::releaseSource(SoundSource* source) {
     if (it == impl->sources.end()) return;
     SoundBuffer* transient = source->scheduledBuffer;
     source->stop();
+    if (source->pcmStream && alcGetCurrentContext()) {
+        ALint queued = 0;
+        alGetSourcei(source->source, AL_BUFFERS_QUEUED, &queued);
+        while (queued-- > 0) {
+            ALuint buffer = 0;
+            alSourceUnqueueBuffers(source->source, 1, &buffer);
+            if (buffer) alDeleteBuffers(1, &buffer);
+        }
+        source->queuedPcmBuffers.clear();
+    }
     source->destroy();
     impl->sources.erase(it);
     delete source;
@@ -628,7 +714,14 @@ void AudioSystem::releaseSource(SoundSource* source) {
 }
 
 void AudioSystem::stopAll() {
-    for (auto* src : impl->sources) src->stop();
+    for (auto* src : impl->sources) {
+        if (!src) continue;
+        src->stop();
+        if (src->pcmStream) {
+            src->pcmStreamFinished = true;
+            updatePcmStream(src);
+        }
+    }
 }
 
 void AudioSystem::pauseAll() {
