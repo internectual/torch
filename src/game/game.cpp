@@ -7137,7 +7137,8 @@ void Game::update(float dt) {
     if (damageFlash > 0.0f) damageFlash = std::max(0.0f, damageFlash - feedbackDt * (0.007f / 0.032f));
     if (whiteOut > 0.0f) whiteOut = std::max(0.0f, whiteOut - feedbackDt * (0.007f / 0.032f));
 
-    if (gameState == Playing) {
+    if (gameState == Playing || LiveMovePolicy::shouldAdvanceLivePlaybackInShell(
+            gameState == MenuScreen, demoLive, demoPlaying)) {
         // ─── Demo playback ──────────────────────────────────────
         if (demoPlaying) {
             // A replacement can arrive before its mission asset is mounted.

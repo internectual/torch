@@ -44,6 +44,11 @@ inline bool shouldResumeLiveGameForContent(const std::string& content,
     return content == "PlayGui" && liveClient && livePlaybackActive;
 }
 
+inline bool shouldAdvanceLivePlaybackInShell(bool shellActive,
+                                            bool liveClient, bool livePlaybackActive) {
+    return shellActive && liveClient && livePlaybackActive;
+}
+
 inline ClientMoveIn makeMove(const Input& input) {
     auto angle = [](float radians) {
         if (!std::isfinite(radians)) return int16_t{0};

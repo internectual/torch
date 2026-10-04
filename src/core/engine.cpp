@@ -2379,6 +2379,9 @@ void Engine::run() {
         }
 
         // Game update + 3D render (if playing / test shape / shape viewer)
+        const bool liveShell = LiveMovePolicy::shouldAdvanceLivePlaybackInShell(
+            g->state() == Game::MenuScreen, g->isLiveClient(), g->isDemoPlaying());
+        if (liveShell) g->update(dt);
         bool isPlaying = (g->state() != Game::MenuScreen || g->isTestShapeLoaded() || g->isShapeViewerActive());
         if (isPlaying) {
             if (!gui->isDialogActive("ConsoleDlg") && !g->isGamePaused()) {
@@ -2768,6 +2771,7 @@ void Engine::run() {
                         *targetScale += wd * 0.1f;
                         if (*targetScale < 0.5f) *targetScale = 0.5f;
                         if (*targetScale > 3.0f) *targetScale = 3.0f;
+                        plat->input().mouseWheel = 0;
                     }
                 }
             }
@@ -3038,65 +3042,27 @@ void Engine::run() {
                     // or deletes controls while the canvas is loading.
                     displayList.clear();
                     std::function<void(const std::string&, int)> addNode = [&](const std::string& nodeName, int depth) {
-                        if ((int)displayList.size() >= treeScroll + maxItems) return;
                         if (depth > 10) return; // safety
                         auto it = scr->objects.find(nodeName);
                         if (it == scr->objects.end() || !it->second) return;
                         displayList.push_back({nodeName, depth});
 
-                        bool isSimGroup = (it->second->className == "SimGroup");
-                        bool hasChildren = (treeChildren.count(nodeName) && !treeChildren[nodeName].empty());
-                        if (!hasChildren && isSimGroup) {
-                            // Check if any unnamed objects have this as parent
-                            for (auto& kv : scr->objects) {
-                                if (!kv.second) continue;
-                                if (kv.second->name.empty()) continue;
-                                auto pit = kv.second->internals.find("parent");
-                                if (pit != kv.second->internals.end() && pit->second.toString() == nodeName) {
-                                    hasChildren = true;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (expandedNodes.count(nodeName) && hasChildren) {
-                            // Show children
-                            if (treeChildren.count(nodeName)) {
-                                for (auto& child : treeChildren[nodeName])
-                                    addNode(child, depth + 1);
-                            }
-                            // Also show SimGroup children via parent field
-                            for (auto& kv : scr->objects) {
-                                if (!kv.second) continue;
-                                if (kv.second->name.empty() || kv.first == nodeName) continue;
-                                auto pit = kv.second->internals.find("parent");
-                                if (pit != kv.second->internals.end() && pit->second.toString() == nodeName) {
-                                    // Only add if not already in treeChildren
-                                    bool already = false;
-                                    if (treeChildren.count(nodeName))
-                                        for (auto& c : treeChildren[nodeName])
-                                            if (c == kv.first) { already = true; break; }
-                                    if (!already) addNode(kv.first, depth + 1);
-                                }
-                            }
+                        const auto children = treeChildren.find(nodeName);
+                        if (expandedNodes.count(nodeName) && children != treeChildren.end()) {
+                            for (const auto& child : children->second)
+                                addNode(child, depth + 1);
                         }
                     };
                     for (auto& root : treeRoots) addNode(root, 0);
 
                     // Scroll with mouse wheel (only when the cursor is over the tree)
-                    static int prevWheel = 0;
                     int wheel = plat->input().mouseWheel;
-                    if (wheel != prevWheel && wheel != 0) {
-                        int mx = plat->input().mouseX, my = plat->input().mouseY;
-                        if (mx >= 650.0f && my < 480.0f) {
-                            treeScroll -= (wheel - prevWheel);
-                            if (treeScroll < 0) treeScroll = 0;
-                            int maxScroll = std::max(0, (int)displayList.size() - maxItems);
-                            if (treeScroll > maxScroll) treeScroll = maxScroll;
-                            plat->input().mouseWheel = 0;
-                        }
+                    const int mx = plat->input().mouseX, my = plat->input().mouseY;
+                    if (wheel != 0 && mx >= rightX - 20 && my >= treeY && my < canvasBottom) {
+                        const int maxScroll = std::max(0, (int)displayList.size() - maxItems);
+                        treeScroll = std::clamp(treeScroll - wheel, 0, maxScroll);
+                        plat->input().mouseWheel = 0;
                     }
-                    prevWheel = wheel;
                     const int maxScroll = std::max(0, (int)displayList.size() - maxItems);
                     treeScroll = std::clamp(treeScroll, 0, maxScroll);
 
@@ -3110,17 +3076,8 @@ void Engine::run() {
                         int xPos = rightX + entry.second * treeIndent;
 
                         // Expand [+] for objects with children
-                        bool hasKids = (treeChildren.count(entry.first) && !treeChildren[entry.first].empty());
-                        if (!hasKids && obj->className == "SimGroup") {
-                            for (auto& kv : scr->objects) {
-                                if (!kv.second) continue;
-                                if (kv.second->name.empty()) continue;
-                                auto pit = kv.second->internals.find("parent");
-                                if (pit != kv.second->internals.end() && pit->second.toString() == entry.first) {
-                                    hasKids = true; break;
-                                }
-                            }
-                        }
+                        const auto children = treeChildren.find(entry.first);
+                        const bool hasKids = children != treeChildren.end() && !children->second.empty();
                         if (hasKids) {
                             bool isExp = expandedNodes.count(entry.first);
                             overlayFont->render(isExp ? "[-]" : "[+]", xPos - 14, yPos, {0.5f, 1, 0.5f, 1}, treeFontScale);
@@ -3236,7 +3193,7 @@ void Engine::run() {
                                 tx += tw + 1;
                             }
                             // Object Tree click handling (right panel, x >= 650)
-                            if (mx >= 650.0f && my < 480.0f && g_treeY > 0) {
+                            if (mx >= 630.0f && my >= g_treeY && my < 480.0f) {
                                 int treeY = g_treeY;
                                 float ts = treeFontScale * (overlayFont ? overlayFont->defaultScale : 1.0f);
                                 int itemH = (int)(14 * ts);

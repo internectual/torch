@@ -17,7 +17,6 @@
 #include "core/console_args.h"
 #include "core/config.h"
 #include "core/engine.h"
-#include "game/live_move.h"
 #include "core/string_table.h"
 #include "game/damage_parity.h"
 #include "game/mission_parser.h"
@@ -3729,14 +3728,6 @@ bool ScriptEngine::init() {
         if (!args.empty()) {
             std::string name = args.back().toString();
             if (!name.empty()) {
-                // The live-client presentation shares the demo playback
-                // renderer, but its paused shell transition must restore the
-                // actual gameplay state when the stock LobbyGui returns to
-                // PlayGui.
-                auto& game = Engine::instance().game();
-                if (LiveMovePolicy::shouldResumeLiveGameForContent(
-                        name, game.isLiveClient(), game.isDemoPlaying()))
-                    game.setState(Game::Playing);
                 auto& gui = Engine::instance().guiRenderer();
                 if (!gui.findControl(name)) {
                     std::string path = "gui/" + name + ".gui";

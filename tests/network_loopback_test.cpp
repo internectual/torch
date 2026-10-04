@@ -77,6 +77,10 @@ int main() {
         assert(LiveMovePolicy::shouldResumeLiveGameForContent("PlayGui", true, true));
         assert(!LiveMovePolicy::shouldResumeLiveGameForContent("PlayGui", true, false));
         assert(!LiveMovePolicy::shouldResumeLiveGameForContent("LobbyGui", true, true));
+        assert(LiveMovePolicy::shouldAdvanceLivePlaybackInShell(true, true, true));
+        assert(!LiveMovePolicy::shouldAdvanceLivePlaybackInShell(false, true, true));
+        assert(!LiveMovePolicy::shouldAdvanceLivePlaybackInShell(true, false, true));
+        assert(!LiveMovePolicy::shouldAdvanceLivePlaybackInShell(true, true, false));
         assert(ObserverParity::shouldCycleReplayTargets(true, false));
         assert(!ObserverParity::shouldCycleReplayTargets(true, true));
         assert(ObserverParity::shouldCycleLiveTargets(true, true, true));

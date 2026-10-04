@@ -2,6 +2,7 @@
 #include <strings.h>
 #include "render/gui_renderer.h"
 #include "game/observer_parity.h"
+#include "game/live_move.h"
 #include "render/shader.h"
 #include "core/console.h"
 #include "core/engine.h"
@@ -5525,6 +5526,13 @@ void GuiRenderer::callOnAddOnce(GuiControl* ctl) {
 }
 
 void GuiRenderer::setContent(const std::string& name) {
+    // A live client uses the demo playback renderer; returning to PlayGui from
+    // the shell must also restore the gameplay state and full game viewport.
+    auto& game = Engine::instance().game();
+    if (LiveMovePolicy::shouldResumeLiveGameForContent(
+            name, game.isLiveClient(), game.isDemoPlaying()))
+        game.setState(Game::Playing);
+
     GuiControl* ctl = soToGui(name, nullptr);
     if (!ctl) {
         Console::instance().printf(LogLevel::Warn, "GUI: setContent '%s' not found", name.c_str());
