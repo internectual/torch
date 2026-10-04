@@ -1,5 +1,6 @@
 #include "sim/engine_classes.h"
 #include "game/game.h"
+#include "game/live_move.h"
 #include "game/voice_stream.h"
 #include "audio/gsm_codec.h"
 #include "sim/client_targets.h"
@@ -7427,8 +7428,13 @@ void Game::update(float dt) {
             // Update window title with progress
             int pct = demoBlocksTotal > 0 ? (demoBlocksDone * 100 / demoBlocksTotal) : 0;
             char title[128];
-            snprintf(title, sizeof(title), "Torch - Demo [%d%%] %d/%d blocks %d packets",
-                pct, demoBlocksDone, demoBlocksTotal, demoPacketsParsed);
+            if (demoLive) {
+                const char* mission = liveMissionName.empty() ? "Connecting" : liveMissionName.c_str();
+                snprintf(title, sizeof(title), "Torch - %s (LAN)", mission);
+            } else {
+                snprintf(title, sizeof(title), "Torch - Demo [%d%%] %d/%d blocks %d packets",
+                    pct, demoBlocksDone, demoBlocksTotal, demoPacketsParsed);
+            }
             Engine::instance().platform().setTitle(title);
 
             // Advance interpolation blend (smooth over ~150ms)
@@ -10846,6 +10852,10 @@ void Game::connectToServer(const char* host, uint16_t port) {
             if (argv.size() >= 2 &&
                 (argv[1] == "MsgClearDebrief" || argv[1] == "MsgDebriefResult")) {
                 liveMatchEnded_ = true;
+                // The stock DebriefGui is a mouse-driven screen even though
+                // the simulation remains Playing while the summary is open.
+                Engine::instance().platform().setRelativeMouse(false);
+                Engine::instance().platform().showMouse(true);
                 liveClockDurationMs_ = 0;
                 liveClockReceivedAt_ = 0.0;
                 clearProjectileAudio();
@@ -11802,6 +11812,7 @@ void Game::stopDemoPlayback() {
     demoPlaying = false;
     demoMissionState = {};
     demoPaused = false;
+    liveLookDelta = {};
     demoStepRequest = false;
     demoStepBlocks = 1;
     demoFastForward = false;
@@ -11836,13 +11847,12 @@ static std::vector<uint8_t> rawMoveBlock(const ClientMoveIn& move) {
         for (int i = 0; i < 4; ++i) block[offset + i] = (uint8_t)(value >> (8 * i));
     };
     auto putF = [&](int offset, float value) { uint32_t u; memcpy(&u, &value, 4); put(offset, u); };
-    constexpr float AngleUnit = 2.0f * Math::PI / 65536.0f;
     put(0, (uint32_t)move.x); put(4, (uint32_t)move.y); put(8, (uint32_t)move.z);
     put(12, (uint16_t)move.yaw); put(16, (uint16_t)move.pitch); put(20, (uint16_t)move.roll);
     putF(24, (move.x - 16) / 16.0f); putF(28, (move.y - 16) / 16.0f); putF(32, (move.z - 16) / 16.0f);
-    putF(36, (uint16_t)move.yaw * AngleUnit);
-    putF(40, (uint16_t)move.pitch * AngleUnit);
-    putF(44, (uint16_t)move.roll * AngleUnit);
+    putF(36, LiveMovePolicy::angleRadians(move.yaw));
+    putF(40, LiveMovePolicy::angleRadians(move.pitch));
+    putF(44, LiveMovePolicy::angleRadians(move.roll));
     put(48, move.id); put(52, (uint32_t)move.sendCount);
     block[56] = move.freeLook ? 1 : 0;
     for (int i = 0; i < 6; ++i) block[57 + i] = move.trigger[i] ? 1 : 0;
@@ -11859,6 +11869,8 @@ void Game::startLiveClient(GameConnection& connection) {
     liveConnection = &connection;
     liveMissionName.clear();
     liveMoveClock = 0.0f;
+    liveLookDelta = {};
+    for (int& triggerCount : livePrevTriggerCount) triggerCount = 0;
     demoMissionState = {};
     demoWorldGhostResets = -1;
     demoBlocksDone = 0;
@@ -11879,34 +11891,53 @@ void Game::startLiveClient(GameConnection& connection) {
     };
 }
 
-// GameConnection::getNextMove: the MoveManager variables the client's
-// action maps set, clamped for the network (Move::clamp).
+// GameConnection::getNextMove: merge Torch's input state with the stock
+// MoveManager variables and clamp to the packet's 0..32 axes.
 ClientMoveIn Game::nextLiveMove() {
-    ClientMoveIn move;
+    LiveMovePolicy::Input input{
+        .forward = currentInput.forward,
+        .backward = currentInput.backward,
+        .left = currentInput.left,
+        .right = currentInput.right,
+        .jump = currentInput.jump,
+        .jet = currentInput.jet,
+        .fire = currentInput.fire,
+        .altFire = currentInput.altFire,
+        .freeLook = currentInput.freeCam,
+        .yaw = liveLookDelta.y,
+        .pitch = liveLookDelta.x,
+    };
     auto* ts = Engine::instance().script().ts();
-    if (!ts) return move;
-    auto f = [&](const char* name) { return ts->getGlobal(name).toFloat(); };
-    const float pitch = f("$mvPitch") + f("$mvPitchUpSpeed") - f("$mvPitchDownSpeed");
-    const float yaw = f("$mvYaw") + f("$mvYawLeftSpeed") - f("$mvYawRightSpeed");
-    const float roll = f("$mvRoll") + f("$mvRollRightSpeed") - f("$mvRollLeftSpeed");
-    ts->setGlobal("$mvPitch", VMValue(0.0f));
-    ts->setGlobal("$mvYaw", VMValue(0.0f));
-    ts->setGlobal("$mvRoll", VMValue(0.0f));
-    constexpr float TwoPi = 6.28318530717958647692f;
-    auto angle = [&](float a) { return (int16_t)(uint16_t)((uint32_t)(int64_t)((a / TwoPi) * 0x10000) & 0xFFFF); };
-    auto axis = [](float v) { return v < -1 ? 0 : v > 1 ? 32 : (int)((v + 1) * 16); };
-    move.pitch = angle(pitch);
-    move.yaw = angle(yaw);
-    move.roll = angle(roll);
-    move.x = axis(f("$mvRightAction") - f("$mvLeftAction"));
-    move.y = axis(f("$mvForwardAction") - f("$mvBackwardAction"));
-    move.z = axis(f("$mvUpAction") - f("$mvDownAction"));
-    move.freeLook = ts->getGlobal("$mvFreeLook").toBool();
+    if (!ts) return LiveMovePolicy::makeMove(input);
+    auto value = [&](const char* name) { return ts->getGlobal(name).toFloat(); };
+    input.forward = input.forward || ts->getGlobal("$mvForwardAction").toBool();
+    input.backward = input.backward || ts->getGlobal("$mvBackwardAction").toBool();
+    input.left = input.left || ts->getGlobal("$mvLeftAction").toBool();
+    input.right = input.right || ts->getGlobal("$mvRightAction").toBool();
+    input.jump = input.jump || ts->getGlobal("$mvUpAction").toBool();
+    input.jet = input.jet || ts->getGlobal("$mvDownAction").toBool();
+    input.jump = input.jump || (ts->getGlobal("$mvTriggerCount2").toInt() & 1) != 0;
+    input.jet = input.jet || (ts->getGlobal("$mvTriggerCount3").toInt() & 1) != 0;
+    input.fire = input.fire || (ts->getGlobal("$mvTriggerCount0").toInt() & 1) != 0;
+    input.altFire = input.altFire || (ts->getGlobal("$mvTriggerCount1").toInt() & 1) != 0;
+    input.freeLook = input.freeLook || ts->getGlobal("$mvFreeLook").toBool();
+    const float scriptYaw = value("$mvYaw") + value("$mvYawLeftSpeed") - value("$mvYawRightSpeed");
+    const float scriptPitch = value("$mvPitch") + value("$mvPitchUpSpeed") - value("$mvPitchDownSpeed");
+    const float scriptRoll = value("$mvRoll") + value("$mvRollRightSpeed") - value("$mvRollLeftSpeed");
+    if (scriptYaw != 0.0f) input.yaw = scriptYaw;
+    if (scriptPitch != 0.0f) input.pitch = scriptPitch;
+    input.roll = scriptRoll;
+    ClientMoveIn move = LiveMovePolicy::makeMove(input);
     for (int i = 0; i < 6; ++i) {
         const int count = ts->getGlobal("$mvTriggerCount" + std::to_string(i)).toInt();
-        move.trigger[i] = (count & 1) || (!(livePrevTriggerCount[i] & 1) && livePrevTriggerCount[i] != count);
+        move.trigger[i] = move.trigger[i] || (count & 1) ||
+            (!(livePrevTriggerCount[i] & 1) && livePrevTriggerCount[i] != count);
         livePrevTriggerCount[i] = count;
     }
+    ts->setGlobal("$mvYaw", VMValue(0.0f));
+    ts->setGlobal("$mvPitch", VMValue(0.0f));
+    ts->setGlobal("$mvRoll", VMValue(0.0f));
+    liveLookDelta = {};
     return move;
 }
 
@@ -11975,7 +12006,8 @@ void Game::forwardLiveEvents(const PacketData& pd) {
         if (ev.ghostMessage >= 0)
             liveConnection->clientGhostMessage(ev.ghostMessage, ev.ghostSequence, (uint32_t)ev.ghostCount);
         if (ev.classId == T2Demo::NetEventClassFirst + 3)
-            if (auto* ts = Engine::instance().script().ts()) ts->callFunction("ghostAlwaysObjectReceived", {});
+            if (auto* ts = Engine::instance().script().ts())
+                ts->callFunction("ghostAlwaysObjectReceived", {});
     }
 }
 
@@ -12029,6 +12061,9 @@ bool Game::startLiveWorld() {
     demoTotalTime = demoTime;
     demoPlaying = true;
     setState(Playing);
+    if (liveConnection) {
+        liveConnection->sendRemoteCommand({NetStrings::literal("ClientJoinGame")});
+    }
     return true;
 }
 
@@ -12661,6 +12696,9 @@ void Game::selectSpectateTarget(int ghostIndex) {
 }
 
 void Game::applyInput(const InputMove& input) {
+    if (demoLive)
+        LiveMovePolicy::accumulateLook(liveLookDelta.x, liveLookDelta.y,
+                                       input.lookDelta.x, input.lookDelta.y);
     previousFire = currentInput.fire;
     previousAltFire = currentInput.altFire;
     previousReload = currentInput.reload;
@@ -12688,7 +12726,10 @@ void Game::applyInput(const InputMove& input) {
 
     // Spectate cycle on the observer right-mouse action or R during playback.
     const bool observerCycle = observerCyclePressed(input.reload, input.altFire);
-    if (demoPlaying && observerCycle && !previousObserverCycle) {
+    const bool replayObserver = ObserverParity::shouldCycleReplayTargets(demoPlaying, demoLive);
+    const bool liveObserver = ObserverParity::shouldCycleLiveTargets(
+        demoLive, gameState == Dead, activeConn != nullptr);
+    if (replayObserver && observerCycle && !previousObserverCycle) {
         if (demoParser) {
             auto indices = demoParser->getGhostTracker().getAllIndices();
             // Match the dead-state target filter so vehicles are reachable by
@@ -12711,7 +12752,7 @@ void Game::applyInput(const InputMove& input) {
                 Console::instance().printf(LogLevel::Info, "Spectating ghost %d", spectateGhostIndex);
             }
         }
-    } else if (observerCycle && !previousObserverCycle && activeConn) {
+    } else if (liveObserver && observerCycle && !previousObserverCycle) {
         const auto observer = activeConn->observerSnapshot();
         const auto indices = liveGhosts.getAllIndices();
         std::vector<int> targets;

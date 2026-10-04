@@ -535,7 +535,16 @@ void GameConnection::checkPacketSend(double now) {
     if (!deliver) return;
     const uint32_t delay = isServer ? curRate.updateDelay : gPacketUpdateDelayToServer;
     if (lastUpdate >= 0.0 && now < lastUpdate + delay / 1000.0) return;
-    if (protocol.windowFull()) return;
+    if (protocol.windowFull()) {
+        // Both peers can fill their 30-packet data windows during a large
+        // guaranteed ghost stream.  A data packet can no longer carry the
+        // acknowledgements needed to free the opposite window, so send an
+        // ACK-only datagram instead of deadlocking until timeout recovery.
+        lastUpdate = now;
+        const auto acknowledgement = protocol.buildPacket(V12::PacketType::Ack);
+        deliver(acknowledgement);
+        return;
+    }
     lastUpdate = now;
     TorqueBitWriter w;
     protocol.writePacketHeader(w.raw(), V12::PacketType::Data);
@@ -715,7 +724,9 @@ void GameConnection::clientGhostMessage(int message, uint32_t sequence, uint32_t
             break;
         }
         case GhostAlwaysStarting:
-            if (ts) ts->callFunction("ghostAlwaysStarted", {VMValue(std::to_string(count))});
+            if (ts) {
+                ts->callFunction("ghostAlwaysStarted", {VMValue(std::to_string(count))});
+            }
             break;
         default: break;
     }

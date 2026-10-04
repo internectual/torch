@@ -1033,6 +1033,7 @@ public:
     const std::map<int, LiveTeamScore>& getLiveTeamScores() const { return liveTeamScores; }
     bool liveMatchStarted() const { return liveMatchStarted_; }
     bool liveMatchEnded() const { return liveMatchEnded_; }
+    const std::string& getLiveMissionName() const { return liveMissionName; }
     const std::string& liveMissionDisplayName() const { return liveMissionDisplayName_; }
     const std::string& liveMissionType() const { return liveMissionType_; }
     int liveClockRemainingMs() const;
@@ -1181,6 +1182,7 @@ private:
     class GameConnection* liveConnection{};
     std::string liveMissionName;
     float liveMoveClock = 0.0f;
+    Point3F liveLookDelta{};
     int livePrevTriggerCount[6]{};
     ClientMoveIn nextLiveMove();
     void pumpLiveClient();

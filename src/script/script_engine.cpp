@@ -6665,8 +6665,10 @@ bool ScriptEngine::init() {
             ctl->fields["messageVector"] = args[1].toString();
         return VMValue(1);
     });
+    // SDL's normal frame loop redraws continuously. Rebuilding the entire GUI
+    // tree here made stock per-object loading callbacks do an O(controls)
+    // refresh for every ghost during mission transfer.
     tsInstance->registerNative("repaint", [](const auto&) -> VMValue {
-        Engine::instance().guiRenderer().refresh();
         return VMValue(1);
     });
     tsInstance->registerNative("getRowNumById", [getListCtrl](const auto& args) -> VMValue {

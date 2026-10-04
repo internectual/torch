@@ -5,6 +5,15 @@
 #include <cstdint>
 
 namespace ObserverParity {
+inline bool shouldCycleReplayTargets(bool demoPlaying, bool liveConnection) {
+    return demoPlaying && !liveConnection;
+}
+
+inline bool shouldCycleLiveTargets(bool liveConnection, bool observerState,
+                                   bool hasObserverTransport) {
+    return liveConnection && observerState && hasObserverTransport;
+}
+
 inline bool isPositionReady(bool hasPosition) {
     return hasPosition;
 }

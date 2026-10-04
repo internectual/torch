@@ -1,4 +1,5 @@
 #include "core/engine.h"
+#include "game/live_move.h"
 #include "sim/sim_state.h"
 #include "sim/game_connection.h"
 #include "sim/net_interface.h"
@@ -1962,6 +1963,10 @@ void Engine::run() {
             char title[128];
             if (mapperMode)
                 snprintf(title, sizeof(title), "Torch Mapper Mode - %s - %d FPS", mapperMap.c_str(), frameCount);
+            else if (g && g->isLiveClient())
+                snprintf(title, sizeof(title), "Torch - %s (LAN) - %d FPS",
+                         g->getLiveMissionName().empty() ? "Connecting" : g->getLiveMissionName().c_str(),
+                         frameCount);
             else
                 snprintf(title, sizeof(title), "Torch - %d FPS tab=%d", frameCount, g_debugTab);
             plat->setTitle(title);
@@ -2520,9 +2525,10 @@ void Engine::run() {
                     tsInput->setGlobal("$mvPitch", VMValue(0.0f));
                     tsInput->setGlobal("$mvYaw", VMValue(0.0f));
                 } else {
+                    // Player yaw is positive from +Y forward toward +X right.
                     input.lookDelta = {
                         (float)plat->input().mouseDeltaY * 0.002f,
-                        -(float)plat->input().mouseDeltaX * 0.002f, 0};
+                        (float)plat->input().mouseDeltaX * 0.002f, 0};
                 }
                 static int lastNumKey = 0;
                 for (int nk = 0; nk < 10; nk++) {
@@ -2554,7 +2560,9 @@ void Engine::run() {
                 g->update(dt);
                 double t1 = Timer::now();
                 g->render(dt);  // 3D render with own beginFrame/endFrame
-                if (!g->targetFinderOpen() && g->state() == Game::Playing) {
+                if (LiveMovePolicy::shouldCaptureMouse(
+                        g->state() == Game::Playing, g->targetFinderOpen(),
+                        g->isLiveClient(), g->liveMatchEnded())) {
                     plat->setRelativeMouse(true);
                     plat->showMouse(false);
                 }
@@ -2990,6 +2998,11 @@ void Engine::run() {
 
                     // Build flat display list: roots → expanded children recursively
                     std::vector<std::pair<std::string, int>>& displayList = g_displayList;
+                    // The hierarchy is cached until a script-object mutation,
+                    // but the visible flat rows are frame-local. Keeping old
+                    // rows here leaves blank slots when GUI bootstrap replaces
+                    // or deletes controls while the canvas is loading.
+                    displayList.clear();
                     std::function<void(const std::string&, int)> addNode = [&](const std::string& nodeName, int depth) {
                         if ((int)displayList.size() >= treeScroll + maxItems) return;
                         if (depth > 10) return; // safety
@@ -3077,8 +3090,9 @@ void Engine::run() {
                     // Render visible items
                     for (int i = treeScroll; i < (int)displayList.size() && i < treeScroll + maxItems; i++) {
                         auto& entry = displayList[i];
-                        auto* obj = scr->objects[entry.first];
-                        if (!obj) continue;
+                        auto objectIt = scr->objects.find(entry.first);
+                        if (objectIt == scr->objects.end() || !objectIt->second) continue;
+                        auto* obj = objectIt->second;
                         int yPos = treeY + (i - treeScroll) * itemH;
                         int xPos = rightX + entry.second * treeIndent;
 

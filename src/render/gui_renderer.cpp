@@ -80,6 +80,11 @@ static void orderGuiChildren(const std::vector<std::pair<std::string, ScriptObje
         for (const auto& childName : guiChildren(object)) {
             GuiControl* child = renderer.findControl(childName);
             if (!child || child == parent || !included.insert(child).second) continue;
+            if (child->parent && child->parent != parent) {
+                auto& oldChildren = child->parent->children;
+                oldChildren.erase(std::remove(oldChildren.begin(), oldChildren.end(), child),
+                                  oldChildren.end());
+            }
             child->parent = parent;
             ordered.push_back(child);
         }
@@ -206,8 +211,12 @@ static void callGuiChildLifecycle(GuiControl* root, const char* suffix) {
 
 GuiRenderer::GuiRenderer() {}
 GuiRenderer::~GuiRenderer() {
+    std::unordered_set<GuiControl*> destroyed;
     auto del = [&](auto& self, GuiControl* ctl) -> void {
-        for (auto* child : ctl->children) self(self, child);
+        if (!ctl || !destroyed.insert(ctl).second) return;
+        const auto children = ctl->children;
+        ctl->children.clear();
+        for (auto* child : children) self(self, child);
         delete ctl;
     };
     s_openPopups.clear();

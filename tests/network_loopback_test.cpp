@@ -1,4 +1,7 @@
 #include "sim/game_connection.h"
+#include "game/live_move.h"
+#include "game/link_beam.h"
+#include "game/observer_parity.h"
 #include "sim/net_interface.h"
 #include "core/timer.h"
 #include "net/v12_protocol.h"
@@ -43,6 +46,48 @@
 int main() {
     setenv("ALSOFT_DRIVERS", "null", 1);
     {
+        const auto forward = LiveMovePolicy::makeMove({.forward = true, .right = true,
+                                                       .jump = true, .fire = true});
+        assert(forward.x == 32 && forward.y == 32 && forward.z == 32);
+        assert(forward.trigger[0] && !forward.trigger[1] && forward.trigger[2]);
+        const auto backward = LiveMovePolicy::makeMove({.backward = true, .left = true,
+                                                        .jet = true, .freeLook = true});
+        assert(backward.x == 0 && backward.y == 0 && backward.z == 0);
+        assert(!backward.trigger[0] && !backward.trigger[1] && backward.trigger[3] &&
+               backward.freeLook);
+        const auto neutral = LiveMovePolicy::makeMove({});
+        assert(neutral.x == 16 && neutral.y == 16 && neutral.z == 16);
+        float accumulatedPitch = 0.0f, accumulatedYaw = 0.0f;
+        LiveMovePolicy::accumulateLook(accumulatedPitch, accumulatedYaw, 0.1f, -0.2f);
+        LiveMovePolicy::accumulateLook(accumulatedPitch, accumulatedYaw, 0.2f, 0.3f);
+        const auto look = LiveMovePolicy::makeMove({.yaw = accumulatedYaw,
+                                                    .pitch = accumulatedPitch});
+        assert(look.yaw == 1043 && look.pitch == 3129);
+        assert(look.x == 16 && look.y == 16);
+        const auto leftLook = LiveMovePolicy::makeMove({.yaw = -1.0f});
+        assert(LiveMovePolicy::angleRadians(leftLook.yaw) < 0.0f);
+        const auto invalidAngles = LiveMovePolicy::makeMove({
+            .yaw = std::numeric_limits<float>::infinity(),
+            .pitch = std::numeric_limits<float>::quiet_NaN()});
+        assert(invalidAngles.yaw == 0 && invalidAngles.pitch == 0);
+        assert(LiveMovePolicy::shouldCaptureMouse(true, false, true, false));
+        assert(!LiveMovePolicy::shouldCaptureMouse(true, false, true, true));
+        assert(!LiveMovePolicy::shouldCaptureMouse(true, true, true, false));
+        assert(!LiveMovePolicy::shouldCaptureMouse(false, false, true, false));
+        assert(ObserverParity::shouldCycleReplayTargets(true, false));
+        assert(!ObserverParity::shouldCycleReplayTargets(true, true));
+        assert(ObserverParity::shouldCycleLiveTargets(true, true, true));
+        assert(!ObserverParity::shouldCycleLiveTargets(true, false, false));
+        assert(!ObserverParity::shouldCycleLiveTargets(false, true, true));
+        constexpr float bodyYaw = 0.7f, headYaw = -0.2f, headPitch = 0.15f;
+        const auto playerAim = playerAimDirection(bodyYaw, headYaw, headPitch, 0.8f);
+        const auto cameraAim = T2Demo::cameraDirectionFromYawPitch(
+            bodyYaw + headYaw * 0.8f, headPitch * 0.8f);
+        assert(std::fabs(playerAim.x - cameraAim.x) < 1e-6f);
+        assert(std::fabs(playerAim.y - cameraAim.y) < 1e-6f);
+        assert(std::fabs(playerAim.z - cameraAim.z) < 1e-6f);
+    }
+    {
         GhostPriority::Scope scope;
         scope.position = {0, 0, 0};
         scope.forward = {0, 1, 0};
@@ -64,6 +109,37 @@ int main() {
     }
     ScriptEngine providerEngine;
     assert(providerEngine.init());
+    {
+        GameConnection sender;
+        sender.curRate.updateDelay = 1;
+        sender.curRate.packetSize = 450;
+        std::vector<std::vector<uint8_t>> packets;
+        sender.deliver = [&](const std::vector<uint8_t>& packet) { packets.push_back(packet); };
+        V12::ProtocolState peer(sender.getConnectSequence());
+        auto headerOf = [](const std::vector<uint8_t>& packet) {
+            V12BitStream stream(packet.data(), packet.size());
+            V12::DnetHeader header;
+            assert(V12::readDnetHeader(stream, header));
+            return header;
+        };
+        for (int i = 0; i < 30; ++i) sender.checkPacketSend(i * 0.002);
+        assert(packets.size() == 30 && sender.moves.empty());
+        for (const auto& packet : packets)
+            assert(peer.processReceived(headerOf(packet)).accepted);
+        assert(!peer.windowFull());
+
+        sender.checkPacketSend(0.1);
+        assert(packets.size() == 31);
+        const auto acknowledgement = headerOf(packets.back());
+        assert(acknowledgement.packetType == V12::PacketType::Ack);
+        assert(peer.processReceived(acknowledgement).accepted);
+        const auto peerAck = peer.buildPacket(V12::PacketType::Ack);
+        sender.receivePacket(peerAck.data(), peerAck.size());
+        const size_t beforeResume = packets.size();
+        sender.checkPacketSend(0.2);
+        assert(packets.size() == beforeResume + 1);
+        assert(headerOf(packets.back()).packetType == V12::PacketType::Data);
+    }
     {
         AudioSystem audio;
         assert(audio.init());
@@ -2266,6 +2342,7 @@ int main() {
             "  commandToClient(%client, 'NetHello', \"world\", 42); }"
             "function GameConnection::onDrop(%client, %reason) { $netDrop = %client @ \":\" @ %reason; }"
             "function ServerConnectionAccepted() { $netAccepted = $netAccepted + 1; }"
+            "function serverCmdTorchSmokeJoin(%client, %team) { $netJoinClient = %client; $netJoinTeam = %team; }"
             "function onChallengeRequestRejected(%msg) { $netChallengeReject = %msg; }"
             "function onConnectRequestRejected(%msg) { $netConnectReject = %msg; }"
             "function onConnectionToServerLost(%msg) { $netLost = %msg; }");
@@ -2278,6 +2355,8 @@ int main() {
 
         GameConnection* clientConnection = nullptr;
         std::vector<std::vector<uint8_t>> clientPackets;
+        DemoParser parser;
+        bool hello = false, streamBegun = false;
         auto savedStarted = gLocalClientStarted;
         gLocalClientStarted = [&](GameConnection& connection) {
             clientConnection = &connection;
@@ -2290,6 +2369,19 @@ int main() {
                 netInterfaceProcess(now);
                 serverNetProcess(now);
                 clientNetProcess(now);
+                if (!streamBegun && clientConnection) {
+                    parser.beginLiveStream(clientConnection->getConnectSequence());
+                    streamBegun = true;
+                }
+                for (const auto& packet : clientPackets) {
+                    PacketData pd = parser.parsePacket(packet.data(), packet.size(), -1);
+                    for (const auto& event : pd.events)
+                        if (event.classId == T2Demo::NetEventClassFirst + 9 &&
+                            event.arguments.size() == 3 && event.arguments[0] == "NetHello" &&
+                            event.arguments[1] == "world" && event.arguments[2] == "42")
+                            hello = true;
+                }
+                clientPackets.clear();
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
             return finished;
@@ -2297,24 +2389,7 @@ int main() {
         const std::string address = "127.0.0.1:" + std::to_string(port);
         ts->callFunction("connect", {VMValue(address), VMValue(""), VMValue("Tester"), VMValue("Human Male"),
                                      VMValue("beagle"), VMValue("Male1")});
-        DemoParser parser;
-        bool hello = false, streamBegun = false;
         assert(pump([&] {
-            // Game::startLiveClient: the reader follows the connection's
-            // connect sequence (the packet header's connect bit).
-            if (!streamBegun && clientConnection) {
-                parser.beginLiveStream(clientConnection->getConnectSequence());
-                streamBegun = true;
-            }
-            for (const auto& packet : clientPackets) {
-                PacketData pd = parser.parsePacket(packet.data(), packet.size(), -1);
-                for (const auto& event : pd.events)
-                    if (event.classId == T2Demo::NetEventClassFirst + 9 && event.arguments.size() == 3 &&
-                        event.arguments[0] == "NetHello" && event.arguments[1] == "world" &&
-                        event.arguments[2] == "42")
-                        hello = true;
-            }
-            clientPackets.clear();
             return hello;
         }));
         assert(ts->getGlobal("$netConnectArgs").toString() == "Tester|Human Male|beagle|Male1|");
@@ -2327,6 +2402,22 @@ int main() {
         assert(named == clientConnection && named->address == "IP:127.0.0.1:" + std::to_string(port));
         ScriptObject* clientGroup = ScriptEngine::instance().findObject("ClientGroup");
         assert(clientGroup);
+
+        // A live player joins after mission ghosting through the same tagged
+        // RemoteCommandEvent path used by commandToServer('ClientJoinGame').
+        ts->callFunction("commandToServer", {
+            VMValue(NetStrings::literal("TorchSmokeJoin")), VMValue("0")});
+        assert(pump([&] { return !ts->getGlobal("$netJoinClient").toString().empty(); }));
+        assert(ts->getGlobal("$netJoinClient").toString() ==
+               ts->getGlobal("$netClient").toString());
+        assert(ts->getGlobal("$netJoinTeam").toString() == "0");
+
+        ClientMoveIn forwardMove;
+        forwardMove.y = 32;
+        forwardMove.trigger[0] = true;
+        assert(clientConnection->pushMove(forwardMove));
+        assert(pump([&] { return !serverSide->moves.empty(); }));
+        assert(serverSide->moves.front().y == 32 && serverSide->moves.front().trigger[0]);
 
         // handleGamePingRequest: the server answers from $ServerName.
         {
