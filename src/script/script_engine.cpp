@@ -17,6 +17,7 @@
 #include "core/console_args.h"
 #include "core/config.h"
 #include "core/engine.h"
+#include "game/live_move.h"
 #include "core/string_table.h"
 #include "game/damage_parity.h"
 #include "game/mission_parser.h"
@@ -1763,6 +1764,7 @@ bool ScriptEngine::addToSet(ScriptObject* set, ScriptObject* object) {
     const int count = set->internals["__childCount"].toInt();
     set->internals["__child" + std::to_string(count)] = VMValue(key);
     set->internals["__childCount"] = VMValue(count + 1);
+    ++objectTreeRevision;
     PathManager::membershipChanged(set, object);
     return true;
 }
@@ -1779,6 +1781,7 @@ bool ScriptEngine::removeFromSet(ScriptObject* set, ScriptObject* object) {
     auto sets = memberSets(object);
     sets.erase(std::remove(sets.begin(), sets.end(), setKey), sets.end());
     storeMemberSets(object, sets);
+    ++objectTreeRevision;
     PathManager::membershipChanged(set, object);
     return true;
 }
@@ -3726,6 +3729,14 @@ bool ScriptEngine::init() {
         if (!args.empty()) {
             std::string name = args.back().toString();
             if (!name.empty()) {
+                // The live-client presentation shares the demo playback
+                // renderer, but its paused shell transition must restore the
+                // actual gameplay state when the stock LobbyGui returns to
+                // PlayGui.
+                auto& game = Engine::instance().game();
+                if (LiveMovePolicy::shouldResumeLiveGameForContent(
+                        name, game.isLiveClient(), game.isDemoPlaying()))
+                    game.setState(Game::Playing);
                 auto& gui = Engine::instance().guiRenderer();
                 if (!gui.findControl(name)) {
                     std::string path = "gui/" + name + ".gui";
@@ -9369,6 +9380,7 @@ void ScriptEngine::addObject(ScriptObject* object) {
     auto existing = objects.find(key);
     if (existing != objects.end() && existing->second == object) return;
     objects[key] = object;
+    ++objectTreeRevision;
     if (!object->name.empty()) {
         auto& taken = nameDictionary_[lowerName(object->name)];
         taken.erase(std::remove(taken.begin(), taken.end(), object), taken.end());
@@ -9379,7 +9391,10 @@ void ScriptEngine::addObject(ScriptObject* object) {
 void ScriptEngine::removeObject(ScriptObject* object) {
     if (!object) return;
     auto it = objects.find(std::to_string(object->id));
-    if (it != objects.end() && it->second == object) objects.erase(it);
+    if (it != objects.end() && it->second == object) {
+        objects.erase(it);
+        ++objectTreeRevision;
+    }
     if (!object->name.empty()) {
         auto named = nameDictionary_.find(lowerName(object->name));
         if (named != nameDictionary_.end()) {
@@ -9403,6 +9418,7 @@ void ScriptEngine::setObjectName(ScriptObject* object, const std::string& name) 
         }
     }
     object->name = name;
+    ++objectTreeRevision;
     if (registered && !name.empty()) nameDictionary_[lowerName(name)].push_back(object);
 }
 

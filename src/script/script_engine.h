@@ -396,6 +396,7 @@ public:
     // object's id. Names live in the name dictionary.
     std::unordered_map<std::string, ScriptObject*> objects;
     std::unordered_map<int, ScriptObject*> objectsById;
+    uint64_t objectTreeRevision = 0;
     // SimObject::registerObject: into the registry under its id, its name
     // (if any) into the name dictionary.
     void addObject(ScriptObject* object);

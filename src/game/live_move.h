@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <string>
 
 namespace LiveMovePolicy {
 
@@ -36,6 +37,11 @@ inline void accumulateLook(float& pitch, float& yaw, float pitchDelta, float yaw
 inline bool shouldCaptureMouse(bool gameplayActive, bool targetFinderOpen,
                                bool liveClient, bool liveMatchEnded) {
     return gameplayActive && !targetFinderOpen && !(liveClient && liveMatchEnded);
+}
+
+inline bool shouldResumeLiveGameForContent(const std::string& content,
+                                           bool liveClient, bool livePlaybackActive) {
+    return content == "PlayGui" && liveClient && livePlaybackActive;
 }
 
 inline ClientMoveIn makeMove(const Input& input) {

@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <sys/file.h>
 #include <map>
+#include <limits>
 
 // ─── Key Bindings ─────────────────────────────────────────────────
 static std::map<std::string, int> s_bindings = {
@@ -2058,10 +2059,11 @@ void Engine::run() {
                     // transition. Avoid evaluating its block in the partial
                     // local TorqueScript runtime; that path can leave the
                     // parser at the opening brace and crash the client.
-                    if (g->isDemoPlaying()) g->stopDemoPlayback();
+                    if (g->isDemoPlaying() && !g->isLiveClient()) g->stopDemoPlayback();
                     else {
                         g->setState(Game::MenuScreen);
                         g->menu().setActive(false);
+                        if (g->isLiveClient()) g->resetInputState();
                         gui->clearDialogs();
                         if (gui->findControl("LobbyGui")) gui->setContent("LobbyGui");
                         else gui->setContent("LaunchGui");
@@ -2942,14 +2944,40 @@ void Engine::run() {
                     // Build parent→children map from all script objects
                     static std::unordered_map<std::string, std::vector<std::string>> treeChildren;
                     static std::vector<std::string> treeRoots;
+                    static std::unordered_set<std::string> treeMembers;
+                    static uint64_t cachedObjectRevision = std::numeric_limits<uint64_t>::max();
+                    if (cachedObjectRevision != scr->objectTreeRevision) {
+                        cachedObjectRevision = scr->objectTreeRevision;
+                        g_treeDirty = true;
+                    }
                     if (g_treeDirty) {
                         treeChildren.clear();
                         treeRoots.clear();
+                        treeMembers.clear();
                         // Gather all named objects
                         std::vector<std::string> allNames;
                         for (auto& kv : scr->objects)
                             if (kv.second && !kv.second->name.empty()) allNames.push_back(kv.first);
-                        // Also collect unnamed objects
+                        // SimGroup membership is stored as __childN object IDs,
+                        // not as a "parent" field. Include those relationships
+                        // so groups expose their children in the tree.
+                        for (auto& kv : scr->objects) {
+                            if (!kv.second || kv.second->className != "SimGroup") continue;
+                            auto countIt = kv.second->internals.find("__childCount");
+                            if (countIt == kv.second->internals.end()) continue;
+                            const int childCount = std::max(0, countIt->second.toInt());
+                            for (int i = 0; i < childCount; ++i) {
+                                auto childIt = kv.second->internals.find("__child" + std::to_string(i));
+                                if (childIt == kv.second->internals.end()) continue;
+                                const std::string childKey = childIt->second.toString();
+                                if (!scr->objects.count(childKey)) continue;
+                                auto& children = treeChildren[kv.first];
+                                if (std::find(children.begin(), children.end(), childKey) == children.end())
+                                    children.push_back(childKey);
+                                treeMembers.insert(childKey);
+                            }
+                        }
+                        // Also collect parent-field relationships used by GUI controls.
                         for (auto& kv : scr->objects) {
                             if (!kv.second) continue;
                             // If the object has a parent, link it
@@ -2957,11 +2985,16 @@ void Engine::run() {
                             if (it != kv.second->internals.end() && !it->second.toString().empty()) {
                                 std::string parentName = it->second.toString();
                                 auto parent = scr->objects.find(parentName);
-                                if (parent != scr->objects.end() && parent->second)
-                                    treeChildren[parentName].push_back(kv.first);
+                                if (parent != scr->objects.end() && parent->second) {
+                                    auto& children = treeChildren[parentName];
+                                    if (std::find(children.begin(), children.end(), kv.first) == children.end())
+                                        children.push_back(kv.first);
+                                    treeMembers.insert(kv.first);
+                                }
                             } else {
                                 // No parent, check if it's a SimGroup or root-level object
-                                if (kv.second->className == "SimGroup" || kv.second->className.find("Sim") == 0)
+                                if (!treeMembers.count(kv.first) &&
+                                    (kv.second->className == "SimGroup" || kv.second->className.find("Sim") == 0))
                                     treeRoots.push_back(kv.first);
                             }
                         }
@@ -2975,7 +3008,8 @@ void Engine::run() {
                                 auto parent = scr->objects.find(pit->second.toString());
                                 hasParent = parent != scr->objects.end() && parent->second;
                             }
-                            if (!hasParent && std::find(treeRoots.begin(), treeRoots.end(), n) == treeRoots.end())
+                            if (!hasParent && !treeMembers.count(n) &&
+                                std::find(treeRoots.begin(), treeRoots.end(), n) == treeRoots.end())
                                 treeRoots.push_back(n);
                         }
                         // Let unnamed GuiControls parented to a SimGroup show up via the parent's children field
@@ -3049,29 +3083,6 @@ void Engine::run() {
                     };
                     for (auto& root : treeRoots) addNode(root, 0);
 
-                    // Handle mouse clicks
-                    {
-                        static bool prevTreeClick = false;
-                        bool treeClick = plat->input().mouseButtons[1];
-                        if (treeClick && !prevTreeClick) {
-                            float mx = (float)plat->input().mouseX, my = (float)plat->input().mouseY;
-                            int idx = (int)(my - treeY) / itemH;
-                            if (mx >= rightX && idx >= 0 && idx + treeScroll < (int)displayList.size() && idx < maxItems) {
-                                auto& entry = displayList[idx + treeScroll];
-                                int ex = rightX + entry.second * treeIndent;
-                                if (mx >= ex - 12 && mx < ex) {
-                                    if (expandedNodes.count(entry.first))
-                                        expandedNodes.erase(entry.first);
-                                    else
-                                        expandedNodes.insert(entry.first);
-                                } else {
-                                    selectedObject = entry.first;
-                                }
-                            }
-                        }
-                        prevTreeClick = treeClick;
-                    }
-
                     // Scroll with mouse wheel (only when the cursor is over the tree)
                     static int prevWheel = 0;
                     int wheel = plat->input().mouseWheel;
@@ -3086,6 +3097,8 @@ void Engine::run() {
                         }
                     }
                     prevWheel = wheel;
+                    const int maxScroll = std::max(0, (int)displayList.size() - maxItems);
+                    treeScroll = std::clamp(treeScroll, 0, maxScroll);
 
                     // Render visible items
                     for (int i = treeScroll; i < (int)displayList.size() && i < treeScroll + maxItems; i++) {
@@ -3249,6 +3262,8 @@ void Engine::run() {
                                         } else {
                                             Console::instance().printf(LogLevel::Debug, "TREE: select '%s'", entry.first.c_str());
                                             g_selectedObject = entry.first;
+                                            bottomActiveTab = 2;
+                                            g_debugTab = 2;
                                         }
                                     }
                                 }

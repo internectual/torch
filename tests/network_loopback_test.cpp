@@ -74,6 +74,9 @@ int main() {
         assert(!LiveMovePolicy::shouldCaptureMouse(true, false, true, true));
         assert(!LiveMovePolicy::shouldCaptureMouse(true, true, true, false));
         assert(!LiveMovePolicy::shouldCaptureMouse(false, false, true, false));
+        assert(LiveMovePolicy::shouldResumeLiveGameForContent("PlayGui", true, true));
+        assert(!LiveMovePolicy::shouldResumeLiveGameForContent("PlayGui", true, false));
+        assert(!LiveMovePolicy::shouldResumeLiveGameForContent("LobbyGui", true, true));
         assert(ObserverParity::shouldCycleReplayTargets(true, false));
         assert(!ObserverParity::shouldCycleReplayTargets(true, true));
         assert(ObserverParity::shouldCycleLiveTargets(true, true, true));
@@ -183,6 +186,21 @@ int main() {
     Engine::instance().filesys = testFileSystem;
     Engine::instance().scr = &providerEngine;
     TorqueScript* utilityScript = providerEngine.ts();
+    {
+        const uint64_t beforeCreation = providerEngine.objectTreeRevision;
+        utilityScript->execute("new SimGroup(TestTreeRevisionGroup) {};"
+                               "new SimObject(TestTreeRevisionChild) {};"
+                               "TestTreeRevisionGroup.add(TestTreeRevisionChild);");
+        assert(providerEngine.objectTreeRevision > beforeCreation);
+        auto* treeGroup = providerEngine.findObject("TestTreeRevisionGroup");
+        auto* treeChild = providerEngine.findObject("TestTreeRevisionChild");
+        assert(treeGroup && treeChild);
+        assert(treeGroup->internals["__childCount"].toInt() == 1);
+        assert(treeGroup->internals["__child0"].toString() == std::to_string(treeChild->id));
+        const uint64_t beforeDeletion = providerEngine.objectTreeRevision;
+        assert(providerEngine.deleteScriptObject("TestTreeRevisionGroup"));
+        assert(providerEngine.objectTreeRevision > beforeDeletion);
+    }
     utilityScript->execute("new GuiCanvas(TestExtentCanvas) { extent = \"800 600\"; };"
                            "new GuiButtonCtrl(TestCloseButton) { position = \"758 7\"; extent = \"35 22\"; };"
                            "new ShellRadioButton(TestRadioLight) { extent = \"80 30\"; };"
