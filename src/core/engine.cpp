@@ -2425,26 +2425,32 @@ void Engine::run() {
                         }
                         int inputIndex = -1;
                         bool down = false;
-                        const bool requiresShift = keyName.rfind("shift ", 0) == 0;
-                        const bool shiftDown = keys[SCANCODE_LSHIFT] ||
-                            keys[SCANCODE_RSHIFT];
+                        const uint8_t requiredModifiers = bindingModifierMask(keyName);
+                        const uint8_t activeModifiers =
+                            ((keys[SCANCODE_LSHIFT] || keys[SCANCODE_RSHIFT]) ? modifierShift : 0) |
+                            ((keys[SCANCODE_LCTRL] || keys[SCANCODE_RCTRL]) ? modifierCtrl : 0) |
+                            ((keys[SCANCODE_LALT] || keys[SCANCODE_RALT]) ? modifierAlt : 0);
                         if (device == 0) {
                             std::string key = keyName;
                             const auto space = key.rfind(' ');
                             if (space != std::string::npos) key = key.substr(space + 1);
                             inputIndex = GuiRenderer::keyNameToScancode(key);
                             if (inputIndex < 0 || inputIndex >= 512) continue;
-                            down = modifiedBindingDown(keys[inputIndex], requiresShift,
-                                                       shiftDown);
-                        } else if (device == 1 && keyName.rfind("button", 0) == 0) {
-                            const int button = atoi(keyName.c_str() + 6);
+                            down = modifiedBindingDown(keys[inputIndex], requiredModifiers,
+                                                       activeModifiers);
+                        } else if (device == 1) {
+                            std::string key = keyName;
+                            const auto space = key.rfind(' ');
+                            if (space != std::string::npos) key = key.substr(space + 1);
+                            if (key.rfind("button", 0) != 0) continue;
+                            const int button = atoi(key.c_str() + 6);
                             // SDL button numbering uses 1 for left and 3 for right.
                             inputIndex = 512 + button;
                             const int platformButton = button == 0 ? 1 : button == 1 ? 3 : button;
                             if (platformButton < 0 || platformButton >= (int)sizeof(plat->input().mouseButtons)) continue;
                             down = modifiedBindingDown(
-                                plat->input().mouseButtons[platformButton], requiresShift,
-                                shiftDown);
+                                plat->input().mouseButtons[platformButton], requiredModifiers,
+                                activeModifiers);
                         } else {
                             continue;
                         }
@@ -2461,8 +2467,15 @@ void Engine::run() {
                             continue;
                         }
                         if (command == "nextWeapon" || command == "prevWeapon") {
-                            if (down)
+                            if (down && LiveMovePolicy::shouldMutateLocalWeaponState(
+                                    g->isLiveClient())) {
                                 g->player().weaponCycle(command == "nextWeapon" ? 1 : -1);
+                            } else if (down && tsInput->hasFunction(command)) {
+                                // The stock binding sends weapon cycling to the
+                                // server; do not cycle Torch's unused local
+                                // Player while viewing a live client.
+                                tsInput->callFunction(command, {VMValue(1)});
+                            }
                             continue;
                         }
                         // The live client's moves come from the scripts' $mv*
@@ -2533,7 +2546,8 @@ void Engine::run() {
                     // Player yaw is positive from +Y forward toward +X right.
                     input.lookDelta = {
                         (float)plat->input().mouseDeltaY * 0.002f,
-                        (float)plat->input().mouseDeltaX * 0.002f, 0};
+                        LiveMovePolicy::yawDeltaFromMouseX(
+                            (float)plat->input().mouseDeltaX), 0};
                 }
                 static int lastNumKey = 0;
                 for (int nk = 0; nk < 10; nk++) {
@@ -2542,7 +2556,9 @@ void Engine::run() {
                         if (lastNumKey != nk + 1) {
                             if (g->isMapperMode())
                                 g->selectMapperObserverCamera(nk + 1);
-                            else if (!scriptInput && !g->isMapperMode())
+                            else if (!scriptInput && !g->isMapperMode() &&
+                                     LiveMovePolicy::shouldMutateLocalWeaponState(
+                                         g->isLiveClient()))
                                 g->player().selectWeapon(nk);
                             lastNumKey = nk + 1;
                         }

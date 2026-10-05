@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cmath>
+#include <cstdint>
 #include <limits>
+#include <string_view>
 
 // SDL mouse button values are 1-based.  Keep these separate from array
 // bounds so gameplay code does not accidentally treat slot zero as left click.
@@ -73,11 +75,31 @@ constexpr bool buttonPressed(bool down, bool wasDown) {
     return down && !wasDown;
 }
 
-// A modifier is part of a binding's state.  When it is released while the
-// primary key remains held, the action must receive its release transition.
-constexpr bool modifiedBindingDown(bool keyDown, bool requiresModifier,
-                                    bool modifierDown) {
-    return keyDown && (!requiresModifier || modifierDown);
+constexpr uint8_t modifierShift = 1u << 0;
+constexpr uint8_t modifierCtrl = 1u << 1;
+constexpr uint8_t modifierAlt = 1u << 2;
+
+constexpr uint8_t bindingModifierMask(std::string_view binding) {
+    uint8_t mask = 0;
+    std::size_t begin = 0;
+    while (begin < binding.size()) {
+        const std::size_t end = binding.find(' ', begin);
+        const auto token = binding.substr(begin,
+            end == std::string_view::npos ? binding.size() - begin : end - begin);
+        if (token == "shift") mask |= modifierShift;
+        else if (token == "ctrl" || token == "control") mask |= modifierCtrl;
+        else if (token == "alt") mask |= modifierAlt;
+        if (end == std::string_view::npos) break;
+        begin = end + 1;
+    }
+    return mask;
+}
+
+// A binding fires only for its exact modifier chord. This prevents a plain
+// key binding from also firing when a Ctrl/Shift/Alt variant is held.
+constexpr bool modifiedBindingDown(bool keyDown, uint8_t requiredModifiers,
+                                    uint8_t activeModifiers) {
+    return keyDown && requiredModifiers == activeModifiers;
 }
 
 // Tribes 2's toggleZoom action latches on the press edge instead of treating

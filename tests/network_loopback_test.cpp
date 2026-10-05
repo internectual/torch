@@ -66,6 +66,8 @@ int main() {
         assert(look.x == 16 && look.y == 16);
         const auto leftLook = LiveMovePolicy::makeMove({.yaw = -1.0f});
         assert(LiveMovePolicy::angleRadians(leftLook.yaw) < 0.0f);
+        assert(LiveMovePolicy::yawDeltaFromMouseX(10.0f) > 0.0f);
+        assert(LiveMovePolicy::yawDeltaFromMouseX(-10.0f) < 0.0f);
         const auto invalidAngles = LiveMovePolicy::makeMove({
             .yaw = std::numeric_limits<float>::infinity(),
             .pitch = std::numeric_limits<float>::quiet_NaN()});
@@ -81,6 +83,8 @@ int main() {
         assert(!LiveMovePolicy::shouldAdvanceLivePlaybackInShell(false, true, true));
         assert(!LiveMovePolicy::shouldAdvanceLivePlaybackInShell(true, false, true));
         assert(!LiveMovePolicy::shouldAdvanceLivePlaybackInShell(true, true, false));
+        assert(LiveMovePolicy::shouldMutateLocalWeaponState(false));
+        assert(!LiveMovePolicy::shouldMutateLocalWeaponState(true));
         assert(ObserverParity::shouldCycleReplayTargets(true, false));
         assert(!ObserverParity::shouldCycleReplayTargets(true, true));
         assert(ObserverParity::shouldCycleLiveTargets(true, true, true));

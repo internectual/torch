@@ -53,10 +53,16 @@ int main() {
     assert(toggledActionState(false, true, true));
     assert(toggledActionState(false, false, true));
     assert(toggledActionState(true, true, true));
-    assert(modifiedBindingDown(true, true, true));
+    assert(modifiedBindingDown(true, modifierShift, modifierShift));
     // Releasing Shift while the primary key remains held must emit cmdOff.
-    assert(!modifiedBindingDown(true, true, false));
-    assert(modifiedBindingDown(true, false, false));
+    assert(!modifiedBindingDown(true, modifierShift, 0));
+    assert(modifiedBindingDown(true, 0, 0));
+    assert(!modifiedBindingDown(true, 0, modifierShift));
+    assert(modifiedBindingDown(true, modifierCtrl, modifierCtrl));
+    assert(!modifiedBindingDown(true, 0, modifierCtrl));
+    assert(bindingModifierMask("ctrl w") == modifierCtrl);
+    assert(bindingModifierMask("shift numpad1") == modifierShift);
+    assert(bindingModifierMask("ctrl shift k") == (modifierCtrl | modifierShift));
 
     GuiMouseCapture capture;
     capture.begin(1);

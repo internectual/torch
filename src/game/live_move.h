@@ -49,6 +49,15 @@ inline bool shouldAdvanceLivePlaybackInShell(bool shellActive,
     return shellActive && liveClient && livePlaybackActive;
 }
 
+inline bool shouldMutateLocalWeaponState(bool liveClient) {
+    return !liveClient;
+}
+
+// Positive mouse X is a rightward look, matching positive yaw toward +X.
+inline float yawDeltaFromMouseX(float mouseDeltaX) {
+    return std::isfinite(mouseDeltaX) ? mouseDeltaX * 0.002f : 0.0f;
+}
+
 inline ClientMoveIn makeMove(const Input& input) {
     auto angle = [](float radians) {
         if (!std::isfinite(radians)) return int16_t{0};
