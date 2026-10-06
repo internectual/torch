@@ -2102,6 +2102,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
             auto bi = prof->fields.find("bitmap"); if (bi != prof->fields.end()) bmp = bi->second.toString();
         }
+        tc = readableGuiTextColor(ctl, tc);
         Texture* fieldTex = nullptr;
         if (!bmp.empty()) fieldTex = t2Bitmap(r, bmp);
         // Shell entry field: T2 bitmap array (pieces as rows: left cap /
@@ -2165,6 +2166,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto sfi = prof->fields.find("selectionColor"); if (sfi != prof->fields.end()) parseColor(sfi->second.toString(), selFc);
             auto sfci = prof->fields.find("fontColorSEL"); if (sfci != prof->fields.end()) parseColor(sfci->second.toString(), selTc);
         }
+        tc = readableGuiTextColor(ctl, tc);
+        selTc = readableGuiTextColor(ctl, selTc);
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
         Texture* selectedBar = getShellTex(r, "shll_bar_act.png");
         // Find scroll offset from parent scroll container
@@ -2215,6 +2218,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 auto colorIt = ctl->fields.find(prefix + colorKey);
                 if (colorIt != ctl->fields.end()) parseColor(colorIt->second, rowColor);
             }
+            rowColor = readableGuiTextColor(ctl, rowColor);
             auto rowColorIt = ctl->fields.find("rowColor" + std::to_string(i));
             if (!isSel && rowColorIt != ctl->fields.end())
                 parseColor(rowColorIt->second, rowColor);
@@ -2668,6 +2672,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto bbi = prof->fields.find("bitmapBase"); if (bbi != prof->fields.end()) bmpBase = bbi->second.toString();
             auto toi = prof->fields.find("textOffset"); if (toi != prof->fields.end()) sscanf(toi->second.toString().c_str(), "%f %f", &textOfsX, &textOfsY);
         }
+        txc = readableGuiTextColor(ctl, txc);
         Texture* tabTex = nullptr;
         auto loadTex = [&](const std::string& p) { tabTex = t2Bitmap(r, p); };
         if (!bmpBase.empty()) loadTex(bmpBase);
@@ -2758,6 +2763,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc);
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), txc);
         }
+        txc = readableGuiTextColor(ctl, txc);
         // Closed popup: T2 renders a slim pulldown button vertically centered
         // in the control extent, with horizontally centered value text.
         float slimH = 20.0f;
@@ -4010,6 +4016,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto toi = prof->fields.find("textOffset"); if (toi != prof->fields.end()) sscanf(toi->second.toString().c_str(), "%f %f", &textOfsX, &textOfsY);
             auto ji = prof->fields.find("justify"); if (ji != prof->fields.end()) justify = ji->second.toString();
         }
+        tc = readableGuiTextColor(ctl, tc);
         bool isOpaque = false;
         if (prof) {
             auto oi = prof->fields.find("opaque");
