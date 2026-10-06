@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <cctype>
 #include <fnmatch.h>
+#include <list>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <zip.h>
 
@@ -36,10 +38,119 @@ bool normalizePrefix(const char* prefix, std::string& result) {
 struct ZipArchive::Impl {
     zip_t* archive = nullptr;
     std::shared_ptr<std::vector<uint8_t>> backing;
+    std::shared_ptr<Impl> parent;
+    zip_uint64_t parentEntry = 0;
+    mutable std::mutex ioMutex;
     std::string prefix;
     std::string description;
     std::unordered_map<std::string, zip_uint64_t> entries;
     std::unordered_map<std::string, std::string> names;
+
+    static std::recursive_mutex& nestedCacheMutex() {
+        static std::recursive_mutex mutex;
+        return mutex;
+    }
+
+    static std::list<std::weak_ptr<Impl>>& nestedCacheLru() {
+        static std::list<std::weak_ptr<Impl>> lru;
+        return lru;
+    }
+
+    bool readEntry(zip_uint64_t index, std::vector<uint8_t>& data) const {
+        data.clear();
+        if (!archive) return false;
+        std::lock_guard lock(ioMutex);
+        zip_stat_t stat;
+        zip_stat_init(&stat);
+        if (zip_stat_index(archive, index, ZIP_FL_UNCHANGED, &stat) != 0 ||
+            !(stat.valid & ZIP_STAT_SIZE) || stat.size > MaxZipEntrySize) return false;
+        zip_file_t* file = zip_fopen_index(archive, index, ZIP_FL_UNCHANGED);
+        if (!file) return false;
+        data.resize(static_cast<size_t>(stat.size));
+        size_t offset = 0;
+        while (offset < data.size()) {
+            const zip_int64_t count = zip_fread(file, data.data() + offset, data.size() - offset);
+            if (count <= 0) {
+                zip_fclose(file);
+                data.clear();
+                return false;
+            }
+            offset += static_cast<size_t>(count);
+        }
+        if (zip_fclose(file) != 0) {
+            data.clear();
+            return false;
+        }
+        return true;
+    }
+
+    bool ensureNestedOpen() {
+        std::lock_guard cacheLock(nestedCacheMutex());
+        if (archive) return true;
+        if (!parent || !parent->ensureNestedOpen()) return false;
+        auto bytes = std::make_shared<std::vector<uint8_t>>();
+        if (!parent->readEntry(parentEntry, *bytes) || bytes->empty()) return false;
+
+        zip_error_t error;
+        zip_error_init(&error);
+        zip_source_t* source = zip_source_buffer_create(bytes->data(), bytes->size(), 0, &error);
+        if (!source) {
+            Console::instance().printf(LogLevel::Warn, "Cannot reopen nested ZIP %s: %s",
+                                       description.c_str(), zip_error_strerror(&error));
+            zip_error_fini(&error);
+            return false;
+        }
+        archive = zip_open_from_source(source, ZIP_RDONLY, &error);
+        if (!archive) {
+            Console::instance().printf(LogLevel::Warn, "Cannot reopen nested ZIP %s: %s",
+                                       description.c_str(), zip_error_strerror(&error));
+            zip_source_free(source);
+            zip_error_fini(&error);
+            return false;
+        }
+        zip_error_fini(&error);
+        backing = std::move(bytes);
+        return true;
+    }
+
+    void closeNestedBacking() {
+        if (archive && parent) {
+            zip_close(archive);
+            archive = nullptr;
+            backing.reset();
+        }
+    }
+
+    static void touchNestedCache(const std::shared_ptr<Impl>& state) {
+        auto& lru = nestedCacheLru();
+        for (auto it = lru.begin(); it != lru.end();) {
+            auto cached = it->lock();
+            if (!cached || cached == state) it = lru.erase(it);
+            else ++it;
+        }
+        lru.push_back(state);
+
+        constexpr size_t cacheLimit = 192u * 1024u * 1024u;
+        size_t cachedBytes = 0;
+        for (const auto& weak : lru) {
+            if (auto cached = weak.lock(); cached && cached->archive && cached->backing)
+                cachedBytes += cached->backing->size();
+        }
+        for (auto it = lru.begin(); cachedBytes > cacheLimit && it != lru.end();) {
+            auto cached = it->lock();
+            if (!cached) {
+                it = lru.erase(it);
+                continue;
+            }
+            if (cached == state || !cached->archive || !cached->backing) {
+                ++it;
+                continue;
+            }
+            cachedBytes -= cached->backing->size();
+            cached->closeNestedBacking();
+            it = lru.erase(it);
+        }
+    }
 
     ~Impl() {
         if (archive) zip_close(archive);
@@ -117,38 +228,16 @@ bool ZipArchive::openMember(ZipArchive& parent, const char* memberPath) {
     const auto entry = parent.impl->entries.find(key);
     if (entry == parent.impl->entries.end()) return false;
 
-    // ZIP members can themselves be deflated, and libzip's nested-archive
-    // source is not seekable in that case. Keep the expanded nested VL2 in
-    // memory as a seekable source; it is never extracted to disk.
-    auto bytes = std::make_shared<std::vector<uint8_t>>();
-    if (!parent.readFile(memberPath, *bytes) || bytes->empty()) return false;
-    zip_error_t error;
-    zip_error_init(&error);
-    zip_source_t* source = zip_source_buffer_create(bytes->data(), bytes->size(), 0, &error);
-    if (!source) {
-        Console::instance().printf(LogLevel::Warn, "Cannot create nested ZIP source for %s: %s",
-                                   memberPath, zip_error_strerror(&error));
-        zip_error_fini(&error);
-        return false;
-    }
-    zip_t* archive = zip_open_from_source(source, ZIP_RDONLY, &error);
-    if (!archive) {
-        Console::instance().printf(LogLevel::Warn, "Cannot mount nested archive %s: %s",
-                                   memberPath, zip_error_strerror(&error));
-        zip_source_free(source);
-        zip_error_fini(&error);
-        return false;
-    }
-    zip_error_fini(&error);
-
     auto state = std::make_shared<Impl>();
-    state->archive = archive;
-    state->backing = std::move(bytes); // Keeps the source buffer alive for nested reads.
+    state->parent = parent.impl;
+    state->parentEntry = entry->second;
     state->description = parent.impl->description;
     if (!state->description.empty() && state->description.back() != '/')
         state->description.push_back('/');
     state->description += memberPath;
+    if (!state->ensureNestedOpen()) return false;
     state->indexEntries();
+    state->closeNestedBacking(); // Keep the startup index, not every VL2's bytes.
     if (state->entries.empty()) return false;
     Console::instance().printf(LogLevel::Info, "Mounted nested VL2: %s (%zu entries)",
                                state->description.c_str(), state->entries.size());
@@ -158,36 +247,19 @@ bool ZipArchive::openMember(ZipArchive& parent, const char* memberPath) {
 
 bool ZipArchive::readFile(const char* path, std::vector<uint8_t>& data) {
     data.clear();
-    if (!impl || !impl->archive || !TorchPath::isSafeLogicalPath(path)) return false;
+    if (!impl || !TorchPath::isSafeLogicalPath(path)) return false;
     const auto entry = impl->entries.find(normalizeArchivePath(path));
     if (entry == impl->entries.end()) return false;
-
-    zip_stat_t stat;
-    zip_stat_init(&stat);
-    if (zip_stat_index(impl->archive, entry->second, ZIP_FL_UNCHANGED, &stat) != 0 ||
-        !(stat.valid & ZIP_STAT_SIZE) || stat.size > MaxZipEntrySize) return false;
-    zip_file_t* file = zip_fopen_index(impl->archive, entry->second, ZIP_FL_UNCHANGED);
-    if (!file) return false;
-    data.resize(static_cast<size_t>(stat.size));
-    size_t offset = 0;
-    while (offset < data.size()) {
-        const zip_int64_t count = zip_fread(file, data.data() + offset, data.size() - offset);
-        if (count <= 0) {
-            zip_fclose(file);
-            data.clear();
-            return false;
-        }
-        offset += static_cast<size_t>(count);
+    if (impl->parent) {
+        std::lock_guard cacheLock(Impl::nestedCacheMutex());
+        if (!impl->ensureNestedOpen()) return false;
+        Impl::touchNestedCache(impl);
     }
-    if (zip_fclose(file) != 0) {
-        data.clear();
-        return false;
-    }
-    return true;
+    return impl->readEntry(entry->second, data);
 }
 
 bool ZipArchive::fileExists(const char* path) const {
-    return impl && impl->archive && TorchPath::isSafeLogicalPath(path) &&
+    return impl && TorchPath::isSafeLogicalPath(path) &&
         impl->entries.find(normalizeArchivePath(path)) != impl->entries.end();
 }
 

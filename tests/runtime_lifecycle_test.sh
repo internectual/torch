@@ -118,8 +118,11 @@ if ! (cd "$source_dir" && (sleep 8; printf 'quit();\n') | timeout --kill-after=3
     exit 1
 fi
 if [[ "$has_install" == 1 ]]; then
-    grep -q "UDP initialized on port" "$log_dir/server.out" || {
-        printf 'dedicated server did not open its port\n' >&2; exit 1; }
+    if ! grep -q "UDP initialized on port" "$log_dir/server.out"; then
+        printf 'dedicated server did not open its port\n' >&2
+        while IFS= read -r line; do printf '%s\n' "$line" >&2; done <"$log_dir/server.out"
+        exit 1
+    fi
 else
     grep -q "Init script not found" "$log_dir/server.out" || {
         printf 'dedicated server without an install did not report it\n' >&2; exit 1; }

@@ -61,8 +61,8 @@ ctest --test-dir build --output-on-failure
 
 The client accepts `-data <dir>` for an extracted Tribes 2 installation or
 `-data <archive.zip#root/prefix/>` for a read-only ZIP installation. ZIP roots
-may contain nested VL2 archives; Torch reads them without extracting them. For
-example:
+may contain nested VL2 archives; Torch reads them without extracting them to
+disk and keeps a bounded in-memory cache for random access. For example:
 
 ```sh
 ./build/torch -data '/home/user/Downloads/t2-linux.zip#t2-linux/'
