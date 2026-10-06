@@ -8363,19 +8363,24 @@ bool ScriptEngine::init() {
 
     // ActionMap::getBinding(action) — return "flags key" for the bound action
     // (see saveMapFile: getField(%bind, 1) yields the key name)
-    tsInstance->registerNative("actionmap::getbinding", [&s_actionBinds](const auto& args) -> VMValue {
+    auto sameRemappableCommand = [](const std::string& left, const std::string& right) {
+        return left == right ||
+            (left == "jet" && right == "mouseJet") ||
+            (left == "mouseJet" && right == "jet");
+    };
+    tsInstance->registerNative("actionmap::getbinding", [&s_actionBinds, sameRemappableCommand](const auto& args) -> VMValue {
         if (args.size() < 2) return VMValue("");
         std::string objName = args[0].toString();
         std::string action = args[1].toString();
         for (auto& [k, be] : s_actionBinds) {
             const auto& [obj, dev, key] = k;
-            if (obj == objName && be.cmdOn == action)
+            if (obj == objName && sameRemappableCommand(be.cmdOn, action))
                 return VMValue(std::string("keyboard\t") + key);
         }
         return VMValue("");
     });
 
-    tsInstance->registerNative("actionmap::getcommand", [&s_actionBinds, parseDevice](const auto& args) -> VMValue {
+    tsInstance->registerNative("actionmap::getcommand", [&s_actionBinds, parseDevice, sameRemappableCommand](const auto& args) -> VMValue {
         // getCommand(device, key) — return the command bound to (thisMap, device, key),
         // or "" if the key is not bound on the calling map.
         if (args.size() < 3) return VMValue("");
@@ -8385,7 +8390,8 @@ bool ScriptEngine::init() {
         if (device < 0) return VMValue("");
         auto key = std::make_tuple(objName, device, keyName);
         auto it = s_actionBinds.find(key);
-        if (it != s_actionBinds.end()) return VMValue(it->second.cmdOn);
+        if (it != s_actionBinds.end())
+            return VMValue(sameRemappableCommand(it->second.cmdOn, "mouseJet") ? "mouseJet" : it->second.cmdOn);
         return VMValue("");
     });
 

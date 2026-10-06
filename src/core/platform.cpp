@@ -199,6 +199,14 @@ bool Platform::setVideoMode(int32_t width, int32_t height, bool fullscreen, bool
         impl->resizeCb(drawableWidth(), drawableHeight());
     return true;
 }
+bool Platform::isWindowBordered() const {
+    if (!impl->window) return false;
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(impl->window);
+    return !(flags & (SDL_WINDOW_BORDERLESS | SDL_WINDOW_FULLSCREEN));
+}
+bool Platform::setWindowBordered(bool bordered) {
+    return impl->window && SDL_SetWindowBordered(impl->window, bordered);
+}
 void Platform::showMouse(bool show) {
     mouseWanted = show;
     if (show && !softwareCursor) SDL_ShowCursor();

@@ -5404,6 +5404,16 @@ void GuiRenderer::pushDialog(const std::string& name) {
         }
     }
         if (ctl) {
+            if (name == "OptionsDlg" && !settingsWindowBorderCaptured_) {
+                auto& platform = Engine::instance().platform();
+                settingsWindowWasBordered_ = platform.isWindowBordered();
+                settingsWindowBorderCaptured_ = true;
+                if (settingsWindowWasBordered_ && !platform.setWindowBordered(false)) {
+                    settingsWindowBorderCaptured_ = false;
+                    Console::instance().printf(LogLevel::Warn,
+                        "GUI: couldn't hide the window frame for Settings");
+                }
+            }
             // If a dialog with this name is already stacked, raise it instead
             // of pushing a duplicate — duplicate entries would each draw their
             // background (e.g. DlgBackProfile's dim layer stacks). Compare by
@@ -5463,9 +5473,11 @@ void GuiRenderer::popDialog(const std::string& name) {
     // Remove every stacked instance of the named dialog — duplicates can
     // exist when a .gui is parsed into multiple control objects; leaving any
     // behind keeps its background (dim layer) rendering over the screen.
+    bool removedSettingsDialog = false;
     for (auto it = dialogStack.begin(); it != dialogStack.end();) {
         if ((*it)->name == name || name.empty()) {
             GuiControl* removed = *it;
+            removedSettingsDialog = removedSettingsDialog || removed->name == "OptionsDlg";
             GuiControl* restore = focusBeforeDialog[removed];
             // Children sleep before their parent, matching Torque's tree teardown.
             callGuiChildLifecycle(removed, "::onSleep");
@@ -5510,12 +5522,17 @@ void GuiRenderer::popDialog(const std::string& name) {
             ++it;
         }
     }
+    if (removedSettingsDialog) restoreSettingsWindowBorder();
     Console::instance().printf(LogLevel::Debug,
         "GUI: popDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
     updateCursorState();
 }
 
 void GuiRenderer::clearDialogs() {
+    const bool removedSettingsDialog = settingsWindowBorderCaptured_ &&
+        std::any_of(dialogStack.begin(), dialogStack.end(), [](const GuiControl* dialog) {
+            return dialog && dialog->name == "OptionsDlg";
+        });
     const auto dialogs = dialogStack;
     for (auto it = dialogs.rbegin(); it != dialogs.rend(); ++it) {
         if (!*it) continue;
@@ -5553,6 +5570,15 @@ void GuiRenderer::clearDialogs() {
     lastPushed.clear();
     focusBeforeDialog.clear();
     s_openPopups.clear();
+    if (removedSettingsDialog) restoreSettingsWindowBorder();
+}
+
+void GuiRenderer::restoreSettingsWindowBorder() {
+    if (!settingsWindowBorderCaptured_) return;
+    if (settingsWindowWasBordered_)
+        Engine::instance().platform().setWindowBordered(true);
+    settingsWindowBorderCaptured_ = false;
+    settingsWindowWasBordered_ = false;
 }
 
 bool GuiRenderer::makeFirstResponder(const std::string& name, bool focus) {

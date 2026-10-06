@@ -675,6 +675,17 @@ int main() {
     assert(stringNatives.at("getwords")({VMValue("one two three"), VMValue(1), VMValue(2)}).toString() == "two three");
     assert(stringNatives.at("getfieldcount")({VMValue("one\ttwo\t")}).toInt() == 3);
     assert(stringNatives.at("getfields")({VMValue("one\ttwo\tthree"), VMValue(1)}).toString() == "two\tthree");
+    // Existing input maps can call the jet action "jet", while OptionsDlg's
+    // remap table calls the same action "mouseJet". Keep remap lookup and
+    // row display aliases consistent so Jump can take a Space binding.
+    assert(stringNatives.at("bind")({VMValue("moveMap"), VMValue("keyboard"),
+                                      VMValue("space"), VMValue("jet")}).toInt() != 0);
+    assert(stringNatives.at("actionmap::getcommand")({VMValue("moveMap"),
+        VMValue("keyboard"), VMValue("space")}).toString() == "mouseJet");
+    assert(stringNatives.at("actionmap::getbinding")({VMValue("moveMap"),
+        VMValue("mouseJet")}).toString() == "keyboard\tspace");
+    assert(stringNatives.at("unbind")({VMValue("moveMap"), VMValue("keyboard"),
+                                        VMValue("space")}).toInt() != 0);
     assert(stringNatives.at("format")({VMValue("%1/%2"), VMValue("base"), VMValue("file.cs")}).toString() == "base/file.cs");
     assert(stringNatives.at("filename")({VMValue("scripts/server.cs")}).toString() == "server.cs");
     assert(stringNatives.at("filepath")({VMValue("scripts/server.cs")}).toString() == "scripts/");
