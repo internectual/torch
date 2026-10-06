@@ -733,6 +733,41 @@ static bool parseColor(const std::string& s, ColorF& out) {
     return false;
 }
 
+static float colorLuminance(const ColorF& color) {
+    return 0.2126f * color.r + 0.7152f * color.g + 0.0722f * color.b;
+}
+
+static bool hasDarkGuiSurface(const GuiControl* control) {
+    for (const GuiControl* parent = control ? control->parent : nullptr;
+         parent; parent = parent->parent) {
+        const std::string& cls = parent->className;
+        if (cls == "ShellFieldCtrl" || cls.find("ShellField") == 0 ||
+            cls == "ShellPaneCtrl" || cls == "ShellDlgFrame" ||
+            cls == "GuiPaneControl" || cls == "GuiTabPageCtrl")
+            return true;
+        if (auto* profile = getProfile(parent->profileName)) {
+            const auto opaque = profile->fields.find("opaque");
+            const auto fill = profile->fields.find("fillColor");
+            if (opaque != profile->fields.end() && opaque->second.toBool() &&
+                fill != profile->fields.end()) {
+                ColorF background{0, 0, 0, 1};
+                if (parseColor(fill->second.toString(), background))
+                    return colorLuminance(background) < 0.42f;
+            }
+        }
+    }
+    return false;
+}
+
+static ColorF readableGuiTextColor(const GuiControl* control, ColorF color) {
+    if (hasDarkGuiSurface(control) && colorLuminance(color) < 0.38f) {
+        color.r = 0.9f;
+        color.g = 0.93f;
+        color.b = 0.94f;
+    }
+    return color;
+}
+
 
 // Bitmap array cell detection: scan texture for separator color (pixel 0,0 or magenta as fallback)
 static std::vector<BmpCell> detectBitmapCells(const uint8_t* rgba, int w, int h) {
@@ -1774,6 +1809,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 parseColor(fci->second.toString(), tc);
             font = getProfileFont(prof);
         }
+        tc = readableGuiTextColor(ctl, tc);
         if (font && !ctl->text.empty()) {
             float ch = (float)font->charHeight;
             // Split into lines first so multi-line labels still work.
@@ -1826,6 +1862,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 if (it != prof->fields.end()) parseColor(it->second.toString(), colourTable[k]);
             }
         }
+        for (auto& color : colourTable) color = readableGuiTextColor(ctl, color);
         ColorF curColor = colourTable[0];
         ColorF stackColor = curColor;
         auto getHexColor = [](const std::string& hex) -> ColorF {
@@ -2249,6 +2286,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto bmi = prof->fields.find("bitmap"); if (bmi != prof->fields.end()) radioBmp = bmi->second.toString();
             auto ji = prof->fields.find("justify"); if (ji != prof->fields.end()) justify = ji->second.toString();
         }
+        tc = readableGuiTextColor(ctl, tc);
+        if (tcHL.r >= 0.0f) tcHL = readableGuiTextColor(ctl, tcHL);
         float sz = 16;
         bool drewAtlas = false;
         // T2 ships a radio texture but no textures/gui/shll_checkbox bitmap.
