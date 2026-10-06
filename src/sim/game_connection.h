@@ -192,6 +192,7 @@ private:
     V12::ProtocolState protocol;
     std::deque<std::shared_ptr<NetEventOut>> orderedQueue, unorderedQueue;
     std::map<uint32_t, std::vector<std::shared_ptr<NetEventOut>>> inFlight;
+    std::map<int, std::string> weaponHudItemNames_;
     std::string controlObject_;
     uint32_t controlObjectModifyKey = 0, ackedControlObjectModifyKey = 0;
     int controlStateSkipCount = 0;

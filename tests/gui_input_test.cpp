@@ -46,6 +46,9 @@ int main() {
     assert(mouseWheelSteps(3) == 3);
     assert(mouseWheelSteps(-2) == 2);
     assert(mouseWheelSteps(0) == 0);
+    assert(wheelAxisValue(1) == 1.0f);
+    assert(wheelAxisValue(-2) == -2.0f);
+    assert(wheelAxisValue(1, true) == -1.0f);
     assert(cycleIndexByWheel(4, 1, 63) == 5);
     assert(cycleIndexByWheel(0, -1, 63) == 62);
     assert(cycleIndexByWheel(62, 2, 63) == 1);

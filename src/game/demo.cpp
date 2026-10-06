@@ -1006,12 +1006,16 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
             initialWeaponsHud_.activeIndex = atoi(weapons[6].c_str());
             for (int i = 0; i < count; ++i) {
                 const auto item = next();
+                if (!field(item, 0).empty()) initialWeaponsHud_.itemNames[i] = field(item, 0);
                 if (!field(item, 1).empty()) initialWeaponsHud_.bitmaps[i] = field(item, 1);
             }
             for (int i = 0; i < slotCount; ++i) {
                 const auto slot = next();
-                if (!field(slot, 0).empty())
-                    initialWeaponsHud_.slots[atoi(slot[0].c_str())] = atoi(field(slot, 1).c_str());
+                if (!field(slot, 0).empty()) {
+                    const int slotIndex = atoi(slot[0].c_str());
+                    initialWeaponsHud_.slots[slotIndex] = atoi(field(slot, 1).c_str());
+                    initialWeaponsHud_.slotOrder.push_back(slotIndex);
+                }
             }
         }
         // INVENTORY: the same header; count rows of (bitmap); slot rows.
@@ -1274,13 +1278,40 @@ void DemoParser::handleHudRemoteCommand(const std::string& funcName,
     auto number = [&](size_t index) { return atoi(arg(index).c_str()); };
     if (name == "setweaponshuditem" && has(3)) {
         const int slot = number(0);
-        if (number(2) != 0) weaponsHud_.slots[slot] = number(1);
-        else weaponsHud_.slots.erase(slot); // the item goes; its bitmap stays
+        if (number(2) != 0) {
+            if (!weaponsHud_.slots.count(slot)) weaponsHud_.slotOrder.push_back(slot);
+            weaponsHud_.slots[slot] = number(1);
+            if (has(4)) {
+                const int inventorySlot = number(3);
+                if (inventorySlot >= 0) weaponsHud_.inventorySlots[slot] = inventorySlot;
+            }
+            std::unordered_map<int, size_t> arrivalOrder;
+            for (size_t i = 0; i < weaponsHud_.slotOrder.size(); ++i)
+                arrivalOrder[weaponsHud_.slotOrder[i]] = i;
+            std::stable_sort(weaponsHud_.slotOrder.begin(), weaponsHud_.slotOrder.end(),
+                [&](int left, int right) {
+                    const auto leftSlot = weaponsHud_.inventorySlots.find(left);
+                    const auto rightSlot = weaponsHud_.inventorySlots.find(right);
+                    const bool leftMapped = leftSlot != weaponsHud_.inventorySlots.end();
+                    const bool rightMapped = rightSlot != weaponsHud_.inventorySlots.end();
+                    if (leftMapped && rightMapped && leftSlot->second != rightSlot->second)
+                        return leftSlot->second < rightSlot->second;
+                    if (leftMapped != rightMapped) return leftMapped;
+                    return arrivalOrder[left] < arrivalOrder[right];
+                });
+        } else {
+            weaponsHud_.slots.erase(slot); // the item goes; its bitmap stays
+            weaponsHud_.inventorySlots.erase(slot);
+            weaponsHud_.slotOrder.erase(
+                std::remove(weaponsHud_.slotOrder.begin(), weaponsHud_.slotOrder.end(), slot),
+                weaponsHud_.slotOrder.end());
+        }
     } else if (name == "setweaponshudammo" && has(2)) {
         const int slot = number(0);
         if (weaponsHud_.slots.find(slot) != weaponsHud_.slots.end())
             weaponsHud_.slots[slot] = number(1);
     } else if (name == "setweaponshudbitmap" && has(3)) {
+        weaponsHud_.itemNames[number(0)] = arg(1);
         weaponsHud_.bitmaps[number(0)] = arg(2);
     } else if (name == "setweaponshudbackgroundbmp" && has(1)) {
         weaponsHud_.backgroundBitmap = arg(0);
@@ -1296,6 +1327,8 @@ void DemoParser::handleHudRemoteCommand(const std::string& funcName,
         // HudWeapons::clearAll drops the carried items; the bitmaps were sent
         // once on connect and stay.
         weaponsHud_.slots.clear();
+        weaponsHud_.inventorySlots.clear();
+        weaponsHud_.slotOrder.clear();
         weaponsHud_.activeIndex = -1;
     } else if (name == "setinventoryhuditem" && has(3)) {
         const int slot = number(0);
@@ -2670,6 +2703,50 @@ static void readSniperProjectileData(BitStream& bs, bool isInitial, GhostEntry* 
     }
 }
 
+static void readTargetProjectileData(BitStream& bs, bool isInitial, GhostEntry* entry) {
+    readGameBaseData(bs, isInitial, entry);
+    auto readSource = [&] {
+        const int source = (int)bs.readRangedU32(0, 1024);
+        const int slot = (int)bs.readRangedU32(0, 7);
+        bs.readFlag(); // client owned
+        if (entry) {
+            entry->linkSourceGhost = source;
+            entry->linkSourceSlot = slot;
+        }
+    };
+
+    Vec3 start{};
+    Vec3 end{};
+    bool hasStart = false;
+    bool truncated = false;
+    if (bs.readFlag()) { // InitialUpdateMask
+        start = bs.readPoint3F();
+        end = bs.readPoint3F();
+        truncated = bs.readFlag();
+        hasStart = true;
+        if (bs.readFlag()) readSource();
+    } else {
+        if (bs.readFlag()) {
+            readSource();
+        } else {
+            start = bs.readPoint3F();
+            hasStart = true;
+        }
+        end = bs.readPoint3F();
+        truncated = bs.readFlag();
+    }
+    if (entry) {
+        if (hasStart) {
+            entry->position = start;
+            entry->beamStart = start;
+            entry->hasPosition = true;
+        }
+        entry->beamEnd = end;
+        entry->beamTruncated = truncated;
+        entry->hasBeam = true;
+    }
+}
+
 static void readShockLanceProjectileData(BitStream& bs, bool isInitial, GhostEntry* entry) {
     readGameBaseData(bs, isInitial, entry);
     if (bs.readFlag()) { // targetObject
@@ -3327,25 +3404,7 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
         // InitialUpdateMask: optional station object reference.
         if (bs.readFlag() && bs.readFlag()) bs.readRangedU32(0, 1024);
     }
-    else if (cn == "TargetProjectile") {
-        readGameBaseData(bs, isInitial, entry);
-        auto readSource = [&] {
-            bs.readRangedU32(0, 1024); // source object
-            bs.readRangedU32(0, 7);    // source image slot
-            bs.readFlag();             // client owned
-        };
-        if (bs.readFlag()) { // InitialUpdateMask
-            bs.readPoint3F(); // start
-            bs.readPoint3F(); // end
-            bs.readFlag();    // truncated
-            if (bs.readFlag()) readSource();
-        } else {
-            if (bs.readFlag()) readSource();
-            else bs.readPoint3F();
-            bs.readPoint3F();
-            bs.readFlag();
-        }
-    }
+    else if (cn == "TargetProjectile") readTargetProjectileData(bs, isInitial, entry);
     else if (cn == "TSStatic") readTSStaticData(bs, isInitial, cp, entry);
     else if (cn == "FireballAtmosphere") {
         // FireballAtmosphere::unpackUpdate.

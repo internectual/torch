@@ -3264,7 +3264,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
     } else if (cn.find("Hud") == 0 || cn.find("ShellFieldCtrl") == 0 || cn.find("ShellField") == 0) {
         // T2 shell pane/field frame (shll_field_* nine-piece files)
         if (cn.find("ShellField") == 0) {
-            if (!drawShellNinePatch(r, "shll_field", x, y, ctl->extentX, ctl->extentY))
+            // OuterChatHud is an in-game text overlay, not a dialog field; its
+            // shell frame paints an unwanted opaque panel behind chat lines.
+            if (ctl->name != "OuterChatHud" &&
+                !drawShellNinePatch(r, "shll_field", x, y, ctl->extentX, ctl->extentY))
                 r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.12f, 0.12f, 0.15f, 1});
             for (auto* child : ctl->children)
                 renderControlRec(gr, child, canvas, scrollOfsX, scrollOfsY, clip);
@@ -3348,7 +3351,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             // Compass: rotate cardinal labels with the active camera heading.
             float cx = x + ctl->extentX * 0.5f, cy = y + ctl->extentY * 0.5f;
             float radius = std::min(ctl->extentX, ctl->extentY) * 0.4f;
-            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0,0,0,0.3f});
             if (hf) {
                 const float heading = std::atan2(r.cameraTarget.x - r.cameraPos.x,
                                                  -(r.cameraTarget.z - r.cameraPos.z));
@@ -3490,16 +3492,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             }
         } else if (cn == "HudWeapons" || cn == "HudVehicleWeapon" || cn == "HudInventory") {
             const bool inventory = cn == "HudInventory";
-            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0},
-                           {0.02f, 0.03f, 0.04f, 0.45f});
             // HUD bitmap names are relative to textures/ ("gui/hud_disc").
             auto hudTexture = [&](const std::string& name) -> Texture* { return t2Bitmap(r, name); };
             auto loadHudBitmap = [&](const char* field) -> Texture* {
                 auto it = ctl->fields.find(field);
                 return it == ctl->fields.end() ? nullptr : hudTexture(it->second);
             };
-            if (Texture* background = loadHudBitmap("backgroundBitmap"))
-                r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, background->id);
+            Texture* background = loadHudBitmap("backgroundBitmap");
             Texture* highlight = loadHudBitmap("highlightBitmap");
             Texture* infiniteAmmo = loadHudBitmap("infiniteAmmoBitmap");
             if (!ctl->hudSlots.empty()) {
@@ -3513,6 +3512,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     const float sy = y + (inventory ? 2.0f : (float)row * 30.0f);
                     const float sw = inventory ? 28.0f : ctl->extentX - 4.0f;
                     const float sh = inventory ? ctl->extentY - 4.0f : 28.0f;
+                    if (background)
+                        r.drawTexturedRect({sx, sy, 0}, {sx + sw, sy + sh, 0}, background->id);
                     if (slot.active && highlight)
                         r.drawTexturedRect({sx, sy, 0}, {sx + sw, sy + sh, 0}, highlight->id);
                     else if (slot.active)

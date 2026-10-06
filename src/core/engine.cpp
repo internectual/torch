@@ -2349,31 +2349,13 @@ void Engine::run() {
         {
             int wheel = plat->input().mouseWheel;
             if (wheel != 0) {
-                bool scrolled = false;
                 if (gui) {
-                    const int physicalX = plat->input().mouseX;
-                    const int physicalY = plat->input().mouseY;
                     int mx = 0, my = 0;
                     gui->mapMouse(plat->input().mouseX, plat->input().mouseY, mx, my);
-                    scrolled = gui->handleScroll(mx, my, wheel);
-                    if (scrolled) {
+                    if (gui->handleScroll(mx, my, wheel)) {
                         // Consume the wheel so the dev panel console does not also scroll
                         plat->input().mouseWheel = 0;
-                    } else if (physicalY >= 482 || (physicalX >= 650 && physicalY < 480)) {
-                        // Cursor is over the dev panel (bottom tab panel or the
-                        // object tree) — leave the wheel for the dev panel's own
-                        // scroll handling instead of cycling the weapon.
-                        scrolled = true;
                     }
-                }
-                if (!scrolled && !g->isMapperMode()) {
-                    // SDL can coalesce several wheel notches into one frame.
-                    // Each notch is a native weapon-cycle action; collapsing
-                    // the aggregate to its sign drops selections on fast
-                    // scrolling.
-                    const int direction = wheel > 0 ? 1 : -1;
-                    for (int step = 0; step < mouseWheelSteps(wheel); ++step)
-                        g->player().weaponCycle(direction);
                 }
             }
         }
@@ -2414,6 +2396,21 @@ void Engine::run() {
                                 mapActive = map->internals["__pushed"].toBool();
                         }
                         if (action.cmdOn.empty() || !mapActive) continue;
+                        if (device == 1 && keyName == "zaxis") {
+                            const int wheel = plat->input().mouseWheel;
+                            if (wheel == 0) continue;
+                            const float value = wheelAxisValue(wheel > 0 ? 1 : -1,
+                                (action.flags & ActionBinding::Inverted) != 0);
+                            const int steps = mouseWheelSteps(wheel);
+                            for (int step = 0; step < steps; ++step) {
+                                if (!action.isCmd && tsInput->hasFunction(action.cmdOn))
+                                    tsInput->callFunction(action.cmdOn, {VMValue(value)});
+                                else if (action.isCmd)
+                                    tsInput->execute(action.cmdOn);
+                            }
+                            plat->input().mouseWheel = 0;
+                            continue;
+                        }
                         if (device == 1 && (keyName == "xaxis" || keyName == "yaxis")) {
                             // The axis event value is the mouse delta.
                             const float value = keyName == "xaxis"

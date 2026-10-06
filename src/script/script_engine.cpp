@@ -7,6 +7,7 @@
 #include "sim/engine_object.h"
 #include "sim/path_manager.h"
 #include "sim/projectile_aim.h"
+#include "sim/net_string_table.h"
 #include "sim/net_object.h"
 #include "sim/game_base.h"
 #include "game/material_property_map.h"
@@ -6478,13 +6479,15 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("setWeaponBitmap", [hudSlot](const auto& args) -> VMValue {
         auto [ctl, slot] = hudSlot(args, 3);
         if (!ctl) return VMValue(0);
-        ctl->hudSlots[slot].bitmap = args[2].toString(); ctl->hudSlots[slot].visible = true;
+        // Bitmap definitions cover every weapon type; only addWeapon marks a
+        // slot visible when the player actually carries that weapon.
+        ctl->hudSlots[slot].bitmap = args[2].toString();
         return VMValue(1);
     });
     tsInstance->registerNative("setInventoryBitmap", [hudSlot](const auto& args) -> VMValue {
         auto [ctl, slot] = hudSlot(args, 3);
         if (!ctl) return VMValue(0);
-        ctl->hudSlots[slot].bitmap = args[2].toString(); ctl->hudSlots[slot].visible = true;
+        ctl->hudSlots[slot].bitmap = args[2].toString();
         return VMValue(1);
     });
     tsInstance->registerNative("addWeapon", [hudSlot](const auto& args) -> VMValue {
@@ -7498,7 +7501,9 @@ bool ScriptEngine::init() {
         // game/net.cc: a RemoteCommandEvent on the ServerConnection.
         if (auto* server = EngineObjects::get<GameConnection>("ServerConnection"); server && !server->isServer) {
             std::vector<std::string> argv;
-            for (const auto& arg : args) argv.push_back(arg.toString());
+            const std::string command = args[0].toString();
+            argv.push_back(NetStrings::isTag(command) ? command : NetStrings::literal(command));
+            for (size_t i = 1; i < args.size(); ++i) argv.push_back(args[i].toString());
             server->sendRemoteCommand(argv);
             return VMValue("");
         }

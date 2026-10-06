@@ -332,7 +332,17 @@ int main() {
         assert(l.valid && !l.elf && l.beamRange == 10.0f && l.texRepeat == 0.20f && l.cutoffAngle == 25.0f);
         assert(l.flareTexture == "special/redflare");
     }
-    check("TargetProjectileData", kTargeter, kRefs);
+    {
+        auto r = check("TargetProjectileData", kTargeter, kRefs);
+        const auto& beam = r.decoded.targetBeam;
+        assert(beam.valid && beam.maxRange == 1000.0f);
+        assert(near(beam.color[0], 0.1f, 1.0f / 255.0f) && beam.color[1] == 1.0f);
+        assert(beam.startWidth == 0.20f && beam.pulseWidth == 0.15f);
+        assert(beam.flareAngle == 3.0f && beam.maxFlareSize == 400.0f);
+        assert(beam.pulseSpeed == 6.0f && beam.pulseLength == 0.150f);
+        assert(beam.textures.size() == 4 && beam.textures[0] == "special/nonlingradient" &&
+               beam.textures[2] == "special/pulse");
+    }
     {
         auto r = check("EnergyProjectileData", kEnergyBolt, kRefs);
         const auto& d = r.decoded;

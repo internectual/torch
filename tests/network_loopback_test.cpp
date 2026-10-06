@@ -2369,6 +2369,7 @@ int main() {
             "function GameConnection::onDrop(%client, %reason) { $netDrop = %client @ \":\" @ %reason; }"
             "function ServerConnectionAccepted() { $netAccepted = $netAccepted + 1; }"
             "function serverCmdTorchSmokeJoin(%client, %team) { $netJoinClient = %client; $netJoinTeam = %team; }"
+            "function serverCmdUse(%client, %item) { $netUseClient = %client; $netUseItem = %item; }"
             "function onChallengeRequestRejected(%msg) { $netChallengeReject = %msg; }"
             "function onConnectRequestRejected(%msg) { $netConnectReject = %msg; }"
             "function onConnectionToServerLost(%msg) { $netLost = %msg; }");
@@ -2431,12 +2432,19 @@ int main() {
 
         // A live player joins after mission ghosting through the same tagged
         // RemoteCommandEvent path used by commandToServer('ClientJoinGame').
-        ts->callFunction("commandToServer", {
-            VMValue(NetStrings::literal("TorchSmokeJoin")), VMValue("0")});
+        ts->execute("commandToServer('TorchSmokeJoin', 0);");
         assert(pump([&] { return !ts->getGlobal("$netJoinClient").toString().empty(); }));
         assert(ts->getGlobal("$netJoinClient").toString() ==
                ts->getGlobal("$netClient").toString());
         assert(ts->getGlobal("$netJoinTeam").toString() == "0");
+
+        // Stock weapon commands are lowercase on the wire but dispatch to the
+        // server's capitalized serverCmdUse callback.
+        ts->execute("commandToServer('use', \"TargetingLaser\");");
+        assert(pump([&] { return !ts->getGlobal("$netUseItem").toString().empty(); }));
+        assert(ts->getGlobal("$netUseClient").toString() ==
+               ts->getGlobal("$netClient").toString());
+        assert(ts->getGlobal("$netUseItem").toString() == "TargetingLaser");
 
         ClientMoveIn forwardMove;
         forwardMove.y = 32;

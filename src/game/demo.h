@@ -613,6 +613,11 @@ struct InitialBlockData {
 struct WeaponsHudState {
     std::map<int, int> slots; // slot index -> ammo (-1 = none/infinite)
     std::map<int, std::string> bitmaps;
+    std::map<int, std::string> itemNames;
+    std::map<int, int> inventorySlots; // HUD slot ID -> Player.weaponSlot index
+    // Order item slots were added by the server; this follows the player's
+    // weaponSlot[] order rather than the HUD's fixed weapon-type indices.
+    std::vector<int> slotOrder;
     std::string backgroundBitmap;
     std::string highlightBitmap;
     std::string infiniteAmmoBitmap;
@@ -688,6 +693,7 @@ struct GhostEntry {
     Vec3 beamStart{};
     Vec3 beamEnd{};
     bool hasBeam{};
+    bool beamTruncated{};
     bool hasLinearMomentum{};
     int datablockId = -1;
     bool hasDatablock = false;

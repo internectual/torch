@@ -7348,7 +7348,9 @@ void Game::update(float dt) {
             if (demoPlaying && demoParser) {
                 auto applySlots = [](GuiControl* control, const auto& state, int active,
                                      const auto& bitmaps, const std::string& background,
-                                     const std::string& highlight, const std::string& infinite) {
+                                     const std::string& highlight, const std::string& infinite,
+                                     const std::vector<int>* order,
+                                     const std::map<int, std::string>* names) {
                     if (!control) return;
                     if (control->hudSlots.size() < 32) control->hudSlots.resize(32);
                     for (auto& slot : control->hudSlots) {
@@ -7356,28 +7358,50 @@ void Game::update(float dt) {
                         slot.active = false;
                         slot.bitmap.clear();
                     }
-                    for (const auto& [index, amount] : state) {
-                        if (index < 0 || index >= (int)control->hudSlots.size()) continue;
-                        control->hudSlots[index].amount = amount;
+                    control->activeHudSlot = -1;
+                    size_t displaySlot = 0;
+                    auto setSlot = [&](int index, int amount) {
+                        if (displaySlot >= control->hudSlots.size()) return;
+                        auto& hudSlot = control->hudSlots[displaySlot];
+                        hudSlot.amount = amount;
                         auto bitmap = bitmaps.find(index);
-                        if (bitmap != bitmaps.end()) control->hudSlots[index].bitmap = bitmap->second;
-                        control->hudSlots[index].visible = true;
-                        control->hudSlots[index].active = index == active;
+                        if (bitmap != bitmaps.end()) hudSlot.bitmap = bitmap->second;
+                        if (names) {
+                            auto name = names->find(index);
+                            hudSlot.name = name != names->end() ? name->second : std::string();
+                        }
+                        hudSlot.visible = true;
+                        hudSlot.active = index == active;
+                        if (hudSlot.active) control->activeHudSlot = (int)displaySlot;
+                        ++displaySlot;
+                    };
+                    std::unordered_set<int> assigned;
+                    if (order) {
+                        for (int index : *order) {
+                            auto slot = state.find(index);
+                            if (slot == state.end() || !assigned.insert(index).second) continue;
+                            setSlot(index, slot->second);
+                        }
                     }
-                    control->activeHudSlot = active;
+                    for (const auto& [index, amount] : state) {
+                        if (!assigned.insert(index).second) continue;
+                        setSlot(index, amount);
+                    }
                     control->fields["backgroundBitmap"] = background;
                     control->fields["highlightBitmap"] = highlight;
                     control->fields["infiniteAmmoBitmap"] = infinite;
                 };
                 auto& gui = Engine::instance().guiRenderer();
-                applySlots(gui.findControl("weaponsHud"), demoParser->getWeaponsHud().slots,
-                            demoParser->getWeaponsHud().activeIndex, demoParser->getWeaponsHud().bitmaps,
-                            demoParser->getWeaponsHud().backgroundBitmap,
-                            demoParser->getWeaponsHud().highlightBitmap,
-                            demoParser->getWeaponsHud().infiniteAmmoBitmap);
+                const auto& weaponHud = demoParser->getWeaponsHud();
+                applySlots(gui.findControl("weaponsHud"), weaponHud.slots,
+                            weaponHud.activeIndex, weaponHud.bitmaps,
+                            weaponHud.backgroundBitmap, weaponHud.highlightBitmap,
+                            weaponHud.infiniteAmmoBitmap, &weaponHud.slotOrder,
+                            &weaponHud.itemNames);
+                const auto& inventoryHud = demoParser->getInventoryHud();
                 applySlots(gui.findControl("inventoryHud"), demoParser->getInventoryHud().slots, -1,
-                            demoParser->getInventoryHud().bitmaps,
-                            demoParser->getInventoryHud().backgroundBitmap, "", "");
+                            inventoryHud.bitmaps, inventoryHud.backgroundBitmap, "", "",
+                            nullptr, nullptr);
                 if (auto* frame = gui.findControl("backpackFrame"))
                     frame->visible = demoParser->getBackpackHud().active;
                 if (auto* text = gui.findControl("backpackText"))
@@ -8828,8 +8852,17 @@ void Game::render(float dt) {
                   applyShapeBaseAudio(*mg, idx, p, demoParser->getInitialBlock().dataBlocks);
 
                if (visualData && visualData->projectileMaterial != V12::DecodedDataBlock::ProjectileMaterial::None) {
-                   const auto& data = *visualData;
-                   std::vector<uint32_t> materialTextures;
+                    const auto& data = *visualData;
+                    const GLboolean blendWasOn = glIsEnabled(GL_BLEND);
+                    GLint blendSrcRGB, blendDstRGB, blendSrcAlpha, blendDstAlpha;
+                    glGetIntegerv(GL_BLEND_SRC_RGB, &blendSrcRGB);
+                    glGetIntegerv(GL_BLEND_DST_RGB, &blendDstRGB);
+                    glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrcAlpha);
+                    glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDstAlpha);
+                    // Projectile material sprites are transparent/additive even
+                    // though the opaque scene pass has blending disabled.
+                    glEnable(GL_BLEND);
+                    std::vector<uint32_t> materialTextures;
                   for (const auto& name : data.projectileMaterialTextures) {
                       std::vector<uint32_t> frames;
                       std::vector<float> durations;
@@ -8847,8 +8880,9 @@ void Game::render(float dt) {
                    // the projectile along its flight, plus an end-on cross seen
                    // within crossViewAng of the axis; bolts add a motion-blur tail.
                    // Unfogged.
-                   const bool crossStyle = data.projectileMaterial == V12::DecodedDataBlock::ProjectileMaterial::Cross;
-                   if (crossStyle) {
+                    const bool crossStyle = data.projectileMaterial == V12::DecodedDataBlock::ProjectileMaterial::Cross;
+                    const bool tracerAdditive = !data.projectileTracerAlpha;
+                    if (crossStyle) {
                        const float length = data.projectileIsEnergyBolt
                            ? (data.hasProjectileScale ? data.projectileScale.y : 20.0f) : data.projectileTracerLength;
                        const float halfWidth = data.projectileIsEnergyBolt
@@ -8880,7 +8914,8 @@ void Game::render(float dt) {
                                                                         data.projectileBlurLifetime);
                                r.drawTexturedQuad({a.x + c.x, a.y + c.y, a.z + c.z}, {b.x + c.x, b.y + c.y, b.z + c.z},
                                                   {b.x - c.x, b.y - c.y, b.z - c.z}, {a.x - c.x, a.y - c.y, a.z - c.z},
-                                                  0, {blurColor.r, blurColor.g, blurColor.b, alpha}, 0, 0, 1, 1, true);
+                                                   0, {blurColor.r, blurColor.g, blurColor.b, alpha}, 0, 0, 1, 1,
+                                                   tracerAdditive);
                            }
                        }
                        if (dl > 1e-4f) {
@@ -8901,7 +8936,7 @@ void Game::render(float dt) {
                            if (mainTexture != UINT32_MAX)
                                r.drawTexturedQuad({a.x + c.x, a.y + c.y, a.z + c.z}, {b.x + c.x, b.y + c.y, b.z + c.z},
                                                   {b.x - c.x, b.y - c.y, b.z - c.z}, {a.x - c.x, a.y - c.y, a.z - c.z},
-                                                  mainTexture, {1, 1, 1, 1}, 0, 0, 1, 1, true);
+                                                   mainTexture, {1, 1, 1, 1}, 0, 0, 1, 1, tracerAdditive);
                            const float fl = std::sqrt(fromCam.x * fromCam.x + fromCam.y * fromCam.y + fromCam.z * fromCam.z);
                            const float along = fl > 1e-5f
                                ? (dir.x * fromCam.x + dir.y * fromCam.y + dir.z * fromCam.z) / fl : 0.0f;
@@ -8919,7 +8954,7 @@ void Game::render(float dt) {
                                                   {m.x + (u.x - v.x) * h, m.y + (u.y - v.y) * h, m.z + (u.z - v.z) * h},
                                                   {m.x + (u.x + v.x) * h, m.y + (u.y + v.y) * h, m.z + (u.z + v.z) * h},
                                                   {m.x + (-u.x + v.x) * h, m.y + (-u.y + v.y) * h, m.z + (-u.z + v.z) * h},
-                                                  crossTexture, {1, 1, 1, 1}, 0, 0, 1, 1, true);
+                                                   crossTexture, {1, 1, 1, 1}, 0, 0, 1, 1, tracerAdditive);
                            }
                        }
                    }
@@ -8972,13 +9007,105 @@ void Game::render(float dt) {
                    }
                    // FlareProjectile: an additive flareTexture sprite of the
                    // datablock size (t2-mapper tracer.ts createSpriteView).
-                   if (data.projectileMaterial == V12::DecodedDataBlock::ProjectileMaterial::Flare) {
+                    if (data.projectileMaterial == V12::DecodedDataBlock::ProjectileMaterial::Flare) {
                        const uint32_t flareTexture = texture(0);
                        if (flareTexture != UINT32_MAX)
                            r.drawSprite(materialPos, data.projectileMaterialSizes[0], {1.0f, 0.9f, 0.5f, 1.0f},
-                                        flareTexture, true);
-                   }
-              }
+                                         flareTexture, true);
+                    }
+                    if (!blendWasOn) glDisable(GL_BLEND);
+                    glBlendFuncSeparate((GLenum)blendSrcRGB, (GLenum)blendDstRGB,
+                                        (GLenum)blendSrcAlpha, (GLenum)blendDstAlpha);
+               }
+
+                // TargetProjectile is the held targeting laser. Its datablock
+                // and ghost endpoints carry the beam independently of the
+                // server-side target markers, so render it as a live ribbon.
+                if (ghostClassIs(g->className, "TargetProjectile") && g->hasBeam) {
+                    const auto& dataBlocks = demoParser->getInitialBlock().dataBlocks;
+                    const auto dataIt = g->hasDatablock
+                        ? dataBlocks.find((uint32_t)g->datablockId) : dataBlocks.end();
+                    const auto* beam = dataIt != dataBlocks.end() &&
+                        dataIt->second.decoded.targetBeam.valid
+                        ? &dataIt->second.decoded.targetBeam : nullptr;
+                    if (!beam) continue;
+
+                    Point3F start = Math::torquePointToYUp(
+                        {g->beamStart.x, g->beamStart.y, g->beamStart.z});
+                    if (g->linkSourceGhost >= 0) {
+                        const GhostEntry* source = demoParser->getGhostTracker().getGhost(
+                            g->linkSourceGhost);
+                        const int slot = std::clamp(g->linkSourceSlot, 0, 7);
+                        if (source && source->hasMuzzle[slot])
+                            start = source->muzzlePos[slot];
+                        else if (source)
+                            start = Math::torquePointToYUp(
+                                {source->renderPos.x, source->renderPos.y, source->renderPos.z});
+                    }
+                    const Point3F end = Math::torquePointToYUp(
+                        {g->beamEnd.x, g->beamEnd.y, g->beamEnd.z});
+                    const float dx = end.x - start.x, dy = end.y - start.y, dz = end.z - start.z;
+                    const float length = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (length <= 0.001f) continue;
+
+                    auto texture = [&](size_t index) -> uint32_t {
+                        if (index >= beam->textures.size() || beam->textures[index].empty()) return 0;
+                        std::vector<uint32_t> frames;
+                        std::vector<float> durations;
+                        r.loadTextureFrames(beam->textures[index].c_str(), frames, durations);
+                        return frames.empty() ? 0u : frames.front();
+                    };
+                    const ColorF color{beam->color[0], beam->color[1], beam->color[2], 1.0f};
+                    auto ribbon = [&](float width, uint32_t tex, const ColorF& tint,
+                                      float u0, float u1) {
+                        const auto quad = projectileBeamQuad(start, end, r.cameraPos, width);
+                        if (quad.size() != 4) return false;
+                        r.drawTexturedQuad(quad[0], quad[1], quad[2], quad[3], tex,
+                                           tint, u0, 0.0f, u1, 1.0f, true);
+                        return true;
+                    };
+                    const uint32_t gradient = texture(0);
+                    if (gradient) {
+                        ribbon(std::max(beam->startWidth, 0.02f), gradient,
+                               {color.r, color.g, color.b, 0.9f}, 0.0f, 1.0f);
+                    } else {
+                        r.drawLine(start, end, color);
+                    }
+                    const uint32_t pulse = texture(2);
+                    if (pulse) {
+                        const float u0 = -beam->pulseSpeed * demoTime * 0.5f;
+                        const float u1 = u0 + length * std::max(beam->pulseLength, 0.01f);
+                        ribbon(std::max(beam->pulseWidth, 0.02f), pulse,
+                               {color.r, color.g, color.b, 0.8f}, u0, u1);
+                    }
+                    if (g->beamTruncated) {
+                        if (const uint32_t flare = texture(1))
+                            r.drawSprite(end, 0.35f, color, flare, true);
+                        const Point3F screen = worldToScreen(end, r.viewMatrix(),
+                            r.projectionMatrix(), r.config().width, r.config().height);
+                        if (screen.z >= -1.0f && screen.z <= 1.0f &&
+                            screen.x >= 0.0f && screen.x <= r.config().width &&
+                            screen.y >= 0.0f && screen.y <= r.config().height) {
+                            ScreenSpace2D screenSpace(r);
+                            constexpr float markerRadius = 6.0f;
+                            r.drawLine({screen.x, screen.y - markerRadius, 0},
+                                       {screen.x + markerRadius, screen.y, 0}, color);
+                            r.drawLine({screen.x + markerRadius, screen.y, 0},
+                                       {screen.x, screen.y + markerRadius, 0}, color);
+                            r.drawLine({screen.x, screen.y + markerRadius, 0},
+                                       {screen.x - markerRadius, screen.y, 0}, color);
+                            r.drawLine({screen.x - markerRadius, screen.y, 0},
+                                       {screen.x, screen.y - markerRadius, 0}, color);
+                            if (Font* font = r.getFont()) {
+                                const std::string distance =
+                                    std::to_string((int)std::lround(length)) + "m";
+                                font->render(distance.c_str(), screen.x + markerRadius + 3.0f,
+                                             screen.y - 7.0f, color, 1.0f);
+                            }
+                        }
+                    }
+                    continue;
+                }
 
                 // ELF / repair link beams (ELFProjectile, RepairProjectile
                 // renderObject): an additive ribbon bowing from the source's
@@ -10394,6 +10521,10 @@ void Game::render(float dt) {
 
     // The HUD switches to its 2D projection, so it draws after every 3D
     // pass (world, demo and live ghosts).
+    // Several world renderers change the blend function for additive passes;
+    // establish normal source-alpha compositing for the in-game HUD and GUI.
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     if (hud && !mapperMode && (gameState == Playing ||
                                (gameState == Dead && !demoPlaying)))
         hud->render(this);
@@ -10516,6 +10647,11 @@ void Game::startLocalGame(const char* map, std::vector<MisObject>* sceneObjects)
             weaponsHud->fields["highlightBitmap"] = "gui/hud_new_weaponselect";
             weaponsHud->fields["infiniteAmmoBitmap"] = "gui/hud_infinity";
             weaponsHud->hudSlots.resize(18);
+            for (auto& slot : weaponsHud->hudSlots) {
+                slot.visible = false;
+                slot.active = false;
+            }
+            weaponsHud->activeHudSlot = -1;
             auto hudName = [&](int slot, const char* field) {
                 if (auto* ts = Engine::instance().script().ts())
                     return ts->getGlobal("$WeaponsHudData[" + std::to_string(slot) + "," + field + "]").toString();

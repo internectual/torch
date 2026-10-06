@@ -27,6 +27,11 @@ constexpr int mouseWheelSteps(int delta) {
     return delta < 0 ? -delta : delta;
 }
 
+constexpr float wheelAxisValue(int delta, bool inverted = false) {
+    const float value = static_cast<float>(delta);
+    return inverted ? -value : value;
+}
+
 // SDL can report several whole notches in one event, or a fractional
 // high-resolution notch. Preserve whole-notch magnitude and make fractional
 // motion usable by emitting one directional step.

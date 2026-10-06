@@ -20,6 +20,8 @@
 #include "core/console.h"
 #include "core/timer.h"
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 
 static NetObject* netObjectFor(const std::string& key);
 
@@ -203,6 +205,54 @@ void GameConnection::sendRemoteCommand(const std::vector<std::string>& argv) {
     }
     // Trailing empty arguments are not sent.
     std::vector<std::string> args = argv;
+    const std::string* taggedCommand = NetStrings::lookup(NetStrings::tagId(args[0]));
+    auto lower = [](std::string value) {
+        for (char& c : value) c = (char)std::tolower((unsigned char)c);
+        return value;
+    };
+    if (isServer && taggedCommand && lower(*taggedCommand) == "setweaponshudbitmap" &&
+        args.size() >= 4) {
+        weaponHudItemNames_[std::atoi(args[1].c_str())] = args[2];
+    }
+    if (isServer && taggedCommand && lower(*taggedCommand) == "setweaponshuditem" &&
+        args.size() == 4) {
+        const int hudSlot = std::atoi(args[1].c_str());
+        int inventorySlot = -1;
+        const auto item = weaponHudItemNames_.find(hudSlot);
+        ScriptObject* player = controlObject_.empty()
+            ? nullptr : ScriptEngine::instance().findObject(controlObject_.c_str());
+        if (item != weaponHudItemNames_.end() && player) {
+            auto fieldValue = [&](const std::string& name) {
+                auto value = player->fields.find(name);
+                if (value != player->fields.end()) return value->second.toString();
+                auto internal = player->internals.find(name);
+                return internal == player->internals.end()
+                    ? std::string() : internal->second.toString();
+            };
+            const int slotCount = std::clamp(std::atoi(fieldValue("weaponSlotCount").c_str()),
+                                             0, 64);
+            for (int slot = 0; slot < slotCount; ++slot) {
+                if (fieldValue("weaponSlot[" + std::to_string(slot) + "]") == item->second) {
+                    inventorySlot = slot;
+                    break;
+                }
+            }
+            // Weapon::onInventory sends setWeaponsHudItem before
+            // ShapeBase::setInventory updates weaponSlot[]. Predict the same
+            // insertion index that inventory.cs will use so the HUD can still
+            // be ordered by the player's actual weapon keys.
+            if (inventorySlot < 0 && args[3] != "0") {
+                inventorySlot = slotCount;
+                if (slotCount > 0 &&
+                    fieldValue("weaponSlot[" + std::to_string(slotCount - 1) + "]") ==
+                        "TargetingLaser")
+                    --inventorySlot;
+            }
+        }
+        // Extra remote-command arguments are ignored by stock TorqueScript
+        // handlers; Torch clients use this to display the HUD in inventory order.
+        args.push_back(std::to_string(inventorySlot));
+    }
     while (args.size() > 1 && args.back().empty()) args.pop_back();
     if (args.size() > 20) args.resize(20);
     for (const auto& arg : args) validateSendString(arg);
@@ -690,7 +740,9 @@ void GameConnection::receivePacket(const uint8_t* data, size_t size) {
         std::vector<std::string> args = RemoteCommand::scriptArguments(event.rawArguments, event.taggedArguments);
         std::vector<VMValue> callArgs{VMValue(std::to_string(ScriptEngine::instance().objectId(script)))};
         for (size_t i = 1; i < args.size(); ++i) callArgs.emplace_back(args[i]);
-        const std::string function = "serverCmd" + args[0];
+        std::string function = "serverCmd" + args[0];
+        if (function.size() > 9)
+            function[9] = (char)std::toupper((unsigned char)function[9]);
         if (ts->isFunction(function)) ts->callFunction(function, callArgs);
     }
 }

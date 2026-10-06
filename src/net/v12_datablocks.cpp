@@ -996,7 +996,30 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
                    activeDecoded->constructorSequences = std::move(sequences);
                }
                break;
-           } case 48: projectile(s);s.readF32();colors(s,1);f32s(s,7);strings(s,4);break; case 49: {
+            } case 48: { // TargetProjectileData: targeting-laser beam visuals.
+            projectile(s);
+            const float maxRange = s.readF32();
+            float color[4];
+            for (float& channel : color) channel = s.readUnsigned(8) / 255.0f;
+            float values[7];
+            for (float& value : values) value = s.readF32();
+            auto textures = materialStrings(s, 4);
+            if (activeDecoded) {
+                auto& beam = activeDecoded->targetBeam;
+                beam.valid = true;
+                beam.maxRange = maxRange;
+                for (int i = 0; i < 4; ++i) beam.color[i] = color[i];
+                beam.startWidth = values[0];
+                beam.pulseWidth = values[1];
+                beam.flareAngle = values[2];
+                beam.minFlareSize = values[3];
+                beam.maxFlareSize = values[4];
+                beam.pulseSpeed = values[5];
+                beam.pulseLength = values[6];
+                beam.textures = std::move(textures);
+            }
+            break;
+        } case 49: {
            linear(s); float values[3]; for (float& value : values) value = s.readF32();
            const bool tracerAlpha = s.readUnsigned(8) != 0; const auto color = s.readUnsigned(32);
            float cross[2]; for (float& value : cross) value = s.readF32();

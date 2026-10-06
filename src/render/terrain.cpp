@@ -1958,6 +1958,7 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     // textures with alphaZeroRatio>0 render translucent (depth writes OFF, blending ON).
     auto renderMesh = [&](size_t mi, bool doBlend) {
         MeshData& mesh = meshes[mi];
+        if (shader) shader->setUniform("uTint", ColorF{1, 1, 1, alphaScale});
         if (shader) shader->setUniform("uInteriorOutsideVisible",
             (int32_t)(isInterior && mesh.interiorOutsideVisible ? 1 : 0));
         if (mi < skins.size() && skins[mi].hasSkin) {
@@ -2075,6 +2076,7 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
 
     // Classify meshes by material flags (Translucent/Additive → translucent pass)
     auto needsTranslucent = [&](size_t mi) -> bool {
+        if (alphaScale < 0.999f) return true;
         if (mi >= meshes.size()) return false;
         int32_t matIdx = meshes[mi].materialIndex;
         if (matIdx >= 0 && matIdx < (int)materialFlags.size())
@@ -2586,6 +2588,7 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
 
     // Classify meshes by material flags (same as render())
     auto needsTranslucent = [&](size_t mi) -> bool {
+        if (alphaScale < 0.999f) return true;
         if (mi >= meshes.size()) return false;
         int32_t matIdx = meshes[mi].materialIndex;
         if (matIdx >= 0 && matIdx < (int)materialFlags.size())

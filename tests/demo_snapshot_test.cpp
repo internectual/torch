@@ -64,6 +64,30 @@ static bool sameBlocks(const std::vector<DemoBlock>& left,
 int main(int argc, char** argv) {
     CHECK(argc == 2);
 
+    {
+        // The server assigns fixed HUD IDs by item type, but weapon-add events
+        // arrive in inventory slot order. The display order must preserve that
+        // arrival sequence, and removals close the corresponding visual slot.
+        DemoParser weaponOrder;
+        weaponOrder.handleHudRemoteCommand("setWeaponsHudBitmap",
+            {"setWeaponsHudBitmap", "0", "Blaster", "gui/hud_blaster"});
+        weaponOrder.handleHudRemoteCommand("setWeaponsHudBitmap",
+            {"setWeaponsHudBitmap", "2", "Chaingun", "gui/hud_chaingun"});
+        weaponOrder.handleHudRemoteCommand("setWeaponsHudBitmap",
+            {"setWeaponsHudBitmap", "3", "Disc", "gui/hud_disc"});
+        weaponOrder.handleHudRemoteCommand("setWeaponsHudItem",
+            {"setWeaponsHudItem", "0", "-1", "1", "0"});
+        weaponOrder.handleHudRemoteCommand("setWeaponsHudItem",
+            {"setWeaponsHudItem", "3", "20", "1", "2"});
+        weaponOrder.handleHudRemoteCommand("setWeaponsHudItem",
+            {"setWeaponsHudItem", "2", "100", "1", "1"});
+        CHECK(weaponOrder.getWeaponsHud().slotOrder == std::vector<int>({0, 2, 3}));
+        CHECK(weaponOrder.getWeaponsHud().itemNames.at(2) == "Chaingun");
+        weaponOrder.handleHudRemoteCommand("setWeaponsHudItem",
+            {"setWeaponsHudItem", "3", "0", "0", "2"});
+        CHECK(weaponOrder.getWeaponsHud().slotOrder == std::vector<int>({0, 2}));
+    }
+
     // A recorded neutral view must reset a previous camera direction. The
     // playback path must reject malformed floats without rejecting zero.
     CHECK(demoMoveOrientationValid(0.0f, 0.0f));

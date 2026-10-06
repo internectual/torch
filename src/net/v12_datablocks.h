@@ -166,6 +166,16 @@ struct DecodedDataBlock {
         float pulseSpeed = 0, pulseLength = 0;
         std::vector<std::string> textures; // [0] unused by the beam, [1..11]
     } sniperBeam;
+    // TargetProjectileData targeting-laser beam (TargetProjectile::renderObject).
+    struct TargetBeam {
+        bool valid = false;
+        float maxRange = 0;
+        float color[4] = {1, 1, 1, 1};
+        float startWidth = 0, pulseWidth = 0, flareAngle = 0;
+        float minFlareSize = 0, maxFlareSize = 0;
+        float pulseSpeed = 0, pulseLength = 0;
+        std::vector<std::string> textures; // gradient, flare, pulse, explosion flare
+    } targetBeam;
     // ELFProjectileData / RepairProjectileData link beams.
     struct LinkBeam {
         bool valid = false, elf = false;
