@@ -9,6 +9,7 @@
 #include <GL/glew.h>
 #include "fs/vol_archive.h"
 #include "fs/vl2_archive.h"
+#include "fs/zip_archive.h"
 #include "script/torquescript.h"
 #include "render/shader.h"
 #include "render/renderer.h"
@@ -536,9 +537,32 @@ bool Engine::init(int argc, char* argv[]) {
     // Rebind the runtime paths so previews and scripts use the same root.
     expandHome(dataDir);
     expandHome(outputDir);
+    std::string zipDataPath;
+    std::string zipDataPrefix;
+    {
+        const size_t qualifier = dataDir.find('#');
+        const std::string archivePath = dataDir.substr(0, qualifier);
+        std::string extension = std::filesystem::path(archivePath).extension().string();
+        for (char& c : extension) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (extension == ".zip") {
+            zipDataPath = archivePath;
+            if (qualifier != std::string::npos) zipDataPrefix = dataDir.substr(qualifier + 1);
+            for (char& c : zipDataPrefix) if (c == '\\') c = '/';
+            while (!zipDataPrefix.empty() && zipDataPrefix.front() == '/') zipDataPrefix.erase(zipDataPrefix.begin());
+            while (!zipDataPrefix.empty() && zipDataPrefix.back() == '/') zipDataPrefix.pop_back();
+            if (!zipDataPrefix.empty() && !TorchPath::isSafeLogicalPath(zipDataPrefix.c_str())) {
+                Console::instance().printf(LogLevel::Error, "Unsafe dataDir archive prefix: %s", zipDataPrefix.c_str());
+                return false;
+            }
+        } else if (qualifier != std::string::npos) {
+            Console::instance().printf(LogLevel::Error, "dataDir qualifier requires a .zip archive: %s", dataDir.c_str());
+            return false;
+        }
+    }
     if (outputDir.empty()) {
         const char* home = getenv("HOME");
-        outputDir = home ? std::string(home) + "/.torch" : dataDir;
+        outputDir = home ? std::string(home) + "/.torch" :
+            (zipDataPath.empty() ? dataDir : std::string("."));
     }
     Console::instance().setVariable("dataDir", dataDir.c_str());
     // initScript comes from torch.cfg (may be empty); -init overrides it.
@@ -631,8 +655,9 @@ bool Engine::init(int argc, char* argv[]) {
     // Keep the configured root semantics explicit.  A dataDir may itself be
     // the extracted base directory, or it may be an installation root with
     // base/classic siblings.  Loose files are searched in this order.
-    const std::filesystem::path configuredRoot(dataDir);
-    const std::string configuredName = configuredRoot.filename().string();
+    const std::filesystem::path configuredRoot(zipDataPath.empty() ? dataDir : std::string());
+    const std::string configuredName = zipDataPath.empty()
+        ? configuredRoot.filename().string() : std::filesystem::path(zipDataPrefix).filename().string();
     const bool directBase = strcasecmp(configuredName.c_str(), "base") == 0;
     const std::filesystem::path installRoot = directBase ? configuredRoot.parent_path() : configuredRoot;
     const std::filesystem::path baseRoot = directBase ? configuredRoot : installRoot / "base";
@@ -652,9 +677,11 @@ bool Engine::init(int argc, char* argv[]) {
         std::filesystem::create_directories(std::filesystem::path(outputDir) / modPath, error);
         addDataPath((std::filesystem::path(outputDir) / modPath).string());
     }
-    addDataPath(activeRoot.string());
-    addDataPath(baseRoot.string());
-    if (!directBase) addDataPath(configuredRoot.string());
+    if (zipDataPath.empty()) {
+        addDataPath(activeRoot.string());
+        addDataPath(baseRoot.string());
+        if (!directBase) addDataPath(configuredRoot.string());
+    }
     filesys->init(paths);
     filesys->setOriginalOnly(true);
 
@@ -686,16 +713,49 @@ bool Engine::init(int argc, char* argv[]) {
         std::error_code error;
         if (std::filesystem::is_directory(path, error)) archiveRoots.push_back(value);
     };
-    addArchiveRoot(baseRoot);
-    addArchiveRoot(configuredRoot);
-    addArchiveRoot(activeRoot);
-    for (const auto& path : archiveRoots) {
-        auto found = scanArchives(path);
-        archives.insert(archives.end(), found.begin(), found.end());
+    ZipArchive* zipRoot = nullptr;
+    if (!zipDataPath.empty()) {
+        zipRoot = new ZipArchive;
+        if (zipRoot->open(zipDataPath.c_str(), zipDataPrefix.c_str())) {
+            fs.addArchive(zipRoot);
+            std::vector<std::string> virtualArchiveRoots;
+            auto addVirtualRoot = [&](std::string root) {
+                if (!root.empty() && root.back() != '/') root.push_back('/');
+                if (std::find(virtualArchiveRoots.begin(), virtualArchiveRoots.end(), root) ==
+                    virtualArchiveRoots.end()) virtualArchiveRoots.push_back(std::move(root));
+            };
+            addVirtualRoot(directBase ? "" : "base");
+            addVirtualRoot("");
+            if (modPath != "base") addVirtualRoot(modPath);
+            for (const auto& root : virtualArchiveRoots) {
+                std::vector<std::string> found;
+                const std::string pattern = root + "*.vl2";
+                zipRoot->listFiles(pattern.c_str(), found);
+                std::sort(found.begin(), found.end());
+                archives.insert(archives.end(), found.begin(), found.end());
+            }
+        } else {
+            delete zipRoot;
+            zipRoot = nullptr;
+        }
+    } else {
+        addArchiveRoot(baseRoot);
+        addArchiveRoot(configuredRoot);
+        addArchiveRoot(activeRoot);
+        for (const auto& path : archiveRoots) {
+            auto found = scanArchives(path);
+            archives.insert(archives.end(), found.begin(), found.end());
+        }
     }
 
     Console::instance().printf(LogLevel::Info, "Found %zu archives", archives.size());
     for (auto& a : archives) {
+        if (zipRoot) {
+            auto* nested = new ZipArchive;
+            if (nested->openMember(*zipRoot, a.c_str())) fs.addArchive(nested);
+            else delete nested;
+            continue;
+        }
         std::string extension = std::filesystem::path(a).extension().string();
         for (char& c : extension) c = (char)std::tolower((unsigned char)c);
         if (extension == ".vl2") {

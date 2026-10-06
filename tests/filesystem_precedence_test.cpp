@@ -1,10 +1,13 @@
 #include "fs/file_system.h"
 #include "fs/vl2_archive.h"
+#include "fs/zip_archive.h"
 
 #include <cassert>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
+#include <zip.h>
 
 static void put16(std::ofstream& f, uint16_t value) { f.write((char*)&value, 2); }
 static void put32(std::ofstream& f, uint32_t value) { f.write((char*)&value, 4); }
@@ -25,6 +28,17 @@ static void writeStoredVl2(const std::filesystem::path& path, const char* textur
         f.write(name, std::string(name).size());
         f.write(data, dataSize);
     }
+}
+
+static std::vector<uint8_t> readBytes(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    return std::vector<uint8_t>(std::istreambuf_iterator<char>(file), {});
+}
+
+static void addZipEntry(zip_t* archive, const char* name, const void* bytes, size_t size) {
+    zip_source_t* source = zip_source_buffer(archive, bytes, size, 0);
+    assert(source);
+    assert(zip_file_add(archive, name, source, ZIP_FL_ENC_UTF_8) >= 0);
 }
 
 int main() {
@@ -117,6 +131,42 @@ int main() {
     assert(classic.readFile("textures/gui/button.png", data));
     assert(std::string(data.begin(), data.end()) == "classic-archive");
     classic.shutdown();
+
+    // A ZIP datadir root exposes its qualified directory and mounts nested
+    // VL2 files without extracting either the outer ZIP or the inner archive.
+    int zipError = 0;
+    const auto nestedVl2Path = root / "NestedFromZip.VL2";
+    zip_t* innerZip = zip_open(nestedVl2Path.c_str(), ZIP_CREATE | ZIP_TRUNCATE, &zipError);
+    assert(innerZip);
+    static const char innerShape[] = "shape";
+    static const char innerMission[] = "mission";
+    addZipEntry(innerZip, "Shapes/Native.DTS", innerShape, sizeof(innerShape) - 1);
+    addZipEntry(innerZip, "Missions/Native.MIS", innerMission, sizeof(innerMission) - 1);
+    assert(zip_close(innerZip) == 0);
+    const auto nestedVl2 = readBytes(nestedVl2Path);
+    const auto outerZipPath = root / "t2-linux.zip";
+    zip_t* outerZip = zip_open(outerZipPath.c_str(), ZIP_CREATE | ZIP_TRUNCATE, &zipError);
+    assert(outerZip);
+    static const char looseData[] = "zip-root-loose";
+    addZipEntry(outerZip, "t2-linux/console_start.cs", looseData, sizeof(looseData) - 1);
+    addZipEntry(outerZip, "t2-linux/base/Nested.VL2", nestedVl2.data(), nestedVl2.size());
+    assert(zip_close(outerZip) == 0);
+
+    FileSystem zipped;
+    assert(zipped.init({}));
+    auto* zipRoot = new ZipArchive;
+    assert(zipRoot->open(outerZipPath.c_str(), "t2-linux/"));
+    auto* nestedArchive = new ZipArchive;
+    assert(nestedArchive->openMember(*zipRoot, "base/nested.vl2"));
+    zipped.addArchive(zipRoot);
+    zipped.addArchive(nestedArchive);
+    assert(zipped.readTextFile("console_start.cs", mission));
+    assert(mission == looseData);
+    assert(zipped.readTextFile("SHAPES/NATIVE.DTS", mission));
+    assert(mission == "shape");
+    assert(zipped.fileExists("missions/native.mis"));
+    zipped.shutdown();
+
     // Invalid paths must not become mounts or escape the logical namespace.
     FileSystem invalid;
     invalid.addPath((layered / "does-not-exist").c_str());

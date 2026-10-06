@@ -15,6 +15,7 @@ pkg_check_modules(GLEW REQUIRED IMPORTED_TARGET glew)
 pkg_check_modules(OpenAL REQUIRED IMPORTED_TARGET openal)
 pkg_check_modules(MPG123 REQUIRED IMPORTED_TARGET libmpg123)
 pkg_check_modules(GLU REQUIRED IMPORTED_TARGET glu)
+pkg_check_modules(LIBZIP REQUIRED IMPORTED_TARGET libzip)
 
 find_package(OpenGL REQUIRED)
 find_package(ZLIB REQUIRED)
@@ -37,6 +38,7 @@ add_executable(torch
     src/fs/path_policy.cpp
     src/fs/vol_archive.cpp
     src/fs/vl2_archive.cpp
+    src/fs/zip_archive.cpp
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
@@ -131,6 +133,7 @@ target_link_libraries(torch PRIVATE
     PkgConfig::GLU
     CURL::libcurl
     vorbisfile vorbis PkgConfig::MPG123
+    PkgConfig::LIBZIP
     ${GSM_LIBRARY}
     m
     dl
@@ -159,6 +162,7 @@ add_executable(torch_server
     src/fs/path_policy.cpp
     src/fs/vol_archive.cpp
     src/fs/vl2_archive.cpp
+    src/fs/zip_archive.cpp
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
@@ -250,6 +254,7 @@ target_link_libraries(torch_server PRIVATE
     PkgConfig::GLU
     CURL::libcurl
     vorbisfile vorbis PkgConfig::MPG123
+    PkgConfig::LIBZIP
     ${GSM_LIBRARY}
     m
     dl
@@ -476,6 +481,7 @@ add_executable(torch_parity_test
     src/fs/path_policy.cpp
     src/fs/vol_archive.cpp
     src/fs/vl2_archive.cpp
+    src/fs/zip_archive.cpp
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
@@ -556,7 +562,7 @@ add_executable(torch_parity_test
 target_include_directories(torch_parity_test PRIVATE src ${GSM_INCLUDE_DIR})
 target_link_libraries(torch_parity_test PRIVATE
     OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
-    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 ${GSM_LIBRARY} m dl)
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 PkgConfig::LIBZIP ${GSM_LIBRARY} m dl)
 target_compile_definitions(torch_parity_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_parity_test PRIVATE -UNDEBUG -ffunction-sections -fdata-sections)
 target_link_options(torch_parity_test PRIVATE -Wl,--gc-sections)
@@ -577,6 +583,7 @@ add_executable(torch_network_loopback_test
     src/fs/path_policy.cpp
     src/fs/vol_archive.cpp
     src/fs/vl2_archive.cpp
+    src/fs/zip_archive.cpp
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
@@ -659,7 +666,7 @@ add_executable(torch_network_loopback_test
 target_include_directories(torch_network_loopback_test PRIVATE src ${GSM_INCLUDE_DIR})
 target_link_libraries(torch_network_loopback_test PRIVATE
     OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
-    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 ${GSM_LIBRARY} m dl)
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 PkgConfig::LIBZIP ${GSM_LIBRARY} m dl)
 target_compile_definitions(torch_network_loopback_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_network_loopback_test PRIVATE -UNDEBUG)
 add_test(NAME torch_network_loopback COMMAND torch_network_loopback_test)
@@ -679,6 +686,7 @@ add_executable(torch_nav_graph_test
     src/fs/path_policy.cpp
     src/fs/vol_archive.cpp
     src/fs/vl2_archive.cpp
+    src/fs/zip_archive.cpp
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
@@ -761,7 +769,7 @@ add_executable(torch_nav_graph_test
 target_include_directories(torch_nav_graph_test PRIVATE src ${GSM_INCLUDE_DIR})
 target_link_libraries(torch_nav_graph_test PRIVATE
     OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
-    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 ${GSM_LIBRARY} m dl)
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 PkgConfig::LIBZIP ${GSM_LIBRARY} m dl)
 target_compile_definitions(torch_nav_graph_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_nav_graph_test PRIVATE -UNDEBUG)
 add_test(NAME torch_nav_graph COMMAND torch_nav_graph_test)
@@ -782,6 +790,7 @@ add_executable(torch_target_manager_test
     src/fs/path_policy.cpp
     src/fs/vol_archive.cpp
     src/fs/vl2_archive.cpp
+    src/fs/zip_archive.cpp
     src/script/dso_reader.cpp
     src/script/script_engine.cpp
     src/sim/sim_natives.cpp
@@ -864,7 +873,7 @@ add_executable(torch_target_manager_test
 target_include_directories(torch_target_manager_test PRIVATE src ${GSM_INCLUDE_DIR})
 target_link_libraries(torch_target_manager_test PRIVATE
     OpenGL::GL ZLIB::ZLIB PkgConfig::SDL3 PkgConfig::GLEW PkgConfig::OpenAL
-    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 ${GSM_LIBRARY} m dl)
+    PkgConfig::GLU CURL::libcurl vorbisfile vorbis PkgConfig::MPG123 PkgConfig::LIBZIP ${GSM_LIBRARY} m dl)
 target_compile_definitions(torch_target_manager_test PRIVATE GLEW_STATIC)
 target_compile_options(torch_target_manager_test PRIVATE -UNDEBUG)
 add_test(NAME torch_target_manager COMMAND torch_target_manager_test)
@@ -1050,9 +1059,10 @@ add_executable(torch_filesystem_precedence_test
     src/fs/asset_policy.cpp
     src/fs/path_policy.cpp
     src/fs/vl2_archive.cpp
+    src/fs/zip_archive.cpp
 )
 target_include_directories(torch_filesystem_precedence_test PRIVATE src)
-target_link_libraries(torch_filesystem_precedence_test PRIVATE ZLIB::ZLIB)
+target_link_libraries(torch_filesystem_precedence_test PRIVATE ZLIB::ZLIB PkgConfig::LIBZIP)
 target_compile_options(torch_filesystem_precedence_test PRIVATE -UNDEBUG)
 add_test(NAME torch_filesystem_precedence COMMAND torch_filesystem_precedence_test)
 

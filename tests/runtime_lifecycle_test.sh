@@ -101,16 +101,23 @@ fi
 # The dedicated server is the retail DedicatedServer launch: run from the
 # source tree it reads torch.cfg (the Tribes 2 dataDir and init script),
 # hosts the mission, opens its UDP port and takes TorqueScript on stdin.
-# Without an install it stops at the missing init script.
 install=$(sed -n 's/^dataDir = //p' "$source_dir/torch.cfg" 2>/dev/null)
 install=${install/#\~/$HOME}
+install_archive=${install%%#*}
+if [[ -n "$install" && -f "$install/console_start.cs" ]]; then
+    has_install=1
+elif [[ "$install" == *".zip#"* && -f "$install_archive" ]]; then
+    has_install=1
+else
+    has_install=0
+fi
 if ! (cd "$source_dir" && (sleep 8; printf 'quit();\n') | timeout --kill-after=3s 30s \
     "$server" -nologin -output "$log_dir/server-output" \
     -mission TWL_Minotaur CTF) >"$log_dir/server.out" 2>&1; then
     printf 'dedicated server smoke failed\n' >&2
     exit 1
 fi
-if [[ -n "$install" && -f "$install/console_start.cs" ]]; then
+if [[ "$has_install" == 1 ]]; then
     grep -q "UDP initialized on port" "$log_dir/server.out" || {
         printf 'dedicated server did not open its port\n' >&2; exit 1; }
 else

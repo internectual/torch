@@ -13,7 +13,7 @@ fixed against the original DTS, DIF, TER, GUI, and script data.
 
 - CMake 3.20 or newer
 - C++20 compiler (GCC 11+ or Clang 14+)
-- SDL3, GLEW, OpenAL, GLU, zlib, libcurl, libvorbis, libmpg123, and libgsm
+- SDL3, GLEW, OpenAL, GLU, zlib, libzip, libcurl, libvorbis, libmpg123, and libgsm
 
 ## Build
 
@@ -22,7 +22,7 @@ fixed against the original DTS, DIF, TER, GUI, and script data.
 ```sh
 sudo apt install cmake g++ libsdl3-dev libglew-dev libopenal-dev \
                  libglu1-mesa-dev libvorbis-dev libmpg123-dev \
-                 libcurl4-openssl-dev libgsm1-dev zlib1g-dev
+                 libcurl4-openssl-dev libgsm1-dev zlib1g-dev libzip-dev
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
@@ -40,7 +40,7 @@ cmake --build build-win -j$(nproc)
 ### macOS
 
 ```sh
-brew install cmake sdl3 glew openal-soft glm zlib libvorbis libmpg123 gsm
+brew install cmake sdl3 glew openal-soft glm zlib libzip libvorbis libmpg123 gsm
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(sysctl -n hw.ncpu)
 ```
@@ -59,8 +59,18 @@ ctest --test-dir build --output-on-failure
 ./build/torch
 ```
 
-The client accepts `-data <dir>` for the Tribes 2 installation, `-mod <path>`
-for the active mod, and `-output <dir>` for writable runtime state and logs.
+The client accepts `-data <dir>` for an extracted Tribes 2 installation or
+`-data <archive.zip#root/prefix/>` for a read-only ZIP installation. ZIP roots
+may contain nested VL2 archives; Torch reads them without extracting them. For
+example:
+
+```sh
+./build/torch -data '/home/user/Downloads/t2-linux.zip#t2-linux/'
+```
+
+Use `-output <dir>` (or `outputDir` in `torch.cfg`) for writable preferences,
+compiled script caches, and runtime logs. The client also accepts `-mod <path>`
+for the active mod.
 The default output directory is `~/.torch`. Configuration is read from
 `torch.cfg`, then command-line options; later console and script writes are
 runtime-only overrides.
