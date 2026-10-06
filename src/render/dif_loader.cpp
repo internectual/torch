@@ -1057,9 +1057,13 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
     uint32_t numDetailLevels = capU32(readU32(ptr, rem));
     if (numDetailLevels > kMaxDetailLevels) numDetailLevels = kMaxDetailLevels;
 
+    // Current world rendering, collision, and bounds use only the first
+    // (highest-detail) Interior. Avoid parsing lower LOD payloads that are not
+    // consumed; some stock interiors use a secondary layout we do not need.
+    const uint32_t loadedDetailLevels = std::min(numDetailLevels, 1u);
     size_t prevRem = rem;
-    std::vector<DIFInterior> interiors(numDetailLevels);
-    for (uint32_t i = 0; i < numDetailLevels; i++) {
+    std::vector<DIFInterior> interiors(loadedDetailLevels);
+    for (uint32_t i = 0; i < loadedDetailLevels; i++) {
         if (rem < 60) {
             Console::instance().printf(LogLevel::Warn, "DIF: not enough data for detail level %u", i);
             break;
