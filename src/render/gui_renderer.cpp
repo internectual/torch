@@ -2470,10 +2470,19 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
     } else if (cn == "ShellPaneCtrl" || cn == "GuiPaneControl" ||
                cn.find("ShellPane") == 0 || cn == "ShellDlgFrame") {
         ColorF fc{0.12f,0.12f,0.15f,1.0f}, txc{1,1,1,1};
+        Font* paneTitleFont = font;
         auto* prof = getProfile(ctl->profileName);
         if (prof) {
             auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc);
             // Don't use profile fontColor for panes — it's designed for the original game's lighter title bars
+            paneTitleFont = getProfileFont(prof);
+        }
+        if (ctl->text == "SETTINGS") {
+            if (auto* doneProfile = getProfile("ShellButtonProfile")) {
+                paneTitleFont = getProfileFont(doneProfile);
+                auto color = doneProfile->fields.find("fontColor");
+                if (color != doneProfile->fields.end()) parseColor(color->second.toString(), txc);
+            }
         }
         if (fc.a < 1.0f) fc.a = 1.0f; // force opaque
         // Opaque dark background behind everything
@@ -2559,8 +2568,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     }
                 };
                 dq(x+4,ty,lw,bh,cL,false); dq(x+4+lw,ty,midW,bh,cM,true); dq(x+4+lw+midW,ty,rw,bh,cR,false);
-                if (font) {
-                    font = getProfileFont(prof);
+                if (paneTitleFont) {
                     float toX, toY;
                     float tx = x+4+lw+4;
                     if (getTextOffset(prof, toX, toY)) { tx += toX; }
@@ -2570,12 +2578,12 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                         // centered in the pane width, sitting just below the
                         // bright band — matches the reference screenshot.
                         ColorF black{0.02f, 0.02f, 0.02f, 1};
-                        float tw = font->measure(ctl->text.c_str()).x;
-                        font->render(ctl->text.c_str(), x + (ctl->extentX - tw) * 0.5f,
+                        float tw = paneTitleFont->measure(ctl->text.c_str()).x;
+                        paneTitleFont->render(ctl->text.c_str(), x + (ctl->extentX - tw) * 0.5f,
                                      y + 7.5f, black, 1.0f);
                     } else {
-                        const float titleY = ty + (bh - (float)font->charHeight) * 0.5f;
-                        font->render(ctl->text.c_str(), tx, titleY, txc, 1.0f);
+                        const float titleY = ty + (bh - (float)paneTitleFont->charHeight) * 0.5f;
+                        paneTitleFont->render(ctl->text.c_str(), tx, titleY, txc, 1.0f);
                     }
                 }
             }
@@ -2599,22 +2607,21 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 r.drawTexturedRectUV({x + lw, y, 0}, {x + lw + midW, y + th, 0}, tabTex->id,
                     (float)cF.x/tabTex->width, (float)cF.y/tabTex->height,
                     (float)(cF.x+cF.w)/tabTex->width, (float)(cF.y+cF.h)/tabTex->height);
-                if (font) {
-                    font = getProfileFont(prof);
+                if (paneTitleFont) {
                     bool shellPane2 = prof && prof->fields.count("bitmapBase") &&
                                       prof->fields["bitmapBase"].toString().find("gui/shll") == 0;
                     if (shellPane2) {
                         // Shell panes: black title centered below the band
                         ColorF black{0.02f, 0.02f, 0.02f, 1};
-                        float tw = font->measure(ctl->text.c_str()).x;
-                        font->render(ctl->text.c_str(), x + (ctl->extentX - tw) * 0.5f,
+                        float tw = paneTitleFont->measure(ctl->text.c_str()).x;
+                        paneTitleFont->render(ctl->text.c_str(), x + (ctl->extentX - tw) * 0.5f,
                                      y + 7.5f, black, 1.0f);
                     } else {
                         float tx = x + lw + 4;
-                        float titleY = y + (th - (float)font->charHeight) * 0.5f;
+                        float titleY = y + (th - (float)paneTitleFont->charHeight) * 0.5f;
                         float toX, toY;
                         if (getTextOffset(prof, toX, toY)) { tx += toX; titleY += toY; }
-                        font->render(ctl->text.c_str(), tx, titleY, txc, 1.0f);
+                        paneTitleFont->render(ctl->text.c_str(), tx, titleY, txc, 1.0f);
                     }
                 }
             } else if (tabTex && tabTex->loaded) {
@@ -2677,7 +2684,17 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto toi = prof->fields.find("textOffset"); if (toi != prof->fields.end()) sscanf(toi->second.toString().c_str(), "%f %f", &textOfsX, &textOfsY);
             auto ji = prof->fields.find("justify"); if (ji != prof->fields.end()) justify = ji->second.toString();
         }
-        txc = readableGuiTextColor(ctl, txc);
+        if (cn == "ShellTabButton") {
+            // Settings navigation tabs share the typography and color of the
+            // DONE button in their parent shell pane.
+            if (auto* doneProfile = getProfile("ShellButtonProfile")) {
+                tabFont = getProfileFont(doneProfile);
+                auto color = doneProfile->fields.find("fontColor");
+                if (color != doneProfile->fields.end()) parseColor(color->second.toString(), txc);
+            }
+        } else {
+            txc = readableGuiTextColor(ctl, txc);
+        }
         Texture* tabTex = nullptr;
         auto loadTex = [&](const std::string& p) { tabTex = t2Bitmap(r, p); };
         if (!bmpBase.empty()) loadTex(bmpBase);
