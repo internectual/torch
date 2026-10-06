@@ -94,8 +94,6 @@ public:
 
     void setTitle(const char* title);
     bool setVideoMode(int32_t width, int32_t height, bool fullscreen, bool vsync);
-    bool isWindowBordered() const;
-    bool setWindowBordered(bool bordered);
     void showMouse(bool show);
     // While the GUI draws its software cursor the OS cursor stays hidden;
     // showMouse records what is wanted otherwise.

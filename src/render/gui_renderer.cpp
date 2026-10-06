@@ -5403,62 +5403,61 @@ void GuiRenderer::pushDialog(const std::string& name) {
             ctl = soToGui(name, nullptr);
         }
     }
-        if (ctl) {
-            if (name == "OptionsDlg" && !settingsWindowBorderCaptured_) {
-                auto& platform = Engine::instance().platform();
-                settingsWindowWasBordered_ = platform.isWindowBordered();
-                settingsWindowBorderCaptured_ = true;
-                if (settingsWindowWasBordered_ && !platform.setWindowBordered(false)) {
-                    settingsWindowBorderCaptured_ = false;
-                    Console::instance().printf(LogLevel::Warn,
-                        "GUI: couldn't hide the window frame for Settings");
-                }
+    if (ctl) {
+        if (name == "OptionsDlg" && !settingsCloseButtonCaptured_) {
+            if (GuiControl* closeButton = findControl("LaunchToolbarCloseButton")) {
+                settingsCloseButtonWasVisible_ = closeButton->visible;
+                settingsCloseButtonCaptured_ = true;
+                closeButton->visible = false;
+                if (auto* script = ScriptEngine::instance().findObject(closeButton->name.c_str()))
+                    script->fields["visible"] = VMValue(0);
             }
-            // If a dialog with this name is already stacked, raise it instead
-            // of pushing a duplicate — duplicate entries would each draw their
-            // background (e.g. DlgBackProfile's dim layer stacks). Compare by
-            // name as well as pointer: duplicate .gui parses can yield
-            // distinct control objects sharing one name.
-            for (auto it = dialogStack.begin(); it != dialogStack.end();) {
-                if (*it == ctl || (!ctl->name.empty() && (*it)->name == ctl->name))
-                    it = dialogStack.erase(it);
-                else
-                    ++it;
-            }
-            focusBeforeDialog[ctl] = focusedCtrl;
-            ctl->visible = true;
-            ctl->isBaseDialog = inBaseDialogPush;
-            if (!ctl->name.empty()) lastPushed[ctl->name] = ctl;
-            dialogStack.push_back(ctl);
-            // A pushed GUI owns the pointer while gameplay is running.
-            if (Engine::instance().game().state() == Game::Playing) {
-                Engine::instance().platform().setRelativeMouse(false);
-                Engine::instance().platform().showMouse(true);
-            }
+        }
+        // If a dialog with this name is already stacked, raise it instead
+        // of pushing a duplicate — duplicate entries would each draw their
+        // background (e.g. DlgBackProfile's dim layer stacks). Compare by
+        // name as well as pointer: duplicate .gui parses can yield
+        // distinct control objects sharing one name.
+        for (auto it = dialogStack.begin(); it != dialogStack.end();) {
+            if (*it == ctl || (!ctl->name.empty() && (*it)->name == ctl->name))
+                it = dialogStack.erase(it);
+            else
+                ++it;
+        }
+        focusBeforeDialog[ctl] = focusedCtrl;
+        ctl->visible = true;
+        ctl->isBaseDialog = inBaseDialogPush;
+        if (!ctl->name.empty()) lastPushed[ctl->name] = ctl;
+        dialogStack.push_back(ctl);
+        // A pushed GUI owns the pointer while gameplay is running.
+        if (Engine::instance().game().state() == Game::Playing) {
+            Engine::instance().platform().setRelativeMouse(false);
+            Engine::instance().platform().showMouse(true);
+        }
         callOnAddOnce(ctl);
-            // Trigger onWake so script functions can populate menus, etc.
-            if (auto* ts = Engine::instance().script().ts()) {
-                if (ts->hasFunction(name + "::onWake")) {
-                    Console::instance().printf(LogLevel::Debug, "GUI: pushDialog calling onWake '%s'", name.c_str());
-                    ts->callFunction(name + "::onWake", {VMValue(name)});
+        // Trigger onWake so script functions can populate menus, etc.
+        if (auto* ts = Engine::instance().script().ts()) {
+            if (ts->hasFunction(name + "::onWake")) {
+                Console::instance().printf(LogLevel::Debug, "GUI: pushDialog calling onWake '%s'", name.c_str());
+                ts->callFunction(name + "::onWake", {VMValue(name)});
+            }
+        }
+        callGuiChildLifecycle(ctl, "::onWake");
+        Console::instance().printf(LogLevel::Debug, "GUI: pushDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
+        // Keep launch chrome above most dialogs, but let modal Settings
+        // cover it so its background close-tab control cannot float over
+        // the DONE button or the Settings title bar.
+        if (name != "LaunchToolbarDlg" && name != "ConsoleDlg" && name != "OptionsDlg") {
+            for (auto it = dialogStack.begin(); it != dialogStack.end(); ++it) {
+                if ((*it) && (*it)->name == "LaunchToolbarDlg" && it + 1 != dialogStack.end()) {
+                    GuiControl* bar = *it;
+                    dialogStack.erase(it);
+                    dialogStack.push_back(bar);
+                    break;
                 }
             }
-            callGuiChildLifecycle(ctl, "::onWake");
-            Console::instance().printf(LogLevel::Debug, "GUI: pushDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
-            // Persistent chrome: keep LaunchToolbarDlg on TOP of the stack so
-            // the bar stays visible and clickable over OptionsDlg,
-            // RecordingsDlg, etc.  (Rendered last = on top.)
-            if (name != "LaunchToolbarDlg" && name != "ConsoleDlg") {
-                for (auto it = dialogStack.begin(); it != dialogStack.end(); ++it) {
-                    if ((*it) && (*it)->name == "LaunchToolbarDlg" && it + 1 != dialogStack.end()) {
-                        GuiControl* bar = *it;
-                        dialogStack.erase(it);
-                        dialogStack.push_back(bar);
-                        break;
-                    }
-                }
-            }
-        } else {
+        }
+    } else {
         Console::instance().printf(LogLevel::Warn, "GUI: pushDialog '%s' not found", name.c_str());
     }
     updateCursorState();
@@ -5522,14 +5521,14 @@ void GuiRenderer::popDialog(const std::string& name) {
             ++it;
         }
     }
-    if (removedSettingsDialog) restoreSettingsWindowBorder();
+    if (removedSettingsDialog) restoreSettingsCloseButton();
     Console::instance().printf(LogLevel::Debug,
         "GUI: popDialog %s (stack now %zu)", name.c_str(), dialogStack.size());
     updateCursorState();
 }
 
 void GuiRenderer::clearDialogs() {
-    const bool removedSettingsDialog = settingsWindowBorderCaptured_ &&
+    const bool removedSettingsDialog = settingsCloseButtonCaptured_ &&
         std::any_of(dialogStack.begin(), dialogStack.end(), [](const GuiControl* dialog) {
             return dialog && dialog->name == "OptionsDlg";
         });
@@ -5570,15 +5569,18 @@ void GuiRenderer::clearDialogs() {
     lastPushed.clear();
     focusBeforeDialog.clear();
     s_openPopups.clear();
-    if (removedSettingsDialog) restoreSettingsWindowBorder();
+    if (removedSettingsDialog) restoreSettingsCloseButton();
 }
 
-void GuiRenderer::restoreSettingsWindowBorder() {
-    if (!settingsWindowBorderCaptured_) return;
-    if (settingsWindowWasBordered_)
-        Engine::instance().platform().setWindowBordered(true);
-    settingsWindowBorderCaptured_ = false;
-    settingsWindowWasBordered_ = false;
+void GuiRenderer::restoreSettingsCloseButton() {
+    if (!settingsCloseButtonCaptured_) return;
+    if (GuiControl* closeButton = findControl("LaunchToolbarCloseButton")) {
+        closeButton->visible = settingsCloseButtonWasVisible_;
+        if (auto* script = ScriptEngine::instance().findObject(closeButton->name.c_str()))
+            script->fields["visible"] = VMValue(settingsCloseButtonWasVisible_ ? 1 : 0);
+    }
+    settingsCloseButtonCaptured_ = false;
+    settingsCloseButtonWasVisible_ = false;
 }
 
 bool GuiRenderer::makeFirstResponder(const std::string& name, bool focus) {

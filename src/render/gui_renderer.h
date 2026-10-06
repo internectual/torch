@@ -360,9 +360,9 @@ private:
     std::vector<GuiControl*> dialogStack;
     bool cursorOn_ = true, showCursor_ = true;
     std::string defaultCursor_;
-    bool settingsWindowBorderCaptured_ = false;
-    bool settingsWindowWasBordered_ = false;
-    void restoreSettingsWindowBorder();
+    bool settingsCloseButtonCaptured_ = false;
+    bool settingsCloseButtonWasVisible_ = false;
+    void restoreSettingsCloseButton();
 
     // Scheduler
     struct ScheduledEvent {
