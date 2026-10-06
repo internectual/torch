@@ -2668,6 +2668,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         auto* prof = getProfile(ctl->profileName);
         // Tab buttons created dynamically may not have a profile — fall back to parent's
         if (!prof && ctl->parent) prof = getProfile(ctl->parent->profileName);
+        Font* tabFont = prof ? getProfileFont(prof) : font;
         if (prof) {
             auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc);
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), txc);
@@ -2744,25 +2745,29 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                                               : ColorF{0.05f, 0.35f, 0.32f, 1});
                 }
             }
-            if (font && !ctl->text.empty()) {
-                const float textWidth = font->measure(ctl->text.c_str()).x;
+            if (tabFont && !ctl->text.empty()) {
+                const float textWidth = tabFont->measure(ctl->text.c_str()).x;
+                const float availableTextWidth = std::max(0.0f, ctl->extentX - 8.0f);
+                const float textScale = textWidth > availableTextWidth && textWidth > 0.0f
+                    ? availableTextWidth / textWidth : 1.0f;
+                const float drawnTextWidth = textWidth * textScale;
                 float tx2 = x + textOfsX;
                 if (cn == "ShellTabButton" || justify == "center")
-                    tx2 = x + (ctl->extentX - textWidth) * 0.5f;
+                    tx2 = x + (ctl->extentX - drawnTextWidth) * 0.5f;
                 else if (justify == "right")
-                    tx2 = x + ctl->extentX - textWidth - textOfsX;
-                float ty2 = y + (ctl->extentY - (float)font->charHeight) * 0.5f + textOfsY;
-                font->render(ctl->text.c_str(), tx2, ty2, txc, 1.0f);
+                    tx2 = x + ctl->extentX - drawnTextWidth - textOfsX;
+                float ty2 = y + (ctl->extentY - (float)tabFont->charHeight * textScale) * 0.5f + textOfsY;
+                tabFont->render(ctl->text.c_str(), tx2, ty2, txc, textScale);
             }
         } else {
             // GuiTabPageCtrl (selected content pane): draw dark background and content
             r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.12f,0.12f,0.15f,1});
             // Thin border at top to separate from tab bar
             r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + 1, 0}, {0.3f,0.3f,0.4f,0.5f});
-            if (font && !ctl->text.empty()) {
+            if (tabFont && !ctl->text.empty()) {
                 float tx2 = x + textOfsX;
                 float ty2 = y + textOfsY;
-                font->render(ctl->text.c_str(), tx2, ty2, txc, 1.0f);
+                tabFont->render(ctl->text.c_str(), tx2, ty2, txc, 1.0f);
             }
         }
     } else if (cn == "GuiPopUpMenuCtrl") {
