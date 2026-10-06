@@ -30,6 +30,7 @@
 #include <sstream>
 #include <stack>
 #include <cstring>
+#include <strings.h>
 #include <cstdlib>
 #include <climits>
 #include <unistd.h>
@@ -4157,7 +4158,9 @@ bool ScriptEngine::init() {
         }
         Console::instance().forEach([&](const char* name, const Console::ConsoleItem& item) {
             if (item.type != Console::ConsoleItem::Variable) return;
-            bool match = prefixMatch ? strncmp(name, prefix.c_str(), prefix.size()) == 0 : name == prefix;
+            bool match = prefixMatch
+                ? strncasecmp(name, prefix.c_str(), prefix.size()) == 0
+                : strcasecmp(name, prefix.c_str()) == 0;
             if (match) {
                 fprintf(f, "%s = \"%s\";\n", name, item.value.c_str());
             }

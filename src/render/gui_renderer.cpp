@@ -259,6 +259,17 @@ static std::string normalizeGuiClassName(const std::string& cn) {
     return it != sShellToGui.end() ? it->second : cn;
 }
 
+static void syncCheckedFromBoundVariable(GuiControl* ctl) {
+    if (!ctl || (ctl->className != "GuiCheckBoxCtrl" && ctl->className != "GuiRadioCtrl") ||
+        ctl->variable.size() < 2 || ctl->variable[0] != '$')
+        return;
+    const VMValue value(Console::instance().getStringVariable(ctl->variable.c_str(), ""));
+    if (ctl->className == "GuiRadioCtrl")
+        ctl->checked = value.toInt() == ctl->id;
+    else
+        ctl->checked = value.toBool();
+}
+
 // Map SDL3 scancodes to the Tribes 2 InputMap key names used by the ActionMap
 // scripts (GuiInputCtrl::onInputEvent, GlobalActionMap.bind etc.).
 static const std::map<int, const char*>& scancodeKeyNameTable() {
@@ -416,6 +427,7 @@ void GuiRenderer::init() {
             it = obj->fields.find("id"); if (it != obj->fields.end()) ctl->id = (int)it->second.toDouble();
             it = obj->fields.find("sel"); if (it != obj->fields.end()) ctl->checked = it->second.toBool();
             it = obj->fields.find("variable"); if (it != obj->fields.end()) ctl->variable = it->second.toString();
+            syncCheckedFromBoundVariable(ctl);
             it = obj->fields.find("active"); if (it != obj->fields.end()) ctl->active = it->second.toBool();
             it = obj->fields.find("vScrollBar"); if (it != obj->fields.end()) ctl->vScrollBarMode = it->second.toString();
             it = obj->fields.find("hScrollBar"); if (it != obj->fields.end()) ctl->hScrollBarMode = it->second.toString();
@@ -506,6 +518,7 @@ void GuiRenderer::refresh() {
             it = obj->fields.find("groupNum"); if (it != obj->fields.end()) ctl->groupNum = (int)it->second.toDouble();
             it = obj->fields.find("sel"); if (it != obj->fields.end()) ctl->checked = it->second.toBool();
             it = obj->fields.find("variable"); if (it != obj->fields.end()) ctl->variable = it->second.toString();
+            syncCheckedFromBoundVariable(ctl);
             it = obj->fields.find("vScrollBar"); if (it != obj->fields.end()) ctl->vScrollBarMode = it->second.toString();
             it = obj->fields.find("hScrollBar"); if (it != obj->fields.end()) ctl->hScrollBarMode = it->second.toString();
             if (ctl->className == "GuiCanvas") canvas = ctl;
@@ -4835,6 +4848,13 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
     }
 
     // Radio button / checkbox: handle group mutual exclusion before onClick
+    bool savePrefAfterAction = false;
+    auto setBoundVariable = [](const std::string& name, const VMValue& value) {
+        if (auto* ts = Engine::instance().script().ts())
+            ts->setGlobal(name, value);
+        else
+            Console::instance().setVariable(name.c_str(), value.toString().c_str());
+    };
     if (hit->className == "GuiRadioCtrl") {
         if (hit->groupNum != 0) {
             // Uncheck siblings with same groupNum, then check this one
@@ -4851,28 +4871,42 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         // (e.g. $pref::Player::ArmorType = 1 for MEDIUM). Scripts read this to
         // determine which radio is selected.
         if (!hit->variable.empty()) {
-            Console::instance().setVariable(hit->variable.c_str(), std::to_string(hit->id).c_str());
+            setBoundVariable(hit->variable, VMValue(hit->id));
+            savePrefAfterAction = hit->variable.size() >= 7 &&
+                strncasecmp(hit->variable.c_str(), "$pref::", 7) == 0;
         }
         if (!hit->onClick && !hit->command.empty())
             Console::instance().execute(hit->command.c_str());
     } else if (hit->className == "GuiCheckBoxCtrl") {
         hit->checked = !hit->checked;
-        if (!hit->variable.empty())
-            Console::instance().setVariable(hit->variable.c_str(), hit->checked ? "1" : "0");
+        if (!hit->variable.empty()) {
+            setBoundVariable(hit->variable, VMValue(hit->checked ? 1 : 0));
+            savePrefAfterAction = hit->variable.size() >= 7 &&
+                strncasecmp(hit->variable.c_str(), "$pref::", 7) == 0;
+        }
     }
     if (auto* ts = Engine::instance().script().ts()) {
         const std::string action = hit->name + "::onAction";
         if (ts->hasFunction(action))
             ts->callFunction(action, {VMValue(hit->name), VMValue(hit->checked ? 1 : 0)});
     }
+    auto saveChangedPreference = [&]() {
+        if (!savePrefAfterAction) return;
+        if (auto* ts = Engine::instance().script().ts())
+            ts->execute("export(\"$pref::*\", \"prefs/ClientPrefs.cs\", false);",
+                        "checkbox-pref-save");
+    };
     if (hit->onClick) {
         hit->onClick();
+        saveChangedPreference();
         return true;
     }
     if (!hit->altCommand.empty()) {
         Console::instance().execute(hit->altCommand.c_str());
+        saveChangedPreference();
         return true;
     }
+    saveChangedPreference();
     return false;
 }
 
@@ -5353,6 +5387,7 @@ GuiControl* GuiRenderer::soToGui(const std::string& handle, GuiControl* parent) 
     fi = so->fields.find("sel"); if (fi != so->fields.end()) ctl->checked = fi->second.toBool();
     fi = so->fields.find("active"); if (fi != so->fields.end()) ctl->active = fi->second.toBool();
     fi = so->fields.find("variable"); if (fi != so->fields.end()) ctl->variable = fi->second.toString();
+    syncCheckedFromBoundVariable(ctl);
     for (const auto& [field, value] : so->fields)
         ctl->fields[field] = value.toString();
     fi = so->fields.find("range"); if (fi != so->fields.end()) {

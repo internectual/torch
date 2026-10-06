@@ -440,13 +440,17 @@ void TorqueScript::setGlobal(const std::string& name, const VMValue& val) {
     const std::string key = normalizeGlobalKey(name);
     const std::string lower = toLower(key);
     auto indexed = impl->globalIndex.find(lower);
+    std::string canonicalKey = key;
     if (indexed != impl->globalIndex.end()) {
-        impl->globals[indexed->second] = val;
+        canonicalKey = indexed->second;
+        impl->globals[canonicalKey] = val;
     } else {
         impl->globalIndex.emplace(lower, key);
-        impl->globals[key] = val;
+        impl->globals[canonicalKey] = val;
     }
-    Console::instance().setVariable(name.c_str(), val.toString().c_str());
+    // Keep the console registry on the same canonical key as TorqueScript's
+    // case-insensitive global table; exporting prefs reads from this registry.
+    Console::instance().setVariable(canonicalKey.c_str(), val.toString().c_str());
 }
 
 VMValue TorqueScript::getGlobal(const std::string& name) {

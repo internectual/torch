@@ -30,6 +30,7 @@
 #include "script/torquescript.h"
 #include "game/game.h"
 #include "core/engine.h"
+#include "core/console.h"
 
 #include <cassert>
 #include <limits>
@@ -45,6 +46,14 @@
 
 int main() {
     setenv("ALSOFT_DRIVERS", "null", 1);
+    {
+        TorqueScript variables;
+        variables.setGlobal("$pref::CheckboxSyncProbe", VMValue(0));
+        variables.setGlobal("$Pref::CheckboxSyncProbe", VMValue(1));
+        assert(variables.getGlobal("$pref::CheckboxSyncProbe").toInt() == 1);
+        assert(Console::instance().find("$pref::CheckboxSyncProbe") != nullptr);
+        assert(Console::instance().find("$Pref::CheckboxSyncProbe") == nullptr);
+    }
     {
         const auto forward = LiveMovePolicy::makeMove({.forward = true, .right = true,
                                                        .jump = true, .fire = true});
