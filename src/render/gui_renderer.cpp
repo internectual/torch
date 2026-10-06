@@ -2574,7 +2574,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                         font->render(ctl->text.c_str(), x + (ctl->extentX - tw) * 0.5f,
                                      y + 7.5f, black, 1.0f);
                     } else {
-                        font->render(ctl->text.c_str(), tx, ty+bh*0.2f, txc, 1.0f);
+                        const float titleY = ty + (bh - (float)font->charHeight) * 0.5f;
+                        font->render(ctl->text.c_str(), tx, titleY, txc, 1.0f);
                     }
                 }
             }
@@ -2609,10 +2610,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                         font->render(ctl->text.c_str(), x + (ctl->extentX - tw) * 0.5f,
                                      y + 7.5f, black, 1.0f);
                     } else {
-                        float tx = x + lw + 4, ty = y + 2;
+                        float tx = x + lw + 4;
+                        float titleY = y + (th - (float)font->charHeight) * 0.5f;
                         float toX, toY;
-                        if (getTextOffset(prof, toX, toY)) { tx += toX; ty += toY; }
-                        font->render(ctl->text.c_str(), tx, ty, txc, 1.0f);
+                        if (getTextOffset(prof, toX, toY)) { tx += toX; titleY += toY; }
+                        font->render(ctl->text.c_str(), tx, titleY, txc, 1.0f);
                     }
                 }
             } else if (tabTex && tabTex->loaded) {
@@ -2662,6 +2664,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         ColorF fc{0.25f,0.25f,0.32f,1}, txc{1,1,1,1};
         std::string bmp, bmpBase;
         float textOfsX = 4, textOfsY = 0;
+        std::string justify = "left";
         auto* prof = getProfile(ctl->profileName);
         // Tab buttons created dynamically may not have a profile — fall back to parent's
         if (!prof && ctl->parent) prof = getProfile(ctl->parent->profileName);
@@ -2671,6 +2674,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto bi = prof->fields.find("bitmap"); if (bi != prof->fields.end()) bmp = bi->second.toString();
             auto bbi = prof->fields.find("bitmapBase"); if (bbi != prof->fields.end()) bmpBase = bbi->second.toString();
             auto toi = prof->fields.find("textOffset"); if (toi != prof->fields.end()) sscanf(toi->second.toString().c_str(), "%f %f", &textOfsX, &textOfsY);
+            auto ji = prof->fields.find("justify"); if (ji != prof->fields.end()) justify = ji->second.toString();
         }
         txc = readableGuiTextColor(ctl, txc);
         Texture* tabTex = nullptr;
@@ -2741,7 +2745,12 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 }
             }
             if (font && !ctl->text.empty()) {
+                const float textWidth = font->measure(ctl->text.c_str()).x;
                 float tx2 = x + textOfsX;
+                if (cn == "ShellTabButton" || justify == "center")
+                    tx2 = x + (ctl->extentX - textWidth) * 0.5f;
+                else if (justify == "right")
+                    tx2 = x + ctl->extentX - textWidth - textOfsX;
                 float ty2 = y + (ctl->extentY - (float)font->charHeight) * 0.5f + textOfsY;
                 font->render(ctl->text.c_str(), tx2, ty2, txc, 1.0f);
             }
