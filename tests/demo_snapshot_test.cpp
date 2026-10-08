@@ -65,6 +65,27 @@ int main(int argc, char** argv) {
     CHECK(argc == 2);
 
     {
+        // collectMove admits at most MaxMoveQueueSize + 1 unacknowledged
+        // moves; past that the recorded input history is discarded for good.
+        RecordedMoveQueue q;
+        q.reset(100, 10);
+        CHECK(q.available && q.nextMoveId == 110);
+        for (int i = 0; i < 36; ++i) CHECK(q.admit());
+        CHECK(q.nextMoveId - q.lastMoveAck == RecordedMoveQueue::MaxPending);
+        q.acknowledge(120);
+        CHECK(q.admit());
+        RecordedMoveQueue full;
+        full.reset(0, 46);
+        CHECK(full.available);
+        CHECK(!full.admit());
+        full.acknowledge(40);
+        CHECK(!full.available && !full.admit());
+        RecordedMoveQueue overflow;
+        overflow.reset(0, 47);
+        CHECK(!overflow.available);
+    }
+
+    {
         // The server assigns fixed HUD IDs by item type, but weapon-add events
         // arrive in inventory slot order. The display order must preserve that
         // arrival sequence, and removals close the corresponding visual slot.

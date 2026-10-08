@@ -560,6 +560,51 @@ static float raycastShape(const DTSShape& shape, const MatrixF& renderModel,
     return best;
 }
 
+// The shape's Collision-1..8 details (ShapeBase::buildConvex uses
+// mShapeInstance's collisionDetails, never LOS-N), in Torque world space with
+// outward face normals. The DTSShape is shared between instances, so its
+// animated pose belongs to whichever instance rendered last; hulls use the
+// default node transforms.
+static void appendShapeCollisionTriangles(const DTSShape& shape, const MatrixF& renderModel,
+                                          std::vector<PlayerPrediction::Triangle>& out) {
+    const auto& nodeWorld = shape.defaultTransforms;
+    auto toTorque = [](const Point3F& p) { return Point3F{p.x, -p.z, p.y}; };
+    for (int i = 0; i < 8; ++i) {
+        const std::string wanted = "Collision-" + std::to_string(i + 1);
+        const DTSShape::UtilityDetail* detail = nullptr;
+        for (const auto& d : shape.utilityDetails)
+            if (strcasecmp(d.name.c_str(), wanted.c_str()) == 0) { detail = &d; break; }
+        if (!detail) continue;
+        for (int32_t mi : detail->meshIndices) {
+            if (mi < 0 || mi >= (int)shape.meshes.size()) continue;
+            const MeshData& mesh = shape.meshes[mi];
+            const bool skinned = mi < (int)shape.skins.size() && shape.skins[mi].hasSkin;
+            MatrixF transform = renderModel;
+            if (!skinned && mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)nodeWorld.size())
+                transform = renderModel * nodeWorld[mesh.nodeIndex];
+            std::vector<Point3F> world(mesh.vertices.size());
+            for (size_t v = 0; v < mesh.vertices.size(); ++v)
+                world[v] = toTorque(transform.transform(mesh.vertices[v].pos));
+            if (world.empty()) continue;
+            // Each collision mesh is a convex hull: its faces point away from
+            // the hull's centre, whatever the authored winding.
+            Point3F centre{0, 0, 0};
+            for (const Point3F& p : world) centre = PlayerPrediction::add(centre, p);
+            centre = PlayerPrediction::mul(centre, 1.0f / (float)world.size());
+            for (size_t k = 0; k + 2 < mesh.indices.size(); k += 3) {
+                const uint32_t i0 = mesh.indices[k], i1 = mesh.indices[k + 1], i2 = mesh.indices[k + 2];
+                if (i0 >= world.size() || i1 >= world.size() || i2 >= world.size()) continue;
+                const Point3F a = world[i0], b = world[i1], c = world[i2];
+                Point3F n = PlayerPrediction::cross(PlayerPrediction::sub(b, a), PlayerPrediction::sub(c, a));
+                if (PlayerPrediction::dot(n, PlayerPrediction::sub(a, centre)) < 0) n = PlayerPrediction::mul(n, -1.0f);
+                const float len = std::sqrt(PlayerPrediction::dot(n, n));
+                if (len < 1e-12f) continue;
+                out.push_back({a, b, c, PlayerPrediction::mul(n, 1.0f / len)});
+            }
+        }
+    }
+}
+
 static void renderMountedImage(DTSShape& shape, const WeaponImage::Animation& animation,
                                float now) {
     std::vector<DTSShape::BlendThread> threads;
@@ -7896,8 +7941,27 @@ void Game::render(float dt) {
                 }
                 continue;
             }
-            if (it == shapeBaseSoundSources.end()) {
-                // ShapeBase::updateAudioState plays the thread's profile.
+            // ShapeBase::updateAudioState stops the slot's sound and plays the
+            // written profile on every SoundMask write. A slot whose source
+            // was dropped (restore, remount) without a newer write resumes
+            // only a looping profile; a one-shot already played.
+            auto started = shapeBaseSoundRevisions.find(key);
+            const bool newWrite = started == shapeBaseSoundRevisions.end() || state.revision > started->second;
+            if (!newWrite) {
+                if (it != shapeBaseSoundSources.end()) {
+                    it->second->setPosition(Math::torquePointToYUp({position.x, position.y, position.z}));
+                    continue;
+                }
+                auto profile = blocks.find((uint32_t)state.profileId);
+                if (profile == blocks.end() || !profile->second.decoded.audioLooping) continue;
+            } else {
+                shapeBaseSoundRevisions[key] = state.revision;
+            }
+            if (it != shapeBaseSoundSources.end()) {
+                audio.releaseSource(it->second);
+                shapeBaseSoundSources.erase(it);
+            }
+            {
                 auto* source = playNativeAudioProfile(audio, blocks, (uint32_t)state.profileId,
                     Math::torquePointToYUp({position.x, position.y, position.z}), false, true);
                 if (!source) continue;
@@ -11330,7 +11394,8 @@ void Game::connectToServer(const char* host, uint16_t port) {
               for (int i = 0; i < 4; ++i)
                   ghost->soundThreads[i] = {state->soundThreads[i].profileId,
                                              state->soundThreads[i].playing,
-                                             state->soundThreads[i].valid};
+                                             state->soundThreads[i].valid,
+                                             state->soundThreads[i].revision};
                if (state->hasCloak) {
                   ghost->cloaked = state->cloaked;
                   ghost->hasCloak = true;
@@ -12357,7 +12422,7 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
     if (!demoParser || !w || demoMatchEnded) return;
     PlayerPrediction::Move recorderMove;
     bool haveRecorderMove = false;
-    if (moveBlock.size >= 64) {
+    if (moveBlock.size >= 64 && demoParser->moveQueue().admit()) {
         const DemoMove move = demoParser->readRawMove(moveBlock.data.data(), moveBlock.data.size());
         recorderMove.x = move.x; recorderMove.y = move.y; recorderMove.z = move.z;
         recorderMove.yaw = move.yaw; recorderMove.pitch = move.pitch; recorderMove.roll = move.roll;
@@ -12366,12 +12431,38 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
         haveRecorderMove = true;
     }
     const auto& blocks = demoParser->getInitialBlock().dataBlocks;
+    auto& tracker = demoParser->getGhostTracker();
+    // Static shapes are in the player's collision mask (StaticShapeObjectType
+    // | StaticTSObjectType); collect their collision hulls once per tick.
+    struct ShapeHull { Point3F lo, hi; std::vector<PlayerPrediction::Triangle> tris; };
+    std::vector<ShapeHull> hulls;
+    for (int index : tracker.getAllIndices()) {
+        const GhostEntry* g = tracker.getGhost(index);
+        if (!g || !g->shape || !g->hasRenderModel) continue;
+        if (!ghostClassIs(g->className, "StaticShape") && !ghostClassIs(g->className, "ScopeAlwaysShape") &&
+            !ghostClassIs(g->className, "TSStatic") && !isTurretGhostClass(g->className)) continue;
+        ShapeHull hull;
+        appendShapeCollisionTriangles(*g->shape, g->renderModel, hull.tris);
+        if (hull.tris.empty()) continue;
+        hull.lo = {1e30f, 1e30f, 1e30f};
+        hull.hi = {-1e30f, -1e30f, -1e30f};
+        for (const auto& t : hull.tris)
+            for (const Point3F& p : {t.a, t.b, t.c}) {
+                hull.lo = {std::min(hull.lo.x, p.x), std::min(hull.lo.y, p.y), std::min(hull.lo.z, p.z)};
+                hull.hi = {std::max(hull.hi.x, p.x), std::max(hull.hi.y, p.y), std::max(hull.hi.z, p.z)};
+            }
+        hulls.push_back(std::move(hull));
+    }
     const PlayerPrediction::GatherTriangles gather = [&](const Point3F& lo, const Point3F& hi,
                                                          std::vector<PlayerPrediction::Triangle>& out) {
         w->playerTrianglesInBox(lo, hi, out);
+        for (const auto& hull : hulls) {
+            if (hull.hi.x < lo.x || hull.lo.x > hi.x || hull.hi.y < lo.y || hull.lo.y > hi.y ||
+                hull.hi.z < lo.z || hull.lo.z > hi.z) continue;
+            out.insert(out.end(), hull.tris.begin(), hull.tris.end());
+        }
     };
     const PlayerPrediction::WaterLevel water = [&](float x, float y) { return w->waterSurfaceAt(x, y); };
-    auto& tracker = demoParser->getGhostTracker();
     for (int index : tracker.getAllIndices()) {
         GhostEntry* g = const_cast<GhostEntry*>(tracker.getGhost(index));
         if (!g || !ObserverParity::isPlayerClass(g->className) || !g->hasDatablock) continue;
@@ -12391,6 +12482,9 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
         state.mounted = g->mountObject >= 0;
         state.damageState = g->damageState;
         const bool recorder = index == controlGhostIndex;
+        // Once the recorded queue overflows its input history is unusable;
+        // the recorder is predicted without its retained move.
+        if (recorder && !demoParser->moveQueue().available) state.move = {};
         state.allowFreelook = recorder && ((state.mounted && g->mountNode == 0) || !demoRecordedFirstPerson);
         PlayerPrediction::processTick(state, data, getGravity(), recorder && haveRecorderMove ? &recorderMove : nullptr,
                                       0.0f, demoPlayerCollision, gather, water);

@@ -835,6 +835,7 @@ bool DemoParser::readInitialBlock(const uint8_t* data, size_t size, uint32_t pro
     initialBlock.queuedMoves.clear();
     for (uint32_t i = 0; i < moveCount; ++i)
         initialBlock.queuedMoves.push_back(readQueuedMove(bs));
+    moveQueue_.reset(initialBlock.connectionFields[4], initialBlock.queuedMoves.size());
     initialBlock.demoValues = readDemoValues(bs);
     extractMissionInfo();
     readComplexTargetManager(bs);
@@ -1432,6 +1433,7 @@ DemoParserSnapshot DemoParser::captureSnapshot() const {
     snapshot.vehicleHud = vehicleHud_;
     snapshot.ammoHud = ammoHud_;
     snapshot.pendingExplosions = s_pendingExplosions;
+    snapshot.moveQueue = moveQueue_;
     return snapshot;
 }
 
@@ -1478,6 +1480,7 @@ bool DemoParser::restoreSnapshot(const DemoParserSnapshot& snapshot) {
     vehicleHud_ = snapshot.vehicleHud;
     ammoHud_ = snapshot.ammoHud;
     s_pendingExplosions = snapshot.pendingExplosions;
+    moveQueue_ = snapshot.moveQueue;
     return true;
 }
 
@@ -1648,6 +1651,7 @@ GameState DemoParser::readGameState(BitStream& bs) {
     GameState gs{};
     gs.compressionPoint = compressionPoint;
     gs.lastMoveAck = bs.readU32();
+    moveQueue_.acknowledge(gs.lastMoveAck);
 
     // damageFlash and whiteOut (optional 7-bit floats)
     if (bs.readFlag()) {
@@ -2166,7 +2170,7 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
             if (bs.readFlag()) {
                 bool playing = bs.readFlag();
                 int profile = playing ? bs.readInt(11) : -1;
-                if (entry) entry->soundThreads[i] = {profile, playing, true};
+                if (entry) entry->soundThreads[i] = {profile, playing, true, nextSoundThreadRevision()};
             }
     }
     // ThreadMask: sequence/state plus compact direction/end flags.

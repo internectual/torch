@@ -1126,6 +1126,8 @@ private:
     SoundBuffer* ambientSound{};
     std::vector<SoundSource*> emitterSources;
     std::unordered_map<uint64_t, SoundSource*> shapeBaseSoundSources;
+    // Per slot: the SoundMask write revision whose sound was last started.
+    std::unordered_map<uint64_t, uint32_t> shapeBaseSoundRevisions;
     std::unordered_map<int, SoundSource*> demoJetSoundSources; // ghost -> looping jetSound
     std::unordered_map<uint16_t, SoundSource*> projectileSoundSources;
     std::unordered_map<uint64_t, std::unique_ptr<VoicePlayback>> voicePlaybacks;

@@ -250,7 +250,7 @@ static bool readShapeBasePayload(V12BitStream& stream, bool initial,
                 const bool playing = stream.readFlag();
                 int profile = -1;
                 if (playing) profile = (int)stream.readUnsigned(11);
-                if (state) state->soundThreads[i] = {profile, playing, true};
+                if (state) state->soundThreads[i] = {profile, playing, true, nextSoundThreadRevision()};
             }
         }
     }

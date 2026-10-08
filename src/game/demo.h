@@ -1,4 +1,5 @@
 #pragma once
+#include "net/sound_thread_revision.h"
 #include "game/player_prediction.h"
 #include "game/shape_lighting.h"
 #include "game/weapon_image_state.h"
@@ -674,6 +675,7 @@ struct GhostEntry {
         int profileId = -1;
         bool playing = false;
         bool valid = false;
+        uint32_t revision = 0; // nextSoundThreadRevision() at the last write
     };
     int classId{};
     std::string className;
@@ -940,6 +942,37 @@ struct DemoPendingExplosion {
     bool endedWithDecal = false;
 };
 
+// The recorder's client move queue (GameConnection mFirstMoveIndex /
+// mLastMoveAck). Playback's collectMove (Tribes2.exe 0x00601ca0) stops
+// admitting moves once more than MaxMoveQueueSize + 1 are unacknowledged;
+// relay/observer recordings whose inputs never reached the server exceed
+// that, and the recorded input history is then unusable.
+struct RecordedMoveQueue {
+    static constexpr uint32_t MaxPending = 46; // GameConnection::MaxMoveQueueSize + 1
+    uint32_t lastMoveAck{}, nextMoveId{};
+    bool available{true};
+    void reset(uint32_t firstMoveIndex, size_t queued) {
+        lastMoveAck = firstMoveIndex;
+        nextMoveId = firstMoveIndex + (uint32_t)queued;
+        available = true;
+        validate(0);
+    }
+    void acknowledge(uint32_t ack) {
+        lastMoveAck = std::max(lastMoveAck, ack);
+        nextMoveId = std::max(nextMoveId, ack);
+    }
+    void validate(uint32_t incoming) {
+        if (available && nextMoveId + incoming - lastMoveAck > MaxPending) available = false;
+    }
+    // A recorded Move block: true when the move is admitted to the queue.
+    bool admit() {
+        validate(1);
+        if (!available) return false;
+        ++nextMoveId;
+        return true;
+    }
+};
+
 struct DemoParserSnapshot {
     size_t blockStreamOffset{};
     int blockCount{-1};
@@ -973,6 +1006,7 @@ struct DemoParserSnapshot {
     VehicleHudState vehicleHud;
     AmmoHudState ammoHud;
     std::vector<DemoPendingExplosion> pendingExplosions;
+    RecordedMoveQueue moveQueue;
 };
 
 // ─── DemoParser ─────────────────────────────────────────────────
@@ -1057,6 +1091,7 @@ public:
     const InventoryHudState& getInventoryHud() const { return inventoryHud_; }
     const VehicleHudState& getVehicleHud() const { return vehicleHud_; }
     const AmmoHudState& getAmmoHud() const { return ammoHud_; }
+    RecordedMoveQueue& moveQueue() { return moveQueue_; }
     const std::map<std::pair<int, uint32_t>, uint32_t>& getSensorGroupColors() const {
         return sensorGroupColors_;
     }
@@ -1107,6 +1142,7 @@ private:
     InventoryHudState inventoryHud_;
     VehicleHudState vehicleHud_;
     AmmoHudState ammoHud_;
+    RecordedMoveQueue moveQueue_;
     // HUD state saved in the demo values at record start (recordings.cs
     // saveDemoSettings); every HUD reset starts from it.
     WeaponsHudState initialWeaponsHud_;

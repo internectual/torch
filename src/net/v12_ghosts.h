@@ -1,4 +1,5 @@
 #pragma once
+#include "net/sound_thread_revision.h"
 
 #include "net/v12_bitstream.h"
 #include "net/v12_registry.h"
@@ -38,6 +39,7 @@ struct PlayerGhostState {
         int profileId = -1;
         bool playing = false;
         bool valid = false;
+        uint32_t revision = 0; // nextSoundThreadRevision() at the last write
     };
     struct MountedImage {
         int datablockId = -1;
