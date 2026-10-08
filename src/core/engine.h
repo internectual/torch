@@ -101,6 +101,9 @@ public: // TEST HARNESS: temporarily public so dts_one can install an empty FS
     bool previewDone = false;
     std::string previewMap;
     std::string demoPath;
+    // -demo: the recording waiting for the shell (see startPendingDemo).
+    std::string pendingDemo;
+    void startPendingDemo();
     bool demoMode = false; // Explicit -demo-mode launch flag, not recording playback.
     int maxFrames = 0;
     Point3F previewCamPos{0, 200, -400};

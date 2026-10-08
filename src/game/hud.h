@@ -11,19 +11,10 @@ public:
     ~HUD();
 
     void init();
+    // GameRenderFilters (damage flash, white-out, black-out, underwater)
+    // and Torch's developer tools; the player's HUD is the stock GUI.
     void render(Game* game);
-    void renderCrosshair();
-    void renderHealthBar(float health, float maxHealth);
-    void renderEnergyBar(float energy, float maxEnergy);
-    void renderAmmo(int32_t current, int32_t max);
-    void renderScoreboard(Game* game);
-    void renderMessage(const char* text, float duration = 3.0f);
-
-    void showMessage(const char* text, const ColorF& color = {1,1,1,1});
-    void setChatInput(const char* text);
     void resetState();
-    void setObjectiveTask(const char* line1, const char* line2 = nullptr);
-    void clearObjectiveTask();
 
     void setVisible(bool v) { visible = v; }
     bool isVisible() const { return visible; }

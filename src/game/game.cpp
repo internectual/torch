@@ -10896,10 +10896,6 @@ void Game::startLocalGame(const char* map, std::vector<MisObject>* sceneObjects)
         auto& gui = Engine::instance().guiRenderer();
          gui.clearDialogs();
          gui.setContent("PlayGui");
-         if (hud) {
-             const auto initialObjective = stockTrainingInitialObjective(missionPath);
-             hud->setObjectiveTask(initialObjective.first.c_str(), initialObjective.second.c_str());
-         }
          if (auto* weaponsHud = gui.findControl("weaponsHud")) {
             weaponsHud->visible = true;
             weaponsHud->fields["backgroundBitmap"] = "gui/hud_new_panel";
@@ -11047,8 +11043,6 @@ void Game::connectToServer(const char* host, uint16_t port) {
     nativeDatablockShapes.clear();
 
     Console::instance().printf(LogLevel::Info, "Connecting to %s:%d...", host, port);
-    // Show connecting message
-    if (hud) hud->showMessage("Connecting...", ColorF{1, 1, 0, 1});
 
     auto& net = Engine::instance().network();
     activeConn = net.createConnection();
@@ -12254,6 +12248,7 @@ bool Game::playDemo(const char* path) {
 }
 
 void Game::stopDemoPlayback() {
+    const bool wasPlayingRecording = demoParser != nullptr && !demoLive;
     demoLive = false;
     liveConnection = nullptr;
     if (auto* ts = Engine::instance().script().ts()) ts->clearPackages();
@@ -12282,9 +12277,15 @@ void Game::stopDemoPlayback() {
     }
     setState(MenuScreen);
     menu().setActive(false);
-    auto& gui = Engine::instance().guiRenderer();
-    if (gui.findControl("LobbyGui")) gui.setContentImmediate("LobbyGui");
-    else gui.setContentImmediate("LaunchGui");
+    // Removing the playback connection runs the script's
+    // demoPlaybackComplete(), which returns the shell to its recordings.
+    if (wasPlayingRecording) {
+        auto* ts = Engine::instance().script().ts();
+        if (ts && ts->isFunction("demoPlaybackComplete"))
+            ts->callFunction("demoPlaybackComplete", {});
+        else
+            Console::instance().printf(LogLevel::Warn, "Demo: demoPlaybackComplete() is not defined");
+    }
 }
 
 // The recording's Move block: the engine Move struct as the client
@@ -13141,7 +13142,6 @@ void Game::resetLiveMissionState() {
     freeCamTarget = {0, 10, -1};
     freeCamRot = {0, 0, 0};
     gamePaused = false;
-    showScoreboard = false;
     targetFinderShown = false;
     serverPlayerGhostIndex = 0;
     serverPlayerGhostSynced = false;
@@ -13189,7 +13189,6 @@ void Game::applyInput(const InputMove& input) {
     zoomed = nextZoomed;
     currentInput = input;
     currentInput.zoom = nextZoomed;
-    showScoreboard = input.showScoreboard;
 
     // Demo pause toggle on rising edge of P key
     if (demoPlaying && input.demoPause && !previousDemoPause)

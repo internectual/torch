@@ -750,40 +750,6 @@ static bool parseColor(const std::string& s, ColorF& out) {
     return false;
 }
 
-static float colorLuminance(const ColorF& color) {
-    return 0.2126f * color.r + 0.7152f * color.g + 0.0722f * color.b;
-}
-
-static bool hasDarkGuiSurface(const GuiControl* control) {
-    for (const GuiControl* parent = control ? control->parent : nullptr;
-         parent; parent = parent->parent) {
-        const std::string& cls = parent->className;
-        if (cls == "ShellFieldCtrl" || cls.find("ShellField") == 0 ||
-            cls == "ShellPaneCtrl" || cls == "ShellDlgFrame" ||
-            cls == "GuiPaneControl" || cls == "GuiTabPageCtrl")
-            return true;
-        if (auto* profile = getProfile(parent->profileName)) {
-            const auto opaque = profile->fields.find("opaque");
-            const auto fill = profile->fields.find("fillColor");
-            if (opaque != profile->fields.end() && opaque->second.toBool() &&
-                fill != profile->fields.end()) {
-                ColorF background{0, 0, 0, 1};
-                if (parseColor(fill->second.toString(), background))
-                    return colorLuminance(background) < 0.42f;
-            }
-        }
-    }
-    return false;
-}
-
-static ColorF readableGuiTextColor(const GuiControl* control, ColorF color) {
-    if (hasDarkGuiSurface(control) && colorLuminance(color) < 0.38f) {
-        color.r = 0.9f;
-        color.g = 0.93f;
-        color.b = 0.94f;
-    }
-    return color;
-}
 
 
 // Bitmap array cell detection: scan texture for separator color (pixel 0,0 or magenta as fallback)
@@ -1826,7 +1792,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 parseColor(fci->second.toString(), tc);
             font = getProfileFont(prof);
         }
-        tc = readableGuiTextColor(ctl, tc);
         if (font && !ctl->text.empty()) {
             float ch = (float)font->charHeight;
             // Split into lines first so multi-line labels still work.
@@ -1879,7 +1844,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 if (it != prof->fields.end()) parseColor(it->second.toString(), colourTable[k]);
             }
         }
-        for (auto& color : colourTable) color = readableGuiTextColor(ctl, color);
         ColorF curColor = colourTable[0];
         ColorF stackColor = curColor;
         auto getHexColor = [](const std::string& hex) -> ColorF {
@@ -2119,7 +2083,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), tc);
             auto bi = prof->fields.find("bitmap"); if (bi != prof->fields.end()) bmp = bi->second.toString();
         }
-        tc = readableGuiTextColor(ctl, tc);
         Texture* fieldTex = nullptr;
         if (!bmp.empty()) fieldTex = t2Bitmap(r, bmp);
         // Shell entry field: T2 bitmap array (pieces as rows: left cap /
@@ -2186,8 +2149,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto sfi = prof->fields.find("selectionColor"); if (sfi != prof->fields.end()) parseColor(sfi->second.toString(), selFc);
             auto sfci = prof->fields.find("fontColorSEL"); if (sfci != prof->fields.end()) parseColor(sfci->second.toString(), selTc);
         }
-        tc = readableGuiTextColor(ctl, tc);
-        selTc = readableGuiTextColor(ctl, selTc);
         r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
         Texture* selectedBar = getShellTex(r, "shll_bar_act.png");
         // Find scroll offset from parent scroll container
@@ -2238,7 +2199,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 auto colorIt = ctl->fields.find(prefix + colorKey);
                 if (colorIt != ctl->fields.end()) parseColor(colorIt->second, rowColor);
             }
-            rowColor = readableGuiTextColor(ctl, rowColor);
             auto rowColorIt = ctl->fields.find("rowColor" + std::to_string(i));
             if (!isSel && rowColorIt != ctl->fields.end())
                 parseColor(rowColorIt->second, rowColor);
@@ -2310,8 +2270,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto bmi = prof->fields.find("bitmap"); if (bmi != prof->fields.end()) radioBmp = bmi->second.toString();
             auto ji = prof->fields.find("justify"); if (ji != prof->fields.end()) justify = ji->second.toString();
         }
-        tc = readableGuiTextColor(ctl, tc);
-        if (tcHL.r >= 0.0f) tcHL = readableGuiTextColor(ctl, tcHL);
         float sz = 16;
         bool drewAtlas = false;
         // T2 ships a radio texture but no textures/gui/shll_checkbox bitmap.
@@ -2713,7 +2671,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 if (color != doneProfile->fields.end()) parseColor(color->second.toString(), txc);
             }
         } else {
-            txc = readableGuiTextColor(ctl, txc);
         }
         Texture* tabTex = nullptr;
         auto loadTex = [&](const std::string& p) { tabTex = t2Bitmap(r, p); };
@@ -2814,7 +2771,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), fc);
             auto fci = prof->fields.find("fontColor"); if (fci != prof->fields.end()) parseColor(fci->second.toString(), txc);
         }
-        txc = readableGuiTextColor(ctl, txc);
         // Closed popup: T2 renders a slim pulldown button vertically centered
         // in the control extent, with horizontally centered value text.
         float slimH = 20.0f;
@@ -4072,7 +4028,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             auto toi = prof->fields.find("textOffset"); if (toi != prof->fields.end()) sscanf(toi->second.toString().c_str(), "%f %f", &textOfsX, &textOfsY);
             auto ji = prof->fields.find("justify"); if (ji != prof->fields.end()) justify = ji->second.toString();
         }
-        tc = readableGuiTextColor(ctl, tc);
         bool isOpaque = false;
         if (prof) {
             auto oi = prof->fields.find("opaque");

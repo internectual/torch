@@ -8192,7 +8192,6 @@ bool ScriptEngine::init() {
             else if (command == "jump") action = "jump";
             else if (command == "jet") action = "jet";
             else if (command == "reload") action = "reload";
-            else if (command == "showScoreboard") action = "scoreboard";
             else if (command == "toggleConsole") action = "console";
             else if (command == "toggleZoom") action = "zoom";
             if (action) {

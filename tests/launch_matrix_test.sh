@@ -65,7 +65,9 @@ if grep -q 'Bootstrap:' "$log_dir/retail.log"; then printf 'retail loaded hardco
 for name in playback demo-mode mapper; do
     grep -q -- '-nologin: dev panel\|Mapper mode:' "$log_dir/$name.log" || exit 1
 done
-grep -q 'Loading demo:' "$log_dir/playback.log" || exit 1
+# Playback starts from the stock Recordings dialog once the shell is up; the
+# bootstrap must take console_start's offline (-nologin) path to get there.
+grep -q 'Game::argv\[[0-9]*\] = -nologin' "$log_dir/playback.log" || exit 1
 if [[ -f "$data/base/$mission" ]]; then
     grep -q 'Mapper mode: free-fly camera active' "$log_dir/mapper.log" || exit 1
     grep -q 'Preview:' "$log_dir/preview.log" || exit 1

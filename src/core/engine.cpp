@@ -35,7 +35,7 @@
 static std::map<std::string, int> s_bindings = {
     {"forward", 26}, {"backward", 22}, {"left", 4}, {"right", 7},
     {"jump", 44}, {"jet", 225}, {"fire", -1}, {"altfire", -3},
-    {"zoom", -2}, {"reload", 21}, {"scoreboard", 43},
+    {"zoom", -2}, {"reload", 21},
     {"f1", 58}, {"f2", 59}, {"f3", 60}, {"f4", 61},
     {"chat", 40}, {"console", 53},
 };
@@ -1485,6 +1485,10 @@ bool Engine::init(int argc, char* argv[]) {
             else a += c;
         }
         if (!a.empty()) args.push_back(a);
+        // A recording plays from the shell, so the stock bootstrap must run
+        // its offline path (console_start's -nologin) to console_end.cs.
+        if (!demoPath.empty() && std::find(args.begin(), args.end(), "-nologin") == args.end())
+            args.push_back("-nologin");
         ts->setGlobal("$Game::argc", VMValue((int32_t)args.size()));
         for (size_t i = 0; i < args.size(); i++)
             ts->setGlobal("$Game::argv[" + std::to_string(i) + "]", VMValue(args[i]));
@@ -1599,7 +1603,6 @@ bool Engine::init(int argc, char* argv[]) {
                 else if (command == "jump") action = "jump";
                 else if (command == "jet") action = "jet";
                 else if (command == "reload") action = "reload";
-                else if (command == "showScoreboard") action = "scoreboard";
                 else if (command == "toggleConsole") action = "console";
                 else if (command == "toggleZoom") action = "zoom";
                 if (action) {
@@ -1843,10 +1846,8 @@ bool Engine::init(int argc, char* argv[]) {
         g->enterShapeViewer();
     }
 
-    // -demo mode: load the demo (playback happens in the render loop)
-    if (!demoPath.empty()) {
-        g->playDemo(demoPath.c_str());
-    }
+    // -demo: played from the stock Recordings dialog once the shell is up.
+    if (!demoPath.empty()) pendingDemo = demoPath;
 
     // -mapper mode: load a mission for inspection without gameplay
     if (mapperMode) {
@@ -1983,6 +1984,36 @@ void Engine::runDedicated() {
 }
 #endif
 
+// -demo <file>: the stock flow a player takes. Once console_end.cs has the
+// shell up (its launch toolbar is pushed over the launch screen), open
+// RecordingsDlg (which lists recordings/*.rec), select the recording's row
+// and run StartSelectedDemo().
+void Engine::startPendingDemo() {
+    auto* ts = scr ? scr->ts() : nullptr;
+    if (!ts || !gui || !gui->isDialogActive("LaunchToolbarDlg") || !ts->isFunction("StartSelectedDemo") ||
+        !ScriptEngine::instance().findObject("RecordingsDlg"))
+        return;
+    std::string name = std::filesystem::path(pendingDemo).stem().string();
+    pendingDemo.clear();
+    std::string escaped;
+    for (char c : name) {
+        if (c == '"' || c == '\\') escaped += '\\';
+        escaped += c;
+    }
+    const std::string source =
+        "Canvas.pushDialog(RecordingsDlg);\n"
+        "%found = false;\n"
+        "for (%i = 0; %i < RecordingsDlgList.rowCount(); %i++)\n"
+        "   if (getField(RecordingsDlgList.getRowText(%i), 0) $= \"" + escaped + "\") {\n"
+        "      RecordingsDlgList.setSelectedRow(%i);\n"
+        "      %found = true;\n"
+        "      break;\n"
+        "   }\n"
+        "if (%found) StartSelectedDemo();\n"
+        "else error(\"-demo: recordings/" + escaped + ".rec is not in the recordings list\");\n";
+    ts->executeNested(source, "-demo");
+}
+
 void Engine::run() {
     // A quit() issued before the loop starts (e.g. the final line of an
     // -exec script) must not be lost by forcing running=true below.
@@ -2009,6 +2040,7 @@ void Engine::run() {
             break;
         }
         loopFrameRan = true;
+        if (!pendingDemo.empty()) startPendingDemo();
         double now = Timer::now();
         float dt = (float)(now - lastTime);
         lastTime = now;
@@ -2619,7 +2651,6 @@ void Engine::run() {
                     input.zoom = boundActionDown("zoom");
                 }
                 input.reload = boundKeyDown("reload");
-                input.showScoreboard = boundKeyDown("scoreboard");
                 input.demoPause = keys[SCANCODE_P] != 0;
                 input.demoStepFrame = keys[SCANCODE_PERIOD] != 0;
                 input.demoShowEvents = keys[SCANCODE_E] != 0;

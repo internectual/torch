@@ -73,7 +73,9 @@ run_client demo -demo recordings/treachery.rec -quit-after-frames 3
 run_client playdemo -playdemo recordings/treachery.rec -quit-after-frames 3
 run_client demo-mode -demo-mode -quit-after-frames 3
 for demo_name in demo playdemo; do
-    if ! grep -q "Loading demo:" "$log_dir/$demo_name.out" ||
+    # Playback starts from the stock Recordings dialog once the shell is up;
+    # within a few frames the bootstrap must be on console_start's -nologin path.
+    if ! grep -q 'Game::argv\[[0-9]*\] = -nologin' "$log_dir/$demo_name.out" ||
        ! grep -q "TORCH-RUN-START" "$log_dir/$demo_name.out"; then
         printf '%s did not reach demo startup\n' "$demo_name" >&2
         exit 1

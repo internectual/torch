@@ -20,26 +20,15 @@ constexpr RemapAction kRemapActions[] = {
     {"left", "Strafe Left"}, {"right", "Strafe Right"},
     {"jump", "Jump"}, {"jet", "Jet"}, {"fire", "Fire"},
     {"altfire", "Alt Fire"}, {"zoom", "Zoom"}, {"reload", "Reload"},
-    {"scoreboard", "Scoreboard"}, {"f1", "Free Camera"},
+    {"f1", "Free Camera"},
     {"f2", "Orbit Camera"}, {"chat", "Chat"}, {"console", "Console"},
 };
 constexpr int kRemapActionCount = sizeof(kRemapActions) / sizeof(kRemapActions[0]);
 }
 
 struct HUD::Impl {
-    struct Message {
-        std::string text;
-        ColorF color;
-        double start;
-        double duration;
-    };
-    std::vector<Message> messages;
-    std::string chatInput;
-    double messageStart = 0;
     std::string targetSearch;
     int targetSelection = 0;
-    std::string objectiveLine1;
-    std::string objectiveLine2;
 };
 
 HUD::HUD() : impl(new Impl) {}
@@ -48,27 +37,12 @@ HUD::~HUD() { delete impl; }
 void HUD::init() {}
 
 void HUD::resetState() {
-    impl->messages.clear();
-    impl->chatInput.clear();
-    impl->messageStart = 0;
     impl->targetSearch.clear();
     impl->targetSelection = 0;
-    clearObjectiveTask();
-}
-
-void HUD::setObjectiveTask(const char* line1, const char* line2) {
-    impl->objectiveLine1 = line1 ? line1 : "";
-    impl->objectiveLine2 = line2 ? line2 : "";
-}
-
-void HUD::clearObjectiveTask() {
-    impl->objectiveLine1.clear();
-    impl->objectiveLine2.clear();
 }
 
 void HUD::render(Game* game) {
     const bool dead = game && game->state() == Game::Dead;
-    const bool liveObserver = game && game->isConnected();
     if (!visible || !game || (game->state() != Game::Playing && !dead)) return;
 
     auto& input = Engine::instance().platform().input();
@@ -101,11 +75,6 @@ void HUD::render(Game* game) {
     r.setView(id);
     glDisable(GL_DEPTH_TEST);
 
-    // The reticle belongs to active first-person play, not dead/observer HUDs
-    // or the target-finder overlay.
-    if (HudParity::crosshairVisible(dead, liveObserver, game->targetFinderOpen()))
-        renderCrosshair();
-
     // GameRenderFilters applies these effects for both network and demo
     // snapshots. They are intentionally drawn before the HUD controls.
     const float damageFlash = game->getDamageFlash();
@@ -118,90 +87,18 @@ void HUD::render(Game* game) {
     if (blackOut > 0.0f)
         r.drawBox({{0, 0, 0}, {(float)w, (float)h, 0}}, {0, 0, 0, std::min(blackOut, 1.0f)});
 
+    // GameRenderFilters applies the water filter before the GUI. Lava and
+    // quicksand deliberately do not use it.
+    if (game->isUnderwater()) {
+        r.drawBox({{0, 0, 0}, {(float)w, (float)h, 0}}, {0.2f, 0.6f, 0.6f, 0.3f});
+    }
+
+    // Everything the player sees beyond the render filters is the stock GUI
+    // (PlayGui, its HUD controls and the scripts that drive them). Torch's
+    // own playback tools draw only with the F1 developer overlay.
     char buf[128];
-    if (!dead && !liveObserver) {
-        // PlayerData::maxDamage is the local ShapeBase health cap. Using the
-        // stock 100-point default makes heavy/custom armor display the wrong
-        // bar length and HP denominator.
-        const float maxHealth = game->player().maxHealth();
-        renderHealthBar(game->player().health(), maxHealth);
-        const float maxEnergy = game->player().maxEnergy();
-        renderEnergyBar(game->player().energy(), maxEnergy);
-        const int weapon = game->player().currentWeapon();
-        const int ammo = weapon >= 0 && weapon < game->player().weaponCount()
-            ? game->player().weapon(weapon).ammo : -1;
-        int maxAmmo = 0;
-        if (weapon >= 0 && weapon < game->player().weaponCount()) {
-            const int type = game->player().weapon(weapon).type;
-            if (type >= 0 && type < gWeaponCount) maxAmmo = gWeaponTable[type].maxAmmo;
-        }
-        renderAmmo(ammo, maxAmmo);
-        snprintf(buf, sizeof(buf), "HP: %.0f/%.0f  AR: %.0f",
-                 game->player().health(), maxHealth, game->player().armor());
-        if (font) font->render(buf, 20.0f, (float)h - 60.0f, {1, 1, 1, 1}, 2.0f);
-        snprintf(buf, sizeof(buf), "EN: %.0f/%.0f  RECHARGE: %.1f",
-                 game->player().energy(), maxEnergy, Movement::energyRecharge);
-        if (font) font->render(buf, 20.0f, (float)h - 40.0f, {0, 1, 1, 1}, 2.0f);
-    }
-
-    if (dead && !liveObserver && font) {
-        font->render("YOU ARE DEAD", w * 0.5f - 90.0f, h * 0.5f - 30.0f,
-                     {1.0f, 0.25f, 0.2f, 1.0f}, 2.5f);
-        font->render("Respawning...", w * 0.5f - 75.0f, h * 0.5f + 10.0f,
-                     {0.8f, 0.8f, 0.8f, 1.0f}, 1.5f);
-    }
-
-    // Stock Observer HUD keeps the current control target visible even when
-    // the camera is not attached to a player.  The native observer snapshot
-    // has the same target/client association used by the scoreboard.
-    if (liveObserver) {
-        const auto observer = game->activeConnection()->observerSnapshot();
-        const int selected = game->getSpectateGhostIndex();
-        const int targetIndex = selected >= 0 ? selected :
-            ObserverParity::controlGhostIndex(observer.controlGhost);
-        const GhostEntry* target = game->getLiveGhost(targetIndex);
-        const char* targetName = target && !target->playerName.empty()
-            ? target->playerName.c_str() : "Free camera";
-        snprintf(buf, sizeof(buf), "FOLLOW: %s  [R / RMB] next", targetName);
-        if (font) font->render(buf, w * 0.5f - 80.0f, 20.0f,
-                               {0.35f, 1.0f, 0.55f, 0.95f}, 2.0f);
-    }
-
-    // Messages
-    double now = Engine::instance().timer().now();
-    for (size_t i = 0; i < impl->messages.size();) {
-        auto& msg = impl->messages[i];
-        double age = now - msg.start;
-        if (msg.duration > 0.0 && age >= msg.duration) {
-            impl->messages.erase(impl->messages.begin() + i);
-            continue;
-        }
-        float alpha = HudParity::messageAlpha(age, msg.duration);
-        ColorF color = msg.color;
-        color.a *= std::clamp(alpha, 0.0f, 1.0f);
-        if (font) font->render(msg.text.c_str(), w * 0.5f - 100, h * 0.3f + (float)i * 25,
-                               color, 2.0f);
-        i++;
-    }
-    if (font && !impl->chatInput.empty()) {
-        font->render(("> " + impl->chatInput).c_str(), 20.0f, h - 40.0f,
-                     {1, 1, 1, 1}, 2.0f);
-    }
-
-    if (font && (!impl->objectiveLine1.empty() || !impl->objectiveLine2.empty())) {
-        const float objectiveY = dead ? 90.0f : 20.0f;
-        font->render("OBJECTIVE", 20.0f, objectiveY,
-                     {1.0f, 0.85f, 0.25f, 1.0f}, 1.1f);
-        if (!impl->objectiveLine1.empty())
-            font->render(impl->objectiveLine1.c_str(), 20.0f, objectiveY + 18.0f,
-                         {1, 1, 1, 1}, 1.0f);
-        if (!impl->objectiveLine2.empty())
-            font->render(impl->objectiveLine2.c_str(), 20.0f, objectiveY + 34.0f,
-                         {1, 1, 1, 1}, 1.0f);
-    }
-
     // Demo playback info (a live connection is not a playback).
-    if (game->isDemoPlaying() && !game->isLiveClient()) {
+    if (Engine::instance().overlayActive() && game->isDemoPlaying() && !game->isLiveClient()) {
         const char* status = "> PLAY";
         ColorF statusColor = {0, 1, 0, 1};
         if (game->demoStepFeedback()) {
@@ -303,25 +200,6 @@ void HUD::render(Game* game) {
         }
     }
 
-    // GameRenderFilters applies the water filter before the GUI. Lava and
-    // quicksand deliberately do not use it.
-    if (game->isUnderwater()) {
-        r.drawBox({{0, 0, 0}, {(float)w, (float)h, 0}}, {0.2f, 0.6f, 0.6f, 0.3f});
-    }
-
-    // Scoreboard (Tab overlay)
-    if (game->scoreboardShown()) {
-        renderScoreboard(game);
-    }
-
-    // Pause overlay
-    if (game->isGamePaused() && font) {
-        auto& plat = Engine::instance().platform();
-        r.drawBox({{0, 0, 0}, {(float)plat.width(), (float)plat.height(), 0}}, {0, 0, 0, 0.6f});
-        font->render("PAUSED", 400, 300, {1, 1, 1, 1}, 3.0f);
-        font->render("[ESC] Resume  [Q] Quit to Desktop", 300, 360, {0.7f, 0.7f, 0.7f, 0.8f}, 2.0f);
-    }
-
     if (game->targetFinderOpen() && font) {
         struct Entry { int ghost; std::string label; bool selectable; };
         std::vector<Entry> entries;
@@ -396,319 +274,6 @@ void HUD::render(Game* game) {
         font->render("UP/DOWN select  ENTER follow  ESC/F3 close", x + 24, y + 466, {0.6f, 0.7f, 0.75f, 1}, 1.2f);
     }
 
-}
-
-void HUD::renderCrosshair() {
-    auto& r = Engine::instance().renderer();
-    int32_t w = Engine::instance().platform().width() / 2;
-    int32_t h = Engine::instance().platform().height() / 2;
-    float s = 8.0f;
-
-    r.drawLine({(float)w - s, (float)h, 0}, {(float)w + s, (float)h, 0}, {0, 1, 0, 1});
-    r.drawLine({(float)w, (float)h - s, 0}, {(float)w, (float)h + s, 0}, {0, 1, 0, 1});
-}
-
-void HUD::renderHealthBar(float health, float maxHealth) {
-    auto& r = Engine::instance().renderer();
-    int32_t h = Engine::instance().platform().height();
-    float barW = 200.0f, barH = 16.0f;
-    float x = 20.0f, y = (float)h - 80.0f;
-    const float fill = HudParity::resourceFraction(health, maxHealth);
-
-    r.drawLine({x, y, 0}, {x + barW, y, 0}, {1, 1, 1, 0.5f});
-    r.drawLine({x + barW, y, 0}, {x + barW, y - barH, 0}, {1, 1, 1, 0.5f});
-    r.drawLine({x + barW, y - barH, 0}, {x, y - barH, 0}, {1, 1, 1, 0.5f});
-    r.drawLine({x, y - barH, 0}, {x, y, 0}, {1, 1, 1, 0.5f});
-
-    if (HudParity::resourceFillVisible(health, maxHealth, barW)) {
-        float fw = barW * fill;
-        Box3F hBox = {{x + 1, y - barH + 1, 0}, {x + fw - 1, y - 1, 0}};
-        r.drawBox(hBox, {0.2f, 1.0f, 0.2f, 0.8f});
-    }
-}
-
-void HUD::renderEnergyBar(float energy, float maxEnergy) {
-    auto& r = Engine::instance().renderer();
-    int32_t h = Engine::instance().platform().height();
-    float barW = 200.0f, barH = 12.0f;
-    float x = 20.0f, y = (float)h - 56.0f;
-    const float fill = HudParity::resourceFraction(energy, maxEnergy);
-
-    r.drawLine({x, y, 0}, {x + barW, y, 0}, {1, 1, 1, 0.5f});
-    r.drawLine({x + barW, y, 0}, {x + barW, y - barH, 0}, {1, 1, 1, 0.5f});
-    r.drawLine({x + barW, y - barH, 0}, {x, y - barH, 0}, {1, 1, 1, 0.5f});
-    r.drawLine({x, y - barH, 0}, {x, y, 0}, {1, 1, 1, 0.5f});
-
-    if (HudParity::resourceFillVisible(energy, maxEnergy, barW)) {
-        float fw = barW * fill;
-        Box3F eBox = {{x + 1, y - barH + 1, 0}, {x + fw - 1, y - 1, 0}};
-        r.drawBox(eBox, {0.2f, 0.8f, 1.0f, 0.8f});
-    }
-}
-
-void HUD::renderAmmo(int32_t current, int32_t max) {
-    auto& r = Engine::instance().renderer();
-    int32_t h = Engine::instance().platform().height();
-    float barW = 200.0f, barH = 10.0f;
-    float x = 20.0f, y = (float)h - 36.0f;
-    if (max <= 0) return;
-    const float fill = HudParity::resourceFraction((float)current, (float)max);
-
-    r.drawLine({x, y, 0}, {x + barW, y, 0}, {1, 1, 1, 0.5f});
-    r.drawLine({x + barW, y, 0}, {x + barW, y - barH, 0}, {1, 1, 1, 0.5f});
-    r.drawLine({x + barW, y - barH, 0}, {x, y - barH, 0}, {1, 1, 1, 0.5f});
-    r.drawLine({x, y - barH, 0}, {x, y, 0}, {1, 1, 1, 0.5f});
-
-    if (HudParity::resourceFillVisible((float)current, (float)max, barW)) {
-        float fw = barW * fill;
-        Box3F aBox = {{x + 1, y - barH + 1, 0}, {x + fw - 1, y - 1, 0}};
-        r.drawBox(aBox, {1.0f, 0.8f, 0.2f, 0.8f});
-    }
-}
-
-void HUD::renderScoreboard(Game* game) {
-    auto& r = Engine::instance().renderer();
-    auto* font = r.getFont();
-    if (!font) return;
-
-    int32_t w = Engine::instance().platform().width();
-    int32_t h = Engine::instance().platform().height();
-
-    // Leave room for the team/flag strip above the player table.
-    const int teamRows = HudParity::scoreboardTeamRows(
-        game->isConnected(), (int)game->getLiveTeamScores().size());
-    float bw = 550.0f, bh = std::max(400.0f, 430.0f + teamRows * 16.0f);
-    float bx = (w - bw) * 0.5f, by = (h - bh) * 0.5f;
-    r.drawBox(Box3F{{bx, by, 0}, {bx + bw, by + bh, 0}}, {0, 0, 0, 0.7f});
-
-    char buf[256];
-
-    // Title
-    if (font) font->render("SCOREBOARD", bx + 10, by + 10, {1, 1, 0, 1}, 2.0f);
-    if (game->isConnected()) {
-        const auto observer = game->activeConnection()->observerSnapshot();
-        snprintf(buf, sizeof(buf), "Observed players: %zu  targets: %zu  mission CRC: %08X",
-                 observer.players.size(), observer.targets.size(), observer.missionCrc);
-        if (font) font->render(buf, bx + 10, by + 30, {0.65f, 0.75f, 0.85f, 0.9f}, 1.0f);
-        const char* phase = game->liveMatchEnded() ? "DEBRIEF" :
-                            game->liveMatchStarted() ? "MATCH LIVE" : "WARMUP";
-        if (font) font->render(phase, bx + 10, by + 40,
-                              {0.55f, 0.65f, 0.75f, 0.8f}, 1.0f);
-        if (font && (!game->liveMissionDisplayName().empty() ||
-                     !game->liveMissionType().empty())) {
-            snprintf(buf, sizeof(buf), "%s  %s",
-                     game->liveMissionDisplayName().c_str(),
-                     game->liveMissionType().c_str());
-            font->render(buf, bx + 140, by + 40, {0.75f, 0.75f, 0.55f, 0.9f}, 1.0f);
-        }
-        const int clockMs = game->liveClockRemainingMs();
-        if (clockMs > 0) {
-            snprintf(buf, sizeof(buf), "Clock %d:%02d", clockMs / 60000,
-                     (clockMs / 1000) % 60);
-            if (font) font->render(buf, bx + 420, by + 40, {0.9f, 0.85f, 0.5f, 0.9f}, 1.0f);
-        }
-        if (font && !game->liveLoadInfoLines().empty()) {
-            const auto& line = game->liveLoadInfoLines().front();
-            font->render(line.c_str(), bx + 20, by + 385, {0.8f, 0.8f, 0.7f, 0.9f}, 1.0f);
-        }
-        float teamY = by + 58;
-        for (const auto& [teamId, team] : game->getLiveTeamScores()) {
-            int playerCount = 0;
-            const auto snapshot = game->activeConnection()->observerSnapshot();
-            for (const auto& [clientId, clientTeam] : snapshot.clientTeams)
-                if (clientTeam == teamId) ++playerCount;
-            const char* flag = team.flagStatus == "held" ? "Held" :
-                               team.flagStatus == "field" ? "Dropped" : "Home";
-            const char* carrier = team.flagStatus == "held" && !team.flagCarrier.empty()
-                ? team.flagCarrier.c_str() : "";
-            const char* name = team.name.empty() ?
-                (teamId == 1 ? "Storm" : teamId == 2 ? "Inferno" : "Team") : team.name.c_str();
-            snprintf(buf, sizeof(buf), "%s  %d  (%d)  Flag: %s%s%s",
-                     name, team.score, playerCount, flag,
-                     carrier[0] ? " " : "", carrier[0] ? carrier : "");
-            if (font) font->render(buf, bx + 20, teamY,
-                                   {0.8f, 0.85f, 0.45f, 0.95f}, 1.0f);
-            teamY += 16.0f;
-        }
-    }
-
-    // Column headers
-    float colX[] = {bx + 20, bx + 140, bx + 250, bx + 325, bx + 395, bx + 455, bx + 505};
-    const char* headers[] = {"Player", "Team", "Score", "Damage", "Health", "Ping", "Loss"};
-    const float headerY = HudParity::scoreboardHeaderY(by, teamRows);
-    for (int i = 0; i < 7; i++) {
-        if (font) font->render(headers[i], colX[i], headerY, {1, 1, 1, 1}, 2.0f);
-    }
-
-    int row = 0;
-    const int maxRows = 15;
-
-    // Use demo player data if available
-    if (game->isDemoPlaying()) {
-        auto* dp = game->getDemoParser();
-        if (dp) {
-            auto players = dp->getPlayerInfo();
-            std::stable_sort(players.begin(), players.end(), [](const auto& a, const auto& b) {
-                return HudParity::scoreboardPlayerBefore(
-                    a.teamId, a.score, a.clientId, a.name,
-                    b.teamId, b.score, b.clientId, b.name);
-            });
-            for (auto& p : players) {
-                if (row >= maxRows) break;
-                float ry = headerY + 26 + row * 22;
-                ColorF col = {0.8f, 0.8f, 1.0f, 0.9f};
-                 const ColorF teamCol = HudParity::teamColor(p.teamId);
-                snprintf(buf, sizeof(buf), "%s", p.name.c_str());
-                if (font) font->render(buf, colX[0], ry, col, 2.0f);
-                 const char* teamName = HudParity::teamName(p.teamId);
-                if (font) font->render(teamName, colX[1], ry, teamCol, 2.0f);
-                snprintf(buf, sizeof(buf), "%d", p.score);
-                if (font) font->render(buf, colX[2], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
-                float dmgPct = (1.0f - p.damage) * 100.0f;
-                snprintf(buf, sizeof(buf), "%.0f%%", p.damage * 100.0f);
-                if (font) font->render(buf, colX[3], ry, {1, 0.5f, 0.2f, 0.9f}, 2.0f);
-                ColorF hc = dmgPct > 66 ? ColorF{0,1,0,0.9f} : dmgPct > 33 ? ColorF{1,1,0,0.9f} : ColorF{1,0,0,0.9f};
-                 snprintf(buf, sizeof(buf), "%.0f%%", dmgPct);
-                 if (font) font->render(buf, colX[4], ry, hc, 2.0f);
-                 snprintf(buf, sizeof(buf), "%d", p.ping);
-                 if (font) font->render(buf, colX[5], ry, {0.7f, 0.85f, 1.0f, 0.9f}, 2.0f);
-                 snprintf(buf, sizeof(buf), "%d%%", p.packetLoss);
-                 if (font) font->render(buf, colX[6], ry, {1.0f, 0.7f, 0.4f, 0.9f}, 2.0f);
-                 row++;
-            }
-            if (row == 0 && font) {
-                font->render("No player data available", colX[0], by + 80, {0.5f,0.5f,0.5f,1}, 2.0f);
-            }
-            return;
-        }
-    }
-
-    // Live game: show all ghosts with kills/deaths from server
-    if (game->isConnected()) {
-        if (auto* connection = game->activeConnection()) {
-            const auto observer = connection->observerSnapshot();
-            if (!observer.clientNames.empty()) {
-                std::vector<int> clientIds;
-                clientIds.reserve(observer.clientNames.size());
-                for (const auto& [clientId, name] : observer.clientNames)
-                    clientIds.push_back(clientId);
-                std::sort(clientIds.begin(), clientIds.end(), [&](int left, int right) {
-                    const auto leftName = observer.clientNames.find(left);
-                    const auto rightName = observer.clientNames.find(right);
-                    const auto leftTeam = observer.clientTeams.find(left);
-                    const auto rightTeam = observer.clientTeams.find(right);
-                    const auto leftScore = observer.playerScores.find(left);
-                    const auto rightScore = observer.playerScores.find(right);
-                    return HudParity::scoreboardPlayerBefore(
-                        leftTeam == observer.clientTeams.end() ? 0 : leftTeam->second,
-                        leftScore == observer.playerScores.end() ? 0 : leftScore->second,
-                        left, leftName == observer.clientNames.end() ? "" : leftName->second,
-                        rightTeam == observer.clientTeams.end() ? 0 : rightTeam->second,
-                        rightScore == observer.playerScores.end() ? 0 : rightScore->second,
-                        right, rightName == observer.clientNames.end() ? "" : rightName->second);
-                });
-                for (const int clientId : clientIds) {
-                    if (row >= maxRows) break;
-                    const auto nameIt = observer.clientNames.find(clientId);
-                    const std::string& name = nameIt->second;
-                    const auto team = observer.clientTeams.find(clientId);
-                    const auto score = observer.playerScores.find(clientId);
-                    const auto ping = observer.playerPings.find(clientId);
-                    const auto loss = observer.playerPacketLoss.find(clientId);
-                    const auto target = observer.clientTargets.find(clientId);
-                    const GhostEntry* ghost = target == observer.clientTargets.end()
-                        ? nullptr : game->getLiveGhost(target->second);
-                 float ry = headerY + 26 + row * 22;
-                    ColorF nameCol = team == observer.clientTeams.end()
-                        ? ColorF{0.8f, 0.8f, 1.0f, 0.9f}
-                        : HudParity::teamColor(team->second);
-                    if (font) font->render(name.c_str(), colX[0], ry, nameCol, 2.0f);
-                    const char* teamName = team == observer.clientTeams.end() ? "N/A" :
-                        HudParity::teamName(team->second);
-                    if (font) font->render(teamName, colX[1], ry, nameCol, 2.0f);
-                    snprintf(buf, sizeof(buf), "%d", score == observer.playerScores.end() ? 0 : score->second);
-                    if (font) font->render(buf, colX[2], ry, {1, 1, 0, 0.9f}, 2.0f);
-                    snprintf(buf, sizeof(buf), "-");
-                    if (font) font->render(buf, colX[3], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
-                     if (ghost) {
-                         const float health = 100.0f * HudParity::resourceFraction(
-                             ghost->health, ghost->maxHealth);
-                         snprintf(buf, sizeof(buf), "%.0f%%", health);
-                     }
-                    else snprintf(buf, sizeof(buf), "-");
-                    if (font) font->render(buf, colX[4], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
-                    snprintf(buf, sizeof(buf), "%d", ping == observer.playerPings.end() ? 0 : ping->second);
-                    if (font) font->render(buf, colX[5], ry, {0.7f, 0.85f, 1.0f, 0.9f}, 2.0f);
-                    snprintf(buf, sizeof(buf), "%d%%", loss == observer.playerPacketLoss.end() ? 0 : loss->second);
-                    if (font) font->render(buf, colX[6], ry, {1.0f, 0.7f, 0.4f, 0.9f}, 2.0f);
-                    row++;
-                }
-                return;
-            }
-        }
-        auto indices = game->getLiveGhostIndices();
-        row = 0;
-        for (auto idx : indices) {
-            if (row >= maxRows) break;
-            auto* g = game->getLiveGhost(idx);
-            if (!g || !ObserverParity::isPlayerTarget(g->className, g->damageState))
-                continue;
-             float ry = headerY + 26 + row * 22;
-            const ColorF nameCol = g->teamId == 0
-                ? ColorF{0.8f, 0.8f, 1.0f, 0.9f}
-                : HudParity::teamColor(g->teamId);
-            snprintf(buf, sizeof(buf), "%s", g->playerName.empty() ? "Player" : g->playerName.c_str());
-            if (font) font->render(buf, colX[0], ry, nameCol, 2.0f);
-             const char* teamName = HudParity::teamName(g->teamId);
-            if (font) font->render(teamName, colX[1], ry, nameCol, 2.0f);
-             snprintf(buf, sizeof(buf), "%d", g->score);
-            if (font) font->render(buf, colX[2], ry, {1,1,0,0.9f}, 2.0f);
-            snprintf(buf, sizeof(buf), "%d", g->deaths);
-            if (font) font->render(buf, colX[3], ry, {1,0.5f,0.2f,0.9f}, 2.0f);
-             const float health = 100.0f * HudParity::resourceFraction(
-                 g->health, g->maxHealth);
-             snprintf(buf, sizeof(buf), "%.0f", health);
-            if (font) font->render(buf, colX[4], ry, {0,1,0,0.9f}, 2.0f);
-            row++;
-        }
-        if (row == 0 && font)
-             font->render("No live players", colX[0], headerY + 26, {0.5f,0.5f,0.5f,1}, 2.0f);
-        return;
-    }
-
-    // Fallback: local player only (single-player / demo)
-    auto& p = game->player();
-    const float ry = headerY + 26.0f;
-    const ColorF teamCol = HudParity::teamColor(p.team());
-    snprintf(buf, sizeof(buf), "%s", game->config().playerName.c_str());
-    if (font) font->render(buf, colX[0], ry, teamCol, 2.0f);
-    if (font) font->render(HudParity::teamName(p.team()), colX[1], ry, teamCol, 2.0f);
-    snprintf(buf, sizeof(buf), "%.0f", p.score);
-    if (font) font->render(buf, colX[2], ry, {1, 1, 1, 1}, 2.0f);
-    if (font) font->render("-", colX[3], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
-    const float healthPercent = 100.0f * HudParity::resourceFraction(
-        p.health(), p.maxHealth());
-    snprintf(buf, sizeof(buf), "%.0f%%", healthPercent);
-    if (font) font->render(buf, colX[4], ry, {0, 1, 0, 0.9f}, 2.0f);
-    if (font) font->render("-", colX[5], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
-    if (font) font->render("-", colX[6], ry, {0.6f, 0.6f, 0.6f, 0.8f}, 2.0f);
-}
-
-void HUD::renderMessage(const char* text, float duration) {
-    if (impl->messages.size() >= 16) impl->messages.erase(impl->messages.begin());
-    impl->messages.push_back({text ? text : "", {1, 1, 1, 1},
-                              Engine::instance().timer().now(), std::max(0.0f, duration)});
-}
-
-void HUD::showMessage(const char* text, const ColorF& color) {
-    if (impl->messages.size() >= 16) impl->messages.erase(impl->messages.begin());
-    impl->messages.push_back({text ? text : "", color,
-                              Engine::instance().timer().now(), 3.0});
-}
-
-
-void HUD::setChatInput(const char* text) {
-    impl->chatInput = text ? text : "";
 }
 
 void Menu::init() {}
