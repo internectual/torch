@@ -702,6 +702,22 @@ void GuiRenderer::mapMouse(int physicalX, int physicalY, int& logicalX, int& log
 }
 
 struct ClipRect { float x, y, w, h; };
+
+// Saves the scissor test and box; restore() puts both back, so a nested
+// clip never leaves its own box (or the test) behind for later controls.
+struct GuiScissorState {
+    GLboolean enabled = GL_FALSE;
+    GLint box[4]{};
+    GuiScissorState() {
+        enabled = glIsEnabled(GL_SCISSOR_TEST);
+        glGetIntegerv(GL_SCISSOR_BOX, box);
+    }
+    void restore() const {
+        glScissor(box[0], box[1], box[2], box[3]);
+        if (enabled) glEnable(GL_SCISSOR_TEST);
+        else glDisable(GL_SCISSOR_TEST);
+    }
+};
 struct BmpCell { int x, y, w, h; };
 
 static ScriptObject* getProfile(const std::string& name) {
@@ -1840,6 +1856,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 else if (strcasecmp(justify.c_str(), "center") == 0) startX = std::floor((ctl->extentX - textWidth) / 2.0f);
             }
             const float startY = std::floor((ctl->extentY - (float)font->charHeight) / 2.0f);
+            // Text that fits its control needs no clip of its own (any
+            // enclosing clip is already active).
+            const bool fits = textWidth <= ctl->extentX && (float)font->charHeight <= ctl->extentY;
+            if (fits) drawTextN(font, ctl->text, x + startX, y + startY, colors);
             float cx = x, cy = y, cw = ctl->extentX, ch = ctl->extentY;
             if (clip) {
                 const float right = std::min(x + ctl->extentX, clip->x + clip->w);
@@ -1849,19 +1869,16 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 cw = right - cx;
                 ch = bottom - cy;
             }
-            if (cw > 0.0f && ch > 0.0f) {
+            if (!fits && cw > 0.0f && ch > 0.0f) {
                 r.flushSpriteBatch();
-                GLint oldScissor[4];
-                const GLboolean scissorWas = glIsEnabled(GL_SCISSOR_TEST);
-                glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
+                const GuiScissorState saved;
                 int sx, sy, sw, sh;
                 guiLogicalToScissor(s_renderViewport, s_renderDrawableHeight, cx, cy, cw, ch, sx, sy, sw, sh);
                 glEnable(GL_SCISSOR_TEST);
                 glScissor(sx, sy, sw, sh);
                 drawTextN(font, ctl->text, x + startX, y + startY, colors);
                 r.flushSpriteBatch();
-                if (scissorWas) glScissor(oldScissor[0], oldScissor[1], oldScissor[2], oldScissor[3]);
-                else glDisable(GL_SCISSOR_TEST);
+                saved.restore();
             }
         }
     } else if (cn == "GuiMLTextCtrl" || cn == "GuiMessageVectorCtrl") {
@@ -2885,8 +2902,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // Set up clip rect for children
         ClipRect childClip = {x, y, ctl->extentX, ctl->extentY};
         bool useScissor = false;
-        GLboolean scissorWas = glIsEnabled(GL_SCISSOR_TEST);
-        GLint oldScissor[4];
+        const GuiScissorState savedScissor;
         if (clip) {
             // Intersect with existing clip
             float cx = (x > clip->x) ? x : clip->x;
@@ -2907,7 +2923,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             int sx, sy, sw, sh;
             guiLogicalToScissor(s_renderViewport, s_renderDrawableHeight,
                                 childClip.x, childClip.y, childClip.w, childClip.h, sx, sy, sw, sh);
-            glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
             glEnable(GL_SCISSOR_TEST);
             glScissor(sx, sy, sw, sh);
         }
@@ -2925,10 +2940,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // Restore scissor
         if (useScissor) {
             r.flushSpriteBatch();
-            if (scissorWas)
-                glScissor(oldScissor[0], oldScissor[1], oldScissor[2], oldScissor[3]);
-            else
-                glDisable(GL_SCISSOR_TEST);
+            savedScissor.restore();
         }
 
         // Scrollbar (T2 shell skin): arrow buttons + 3-piece track + 3-piece
@@ -3933,11 +3945,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 // Save GL state
                 auto savedProj = r.projectionMatrix();
                 auto savedView = r.view;
-                GLint oldScissor[4]; glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
+                const GuiScissorState savedScissor;
                 GLint oldVP[4]; glGetIntegerv(GL_VIEWPORT, oldVP);
 
-                // Compute screen-space clip region (GL coords: origin bottom-left)
-                int h = Engine::instance().platform().height();
+                // The control's canvas rectangle (clipped to its parent).
                 float sx = x, sy = y, sw = ctl->extentX, sh = ctl->extentY;
 
                 // Clamp to parent clip
@@ -3954,10 +3965,12 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 // later under wrong state or land on top of the 3D model.
                 r.flushSpriteBatch();
 
-                // Set viewport and scissor to control bounds
-                glViewport((GLint)sx, (GLint)(h - sy - sh), (GLsizei)sw, (GLsizei)sh);
+                // Viewport and scissor on the control, in drawable pixels.
+                int px, py, pw, ph;
+                guiLogicalToScissor(s_renderViewport, s_renderDrawableHeight, sx, sy, sw, sh, px, py, pw, ph);
+                glViewport(px, py, pw, ph);
                 glEnable(GL_SCISSOR_TEST);
-                glScissor((GLint)sx, (GLint)(h - sy - sh), (GLsizei)sw, (GLsizei)sh);
+                glScissor(px, py, pw, ph);
                 glEnable(GL_DEPTH_TEST);
                 glDepthMask(GL_TRUE);
                 glClear(GL_DEPTH_BUFFER_BIT);
@@ -4061,7 +4074,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
 
                 // Restore GL state
                 glViewport(oldVP[0], oldVP[1], oldVP[2], oldVP[3]);
-                glScissor(oldScissor[0], oldScissor[1], oldScissor[2], oldScissor[3]);
+                savedScissor.restore();
                 glDisable(GL_DEPTH_TEST);
                 glDepthMask(GL_FALSE);
                 r.setProjection(savedProj);
