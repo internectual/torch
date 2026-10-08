@@ -15,7 +15,9 @@ inline bool ghostClassIs(const std::string& className, const char* expected) {
 }
 
 inline bool isWorldLevelGhostClass(const std::string& className) {
-    for (const char* name : {"InteriorInstance", "StaticShape", "ScopeAlwaysShape",
+    // StaticShape and ScopeAlwaysShape ghosts carry their datablock shape
+    // and draw (and collide) as ghosts; the world never holds them.
+    for (const char* name : {"InteriorInstance",
                              "TSStatic", "TerrainBlock", "Sky", "Sun", "Lightning",
                              "WaterBlock", "MissionArea", "ForceFieldBare",
                              // SceneObjects without a shape; World draws or

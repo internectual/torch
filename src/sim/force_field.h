@@ -11,7 +11,8 @@ class ForceFieldBareObject : public GameBase {
 public:
     enum State { Open = 0, Opening = 1, Closing = 2, Closed = 3 };
     enum Masks : uint32_t { TransformMask = GameBase::NextFreeMask, StateChangeMask = GameBase::NextFreeMask << 1 };
-    ForceFieldBareObject() { ghostable = true; }
+    // ForceFieldBare: Ghostable | ScopeAlways.
+    ForceFieldBareObject() { ghostable = true; scopeAlways = true; }
     const char* netClassName() const override { return "ForceFieldBare"; }
     void processMove(const ClientMoveIn* move) override;
     uint32_t packUpdate(GameConnection& connection, uint32_t mask, TorqueBitWriter& w) override;
