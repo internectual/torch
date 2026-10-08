@@ -69,24 +69,6 @@ inline bool isStockTrainingMission(const std::string& missionName) {
            name.back() >= '1' && name.back() <= '5';
 }
 
-// Mission filenames are resolved case-insensitively. Keep ambient weather
-// selection consistent so renamed or Windows-cased stock missions retain their
-// authored environmental sound profile.
-inline int missionWeatherType(const std::string& missionName) {
-    const std::string name = missionRulesLower(missionName);
-    // Mission display names and paths may retain spaces or punctuation (for
-    // example, "Sol's Descent"). Weather selection follows the compact map
-    // identity used by the mission browser rather than the raw spelling.
-    const std::string compactName = missionRulesCompact(name);
-    if (compactName.find("whiteout") != std::string::npos ||
-        compactName.find("solsdescent") != std::string::npos)
-        return 1; // cold/windy
-    if (compactName.find("training2") != std::string::npos ||
-        compactName.find("swamp") != std::string::npos)
-        return 2; // wet
-    return 0; // dry
-}
-
 inline MissionRules stockMissionRules(const std::string& missionName,
                                        const std::string& missionContent = {}) {
     std::string name = missionRulesLower(missionName);

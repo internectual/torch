@@ -7246,9 +7246,6 @@ void Game::clearMissionAudio() {
     audio.clearEnvironmentState();
     for (auto* source : emitterSources) audio.releaseSource(source);
     emitterSources.clear();
-    if (ambientSource) audio.releaseSource(ambientSource);
-    ambientSource = nullptr;
-    ambientSound = nullptr;
 }
 
 static SoundSource* playNativeAudioProfile(AudioSystem& audio,
@@ -10916,7 +10913,6 @@ void Game::startLocalGame(const char* map, std::vector<MisObject>* sceneObjects)
     }
 
     // Classify weather by mission name for ambient audio selection
-    weatherType = missionWeatherType(missionPath);
 
     if (sceneObjects && demoParser) w->sceneDataBlocks = &demoParser->getInitialBlock().dataBlocks;
     const bool worldLoaded = sceneObjects
@@ -11027,27 +11023,6 @@ void Game::startLocalGame(const char* map, std::vector<MisObject>* sceneObjects)
             }
         }
 
-        // Start ambient audio
-        if (audio.config().enabled) {
-            const char* ambPath;
-            if (weatherType == 1)      ambPath = "audio/fx/environment/coldwind1.wav";
-            else if (weatherType == 2) ambPath = "audio/fx/environment/wetwind.wav";
-            else                        ambPath = "audio/fx/environment/drywind.wav";
-            if (!Engine::instance().fs().fileExists(ambPath)) {
-                Console::instance().printf(LogLevel::Warn, "Ambient sound not found: %s (weather type %d)", ambPath, weatherType);
-            }
-            ambientSound = audio.loadSound(ambPath);
-            if (ambientSound) {
-                ambientSource = audio.createSource(true);
-                if (ambientSource) {
-                    ambientSource->setLooping(true);
-                     ambientSource->setVolume(0.3f * audio.config().masterVolume *
-                         audio.config().sfxVolume);
-                    ambientSource->play(ambientSound);
-                    Console::instance().printf(LogLevel::Info, "Ambient: %s", ambPath);
-                }
-            }
-        }
     } else {
         Console::instance().printf(LogLevel::Error, "Failed to load map '%s'", missionPath.c_str());
         failLocalGame();

@@ -30,12 +30,6 @@ int main() {
     assert(candidates[1] == "missions/Official/Desert.misPK");
     assert(missionPreviewCandidates("missions/../outside").empty());
 
-    assert(missionWeatherType("missions/whiteout.mis") == 1);
-    assert(missionWeatherType("MISSIONS\\SolsDescent.MISPK") == 1);
-    assert(missionWeatherType("missions/Sol's Descent.mis") == 1);
-    assert(missionWeatherType("missions/TRAINING2.mis") == 2);
-    assert(missionWeatherType("missions/swamp.mis") == 2);
-    assert(missionWeatherType("missions/raindance.mis") == 0);
 
     const auto previews = missionPreviewCandidates("official/Desert");
     assert(previews.size() == 3);

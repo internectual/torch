@@ -1155,8 +1155,6 @@ private:
     float timeScale = 1.0f;
     float deathTimer = 0.0f;
     bool missionRespawn = true;
-    SoundSource* ambientSource{};
-    SoundBuffer* ambientSound{};
     std::vector<SoundSource*> emitterSources;
     std::unordered_map<uint64_t, SoundSource*> shapeBaseSoundSources;
     // Per slot: the SoundMask write revision whose sound was last started.
@@ -1175,7 +1173,6 @@ private:
     void processVoiceCapture();
     void clearVoicePlaybacks();
     std::unordered_set<uint64_t> demoAudioEventsPlayed;
-    int32_t weatherType = 0; // 0=dry, 1=cold, 2=wet
     InputMove currentInput;
     bool previousFire = false;
     bool previousAltFire = false;
