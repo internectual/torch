@@ -7230,6 +7230,8 @@ void Game::shutdown() {
 }
 
 void Game::clearMissionAudio() {
+    // Mission teardown: shapes are reloaded, so cached hulls go too.
+    staticShapeHulls.clear();
     auto& audio = Engine::instance().audio();
     for (auto& [key, source] : shapeBaseSoundSources)
         if (source) audio.releaseSource(source);
@@ -12681,30 +12683,37 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
     const auto& blocks = demoParser->getInitialBlock().dataBlocks;
     auto& tracker = demoParser->getGhostTracker();
     // Static shapes are in the player's collision mask (StaticShapeObjectType
-    // | StaticTSObjectType); collect their collision hulls once per tick.
-    struct ShapeHull { Point3F lo, hi; std::vector<PlayerPrediction::Triangle> tris; };
-    std::vector<ShapeHull> hulls;
+    // | StaticTSObjectType). Their hulls are rebuilt only when a ghost's shape
+    // or placement changes.
+    std::vector<const StaticShapeHull*> hulls;
+    for (auto it = staticShapeHulls.begin(); it != staticShapeHulls.end();)
+        it = tracker.getGhost(it->first) ? std::next(it) : staticShapeHulls.erase(it);
     for (int index : tracker.getAllIndices()) {
         const GhostEntry* g = tracker.getGhost(index);
         if (!g || !g->shape || !g->hasRenderModel) continue;
         if (!ghostClassIs(g->className, "StaticShape") && !ghostClassIs(g->className, "ScopeAlwaysShape") &&
             !ghostClassIs(g->className, "TSStatic") && !isTurretGhostClass(g->className)) continue;
-        ShapeHull hull;
-        appendShapeCollisionTriangles(*g->shape, g->renderModel, hull.tris);
-        if (hull.tris.empty()) continue;
-        hull.lo = {1e30f, 1e30f, 1e30f};
-        hull.hi = {-1e30f, -1e30f, -1e30f};
-        for (const auto& t : hull.tris)
-            for (const Point3F& p : {t.a, t.b, t.c}) {
-                hull.lo = {std::min(hull.lo.x, p.x), std::min(hull.lo.y, p.y), std::min(hull.lo.z, p.z)};
-                hull.hi = {std::max(hull.hi.x, p.x), std::max(hull.hi.y, p.y), std::max(hull.hi.z, p.z)};
-            }
-        hulls.push_back(std::move(hull));
+        StaticShapeHull& hull = staticShapeHulls[index];
+        if (hull.shape != g->shape || std::memcmp(hull.model.m, g->renderModel.m, sizeof(hull.model.m)) != 0) {
+            hull.shape = g->shape;
+            hull.model = g->renderModel;
+            hull.tris.clear();
+            appendShapeCollisionTriangles(*g->shape, g->renderModel, hull.tris);
+            hull.lo = {1e30f, 1e30f, 1e30f};
+            hull.hi = {-1e30f, -1e30f, -1e30f};
+            for (const auto& t : hull.tris)
+                for (const Point3F& p : {t.a, t.b, t.c}) {
+                    hull.lo = {std::min(hull.lo.x, p.x), std::min(hull.lo.y, p.y), std::min(hull.lo.z, p.z)};
+                    hull.hi = {std::max(hull.hi.x, p.x), std::max(hull.hi.y, p.y), std::max(hull.hi.z, p.z)};
+                }
+        }
+        if (!hull.tris.empty()) hulls.push_back(&hull);
     }
     const PlayerPrediction::GatherTriangles gather = [&](const Point3F& lo, const Point3F& hi,
                                                          std::vector<PlayerPrediction::Triangle>& out) {
         w->playerTrianglesInBox(lo, hi, out);
-        for (const auto& hull : hulls) {
+        for (const StaticShapeHull* h : hulls) {
+            const StaticShapeHull& hull = *h;
             if (hull.hi.x < lo.x || hull.lo.x > hi.x || hull.hi.y < lo.y || hull.lo.y > hi.y ||
                 hull.hi.z < lo.z || hull.lo.z > hi.z) continue;
             out.insert(out.end(), hull.tris.begin(), hull.tris.end());

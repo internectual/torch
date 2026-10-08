@@ -996,6 +996,14 @@ public:
     // One 32 ms client tick of every demo Player ghost's simulation (the
     // recorder's with this Move block's move).
     void tickDemoPlayers(const DemoBlock& moveBlock);
+    // Collision-N hulls of static shape ghosts (Torque space), by ghost index.
+    struct StaticShapeHull {
+        const DTSShape* shape = nullptr;
+        MatrixF model;
+        Point3F lo{}, hi{};
+        std::vector<PlayerPrediction::Triangle> tris;
+    };
+    std::unordered_map<int, StaticShapeHull> staticShapeHulls;
     PlayerPrediction::Collision demoPlayerCollision;
     float demoLastPlayerTick = 0.0f;
     bool targetFinderOpen() const { return targetFinderShown; }
