@@ -2116,11 +2116,12 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     }
     // Objects whose default state hides them (muzzle flashes, jet flares)
     // stay hidden without a thread.
+    // A part instance (onlyObject) draws just its object.
     renderList.erase(std::remove_if(renderList.begin(), renderList.end(), [&](size_t mi) {
         for (size_t oi = 0; oi < objectStartMesh.size() && oi < objectDefaults.size(); ++oi)
             if (mi >= (size_t)objectStartMesh[oi] && mi < (size_t)(objectStartMesh[oi] + objectNumMeshes[oi]))
-                return objectDefaults[oi].vis <= 0.01f;
-        return false;
+                return objectDefaults[oi].vis <= 0.01f || (onlyObject >= 0 && (int32_t)oi != onlyObject);
+        return onlyObject >= 0;
     }), renderList.end());
 
     // Pass 1: Opaque meshes
