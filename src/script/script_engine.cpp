@@ -6137,7 +6137,8 @@ bool ScriptEngine::init() {
                 else if (ctl->className == "ShellTabButton" || ctl->className == "GuiTabButton")
                     ctl->selected = args[1].toBool();  // T2 tabs: setValue(1/0) = select/deselect
                 else if (ctl->className.find("Slider") != std::string::npos)
-                    ctl->sliderValue = (float)args[1].toInt() / 1000.0f;  // T2 convention: value * 1000
+                    // GuiSliderCtrl::setValue: a float clamped to the range.
+                    ctl->sliderValue = std::clamp((float)args[1].toDouble(), ctl->sliderMin, ctl->sliderMax);
                 else if (ctl->className == "GuiProgressCtrl" || ctl->className.find("Hud") == 0) {
                     ctl->hudValue = (float)args[1].toDouble();
                     ctl->hudValueSet = true;
@@ -6171,7 +6172,7 @@ bool ScriptEngine::init() {
         auto* ctl = getListCtrl(args[0].toString());
         if (!ctl) return VMValue(0);
         if (ctl->className.find("Slider") != std::string::npos)
-            return VMValue((int)(ctl->sliderValue * 1000.0f));  // T2 convention
+            return VMValue(ctl->sliderValue);  // GuiSliderCtrl::getValue: the value in its range
         if (ctl->className == "GuiProgressCtrl" || ctl->className.find("Hud") == 0)
             return VMValue(ctl->hudValueSet ? ctl->hudValue : 0.0f);
         if (ctl->className.find("CheckBox") != std::string::npos || ctl->className.find("Radio") != std::string::npos || ctl->className.find("Toggle") != std::string::npos)
