@@ -64,6 +64,11 @@ struct PlayerGhostState {
     float maxHealth = 100.0f;
     float steeringYaw = 0.0f;
     int damageState = 0;
+    // DamageMask: blow-apart flag, damage direction (Torque space) and a
+    // per-read revision, so a merged state still shows a fresh damage update.
+    bool blowApart = false;
+    V12Vec3 damageDir{0.0f, 0.0f, 1.0f};
+    uint32_t damageRevision = 0;
     float energy = 100.0f;
     bool hasHealth = false;
     bool hasMaxHealth = false;

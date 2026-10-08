@@ -16,6 +16,7 @@ struct DTSLoadResult {
     std::vector<UtilityDetail> utilityDetails; // negative-size details (Collision-N, LOS-N)
     struct ObjectDefault { float vis = 1.0f; int32_t frame = 0, matFrame = 0; };
     std::vector<ObjectDefault> objectDefaults; // TSShape::objectStates[object]
+    std::vector<int32_t> subShapeFirstNode;    // TSShape::subShapeFirstNode
     // TSShape::bounds (shape space, as stored in the file).
     Point3F boundsMin{}, boundsMax{};
     bool hasBounds = false;

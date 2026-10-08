@@ -355,15 +355,18 @@ void debrisData(Stream& s) {
     f32s(s, 2); // minSpinSpeed, maxSpinSpeed again
     const float velocity = s.readF32();
     const float velocityVariance = s.readF32();
-    bools(s, 2); // fade, useRadiusMass
-    s.readF32(); // baseRadius
+    const bool fade = s.readUnsigned(8) != 0;
+    const bool useRadiusMass = s.readUnsigned(8) != 0;
+    const float baseRadius = s.readF32();
     const float gravModifier = s.readF32();
     const float terminalVelocity = s.readF32();
-    bools(s, 1); // ignoreWater
+    const bool ignoreWater = s.readUnsigned(8) != 0;
     s.readString(); // texture
     const std::string shape = s.readString();
-    refs(s, 3); // emitters[2], explosion
+    const uint32_t emitter0 = optionalRef(s), emitter1 = optionalRef(s);
+    const uint32_t explosion = optionalRef(s);
     if (auto* d = activeDecoded) {
+        d->hasDebris = true;
         auto& debris = d->debris;
         debris.shape = shape;
         debris.lifetimeMS = (int32_t)(lifetime * 1000.0f);
@@ -379,8 +382,14 @@ void debrisData(Stream& s) {
         debris.explodeOnMaxBounce = explodeOnMaxBounce;
         debris.staticOnMaxBounce = staticOnMaxBounce;
         debris.snapOnMaxBounce = snapOnMaxBounce;
+        debris.fade = fade;
+        debris.useRadiusMass = useRadiusMass;
+        debris.baseRadius = baseRadius;
         debris.gravModifier = gravModifier;
         debris.terminalVelocity = terminalVelocity;
+        debris.ignoreWater = ignoreWater;
+        debris.emitterRefs = {emitter0, emitter1};
+        debris.explosionRef = explosion;
     }
 }
 void shapeBase(Stream& s) {
@@ -430,13 +439,19 @@ void shapeBase(Stream& s) {
         if (i == 3 && activeDecoded) activeDecoded->shapeEmap = flag;
         if (i == 4 && activeDecoded) activeDecoded->shapeIsInvincible = flag;
         if (i == 0 && activeDecoded) activeDecoded->shapeCanControl = flag;
+        if (i == 5 && activeDecoded) activeDecoded->shapeRenderWhenDestroyed = flag;
     }
     // cmdIcon, explosion, underwaterExplosion, debris.
     if (s.readFlag()) {
         const uint32_t icon = s.readUnsigned(11);
         if (activeDecoded) activeDecoded->cmdIconRef = icon;
     }
-    refs(s, 3);
+    const uint32_t explosion = optionalRef(s), underwaterExplosion = optionalRef(s), debris = optionalRef(s);
+    if (activeDecoded) {
+        activeDecoded->shapeExplosionRef = explosion;
+        activeDecoded->shapeUnderwaterExplosionRef = underwaterExplosion;
+        activeDecoded->shapeDebrisRef = debris;
+    }
     for (int i = 0; i < 3; ++i) s.readFlag();
     s.readUnsigned(32);
     if (s.readFlag()) f32s(s, 3);

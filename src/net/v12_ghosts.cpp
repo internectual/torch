@@ -221,8 +221,14 @@ static bool readShapeBasePayload(V12BitStream& stream, bool initial,
         } else {
             stream.readUnsigned(2);
         }
-        stream.readFlag();
-        stream.readNormalVector(8);
+        const bool blowApart = stream.readFlag();
+        const V12Vec3 damageDir = stream.readNormalVector(8);
+        if (state) {
+            static uint32_t damageRevision = 0;
+            state->blowApart = blowApart;
+            state->damageDir = damageDir;
+            state->damageRevision = ++damageRevision;
+        }
     }
     if (stream.readFlag()) {
         for (int i = 0; i < 4; ++i) {
@@ -1125,6 +1131,11 @@ PlayerGhostState mergePlayerGhostState(const PlayerGhostState& base,
     if (update.hasDamageState) {
         merged.damageState = update.damageState;
         merged.hasDamageState = true;
+    }
+    if (update.damageRevision) {
+        merged.blowApart = update.blowApart;
+        merged.damageDir = update.damageDir;
+        merged.damageRevision = update.damageRevision;
     }
     if (update.hasEnergy) {
         merged.energy = update.energy;

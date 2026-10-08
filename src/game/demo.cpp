@@ -21,6 +21,7 @@
 
 // Pending explosion events from projectile ghost parsers
 std::vector<DemoParser::PendingExplosion> DemoParser::s_pendingExplosions;
+std::vector<DemoPendingBlowUp> DemoParser::s_pendingBlowUps;
 float DemoParser::s_packetTime = 0.0f;
 
 // Quaternion for a Torque yaw about +Z (MatrixF::set(EulerF(0, 0, yaw)),
@@ -893,6 +894,7 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
     parseFault_.clear();
     packetsDroppedAfterFault_ = 0;
     s_pendingExplosions.clear();
+    s_pendingBlowUps.clear();
     buf = buffer; bufSize = size; offset = 0; ownsBuffer = false;
     decompressed = nullptr; decompressedSize = 0;
 
@@ -1181,6 +1183,7 @@ void DemoParser::beginLiveStream(uint32_t sequence) {
     parseFault_.clear();
     packetsDroppedAfterFault_ = 0;
     s_pendingExplosions.clear();
+    s_pendingBlowUps.clear();
     blockStreamOffset = 0;
     blockCursor_ = 0;
     blockCount_ = 0;
@@ -1234,6 +1237,7 @@ void DemoParser::reset() {
     eventLog_.clear();
     resetHudState();
     s_pendingExplosions.clear();
+    s_pendingBlowUps.clear();
     ghostTracker.clear();
     for (int index : ibGhostTracker.getAllIndices()) {
         const GhostEntry* source = ibGhostTracker.getGhost(index);
@@ -1264,6 +1268,7 @@ void DemoParser::resetMissionState() {
     playerInfo_ = initialPlayerInfo_;
     resetHudState();
     s_pendingExplosions.clear();
+    s_pendingBlowUps.clear();
 }
 
 void DemoParser::handleHudRemoteCommand(const std::string& funcName,
@@ -1433,6 +1438,7 @@ DemoParserSnapshot DemoParser::captureSnapshot() const {
     snapshot.vehicleHud = vehicleHud_;
     snapshot.ammoHud = ammoHud_;
     snapshot.pendingExplosions = s_pendingExplosions;
+    snapshot.pendingBlowUps = s_pendingBlowUps;
     snapshot.moveQueue = moveQueue_;
     return snapshot;
 }
@@ -1480,6 +1486,7 @@ bool DemoParser::restoreSnapshot(const DemoParserSnapshot& snapshot) {
     vehicleHud_ = snapshot.vehicleHud;
     ammoHud_ = snapshot.ammoHud;
     s_pendingExplosions = snapshot.pendingExplosions;
+    s_pendingBlowUps = snapshot.pendingBlowUps;
     moveQueue_ = snapshot.moveQueue;
     return true;
 }
@@ -2158,11 +2165,17 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
     if (bs.readFlag()) {
         float dmg = bs.readFloat(6);
         int damageState = bs.readInt(2);
+        const bool blowApart = bs.readFlag();
+        const Vec3 damageDir = bs.readNormalVector(8);
         if (entry) {
+            const int previous = entry->damageState;
             entry->health = (1.0f - dmg) * 100.0f;
             entry->damageState = damageState;
+            entry->blowApart = blowApart;
+            entry->damageDir = damageDir;
+            if (!isInitial && ((previous != 2 && damageState == 2) || blowApart))
+                DemoParser::s_pendingBlowUps.push_back({-1, damageDir}); // readGhosts sets the index
         }
-        bs.readFlag(); bs.readNormalVector(8);
     }
     // SoundMask (4 slots: flag -> playing flag -> optional profileId)
     if (bs.readFlag()) {
@@ -3532,7 +3545,9 @@ void DemoParser::readGhosts(BitStream& bs, std::vector<GhostUpdate>& outGhosts, 
         failStart = gu.updateBitsStart;
         failNew = isNew;
         GhostEntry* entry = ghostTracker.getMutableGhost(gu.index);
+        const size_t blowUpsBefore = s_pendingBlowUps.size();
         bool known = readGhostClassData(bs, gu.classId, isNew, cp, entry);
+        for (size_t i = blowUpsBefore; i < s_pendingBlowUps.size(); ++i) s_pendingBlowUps[i].ghostIndex = gu.index;
         if (!known) {
             if (isNew) ghostTracker.deleteGhost(gu.index);
             Console::instance().printf(LogLevel::Error,

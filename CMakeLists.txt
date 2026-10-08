@@ -1203,6 +1203,11 @@ target_include_directories(torch_fluid_test PRIVATE src)
 target_compile_options(torch_fluid_test PRIVATE -UNDEBUG)
 add_test(NAME torch_fluid COMMAND torch_fluid_test)
 
+add_executable(torch_debris_physics_test tests/debris_physics_test.cpp src/core/math.cpp)
+target_include_directories(torch_debris_physics_test PRIVATE src)
+target_compile_options(torch_debris_physics_test PRIVATE -UNDEBUG)
+add_test(NAME torch_debris_physics COMMAND torch_debris_physics_test)
+
 add_executable(torch_player_prediction_test tests/player_prediction_test.cpp)
 target_include_directories(torch_player_prediction_test PRIVATE src)
 target_compile_options(torch_player_prediction_test PRIVATE -UNDEBUG)

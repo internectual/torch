@@ -497,6 +497,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     int32_t numSubShapes = readCount(100000);
     std::vector<int32_t> subFirstNode(numSubShapes), subFirstObj(numSubShapes), subFirstDecal(numSubShapes);
     for (int i = 0; i < numSubShapes; i++) subFirstNode[i] = rS32();
+    result.subShapeFirstNode = subFirstNode;
     rS32(); // tossed (subShapeLastNode not in file)
     for (int i = 0; i < numSubShapes; i++) subFirstObj[i] = rS32();
     rS32(); // tossed
@@ -1231,7 +1232,8 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         for (int j = 0; j < 3; j++) capCount(buf.readS32());
     }
     buf.checkGuard(); // 5
-    for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
+    result.subShapeFirstNode.clear();
+    for (int i = 0; i < numSubShapes; i++) result.subShapeFirstNode.push_back(capCount(buf.readS32()));
     for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
     for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
     buf.checkGuard(); // 6

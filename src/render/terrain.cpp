@@ -1575,6 +1575,7 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
         objectDefaults.clear();
         for (const auto& state : dtsResult.objectDefaults)
             objectDefaults.push_back({state.vis, state.frame, state.matFrame});
+        subShapeFirstNode = std::move(dtsResult.subShapeFirstNode);
         headerBoundsMin = dtsResult.boundsMin;
         headerBoundsMax = dtsResult.boundsMax;
         hasHeaderBounds = dtsResult.hasBounds;
@@ -2648,6 +2649,7 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
     };
     auto meshVisibility = [&](size_t mi) {
         const int32_t oi = meshObject(mi);
+        if (onlyObject >= 0 && oi != onlyObject) return 0.0f;
         return (oi >= 0 && oi < (int32_t)objectVisible.size() ? objectVisible[oi] : 1.0f) * alphaScale;
     };
     auto renderAnimMesh = [&](size_t mi, bool doBlend) {

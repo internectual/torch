@@ -718,6 +718,10 @@ struct GhostEntry {
     float maxHealth{100.0f};
     float steeringYaw{};
     int damageState = 0; // 0 enabled, 1 disabled, 2 destroyed
+    // DamageMask's blow-apart flag and damage direction (Torque space).
+    bool blowApart{};
+    Vec3 damageDir{0, 0, 1};
+    uint32_t damageRevision{}; // live: the last DamageMask read applied
     float energy{100.0f};
     int32_t kills{};
     int32_t deaths{};
@@ -942,6 +946,13 @@ struct DemoPendingExplosion {
     bool endedWithDecal = false;
 };
 
+// ShapeBase::unpackUpdate: an object already in the scene blows up when it
+// becomes Destroyed or its blow-apart flag is set (ShapeBase::blowUp).
+struct DemoPendingBlowUp {
+    int ghostIndex = -1;
+    Vec3 normal{0, 0, 1};
+};
+
 // The recorder's client move queue (GameConnection mFirstMoveIndex /
 // mLastMoveAck). Playback's collectMove (Tribes2.exe 0x00601ca0) stops
 // admitting moves once more than MaxMoveQueueSize + 1 are unacknowledged;
@@ -1006,6 +1017,7 @@ struct DemoParserSnapshot {
     VehicleHudState vehicleHud;
     AmmoHudState ammoHud;
     std::vector<DemoPendingExplosion> pendingExplosions;
+    std::vector<DemoPendingBlowUp> pendingBlowUps;
     RecordedMoveQueue moveQueue;
 };
 
@@ -1214,6 +1226,8 @@ public:
     // Demo time of the packet being parsed, for timestamping ghost updates.
     static float s_packetTime;
     std::vector<PendingExplosion> consumeExplosions() { auto r = std::move(s_pendingExplosions); s_pendingExplosions.clear(); return r; }
+    static std::vector<DemoPendingBlowUp> s_pendingBlowUps;
+    std::vector<DemoPendingBlowUp> consumeBlowUps() { auto r = std::move(s_pendingBlowUps); s_pendingBlowUps.clear(); return r; }
 
     // Terrain file from ghost data (for when .mis doesn't have it)
 

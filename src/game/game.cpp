@@ -5315,6 +5315,18 @@ void World::spawnExplosionEffect(const Point3F& pos,
         }
     }
     if (!selectedExplosion || !selectedExplosion->hasExplosion) return;
+    spawnExplosionData(selectedExplosion, selectedExplosionId, pos, *dataBlocks, impactNormal, tick);
+}
+
+void World::spawnExplosionData(const V12::DecodedDataBlock* explosion, uint32_t explosionId,
+                               const Point3F& pos, const std::map<uint32_t, ParsedDataBlock>& dataBlocks,
+                               const Point3F& impactNormal, int tick, int depth) {
+    static constexpr size_t maxEffectInstances = 4096;
+    if (!explosion || !explosion->hasExplosion) return;
+    const auto find = [&](uint32_t id) -> const V12::DecodedDataBlock* {
+        auto it = dataBlocks.find(id);
+        return it == dataBlocks.end() ? nullptr : &it->second.decoded;
+    };
     const auto addEmitter = [&](uint32_t emitterId, bool burst, int burstCount,
                                 float effectLifetime, float effectDelay, const Point3F& origin,
                                 TimelineRandom& random, float radialRadius = -1.0f) {
@@ -5447,65 +5459,25 @@ void World::spawnExplosionEffect(const Point3F& pos,
             effectCameraShakes.push_back(shake);
         }
         if (effect.debrisRef) {
+            // Explosion::launchDebris: debrisNum +- debrisNumVariance pieces
+            // from 0.5 above the explosion, each along randomDir(normal,
+            // theta, phi) at debrisVelocity +- debrisVelocityVariance.
             const auto* debrisBlock = find(effect.debrisRef);
-            const int debrisCount = effect.debrisNum > 0 ? std::clamp(effect.debrisNum +
-                random.intInclusive(effect.debrisNumVariance), 0, 128) : 1;
-            for (int debrisIndex = 0; debrisBlock && debrisIndex < debrisCount &&
-                 effectDebris.size() < maxEffectInstances; ++debrisIndex) {
+            if (debrisBlock && debrisBlock->hasDebris) {
                 const auto& data = debrisBlock->debris;
-                const float random01 = random();
-                const float theta = random01 * Math::PI * 2.0f;
-                Point3F normal = impactNormal;
-                const float normalLength = std::sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
-                if (normalLength > 0.001f) {
-                    normal.x /= normalLength; normal.y /= normalLength; normal.z /= normalLength;
-                } else normal = {0, 1, 0};
-                EffectDebris debris;
-                debris.pos = effectOrigin;
-                const float baseSpeed = effect.debrisVelocity != 0.0f
-                    ? effect.debrisVelocity : data.velocity;
-                const float speedVariance = effect.debrisVelocity != 0.0f
-                    ? effect.debrisVelocityVariance : data.velocityVariance;
-                const float speed = std::max(0.0f, baseSpeed +
-                    (random01 * 2.0f - 1.0f) * speedVariance);
-                const float spread = std::max(0.0f, speedVariance * 0.25f);
-                Point3F tangent{normal.y, -normal.x, 0};
-                const float tangentLength = std::sqrt(tangent.x * tangent.x + tangent.y * tangent.y);
-                if (tangentLength < 0.001f) tangent = {1, 0, 0};
-                else { tangent.x /= tangentLength; tangent.y /= tangentLength; }
-                const Point3F bitangent{normal.y * tangent.z - normal.z * tangent.y,
-                                        normal.z * tangent.x - normal.x * tangent.z,
-                                        normal.x * tangent.y - normal.y * tangent.x};
-                debris.vel = {normal.x * speed + tangent.x * std::cos(theta) * spread + bitangent.x * std::sin(theta) * spread,
-                              normal.y * speed + tangent.y * std::cos(theta) * spread + bitangent.y * std::sin(theta) * spread,
-                              normal.z * speed + tangent.z * std::cos(theta) * spread + bitangent.z * std::sin(theta) * spread};
-                debris.lifetime = std::max(0.05f, (data.lifetimeMS +
-                    (random01 * 2.0f - 1.0f) * data.lifetimeVarianceMS) / 1000.0f);
-                debris.elasticity = std::clamp(data.elasticity, 0.0f, 1.0f);
-                debris.friction = std::clamp(data.friction, 0.0f, 1.0f);
-                debris.gravModifier = std::max(0.0f, data.gravModifier);
-                debris.terminalVelocity = std::max(0.0f, data.terminalVelocity);
-                debris.maxBounces = std::max(0, data.numBounces +
-                    (int)((random01 * 2.0f - 1.0f) * data.bounceVariance));
-                debris.explodeOnMaxBounce = data.explodeOnMaxBounce;
-                debris.rotation = data.minSpin + random01 * (data.maxSpin - data.minSpin);
-                std::string path = normalizeShapePath(data.shape.empty() ? debrisBlock->debrisShape : data.shape);
-                if (!path.empty()) {
-                    auto cached = debrisShapeIndex.find(path);
-                    if (cached == debrisShapeIndex.end()) {
-                        int index = -1;
-                        auto shapeData = Engine::instance().fs().read(path.c_str());
-                        DTSShape shape;
-                        shape.name = path;
-                        if (!shapeData.empty() && shape.load(shapeData.data(), shapeData.size())) {
-                            index = (int)debrisShapes.size();
-                            debrisShapes.push_back(std::move(shape));
-                        }
-                        cached = debrisShapeIndex.emplace(path, index).first;
-                    }
-                    debris.shapeIndex = cached->second;
+                const int debrisCount = std::max(0, effect.debrisNum + random.intInclusive(effect.debrisNumVariance));
+                const Point3F launchPos{effectOrigin.x, effectOrigin.y + 0.5f, effectOrigin.z};
+                const int shapeIndex = debrisShapeFor(data.shape);
+                for (int debrisIndex = 0; debrisIndex < debrisCount &&
+                     effectDebris.size() < maxEffectInstances; ++debrisIndex) {
+                    const Point3F dir = DebrisPhysics::randomDir(impactNormal,
+                        (float)effect.debrisThetaMin, (float)effect.debrisThetaMax,
+                        (float)effect.debrisPhiMin, (float)effect.debrisPhiMax, random);
+                    const float speed = effect.debrisVelocity +
+                        (random() * 2.0f - 1.0f) * effect.debrisVelocityVariance;
+                    launchDebris(data, launchPos, {dir.x * speed, dir.y * speed, dir.z * speed}, shapeIndex,
+                                 -1, 0.2f, MatrixF{}, effectDelay, depth, dataBlocks, random);
                 }
-                effectDebris.push_back(std::move(debris));
             }
         }
         if (effect.particleEmitterRef)
@@ -5570,7 +5542,154 @@ void World::spawnExplosionEffect(const Point3F& pos,
         }
         explosionStack.pop_back();
     };
-    spawnGraph(selectedExplosion, selectedExplosionId, 0, pos, tick, 0.0f);
+    spawnGraph(explosion, explosionId, depth, pos, tick, 0.0f);
+}
+
+int World::debrisShapeFor(const std::string& shapeName) {
+    const std::string path = normalizeShapePath(shapeName);
+    if (path.empty()) return -1;
+    auto cached = debrisShapeIndex.find(path);
+    if (cached == debrisShapeIndex.end()) {
+        int index = -1;
+        auto shapeData = Engine::instance().fs().read(path.c_str());
+        DTSShape shape;
+        shape.name = path;
+        if (!shapeData.empty() && shape.load(shapeData.data(), shapeData.size())) {
+            index = (int)debrisShapes.size();
+            debrisShapes.push_back(std::move(shape));
+        } else {
+            Console::instance().printf(LogLevel::Warn, "Debris: unable to load shape '%s'", path.c_str());
+        }
+        cached = debrisShapeIndex.emplace(path, index).first;
+    }
+    return cached->second;
+}
+
+void World::launchDebris(const V12::DecodedDataBlock::DebrisData& data, const Point3F& pos, const Point3F& vel,
+                         int shapeIndex, int partObject, float partRadius, const MatrixF& orientation,
+                         float delay, int depth, const std::map<uint32_t, ParsedDataBlock>& dataBlocks,
+                         TimelineRandom& random) {
+    EffectDebris debris;
+    debris.body = DebrisPhysics::init(data, pos, vel, partRadius, random);
+    debris.data = data;
+    debris.id = ++nextDebrisId;
+    debris.delay = std::max(0.0f, delay);
+    debris.shapeIndex = shapeIndex;
+    debris.partObject = partObject;
+    debris.orientation = orientation;
+    debris.depth = depth;
+    debris.dataBlocks = &dataBlocks;
+    // Debris::onAdd: emitters[0] and [1], with emitter sizes {1, 2, 3} and
+    // {0, 1, 2} where the emitter takes its sizes from the instance.
+    for (int slot = 0; slot < 2; ++slot) {
+        const uint32_t ref = data.emitterRefs[slot];
+        auto emitterBlock = ref ? dataBlocks.find(ref) : dataBlocks.end();
+        if (emitterBlock == dataBlocks.end() || !emitterBlock->second.decoded.hasEmitter ||
+            emitterBlock->second.decoded.emitter.particleRefs.empty()) continue;
+        auto particleBlock = dataBlocks.find(emitterBlock->second.decoded.emitter.particleRefs.front());
+        if (particleBlock == dataBlocks.end() || !particleBlock->second.decoded.hasParticle) continue;
+        EffectEmitter emitter;
+        emitter.debrisOwner = debris.id;
+        emitter.debrisSlot = slot;
+        emitter.pos = pos;
+        emitter.emitter = emitterBlock->second.decoded.emitter;
+        if (emitter.emitter.useEmitterSizes)
+            emitter.emitter.sizes = slot == 0 ? std::vector<float>{1.0f, 2.0f, 3.0f}
+                                              : std::vector<float>{0.0f, 1.0f, 2.0f};
+        emitter.particle = particleBlock->second.decoded.particle;
+        emitter.age = -debris.delay;
+        emitter.delay = debris.delay;
+        emitter.nextEmission = 0.0f;
+        emitter.stopped = debris.delay > 0.0f;
+        for (const std::string& name : emitter.particle.textures) {
+            std::vector<uint32_t> frames;
+            std::vector<float> durations;
+            Engine::instance().renderer().loadTextureFrames(name.c_str(), frames, durations);
+            if (durations.empty() && !frames.empty()) durations.assign(frames.size(), 1.0f);
+            emitter.textures.insert(emitter.textures.end(), frames.begin(), frames.end());
+            emitter.textureDurations.insert(emitter.textureDurations.end(), durations.begin(), durations.end());
+        }
+        if (!emitter.textures.empty()) emitter.texture = emitter.textures.front();
+        effectEmitters.push_back(std::move(emitter));
+    }
+    effectDebris.push_back(std::move(debris));
+}
+
+void World::blowUpShape(const V12::DecodedDataBlock& shapeData, DTSShape* shape, const MatrixF& renderModel,
+                        const Point3F& damageDir, const std::map<uint32_t, ParsedDataBlock>& dataBlocks, int tick) {
+    // The world box centre: mObjBox (TSShape::bounds) under the transform.
+    Point3F localCenter{0, 0, 0};
+    if (shape) {
+        localCenter = shape->boundsCenter();
+        if (shape->hasHeaderBounds) {
+            const Point3F& lo = shape->headerBoundsMin;
+            const Point3F& hi = shape->headerBoundsMax;
+            localCenter = {(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+        }
+    }
+    const Point3F center = renderModel.transform(localCenter);
+    uint32_t explosionRef = shapeData.shapeExplosionRef;
+    if (shapeData.shapeUnderwaterExplosionRef) {
+        const float level = waterSurfaceAt(center.x, -center.z);
+        if (std::isfinite(level) && level > center.y) explosionRef = shapeData.shapeUnderwaterExplosionRef;
+    }
+    if (explosionRef) {
+        auto explosion = dataBlocks.find(explosionRef);
+        if (explosion != dataBlocks.end())
+            spawnExplosionData(&explosion->second.decoded, explosionRef, center, dataBlocks, damageDir, tick);
+    }
+    // TSPartInstance::breakShape of debrisShapeName: one piece per visible
+    // object under the first subshape, each launched within 50 degrees of
+    // the damage direction. Without a debris datablock the pieces use
+    // DebrisData's defaults.
+    if (shapeData.debrisShape.empty()) return;
+    const int shapeIndex = debrisShapeFor(shapeData.debrisShape);
+    if (shapeIndex < 0) return;
+    const DTSShape& debrisShape = debrisShapes[shapeIndex];
+    V12::DecodedDataBlock::DebrisData data;
+    if (shapeData.shapeDebrisRef) {
+        auto block = dataBlocks.find(shapeData.shapeDebrisRef);
+        if (block != dataBlocks.end() && block->second.decoded.hasDebris) data = block->second.decoded.debris;
+    }
+    // The world rotation without the shape's own up conversion.
+    MatrixF orientation = renderModel * (shape ? shape->upOrientation() : MatrixF{}).inverse();
+    orientation.setTranslation({0, 0, 0});
+    TimelineRandom random = timelineRandom({(double)shapeData.shapeExplosionRef, (double)tick,
+                                            center.x, center.y, center.z});
+    const int root = debrisShape.subShapeFirstNode.empty() ? -1 : debrisShape.subShapeFirstNode.front();
+    const auto& nodeWorld = debrisShape.defaultTransforms;
+    for (size_t object = 0; object < debrisShape.objectStartMesh.size(); ++object) {
+        if (object < debrisShape.objectDefaults.size() && debrisShape.objectDefaults[object].vis < 0.01f) continue;
+        const int first = debrisShape.objectStartMesh[object];
+        const int count = object < debrisShape.objectNumMeshes.size() ? debrisShape.objectNumMeshes[object] : 0;
+        // The object's highest detail mesh: the first of its meshes drawn by
+        // detail 0.
+        int meshIndex = -1;
+        if (!debrisShape.details.empty())
+            for (int32_t mi : debrisShape.details.front().meshIndices)
+                if (mi >= first && mi < first + count) { meshIndex = mi; break; }
+        if (meshIndex < 0 || meshIndex >= (int)debrisShape.meshes.size()) continue;
+        const MeshData& mesh = debrisShape.meshes[meshIndex];
+        if (mesh.vertices.empty()) continue;
+        int node = mesh.nodeIndex;
+        while (node >= 0 && node != root && node < (int)debrisShape.nodes.size())
+            node = debrisShape.nodes[node].parentIndex;
+        if (node < 0 || node != root) continue;
+        const MatrixF toShape = mesh.nodeIndex >= 0 && mesh.nodeIndex < (int)nodeWorld.size()
+            ? nodeWorld[mesh.nodeIndex] : MatrixF{};
+        Point3F lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+        for (const auto& vertex : mesh.vertices) {
+            const Point3F p = toShape.transform(vertex.pos);
+            lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+            hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+        }
+        // TSPartInstance's radius: half the box diagonal, halved again.
+        const float radius = 0.25f * std::sqrt((hi.x - lo.x) * (hi.x - lo.x) + (hi.y - lo.y) * (hi.y - lo.y) +
+                                               (hi.z - lo.z) * (hi.z - lo.z));
+        const Point3F dir = DebrisPhysics::randomDir(damageDir, 0.0f, 50.0f, 0.0f, 360.0f, random);
+        if (effectDebris.size() >= 4096) break;
+        launchDebris(data, center, dir, shapeIndex, (int)object, radius, orientation, 0.0f, 0, dataBlocks, random);
+    }
 }
 
 void World::spawnSplashEffect(const Point3F& inputPos,
@@ -5827,52 +5946,75 @@ void World::updateParticles(float dt) {
     effectExplosionShapes.erase(std::remove_if(effectExplosionShapes.begin(), effectExplosionShapes.end(),
         [](const EffectExplosionShape& shape) { return !shape.active; }), effectExplosionShapes.end());
 
-    for (auto& debris : effectDebris) {
-        if (!debris.active) continue;
-        debris.age += dt;
-        if (debris.age >= debris.lifetime) { debris.active = false; continue; }
-        debris.vel.y += debrisGravityAcceleration(
-            Engine::instance().game().getGravity(), debris.gravModifier) * dt;
-        if (debris.terminalVelocity > 0.0f) {
-            const float speed = std::sqrt(debris.vel.x * debris.vel.x + debris.vel.y * debris.vel.y +
-                                          debris.vel.z * debris.vel.z);
-            if (speed > debris.terminalVelocity) {
-                const float scale = debris.terminalVelocity / speed;
-                debris.vel.x *= scale; debris.vel.y *= scale; debris.vel.z *= scale;
+    // Debris::processTick in 32 ms ticks: the ray is the static world
+    // (terrain and interiors; force fields are not in the mask) plus water
+    // unless the datablock ignores it.
+    {
+        const float gravity = debrisGravityAcceleration(Engine::instance().game().getGravity(), 1.0f);
+        struct PendingExplosion { uint32_t ref; Point3F pos; int depth; const std::map<uint32_t, ParsedDataBlock>* blocks; };
+        std::vector<PendingExplosion> pending;
+        for (auto& debris : effectDebris) {
+            if (!debris.active) continue;
+            float advance = dt;
+            if (debris.delay > 0.0f) {
+                debris.delay -= dt;
+                if (debris.delay > 0.0f) continue;
+                advance = -debris.delay;
+                debris.delay = 0.0f;
+            }
+            const bool water = !debris.data.ignoreWater;
+            const ProjectilePhysics::CastRay cast = [&](const Point3F& a, const Point3F& b,
+                                                        ProjectilePhysics::RayHit& hit) {
+                bool found = castStaticRay(*this, a, b, hit);
+                if (water) {
+                    // Crossing a liquid surface downward.
+                    const float level = waterSurfaceAt(b.x, -b.z);
+                    if (std::isfinite(level) && a.y >= level && b.y < level && a.y != b.y) {
+                        const float t = (a.y - level) / (a.y - b.y);
+                        if (!found || t < hit.t) {
+                            hit.t = t;
+                            hit.point = {a.x + (b.x - a.x) * t, level, a.z + (b.z - a.z) * t};
+                            hit.normal = {0, 1, 0};
+                            found = true;
+                        }
+                    }
+                }
+                return found;
+            };
+            debris.tickTime += advance;
+            while (debris.active && debris.tickTime >= DebrisPhysics::TickSeconds) {
+                debris.tickTime -= DebrisPhysics::TickSeconds;
+                debris.body.age += DebrisPhysics::TickSeconds;
+                if (debris.body.age >= debris.body.lifetime) { debris.active = false; break; }
+                if (DebrisPhysics::step(debris.body, debris.data, gravity, cast) ==
+                        DebrisPhysics::StepResult::MaxBounce && debris.data.explodeOnMaxBounce) {
+                    if (debris.data.explosionRef && debris.dataBlocks)
+                        pending.push_back({debris.data.explosionRef, debris.body.pos, debris.depth + 1,
+                                           debris.dataBlocks});
+                    debris.active = false;
+                }
+            }
+            // Debris::updateEmitters: emit along -velocity from the piece.
+            const Point3F& v = debris.body.vel;
+            const float speed = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+            const Point3F axis = speed > 1e-6f ? Point3F{-v.x / speed, -v.y / speed, -v.z / speed} : Point3F{0, 1, 0};
+            for (auto& emitter : effectEmitters) {
+                if (emitter.debrisOwner != debris.id) continue;
+                emitter.pos = debris.body.pos;
+                emitter.ownerVelocity = v;
+                emitter.axis = axis;
+                emitter.stopped = !debris.active;
             }
         }
-        debris.pos.x += debris.vel.x * dt;
-        debris.pos.y += debris.vel.y * dt;
-        debris.pos.z += debris.vel.z * dt;
-        const float floor = getFloorHeight(debris.pos.x, debris.pos.y, debris.pos.z);
-        if (floor > -1e8f && debris.pos.y - debris.radius <= floor && debris.vel.y < 0.0f) {
-            debris.pos.y = floor + debris.radius;
-            debris.vel.y = -debris.vel.y * debris.elasticity;
-            debris.vel.x *= std::max(0.0f, 1.0f - debris.friction * dt);
-            debris.vel.z *= std::max(0.0f, 1.0f - debris.friction * dt);
-            if (++debris.bounces > debris.maxBounces ||
-                (std::fabs(debris.vel.y) < 0.15f && std::fabs(debris.vel.x) < 0.15f &&
-                 std::fabs(debris.vel.z) < 0.15f))
-                if (debris.explodeOnMaxBounce && debris.bounces > debris.maxBounces)
-                    spawnExplosion(debris.pos, {1.0f, 0.65f, 0.25f, 1.0f}, 0.7f, 6);
-            if (debris.bounces > debris.maxBounces ||
-                (std::fabs(debris.vel.y) < 0.15f && std::fabs(debris.vel.x) < 0.15f &&
-                 std::fabs(debris.vel.z) < 0.15f))
-                debris.active = false;
-        } else if (interiorCollision.loaded) {
-            Point3F push{};
-            if (interiorCollision.sphereCollide(debris.pos, debris.radius, push)) {
-                debris.pos.x += push.x; debris.pos.y += push.y; debris.pos.z += push.z;
-                debris.vel.y = -debris.vel.y * debris.elasticity;
-                debris.vel.x *= std::max(0.0f, 1.0f - debris.friction * dt);
-                debris.vel.z *= std::max(0.0f, 1.0f - debris.friction * dt);
-                if (++debris.bounces > debris.maxBounces) debris.active = false;
-            }
+        effectDebris.erase(std::remove_if(effectDebris.begin(), effectDebris.end(),
+            [](const EffectDebris& debris) { return !debris.active; }), effectDebris.end());
+        for (const auto& explosion : pending) {
+            auto block = explosion.blocks->find(explosion.ref);
+            if (block != explosion.blocks->end())
+                spawnExplosionData(&block->second.decoded, explosion.ref, explosion.pos, *explosion.blocks,
+                                   {0, 1, 0}, 0, explosion.depth);
         }
-        debris.rotation += dt;
     }
-    effectDebris.erase(std::remove_if(effectDebris.begin(), effectDebris.end(),
-        [](const EffectDebris& debris) { return !debris.active; }), effectDebris.end());
 
     auto random01 = []() { return (float)std::rand() / (float)RAND_MAX; };
     for (auto& emitter : effectEmitters) {
@@ -5922,7 +6064,7 @@ void World::updateParticles(float dt) {
             p.pos.y += dir.y * (float)emitter.emitter.ejectionOffset / 100.0f;
             p.pos.z += dir.z * (float)emitter.emitter.ejectionOffset / 100.0f;
             p.vel = {dir.x * speed, dir.y * speed, dir.z * speed};
-            if (emitter.projectileTrail || emitter.nodeEmitter) {
+            if (emitter.projectileTrail || emitter.nodeEmitter || emitter.debrisOwner) {
                 p.vel.x += emitter.ownerVelocity.x * emitter.particle.inheritedVelFactor;
                 p.vel.y += emitter.ownerVelocity.y * emitter.particle.inheritedVelFactor;
                 p.vel.z += emitter.ownerVelocity.z * emitter.particle.inheritedVelFactor;
@@ -6052,7 +6194,13 @@ void World::updateParticles(float dt) {
             [](const EffectParticle& p) { return !p.active; }), emitter.particles.end());
     }
     effectEmitters.erase(std::remove_if(effectEmitters.begin(), effectEmitters.end(),
-        [](const EffectEmitter& e) {
+        [this](const EffectEmitter& e) {
+            if (e.debrisOwner) {
+                if (!e.stopped || !e.particles.empty()) return false;
+                // A delayed piece's emitter waits for its launch.
+                return std::none_of(effectDebris.begin(), effectDebris.end(),
+                    [&](const EffectDebris& d) { return d.id == e.debrisOwner; });
+            }
             return (e.burst && e.age >= 0.0f && e.particles.empty()) ||
                    (!e.burst && e.lifetime > 0.0f && e.age > e.lifetime);
         }),
@@ -6222,22 +6370,32 @@ void World::renderParticles() {
     auto* debrisShader = ShaderManager::getDefaultShader();
     if (debrisShader) debrisShader->bind();
     for (const auto& debris : effectDebris) {
-        const float alpha = std::clamp(1.0f - debris.age / debris.lifetime, 0.0f, 1.0f);
-        if (debris.shapeIndex >= 0 && debris.shapeIndex < (int)debrisShapes.size() &&
-            debrisShapes[debris.shapeIndex].loaded) {
-            MatrixF model;
-            model.setRotationAxis(debris.rotationAxis, debris.rotation);
-            model.setTranslation(debris.pos);
-            r.setModel(model * debrisShapes[debris.shapeIndex].upOrientation());
-            if (debrisShader) {
-                debrisShader->setUniform("uUseTexture", (int32_t)1);
-                debrisShader->setUniform("uUseLightmap", (int32_t)0);
-            }
-            debrisShapes[debris.shapeIndex].render(0);
-        } else {
-            r.drawSprite(debris.pos, debris.radius * 2.0f,
-                         {0.8f, 0.55f, 0.25f, alpha});
+        if (debris.delay > 0.0f || debris.shapeIndex < 0 || debris.shapeIndex >= (int)debrisShapes.size() ||
+            !debrisShapes[debris.shapeIndex].loaded) continue;
+        DTSShape& shape = debrisShapes[debris.shapeIndex];
+        // Between the last two ticks; spin X then Z in object space.
+        const DebrisPhysics::Body& b = debris.body;
+        const float f = std::clamp(debris.tickTime / DebrisPhysics::TickSeconds, 0.0f, 1.0f);
+        const Point3F pos{b.prevPos.x + (b.pos.x - b.prevPos.x) * f, b.prevPos.y + (b.pos.y - b.prevPos.y) * f,
+                          b.prevPos.z + (b.pos.z - b.prevPos.z) * f};
+        const float rotX = b.prevRotX + (b.rotX - b.prevRotX) * f;
+        const float rotZ = b.prevRotZ + (b.rotZ - b.prevRotZ) * f;
+        MatrixF model = debris.orientation *
+            Math::torqueRotationToYUp({0, 0, 1}, Math::DEG2RAD(rotZ)) *
+            Math::torqueRotationToYUp({1, 0, 0}, Math::DEG2RAD(rotX));
+        model.setTranslation(pos);
+        r.setModel(model * shape.upOrientation());
+        if (debrisShader) {
+            debrisShader->setUniform("uUseTexture", (int32_t)1);
+            debrisShader->setUniform("uUseLightmap", (int32_t)0);
         }
+        // DebrisData::fade: the last second fades out.
+        shape.alphaScale = debris.data.fade ? std::clamp(b.lifetime - b.age, 0.0f, 1.0f) : 1.0f;
+        shape.onlyObject = debris.partObject;
+        shape.animatedNodeWorld.clear();
+        shape.render(0);
+        shape.onlyObject = -1;
+        shape.alphaScale = 1.0f;
     }
     for (auto& instance : effectExplosionShapes) {
         if (instance.age < instance.delay || instance.shapeIndex < 0 ||
@@ -7366,6 +7524,16 @@ void Game::update(float dt) {
                         // The move tick the explosion lands on seeds its cosmetic randomness.
                          w->spawnExplosionEffect(expPos, projectileData, explosionData, &dataBlocks, expNormal,
                                                 (int)std::floor(demoTime / 0.032f), exp.endedWithDecal);
+                    }
+                    for (const auto& blowUp : demoParser->consumeBlowUps()) {
+                        const GhostEntry* g = demoParser->getGhostTracker().getGhost(blowUp.ghostIndex);
+                        if (!g || !g->hasDatablock || !g->hasRenderModel) continue;
+                        const auto& dataBlocks = demoParser->getInitialBlock().dataBlocks;
+                        auto block = dataBlocks.find((uint32_t)g->datablockId);
+                        if (block == dataBlocks.end()) continue;
+                        w->blowUpShape(block->second.decoded, g->shape, g->renderModel,
+                                       Math::torquePointToYUp({blowUp.normal.x, blowUp.normal.y, blowUp.normal.z}),
+                                       dataBlocks, (int)std::floor(demoTime / 0.032f));
                     }
 
                 }
@@ -9700,6 +9868,17 @@ void Game::render(float dt) {
                         }
                     }
                     if (!mg->cloaked) shape->alphaScale *= mg->fadeVal;
+                    // ShapeBase::renderObject: a Destroyed shape whose datablock
+                    // clears renderWhenDestroyed, or a blown-apart player,
+                    // is not drawn.
+                    if (g->hasDatablock) {
+                        const auto& shapeBlocks = demoParser->getInitialBlock().dataBlocks;
+                        auto shapeBlock = shapeBlocks.find((uint32_t)g->datablockId);
+                        if (shapeBlock != shapeBlocks.end() &&
+                            ((g->damageState == 2 && !shapeBlock->second.decoded.shapeRenderWhenDestroyed) ||
+                             (g->blowApart && ObserverParity::isPlayerClass(g->className))))
+                            shape->alphaScale = 0.0f;
+                    }
                     // Item::registerLights: the ItemData light at the world
                     // box centre, skipped for a lightOnlyStatic item that is
                     // not static; pulsing lights follow sin(pi t / lightTime).
@@ -11360,6 +11539,24 @@ void Game::connectToServer(const char* host, uint16_t port) {
                                state->rotation.z, state->rotationW};
             ghost->hasRotation = state->hasRotation;
             ghost->health = state->health;
+             if (state->damageRevision != ghost->damageRevision) {
+                 // ShapeBase::unpackUpdate: an object already in the scene
+                 // blows up when it becomes Destroyed or is blown apart.
+                 const int previous = ghost->damageState;
+                 const bool known = ghost->damageRevision != 0;
+                 ghost->damageRevision = state->damageRevision;
+                 ghost->blowApart = state->blowApart;
+                 ghost->damageDir = {state->damageDir.x, state->damageDir.y, state->damageDir.z};
+                 if (known && ghost->hasRenderModel && ghost->hasDatablock &&
+                     ((previous != 2 && state->damageState == 2) || state->blowApart)) {
+                     auto block = nativeDatablocks.find((uint32_t)ghost->datablockId);
+                     if (block != nativeDatablocks.end())
+                         w->blowUpShape(block->second.decoded, ghost->shape, ghost->renderModel,
+                                        Math::torquePointToYUp({ghost->damageDir.x, ghost->damageDir.y,
+                                                                ghost->damageDir.z}),
+                                        nativeDatablocks, 0);
+                 }
+             }
              if (state->hasDamageState)
                  ghost->damageState = state->damageState;
              ghost->energy = state->energy;

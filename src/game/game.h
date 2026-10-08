@@ -16,6 +16,7 @@
 #include "game/hud.h"
 #include "game/hud_parity.h"
 #include "game/water_parity.h"
+#include "game/debris_physics.h"
 #include <vector>
 #include <array>
 #include <limits>
@@ -437,6 +438,16 @@ public:
                               const std::map<uint32_t, ParsedDataBlock>* dataBlocks = nullptr,
                               const Point3F& impactNormal = {0, 1, 0}, int tick = 0,
                               bool endedWithDecal = false);
+    // Explosion::onAdd of an ExplosionData at `pos` (Y-up); `depth` counts
+    // the explosions that led to this one (sub-explosions, debris).
+    void spawnExplosionData(const V12::DecodedDataBlock* explosion, uint32_t explosionId,
+                            const Point3F& pos, const std::map<uint32_t, ParsedDataBlock>& dataBlocks,
+                            const Point3F& impactNormal = {0, 1, 0}, int tick = 0, int depth = 0);
+    // ShapeBase::blowUp: the shape's explosion (underwater when submerged) at
+    // its world box centre, and its debrisShapeName broken into one debris
+    // piece per visible object. `damageDir` is Y-up.
+    void blowUpShape(const V12::DecodedDataBlock& shapeData, DTSShape* shape, const MatrixF& renderModel,
+                     const Point3F& damageDir, const std::map<uint32_t, ParsedDataBlock>& dataBlocks, int tick);
     void spawnSplashEffect(const Point3F& pos, const V12::DecodedDataBlock& splash,
                            const std::map<uint32_t, ParsedDataBlock>& dataBlocks);
     void spawnTrail(const Point3F& pos, const ColorF& color, float size = 0.2f);
@@ -565,6 +576,10 @@ private:
         // they stop emitting and are removed when their particles are gone.
         bool nodeEmitter = false;
         int64_t nodeKey = -1;
+        // A Debris piece's emitter (Debris::updateEmitters) follows its
+        // owner and stops when the piece is deleted.
+        uint64_t debrisOwner = 0;
+        int debrisSlot = -1;
         bool stopped = false;
         float emitScale = 1.0f; // node emitters: share of the frame they emit over
         // ParticleEmitter::emitParticles(centre, normal, radius, ..., count):
@@ -591,23 +606,26 @@ private:
     std::vector<EffectShockwave> effectShockwaves;
 
     struct EffectDebris {
-        Point3F pos{}, vel{};
-        Point3F rotationAxis{0, 1, 0};
-        float rotation = 0.0f;
-        float age = 0.0f;
-        float lifetime = 3.0f;
-        float radius = 0.25f;
-        float elasticity = 0.35f;
-        float friction = 0.5f;
-        float gravModifier = 1.0f;
-        float terminalVelocity = 0.0f;
-        int bounces = 0;
-        int maxBounces = 3;
-        int shapeIndex = -1;
-        bool explodeOnMaxBounce = false;
+        DebrisPhysics::Body body;
+        V12::DecodedDataBlock::DebrisData data;
+        uint64_t id = 0;             // owner key of its emitters
+        float delay = 0.0f;          // until Debris::onAdd (the explosion's explode)
+        float tickTime = 0.0f;       // into the current 32 ms tick
+        int shapeIndex = -1;         // debrisShapes
+        int partObject = -1;         // a broken shape's object (TSPartInstance), else -1
+        MatrixF orientation;         // world rotation at launch (Y-up)
+        int depth = 0;               // explosions that led to this piece
+        const std::map<uint32_t, ParsedDataBlock>* dataBlocks = nullptr;
         bool active = true;
     };
     std::vector<EffectDebris> effectDebris;
+    uint64_t nextDebrisId = 0;
+    // Debris::onAdd for one piece launched at `pos` with `vel` (Y-up).
+    void launchDebris(const V12::DecodedDataBlock::DebrisData& data, const Point3F& pos, const Point3F& vel,
+                      int shapeIndex, int partObject, float partRadius, const MatrixF& orientation,
+                      float delay, int depth, const std::map<uint32_t, ParsedDataBlock>& dataBlocks,
+                      TimelineRandom& random);
+    int debrisShapeFor(const std::string& shapeName);
     std::vector<DTSShape> debrisShapes;
     std::unordered_map<std::string, int> debrisShapeIndex; // path -> debrisShapes index (-1: failed)
 

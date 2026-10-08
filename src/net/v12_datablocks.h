@@ -90,15 +90,21 @@ struct DecodedDataBlock {
         float velocity{};
         float velocityVariance{};
         float minSpin{}, maxSpin{};
-        float elasticity = 0.35f;
-        float friction = 0.5f;
+        float elasticity = 0.3f;  // DebrisData::DebrisData
+        float friction = 0.2f;
         int32_t numBounces{};
         int32_t bounceVariance{};
         bool explodeOnMaxBounce{};
         bool staticOnMaxBounce{};
         bool snapOnMaxBounce{};
+        bool fade = true;
+        bool useRadiusMass{};
+        float baseRadius = 1.0f;
         float gravModifier = 1.0f;
         float terminalVelocity{};
+        bool ignoreWater = true;
+        std::array<uint32_t, 2> emitterRefs{};
+        uint32_t explosionRef = 0;
     };
     struct DecalData {
         std::string texture;
@@ -205,6 +211,10 @@ struct DecodedDataBlock {
     uint32_t mountPoint = 0;
     bool hasMountPoint{};
     std::string debrisShape;
+    // ShapeBaseData::renderWhenDestroyed, explosion, underwaterExplosion,
+    // debris (ShapeBase::blowUp).
+    bool shapeRenderWhenDestroyed = true;
+    uint32_t shapeExplosionRef = 0, shapeUnderwaterExplosionRef = 0, shapeDebrisRef = 0;
     std::string cmdCategory;      // ShapeBaseData::cmdCategory
     std::string cmdMiniIconName;  // ShapeBaseData::cmdMiniIconName
     uint32_t cmdIconRef = 0;      // ShapeBaseData::cmdIcon (CommanderIconData)
@@ -299,7 +309,7 @@ struct DecodedDataBlock {
     std::vector<uint32_t> effectRefs;
     ShockwaveData shockwave;
     SplashData splash;
-    bool hasParticle{}, hasEmitter{}, hasExplosion{}, hasShockwave{}, hasSplash{}, hasDecal{};
+    bool hasParticle{}, hasEmitter{}, hasExplosion{}, hasShockwave{}, hasSplash{}, hasDecal{}, hasDebris{};
 };
 
 // Consume one Tribes 2 build-25034 SimDataBlock payload. classId may be

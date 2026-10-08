@@ -170,6 +170,9 @@ struct DTSShape {
     // animates the object.
     struct ObjectDefault { float vis = 1.0f; int32_t frame = 0, matFrame = 0; };
     std::vector<ObjectDefault> objectDefaults;
+    std::vector<int32_t> subShapeFirstNode; // TSShape::subShapeFirstNode
+    // Draw only this object's meshes (a TSPartInstance), or -1 for all.
+    int32_t onlyObject = -1;
     struct Node {
         std::string name;
         int32_t parentIndex = -1;
