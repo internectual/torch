@@ -267,6 +267,8 @@ void rebuild() {
                                    s.terrains.size(), s.interiors.triangles.size(), s.water.size());
 }
 
+void invalidate() { state().lastCheck = -1; }
+
 void refresh() {
     auto& s = state();
     s.lastCheck = Timer::now();

@@ -32,7 +32,8 @@ uint32_t fileCrc(const std::string& path) {
 // terrData.cc
 class TerrainBlockObject : public SceneObject {
 public:
-    TerrainBlockObject() { scopeAlways = true; }
+    TerrainBlockObject() { scopeAlways = true; ServerContainer::invalidate(); }
+    ~TerrainBlockObject() override { ServerContainer::invalidate(); }
     const char* netClassName() const override { return "TerrainBlock"; }
     std::string terrainFile, detailTexture;
     int32_t squareSize = 8;
@@ -233,7 +234,8 @@ public:
 class InteriorInstanceObject : public SceneObject {
 public:
     enum InteriorMasks : uint32_t { AlarmMask = 1u << 1 };
-    InteriorInstanceObject() { scopeAlways = true; }
+    InteriorInstanceObject() { scopeAlways = true; ServerContainer::invalidate(); }
+    ~InteriorInstanceObject() override { ServerContainer::invalidate(); }
     const char* netClassName() const override { return "InteriorInstance"; }
     uint32_t crc = 0;
     bool alarmState = false; // mAlarmState
@@ -572,7 +574,8 @@ private:
 // waterBlock.cc
 class WaterBlockObject : public SceneObject {
 public:
-    WaterBlockObject() { scopeAlways = true; }
+    WaterBlockObject() { scopeAlways = true; ServerContainer::invalidate(); }
+    ~WaterBlockObject() override { ServerContainer::invalidate(); }
     const char* netClassName() const override { return "WaterBlock"; }
     uint32_t packUpdate(GameConnection&, uint32_t, TorqueBitWriter& w) override {
         static const char* types[] = {"Water", "OceanWater", "RiverWater", "StagnantWater",

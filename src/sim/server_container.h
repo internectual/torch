@@ -28,6 +28,9 @@ void rebuild();
 // Rebuild now if the mission's terrain, interiors or water changed (the
 // check gatherTriangles makes at most twice a second).
 void refresh();
+// A terrain, interior or water object was added or removed: the next query
+// checks the scene at once instead of after the 0.5 s recheck interval.
+void invalidate();
 
 // gatherTriangles restricted to the terrain and / or the interiors; owners,
 // when given, gets each triangle's TerrainBlock or InteriorInstance.
