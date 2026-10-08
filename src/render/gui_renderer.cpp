@@ -1,4 +1,5 @@
 #include "sim/static_shapes.h"
+#include "sim/target_name.h"
 #include <strings.h>
 #include "render/gui_renderer.h"
 #include "game/observer_parity.h"
@@ -3795,7 +3796,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                      // A beacon reads its type's name (setBeaconNames).
                      const std::string label = ghost->isFlag ? "Flag" :
                          ghost->className == "BeaconObject" ? beaconName(ghost->beaconType < 0 ? 0 : ghost->beaconType) :
-                         (!ghost->playerName.empty() ? ghost->playerName : ghost->targetType);
+                         (TargetNames::isShown(ghost->playerName) ? ghost->playerName :
+                          TargetNames::isShown(ghost->targetType) ? ghost->targetType : std::string());
                     if (renderText && hf && !label.empty())
                         hf->render(label.c_str(), markerX + 7, markerY - 6, color, 0.8f);
                 };

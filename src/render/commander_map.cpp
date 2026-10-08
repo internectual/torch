@@ -12,6 +12,7 @@
 #include "sim/engine_classes.h"
 #include "sim/net_string_table.h"
 #include "sim/sim_state.h"
+#include "sim/target_name.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -1270,12 +1271,8 @@ void CommanderMap::renderIcons(float, float) {
             if (e->kind == 0) {
                 // TargetManager::getGameName: "name type"; '_' names are skipped.
                 auto ti = parser->getTargets().find(e->id);
-                if (ti != parser->getTargets().end()) {
-                    const std::string& name = ti->second.name;
-                    const std::string& type = ti->second.type;
-                    const bool hasName = !name.empty() && name[0] != '_', hasType = !type.empty() && type[0] != '_';
-                    text = hasName ? (hasType ? name + " " + type : name) : hasType ? type : std::string();
-                }
+                if (ti != parser->getTargets().end())
+                    text = TargetNames::gameName(ti->second.name, ti->second.type);
             } else if (e->clientTarget) {
                 text = e->clientTarget->text;
             }

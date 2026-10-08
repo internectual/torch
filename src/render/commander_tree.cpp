@@ -10,6 +10,7 @@
 #include "script/script_engine.h"
 #include "script/torquescript.h"
 #include "sim/net_string_table.h"
+#include "sim/target_name.h"
 #include <GL/glew.h>
 #include <algorithm>
 #include <cstdio>
@@ -52,8 +53,7 @@ bool gameName(int id, std::string& out, size_t bufSize) {
     if (id < 0 || id >= 512) return false;
     const DemoTargetState* ti = clientTarget(id);
     if (!ti) return false;
-    const bool hasName = !ti->name.empty() && ti->name[0] != '_', hasType = !ti->type.empty() && ti->type[0] != '_';
-    std::string text = hasName ? (hasType ? ti->name + " " + ti->type : ti->name) : hasType ? ti->type : std::string();
+    std::string text = TargetNames::gameName(ti->name, ti->type);
     if (bufSize && text.size() > bufSize - 1) text.resize(bufSize - 1);
     out = text;
     return true;

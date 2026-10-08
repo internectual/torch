@@ -8,6 +8,7 @@
 #include "sim/game_connection.h"
 #include "sim/net_object.h"
 #include "sim/net_string_table.h"
+#include "sim/target_name.h"
 #include "script/script_engine.h"
 #include "script/torquescript.h"
 #include "core/console.h"
@@ -769,10 +770,7 @@ void registerTargetManagerNatives(TorqueScript& ts) {
         if (!t.allocated) return VMValue("");
         const std::string* name = NetStrings::lookup(t.nameTag);
         const std::string* type = NetStrings::lookup(t.typeTag);
-        const bool hasName = name && !name->empty() && (*name)[0] != '_';
-        const bool hasType = type && !type->empty() && (*type)[0] != '_';
-        if (hasName) return VMValue(hasType ? *name + " " + *type : *name);
-        return VMValue(hasType ? *type : std::string());
+        return VMValue(TargetNames::gameName(name ? *name : std::string(), type ? *type : std::string()));
     });
 
     // Tag fields: get returns the tag id, set takes a tag or an id.
