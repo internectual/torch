@@ -1,4 +1,5 @@
 #pragma once
+#include <cctype>
 #include <memory>
 #include "script/dso_reader.h"
 #include "core/console.h"
@@ -141,6 +142,28 @@ struct VMValue {
 
 class EngineObject;
 
+// SimObject field names are case-insensitive (StringTable entries); a field
+// keeps the spelling it was first given.
+struct FieldNameHash {
+    size_t operator()(const std::string& name) const {
+        size_t hash = 1469598103934665603ull;
+        for (unsigned char c : name) {
+            hash ^= (size_t)std::tolower(c);
+            hash *= 1099511628211ull;
+        }
+        return hash;
+    }
+};
+struct FieldNameEqual {
+    bool operator()(const std::string& a, const std::string& b) const {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)b[i])) return false;
+        return true;
+    }
+};
+using FieldMap = std::unordered_map<std::string, VMValue, FieldNameHash, FieldNameEqual>;
+
 struct ScriptObject {
     // SimObject id: datablocks from 3, dynamic objects from 2051 (Tribes 2:
     // 11-bit datablock ids, 3..2050). Assigned
@@ -149,7 +172,7 @@ struct ScriptObject {
     int id = 0;
     std::string className;
     std::string name;
-    std::unordered_map<std::string, VMValue> fields;
+    FieldMap fields;
     std::unordered_map<std::string, VMValue> internals;
     std::vector<std::string> deleteNotifyListeners;
     // Engine-class state (src/sim), when the class is an engine class.
@@ -161,7 +184,7 @@ struct ScriptMissionObject {
     std::string className;
     std::string name;
     std::string parentName;
-    std::unordered_map<std::string, VMValue> fields;
+    FieldMap fields;
 };
 
 // Action-map binding store, shared by the TS bind/bindcmd natives and the

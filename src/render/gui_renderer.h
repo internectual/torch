@@ -1,4 +1,5 @@
 #pragma once
+#include <strings.h>
 #include "render/renderer.h"
 #include "net/network.h"
 #include <algorithm>
@@ -201,7 +202,13 @@ struct GuiControl {
 
 
     // Generic named-field storage set from script (e.g. altColor on ShellTabFrame)
-    std::map<std::string, std::string> fields;
+    // Field names are case-insensitive, as on the control's SimObject.
+    struct FieldLess {
+        bool operator()(const std::string& a, const std::string& b) const {
+            return strcasecmp(a.c_str(), b.c_str()) < 0;
+        }
+    };
+    std::map<std::string, std::string, FieldLess> fields;
 
     // GuiPlayerView mouse-drag rotation
     bool modelRotating = false;

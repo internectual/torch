@@ -752,17 +752,11 @@ static bool parseColor(const std::string& s, ColorF& out) {
 
 
 
-// Bitmap array cell detection: scan texture for separator color (pixel 0,0 or magenta as fallback)
+// Bitmap array cell detection (GuiControl::createBitmapArray): the separator
+// colour is pixel (0,0).
 static std::vector<BmpCell> detectBitmapCells(const uint8_t* rgba, int w, int h) {
     std::vector<BmpCell> cells;
-    uint8_t sepR = rgba[0], sepG = rgba[1], sepB = rgba[2];
-    // Try magenta (255,0,255) as separator if pixel(0,0) is common (black/transparent)
-    if ((sepR == 0 && sepG == 0 && sepB == 0) || rgba[3] == 0) {
-        // Check if magenta exists as a separator color
-        bool hasMagenta = false;
-        for (int i = 0; i < w * 4; i += 4) if (rgba[i]==255 && rgba[i+1]==0 && rgba[i+2]==255) { hasMagenta = true; break; }
-        if (hasMagenta) { sepR = 255; sepG = 0; sepB = 255; }
-    }
+    const uint8_t sepR = rgba[0], sepG = rgba[1], sepB = rgba[2];
     auto isSep = [&](int x, int y) {
         int i = (y * w + x) * 4;
         return rgba[i] == sepR && rgba[i+1] == sepG && rgba[i+2] == sepB;
@@ -1490,7 +1484,7 @@ float GuiRenderer::launchTabWidth(const GuiControl* grp, int ti, float maxTabW) 
 // LAUNCH sidebar popup list — renders ABOVE the button (ShellLaunchMenu).
 // Called from the top-most post pass in GuiRenderer::render().
 static void drawLaunchPopupList(Renderer& r, GuiControl* ctl, float x, float y) {
-    auto* font = r.getFont();
+    auto* font = getProfileFont(getProfile(ctl->profileName));
     const float lineH = 26.0f;
     // Width: T2 sizes the popup to its widest item; never narrower than the
     // button it belongs to (reference: 136px popup over a 115px button).
@@ -1537,8 +1531,9 @@ static void drawLaunchPopupList(Renderer& r, GuiControl* ctl, float x, float y) 
                     r.drawRectFill({popX + 2, iy, 0}, {popX + popW - 2, iy + lineH, 0}, {0.26f, 0.65f, 0.71f, 0.85f});
             }
             if (font && !item.text.empty()) {
-                ColorF ic{6 / 255.f, 245 / 255.f, 215 / 255.f, 1};   // LaunchMenuProfile fontColor
-                ColorF hc{74 / 255.f, 251 / 255.f, 228 / 255.f, 1};  // LaunchMenuProfile fontColorHL
+                // The menu's profile fontColor, fontColorHL while hovered.
+                const ColorF ic = GuiShared::profileFontColor(ctl->profileName, 0);
+                const ColorF hc = GuiShared::profileFontColor(ctl->profileName, 1);
                 font->render(item.text.c_str(), popX + 10,
                              iy + (lineH - (float)font->charHeight) * 0.5f,
                              hovered ? hc : ic, 1.0f);
@@ -3371,11 +3366,21 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
     } else if (cn.find("Hud") == 0 || cn.find("ShellFieldCtrl") == 0 || cn.find("ShellField") == 0) {
         // T2 shell pane/field frame (shll_field_* nine-piece files)
         if (cn.find("ShellField") == 0) {
-            // OuterChatHud is an in-game text overlay, not a dialog field; its
-            // shell frame paints an unwanted opaque panel behind chat lines.
-            if (ctl->name != "OuterChatHud" &&
-                !drawShellNinePatch(r, "shll_field", x, y, ctl->extentX, ctl->extentY))
-                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, {0.12f, 0.12f, 0.15f, 1});
+            // ShellFieldCtrl draws its profile's bitmapBase nine-piece frame
+            // (shll_field for ShellFieldProfile, hud_new_window for the chat
+            // HUD's GuiChatBackProfile).
+            if (auto* fieldProfile = getProfile(ctl->profileName)) {
+                auto base = fieldProfile->fields.find("bitmapBase");
+                if (base != fieldProfile->fields.end()) {
+                    std::string piece = base->second.toString();
+                    if (strncasecmp(piece.c_str(), "gui/", 4) == 0) piece = piece.substr(4);
+                    static std::set<std::string> missingBases;
+                    if (!drawShellNinePatch(r, piece, x, y, ctl->extentX, ctl->extentY) &&
+                        missingBases.insert(piece).second)
+                        Console::instance().printf(LogLevel::Warn, "ShellFieldCtrl %s: bitmapBase '%s' not found",
+                                                   ctl->name.c_str(), base->second.toString().c_str());
+                }
+            }
             for (auto* child : ctl->children)
                 renderControlRec(gr, child, canvas, scrollOfsX, scrollOfsY, clip);
             return;
@@ -3388,71 +3393,72 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // HudEnergy/HudDamage/HudHeat/HudBarBaseCtrl: bar display
         if (cn == "HudEnergy" || cn == "HudDamage" || cn == "HudHeat" ||
             cn == "HudCapacitor" || cn == "HudBarBaseCtrl") {
-            ColorF barBg{0.1f,0.1f,0.15f,0.5f};
-            ColorF barFg = cn == "HudEnergy" ? ColorF{0,0.8f,1,0.8f} :
-                           cn == "HudDamage" ? ColorF{1,0.2f,0.2f,0.8f} :
-                           cn == "HudHeat" ? ColorF{1,0.5f,0,0.8f} :
-                           cn == "HudCapacitor" ? ColorF{1,0.75f,0.2f,0.85f} :
-                           ColorF{0.3f,0.6f,0.3f,0.8f};
-            float barH = ctl->extentY * 0.7f;
-            float barY = y + (ctl->extentY - barH) * 0.5f;
-            r.drawRectFill({x, barY, 0}, {x + ctl->extentX, barY + barH, 0}, barBg);
-            float fill = ctl->hudValueSet ? ctl->hudValue : 0.5f;
-            if (cn == "HudEnergy" && Engine::instance().game().state() == Game::Playing)
-                fill = HudParity::resourceFraction(
-                    Engine::instance().game().player().energy(),
-                    Engine::instance().game().player().maxEnergy());
-            else if (cn == "HudDamage" && Engine::instance().game().state() == Game::Playing)
-                fill = HudParity::resourceFraction(
-                    Engine::instance().game().player().health(),
-                    Engine::instance().game().player().maxHealth());
-            else if (cn == "HudHeat" && Engine::instance().game().state() == Game::Playing)
-                fill = Engine::instance().game().player().heat() / 100.0f;
-            else if (cn == "HudCapacitor" && Engine::instance().game().state() == Game::Playing)
-                fill = HudParity::resourceFraction(
-                    Engine::instance().game().player().energy(),
-                    Engine::instance().game().player().maxEnergy());
-            bool underDashboard = false;
-            for (auto* parent = ctl->parent; parent; parent = parent->parent) {
-                if (parent->name == "dashboardHud") {
-                    underDashboard = true;
-                    break;
-                }
+            // HudBarBaseCtrl: the control's bitmap, then the fill in its
+            // subRegion (clipped to the extent) in fillColor x opacity, for
+            // the value of the control object (its mount with
+            // displayMounted).
+            auto fieldText = [&](const char* name) { return GuiShared::field(*ctl, name); };
+            auto fieldTrue = [&](const char* name) {
+                const std::string v = fieldText(name);
+                return v == "1" || strcasecmp(v.c_str(), "true") == 0;
+            };
+            const std::string bitmapName = fieldText("bitmap");
+            if (!bitmapName.empty()) {
+                Texture* bar = GuiShared::bitmap(bitmapName);
+                if (bar && bar->loaded)
+                    drawTexRegion(r, bar, 0, 0, (float)bar->width, (float)bar->height,
+                                  x, y, ctl->extentX, ctl->extentY);
             }
-            if (underDashboard) {
+            ColorF fillColor{0, 0, 0, 0};
+            const std::string fillText = fieldText("fillColor");
+            if (!fillText.empty())
+                sscanf(fillText.c_str(), "%f %f %f %f", &fillColor.r, &fillColor.g, &fillColor.b, &fillColor.a);
+            const std::string opacityText = fieldText("opacity");
+            if (!opacityText.empty()) fillColor.a *= (float)atof(opacityText.c_str());
+            float rx = 0, ry = 0, rw = ctl->extentX, rh = ctl->extentY;
+            const std::string region = fieldText("subRegion");
+            if (!region.empty()) sscanf(region.c_str(), "%f %f %f %f", &rx, &ry, &rw, &rh);
+            rw = std::max(0.0f, std::min(rw, ctl->extentX - rx));
+            rh = std::max(0.0f, std::min(rh, ctl->extentY - ry));
+            float fill = ctl->hudValueSet ? ctl->hudValue : 0.0f;
+            auto& game = Engine::instance().game();
+            const bool remote = game.isDemoPlaying() || game.isLiveClient();
+            if (remote && (cn == "HudDamage" || cn == "HudEnergy")) {
                 const GhostEntry* ghost = nullptr;
-                if (Engine::instance().game().isDemoPlaying()) {
-                    if (auto* parser = Engine::instance().game().getDemoParser())
-                        ghost = parser->getGhostTracker().getGhost(
-                            Engine::instance().game().getControlGhostIndex());
+                if (game.isDemoPlaying()) {
+                    if (auto* parser = game.getDemoParser())
+                        ghost = parser->getGhostTracker().getGhost(game.getControlGhostIndex());
                 } else {
-                    ghost = Engine::instance().game().getLiveGhost(
-                        Engine::instance().game().getControlGhostIndex());
+                    ghost = game.getLiveGhost(game.getControlGhostIndex());
                 }
-                if (ghost) {
-                    if (cn == "HudDamage")
-                        fill = HudParity::resourceFraction(ghost->health, ghost->maxHealth);
-                    else if (cn == "HudEnergy")
-                        // Energy is already an authored resource value.  The
-                        // generic percentage fallback below interprets any
-                        // value above one as a percentage, so feeding it
-                        // energy above 100 would turn 150 into 0.015 instead
-                        // of a full dashboard bar.
-                        fill = HudParity::resourceFraction(ghost->energy);
+                if (ghost && fieldTrue("displayMounted") && ghost->mountObject >= 0) {
+                    if (game.isDemoPlaying()) {
+                        if (auto* parser = game.getDemoParser())
+                            ghost = parser->getGhostTracker().getGhost(ghost->mountObject);
+                    } else {
+                        ghost = game.getLiveGhost(ghost->mountObject);
+                    }
                 }
+                if (ghost)
+                    fill = cn == "HudDamage" ? HudParity::resourceFraction(ghost->health, ghost->maxHealth)
+                                             : HudParity::resourceFraction(ghost->energy);
+            } else if (!remote && game.state() == Game::Playing) {
+                if (cn == "HudDamage")
+                    fill = HudParity::resourceFraction(game.player().health(), game.player().maxHealth());
+                else if (cn == "HudEnergy" || cn == "HudCapacitor")
+                    fill = HudParity::resourceFraction(game.player().energy(), game.player().maxEnergy());
+                else if (cn == "HudHeat")
+                    fill = game.player().heat() / 100.0f;
             }
             if (fill > 1.0f) fill /= 100.0f;
             fill = std::clamp(fill, 0.0f, 1.0f);
-            auto verticalIt = ctl->fields.find("verticalFill");
-            const bool vertical = verticalIt != ctl->fields.end() &&
-                (verticalIt->second == "1" || verticalIt->second == "true");
-            if (vertical) {
-                const float filledH = barH * fill;
-                r.drawRectFill({x, barY + barH - filledH, 0},
-                               {x + ctl->extentX, barY + barH, 0}, barFg);
-            } else {
-                r.drawRectFill({x, barY, 0},
-                               {x + ctl->extentX * fill, barY + barH, 0}, barFg);
+            if (fillColor.a > 0.0f && rw > 0.0f && rh > 0.0f) {
+                if (fieldTrue("verticalFill")) {
+                    const float filled = rh * fill;
+                    r.drawRectFill({x + rx, y + ry + rh - filled, 0}, {x + rx + rw, y + ry + rh, 0}, fillColor);
+                } else {
+                    r.drawRectFill({x + rx, y + ry, 0}, {x + rx + rw * fill, y + ry + rh, 0}, fillColor);
+                }
             }
         } else if (cn == "HudCompass") {
             // Compass: rotate cardinal labels with the active camera heading.
