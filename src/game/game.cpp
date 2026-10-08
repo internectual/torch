@@ -1902,7 +1902,7 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                 auto terData = fs.read(tp.c_str());
                 if (!terData.empty()) {
                     Console::instance().printf(LogLevel::Info, "  loaded terrain: %s", tp.c_str());
-                    terrainBlock.load(terData.data(), terData.size());
+                    terrainBlock.load(terData.data(), terData.size(), false);
                     break;
                 }
             }
@@ -2821,7 +2821,8 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                     };
                     const uint32_t base = vertBase;
                     for (const auto& corner : corners) {
-                        const Point3F v = xform.transform(corner);
+                        // The unit box is in Torque object space.
+                        const Point3F v = xform.transform(Math::torquePointToYUp(corner));
                         allVerts.insert(allVerts.end(), {v.x, v.y, v.z});
                     }
                     for (const auto index : faces) allIndices.push_back(base + index);
@@ -2916,7 +2917,7 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
             if (!lightProbeTris.empty()) lightProbeGrid.build(lightProbeTris);
             // Mission lighting: the sun swept over the heightfield, with the
             // interiors as occluders (TerrainProxy::light).
-            if (sunLightDirUsed && terrainBlock.loaded) {
+            if (terrainBlock.loaded) {
                 std::function<bool(const Point3F&)> occluder;
                 Point3F lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
                 for (const auto& tri : lightProbeTris)
@@ -3912,7 +3913,9 @@ void World::playerTrianglesInBox(const Point3F& min, const Point3F& max,
         Point3F corner[8];
         Point3F lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
         for (int i = 0; i < 8; ++i) {
-            const Point3F y = box.transform({(float)(i & 1), (float)((i >> 1) & 1), (float)((i >> 2) & 1)});
+            // The unit box is in Torque object space.
+            const Point3F y = box.transform(Math::torquePointToYUp(
+                {(float)(i & 1), (float)((i >> 1) & 1), (float)((i >> 2) & 1)}));
             corner[i] = toTorque({origin.x + y.x, origin.y + y.y, origin.z + y.z});
             lo = {std::min(lo.x, corner[i].x), std::min(lo.y, corner[i].y), std::min(lo.z, corner[i].z)};
             hi = {std::max(hi.x, corner[i].x), std::max(hi.y, corner[i].y), std::max(hi.z, corner[i].z)};
@@ -4373,7 +4376,8 @@ void World::render(const Point3F& cameraPos, float dt) {
                  {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}
             };
             Point3F transformed[8];
-            for (int i = 0; i < 8; ++i) transformed[i] = fieldModel.transform(corners[i]);
+            // The unit box is in Torque object space (+y is Y-up -z).
+            for (int i = 0; i < 8; ++i) transformed[i] = fieldModel.transform(Math::torquePointToYUp(corners[i]));
             const float fieldAlpha = obj.forceFieldFadeMS > 0.0f
                 ? std::clamp(1.0f - obj.forceFieldFadePosition / obj.forceFieldFadeMS, 0.0f, 1.0f)
                 : (obj.forceFieldOpen ? 0.0f : 1.0f);
@@ -6346,7 +6350,7 @@ bool World::isObjectVisible(const WorldObject& obj, const Point3F& cameraPositio
         for (int i = 0; i < 9; ++i) {
             const Point3F local = i == 8 ? Point3F{0.5f, 0.5f, 0.5f}
                 : Point3F{(float)(i & 1), (float)((i >> 1) & 1), (float)((i >> 2) & 1)};
-            const Point3F yUp = box.transform(local); // as the force-field pass places it
+            const Point3F yUp = box.transform(Math::torquePointToYUp(local)); // as the force-field pass places it
             points.push_back({origin.x + yUp.x, -(origin.z + yUp.z), origin.y + yUp.y});
         }
     } else {

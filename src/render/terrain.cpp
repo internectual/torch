@@ -335,7 +335,7 @@ float TerrainBlock::sampleLightmapNdotL(float wx, float wz) const {
     return lightmapNdotL[(size_t)row * lightmapSize + col] / 255.0f;
 }
 
-bool TerrainBlock::load(const uint8_t* data, size_t size) {
+bool TerrainBlock::load(const uint8_t* data, size_t size, bool bakeLightmapNow) {
     Console::instance().printf(LogLevel::Debug, "Terrain load: %zu bytes", size);
     if (!data || size < 4) {
         Console::instance().printf(LogLevel::Error,
@@ -550,7 +550,7 @@ bool TerrainBlock::load(const uint8_t* data, size_t size) {
     }
 
     generateMesh();
-    bakeLightmap();
+    if (bakeLightmapNow) bakeLightmap();
     loaded = true;
     return true;
 }

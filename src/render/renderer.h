@@ -421,7 +421,9 @@ struct TerrainBlock {
                                std::vector<Point3F>& out) const;
     void setEmptySquareRuns(const std::vector<uint32_t>& runs);
     bool isEmptySquare(float wx, float wz) const;
-    bool load(const uint8_t* data, size_t size);
+    // bakeLightmapNow false: the mission bakes once its sun and interiors
+    // are known (World::load).
+    bool load(const uint8_t* data, size_t size, bool bakeLightmapNow = true);
     void reset();
     void generateMesh();
     // `occludedByInterior(world point)`: true when a building stands between
