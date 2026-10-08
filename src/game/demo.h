@@ -811,6 +811,8 @@ struct GhostEntry {
     int forceFieldState = 3;
     uint32_t forceFieldPosition = 0;
     int forceFieldStateUpdates = 0;
+    // InteriorInstance mAlarmState (InitMask and AlarmMask updates).
+    bool interiorAlarm = false;
     std::string shapeName; // from datablock
     int linkSourceGhost = -1;
     int linkTargetGhost = -1;

@@ -6,6 +6,9 @@
 #include <vector>
 #include <unordered_map>
 #include "render/dynamic_lighting.h"
+#include "render/dif_lighting.h"
+
+class DIFLightingInstance;
 
 // Native Torque material flags are shared by DTS, DIF, and renderer code.
 // They must not live in the diagnostic GLB loader.
@@ -264,6 +267,14 @@ struct DTSShape {
     std::vector<std::vector<Point2F>> meshTVerts; // per-mesh: all tvert data (numTVerts * numMatFrames)
     std::vector<Texture> lightmaps;
     std::vector<int16_t> materialLightmapIndex; // per-material: -1 no lightmap, >=0 index into lightmaps[]
+    std::vector<int16_t> materialAlarmLightmapIndex; // per-material lightmap in alarm mode (DIF)
+    // DIF animated lights and alarm state, shared by every instance.
+    DIFLightingData interiorLighting;
+    // The instance being drawn (its alarm mode and animated lightmaps);
+    // set by the caller per draw, null for the static normal lightmaps.
+    const DIFLightingInstance* interiorLightingInstance = nullptr;
+    // The lightmap texture a mesh binds in the current lighting mode, 0 for none.
+    uint32_t lightmapTexture(const MeshData& mesh) const;
     struct InteriorPlane { Point3F normal; float d = 0.0f; };
     struct InteriorBSPNode { uint16_t planeIndex = 0, frontIndex = 0, backIndex = 0; };
     struct InteriorPortal {

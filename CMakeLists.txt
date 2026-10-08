@@ -92,6 +92,7 @@ add_executable(torch
     src/render/sky.cpp
     src/render/dts_loader.cpp
     src/render/dif_loader.cpp
+    src/render/dif_lighting.cpp
     src/render/gui_renderer.cpp
     src/render/commander_map.cpp
     src/render/commander_tree.cpp
@@ -216,6 +217,7 @@ add_executable(torch_server
     src/render/sky.cpp
     src/render/dts_loader.cpp
     src/render/dif_loader.cpp
+    src/render/dif_lighting.cpp
     src/render/gui_renderer.cpp
     src/render/commander_map.cpp
     src/render/commander_tree.cpp
@@ -533,6 +535,7 @@ add_executable(torch_parity_test
     src/render/sky.cpp
     src/render/dts_loader.cpp
     src/render/dif_loader.cpp
+    src/render/dif_lighting.cpp
     src/render/gui_renderer.cpp
     src/render/commander_map.cpp
     src/render/commander_tree.cpp
@@ -637,6 +640,7 @@ add_executable(torch_network_loopback_test
     src/render/sky.cpp
     src/render/dts_loader.cpp
     src/render/dif_loader.cpp
+    src/render/dif_lighting.cpp
     src/render/gui_renderer.cpp
     src/render/commander_map.cpp
     src/render/commander_tree.cpp
@@ -740,6 +744,7 @@ add_executable(torch_nav_graph_test
     src/render/sky.cpp
     src/render/dts_loader.cpp
     src/render/dif_loader.cpp
+    src/render/dif_lighting.cpp
     src/render/gui_renderer.cpp
     src/render/commander_map.cpp
     src/render/commander_tree.cpp
@@ -844,6 +849,7 @@ add_executable(torch_target_manager_test
     src/render/sky.cpp
     src/render/dts_loader.cpp
     src/render/dif_loader.cpp
+    src/render/dif_lighting.cpp
     src/render/gui_renderer.cpp
     src/render/commander_map.cpp
     src/render/commander_tree.cpp
@@ -1028,6 +1034,11 @@ add_executable(torch_shape_lighting_test tests/shape_lighting_test.cpp)
 target_include_directories(torch_shape_lighting_test PRIVATE src)
 target_compile_options(torch_shape_lighting_test PRIVATE -UNDEBUG)
 add_test(NAME torch_shape_lighting COMMAND torch_shape_lighting_test)
+
+add_executable(torch_dif_lighting_test tests/dif_lighting_test.cpp)
+target_include_directories(torch_dif_lighting_test PRIVATE src)
+target_compile_options(torch_dif_lighting_test PRIVATE -UNDEBUG)
+add_test(NAME torch_dif_lighting COMMAND torch_dif_lighting_test)
 
 add_executable(torch_player_animation_test tests/player_animation_test.cpp)
 target_include_directories(torch_player_animation_test PRIVATE src)

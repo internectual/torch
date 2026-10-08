@@ -349,6 +349,8 @@ public:
         int forceFieldStateUpdates = -1;
         std::string animName; // empty = static render; non-empty = play this animation
         ShapeLighting::State shapeLight; // getLightingColor probe state
+        // An interior's alarm mode and animated lightmaps (created on demand).
+        std::shared_ptr<DIFLightingInstance> interiorLight;
         float animTime = 0;
         int zoneManager = -1;
         int interiorZone = -1;
@@ -469,6 +471,8 @@ public:
     // A Lightning object from mission-file fields (get returns "" if unset).
     void addSceneLightning(const std::function<std::string(const char*)>& get);
     void syncForceFieldGhost(int ghostIndex, int state, uint32_t position, int updates);
+    // InteriorInstance alarm state from a demo ghost's AlarmMask.
+    void syncInteriorAlarmGhost(int ghostIndex, bool alarm);
     // Player::updateWorkingCollisionSet's world polygons in a Torque-space
     // box: terrain, interiors and closed force fields, facing free space.
     void playerTrianglesInBox(const Point3F& min, const Point3F& max,
@@ -500,6 +504,8 @@ private:
     struct LightProbeTriangle {
         Point2F uv[3];
         uint32_t lightmap = 0; // GL texture id, 0 = no lighting data
+        uint32_t alarmLightmap = 0; // the same in alarm mode
+        int object = -1; // the interior's worldObjects index
         bool outsideVisible = false;
     };
     std::vector<CollisionTri> lightProbeTris;
@@ -508,6 +514,9 @@ private:
     struct LightmapPixels { int width = 0, height = 0; std::vector<uint8_t> rgba; };
     std::unordered_map<uint32_t, LightmapPixels> lightmapPixelCache;
     bool sampleInteriorLight(int triangle, const Point3F& point, ShapeLighting::Color& out);
+    // Bumped when an interior changes lighting mode: shapes probe again.
+    uint32_t interiorLightingVersion = 0;
+    DIFLightingInstance& interiorLighting(WorldObject& object);
 public:
     // SceneObject::getLightingColor for a shape centred at `center` (Y-up
     // world). Returns false when a roof has no floor beneath it, leaving

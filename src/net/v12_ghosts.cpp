@@ -129,6 +129,39 @@ static bool readTSStaticPayload(V12BitStream& stream) {
     return !stream.failed();
 }
 
+// InteriorInstance::packUpdate: the alarm state rides both InitMask and
+// the update's AlarmMask layout.
+static bool readInteriorInstancePayload(V12BitStream& stream, PlayerGhostState* state) {
+    auto readTransform = [&stream]() {
+        for (int i = 0; i < 16; ++i) stream.readF32();
+        stream.readPoint3F(); // scale
+    };
+    bool alarm = false;
+    if (stream.readFlag()) {
+        stream.readU32(); // CRC
+        stream.readString(); // interior file
+        stream.readFlag(); // showTerrainInside
+        readTransform();
+        alarm = stream.readFlag();
+        stream.readString(); // skin base
+        if (stream.readFlag()) stream.readUnsigned(11); // audio profile
+        if (stream.readFlag()) stream.readUnsigned(11); // audio environment
+    } else {
+        if (stream.readFlag()) readTransform();
+        alarm = stream.readFlag();
+        if (stream.readFlag()) stream.readString();
+        if (stream.readFlag()) {
+            if (stream.readFlag()) stream.readUnsigned(11);
+            if (stream.readFlag()) stream.readUnsigned(11);
+        }
+    }
+    if (state) {
+        state->interiorAlarm = alarm;
+        state->hasInteriorAlarm = true;
+    }
+    return !stream.failed();
+}
+
 static bool readTriggerPayload(V12BitStream& stream) {
     // Trigger::packUpdate writes the complete edit-time polyhedron.  Keep the
     // same unbounded scalar representation as the original V12 source, but
@@ -993,6 +1026,7 @@ bool readGhostPayload(V12BitStream& stream, uint16_t classId, bool initial,
         if (stream.readFlag()) return !stream.failed();
         stream.readFlag(); stream.readUnsigned(3);
         return !stream.failed();
+    case 15: return readInteriorInstancePayload(stream, playerState);
     case 14: // HoverVehicle
         return readShapeBasePayload(stream, initial, playerState) &&
                readVehiclePayload(stream, compressionPoint, playerState) &&
@@ -1123,6 +1157,10 @@ PlayerGhostState mergePlayerGhostState(const PlayerGhostState& base,
     if (update.hasHealth) {
         merged.health = update.health;
         merged.hasHealth = true;
+    }
+    if (update.hasInteriorAlarm) {
+        merged.interiorAlarm = update.interiorAlarm;
+        merged.hasInteriorAlarm = true;
     }
     if (update.hasMaxHealth) {
         merged.maxHealth = update.maxHealth;

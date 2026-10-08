@@ -2,9 +2,12 @@
 #include "core/console.h"
 #include "core/engine.h"
 #include "fs/file_system.h"
+#include "stb_image.h"
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <map>
+#include <tuple>
 #include <unordered_map>
 
 // ─── Read Helpers ────────────────────────────────────────────────
@@ -232,6 +235,16 @@ struct DIFInterior {
 
     // Solid leaf surfaces
     std::vector<uint32_t> solidLeafSurfaces;
+
+    // Animated lights
+    std::vector<DIFAnimatedLight> animatedLights;
+    std::vector<DIFLightState> lightStates;
+    std::vector<DIFLightStateData> lightStateData;
+    std::vector<uint8_t> lightStateBuffer;
+
+    // Ambient colours (ColorI, base + alarm)
+    uint8_t baseAmbient[4] = {0, 0, 0, 0};
+    uint8_t alarmAmbient[4] = {0, 0, 0, 0};
 
     // Convex hull data for collision
     struct ConvexHull {
@@ -489,31 +502,39 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
 
     // ── Animated lights ──
     uint32_t animLightCount = capU32(readU32(ptr, rem));
-    for (uint32_t i = 0; i < animLightCount; i++) {
-        readU32(ptr, rem); readU32(ptr, rem); readU16(ptr, rem); readU16(ptr, rem); readU32(ptr, rem);
+    out.animatedLights.resize(animLightCount);
+    for (auto& light : out.animatedLights) {
+        light.nameIndex = readU32(ptr, rem);
+        light.stateIndex = readU32(ptr, rem);
+        light.stateCount = readU16(ptr, rem);
+        light.flags = readU16(ptr, rem);
+        light.duration = readU32(ptr, rem);
     }
 
     // ── Light states ──
     uint32_t lightStateCount = capU32(readU32(ptr, rem));
-    for (uint32_t i = 0; i < lightStateCount; i++) {
-        readU8(ptr, rem); readU8(ptr, rem); readU8(ptr, rem); // RGB
-        readU32(ptr, rem); // activeTime
-        readU32(ptr, rem); // dataIndex
-        readU16(ptr, rem); // dataCount
+    out.lightStates.resize(lightStateCount);
+    for (auto& state : out.lightStates) {
+        for (uint8_t& c : state.color) c = readU8(ptr, rem);
+        state.activeTime = readU32(ptr, rem);
+        state.dataIndex = readU32(ptr, rem);
+        state.dataCount = readU16(ptr, rem);
     }
 
     // ── State data ──
     uint32_t stateDataCount = capU32(readU32(ptr, rem));
-    for (uint32_t i = 0; i < stateDataCount; i++) {
-        readU32(ptr, rem); // surfaceIndex
-        readU32(ptr, rem); // mapIndex
-        readU16(ptr, rem); // lightStateIndex
+    out.lightStateData.resize(stateDataCount);
+    for (auto& data : out.lightStateData) {
+        data.surfaceIndex = readU32(ptr, rem);
+        data.mapIndex = readU32(ptr, rem);
+        data.lightStateIndex = readU16(ptr, rem);
     }
 
     // ── State data buffer ──
     uint32_t stateDataBufSize = readU32(ptr, rem);
     readU32(ptr, rem); // flags (always 0)
     if (stateDataBufSize > rem) stateDataBufSize = (uint32_t)rem;
+    out.lightStateBuffer.assign(ptr, ptr + stateDataBufSize);
     ptr += stateDataBufSize; rem -= stateDataBufSize;
 
     // ── Name buffer ──
@@ -575,7 +596,8 @@ static bool readInterior(const uint8_t*& ptr, size_t& rem, DIFInterior& out) {
     readU32(ptr, rem); // coord bin mode
 
     // ── Ambient colors (stored as ColorI = 4×U8 each, base + alarm) ──
-    if (rem >= 8) { ptr += 8; rem -= 8; }
+    for (uint8_t& c : out.baseAmbient) c = readU8(ptr, rem);
+    for (uint8_t& c : out.alarmAmbient) c = readU8(ptr, rem);
 
     // ── 4x U32 padding ──
     if (rem >= 16) { ptr += 16; rem -= 16; }
@@ -590,6 +612,7 @@ static bool interiorToMeshes(DIFInterior& interior,
                               std::vector<Texture>& outTextures,
                               std::vector<uint32_t>& outMatFlags,
                                std::vector<int16_t>& outMatLMIndex,
+                              std::vector<int16_t>& outMatAlarmLMIndex,
                               std::vector<Texture>& outLightmaps,
                               std::vector<std::string>& outMatNames,
                               bool skipGpu = false,
@@ -642,7 +665,8 @@ static bool interiorToMeshes(DIFInterior& interior,
         }
     }
 
-    // Group surfaces by (texture slot, lightmap) pair.
+    // Group surfaces by texture slot, normal and alarm lightmaps, zone and
+    // outside visibility.
     std::vector<int> surfaceZones(interior.surfaces.size(), -1);
     for (size_t zone = 0; zone < interior.zones.size(); zone++) {
         const auto& z = interior.zones[zone];
@@ -655,41 +679,22 @@ static bool interiorToMeshes(DIFInterior& interior,
     struct GroupKey {
         int texIdx;   // texture slot -> materialIndex (texture binding)
         int lmIdx;    // lightmap index -> lightmap binding
+        int alarmLmIdx; // alarm lightmap index -> lightmap binding in alarm mode
         int zone;
         bool outsideVisible;
-        int group;    // sequential id -> materialIdx (lightmap binding lookup)
-    };
-    std::vector<GroupKey> groupKeys;
-    std::unordered_map<int, int> keyToGroup; // key = texIdx*256 + (lmIdx+1)
-    for (size_t si = 0; si < interior.surfaces.size(); si++) {
-        auto& surf = interior.surfaces[si];
-        if (surf.windingCount < 3) continue;
-        int matIdx = surf.textureIndex;
-        int texIdx = (matIdx >= 0 && matIdx < (int)matSlots.size()) ? matSlots[matIdx].texIdx : -1;
-        if (texIdx < 0) continue;
-        int lmIdx = si < interior.normalLMapIndices.size()
-            ? interior.normalLMapIndices[si] : -1;
-        if (lmIdx < 0 || lmIdx >= (int)outLightmaps.size()) lmIdx = -1;
-        int zone = surfaceZones[si];
-        bool outsideVisible = (surf.surfaceFlags & (1u << 4)) != 0;
-        int hash = ((texIdx * 256 + (lmIdx + 1)) * 4096 + (zone + 1)) * 2 +
-            (outsideVisible ? 1 : 0);
-        auto it = keyToGroup.find(hash);
-        if (it == keyToGroup.end()) {
-            int g = (int)groupKeys.size();
-            groupKeys.push_back({texIdx, lmIdx, zone, outsideVisible, g});
-            keyToGroup[hash] = g;
+        bool operator<(const GroupKey& o) const {
+            return std::tie(texIdx, lmIdx, alarmLmIdx, zone, outsideVisible) <
+                   std::tie(o.texIdx, o.lmIdx, o.alarmLmIdx, o.zone, o.outsideVisible);
         }
-    }
-
-    // materialLightmapIndex is indexed by the per-group id (mesh.materialIdx).
-    outMatLMIndex.assign(groupKeys.size(), -1);
-    for (auto& gk : groupKeys)
-        if (gk.lmIdx >= 0)
-            outMatLMIndex[gk.group] = (int8_t)gk.lmIdx;
-
-    // Group surface indices the same way
-    std::unordered_map<int, std::vector<int>> surfGroups; // key = texIdx*256 + (lmIdx+1)
+    };
+    auto lightmapAt = [&](const std::vector<uint8_t>& indices, size_t si) {
+        const int index = si < indices.size() ? indices[si] : -1;
+        return index >= 0 && index < (int)outLightmaps.size() ? index : -1;
+    };
+    // The group id is mesh.materialIdx (the lightmap binding lookup).
+    std::vector<GroupKey> groupKeys;
+    std::map<GroupKey, int> keyToGroup;
+    std::vector<std::vector<int>> surfGroups;
     size_t dbgSurfGeo = 0, dbgSurfNoTex = 0, dbgSurfFew = 0;
     for (size_t si = 0; si < interior.surfaces.size(); si++) {
         auto& surf = interior.surfaces[si];
@@ -701,14 +706,24 @@ static bool interiorToMeshes(DIFInterior& interior,
             dbgSurfNoTex++;
             continue;
         }
-        int lmIdx = si < interior.normalLMapIndices.size()
-            ? interior.normalLMapIndices[si] : -1;
-        if (lmIdx < 0 || lmIdx >= (int)outLightmaps.size()) lmIdx = -1;
-        int zone = surfaceZones[si];
-        bool outsideVisible = (surf.surfaceFlags & (1u << 4)) != 0;
-        int hash = ((texIdx * 256 + (lmIdx + 1)) * 4096 + (zone + 1)) * 2 +
-            (outsideVisible ? 1 : 0);
-        surfGroups[hash].push_back((int)si);
+        const int lmIdx = lightmapAt(interior.normalLMapIndices, si);
+        const int alarmLmIdx = interior.hasAlarmState ? lightmapAt(interior.alarmLMapIndices, si) : lmIdx;
+        const GroupKey key{texIdx, lmIdx, alarmLmIdx, surfaceZones[si], (surf.surfaceFlags & (1u << 4)) != 0};
+        auto it = keyToGroup.find(key);
+        if (it == keyToGroup.end()) {
+            it = keyToGroup.emplace(key, (int)groupKeys.size()).first;
+            groupKeys.push_back(key);
+            surfGroups.emplace_back();
+        }
+        surfGroups[it->second].push_back((int)si);
+    }
+
+    // materialLightmapIndex is indexed by the per-group id (mesh.materialIdx).
+    outMatLMIndex.assign(groupKeys.size(), -1);
+    outMatAlarmLMIndex.assign(groupKeys.size(), -1);
+    for (size_t g = 0; g < groupKeys.size(); g++) {
+        outMatLMIndex[g] = (int16_t)groupKeys[g].lmIdx;
+        outMatAlarmLMIndex[g] = (int16_t)groupKeys[g].alarmLmIdx;
     }
     Console::instance().printf(LogLevel::Debug,
         "DIFDIAG totalSurfaces=%zu geometrySurfaces=%zu noTexture=%zu fewVerts=%zu matNames=%zu lightmaps=%zu",
@@ -790,22 +805,15 @@ static bool interiorToMeshes(DIFInterior& interior,
     };
 
     // Build meshes
-    for (auto& [keyHash, surfIdxs] : surfGroups) {
-        bool outsideVisible = (keyHash & 1) != 0;
-        int groupedHash = keyHash / 2;
-        int zone = (groupedHash % 4096) - 1;
-        int materialHash = groupedHash / 4096;
-        int texIdx = materialHash / 256;
-        int lmIdx = (materialHash % 256) - 1;
-        int group = -1;
-        for (auto& gk : groupKeys)
-            if (gk.texIdx == texIdx && gk.lmIdx == lmIdx && gk.zone == zone &&
-                gk.outsideVisible == outsideVisible) { group = gk.group; break; }
-        if (group < 0) group = 0;
+    for (size_t group = 0; group < surfGroups.size(); group++) {
+        const std::vector<int>& surfIdxs = surfGroups[group];
+        const int texIdx = groupKeys[group].texIdx;
+        const int zone = groupKeys[group].zone;
+        const bool outsideVisible = groupKeys[group].outsideVisible;
 
         MeshData mesh;
         mesh.materialIndex = texIdx;   // texture binding
-        mesh.materialIdx = group;      // lightmap binding (looks up materialLightmapIndex)
+        mesh.materialIdx = (int32_t)group; // lightmap binding (looks up materialLightmapIndex)
         mesh.interiorZone = zone;
         mesh.interiorOutsideVisible = outsideVisible;
 
@@ -1029,6 +1037,77 @@ static bool interiorToMeshes(DIFInterior& interior,
     return !outMeshes.empty();
 }
 
+// ─── Animated lighting ────────────────────────────────────────────
+
+// Keeps the animated lights and their relight plans, with the decoded base
+// image of every lightmap a plan rewrites. A table that references outside
+// its targets leaves the interior with its static lightmaps.
+static void buildInteriorLighting(const DIFInterior& interior, DIFLoadResult& result,
+                                  const char* name, bool skipGpu) {
+    memcpy(result.baseAmbient, interior.baseAmbient, sizeof(result.baseAmbient));
+    memcpy(result.alarmAmbient, interior.alarmAmbient, sizeof(result.alarmAmbient));
+    DIFLightingData& lighting = result.lighting;
+    lighting.hasAlarmState = interior.hasAlarmState;
+    if (interior.animatedLights.empty()) return;
+
+    std::vector<DIFLitSurface> surfaces(interior.surfaces.size());
+    for (size_t i = 0; i < surfaces.size(); i++) {
+        const DIFSurface& surface = interior.surfaces[i];
+        surfaces[i] = {surface.lightCount, surface.lightStateInfoStart,
+                       surface.mapOffsetX, surface.mapOffsetY, surface.mapSizeX, surface.mapSizeY};
+    }
+    const char* error = nullptr;
+    if (!validateDIFLighting(interior.animatedLights, interior.lightStates, interior.lightStateData,
+                             interior.lightStateBuffer.size(), surfaces, error)) {
+        Console::instance().printf(LogLevel::Warn, "DIF: '%s' animated lights not used: %s", name, error);
+        return;
+    }
+    auto plans = buildDIFLightingPlans(interior.animatedLights, interior.lightStates,
+                                       interior.lightStateData, surfaces,
+                                       interior.normalLMapIndices, interior.alarmLMapIndices,
+                                       interior.hasAlarmState);
+    if (!skipGpu) {
+        for (const auto& [key, plan] : plans) {
+            const int index = key / 2;
+            if (lighting.basePixels.count(index)) continue;
+            if (index >= (int)interior.lightmapEntries.size() ||
+                interior.lightmapEntries[index].pngData.empty()) {
+                Console::instance().printf(LogLevel::Warn,
+                    "DIF: '%s' animated lights not used: lightmap %d has no image", name, index);
+                return;
+            }
+            const auto& png = interior.lightmapEntries[index].pngData;
+            int w = 0, h = 0, channels = 0;
+            unsigned char* pixels = stbi_load_from_memory(png.data(), (int)png.size(), &w, &h, &channels, 4);
+            if (!pixels) {
+                Console::instance().printf(LogLevel::Warn,
+                    "DIF: '%s' animated lights not used: lightmap %d does not decode", name, index);
+                return;
+            }
+            DIFLightingData::Pixels& base = lighting.basePixels[index];
+            base.width = w;
+            base.height = h;
+            base.rgba.assign(pixels, pixels + (size_t)w * h * 4);
+            stbi_image_free(pixels);
+        }
+        for (const auto& [key, plan] : plans) {
+            const DIFLightingData::Pixels& base = lighting.basePixels[key / 2];
+            for (const auto& surface : plan.surfaces)
+                if (surface.x + surface.width > base.width || surface.y + surface.height > base.height) {
+                    Console::instance().printf(LogLevel::Warn,
+                        "DIF: '%s' animated lights not used: surface patch outside lightmap %d",
+                        name, key / 2);
+                    lighting.basePixels.clear();
+                    return;
+                }
+        }
+    }
+    lighting.lights = interior.animatedLights;
+    lighting.states = interior.lightStates;
+    lighting.stateBuffer = interior.lightStateBuffer;
+    lighting.plans = std::move(plans);
+}
+
 // ─── Main DIF Loader ──────────────────────────────────────────────
 
 DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool skipGpu) {
@@ -1098,6 +1177,7 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
                           result.textures,
                           result.materialFlags,
                           result.materialLightmapIndex,
+                          result.materialAlarmLightmapIndex,
                           result.lightmaps,
                           result.materialNames,
                           skipGpu,
@@ -1164,6 +1244,8 @@ DIFLoadResult loadDIF(const uint8_t* data, size_t size, const char* name, bool s
         if (retained.vertices.size() >= 3)
             result.interiorPortals.push_back(std::move(retained));
     }
+
+    buildInteriorLighting(interiors[0], result, name, skipGpu);
 
     DTSShape::DetailLevel dl;
     dl.size = interiors[0].minPixels > 0 ? interiors[0].minPixels : 1000.0f;

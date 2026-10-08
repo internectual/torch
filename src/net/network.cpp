@@ -952,7 +952,7 @@ void Connection::update() {
                                         projectileImpacts.emplace_back(index, impact);
                                 }
                                  if (ok && (classId == 3 || classId == 6 || classId == 7 || classId == 9 ||
-                                            classId == 13 || classId == 16 || classId == 18 || classId == 19 ||
+                                            classId == 13 || classId == 15 || classId == 16 || classId == 18 || classId == 19 ||
                                              classId == 10 || classId == 14 || classId == 22 || classId == 25 || classId == 27 || classId == 28 || classId == 38 ||
                                              classId == 30 || classId == 32 || classId == 36 || classId == 37 ||
                                              classId == 39 || classId == 44 || classId == 46 || classId == 51 || classId == 52))

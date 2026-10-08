@@ -112,6 +112,8 @@ struct PlayerGhostState {
     bool hasCloak = false;
     float shieldLevel = 0.0f;
     bool hasShield = false;
+    bool interiorAlarm = false; // InteriorInstance mAlarmState
+    bool hasInteriorAlarm = false;
 };
 
 struct ProjectileImpact {

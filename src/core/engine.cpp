@@ -807,6 +807,9 @@ bool Engine::init(int argc, char* argv[]) {
                 Console::instance().printf(LogLevel::Info, "  BSP nodes: %zu", r.interiorBSP.size());
                 Console::instance().printf(LogLevel::Info, "  Zones:     %zu", r.interiorZoneNeighbors.size());
                 Console::instance().printf(LogLevel::Info, "  Portals:   %zu", r.interiorPortals.size());
+                Console::instance().printf(LogLevel::Info, "  Alarm:     %s", r.hasAlarmState ? "yes" : "no");
+                Console::instance().printf(LogLevel::Info, "  Animated lights: %zu (%zu relit lightmaps)",
+                                           r.lighting.lights.size(), r.lighting.plans.size());
                 int lLoaded = 0;
                 for (auto& lm : r.lightmaps) if (lm.loaded) lLoaded++;
                 Console::instance().printf(LogLevel::Info, "  Lightmaps loaded: %d/%zu", lLoaded, r.lightmaps.size());

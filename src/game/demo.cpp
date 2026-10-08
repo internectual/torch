@@ -3321,13 +3321,15 @@ static void readInteriorData(BitStream& bs, bool, const Vec3&, GhostEntry* entry
         setSceneProp(entry, "interiorFile", bs.readString());
         setSceneProp(entry, "showTerrainInside", bs.readFlag() ? "1" : "0");
         readTransform();
-        bs.readFlag(); // alarm state
+        const bool alarm = bs.readFlag();
+        if (entry) entry->interiorAlarm = alarm;
         setSceneProp(entry, "skinBase", bs.readString());
         if (bs.readFlag()) bs.readInt(11);
         if (bs.readFlag()) bs.readInt(11);
     } else { // normal update
         if (bs.readFlag()) readTransform();
-        bs.readFlag();
+        const bool alarm = bs.readFlag();
+        if (entry) entry->interiorAlarm = alarm;
         if (bs.readFlag()) setSceneProp(entry, "skinBase", bs.readString());
         if (bs.readFlag()) {
             if (bs.readFlag()) bs.readInt(11);

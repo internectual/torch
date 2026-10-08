@@ -38,6 +38,7 @@ struct State {
     Color target;
     Color color;
     bool slewing = false; // the engine's +0x7c flag
+    uint32_t interiorLightingVersion = 0; // World's, at the last probe
 };
 
 inline bool needsProbe(const State& state, float x, float y, float z) {

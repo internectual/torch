@@ -3,6 +3,7 @@
 #include "render/dts_loader.h"
 #include "render/dts_animation.h"
 #include "render/dif_loader.h"
+#include "render/dif_lighting_instance.h"
 #include "render/material_parity.h"
 #include "render/fog_math.h"
 #include "game/animation_parity.h"
@@ -1530,6 +1531,8 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
             materialTextures = std::move(difResult.textures);
             materialFlags = std::move(difResult.materialFlags);
             materialLightmapIndex = std::move(difResult.materialLightmapIndex);
+            materialAlarmLightmapIndex = std::move(difResult.materialAlarmLightmapIndex);
+            interiorLighting = std::move(difResult.lighting);
             lightmaps = std::move(difResult.lightmaps);
             materialNames = std::move(difResult.materialNames);
             collisionVerts = std::move(difResult.hullCollisionVerts);
@@ -2019,11 +2022,11 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
         if (shader) shader->setUniform("uAlphaTest", (int32_t)alphaTest);
         if (shader) shader->setUniform("uAlphaTestThreshold", materialAlphaTestThreshold(flags));
 
-        int lmIdx = (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
-            ? materialLightmapIndex[mesh.materialIdx] : -1;
-        if (getenv("TORCH_NOLMMAP")) lmIdx = -1; // diagnostic: disable lightmaps
-        if (lmIdx >= 0 && lmIdx < (int)lightmaps.size() && lightmaps[lmIdx].loaded) {
-            lightmaps[lmIdx].bind(1);
+        uint32_t lightmap = lightmapTexture(mesh);
+        if (getenv("TORCH_NOLMMAP")) lightmap = 0; // diagnostic: disable lightmaps
+        if (lightmap) {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, lightmap);
             if (shader) shader->setUniform("uLightmap", (int32_t)1);
             if (shader) shader->setUniform("uUseLightmap", (int32_t)1);
         } else {
@@ -2164,6 +2167,17 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     } catch (...) {
         fprintf(stderr, "DBG DTSShape::render EXCEPTION: unknown\n");
     }
+}
+
+uint32_t DTSShape::lightmapTexture(const MeshData& mesh) const {
+    const bool alarm = interiorLightingInstance && interiorLightingInstance->alarm();
+    const auto& indices = alarm ? materialAlarmLightmapIndex : materialLightmapIndex;
+    if (mesh.materialIdx < 0 || mesh.materialIdx >= (int)indices.size()) return 0;
+    const int index = indices[mesh.materialIdx];
+    if (index < 0 || index >= (int)lightmaps.size() || !lightmaps[index].loaded) return 0;
+    if (interiorLightingInstance)
+        if (const uint32_t animated = interiorLightingInstance->animatedLightmap(index)) return animated;
+    return lightmaps[index].id;
 }
 
 float DTSShape::cloakShiftU = 0.0f, DTSShape::cloakShiftV = 0.0f;
@@ -2732,11 +2746,11 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
         if (shader) shader->setUniform("uAlphaTestThreshold", materialAlphaTestThreshold(flags));
 
         // Lightmap
-        int lmIdx = (mesh.materialIdx >= 0 && mesh.materialIdx < (int)materialLightmapIndex.size())
-            ? materialLightmapIndex[mesh.materialIdx] : -1;
-        if (getenv("TORCH_NOLMMAP")) lmIdx = -1; // diagnostic: disable lightmaps
-        if (lmIdx >= 0 && lmIdx < (int)lightmaps.size() && lightmaps[lmIdx].loaded) {
-            lightmaps[lmIdx].bind(1);
+        uint32_t lightmap = lightmapTexture(mesh);
+        if (getenv("TORCH_NOLMMAP")) lightmap = 0; // diagnostic: disable lightmaps
+        if (lightmap) {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, lightmap);
             if (shader) shader->setUniform("uLightmap", (int32_t)1);
             if (shader) shader->setUniform("uUseLightmap", (int32_t)1);
         } else {

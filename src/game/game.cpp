@@ -15,6 +15,7 @@
 #include "render/material_parity.h"
 #include "render/environment_commands.h"
 #include "render/projected_shadows.h"
+#include "render/dif_lighting_instance.h"
 #include "game/timeline_random.h"
 #include "core/timer.h"
 #include "game/decal_runtime.h"
@@ -2459,6 +2460,9 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                          rotate = field->toString();
                  wo.rotate = rotate == "1" || rotate == "true";
              }
+             if (missionClassIs(obj.className, "InteriorInstance"))
+                 if (const std::string ghost = getProp(obj.props, "ghostindex"); !ghost.empty())
+                     wo.ghostIndex = std::atoi(ghost.c_str());
              if (missionClassIs(obj.className, "WayPoint")) {
                 wo.label = getProp(obj.props, "name");
                 wo.collidable = false;
@@ -2857,15 +2861,15 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                 };
 
                 // Render triangles carry the lightmap data the shape lighting
-                // probe samples under a roof.
+                // probe samples under a roof, in both lighting modes.
+                const int objectIndex = (int)(&wo - worldObjects.data());
                 for (const auto& mesh : wo.shape->meshes) {
-                    int lightmapIndex = (mesh.materialIdx >= 0 &&
-                        mesh.materialIdx < (int)wo.shape->materialLightmapIndex.size())
-                        ? wo.shape->materialLightmapIndex[mesh.materialIdx] : -1;
-                    uint32_t lightmapId = 0;
-                    if (lightmapIndex >= 0 && lightmapIndex < (int)wo.shape->lightmaps.size() &&
-                        wo.shape->lightmaps[lightmapIndex].loaded)
-                        lightmapId = wo.shape->lightmaps[lightmapIndex].id;
+                    auto lightmapId = [&](const std::vector<int16_t>& indices) -> uint32_t {
+                        const int index = mesh.materialIdx >= 0 && mesh.materialIdx < (int)indices.size()
+                            ? indices[mesh.materialIdx] : -1;
+                        return index >= 0 && index < (int)wo.shape->lightmaps.size() &&
+                            wo.shape->lightmaps[index].loaded ? wo.shape->lightmaps[index].id : 0u;
+                    };
                     for (size_t k = 0; k + 2 < mesh.indices.size(); k += 3) {
                         const auto& a = mesh.vertices[mesh.indices[k]];
                         const auto& b = mesh.vertices[mesh.indices[k + 1]];
@@ -2883,7 +2887,9 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                         lightProbeTris.push_back(tri);
                         LightProbeTriangle info;
                         info.uv[0] = a.uv2; info.uv[1] = b.uv2; info.uv[2] = c.uv2;
-                        info.lightmap = lightmapId;
+                        info.lightmap = lightmapId(wo.shape->materialLightmapIndex);
+                        info.alarmLightmap = lightmapId(wo.shape->materialAlarmLightmapIndex);
+                        info.object = objectIndex;
                         info.outsideVisible = mesh.interiorOutsideVisible;
                         lightProbeInfo.push_back(info);
                     }
@@ -3824,6 +3830,25 @@ void World::syncForceFieldGhost(int ghostIndex, int state, uint32_t position, in
     }
 }
 
+DIFLightingInstance& World::interiorLighting(WorldObject& object) {
+    if (!object.interiorLight)
+        object.interiorLight = std::make_shared<DIFLightingInstance>(Engine::instance().game().gameTime());
+    return *object.interiorLight;
+}
+
+void World::syncInteriorAlarmGhost(int ghostIndex, bool alarm) {
+    for (auto& object : worldObjects) {
+        if (object.ghostIndex != ghostIndex || !object.shape || !object.shape->isInterior ||
+            !object.shape->interiorLighting.hasAlarmState) continue;
+        if (interiorLighting(object).setAlarm(*object.shape, alarm, Engine::instance().game().gameTime())) {
+            Console::instance().printf(LogLevel::Debug, "InteriorInstance ghost %d '%s': alarm %s",
+                                       ghostIndex, object.shapeName.c_str(), alarm ? "on" : "off");
+            // Power transitions change the lighting of shapes standing still.
+            ++interiorLightingVersion;
+        }
+    }
+}
+
 void World::playerTrianglesInBox(const Point3F& min, const Point3F& max,
                                  std::vector<PlayerPrediction::Triangle>& out) const {
     auto toTorque = [](const Point3F& p) { return Point3F{p.x, -p.z, p.y}; };
@@ -4274,10 +4299,16 @@ void World::render(const Point3F& cameraPos, float dt) {
             if (!obj.shape->isInterior)
                 applyShapeLighting(*obj.shape, obj.shapeLight, model * obj.shape->upOrientation(),
                                    dt * 1000.0f);
+            if (obj.shape->isInterior && obj.shape->interiorLighting.animated()) {
+                DIFLightingInstance& lighting = interiorLighting(obj);
+                lighting.prepare(*obj.shape, Engine::instance().game().gameTime());
+                obj.shape->interiorLightingInstance = &lighting;
+            }
             if (!obj.animName.empty())
                 obj.shape->renderAnimation(obj.animName.c_str(), obj.animTime);
             else
                 obj.shape->render(0);
+            obj.shape->interiorLightingInstance = nullptr;
             obj.shape->activeInteriorZones.clear();
             if (mapperMarker) {
                 glDepthMask(GL_TRUE);
@@ -5037,11 +5068,16 @@ bool World::sampleInteriorLight(int triangle, const Point3F& point, ShapeLightin
     if (triangle < 0 || triangle >= (int)lightProbeInfo.size()) return false;
     const LightProbeTriangle& info = lightProbeInfo[triangle];
     const CollisionTri& tri = lightProbeTris[triangle];
-    if (!info.lightmap) return false;
-    auto cached = lightmapPixelCache.find(info.lightmap);
+    // The interior's current mode picks the lightmap; animated lights are
+    // not sampled (the base image).
+    const bool alarm = info.object >= 0 && info.object < (int)worldObjects.size() &&
+        worldObjects[info.object].interiorLight && worldObjects[info.object].interiorLight->alarm();
+    const uint32_t lightmap = alarm ? info.alarmLightmap : info.lightmap;
+    if (!lightmap) return false;
+    auto cached = lightmapPixelCache.find(lightmap);
     if (cached == lightmapPixelCache.end()) {
         LightmapPixels pixels;
-        glBindTexture(GL_TEXTURE_2D, info.lightmap);
+        glBindTexture(GL_TEXTURE_2D, lightmap);
         GLint w = 0, h = 0;
         glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
         glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
@@ -5052,7 +5088,7 @@ bool World::sampleInteriorLight(int triangle, const Point3F& point, ShapeLightin
             glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.rgba.data());
         }
         glBindTexture(GL_TEXTURE_2D, 0);
-        cached = lightmapPixelCache.emplace(info.lightmap, std::move(pixels)).first;
+        cached = lightmapPixelCache.emplace(lightmap, std::move(pixels)).first;
     }
     const LightmapPixels& px = cached->second;
     if (px.width <= 0) return false;
@@ -5127,7 +5163,9 @@ bool World::probeShapeLighting(const Point3F& center, int& mode, ShapeLighting::
 void World::applyShapeLighting(DTSShape& shape, ShapeLighting::State& state,
                                const MatrixF& renderModel, float dtMs) {
     const Point3F center = renderModel.transform(shape.boundsCenter());
-    if (ShapeLighting::needsProbe(state, center.x, center.y, center.z)) {
+    if (ShapeLighting::needsProbe(state, center.x, center.y, center.z) ||
+        state.interiorLightingVersion != interiorLightingVersion) {
+        state.interiorLightingVersion = interiorLightingVersion;
         int mode = state.mode;
         ShapeLighting::Color color = state.target;
         if (probeShapeLighting(center, mode, color))
@@ -8794,6 +8832,8 @@ void Game::render(float dt) {
                                        g->forceFieldStateUpdates);
                 continue;
             }
+            if (ghostClassIs(g->className, "InteriorInstance"))
+                w->syncInteriorAlarmGhost(idx, g->interiorAlarm);
 
             // Resolve player name from skin name if not already set
             if (g->playerName.empty() && !g->skinName.empty()) {
@@ -11483,6 +11523,7 @@ void Game::connectToServer(const char* host, uint16_t port) {
               }
               GhostEntry* ghost = liveGhosts.getMutableGhost((int)update.index);
               if (!ghost) return;
+              if (state->hasInteriorAlarm) ghost->interiorAlarm = state->interiorAlarm;
               if (state->hasTargetId) {
                   ghost->targetId = state->targetId;
                   if (ghost->targetId < 0) {
@@ -12916,6 +12957,8 @@ std::vector<MisObject> Game::demoSceneObjects() const {
             object.props.push_back({"ghostindex", std::to_string(index)});
             if (g->hasDatablock) object.props.push_back({"datablockid", std::to_string(g->datablockId)});
         }
+        if (missionClassEquals(object.className, "InteriorInstance"))
+            object.props.push_back({"ghostindex", std::to_string(index)});
         terrain = terrain || missionClassEquals(object.className, "TerrainBlock");
         if (missionClassEquals(object.className, "AudioEmitter"))
             resolveDemoAudioEmitter(object, demoParser->getInitialBlock().dataBlocks);
