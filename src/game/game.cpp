@@ -2997,7 +2997,9 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
             for (auto& fn : faceNames) Console::instance().printf(LogLevel::Debug, "    '%s'", fn.c_str());
 
             if (faceNames.size() >= 6) {
-                std::vector<std::string> exts = {".png", ".jpg", ".bm8"};
+                // A material list may name a face with its extension
+                // (Starfallen.dml); the name as written comes first.
+                std::vector<std::string> exts = {"", ".png", ".jpg", ".bm8"};
                 for (auto& fn : faceNames) {
                     bool found = false;
                     for (auto& ext : exts) {
@@ -3035,10 +3037,8 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
         }
     }
 
-    // Fallback if DML-based loading failed
-    if (skyFaces.size() < 6) {
-        Console::instance().printf(LogLevel::Warn, "Sky: cubemap unavailable for materialList '%s'; using solid-color fallback", skyMaterialList.c_str());
-    }
+    if (skyFaces.size() < 6 && !skyMaterialList.empty())
+        Console::instance().printf(LogLevel::Error, "Sky: materialList '%s' could not be resolved", skyMaterialList.c_str());
 
     if (skyFaces.size() >= 6) {
         skyBox.load(skyFaces);
@@ -3120,7 +3120,7 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
             skyBox.cloudLayers.push_back(std::move(layer));
         }
     } else {
-        Console::instance().printf(LogLevel::Info, "No sky textures found, generating default");
+        Console::instance().printf(LogLevel::Info, "Sky: the mission names no material list");
     }
 
     loaded = true;
