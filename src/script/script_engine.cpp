@@ -74,9 +74,8 @@ static bool sameObjectValue(const VMValue& a, const VMValue& b) {
 
 static VMValue* findObjectField(ScriptObject* object, const std::string& name) {
     if (!object) return nullptr;
-    for (auto& [field, value] : object->fields)
-        if (sameFieldName(field, name)) return &value;
-    return nullptr;
+    auto it = object->fields.find(name); // FieldMap matches names case-insensitively
+    return it == object->fields.end() ? nullptr : &it->second;
 }
 
 static ScriptObject* namedScriptObject(const std::string& name) {
@@ -1656,13 +1655,7 @@ void ScriptEngine::objectAdded(ScriptObject* object) {
 bool ScriptEngine::setObjectField(ScriptObject* object, const std::string& field,
                                   const VMValue& value) {
     if (!object || field.empty()) return false;
-    auto it = object->fields.end();
-    for (auto candidate = object->fields.begin(); candidate != object->fields.end(); ++candidate) {
-        if (sameFieldName(candidate->first, field)) {
-            it = candidate;
-            break;
-        }
-    }
+    auto it = object->fields.find(field);
     const VMValue old = it == object->fields.end() ? VMValue() : it->second;
     if (it == object->fields.end()) object->fields[field] = value;
     else it->second = value;
