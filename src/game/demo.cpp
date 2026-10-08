@@ -1196,6 +1196,7 @@ const std::vector<int>& DemoParser::getMoveTicksBefore() {
 }
 
 void DemoParser::beginLiveStream(uint32_t sequence) {
+    moveQueue_ = {};
     if (decompressed) free(decompressed);
     decompressed = nullptr;
     decompressedSize = 0;

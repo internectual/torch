@@ -12667,7 +12667,10 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
     if (!demoParser || !w || demoMatchEnded) return;
     PlayerPrediction::Move recorderMove;
     bool haveRecorderMove = false;
-    if (moveBlock.size >= 64 && demoParser->moveQueue().admit()) {
+    // A recording's move queue follows collectMove's admission limit; a live
+    // connection's moves are the local client's own (GameConnection queues
+    // and acknowledges them).
+    if (moveBlock.size >= 64 && (demoLive || demoParser->moveQueue().admit())) {
         const DemoMove move = demoParser->readRawMove(moveBlock.data.data(), moveBlock.data.size());
         recorderMove.x = move.x; recorderMove.y = move.y; recorderMove.z = move.z;
         recorderMove.yaw = move.yaw; recorderMove.pitch = move.pitch; recorderMove.roll = move.roll;
@@ -12729,7 +12732,7 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
         const bool recorder = index == controlGhostIndex;
         // Once the recorded queue overflows its input history is unusable;
         // the recorder is predicted without its retained move.
-        if (recorder && !demoParser->moveQueue().available) state.move = {};
+        if (recorder && !demoLive && !demoParser->moveQueue().available) state.move = {};
         state.allowFreelook = recorder && ((state.mounted && g->mountNode == 0) || !demoRecordedFirstPerson);
         PlayerPrediction::processTick(state, data, getGravity(), recorder && haveRecorderMove ? &recorderMove : nullptr,
                                       0.0f, demoPlayerCollision, gather, water);
