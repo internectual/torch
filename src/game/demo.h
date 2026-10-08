@@ -21,6 +21,7 @@
 
 #include "core/math.h"
 #include "net/v12_datablocks.h"
+#include "sim/target_name.h"
 
 // ─── Vec3 / Quat helpers ───────────────────────────────────────
 struct Vec3 { float x{}, y{}, z{}; };
@@ -415,12 +416,53 @@ struct QueuedMove {
 
 // TargetManager slot state, keyed by target id (not ghost index).
 struct DemoTargetState {
-    std::string name, skin, type;
+    std::string name, skin, skinPref, type;
+    // A field whose NetString has not arrived reads empty and waits on that
+    // string id (-1: not waiting).
+    int pendingName = -1, pendingSkin = -1, pendingSkinPref = -1, pendingType = -1;
     int sensorGroup = -1;
     int renderFlags = 0;
     bool hasRenderFlags = false;
     int dataBlockId = 0;   // TargetInfo::shapeBaseData (0 none)
     uint32_t changes = 0;  // TargetManagerNotify::targetChanged count
+
+    // A TargetInfoEvent string field: tag -1 is not in the update (left
+    // unchanged), EmptyTag sets it empty, and an id without its NetString
+    // yet clears it until that NetStringEvent arrives.
+    static constexpr int EmptyTag = 0x400;
+    static void updateString(const std::map<int, std::string>& netStrings,
+                             std::string& value, int& pending, int tag) {
+        if (tag < 0) return;
+        pending = -1;
+        if (tag == EmptyTag) {
+            value.clear();
+            return;
+        }
+        auto it = netStrings.find(tag);
+        if (it != netStrings.end()) {
+            value = it->second;
+        } else {
+            value.clear();
+            pending = tag;
+        }
+    }
+    // A NetStringEvent: every field waiting on this id takes the string.
+    bool resolveString(int id, const std::string& value) {
+        bool resolved = false;
+        for (auto [field, pending] : {std::pair{&name, &pendingName}, std::pair{&skin, &pendingSkin},
+                                      std::pair{&skinPref, &pendingSkinPref}, std::pair{&type, &pendingType}}) {
+            if (*pending != id) continue;
+            *field = value;
+            *pending = -1;
+            resolved = true;
+        }
+        return resolved;
+    }
+    // A client's own target (server.cs allocClientTarget type).
+    bool isClient() const { return TargetNames::isClientType(type); }
+    // Render bit 0x2 marks a CTF flag's target; on a client target it marks
+    // the flag's carrier instead (CTFGame.cs).
+    bool isFlag() const { return hasRenderFlags && (renderFlags & 0x2) != 0 && !isClient(); }
 };
 
 struct TargetEntry {
@@ -1176,6 +1218,10 @@ private:
     std::array<uint32_t, 16> targetVisible_{};
     int clientSensorGroup_ = 0;
     void applyTarget(GhostEntry& ghost) const;
+    // TargetManagerNotify::targetChanged: the target's ghosts and roster
+    // entry follow its new info.
+    void targetChanged(int targetId);
+    void syncTargetPlayer(int targetId);
     std::vector<int> moveTicksBefore_;
     uint32_t packetsParsed{};
     std::string parseFault_;

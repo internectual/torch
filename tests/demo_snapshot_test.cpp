@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <cmath>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -107,6 +108,38 @@ int main(int argc, char** argv) {
         weaponOrder.handleHudRemoteCommand("setWeaponsHudItem",
             {"setWeaponsHudItem", "3", "0", "0", "2"});
         CHECK(weaponOrder.getWeaponsHud().slotOrder == std::vector<int>({0, 2}));
+    }
+
+    {
+        // TargetInfoEvent strings: omitted leaves a field, EmptyTag empties
+        // it, and a tag without its NetString yet clears it until the
+        // NetStringEvent arrives.
+        std::map<int, std::string> strings{{5, "Alice"}, {6, "_ClientConnection"}};
+        DemoTargetState t;
+        DemoTargetState::updateString(strings, t.name, t.pendingName, 5);
+        DemoTargetState::updateString(strings, t.type, t.pendingType, 6);
+        CHECK(t.name == "Alice" && t.pendingName == -1 && t.isClient());
+        DemoTargetState::updateString(strings, t.name, t.pendingName, -1);
+        CHECK(t.name == "Alice");
+        DemoTargetState::updateString(strings, t.name, t.pendingName, 9);
+        DemoTargetState::updateString(strings, t.skin, t.pendingSkin, 9);
+        CHECK(t.name.empty() && t.pendingName == 9 && t.pendingSkin == 9);
+        CHECK(!t.resolveString(8, "other"));
+        CHECK(t.resolveString(9, "Bob") && t.name == "Bob" && t.skin == "Bob");
+        CHECK(t.pendingName == -1 && t.pendingSkin == -1);
+        // A newer tag replaces one still waiting.
+        DemoTargetState::updateString(strings, t.skin, t.pendingSkin, 11);
+        DemoTargetState::updateString(strings, t.skin, t.pendingSkin, DemoTargetState::EmptyTag);
+        CHECK(t.skin.empty() && t.pendingSkin == -1 && !t.resolveString(11, "late"));
+        // Render bit 0x2: a flag unless the target is a client's (its carrier).
+        t.renderFlags = 0x2;
+        t.hasRenderFlags = true;
+        CHECK(!t.isFlag());
+        DemoTargetState::updateString(strings, t.type, t.pendingType, 12);
+        CHECK(t.resolveString(12, "Flag") && t.isFlag());
+        CHECK(TargetNames::gameName("Storm", "Flag") == "Storm Flag");
+        CHECK(TargetNames::gameName("Alice", "_ClientConnection") == "Alice");
+        CHECK(TargetNames::gameName("_hidden", "Generator") == "Generator");
     }
 
     // A recorded neutral view must reset a previous camera direction. The

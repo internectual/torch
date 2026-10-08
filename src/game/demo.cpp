@@ -527,6 +527,7 @@ void DemoParser::readComplexTargetManager(BitStream& bs) {
         DemoTargetState& target = initialTargets_[i];
         target.name = te.name;
         target.skin = te.skin;
+        target.skinPref = te.skinPref;
         target.type = te.typeDescription;
         target.sensorGroup = te.sensorGroup;
         target.renderFlags = te.targetData;
@@ -573,23 +574,57 @@ std::vector<PathManagerEntry> DemoParser::readPathManager(BitStream& bs) {
 static bool readGhostClassData(BitStream& bs, int classId, bool isInitial,
                                const Vec3& cp, GhostEntry* entry);
 
+// GameBase::onTargetInfoChanged: the ghost shows its target's current info;
+// a slot with none (freed, or not sent yet) leaves it blank.
 void DemoParser::applyTarget(GhostEntry& ghost) const {
-    auto it = targets_.find(ghost.targetId);
-    if (it == targets_.end()) return;
-    const DemoTargetState& target = it->second;
-    if (!target.name.empty()) ghost.playerName = target.name;
-    if (!target.skin.empty()) ghost.skinName = target.skin;
-    if (!target.type.empty()) ghost.targetType = target.type;
+    static const DemoTargetState none;
+    auto it = ghost.targetId >= 0 ? targets_.find(ghost.targetId) : targets_.end();
+    const DemoTargetState& target = it == targets_.end() ? none : it->second;
+    ghost.playerName = target.name;
+    ghost.skinName = target.skin;
+    ghost.targetType = target.type;
     if (target.sensorGroup >= 0) ghost.sensorGroup = target.sensorGroup;
-    if (target.hasRenderFlags) {
-        ghost.targetRenderFlags = target.renderFlags;
-        // Render bit 0x2 marks CTF flags; on a player's own target it marks
-        // the carrier instead.
-        ghost.isFlag = (target.renderFlags & 0x2) != 0 &&
-            !ObserverParity::isPlayerClass(ghost.className);
-        ghost.flagTeamId = ghost.isFlag ? target.sensorGroup : 0;
-        if (ghost.isFlag) ghost.teamId = target.sensorGroup;
+    ghost.targetRenderFlags = target.hasRenderFlags ? target.renderFlags : 0;
+    // A client target whose type has not arrived yet: its Player ghost
+    // still marks it as the carrier's, not a flag.
+    ghost.isFlag = target.isFlag() && !ObserverParity::isPlayerClass(ghost.className);
+    ghost.flagTeamId = ghost.isFlag ? target.sensorGroup : 0;
+    if (ghost.isFlag) ghost.teamId = target.sensorGroup;
+}
+
+void DemoParser::targetChanged(int targetId) {
+    for (int index : ghostTracker.getAllIndices()) {
+        GhostEntry* ghost = ghostTracker.getMutableGhost(index);
+        if (ghost && ghost->targetId == targetId) applyTarget(*ghost);
     }
+    syncTargetPlayer(targetId);
+}
+
+// The roster holds client targets only: a flag or other named target is not
+// a player. A field still waiting on its NetString leaves the entry as is.
+void DemoParser::syncTargetPlayer(int targetId) {
+    auto player = std::find_if(playerInfo_.begin(), playerInfo_.end(),
+        [&](const DemoPlayerInfo& entry) { return entry.targetId == targetId; });
+    auto it = targets_.find(targetId);
+    if (it == targets_.end()) {
+        if (player != playerInfo_.end()) playerInfo_.erase(player);
+        return;
+    }
+    const DemoTargetState& target = it->second;
+    if (target.pendingType >= 0 || (target.isClient() && target.pendingName >= 0)) return;
+    if (!target.isClient() || target.name.empty()) {
+        if (player != playerInfo_.end()) playerInfo_.erase(player);
+        return;
+    }
+    if (player == playerInfo_.end()) {
+        DemoPlayerInfo added;
+        added.targetId = targetId;
+        playerInfo_.push_back(std::move(added));
+        player = playerInfo_.end() - 1;
+    }
+    player->name = target.name;
+    player->skin = target.skin;
+    if (target.sensorGroup >= 0) player->teamId = target.sensorGroup;
 }
 
 void DemoParser::readEventStartBlock(BitStream& bs) {
@@ -942,13 +977,12 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
 
     playerInfo_.clear();
     for (const auto& target : initialBlock.targetEntries) {
-        if (target.name.empty()) continue;
+        if (target.name.empty() || !TargetNames::isClientType(target.typeDescription)) continue;
         DemoPlayerInfo player;
         player.name = target.name;
         player.skin = target.skin;
         player.teamId = target.sensorGroup;
         player.damage = target.damageLevel;
-        player.clientId = target.targetId;
         player.targetId = target.targetId;
         playerInfo_.push_back(std::move(player));
     }
@@ -1955,8 +1989,12 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
         const int id = bs.readInt(10);
         if (bs.readFlag()) {
             const std::string value = bs.readString();
-            if (applyEffects && !bs.isError() && id >= 0 && id < 1024)
+            if (applyEffects && !bs.isError() && id >= 0 && id < 1024) {
                 initialBlock.taggedStrings[id] = value;
+                // Targets whose fields arrived ahead of this string.
+                for (auto& [targetId, target] : targets_)
+                    if (target.resolveString(id, value)) targetChanged(targetId);
+            }
         }
     } else if (ev.classId == T2Demo::NetEventClassFirst + 4) { // GhostingMessageEvent
         ev.ghostSequence = bs.readU32();
@@ -2035,20 +2073,21 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
     } else if (ev.classId == T2Demo::NetEventClassFirst + 24) { // TargetInfoEvent
         ev.hasTargetInfo = true;
         ev.targetId = bs.readInt(9);
+        // -1: not in this update.
         auto readTag = [&](std::string& value) {
-            if (bs.readFlag()) {
-                const int tag = bs.readFlag() ? bs.readInt(10) : 0x400;
-                if (tag != 0x400) {
-                    auto it = initialBlock.taggedStrings.find(tag);
-                    if (it != initialBlock.taggedStrings.end()) value = it->second;
-                }
+            if (!bs.readFlag()) return -1;
+            const int tag = bs.readFlag() ? bs.readInt(10) : DemoTargetState::EmptyTag;
+            if (tag != DemoTargetState::EmptyTag) {
+                auto it = initialBlock.taggedStrings.find(tag);
+                if (it != initialBlock.taggedStrings.end()) value = it->second;
             }
+            return tag;
         };
-        readTag(ev.targetName);
-        readTag(ev.targetSkin);
-        readTag(ev.targetSkinPreference);
+        const int nameTag = readTag(ev.targetName);
+        const int skinTag = readTag(ev.targetSkin);
+        const int skinPrefTag = readTag(ev.targetSkinPreference);
         readTag(ev.targetVoice);
-        readTag(ev.targetType);
+        const int typeTag = readTag(ev.targetType);
         if (bs.readFlag()) ev.targetSensorGroup = bs.readInt(5);
         if (bs.readFlag()) ev.targetDataBlockId = bs.readFlag() ? bs.readInt(11) : 0;
         if (bs.readFlag()) {
@@ -2057,27 +2096,12 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
         }
         if (bs.readFlag()) ev.targetVoicePitch = bs.readFloat(7) * 1.5f + 0.5f;
         if (!applyEffects) return true;
-        if (!ev.targetName.empty()) {
-            auto player = std::find_if(playerInfo_.begin(), playerInfo_.end(),
-                [&](const DemoPlayerInfo& entry) {
-                    return entry.name == ev.targetName;
-                });
-            if (player != playerInfo_.end()) {
-                if (!ev.targetSkin.empty()) player->skin = ev.targetSkin;
-            } else {
-                DemoPlayerInfo added;
-                added.name = ev.targetName;
-                added.skin = ev.targetSkin;
-                added.teamId = ev.targetSensorGroup >= 0 ? ev.targetSensorGroup : 0;
-                added.clientId = ev.targetId;
-                added.targetId = ev.targetId;
-                playerInfo_.push_back(std::move(added));
-            }
-        }
         DemoTargetState& target = targets_[ev.targetId];
-        if (!ev.targetName.empty()) target.name = ev.targetName;
-        if (!ev.targetSkin.empty()) target.skin = ev.targetSkin;
-        if (!ev.targetType.empty()) target.type = ev.targetType;
+        const auto& netStrings = initialBlock.taggedStrings;
+        DemoTargetState::updateString(netStrings, target.name, target.pendingName, nameTag);
+        DemoTargetState::updateString(netStrings, target.skin, target.pendingSkin, skinTag);
+        DemoTargetState::updateString(netStrings, target.skinPref, target.pendingSkinPref, skinPrefTag);
+        DemoTargetState::updateString(netStrings, target.type, target.pendingType, typeTag);
         if (ev.targetSensorGroup >= 0) target.sensorGroup = ev.targetSensorGroup;
         if (ev.targetDataBlockId != -2) target.dataBlockId = ev.targetDataBlockId;
         if (ev.hasTargetRenderFlags) {
@@ -2085,11 +2109,7 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
             target.hasRenderFlags = true;
         }
         target.changes++;
-        // Apply to every ghost that owns this target slot.
-        for (int index : ghostTracker.getAllIndices()) {
-            GhostEntry* ghost = ghostTracker.getMutableGhost(index);
-            if (ghost && ghost->targetId == ev.targetId) applyTarget(*ghost);
-        }
+        targetChanged(ev.targetId);
     } else if (ev.classId == T2Demo::NetEventClassFirst + 25) { // TargetToEvent
         ev.hasTargetTo = true;
         if (bs.readFlag()) ev.targetToId = bs.readInt(9);
@@ -2109,9 +2129,15 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
         targets_.erase(ev.targetId);
         // TargetInfo::clear.
         targetVisible_[(ev.targetId >> 5) & 15] &= ~(1u << (ev.targetId & 31));
-        playerInfo_.erase(std::remove_if(playerInfo_.begin(), playerInfo_.end(),
-            [&](const DemoPlayerInfo& player) { return player.clientId == ev.targetId; }),
-            playerInfo_.end());
+        // GameBase::onTargetInfoChanged: a ghost on the freed slot drops it,
+        // so the slot's next holder never shows on it.
+        for (int index : ghostTracker.getAllIndices()) {
+            GhostEntry* ghost = ghostTracker.getMutableGhost(index);
+            if (!ghost || ghost->targetId != ev.targetId) continue;
+            ghost->targetId = -1;
+            applyTarget(*ghost);
+        }
+        syncTargetPlayer(ev.targetId);
     } else if (ev.classId == T2Demo::NetEventClassFirst + 10) { // RemoveClientTargetTypeEvent
         ev.removeClientTargetType = (int)bs.readRangedU32(0, 3);
     } else if (ev.classId == T2Demo::NetEventClassFirst + 11) { // ResetClientTargetsEvent
@@ -3563,7 +3589,8 @@ void DemoParser::readGhosts(BitStream& bs, std::vector<GhostUpdate>& outGhosts, 
             break;
         }
         gu.updateBitsEnd = bs.getCurPos();
-        if (entry && entry->targetId >= 0) applyTarget(*entry);
+        // A TargetMask update may have moved the ghost off its target.
+        if (entry) applyTarget(*entry);
         outGhosts.push_back(gu);
     }
     if (bs.isError()) {

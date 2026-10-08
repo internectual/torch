@@ -10,6 +10,7 @@
 #include "script/script_engine.h"
 #include "script/torquescript.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -209,6 +210,52 @@ int main() {
     assert(count(ServerTargets::ResetClientTargetsEvent) == 2);
     assert(ts.getGlobal("$afterReset").toInt() == -1); // unallocated
     assert(ServerTargets::serverTarget(t0) && !ServerTargets::serverTarget(t0)->allocated);
+
+    // The reader's target copy: only client targets ('_ClientConnection')
+    // are players; render bit 0x2 is a flag on any other target and the
+    // carrier on a client's. Tag 0 empties a field.
+    events.clear();
+    ts.execute("$t2 = allocTarget('Carol', 'beagle', 'Male1', '_ClientConnection', 3, 0, 1.0);"
+               "$t3 = allocTarget('Storm', 'base', 'Male1', 'Flag', 3, 0, 1.0);"
+               "setTargetRenderMask($t2, 0x2); setTargetRenderMask($t3, 0x2);"
+               "TMPlayer.setTarget($t2);");
+    const int t2 = ts.getGlobal("$t2").toInt(), t3 = ts.getGlobal("$t3").toInt();
+    pump(10);
+    assert(parser.getParseFault().empty());
+    auto rosterHas = [&](int target) {
+        const auto& players = parser.getPlayerInfo();
+        return std::any_of(players.begin(), players.end(),
+                           [&](const DemoPlayerInfo& p) { return p.targetId == target; });
+    };
+    {
+        const auto& targets = parser.getTargets();
+        assert(targets.at(t2).isClient() && !targets.at(t2).isFlag());
+        assert(!targets.at(t3).isClient() && targets.at(t3).isFlag());
+        assert(targets.at(t3).name == "Storm" && targets.at(t3).type == "Flag");
+        assert(rosterHas(t2) && !rosterHas(t3));
+        const GhostEntry* carrier = parser.getGhostTracker().getGhost(ghostIndex);
+        assert(carrier && carrier->targetId == t2 && carrier->playerName == "Carol");
+        assert((carrier->targetRenderFlags & 0x2) && !carrier->isFlag);
+    }
+    ts.execute("setTargetSkin($t2, 0);");
+    pump(5);
+    assert(parser.getTargets().at(t2).skin.empty());
+    assert(parser.getGhostTracker().getGhost(ghostIndex)->skinName.empty());
+    assert(parser.getTargets().at(t2).name == "Carol"); // not in the update: unchanged
+
+    // TargetFreeEvent: the ghost drops the slot and everything it showed.
+    ts.execute("freeTarget($t2);");
+    pump(10);
+    assert(parser.getParseFault().empty());
+    assert(count(ServerTargets::TargetFreeEvent) == 1);
+    {
+        const GhostEntry* freed = parser.getGhostTracker().getGhost(ghostIndex);
+        // The server object still holds the id, so a later TargetMask may
+        // put it back; the slot shows nothing until it is issued again.
+        assert(freed);
+        assert(freed->playerName.empty() && freed->targetType.empty() && freed->targetRenderFlags == 0);
+        assert(!parser.getTargets().count(t2) && !rosterHas(t2) && !rosterHas(t3));
+    }
 
     std::printf("target_manager_test: %d packets, OK\n", packets);
     return 0;
