@@ -6585,6 +6585,41 @@ bool ScriptEngine::init() {
         if (args.size() >= 2) if (auto* ctl = getListCtrl(args[0].toString())) ctl->fields["infiniteAmmoBitmap"] = args[1].toString();
         return VMValue(1);
     });
+    // HudWeaponInvBase::reset: no items and no active slot (recordings.cs
+    // rebuilds the weapon and inventory HUDs from the demo settings).
+    tsInstance->registerNative("reset", [getListCtrl](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl || !EngineClasses::isA(ctl->className, "HudWeaponInvBase")) return VMValue(0);
+        ctl->hudSlots.clear();
+        ctl->activeHudSlot = -1;
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setInfiniteAmountBitmap", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() >= 2) if (auto* ctl = getListCtrl(args[0].toString())) ctl->fields["infiniteAmountBitmap"] = args[1].toString();
+        return VMValue(1);
+    });
+    tsInstance->registerNative("setActiveInventory", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        if (auto* ctl = getListCtrl(args[0].toString())) {
+            ctl->activeHudSlot = args[1].toInt();
+            for (size_t i = 0; i < ctl->hudSlots.size(); ++i)
+                ctl->hudSlots[i].active = (int)i == ctl->activeHudSlot;
+        }
+        return VMValue(1);
+    });
+    // GuiControl::isAwake: the control is in the canvas (its root is the
+    // content or a pushed dialog).
+    tsInstance->registerNative("isAwake", [](const auto& args) -> VMValue {
+        if (args.empty()) return VMValue(0);
+        auto& gui = Engine::instance().guiRenderer();
+        GuiControl* ctl = gui.findControl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        while (ctl->parent) ctl = ctl->parent;
+        for (size_t i = 0; i < gui.dialogCount(); ++i)
+            if (gui.getDialog(i) == ctl) return VMValue(1);
+        return VMValue(0);
+    });
     tsInstance->registerNative("clearAll", [getListCtrl](const auto& args) -> VMValue {
         if (!args.empty()) if (auto* ctl = getListCtrl(args[0].toString())) {
             ctl->hudSlots.clear(); ctl->activeHudSlot = -1;
@@ -6745,6 +6780,20 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("addStyleSet", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 4) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        const std::string prefix = "styleSet" + std::to_string(args[1].toInt());
+        ctl->fields[prefix + ".fontType"] = args[2].toString();
+        ctl->fields[prefix + ".fontSize"] = args[3].toString();
+        if (args.size() > 4) ctl->fields[prefix + ".fontColor"] = args[4].toString();
+        if (args.size() > 5) ctl->fields[prefix + ".fontColorHL"] = args[5].toString();
+        if (args.size() > 6) ctl->fields[prefix + ".fontColorSEL"] = args[6].toString();
+        return VMValue(1);
+    });
+    // ShellFancyArray::addStyle(id, font, size, color, colorHL, colorSEL):
+    // the same style record a row selects with setRowStyle.
+    tsInstance->registerNative("addStyle", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() < 4) return VMValue(0);
         auto* ctl = getListCtrl(args[0].toString());
         if (!ctl) return VMValue(0);
