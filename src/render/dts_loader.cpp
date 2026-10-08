@@ -459,9 +459,9 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     // After version+pad, stream contains: bounds → header counts → data sections...
 
     // Bounds: radius, tubeRadius, center(3), min(3), max(3) = 11 F32s
-    (void)rF32(); // radius
+    result.radius = rF32();
     (void)rF32(); // tubeRadius
-    (void)rF32(); (void)rF32(); (void)rF32(); // center
+    result.center.x = rF32(); result.center.y = rF32(); result.center.z = rF32();
     float bminx = rF32(), bminy = rF32(), bminz = rF32();
     float bmaxx = rF32(), bmaxy = rF32(), bmaxz = rF32();
     result.boundsMin = {bminx, bminy, bminz};
@@ -1197,12 +1197,16 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     if (numMeshes > 10000) numMeshes = 10000;
     int32_t numSkins = (ver < 23) ? capCount(buf.readS32()) : 0; (void)numSkins;
     int32_t numNames = capCount(buf.readS32());
-    capCount(buf.readS32()); capCount(buf.readS32()); // smallestVisSize, smallestVisDL
+    // smallestVisibleSize, smallestVisibleDL: derived from the details
+    // again when the shape loads (DTSShape::load).
+    buf.readS32(); buf.readS32();
     Console::instance().printf(LogLevel::Debug, "DTS: nodes=%d objects=%d meshes=%d details=%d",
         numNodes, numObjects, numMeshes, numDetails);
     buf.checkGuard(); // 0
     // radius, tubeRadius, center, bounds
-    buf.readF32(); buf.readF32(); buf.readPoint3F();
+    result.radius = buf.readF32();
+    buf.readF32();
+    result.center = buf.readPoint3F();
     result.boundsMin = buf.readPoint3F();
     result.boundsMax = buf.readPoint3F();
     result.hasBounds = result.boundsMax.x >= result.boundsMin.x &&
@@ -1300,8 +1304,10 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     std::vector<DtsDetail> dtsDetails(numDetails);
     for (int i = 0; i < numDetails; i++) {
         dtsDetails[i].nameIdx = capCount(buf.readS32());
-        dtsDetails[i].subShape = capCount(buf.readS32());
-        dtsDetails[i].objDetail = capCount(buf.readS32());
+        // A billboard detail has subShapeNum -1 and packs its parameters
+        // into objectDetailNum.
+        dtsDetails[i].subShape = buf.readS32();
+        dtsDetails[i].objDetail = buf.readS32();
         dtsDetails[i].size = buf.readF32();
         buf.readF32(); buf.readF32(); // averageError, maxError
         capCount(buf.readS32()); // polyCount
@@ -1892,6 +1898,16 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         DTSShape::DetailLevel detail;
         detail.size = dl.size;
         detail.meshIndex = dl.objDetail;
+        if (dl.subShape < 0) {
+            // A billboard (TSLastDetail) is rendered from an image of detail
+            // (objectDetailNum >> 19) & 15; without the imposter, draw that
+            // detail's meshes.
+            const int32_t source = (int32_t)(((uint32_t)dl.objDetail >> 19) & 15);
+            if (source < (int32_t)result.details.size())
+                detail.meshIndices = result.details[source].meshIndices;
+            result.details.push_back(detail);
+            continue;
+        }
         for (int i = 0; i < numObjects; i++) {
             int32_t od = dl.objDetail;
             int32_t sm = dtsObjects[i].sm;

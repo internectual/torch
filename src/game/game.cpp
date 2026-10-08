@@ -641,13 +641,13 @@ static void renderMountedImage(DTSShape& shape, const WeaponImage::Animation& an
     }
     if (threads.empty()) {
         shape.animatedNodeWorld.clear(); // bind pose; the shape is shared
-        shape.render(0);
+        shape.render(DTSShape::SelectDetail);
         return;
     }
     const DTSShape::BlendThread primary = threads.front();
     shape.renderAnimationIndex(primary.animationIndex, primary.time, nullptr, 0,
                                threads.size() > 1 ? threads.data() + 1 : nullptr,
-                               (int)threads.size() - 1);
+                               (int)threads.size() - 1, DTSShape::SelectDetail);
 }
 
 
@@ -1091,9 +1091,9 @@ void Player::render() {
                 // fallback sequence (or rendered the bind pose).
                 const auto* animation = findAnimation(modelShape, animNames[idx]);
                 modelShape.renderAnimation(animation ? animation->name.c_str() : altNames[idx],
-                                           animTime);
+                                           animTime, nullptr, 0, DTSShape::SelectDetail);
             } else {
-                modelShape.render(0);
+                modelShape.render(DTSShape::SelectDetail);
             }
         }
 
@@ -1143,9 +1143,10 @@ void Player::render() {
                 if (animation) break;
             }
             if (animation)
-                weaponShape.renderAnimation(animation->name.c_str(), weaponAnimTime);
+                weaponShape.renderAnimation(animation->name.c_str(), weaponAnimTime, nullptr, 0,
+                                            DTSShape::SelectDetail);
             else
-                weaponShape.render(0);
+                weaponShape.render(DTSShape::SelectDetail);
         }
     }
 }
@@ -4305,9 +4306,10 @@ void World::render(const Point3F& cameraPos, float dt) {
                 obj.shape->interiorLightingInstance = &lighting;
             }
             if (!obj.animName.empty())
-                obj.shape->renderAnimation(obj.animName.c_str(), obj.animTime);
+                obj.shape->renderAnimation(obj.animName.c_str(), obj.animTime, nullptr, 0,
+                                           DTSShape::SelectDetail);
             else
-                obj.shape->render(0);
+                obj.shape->render(DTSShape::SelectDetail);
             obj.shape->interiorLightingInstance = nullptr;
             obj.shape->activeInteriorZones.clear();
             if (mapperMarker) {
@@ -4340,11 +4342,12 @@ void World::render(const Point3F& cameraPos, float dt) {
                         if (!settled) settled = findAnimation(*obj.mountedShape, "visibility");
                         if (settled)
                             obj.mountedShape->renderAnimation(
-                                settled->name.c_str(), settled->duration);
+                                settled->name.c_str(), settled->duration, nullptr, 0,
+                                DTSShape::SelectDetail);
                         else
-                            obj.mountedShape->render(0);
+                            obj.mountedShape->render(DTSShape::SelectDetail);
                     } else {
-                        obj.mountedShape->render(0);
+                        obj.mountedShape->render(DTSShape::SelectDetail);
                     }
                 } else {
                     Console::instance().printf(LogLevel::Error,
@@ -4675,7 +4678,7 @@ skip_grid:
             Engine::instance().renderer().setModel(model * b.shape->upOrientation());
             shader->setUniform("uUseTexture", (int32_t)0);
             shader->setUniform("uUseLightmap", (int32_t)0);
-            b.shape->render(0);
+            b.shape->render(DTSShape::SelectDetail);
         }
         // Health bar above bot
         {
@@ -6431,7 +6434,7 @@ void World::renderParticles() {
         shape.alphaScale = debris.data.fade ? std::clamp(b.lifetime - b.age, 0.0f, 1.0f) : 1.0f;
         shape.onlyObject = debris.partObject;
         shape.animatedNodeWorld.clear();
-        shape.render(0);
+        shape.render(DTSShape::SelectDetail);
         shape.onlyObject = -1;
         shape.alphaScale = 1.0f;
     }
@@ -6499,9 +6502,10 @@ void World::renderParticles() {
         }
         const float elapsed = std::max(0.0f, instance.age - instance.delay);
         if (instance.ambientIndex >= 0)
-            shape.renderAnimationIndex(instance.ambientIndex, elapsed * instance.playSpeed);
+            shape.renderAnimationIndex(instance.ambientIndex, elapsed * instance.playSpeed,
+                                       nullptr, 0, nullptr, 0, DTSShape::SelectDetail);
         else
-            shape.render(0);
+            shape.render(DTSShape::SelectDetail);
     }
     std::vector<size_t> decalOrder(effectDecals.size());
     std::iota(decalOrder.begin(), decalOrder.end(), 0);
@@ -10299,10 +10303,11 @@ void Game::render(float dt) {
                     shape->renderAnimationIndex(animationIndexNow, animationTimeNow,
                                                 numOverrides > 0 ? overrides : nullptr,
                                                 numOverrides, blends + primaryBlend,
-                                                numBlends - primaryBlend);
+                                                numBlends - primaryBlend, DTSShape::SelectDetail);
                     shape->transition = {};
                 } else {
-                    shape->render(0, numOverrides > 0 ? overrides : nullptr, numOverrides);
+                    shape->render(DTSShape::SelectDetail, numOverrides > 0 ? overrides : nullptr,
+                                  numOverrides);
                 }
                 shape->cloakTextureOverride = nullptr;
                 shape->alphaScale = 1.0f;
@@ -10769,9 +10774,11 @@ void Game::render(float dt) {
                if (animation)
                    g->shape->renderAnimation(animation->name.c_str(),
                                              animationPosition * animation->duration,
-                                             overrideCount ? overrides : nullptr, overrideCount);
+                                             overrideCount ? overrides : nullptr, overrideCount,
+                                             DTSShape::SelectDetail);
                else
-                   g->shape->render(0, overrideCount ? overrides : nullptr, overrideCount);
+                   g->shape->render(DTSShape::SelectDetail, overrideCount ? overrides : nullptr,
+                                    overrideCount);
                g->shape->cloakTextureOverride = nullptr;
                g->shape->alphaScale = 1.0f;
 

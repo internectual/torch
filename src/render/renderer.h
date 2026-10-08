@@ -245,6 +245,12 @@ struct DTSShape {
     bool emapEnabled = false;
     Point3F headerBoundsMin{}, headerBoundsMax{};
     bool hasHeaderBounds = false;
+    // TSShape::radius and center (shape space) and the smallest detail drawn
+    // (mSmallestVisibleSize, mSmallestVisibleDL: -1 keeps detail 0 always).
+    float shapeRadius = 0.0f;
+    Point3F shapeCenter{};
+    float smallestVisibleSize = 0.0f;
+    int32_t smallestVisibleDL = -1;
     // Bind-pose bounds in shape space (lazily computed).
     Point3F boundsCenter() const;
     float boundsRadius() const;
@@ -323,14 +329,22 @@ struct DTSShape {
         float time = 0.0f;
         float weight = 1.0f;
     } transition;
+    // A detail level argument: pick it from the projected size of the shape
+    // at the current model matrix and camera (selectDetail).
+    static constexpr int32_t SelectDetail = -2;
+    // TSShapeInstance::setDetailFromDistance: the detail for the current
+    // model matrix, camera, viewport and $pref::TS::detailAdjust; -1 when the
+    // shape is below its smallest visible size.
+    int32_t selectDetail() const;
     void render(int32_t detailLevel = 0, const NodeOverride* overrides = nullptr, int numOverrides = 0);
     void renderAnimation(const char* animName, float time,
                          const NodeOverride* overrides = nullptr,
-                         int numOverrides = 0);
+                         int numOverrides = 0, int32_t detailLevel = 0);
     void renderAnimationIndex(int animationIndex, float time,
                          const NodeOverride* overrides = nullptr,
                          int numOverrides = 0,
-                         const BlendThread* blends = nullptr, int numBlends = 0);
+                         const BlendThread* blends = nullptr, int numBlends = 0,
+                         int32_t detailLevel = 0);
     bool applySkin(const std::string& skinName);
 
     // Find node index by name (-1 if not found)

@@ -6,6 +6,7 @@
 #include "render/dif_lighting_instance.h"
 #include "render/material_parity.h"
 #include "render/fog_math.h"
+#include "render/dts_detail.h"
 #include "game/animation_parity.h"
 #include "core/engine.h"
 #include "stb_image.h"
@@ -1582,6 +1583,10 @@ bool DTSShape::load(const uint8_t* data, size_t size) {
         headerBoundsMin = dtsResult.boundsMin;
         headerBoundsMax = dtsResult.boundsMax;
         hasHeaderBounds = dtsResult.hasBounds;
+        shapeRadius = dtsResult.radius;
+        shapeCenter = dtsResult.center;
+        // TSShape::init derives the smallest visible detail from the sizes.
+        DTSDetail::smallestVisible(details, smallestVisibleSize, smallestVisibleDL);
         utilityDetails.clear();
         for (auto& utility : dtsResult.utilityDetails)
             utilityDetails.push_back({std::move(utility.name), std::move(utility.meshIndices)});
@@ -2094,7 +2099,9 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
             (materialFlags[matIdx] & MatFlag_Additive) != 0;
     };
 
-    // Determine which meshes to render for the selected detail level
+    // Determine which meshes to render for the selected detail level; a
+    // shape below its smallest visible size draws nothing.
+    if (detailLevel == SelectDetail) detailLevel = selectDetail();
     std::vector<size_t> renderList;
     if (detailLevel >= 0 && detailLevel < (int)details.size() && !details[detailLevel].meshIndices.empty()) {
         renderList.reserve(details[detailLevel].meshIndices.size());
@@ -2102,7 +2109,7 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
             if (mi >= 0 && mi < (int)meshes.size())
                 renderList.push_back((size_t)mi);
         }
-    } else {
+    } else if (detailLevel >= 0) {
         renderList.reserve(meshes.size());
         for (size_t mi = 0; mi < meshes.size(); mi++)
             renderList.push_back(mi);
@@ -2167,6 +2174,28 @@ void DTSShape::render(int32_t detailLevel, const NodeOverride* overrides, int nu
     } catch (...) {
         fprintf(stderr, "DBG DTSShape::render EXCEPTION: unknown\n");
     }
+}
+
+int32_t DTSShape::selectDetail() const {
+    // Interiors keep their loaded detail; a shape without detail sizes has
+    // only detail 0.
+    if (isInterior || smallestVisibleDL < 0) return 0;
+    auto& r = Engine::instance().renderer();
+    const MatrixF& model = r.modelMatrix();
+    const Point3F center = model.transform(shapeCenter);
+    const float dx = center.x - r.cameraPos.x, dy = center.y - r.cameraPos.y, dz = center.z - r.cameraPos.z;
+    const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    float scale = 0.0f;
+    for (int c = 0; c < 3; ++c)
+        scale = std::max(scale, model.m[0][c] * model.m[0][c] + model.m[1][c] * model.m[1][c] +
+                                model.m[2][c] * model.m[2][c]);
+    // Pixel scale from the (zoomed) projection: height / 2 / tan(vfov / 2).
+    const bool perspective = r.projection.m[3][3] == 0.0f;
+    const float pixelScale = (float)r.config().height * 0.5f * std::fabs(r.projection.m[1][1]);
+    const float pixels = DTSDetail::pixelSize(
+        shapeRadius, std::sqrt(scale), perspective ? distance : 1.0f, pixelScale,
+        Console::instance().getFloatVariable("$pref::TS::detailAdjust", 1.0f));
+    return DTSDetail::select(details, smallestVisibleDL, smallestVisibleSize, pixels);
 }
 
 uint32_t DTSShape::lightmapTexture(const MeshData& mesh) const {
@@ -2235,7 +2264,8 @@ float DTSShape::boundsRadius() const {
 }
 
 void DTSShape::renderAnimation(const char* animName, float time,
-                               const NodeOverride* overrides, int numOverrides) {
+                               const NodeOverride* overrides, int numOverrides,
+                               int32_t detailLevel) {
     if (!loaded) return;
     std::string wanted = animName ? animName : "";
     for (char& c : wanted) c = (char)std::tolower((unsigned char)c);
@@ -2243,16 +2273,17 @@ void DTSShape::renderAnimation(const char* animName, float time,
         std::string candidate = animations[i].name;
         for (char& c : candidate) c = (char)std::tolower((unsigned char)c);
         if (candidate == wanted) {
-            renderAnimationIndex((int)i, time, overrides, numOverrides);
+            renderAnimationIndex((int)i, time, overrides, numOverrides, nullptr, 0, detailLevel);
             return;
         }
     }
-    render(0, overrides, numOverrides);
+    render(detailLevel, overrides, numOverrides);
 }
 
 void DTSShape::renderAnimationIndex(int animationIndex, float time,
                                     const NodeOverride* overrides, int numOverrides,
-                                    const BlendThread* blends, int numBlends) {
+                                    const BlendThread* blends, int numBlends,
+                                    int32_t detailLevel) {
     if (!loaded) return;
 
     // An object can be hidden in one sample and visible in the next. Reset all
@@ -2264,7 +2295,7 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
     }
 
     if (animationIndex < 0 || animationIndex >= (int)animations.size()) {
-        render(0, overrides, numOverrides);
+        render(detailLevel, overrides, numOverrides);
         return;
     }
     const Animation* anim = &animations[animationIndex];
@@ -2798,17 +2829,18 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
         mesh.render();
     };
 
-    // Determine which meshes to render for the selected detail level
+    // Determine which meshes to render for the selected detail level; a
+    // shape below its smallest visible size draws nothing.
     std::vector<size_t> renderList;
     {
-        int32_t dl = 0; // default to highest detail
+        const int32_t dl = detailLevel == SelectDetail ? selectDetail() : detailLevel;
         if (dl >= 0 && dl < (int)details.size() && !details[dl].meshIndices.empty()) {
             renderList.reserve(details[dl].meshIndices.size());
             for (int32_t mi : details[dl].meshIndices) {
                 if (mi >= 0 && mi < (int)meshes.size())
                     renderList.push_back((size_t)mi);
             }
-        } else {
+        } else if (dl >= 0) {
             renderList.reserve(meshes.size());
             for (size_t mi = 0; mi < meshes.size(); mi++)
                 renderList.push_back(mi);

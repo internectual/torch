@@ -1040,6 +1040,11 @@ target_include_directories(torch_dif_lighting_test PRIVATE src)
 target_compile_options(torch_dif_lighting_test PRIVATE -UNDEBUG)
 add_test(NAME torch_dif_lighting COMMAND torch_dif_lighting_test)
 
+add_executable(torch_dts_detail_test tests/dts_detail_test.cpp)
+target_include_directories(torch_dts_detail_test PRIVATE src)
+target_compile_options(torch_dts_detail_test PRIVATE -UNDEBUG)
+add_test(NAME torch_dts_detail COMMAND torch_dts_detail_test)
+
 add_executable(torch_player_animation_test tests/player_animation_test.cpp)
 target_include_directories(torch_player_animation_test PRIVATE src)
 target_compile_options(torch_player_animation_test PRIVATE -UNDEBUG)

@@ -20,6 +20,9 @@ struct DTSLoadResult {
     // TSShape::bounds (shape space, as stored in the file).
     Point3F boundsMin{}, boundsMax{};
     bool hasBounds = false;
+    // TSShape::radius and center (shape space), for detail selection.
+    float radius = 0.0f;
+    Point3F center{};
     std::vector<float> materialReflectionAmount;
     std::vector<int16_t> materialLightmapIndex;
     std::vector<Texture> lightmaps;
