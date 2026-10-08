@@ -601,8 +601,6 @@ void GuiRenderer::render() {
     };
     syncPrintControl("CenterPrintText", "HUD::centerPrint");
     syncPrintControl("BottomPrintText", "HUD::bottomPrint");
-    if (auto* zoom = findControl("ZoomHud"))
-        zoom->visible = Engine::instance().game().isZooming();
     MatrixF ortho;
     ortho.identity();
     ortho.m[0][0] = 2.0f / viewport.logicalWidth;

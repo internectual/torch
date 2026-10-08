@@ -35,7 +35,7 @@
 static std::map<std::string, int> s_bindings = {
     {"forward", 26}, {"backward", 22}, {"left", 4}, {"right", 7},
     {"jump", 44}, {"jet", 225}, {"fire", -1}, {"altfire", -3},
-    {"zoom", -2}, {"reload", 21},
+    {"reload", 21},
     {"f1", 58}, {"f2", 59}, {"f3", 60}, {"f4", 61},
     {"chat", 40}, {"console", 53},
 };
@@ -107,7 +107,7 @@ void Engine::syncBindsFromActionMap() {
     const std::pair<const char*, const char*> actions[] = {
         {"forward", "moveforward"}, {"backward", "movebackward"},
         {"left", "moveleft"}, {"right", "moveright"},
-        {"jump", "jump"}, {"jet", "jet"}, {"zoom", "toggleZoom"},
+        {"jump", "jump"}, {"jet", "jet"},
     };
     auto& actionBinds = actionBindingStore();
     for (const auto& [action, command] : actions) {
@@ -1607,7 +1607,6 @@ bool Engine::init(int argc, char* argv[]) {
                 else if (command == "jet") action = "jet";
                 else if (command == "reload") action = "reload";
                 else if (command == "toggleConsole") action = "console";
-                else if (command == "toggleZoom") action = "zoom";
                 if (action) {
                     int sc = -1;
                     bool valid = false;
@@ -2638,7 +2637,6 @@ void Engine::run() {
                 if (scriptInput) {
                     input.fire = (tsInput->getGlobal("$mvTriggerCount0").toInt() & 1) != 0;
                     input.altFire = (tsInput->getGlobal("$mvTriggerCount1").toInt() & 1) != 0;
-                    input.zoom = false;
                 } else {
                     auto boundActionDown = [&](const char* action) {
                         const int binding = s_bindings[action];
@@ -2651,7 +2649,6 @@ void Engine::run() {
                     };
                     input.fire = boundActionDown("fire") || mButtons[1];
                     input.altFire = boundActionDown("altfire") || mButtons[3];
-                    input.zoom = boundActionDown("zoom");
                 }
                 input.reload = boundKeyDown("reload");
                 input.demoPause = keys[SCANCODE_P] != 0;

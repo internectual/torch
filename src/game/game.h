@@ -936,7 +936,7 @@ public:
     struct InputMove {
         bool forward{}, backward{}, left{}, right{};
         bool jump{}, jet{}, fire{}, altFire{};
-        bool zoom{}, reload{};
+        bool reload{};
         bool freeCam{}, orbitCam{};
         bool demoPause{}, demoStepFrame{}, demoShowEvents{};
         Point3F lookDelta{};
@@ -955,7 +955,6 @@ public:
     void clearMissionAudio();
     void clearProjectileAudio();
 
-    bool isZooming() const { return currentInput.zoom; }
     bool isDemoPlaying() const { return demoPlaying; }
     bool isDemoPaused() const { return demoPaused; }
     bool isDemoFastForward() const { return demoFastForward || demoJetHeld; }
@@ -1173,8 +1172,6 @@ private:
     bool previousFire = false;
     bool previousAltFire = false;
     bool previousReload = false;
-    bool previousZoom = false;
-    bool zoomed = false;
     bool freeCamActive = false;
     Point3F freeCamPos{0, 10, 0};
     Point3F freeCamTarget{0, 10, -1};

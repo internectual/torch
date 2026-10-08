@@ -8243,7 +8243,6 @@ bool ScriptEngine::init() {
             else if (command == "jet") action = "jet";
             else if (command == "reload") action = "reload";
             else if (command == "toggleConsole") action = "console";
-            else if (command == "toggleZoom") action = "zoom";
             if (action) {
                 int sc = -1;
                 bool valid = false;
@@ -8392,7 +8391,7 @@ bool ScriptEngine::init() {
             const std::pair<const char*, const char*> actions[] = {
                 {"forward", "moveforward"}, {"backward", "movebackward"},
                 {"left", "moveleft"}, {"right", "moveright"},
-                {"jump", "jump"}, {"jet", "jet"}, {"zoom", "toggleZoom"},
+                {"jump", "jump"}, {"jet", "jet"},
             };
             for (const auto& [action, command] : actions) {
                 bool present = false;

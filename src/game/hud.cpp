@@ -19,7 +19,7 @@ constexpr RemapAction kRemapActions[] = {
     {"forward", "Forward"}, {"backward", "Backward"},
     {"left", "Strafe Left"}, {"right", "Strafe Right"},
     {"jump", "Jump"}, {"jet", "Jet"}, {"fire", "Fire"},
-    {"altfire", "Alt Fire"}, {"zoom", "Zoom"}, {"reload", "Reload"},
+    {"altfire", "Alt Fire"}, {"reload", "Reload"},
     {"f1", "Free Camera"},
     {"f2", "Orbit Camera"}, {"chat", "Chat"}, {"console", "Console"},
 };

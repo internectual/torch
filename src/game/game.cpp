@@ -8459,8 +8459,6 @@ void Game::render(float dt) {
     float savedFov = r.config().fov;
     if (demoPlaying && demoCameraFov > 0 && demoCameraFov < 180) {
         r.config().fov = demoCameraFov;
-    } else if (!mapperMode && currentInput.zoom) {
-        r.config().fov = std::max(20.0f, savedFov * 0.5f);
     }
     r.setCamera(finalCam, camTarget, {0, 1, 0});
     r.config().fov = savedFov; // restore for HUD rendering
@@ -13234,11 +13232,7 @@ void Game::applyInput(const InputMove& input) {
     previousFire = currentInput.fire;
     previousAltFire = currentInput.altFire;
     previousReload = currentInput.reload;
-    const bool nextZoomed = toggledActionState(input.zoom, previousZoom, zoomed);
-    previousZoom = input.zoom;
-    zoomed = nextZoomed;
     currentInput = input;
-    currentInput.zoom = nextZoomed;
 
     // Demo pause toggle on rising edge of P key
     if (demoPlaying && input.demoPause && !previousDemoPause)
@@ -13309,8 +13303,6 @@ void Game::resetInputState() {
     previousFire = false;
     previousAltFire = false;
     previousReload = false;
-    previousZoom = false;
-    zoomed = false;
     previousDemoPause = false;
     previousDemoStep = false;
     previousDemoEvent = false;
