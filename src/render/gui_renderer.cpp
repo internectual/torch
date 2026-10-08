@@ -1008,6 +1008,55 @@ Font* GuiShared::font(const std::string& face, int size) {
     return f ? f : Engine::instance().renderer().getFont();
 }
 
+// dglDrawTextN with GuiControlProfile::mFontColors: colour bytes 0x2-0x8,
+// 0xb, 0xc and 0xe select colours 0-9, 0xf returns to colour 0 and
+// 0x10/0x11 push/pop the current colour. Other bytes below 0x20 draw nothing.
+static int drawTextColorIndex(unsigned char b) {
+    static const int remap[15] = {-1, -1, 0, 1, 2, 3, 4, 5, 6, -1, -1, 7, 8, -1, 9};
+    return b < 15 ? remap[b] : -1;
+}
+
+static std::string stripTextColorBytes(const std::string& text) {
+    std::string plain;
+    plain.reserve(text.size());
+    for (unsigned char c : text)
+        if (c >= 32) plain += (char)c;
+    return plain;
+}
+
+static void drawTextN(Font* font, const std::string& text, float x, float y,
+                      const ColorF colors[10]) {
+    if (!font) return;
+    ColorF current = colors[0], pushed = colors[0];
+    std::string run;
+    auto flush = [&]() {
+        if (run.empty()) return;
+        font->render(run.c_str(), x, y, current);
+        x += font->measure(run.c_str()).x;
+        run.clear();
+    };
+    for (unsigned char c : text) {
+        const int index = drawTextColorIndex(c);
+        if (index >= 0) { flush(); current = colors[index]; }
+        else if (c == 15) { flush(); current = colors[0]; }
+        else if (c == 16) pushed = current;
+        else if (c == 17) { flush(); current = pushed; }
+        else if (c >= 32) run += (char)c;
+    }
+    flush();
+}
+
+static void profileFontColors(ScriptObject* prof, ColorF out[10]) {
+    static const char* named[4] = {"fontColor", "fontColorHL", "fontColorNA", "fontColorSEL"};
+    for (int k = 0; k < 10; ++k) {
+        out[k] = {0, 0, 0, 1};
+        if (!prof) continue;
+        auto it = prof->fields.find("fontColors[" + std::to_string(k) + "]");
+        if (it == prof->fields.end() && k < 4) it = prof->fields.find(named[k]);
+        if (it != prof->fields.end()) parseColor(it->second.toString(), out[k]);
+    }
+}
+
 ColorF GuiShared::profileFontColor(const std::string& profile, int index) {
     ColorF color{0, 0, 0, 1};
     ScriptObject* prof = getProfile(profile);
@@ -1777,43 +1826,49 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (ctl->menuOpen && !ctl->menuItems.empty())
             s_openPopups.push_back(ctl);
     } else if (cn == "GuiTextCtrl") {
-        if (ctl->name == "ammoHud" && Engine::instance().game().state() == Game::Playing) {
-            const int weapon = Engine::instance().game().player().currentWeapon();
-            if (weapon >= 0 && weapon < Engine::instance().game().player().weaponCount()) {
-                const auto& item = Engine::instance().game().player().weapon(weapon);
-                ctl->text = item.ammo < 0 ? "" : std::to_string(item.ammo);
-            }
-        }
-        ColorF tc{1,1,1,1};
+        // GuiTextCtrl::onRender -> renderJustifiedText: the profile's
+        // justification (left when the text is wider than the control),
+        // centred vertically, clipped to the control, in the profile's
+        // font colours.
         auto* prof = getProfile(ctl->profileName);
-        if (prof) {
-            auto fci = prof->fields.find("fontColor");
-            if (fci != prof->fields.end())
-                parseColor(fci->second.toString(), tc);
-            font = getProfileFont(prof);
-        }
+        font = getProfileFont(prof);
         if (font && !ctl->text.empty()) {
-            float ch = (float)font->charHeight;
-            // Split into lines first so multi-line labels still work.
-            std::vector<std::string> lines;
-            size_t pos2 = 0;
-            while (pos2 < ctl->text.size()) {
-                size_t nl = ctl->text.find('\n', pos2);
-                lines.push_back((nl != std::string::npos) ? ctl->text.substr(pos2, nl - pos2) : ctl->text.substr(pos2));
-                pos2 = (nl != std::string::npos) ? nl + 1 : ctl->text.size();
+            ColorF colors[10];
+            profileFontColors(prof, colors);
+            std::string justify;
+            if (prof) {
+                auto ji = prof->fields.find("justify");
+                if (ji != prof->fields.end()) justify = ji->second.toString();
             }
-            // Shrink-to-fit: T2's shell fonts fit these stored extents natively;
-            // if ours measures wider than the extent, scale down so labels don't
-            // spill into neighboring controls (e.g. "Game Type:" under its popup).
-            float maxW = 0;
-            for (auto& l : lines) maxW = std::max(maxW, font->measure(l.c_str()).x);
-            float scale = 1.0f;
-            float availW = ctl->extentX - 6.0f;
-            if (ctl->extentX > 8 && maxW > availW && maxW > 1.0f) scale = availW / maxW;
-            float lineY = y + 2;
-            for (auto& l : lines) {
-                font->render(l.c_str(), x + 2, lineY, tc, scale);
-                lineY += ch * scale;
+            const float textWidth = font->measure(stripTextColorBytes(ctl->text).c_str()).x;
+            float startX = 0.0f;
+            if (textWidth <= ctl->extentX) {
+                if (strcasecmp(justify.c_str(), "right") == 0) startX = ctl->extentX - textWidth;
+                else if (strcasecmp(justify.c_str(), "center") == 0) startX = std::floor((ctl->extentX - textWidth) / 2.0f);
+            }
+            const float startY = std::floor((ctl->extentY - (float)font->charHeight) / 2.0f);
+            float cx = x, cy = y, cw = ctl->extentX, ch = ctl->extentY;
+            if (clip) {
+                const float right = std::min(x + ctl->extentX, clip->x + clip->w);
+                const float bottom = std::min(y + ctl->extentY, clip->y + clip->h);
+                cx = std::max(x, clip->x);
+                cy = std::max(y, clip->y);
+                cw = right - cx;
+                ch = bottom - cy;
+            }
+            if (cw > 0.0f && ch > 0.0f) {
+                r.flushSpriteBatch();
+                GLint oldScissor[4];
+                const GLboolean scissorWas = glIsEnabled(GL_SCISSOR_TEST);
+                glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
+                int sx, sy, sw, sh;
+                guiLogicalToScissor(s_renderViewport, s_renderDrawableHeight, cx, cy, cw, ch, sx, sy, sw, sh);
+                glEnable(GL_SCISSOR_TEST);
+                glScissor(sx, sy, sw, sh);
+                drawTextN(font, ctl->text, x + startX, y + startY, colors);
+                r.flushSpriteBatch();
+                if (scissorWas) glScissor(oldScissor[0], oldScissor[1], oldScissor[2], oldScissor[3]);
+                else glDisable(GL_SCISSOR_TEST);
             }
         }
     } else if (cn == "GuiMLTextCtrl" || cn == "GuiMessageVectorCtrl") {
