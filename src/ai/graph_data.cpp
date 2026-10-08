@@ -247,11 +247,10 @@ uint32_t LOSHashTable::makeTheTable() {
     }
     // Fill in empty elements so the bucket size math works.
     IndexType fillValue = (IndexType)mSegments.size();
-    uint32_t numEmpty = 0, numFilled = 0;
+    uint32_t numFilled = 0;
     for (uint32_t H = mTabSz; H; H--) {
         if (mTable[H] == IndexType(-1)) {
             mTable[H] = fillValue;
-            numEmpty++;
         } else {
             fillValue = mTable[H];
             numFilled++;

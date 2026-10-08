@@ -9,6 +9,13 @@ inline bool crosshairVisible(bool dead, bool liveObserver, bool targetFinderOpen
     return !dead && !liveObserver && !targetFinderOpen;
 }
 
+// A flag is usually an Item ghost, not a class whose name contains "Flag";
+// the target system's render bit supplies that identity.
+inline bool navHudMarkerEligible(bool isFlag, bool playerClass, bool vehicleClass,
+                                bool beaconClass, bool flagClass) {
+    return isFlag || playerClass || vehicleClass || beaconClass || flagClass;
+}
+
 inline const char* teamName(int teamId) {
     // Tribes 2's stock team labels are Storm and Inferno, not generic color
     // names. Team zero is the observer/unassigned team, whose scoreboard label

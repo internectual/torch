@@ -53,6 +53,8 @@ struct PlayerGhostState {
     };
     uint16_t datablockId = 0;
     bool hasDatablock = false;
+    int targetId = -1;
+    bool hasTargetId = false;
     V12Vec3 position{};
     V12Vec3 rotation{};
     float rotationW = 1.0f;
@@ -110,6 +112,7 @@ struct ProjectileImpact {
     V12Vec3 normal{0, 1, 0};
     uint16_t datablockId = 0;
     bool hasDatablock = false;
+    bool endedWithDecal = false;
 };
 
 class GhostTracker {

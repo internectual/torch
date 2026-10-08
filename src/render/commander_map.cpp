@@ -460,7 +460,8 @@ void CommanderMap::setTypeVisible(uint32_t typeTag, bool vis) {
     for (int i = head_; i != -1; i = entries_[i].next) {
         Entry& e = entries_[i];
         if (e.typeTag != typeTag) continue;
-        e.flags = (e.flags & ~TypeVisibleFlag) | (vis ? TypeVisibleFlag : 0);
+        e.flags = (e.flags & ~TypeVisibleFlag) |
+                  (vis ? static_cast<uint32_t>(TypeVisibleFlag) : 0u);
         if (!vis) {
             if (lastSelected_ == e.id) lastSelected_ = -1;
             if (followId_ == e.id) followId_ = -1;
@@ -530,10 +531,12 @@ void CommanderMap::updateEntries() {
                 e.sensorGroup = ti->second.sensorGroup;
                 e.flags |= InitFlag;
             }
-            e.flags = (e.flags & ~VisibleFlag) | (parser->isTargetVisibleToSensor(e.id) ? VisibleFlag : 0);
+            e.flags = (e.flags & ~VisibleFlag) |
+                      (parser->isTargetVisibleToSensor(e.id) ? static_cast<uint32_t>(VisibleFlag) : 0u);
             e.hudRef = -1;
             e.flags &= ~TaskTargetFlag;
-            e.flags = (e.flags & ~FriendlyFlag) | (e.sensorGroup == myGroup ? FriendlyFlag : 0);
+            e.flags = (e.flags & ~FriendlyFlag) |
+                      (e.sensorGroup == myGroup ? static_cast<uint32_t>(FriendlyFlag) : 0u);
             if (e.flags & VisibleFlag) {
                 ghostPosition(*obj, e.pos);
                 e.flags |= PositionFlag;
@@ -541,7 +544,8 @@ void CommanderMap::updateEntries() {
             e.flags &= ~(DamagedFlag | DestroyedFlag);
             if (obj->damageState != 0) e.flags |= DamagedFlag;
             if (obj->damageState == 2) e.flags |= DestroyedFlag;
-            e.flags = (e.flags & ~ControlFlag) | (ghostIndex == ctrlGhost ? ControlFlag : 0);
+            e.flags = (e.flags & ~ControlFlag) |
+                      (ghostIndex == ctrlGhost ? static_cast<uint32_t>(ControlFlag) : 0u);
         }
         if (e.kind == 1) {
             const int index = HUDTargetList::handleIndex(e.id);
@@ -666,7 +670,8 @@ void CommanderMap::setSelected(Entry& e, bool sel, bool notify) {
             }
         }
     }
-    e.flags = (e.flags & ~SelectedFlag) | (sel ? SelectedFlag : 0);
+    e.flags = (e.flags & ~SelectedFlag) |
+              (sel ? static_cast<uint32_t>(SelectedFlag) : 0u);
     if (!notify || !(e.flags & FriendlyFlag)) return;
     auto* ts = ScriptEngine::instance().ts();
     if (!ts || !ctl_) return;
@@ -698,7 +703,8 @@ void CommanderMap::setHilighted(Entry& e, bool hil) {
             }
         }
     }
-    e.flags = (e.flags & ~HilightFlag) | (hil ? HilightFlag : 0);
+    e.flags = (e.flags & ~HilightFlag) |
+              (hil ? static_cast<uint32_t>(HilightFlag) : 0u);
 }
 
 bool CommanderMap::selectTarget(int id, bool sel, bool notify) {

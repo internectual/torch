@@ -70,10 +70,6 @@ bool skipPathXRef(GraphStream& s) {
     return true;
 }
 
-// 1 << level as the engine's x86 build computes it: a level of -1 shifts by
-// 31 (the CPU masks the count), giving INT_MIN.
-float levelScale(int32_t level) { return float(int32_t(1u << (level & 31))); }
-
 } // namespace
 
 uint32_t navSimTimeMS() { return (uint32_t)std::llround(SimState::simTime() * 1000.0); }

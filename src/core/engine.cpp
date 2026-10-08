@@ -2482,34 +2482,64 @@ void Engine::run() {
                         }
                         int inputIndex = -1;
                         bool down = false;
-                        const uint8_t requiredModifiers = bindingModifierMask(keyName);
-                        const uint8_t activeModifiers =
-                            ((keys[SCANCODE_LSHIFT] || keys[SCANCODE_RSHIFT]) ? modifierShift : 0) |
-                            ((keys[SCANCODE_LCTRL] || keys[SCANCODE_RCTRL]) ? modifierCtrl : 0) |
-                            ((keys[SCANCODE_LALT] || keys[SCANCODE_RALT]) ? modifierAlt : 0);
-                        if (device == 0) {
-                            std::string key = keyName;
-                            const auto space = key.rfind(' ');
-                            if (space != std::string::npos) key = key.substr(space + 1);
-                            inputIndex = GuiRenderer::keyNameToScancode(key);
-                            if (inputIndex < 0 || inputIndex >= 512) continue;
-                            down = modifiedBindingDown(keys[inputIndex], requiredModifiers,
-                                                       activeModifiers);
-                        } else if (device == 1) {
-                            std::string key = keyName;
-                            const auto space = key.rfind(' ');
-                            if (space != std::string::npos) key = key.substr(space + 1);
-                            if (key.rfind("button", 0) != 0) continue;
-                            const int button = atoi(key.c_str() + 6);
-                            // SDL button numbering uses 1 for left and 3 for right.
-                            inputIndex = 512 + button;
-                            const int platformButton = button == 0 ? 1 : button == 1 ? 3 : button;
-                            if (platformButton < 0 || platformButton >= (int)sizeof(plat->input().mouseButtons)) continue;
-                            down = modifiedBindingDown(
-                                plat->input().mouseButtons[platformButton], requiredModifiers,
-                                activeModifiers);
+                        if (device == 2) {
+                            const bool enabled = Console::instance().getBoolVariable(
+                                "$pref::Input::JoystickEnabled", false);
+                            if (!enabled || !plat->hasJoystick()) continue;
+                            const int axis = JoystickInput::axisIndex(keyName);
+                            if (axis >= 0) {
+                                if (plat->input().consumedJoystickAxes[axis]) continue;
+                                const float value = JoystickInput::applyAxisBinding(
+                                    plat->input().joystickAxes[axis],
+                                    (action.flags & ActionBinding::Inverted) != 0,
+                                    (action.flags & ActionBinding::HasDeadZone) != 0,
+                                    action.deadZoneBegin, action.deadZoneEnd,
+                                    (action.flags & ActionBinding::HasScale) != 0,
+                                    action.scaleFactor);
+                                if (!action.cmdOn.empty() && !action.isCmd &&
+                                    tsInput->hasFunction(action.cmdOn))
+                                    tsInput->callFunction(action.cmdOn, {VMValue(value)});
+                                continue;
+                            }
+                            const int button = JoystickInput::buttonIndex(keyName);
+                            if (button >= 0) {
+                                if (plat->input().consumedJoystickButtons[button]) continue;
+                                down = plat->input().joystickButtons[button];
+                            } else {
+                                if (plat->input().consumedJoystickHat) continue;
+                                down = JoystickInput::povPressed(plat->input().joystickHat, keyName);
+                                if (!JoystickInput::povMask(keyName)) continue;
+                            }
                         } else {
-                            continue;
+                            const uint8_t requiredModifiers = bindingModifierMask(keyName);
+                            const uint8_t activeModifiers =
+                                ((keys[SCANCODE_LSHIFT] || keys[SCANCODE_RSHIFT]) ? modifierShift : 0) |
+                                ((keys[SCANCODE_LCTRL] || keys[SCANCODE_RCTRL]) ? modifierCtrl : 0) |
+                                ((keys[SCANCODE_LALT] || keys[SCANCODE_RALT]) ? modifierAlt : 0);
+                            if (device == 0) {
+                                std::string key = keyName;
+                                const auto space = key.rfind(' ');
+                                if (space != std::string::npos) key = key.substr(space + 1);
+                                inputIndex = GuiRenderer::keyNameToScancode(key);
+                                if (inputIndex < 0 || inputIndex >= 512) continue;
+                                down = modifiedBindingDown(keys[inputIndex], requiredModifiers,
+                                                           activeModifiers);
+                            } else if (device == 1) {
+                                std::string key = keyName;
+                                const auto space = key.rfind(' ');
+                                if (space != std::string::npos) key = key.substr(space + 1);
+                                if (key.rfind("button", 0) != 0) continue;
+                                const int button = atoi(key.c_str() + 6);
+                                // SDL button numbering uses 1 for left and 3 for right.
+                                inputIndex = 512 + button;
+                                const int platformButton = button == 0 ? 1 : button == 1 ? 3 : button;
+                                if (platformButton < 0 || platformButton >= (int)sizeof(plat->input().mouseButtons)) continue;
+                                down = modifiedBindingDown(
+                                    plat->input().mouseButtons[platformButton], requiredModifiers,
+                                    activeModifiers);
+                            } else {
+                                continue;
+                            }
                         }
                         const auto bindingId = std::make_tuple(mapName, device, keyName);
                         const bool previous = previousActionBindings[bindingId];

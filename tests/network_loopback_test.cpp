@@ -733,8 +733,9 @@ int main() {
     assert(echoResult.type == VMValue::None && warnResult.type == VMValue::None &&
            errorResult.type == VMValue::None);
     const auto& log = Console::instance().getLog();
-    assert(log.size() >= 3 && log[log.size() - 3] == "[INFO] one two" &&
-           log[log.size() - 2] == "[WARN] warning" && log.back() == "[ERROR] failure");
+        assert(log.size() >= 3 && log[log.size() - 3] == "[INFO] one two" &&
+               log[log.size() - 2] == "[WARN] TS:<runtime>:1: warning" &&
+               log.back() == "[ERROR] TS:<runtime>:1: failure");
     script.ts()->registerMessageCallback("MsgTest", "messageCallback");
     script.ts()->dispatchMessageCallback("MsgTest", {VMValue("MsgTest"), VMValue(""), VMValue("payload")});
     assert(script.ts()->getGlobal("$messageTrace").toString() == "MsgTest:payload");
@@ -2312,6 +2313,13 @@ int main() {
         auto* field = EngineObjects::get<ForceFieldBareObject>("TestFieldF");
         auto* walker = EngineObjects::get<PlayerObject>("TestFieldP");
         assert(field && walker && field->state == ForceFieldBareObject::Closed);
+        {
+            Point3F lo{}, hi{};
+            field->worldBox(lo, hi);
+            assert(std::fabs((lo.x + hi.x) * 0.5f - 2.0f) < 1e-5f);
+            assert(std::fabs((lo.y + hi.y) * 0.5f - 0.125f) < 1e-5f);
+            assert(std::fabs((lo.z + hi.z) * 0.5f - 2.0f) < 1e-5f);
+        }
         std::vector<PlayerPrediction::Triangle> tris;
         ForceFields::gather(nullptr, {-1, -1, -1}, {1, 1, 1}, tris);
         assert(tris.size() == 12);

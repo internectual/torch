@@ -1905,7 +1905,13 @@ bool ScriptEngine::init() {
             if (!msg.empty()) msg += " ";
             msg += a.toString();
         }
-        Console::instance().printf(LogLevel::Warn, "%s", msg.c_str());
+        auto* ts = Engine::instance().script().ts();
+        const std::string function = ts ? ts->currentFunction() : std::string();
+        const std::string file = ts && !ts->dbgFile().empty() ? ts->dbgFile() : "<runtime>";
+        const std::string where = "TS:" + file +
+            (function.empty() ? ":" + std::to_string(ts ? ts->dbgLine() : 0)
+                              : " [" + function + "]");
+        Console::instance().printf(LogLevel::Warn, "%s: %s", where.c_str(), msg.c_str());
         return VMValue();
     });
 
@@ -1915,7 +1921,13 @@ bool ScriptEngine::init() {
             if (!msg.empty()) msg += " ";
             msg += a.toString();
         }
-        Console::instance().printf(LogLevel::Error, "%s", msg.c_str());
+        auto* ts = Engine::instance().script().ts();
+        const std::string function = ts ? ts->currentFunction() : std::string();
+        const std::string file = ts && !ts->dbgFile().empty() ? ts->dbgFile() : "<runtime>";
+        const std::string where = "TS:" + file +
+            (function.empty() ? ":" + std::to_string(ts ? ts->dbgLine() : 0)
+                              : " [" + function + "]");
+        Console::instance().printf(LogLevel::Error, "%s: %s", where.c_str(), msg.c_str());
         return VMValue();
     });
 
@@ -4173,6 +4185,14 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("exec", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         std::string execPath = args[0].toString();
+        std::string logicalPath = execPath;
+        std::replace(logicalPath.begin(), logicalPath.end(), '\\', '/');
+        const bool preferenceFile = logicalPath.size() >= 6 &&
+            strncasecmp(logicalPath.c_str(), "prefs/", 6) == 0;
+        const bool startupOverride = strcasecmp(logicalPath.c_str(), "autoexec.cs") == 0 ||
+            strcasecmp(logicalPath.c_str(), "autojournal.cs") == 0;
+        const bool optional = preferenceFile || startupOverride ||
+            (args.size() > 1 && args[1].toBool());
         auto& fs = Engine::instance().fs();
         // Try bare path first
         auto data = fs.read(execPath.c_str());
@@ -4211,11 +4231,16 @@ bool ScriptEngine::init() {
             auto* ts = Engine::instance().script().ts();
             if (ts) { ts->executeNested(src, execPath); }
         } else {
-            const bool optional = args.size() > 1 && args[1].toBool();
+            auto* ts = Engine::instance().script().ts();
+            const std::string function = ts ? ts->currentFunction() : std::string();
+            const std::string file = ts && !ts->dbgFile().empty() ? ts->dbgFile() : "<runtime>";
+            const std::string where = "TS:" + file +
+                (function.empty() ? ":" + std::to_string(ts ? ts->dbgLine() : 0)
+                                  : " [" + function + "]");
             Console::instance().printf(optional ? LogLevel::Debug : LogLevel::Error,
-                optional ? "TS: optional exec not found: %s" : "TS: exec file not found: %s",
-                execPath.c_str());
-            return VMValue(0);
+                "%s: %s exec file not found: %s", where.c_str(),
+                optional ? "optional" : "required", execPath.c_str());
+            return VMValue(optional ? 1 : 0);
         }
         return VMValue(1);
     });
@@ -6131,6 +6156,16 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
+    tsInstance->registerNative("replaceText", [getListCtrl](const auto& args) -> VMValue {
+        if (args.size() < 2) return VMValue(0);
+        auto* ctl = getListCtrl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        ctl->replaceMenuTextOnSelect = args[1].toBool();
+        ctl->fields["replaceText"] = args[1].toString();
+        if (auto* object = ScriptEngine::instance().findObject(ctl->name.c_str()))
+            object->fields["replaceText"] = VMValue(args[1].toString());
+        return VMValue(1);
+    });
     tsInstance->registerNative("getValue", [getListCtrl](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         auto* ctl = getListCtrl(args[0].toString());
@@ -7968,8 +8003,26 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("isKoreanBuild", [](const auto&) -> VMValue { return VMValue(0); });
     // Renderer supports windowed mode, so no driver is fullscreen-only.
     tsInstance->registerNative("isDeviceFullScreenOnly", [](const auto&) -> VMValue { return VMValue(0); });
-    // No joystick support in this build — Settings keeps the joystick toggle off.
-    tsInstance->registerNative("isJoystickDetected", [](const auto&) -> VMValue { return VMValue(0); });
+    tsInstance->registerNative("isJoystickDetected", [](const auto&) -> VMValue {
+#ifdef TORCH_DEDICATED
+        return VMValue(0);
+#else
+        return VMValue(Engine::instance().platform().hasJoystick() ? 1 : 0);
+#endif
+    });
+    tsInstance->registerNative("enableJoystick", [this](const auto&) -> VMValue {
+#ifdef TORCH_DEDICATED
+        return VMValue(0);
+#else
+        if (!Engine::instance().platform().hasJoystick()) return VMValue(0);
+        tsInstance->setGlobal("$pref::Input::JoystickEnabled", VMValue(1));
+        return VMValue(1);
+#endif
+    });
+    tsInstance->registerNative("disableJoystick", [this](const auto&) -> VMValue {
+        tsInstance->setGlobal("$pref::Input::JoystickEnabled", VMValue(0));
+        return VMValue(1);
+    });
     // Driver-info dialog: VENDOR\RENDERER\VERSION\EXTENSIONS captured at renderer init.
     tsInstance->registerNative("getVideoDriverInfo", [](const auto&) -> VMValue {
         const std::string& info = Engine::instance().renderer().gpuDriverInfo();

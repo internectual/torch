@@ -450,8 +450,8 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
         return value;
     };
 
-    uint16_t ver16 = rU16();
-    uint16_t verPad = rU16();
+    const uint16_t ver16 = rU16();
+    (void)rU16(); // padding
     int ver = (int)ver16;
     if (ver < 15 || ver > 18) return result;
 
@@ -459,8 +459,9 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     // After version+pad, stream contains: bounds → header counts → data sections...
 
     // Bounds: radius, tubeRadius, center(3), min(3), max(3) = 11 F32s
-    float radius = rF32(), tubeRadius = rF32();
-    float cx = rF32(), cy = rF32(), cz = rF32();
+    (void)rF32(); // radius
+    (void)rF32(); // tubeRadius
+    (void)rF32(); (void)rF32(); (void)rF32(); // center
     float bminx = rF32(), bminy = rF32(), bminz = rF32();
     float bmaxx = rF32(), bmaxy = rF32(), bmaxz = rF32();
     result.boundsMin = {bminx, bminy, bminz};
@@ -599,7 +600,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
 
         int32_t numFrames = rS32();
         if (numFrames < 1 || numFrames > 10000) numFrames = 1;
-        int32_t numMatFrames = rS32();
+        (void)rS32(); // numMatFrames; material animation is not represented by this mesh type
         // parentMesh and bounds are oldAlloc'd, NOT read from stream
 
         int32_t numVerts = rS32();
@@ -813,7 +814,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
     // T2 format: gotList(S32), then TSMaterialList::read = version(U8) + count(U32) + names + flags(reflectance,bump,detail in separate loops)
     int32_t gotList = rS32();
     if (gotList != 0) {
-        uint8_t matVersion = rU8(); // TSMaterialList version (should be 1)
+        (void)rU8(); // TSMaterialList version
         int32_t numMats = capCount(rS32());   // material count
         result.materialNames.resize(numMats);
         result.materialFlags.resize(numMats, 0);
@@ -1594,10 +1595,6 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
         if ((size_t)len > postRem) { postRem = 0; return ""; }
         std::string s((const char*)post, len); post += len; postRem -= len; return s;
     };
-    auto prS16 = [&]() -> int16_t { if (postRem < 2) { postRem = 0; return 0; } int16_t v; memcpy(&v, post, 2); post+=2; postRem-=2; return v; };
-    auto prF32 = [&]() -> float { if (postRem < 4) { postRem = 0; return 0; } float v; memcpy(&v, post, 4); post+=4; postRem-=4; return v; };
-    auto prU8 = [&]() -> uint8_t { if (postRem < 1) { postRem = 0; return 0; } uint8_t v = *post++; postRem--; return v; };
-
     DTSPlainReader seqReader(post, postRem);
     const DTSKeyPools pools{&nodeRotations, &nodeTranslations, &nodeUScales, &nodeAScales};
 
@@ -2029,8 +2026,12 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
                 }
                 Point3F mn{1e9f,1e9f,1e9f}, mx{-1e9f,-1e9f,-1e9f};
                 for (auto& v : m.vertices) {
-                    if (v.pos.x < mn.x) mn.x = v.pos.x; if (v.pos.y < mn.y) mn.y = v.pos.y; if (v.pos.z < mn.z) mn.z = v.pos.z;
-                    if (v.pos.x > mx.x) mx.x = v.pos.x; if (v.pos.y > mx.y) mx.y = v.pos.y; if (v.pos.z > mx.z) mx.z = v.pos.z;
+                    if (v.pos.x < mn.x) mn.x = v.pos.x;
+                    if (v.pos.y < mn.y) mn.y = v.pos.y;
+                    if (v.pos.z < mn.z) mn.z = v.pos.z;
+                    if (v.pos.x > mx.x) mx.x = v.pos.x;
+                    if (v.pos.y > mx.y) mx.y = v.pos.y;
+                    if (v.pos.z > mx.z) mx.z = v.pos.z;
                 }
                 con.printf(LogLevel::Info, "    mesh[%zu] node=%d verts=%zu indices=%zu mat=%d bounds=(%.3f,%.3f,%.3f)-(%.3f,%.3f,%.3f)",
                     i, m.nodeIndex, m.vertices.size(), m.indices.size(), m.materialIndex,

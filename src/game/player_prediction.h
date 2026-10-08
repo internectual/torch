@@ -17,6 +17,7 @@ constexpr float TickSec = 1.0f / 32.0f;
 constexpr int MaxPredictionTicks = 30;
 constexpr float MinWarpTicks = 0.5f;
 constexpr int MaxWarpTicks = 3;
+constexpr int ControlAnchorWarpTicks = 8;
 constexpr int MoveState = 1, RecoverState = 2;
 constexpr int JumpSkipContactsMax = 8;
 
@@ -259,6 +260,7 @@ struct Collision {
 // One ghost's client simulation state.
 struct State {
     bool initialized = false;
+    bool simulateDuringWarp = false;
     Point3F position{}, velocity{}, posVec{};
     float yaw = 0, rotVec = 0, headPitch = 0, headYaw = 0;
     float energy = 0;
@@ -278,21 +280,43 @@ struct Update {
     Point3F position{}, velocity{};
     bool hasMove = false;
     Move move;
+    bool hasEnergy = false;
+    float energy = 0.0f;
+    bool energyNormalized = false;
     int actionState = MoveState, recoverTicks = 0;
     float headX = 0, headZ = 0; // ghost: [-1, 1] of maxLookAngle; packet: radians
     float rotZ = 0;
     bool falling = false, jetting = false;
     bool allowWarp = true;
+    int maxWarpTicks = MaxWarpTicks;
+    bool simulateDuringWarp = false;
     bool headInRadians = false; // control packets carry radians
 };
 
+// GameState carries exact control-player transforms for compression, but
+// playback presents a predicted player. Blend those anchors over a longer
+// interval while continuing the recorded move simulation during correction.
+inline Update interpolatedAnchor(Update update) {
+    if (update.hasPosition) {
+        update.allowWarp = true;
+        update.maxWarpTicks = ControlAnchorWarpTicks;
+        update.simulateDuringWarp = true;
+    }
+    return update;
+}
+
 // Player::unpackUpdate: packet values are authoritative; a warp spreads a
-// small correction over at most three ticks instead of snapping.
+// bounded correction over the update's configured tick interval.
 inline void unpackUpdate(State& s, const Data& d, const Update& u, bool initial, bool headInRadians) {
+    if (u.hasEnergy) {
+        const float energy = u.energyNormalized ? u.energy * d.maxEnergy : u.energy;
+        s.energy = std::clamp(energy, 0.0f, std::max(0.0f, d.maxEnergy));
+    }
     if (!u.hasPosition) return;
     const float oldSpeed = length(s.velocity);
     s.predictionCount = MaxPredictionTicks;
     s.velocity = u.velocity;
+    s.simulateDuringWarp = u.simulateDuringWarp;
     if (u.hasMove) s.move = u.move;
     s.actionState = u.actionState;
     s.recoverTicks = u.recoverTicks;
@@ -306,7 +330,9 @@ inline void unpackUpdate(State& s, const Data& d, const Update& u, bool initial,
         const float distancePerTick = (oldSpeed + length(s.velocity)) * 0.5f * TickSec;
         const float ticks = distancePerTick > 0.00001f ? length(s.warpOffset) / distancePerTick : (float)MaxWarpTicks;
         if (ticks > MinWarpTicks) {
-            s.warpTicks = std::min(MaxWarpTicks, std::max(1, (int)std::floor(ticks + 0.5f)));
+            const int maxWarpTicks = std::clamp(u.maxWarpTicks, 1, MaxPredictionTicks);
+            s.warpTicks = std::min(maxWarpTicks,
+                std::max(1, (int)std::floor(ticks + 0.5f)));
             s.warpOffset = mul(s.warpOffset, 1.0f / s.warpTicks);
             s.rotOffset = angleDifference(u.rotZ, s.yaw) / s.warpTicks;
             return;
@@ -518,19 +544,35 @@ inline void processTick(State& s, const Data& d, float gravity, const Move* move
     s.posVec = {0, 0, 0};
     s.rotVec = 0;
     if (!s.initialized) return;
+    const Point3F tickStart = s.position;
+    const float tickStartYaw = s.yaw;
+    bool warped = false;
     if (s.warpTicks > 0) {
         s.warpTicks--;
         s.position = add(s.position, s.warpOffset);
         s.yaw += s.rotOffset;
-        s.posVec = mul(s.warpOffset, -1.0f);
-        s.rotVec = -s.rotOffset;
+        warped = true;
+        if (!s.simulateDuringWarp) {
+            s.posVec = mul(s.warpOffset, -1.0f);
+            s.rotVec = -s.rotOffset;
+            return;
+        }
+    }
+    if (!move && s.predictionCount-- <= 0) {
+        if (warped) {
+            s.posVec = sub(tickStart, s.position);
+            s.rotVec = angleDifference(tickStartYaw, s.yaw);
+        }
         return;
     }
-    if (!move && s.predictionCount-- <= 0) return;
     if (move) s.move = *move;
     // Mounted players cannot find a run surface; their mount owns placement.
     if (s.mounted) {
         s.contactTimer++;
+        if (warped) {
+            s.posVec = sub(tickStart, s.position);
+            s.rotVec = angleDifference(tickStartYaw, s.yaw);
+        }
         return;
     }
     s.energy = std::min(d.maxEnergy, s.energy + rechargeRate);
@@ -540,7 +582,8 @@ inline void processTick(State& s, const Data& d, float gravity, const Move* move
     collision.prepare(gather, s.position, d.boxSize, mul(s.velocity, TickSec), d.maxStepHeight);
     updateMove(s, d, gravity, collision, water, gravityMod, appliedForce);
     updatePos(s, d, collision, initial);
-    s.posVec = sub(initial, s.position);
+    s.posVec = sub(warped ? tickStart : initial, s.position);
+    if (warped) s.rotVec = angleDifference(tickStartYaw, s.yaw);
 }
 
 // Player::interpolateTick: `backDelta` is the fraction of a tick still to

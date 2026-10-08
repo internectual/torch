@@ -907,7 +907,7 @@ static bool interiorToMeshes(DIFInterior& interior,
         }
         // histogram of triangle counts per mesh
         size_t zeros=0, small=0, reg=0, big=0; size_t totTris=0; size_t degen=0; size_t geoDeg=0;
-        size_t surfMask=0, surfMaskDeg=0;
+        size_t surfMask=0;
         for (size_t mi=0; mi<outMeshes.size(); mi++) {
             auto& m = outMeshes[mi];
             size_t t = m.indices.size()/3; totTris += t;

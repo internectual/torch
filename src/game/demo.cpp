@@ -946,6 +946,7 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
         player.teamId = target.sensorGroup;
         player.damage = target.damageLevel;
         player.clientId = target.targetId;
+        player.targetId = target.targetId;
         playerInfo_.push_back(std::move(player));
     }
     // The recordings.cs PLAYERLIST demo value uses the same roster field
@@ -961,8 +962,9 @@ bool DemoParser::load(const uint8_t* buffer, size_t size) {
             if (fields.size() < 8) continue;
             const int clientId = atoi(fields[2].c_str());
             auto player = std::find_if(playerInfo_.begin(), playerInfo_.end(),
-                [&](const DemoPlayerInfo& entry) { return entry.clientId == clientId; });
+                [&](const DemoPlayerInfo& entry) { return entry.name == fields[0]; });
             if (player != playerInfo_.end()) {
+                player->clientId = clientId;
                 player->ping = atoi(fields[6].c_str());
                 player->packetLoss = atoi(fields[7].c_str());
             }
@@ -1725,6 +1727,9 @@ GameState DemoParser::readGameState(BitStream& bs) {
                 // Player::readPacketData: ShapeBase state, movement, view,
                 // optional piloted object, and final movement flags.
                 auto& cu = gs.controlPlayer;
+                cu.hasEnergy = true;
+                cu.energy = gs.energy;
+                cu.energyNormalized = false;
                 cu.actionState = bs.readInt(3);
                 cu.recoverTicks = bs.readFlag() ? bs.readInt(7) : 0;
                 gs.controlJumpDelay = bs.readFlag() ? bs.readInt(7) : 0;
@@ -2054,6 +2059,7 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
                 added.skin = ev.targetSkin;
                 added.teamId = ev.targetSensorGroup >= 0 ? ev.targetSensorGroup : 0;
                 added.clientId = ev.targetId;
+                added.targetId = ev.targetId;
                 playerInfo_.push_back(std::move(added));
             }
         }
@@ -2297,6 +2303,11 @@ static void readShapeBaseData(BitStream& bs, bool isInitial, GhostEntry* entry =
 
 static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostEntry* entry) {
     readShapeBaseData(bs, isInitial, entry);
+    if (entry) {
+        entry->playerUpdate.hasPosition = false;
+        entry->playerUpdate.hasMove = false;
+        entry->playerUpdate.hasEnergy = false;
+    }
     if (bs.readFlag()) bs.readInt(3); // ImpactMask
     if (bs.readFlag()) { // ActionMask - action animation
         const int action = bs.readInt(8);
@@ -2366,11 +2377,16 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
             u.jetting = jetting;
             u.allowWarp = allowWarp;
             u.headInRadians = false;
-            ++entry->playerUpdates;
         }
     }
     float en = bs.readFloat(5); // energy
-    if (entry) entry->energy = en * 100.0f;
+    if (entry) {
+        entry->energy = en * 100.0f;
+        entry->playerUpdate.hasEnergy = true;
+        entry->playerUpdate.energy = en;
+        entry->playerUpdate.energyNormalized = true;
+        ++entry->playerUpdates;
+    }
 }
 
 // ─── Vehicle ghost parsers ─────────────────────────────────────
@@ -2829,9 +2845,9 @@ static void readLinearProjectileData(BitStream& bs, bool isInitial, const Vec3& 
         if (bs.readFlag()) { // hidden/already exploded
             Vec3 expPos = bs.readCompressedPoint(cp);
             Vec3 normal = bs.readNormalVector(14);
-            bool hitWater = bs.readFlag();
+            const bool endedWithDecal = bs.readFlag();
             DemoParser::s_pendingExplosions.push_back({expPos, normal, 0.0f,
-                entry ? entry->datablockId : -1});
+                entry ? entry->datablockId : -1, endedWithDecal});
             if (entry) entry->exploded = true;
         } else { // live projectile
             if (entry) entry->position = bs.readCompressedPoint(cp);

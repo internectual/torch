@@ -12,12 +12,19 @@ static void readGameBasePayload(V12BitStream& stream, PlayerGhostState* state = 
             state->hasDatablock = true;
         }
     }
-    if (stream.readFlag() && stream.readFlag()) stream.readUnsigned(9);
+    if (stream.readFlag()) {
+        const bool hasTarget = stream.readFlag();
+        const int targetId = hasTarget ? (int)stream.readUnsigned(9) : -1;
+        if (state) {
+            state->hasTargetId = true;
+            state->targetId = targetId;
+        }
+    }
 }
 
 static void addProjectileImpact(std::vector<ProjectileImpact>* impacts,
                                 const V12Vec3& position, const V12Vec3& normal,
-                                const PlayerGhostState* state) {
+                                const PlayerGhostState* state, bool endedWithDecal = false) {
     if (!impacts) return;
     ProjectileImpact impact;
     impact.position = position;
@@ -26,6 +33,7 @@ static void addProjectileImpact(std::vector<ProjectileImpact>* impacts,
         impact.datablockId = state->datablockId;
         impact.hasDatablock = true;
     }
+    impact.endedWithDecal = endedWithDecal;
     impacts->push_back(impact);
 }
 
@@ -530,8 +538,8 @@ static bool readLinearProjectilePayload(V12BitStream& stream, bool initial,
         if (stream.readFlag()) {
             const V12Vec3 position = stream.readCompressedPoint(compressionPoint);
             const V12Vec3 normal = stream.readNormalVector(14);
-            addProjectileImpact(impacts, position, normal, state);
-            stream.readFlag();
+            const bool endedWithDecal = stream.readFlag();
+            addProjectileImpact(impacts, position, normal, state, endedWithDecal);
         } else {
             const V12Vec3 position = stream.readCompressedPoint(compressionPoint);
             const V12Vec3 direction = stream.readNormalVector(14);
@@ -557,8 +565,8 @@ static bool readLinearProjectilePayload(V12BitStream& stream, bool initial,
     } else {
         const V12Vec3 position = stream.readCompressedPoint(compressionPoint);
         const V12Vec3 normal = stream.readNormalVector(14);
-        addProjectileImpact(impacts, position, normal, state);
-        stream.readFlag();
+        const bool endedWithDecal = stream.readFlag();
+        addProjectileImpact(impacts, position, normal, state, endedWithDecal);
     }
     (void)initial;
     return !stream.failed();
@@ -992,7 +1000,7 @@ bool readGhostPayload(V12BitStream& stream, uint16_t classId, bool initial,
     case 26: return readPrecipitationPayload(stream);
     case 12: // GameBase
     case 27: // Projectile inherits the same wire layer
-        readGameBasePayload(stream); return !stream.failed();
+        readGameBasePayload(stream, playerState); return !stream.failed();
     case 28: return readRepairProjectilePayload(stream);
     case 44: return readTargetProjectilePayload(stream, initial);
     case 30: return readSeekerProjectilePayload(stream);

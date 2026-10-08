@@ -54,10 +54,14 @@ bool ForceFieldBareObject::isPermiableTo(const GameBase& pass) const {
 }
 
 void ForceFieldBareObject::worldBox(Point3F& min, Point3F& max) const {
+    // ForceFieldBare's scaled unit box is corner-origin, matching its render
+    // and collider geometry.
     min = {1e30f, 1e30f, 1e30f};
     max = {-1e30f, -1e30f, -1e30f};
     for (int c = 0; c < 8; ++c) {
-        const float p[3] = {(c & 1) ? scale[0] : 0.0f, (c & 2) ? scale[1] : 0.0f, (c & 4) ? scale[2] : 0.0f};
+        const float p[3] = {(c & 1) ? scale[0] : 0.0f,
+                            (c & 2) ? scale[1] : 0.0f,
+                            (c & 4) ? scale[2] : 0.0f};
         float w[3];
         TorqueMath::mulP(transform, p, w);
         min = {std::min(min.x, w[0]), std::min(min.y, w[1]), std::min(min.z, w[2])};

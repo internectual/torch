@@ -3,6 +3,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include "core/joystick_input.h"
 
 // SDL3 scancode constants (USB HID usage table)
 constexpr int SCANCODE_GRAVE   = 53;  // ~ key
@@ -64,6 +65,14 @@ struct InputState {
     bool consumedSc[512]{};
     bool mouseButtons[8]{};
     bool consumedMouse[8]{};
+    bool joystickButtons[JoystickInput::MaxButtons]{};
+    bool consumedJoystickButtons[JoystickInput::MaxButtons]{};
+    std::vector<int> joystickButtonPressQueue;
+    float joystickAxes[JoystickInput::MaxAxes]{};
+    bool consumedJoystickAxes[JoystickInput::MaxAxes]{};
+    uint8_t joystickHat = 0;
+    bool consumedJoystickHat = false;
+    bool joystickConnected = false;
     int32_t mouseX{}, mouseY{}, mouseDeltaX{}, mouseDeltaY{};
     int32_t mouseWheel{};
     std::string textInput; // consumed text this frame (SDL_TEXT_INPUT)
@@ -81,6 +90,7 @@ public:
     bool processEvents();
     void swapBuffers();
     bool isRunning() const;
+    bool hasJoystick() const;
 
     InputState& input() { return inputState; }
 

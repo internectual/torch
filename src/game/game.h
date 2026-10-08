@@ -435,7 +435,8 @@ public:
                               const V12::DecodedDataBlock* projectileData,
                               const V12::DecodedDataBlock* explosionData,
                               const std::map<uint32_t, ParsedDataBlock>* dataBlocks = nullptr,
-                              const Point3F& impactNormal = {0, 1, 0}, int tick = 0);
+                              const Point3F& impactNormal = {0, 1, 0}, int tick = 0,
+                              bool endedWithDecal = false);
     void spawnSplashEffect(const Point3F& pos, const V12::DecodedDataBlock& splash,
                            const std::map<uint32_t, ParsedDataBlock>& dataBlocks);
     void spawnTrail(const Point3F& pos, const ColorF& color, float size = 0.2f);

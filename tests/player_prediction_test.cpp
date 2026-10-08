@@ -60,12 +60,61 @@ int main() {
     for (int i = 0; i < ticks; ++i) processTick(s, d, -20.0f, nullptr, 0, collision, floorGather, nullptr);
     assert(near(s.position.x, before.x + 0.5f, 1e-4f));
 
+    // Demo GameState control-player transforms are exact compression anchors,
+    // but playback must ease them rather than snapping to each packet value.
+    State anchorState;
+    anchorState.initialized = true;
+    anchorState.position = {0, 0, 10};
+    anchorState.velocity = {1, 0, 0};
+    Update exactAnchor;
+    exactAnchor.hasPosition = true;
+    exactAnchor.allowWarp = false;
+    exactAnchor.position = {3, 0, 10};
+    exactAnchor.velocity = {1, 0, 0};
+    const Update playbackAnchor = interpolatedAnchor(exactAnchor);
+    unpackUpdate(anchorState, d, playbackAnchor, false, false);
+    assert(anchorState.warpTicks == ControlAnchorWarpTicks &&
+           anchorState.position.x == 0.0f && anchorState.simulateDuringWarp);
+    Collision openCollision;
+    processTick(anchorState, d, -20.0f, nullptr, 0, openCollision, nullptr, nullptr);
+    assert(anchorState.position.x > 0.0f && anchorState.position.x < 3.0f);
+    assert(anchorState.velocity.z < 0.0f); // prediction continues during warp
+    assert(anchorState.warpTicks == ControlAnchorWarpTicks - 1);
+
     // Without moves a ghost predicts for at most 30 ticks.
     s.predictionCount = 2;
     const Point3F still = s.position;
     s.velocity = {0, 5, 0};
     for (int i = 0; i < 5; ++i) processTick(s, d, -20.0f, nullptr, 0, collision, floorGather, nullptr);
     assert(s.position.y > still.y && s.position.y < still.y + 5 * 5 * TickSec + 0.01f);
+    {
+        Data jetData = lightArmor();
+        jetData.maxEnergy = 60.0f;
+        jetData.minJetEnergy = 2.0f;
+        jetData.jetEnergyDrain = 10.0f;
+        jetData.jetForce = 9000.0f;
+        State jet;
+        jet.initialized = true;
+        jet.position = {0, 0, 100};
+        Update emptyTank;
+        emptyTank.hasEnergy = true;
+        emptyTank.energy = 0.0f;
+        unpackUpdate(jet, jetData, emptyTank, false, false);
+        assert(jet.energy == 0.0f);
+        Move heldJet;
+        heldJet.trigger[3] = true;
+        processTick(jet, jetData, -20.0f, &heldJet, 0, collision, nullptr, nullptr);
+        assert(!jet.jetting);
+
+        Update fueled;
+        fueled.hasEnergy = true;
+        fueled.energy = 0.5f;
+        fueled.energyNormalized = true;
+        unpackUpdate(jet, jetData, fueled, false, false);
+        assert(near(jet.energy, 30.0f, 1e-6f));
+        processTick(jet, jetData, -20.0f, &heldJet, 0, collision, nullptr, nullptr);
+        assert(jet.jetting && jet.energy < 30.0f);
+    }
     {
         // Player::updatePos: a physical zone's face the swept box meets
         // scales the velocity (velocityMod); the free move covers the travel.

@@ -1,5 +1,6 @@
 #include "core/gui_input.h"
 #include "core/input_parity.h"
+#include "core/joystick_input.h"
 #include <limits>
 #include "render/gui_renderer.h"
 
@@ -66,6 +67,23 @@ int main() {
     assert(bindingModifierMask("ctrl w") == modifierCtrl);
     assert(bindingModifierMask("shift numpad1") == modifierShift);
     assert(bindingModifierMask("ctrl shift k") == (modifierCtrl | modifierShift));
+
+    assert(JoystickInput::axisIndex("xaxis") == 0);
+    assert(JoystickInput::axisIndex("RYAXIS") == 4);
+    assert(JoystickInput::axisIndex("slider1") == 7);
+    assert(JoystickInput::axisIndex("button0") == -1);
+    assert(JoystickInput::buttonIndex("button0") == 0);
+    assert(JoystickInput::buttonIndex("BUTTON12") == 12);
+    assert(JoystickInput::buttonIndex("buttonx") == -1);
+    assert(std::abs(JoystickInput::normalizeAxis(-32768) + 1.0f) < 1e-6f);
+    assert(std::abs(JoystickInput::normalizeAxis(32767) - 1.0f) < 1e-6f);
+    assert(JoystickInput::applyAxisBinding(0.05f, false, true, -0.1f, 0.1f,
+                                           false, 1.0f) == 0.0f);
+    assert(std::abs(JoystickInput::applyAxisBinding(0.5f, true, true, -0.1f, 0.1f,
+                                                    true, 0.5f) + 0.25f) < 1e-6f);
+    assert(JoystickInput::povPressed(0x03, "upov"));
+    assert(JoystickInput::povPressed(0x03, "uprightov"));
+    assert(!JoystickInput::povPressed(0x01, "rpov"));
 
     GuiMouseCapture capture;
     capture.begin(1);

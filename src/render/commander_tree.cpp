@@ -306,7 +306,8 @@ public:
         auto* e = new TargetEntry;
         e->targetId = id;
         e->typeTag = typeTag;
-        e->flags = (isHud ? HudFlag : 0) | (control ? ControllableFlag : 0);
+        e->flags = (isHud ? static_cast<uint32_t>(HudFlag) : 0u) |
+                   (control ? static_cast<uint32_t>(ControllableFlag) : 0u);
         entries[id] = e;
         cat->insert(e);
         if (e->category->type == 2) e->flags |= CountedFlag;
@@ -397,8 +398,10 @@ public:
                 if (!(e->flags & ResolvedFlag) && obj) {
                     e->flags |= ResolvedFlag;
                     if (const V12::DecodedDataBlock* db = dataBlock(obj->datablockId)) {
-                        e->flags = (e->flags & ~DamageFlag) | (!db->shapeIsInvincible ? DamageFlag : 0);
-                        e->flags = (e->flags & ~ControllableFlag) | (db->shapeCanControl ? ControllableFlag : 0);
+                        e->flags = (e->flags & ~DamageFlag) |
+                            (!db->shapeIsInvincible ? static_cast<uint32_t>(DamageFlag) : 0u);
+                        e->flags = (e->flags & ~ControllableFlag) |
+                            (db->shapeCanControl ? static_cast<uint32_t>(ControllableFlag) : 0u);
                     }
                 }
                 if ((e->flags & (DamageFlag | ControllableFlag)) && obj) {

@@ -114,7 +114,7 @@ void PlayerObject::setTransform(const std::array<float, 16>& m) {
     state.velocity = {0, 0, 0};
     state.initialized = true;
     syncTransform();
-    setMaskBits(MoveMask | NoWarpMask);
+    setMaskBits(static_cast<uint32_t>(MoveMask) | static_cast<uint32_t>(NoWarpMask));
 }
 
 void PlayerObject::updateDamageLevel() {

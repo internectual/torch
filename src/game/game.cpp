@@ -110,6 +110,19 @@ static const char* liveFlagStatus(const std::string& status) {
     return "home";
 }
 
+static void applyLiveTargetInfoToGhost(GhostEntry& ghost,
+                                       const V12::ServerEvent::TargetInfo& info,
+                                       bool isClientTarget) {
+    if (info.hasName && !info.name.empty()) ghost.playerName = info.name;
+    if (info.hasSkin && !info.skin.empty()) ghost.skinName = info.skin;
+    if (info.hasSensorGroup) ghost.sensorGroup = info.sensorGroup;
+    if (info.hasType) ghost.targetType = info.type;
+    if (info.hasRenderFlags) ghost.targetRenderFlags = info.renderFlags;
+    ghost.isFlag = (ghost.targetRenderFlags & 0x2) != 0 && !isClientTarget;
+    ghost.flagTeamId = ghost.isFlag ? ghost.sensorGroup : 0;
+    if (ghost.isFlag) ghost.teamId = ghost.sensorGroup;
+}
+
 // ─── Mission shape helpers ─────────────────────────────────────────
 // Read shapeFile values from datablocks created by executed TorqueScript.
 static void scanDatablockShapesFromCS(World& world) {
@@ -591,25 +604,6 @@ static void renderMountedImage(DTSShape& shape, const WeaponImage::Animation& an
                                (int)threads.size() - 1);
 }
 
-
-static int findFirstNode(const DTSShape& shape,
-                         std::initializer_list<const char*> names) {
-    for (const char* name : names) {
-        const int node = shape.findNode(name);
-        if (node >= 0) return node;
-    }
-    return -1;
-}
-
-static Point3F mountedNodePosition(const MatrixF& model, const DTSShape& image,
-                                   const char* fallbackNode) {
-    const int node = findFirstNode(image, {"muzzlePoint", "MuzzlePoint", "muzzle", fallbackNode});
-    if (node >= 0 && node < (int)image.defaultTransforms.size())
-        return model.transform({image.defaultTransforms[node].m[0][3],
-                                image.defaultTransforms[node].m[1][3],
-                                image.defaultTransforms[node].m[2][3]});
-    return model.transform({0, 0, 0});
-}
 
 static std::string defaultMissionAnimation(const DTSShape* shape) {
     if (!shape || !shape->loaded) return {};
@@ -2424,9 +2418,9 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                 wo.label = getProp(obj.props, "name");
                 wo.collidable = false;
             }
-             if (missionClassIs(obj.className, "ForceFieldBare")) {
-                wo.forceField = true;
-                wo.translucent = true;
+              if (missionClassIs(obj.className, "ForceFieldBare")) {
+                 wo.forceField = true;
+                 wo.translucent = true;
                 if (const std::string ghost = getProp(obj.props, "ghostindex"); !ghost.empty())
                     wo.ghostIndex = std::atoi(ghost.c_str());
                 // A demo's ForceFieldBareData comes from the recording.
@@ -2505,10 +2499,10 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                  const std::string open = getProp(obj.props, "fieldopen");
                  wo.forceFieldOpen = !open.empty() && std::atoi(open.c_str()) != 0;
                  wo.forceFieldFadePosition = wo.forceFieldOpen ? wo.forceFieldFadeMS : 0.0f;
-                wo.boundsRadius = std::sqrt(wo.scale.x * wo.scale.x +
-                                             wo.scale.y * wo.scale.y +
-                                             wo.scale.z * wo.scale.z) * 0.5f;
-            }
+                  wo.boundsRadius = std::sqrt(wo.scale.x * wo.scale.x +
+                                              wo.scale.y * wo.scale.y +
+                                              wo.scale.z * wo.scale.z) * 0.5f;
+              }
             std::string datablock = getProp(obj.props, "datablock");
             std::string datablockLower = datablock;
             for (char& c : datablockLower)
@@ -2767,10 +2761,8 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                     xform = xform * Math::torqueScaleToYUp(wo.scale);
                     xform.setTranslation(Math::torquePointToYUp(wo.pos));
                     const Point3F corners[8] = {
-                        {-0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, -0.5f},
-                        {0.5f, 0.5f, -0.5f}, {-0.5f, 0.5f, -0.5f},
-                        {-0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, 0.5f},
-                        {0.5f, 0.5f, 0.5f}, {-0.5f, 0.5f, 0.5f}
+                        {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+                        {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}
                     };
                     const uint32_t faces[] = {
                         0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6,
@@ -5220,14 +5212,14 @@ void World::spawnExplosionEffect(const Point3F& pos,
                                  const V12::DecodedDataBlock* projectileData,
                                  const V12::DecodedDataBlock* explosionData,
                                  const std::map<uint32_t, ParsedDataBlock>* dataBlocks,
-                                 const Point3F& impactNormal, int tick) {
+                                 const Point3F& impactNormal, int tick, bool endedWithDecal) {
     static constexpr size_t maxEffectInstances = 4096;
     if (!projectileData || !dataBlocks) return;
     const auto find = [&](uint32_t id) -> const V12::DecodedDataBlock* {
         auto it = dataBlocks->find(id);
         return it == dataBlocks->end() ? nullptr : &it->second.decoded;
     };
-    for (uint32_t ref : projectileData->projectileDecalRefs) {
+    if (endedWithDecal) for (uint32_t ref : projectileData->projectileDecalRefs) {
         const auto* block = find(ref);
         if (!block || !block->hasDecal || block->decal.texture.empty()) continue;
         const DecalBasis basis = makeDecalBasis(pos, impactNormal);
@@ -7319,16 +7311,16 @@ void Game::update(float dt) {
                         const V12::DecodedDataBlock* projectileData = nullptr;
                         const V12::DecodedDataBlock* explosionData = nullptr;
                         const auto& dataBlocks = demoParser->getInitialBlock().dataBlocks;
-                        auto projectileIt = dataBlocks.find((uint32_t)exp.projectileDataBlockId);
-                        if (projectileIt != dataBlocks.end()) {
-                            projectileData = &projectileIt->second.decoded;
-                            auto explosionIt = dataBlocks.find(projectileData->projectileExplosionRef);
-                            if (explosionIt != dataBlocks.end())
-                                explosionData = &explosionIt->second.decoded;
-                        }
+                         auto projectileIt = dataBlocks.find((uint32_t)exp.projectileDataBlockId);
+                         if (projectileIt != dataBlocks.end()) {
+                             projectileData = &projectileIt->second.decoded;
+                             auto explosionIt = dataBlocks.find(projectileData->projectileExplosionRef);
+                             if (explosionIt != dataBlocks.end())
+                                 explosionData = &explosionIt->second.decoded;
+                         }
                         // The move tick the explosion lands on seeds its cosmetic randomness.
-                        w->spawnExplosionEffect(expPos, projectileData, explosionData, &dataBlocks, expNormal,
-                                                (int)std::floor(demoTime / 0.032f));
+                         w->spawnExplosionEffect(expPos, projectileData, explosionData, &dataBlocks, expNormal,
+                                                (int)std::floor(demoTime / 0.032f), exp.endedWithDecal);
                     }
 
                 }
@@ -9477,18 +9469,42 @@ void Game::render(float dt) {
                     continue;
                 }
 
-             // Try to get or load the DTS shape for this ghost class
+            // Resolve the shape against the ghost's current datablock. Player
+            // armor switches replace PlayerData on the ghost while preserving
+            // its id, so a one-time shape load leaves the old armor visible.
             DTSShape* shape = const_cast<DTSShape*>(g->shape);
-             if (!shape && !isEffectOnlyGhostClass(g->className) && g->className.empty() == false) {
+            if (!isEffectOnlyGhostClass(g->className) && !g->className.empty()) {
                 GhostEntry* mutableG = const_cast<GhostEntry*>(g);
                 std::string shapeRef = g->shapeName;
-                if (shapeRef.empty() && g->hasDatablock && demoParser) {
-                    const auto& dataBlocks = demoParser->getInitialBlock().datablockWeaponShapes;
-                    auto shapeIt = dataBlocks.find((uint32_t)g->datablockId);
-                    if (shapeIt != dataBlocks.end()) shapeRef = normalizeShapePath(shapeIt->second);
+                if (g->hasDatablock && demoParser) {
+                    const auto& dataBlocks = demoParser->getInitialBlock().dataBlocks;
+                    auto dataBlock = dataBlocks.find((uint32_t)g->datablockId);
+                    if (dataBlock != dataBlocks.end() &&
+                        !dataBlock->second.decoded.shapeFile.empty())
+                        shapeRef = normalizeShapePath(dataBlock->second.decoded.shapeFile);
                 }
-                mutableG->shape = getOrLoadDemoShape(g->className, g->skinName, shapeRef);
-                shape = mutableG->shape;
+                const int datablockId = g->hasDatablock ? g->datablockId : -1;
+                const bool identityChanged = mutableG->renderedDatablockId != datablockId ||
+                    mutableG->renderedSkinName != g->skinName ||
+                    mutableG->renderedShapeRef != shapeRef;
+                if (!shape || identityChanged) {
+                    if (mutableG->renderedDatablockId >= 0 &&
+                        mutableG->renderedDatablockId != datablockId)
+                        Console::instance().printf(LogLevel::Debug,
+                            "Demo ghost[%d] armor datablock %d -> %d, shape '%s'",
+                            idx, mutableG->renderedDatablockId, datablockId,
+                            shapeRef.c_str());
+                    mutableG->shape = getOrLoadDemoShape(g->className, g->skinName, shapeRef);
+                    mutableG->renderedDatablockId = datablockId;
+                    mutableG->renderedSkinName = g->skinName;
+                    mutableG->renderedShapeRef = shapeRef;
+                    mutableG->skinApplied = false;
+                    mutableG->footClip = nullptr;
+                    mutableG->footPhase = 0.0f;
+                    mutableG->footState = 0;
+                    mutableG->threadAnimTime = 0.0f;
+                    shape = mutableG->shape;
+                }
             }
 
             // Players and vehicles cast projected shadows; a mounted object's
@@ -10903,20 +10919,23 @@ void Game::connectToServer(const char* host, uint16_t port) {
                           profile.decoded.audioMinDistance = data.audioMinDistance;
                           profile.decoded.audioMaxDistance = data.audioMaxDistance;
                       }
-                  }
-             });
+                   }
+              });
          activeConn->setTargetCallback(
-            [this](const V12::ServerEvent::TargetInfo* info, uint16_t targetId) {
-                 if (!info) {
-                  liveTargets.erase(targetId);
-                      if (GhostEntry* ghost = liveGhosts.getMutableGhost((int)targetId)) {
-                          ghost->playerName.clear();
-                          ghost->skinName.clear();
-                          ghost->targetType.clear();
-                          ghost->targetRenderFlags = 0;
-                          ghost->isFlag = false;
-                          ghost->flagTeamId = 0;
-                      }
+             [this](const V12::ServerEvent::TargetInfo* info, uint16_t targetId) {
+                  if (!info) {
+                   liveTargets.erase(targetId);
+                       for (int ghostIndex : liveGhosts.getAllIndices()) {
+                           GhostEntry* ghost = liveGhosts.getMutableGhost(ghostIndex);
+                           if (!ghost || ghost->targetId != (int)targetId) continue;
+                           ghost->targetId = -1;
+                           ghost->playerName.clear();
+                           ghost->skinName.clear();
+                           ghost->targetType.clear();
+                           ghost->targetRenderFlags = 0;
+                           ghost->isFlag = false;
+                           ghost->flagTeamId = 0;
+                       }
                      if (spectateGhostIndex == (int)targetId) {
                          spectateGhostIndex = -1;
                          liveFollowGhostIndex = -1;
@@ -10935,20 +10954,15 @@ void Game::connectToServer(const char* host, uint16_t port) {
                  if (info->hasDataBlockId) { target.hasDataBlockId = true; target.dataBlockId = info->dataBlockId; }
                  if (info->hasRenderFlags) { target.hasRenderFlags = true; target.renderFlags = info->renderFlags; }
                  if (info->hasVoicePitch) { target.hasVoicePitch = true; target.voicePitch = info->voicePitch; }
-                  if (GhostEntry* ghost = liveGhosts.getMutableGhost((int)targetId)) {
-                    if (info->hasName && !info->name.empty()) ghost->playerName = info->name;
-                      if (info->hasSkin && !info->skin.empty()) ghost->skinName = info->skin;
-                       if (info->hasSensorGroup) ghost->sensorGroup = info->sensorGroup;
-                       if (info->hasType) ghost->targetType = info->type;
-                       if (info->hasRenderFlags) ghost->targetRenderFlags = info->renderFlags;
-                     const bool isClientTarget = std::any_of(
-                         liveClientTargetIds.begin(), liveClientTargetIds.end(),
-                         [targetId](const auto& entry) { return entry.second == (int)targetId; });
-                      ghost->isFlag = (target.renderFlags & 0x2) != 0 && !isClientTarget;
-                     ghost->flagTeamId = ghost->isFlag ? target.sensorGroup : 0;
-                     if (ghost->isFlag) ghost->teamId = target.sensorGroup;
-                 }
-            });
+                  for (int ghostIndex : liveGhosts.getAllIndices()) {
+                      GhostEntry* ghost = liveGhosts.getMutableGhost(ghostIndex);
+                      if (!ghost || ghost->targetId != (int)targetId) continue;
+                      const bool isClientTarget = std::any_of(
+                          liveClientTargetIds.begin(), liveClientTargetIds.end(),
+                          [ghostIndex](const auto& entry) { return entry.second == ghostIndex; });
+                      applyLiveTargetInfoToGhost(*ghost, target, isClientTarget);
+                  }
+             });
         activeConn->setMissionCallback([this](uint32_t crc) {
             if (liveMissionCrc != 0 && liveMissionCrc != crc) {
                 resetLiveMissionState();
@@ -11161,7 +11175,7 @@ void Game::connectToServer(const char* host, uint16_t port) {
             }
         });
          activeConn->setGhostCallback([this](const V12::GhostUpdate& update,
-                                              const V12::PlayerGhostState* state) {
+                                             const V12::PlayerGhostState* state) {
               if (update.operation == V12::GhostUpdate::Operation::Delete) {
                    auto& audio = Engine::instance().audio();
                    auto projectileSound = projectileSoundSources.find(update.index);
@@ -11229,8 +11243,19 @@ void Game::connectToServer(const char* host, uint16_t port) {
                       w->spawnSplashEffect(position, splashIt->second.decoded, nativeDatablocks);
                   }
               }
-             GhostEntry* ghost = liveGhosts.getMutableGhost((int)update.index);
-             if (!ghost) return;
+              GhostEntry* ghost = liveGhosts.getMutableGhost((int)update.index);
+              if (!ghost) return;
+              if (state->hasTargetId) {
+                  ghost->targetId = state->targetId;
+                  if (ghost->targetId < 0) {
+                      ghost->playerName.clear();
+                      ghost->skinName.clear();
+                      ghost->targetType.clear();
+                      ghost->targetRenderFlags = 0;
+                      ghost->isFlag = false;
+                      ghost->flagTeamId = 0;
+                  }
+              }
              if (state->hasDamageState && state->damageState >= 2) {
                  auto& audio = Engine::instance().audio();
                  for (int slot = 0; slot < 4; ++slot) {
@@ -11254,23 +11279,14 @@ void Game::connectToServer(const char* host, uint16_t port) {
                      break;
                  }
              }
-             auto target = liveTargets.find((uint16_t)update.index);
-             if (target != liveTargets.end()) {
-                  if (target->second.hasSensorGroup)
-                      ghost->sensorGroup = target->second.sensorGroup;
-                  if (target->second.hasName && !target->second.name.empty())
-                     ghost->playerName = target->second.name;
-                   if (target->second.hasSkin && !target->second.skin.empty())
-                       ghost->skinName = target->second.skin;
-                   if (target->second.hasType) ghost->targetType = target->second.type;
-                   if (target->second.hasRenderFlags)
-                       ghost->targetRenderFlags = target->second.renderFlags;
-                  const bool isClientTarget = std::any_of(
-                      liveClientTargetIds.begin(), liveClientTargetIds.end(),
-                      [index = update.index](const auto& entry) { return entry.second == (int)index; });
-                      ghost->isFlag = (target->second.renderFlags & 0x2) != 0 && !isClientTarget;
-                  ghost->flagTeamId = ghost->isFlag ? target->second.sensorGroup : 0;
-                  if (ghost->isFlag) ghost->teamId = target->second.sensorGroup;
+              if (ghost->targetId >= 0) {
+                  auto target = liveTargets.find((uint16_t)ghost->targetId);
+                  if (target != liveTargets.end()) {
+                      const bool isClientTarget = std::any_of(
+                          liveClientTargetIds.begin(), liveClientTargetIds.end(),
+                          [index = update.index](const auto& entry) { return entry.second == (int)index; });
+                       applyLiveTargetInfoToGhost(*ghost, target->second, isClientTarget);
+                  }
               }
               if (state->hasPosition) {
                   ghost->position = {state->position.x, state->position.y, state->position.z};
@@ -11397,8 +11413,8 @@ void Game::connectToServer(const char* host, uint16_t port) {
                      normal.y /= normalLength;
                      normal.z /= normalLength;
                  }
-                  w->spawnExplosionEffect(position, projectileData, explosionData,
-                                            &nativeDatablocks, normal);
+                   w->spawnExplosionEffect(position, projectileData, explosionData,
+                                           &nativeDatablocks, normal, 0, impact.endedWithDecal);
                   const V12::DecodedDataBlock* soundExplosion = explosionData;
                   if (projectileData->projectileUnderwaterExplosionRef != 0 &&
                       Engine::instance().audio().isUnderwater()) {
@@ -11856,6 +11872,39 @@ bool Game::playDemo(const char* path) {
     Console::instance().printf(LogLevel::Info, "  Protocol: 0x%08X", (unsigned)hdr.protocolVersion);
     Console::instance().printf(LogLevel::Info, "  InitBlock: %u bytes", (unsigned)hdr.initialBlockSize);
     Console::instance().printf(LogLevel::Info, "  Mission: %s", ib.missionName.empty() ? "(unknown)" : ib.missionName.c_str());
+
+    // A recording starts from a mid-match snapshot, so it may contain player
+    // score messages without replaying the original ClientJoin events. Seed
+    // the stock message.cs roster from that snapshot before playback invokes
+    // scoreList.cs callbacks.
+    if (auto* ts = Engine::instance().script().ts(); ts && ts->hasFunction("handleClientJoin")) {
+        const auto ghostIndices = demoParser->getGhostTracker().getAllIndices();
+        for (const auto& player : demoParser->getPlayerInfo()) {
+            if (player.clientId < 0) continue;
+            const bool hasPlayerGhost = std::any_of(
+                ghostIndices.begin(), ghostIndices.end(),
+                [&](int index) {
+                    const GhostEntry* ghost = demoParser->getGhostTracker().getGhost(index);
+                    return ghost && ObserverParity::isPlayerClass(ghost->className) &&
+                        ghost->targetId == player.targetId;
+                });
+            if (!hasPlayerGhost) continue;
+            const std::string playerObject = "$PlayerList[" +
+                std::to_string(player.clientId) + "]";
+            const std::string existing = ts->getGlobal(playerObject).toString();
+            if (!existing.empty()) continue;
+            const std::vector<VMValue> joinArgs{
+                VMValue("MsgClientJoin"), VMValue(""), VMValue(player.name),
+                VMValue(player.clientId), VMValue(player.targetId),
+                // Skip getPlayerPrefs: playback has no server connection from
+                // which to request per-client preferences.
+                VMValue(1), VMValue(0), VMValue(0), VMValue(0), VMValue(0)};
+            ts->callFunction("handleClientJoin", joinArgs);
+            const std::string playerHandle = ts->getGlobal(playerObject).toString();
+            if (auto* object = ScriptEngine::instance().findObject(playerHandle.c_str()))
+                ScriptEngine::instance().setObjectField(object, "isBot", VMValue(0));
+        }
+    }
 
     std::string loadMap = extractMapName(ib.missionName);
     if (loadMap.empty()) {
@@ -12331,9 +12380,12 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
         const auto& data = block->second.decoded.playerPhysics;
         auto& state = g->prediction;
         if (g->predictionUpdate != g->playerUpdates) {
-            PlayerPrediction::unpackUpdate(state, data, g->playerUpdate, g->predictionUpdate < 0,
-                                           g->playerUpdate.headInRadians);
-            if (g->predictionUpdate < 0) state.energy = data.maxEnergy;
+            const auto update = index == controlGhostIndex
+                ? PlayerPrediction::interpolatedAnchor(g->playerUpdate) : g->playerUpdate;
+            PlayerPrediction::unpackUpdate(state, data, update, g->predictionUpdate < 0,
+                                           update.headInRadians);
+            if (g->predictionUpdate < 0 && !g->playerUpdate.hasEnergy)
+                state.energy = data.maxEnergy;
             g->predictionUpdate = g->playerUpdates;
         }
         state.mounted = g->mountObject >= 0;
@@ -12449,7 +12501,8 @@ void Game::applyDemoPacketView(const PacketData& pd) {
         // Player::readPacketData drives the recorder's own simulation.
         GhostEntry* control = const_cast<GhostEntry*>(
             demoParser->getGhostTracker().getGhost(pd.gameState.controlObjectGhostIndex));
-        if (control && pd.gameState.controlPlayer.hasPosition) {
+        if (control && (pd.gameState.controlPlayer.hasPosition ||
+                        pd.gameState.controlPlayer.hasEnergy)) {
             control->playerUpdate = pd.gameState.controlPlayer;
             ++control->playerUpdates;
             control->prediction.jumpDelay = pd.gameState.controlJumpDelay;

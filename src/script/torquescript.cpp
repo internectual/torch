@@ -2156,8 +2156,17 @@ VMValue TorqueScript::Impl::parsePrimary() {
                 // include change behavior when the active mode changed.
                 if (fn == "exec" && !args.empty()) {
                     std::string execPath = args[0].toString();
-                    const bool optional = args.size() > 1 && args[1].toBool();
                     const std::string normalized = normalizedScriptPath(execPath);
+                    // Saved preferences are optional per-user state. Retail
+                    // scripts sometimes exec a prefs/*.cs file without the
+                    // optional flag even though the file is created only
+                    // after the user saves that configuration.
+                    const bool preferenceFile = normalized.size() >= 6 &&
+                        strncasecmp(normalized.c_str(), "prefs/", 6) == 0;
+                    const bool startupOverride = strcasecmp(normalized.c_str(), "autoexec.cs") == 0 ||
+                        strcasecmp(normalized.c_str(), "autojournal.cs") == 0;
+                    const bool optional = preferenceFile || startupOverride ||
+                        (args.size() > 1 && args[1].toBool());
                     if (!TorchPath::isSafeLogicalPath(normalized.c_str())) {
                         Console::instance().printf(LogLevel::Error,
                             "TS: rejecting unsafe exec path '%s'", execPath.c_str());
@@ -2170,10 +2179,15 @@ VMValue TorqueScript::Impl::parsePrimary() {
                     }
                     if (Engine::instance().fs().fileExists(normalized.c_str()))
                         return outer->executeFile(normalized);
+                    const std::string function = callNames.empty()
+                        ? std::string() : " [" + callNames.back() + "]";
+                    const std::string location = "TS:" +
+                        (currentFile.empty() ? std::string("<runtime>") : currentFile) +
+                        (function.empty() ? ":" + std::to_string(srcLine) : function);
                     Console::instance().printf(optional ? LogLevel::Debug : LogLevel::Error,
-                        optional ? "TS: optional exec not found: %s"
-                                 : "TS: exec file not found: %s", execPath.c_str());
-                    return VMValue(0);
+                        "%s: %s exec file not found: %s", location.c_str(),
+                        optional ? "optional" : "required", execPath.c_str());
+                    return VMValue(optional ? 1 : 0);
                 }
                 // Script functions (packages included) replace console
                 // functions of the same name; Parent:: from a package reaches
@@ -3011,6 +3025,9 @@ bool TorqueScript::isActivePackage(const std::string& name) const {
 
 const std::string& TorqueScript::dbgFile() const { return impl->currentFile; }
 int TorqueScript::dbgLine() const { return impl->srcLine; }
+std::string TorqueScript::currentFunction() const {
+    return impl->callNames.empty() ? std::string() : impl->callNames.back();
+}
 
 VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VMValue>& args) {
     static thread_local int callDepth = 0;
@@ -3066,7 +3083,12 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
         auto native = impl->natives.find(nativeName);
         if (native != impl->natives.end())
             return native->second(args);
-        Console::instance().printf(LogLevel::Warn, "TS: function not found: '%s'", name.c_str());
+        const std::string caller = impl->callNames.empty()
+            ? std::string() : " [" + impl->callNames.back() + "]";
+        Console::instance().printf(LogLevel::Warn,
+            "TS:%s%s: function not found: '%s'",
+            impl->currentFile.empty() ? "<runtime>" : impl->currentFile.c_str(),
+            caller.c_str(), name.c_str());
         return {};
     }
 

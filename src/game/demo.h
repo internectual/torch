@@ -702,6 +702,9 @@ struct GhostEntry {
     std::string skinName;
     std::string shapePath;
     DTSShape* shape{};
+    int renderedDatablockId = -1;
+    std::string renderedSkinName;
+    std::string renderedShapeRef;
     Vec3 prevPosition{};
     float animTime{};
     float threadAnimTime{};
@@ -922,7 +925,8 @@ struct DemoPlayerInfo {
     std::string name, skin;
     int teamId{-1};
     float damage{0};
-    int clientId{-1};
+    int clientId{-1}; // ClientManager id used by score and roster callbacks.
+    int targetId{-1}; // GameBase TargetManager slot used by player ghosts.
     int score{0};
     int ping{0};
     int packetLoss{0};
@@ -933,6 +937,7 @@ struct DemoPendingExplosion {
     Vec3 normal{0, 1, 0};
     float time{};
     int projectileDataBlockId = -1;
+    bool endedWithDecal = false;
 };
 
 struct DemoParserSnapshot {

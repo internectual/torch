@@ -3,14 +3,62 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <cstdio>
+#include <iterator>
 
 struct Platform::Impl {
     SDL_Window* window = nullptr;
     SDL_GLContext glContext = nullptr;
+    SDL_Joystick* joystick = nullptr;
+    SDL_JoystickID joystickId = 0;
     bool running = false;
     uint64_t frameCount = 0;
     ResizeCallback resizeCb;
 };
+
+static void openFirstJoystick(SDL_Joystick*& current, SDL_JoystickID& currentId, InputState& input) {
+    if (current) return;
+    int count = 0;
+    SDL_JoystickID* devices = SDL_GetJoysticks(&count);
+    for (int i = 0; devices && i < count; ++i) {
+        SDL_Joystick* joystick = SDL_OpenJoystick(devices[i]);
+        if (!joystick) continue;
+        current = joystick;
+        currentId = SDL_GetJoystickID(joystick);
+        input.joystickConnected = true;
+        std::fill(std::begin(input.joystickAxes), std::end(input.joystickAxes), 0.0f);
+        std::fill(std::begin(input.joystickButtons), std::end(input.joystickButtons), false);
+        std::fill(std::begin(input.consumedJoystickButtons), std::end(input.consumedJoystickButtons), false);
+        std::fill(std::begin(input.consumedJoystickAxes), std::end(input.consumedJoystickAxes), false);
+        input.joystickButtonPressQueue.clear();
+        input.joystickHat = 0;
+        input.consumedJoystickHat = false;
+        for (int axis = 0; axis < std::min(SDL_GetNumJoystickAxes(joystick), JoystickInput::MaxAxes); ++axis) {
+            Sint16 value = 0;
+            if (SDL_GetJoystickAxisInitialState(joystick, axis, &value))
+                input.joystickAxes[axis] = JoystickInput::normalizeAxis(value);
+        }
+        for (int button = 0; button < std::min(SDL_GetNumJoystickButtons(joystick), JoystickInput::MaxButtons); ++button)
+            input.joystickButtons[button] = SDL_GetJoystickButton(joystick, button);
+        if (SDL_GetNumJoystickHats(joystick) > 0)
+            input.joystickHat = SDL_GetJoystickHat(joystick, 0);
+        break;
+    }
+    SDL_free(devices);
+}
+
+static void closeJoystick(SDL_Joystick*& current, SDL_JoystickID& currentId, InputState& input) {
+    if (current) SDL_CloseJoystick(current);
+    current = nullptr;
+    currentId = 0;
+    input.joystickConnected = false;
+    std::fill(std::begin(input.joystickAxes), std::end(input.joystickAxes), 0.0f);
+    std::fill(std::begin(input.joystickButtons), std::end(input.joystickButtons), false);
+    std::fill(std::begin(input.consumedJoystickButtons), std::end(input.consumedJoystickButtons), false);
+    std::fill(std::begin(input.consumedJoystickAxes), std::end(input.consumedJoystickAxes), false);
+    input.joystickButtonPressQueue.clear();
+    input.joystickHat = 0;
+    input.consumedJoystickHat = false;
+}
 
 Platform::Platform() : impl(new Impl) {}
 Platform::~Platform() { shutdown(); delete impl; }
@@ -18,7 +66,7 @@ Platform::~Platform() { shutdown(); delete impl; }
 bool Platform::init(const PlatformConfig& config) {
     // Force X11 backend for GLX compatibility with GLEW
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11");
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_JOYSTICK)) {
         fprintf(stderr, "SDL3 init failed: %s\n", SDL_GetError());
         return false;
     }
@@ -61,11 +109,14 @@ bool Platform::init(const PlatformConfig& config) {
     impl->running = true;
     running = true;
     mouseEnabled = true;
+    SDL_SetJoystickEventsEnabled(true);
+    openFirstJoystick(impl->joystick, impl->joystickId, inputState);
     return true;
 }
 
 void Platform::shutdown() {
     if (!impl) return;
+    closeJoystick(impl->joystick, impl->joystickId, inputState);
     if (impl->glContext) SDL_GL_DestroyContext(impl->glContext);
     impl->glContext = nullptr;
     if (impl->window) SDL_DestroyWindow(impl->window);
@@ -82,6 +133,7 @@ bool Platform::processEvents() {
     inputState.mouseWheel = 0;
     inputState.textInput.clear();
     inputState.keyPressQueue.clear();
+    inputState.joystickButtonPressQueue.clear();
     inputState.focusLost = false;
 
     SDL_Event e;
@@ -139,6 +191,38 @@ bool Platform::processEvents() {
                 inputState.mouseWheel += mouseWheelDelta(
                     e.wheel.y, e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED);
                 break;
+            case SDL_EVENT_JOYSTICK_ADDED:
+                if (!impl->joystick) openFirstJoystick(impl->joystick, impl->joystickId, inputState);
+                break;
+            case SDL_EVENT_JOYSTICK_REMOVED:
+                if (impl->joystick && e.jdevice.which == impl->joystickId) {
+                    closeJoystick(impl->joystick, impl->joystickId, inputState);
+                    openFirstJoystick(impl->joystick, impl->joystickId, inputState);
+                }
+                break;
+            case SDL_EVENT_JOYSTICK_AXIS_MOTION:
+                if (impl->joystick && e.jaxis.which == impl->joystickId &&
+                    e.jaxis.axis < JoystickInput::MaxAxes)
+                    inputState.joystickAxes[e.jaxis.axis] = JoystickInput::normalizeAxis(e.jaxis.value);
+                break;
+            case SDL_EVENT_JOYSTICK_BUTTON_DOWN:
+            case SDL_EVENT_JOYSTICK_BUTTON_UP:
+                if (impl->joystick && e.jbutton.which == impl->joystickId &&
+                    e.jbutton.button < JoystickInput::MaxButtons) {
+                    const bool wasDown = inputState.joystickButtons[e.jbutton.button];
+                    inputState.joystickButtons[e.jbutton.button] = e.type == SDL_EVENT_JOYSTICK_BUTTON_DOWN;
+                    if (e.type == SDL_EVENT_JOYSTICK_BUTTON_DOWN && !wasDown)
+                        inputState.joystickButtonPressQueue.push_back(e.jbutton.button);
+                    if (e.type == SDL_EVENT_JOYSTICK_BUTTON_UP)
+                        inputState.consumedJoystickButtons[e.jbutton.button] = false;
+                }
+                break;
+            case SDL_EVENT_JOYSTICK_HAT_MOTION:
+                if (impl->joystick && e.jhat.which == impl->joystickId && e.jhat.hat == 0) {
+                    inputState.joystickHat = e.jhat.value;
+                    if (e.jhat.value == SDL_HAT_CENTERED) inputState.consumedJoystickHat = false;
+                }
+                break;
             case SDL_EVENT_WINDOW_FOCUS_LOST:
                 // SDL does not guarantee key-up events while the window is
                 // unfocused. Never carry movement, fire, or modifier state
@@ -147,6 +231,11 @@ bool Platform::processEvents() {
                 for (bool& consumed : inputState.consumedSc) consumed = false;
                 for (bool& down : inputState.mouseButtons) down = false;
                 for (bool& consumed : inputState.consumedMouse) consumed = false;
+                for (bool& down : inputState.joystickButtons) down = false;
+                for (bool& consumed : inputState.consumedJoystickButtons) consumed = false;
+                std::fill(std::begin(inputState.joystickAxes), std::end(inputState.joystickAxes), 0.0f);
+                inputState.consumedJoystickHat = false;
+                inputState.joystickHat = 0;
                 inputState.focusLost = true;
                 break;
             case SDL_EVENT_WINDOW_RESIZED:
@@ -158,12 +247,27 @@ bool Platform::processEvents() {
                 break;
         }
     }
+    if (impl->joystick && SDL_JoystickConnected(impl->joystick)) {
+        for (int axis = 0; axis < std::min(SDL_GetNumJoystickAxes(impl->joystick), JoystickInput::MaxAxes); ++axis)
+            inputState.joystickAxes[axis] = JoystickInput::normalizeAxis(SDL_GetJoystickAxis(impl->joystick, axis));
+        for (int button = 0; button < std::min(SDL_GetNumJoystickButtons(impl->joystick), JoystickInput::MaxButtons); ++button) {
+            inputState.joystickButtons[button] = SDL_GetJoystickButton(impl->joystick, button);
+            if (!inputState.joystickButtons[button]) inputState.consumedJoystickButtons[button] = false;
+        }
+        if (SDL_GetNumJoystickHats(impl->joystick) > 0) {
+            inputState.joystickHat = SDL_GetJoystickHat(impl->joystick, 0);
+            if (inputState.joystickHat == SDL_HAT_CENTERED) inputState.consumedJoystickHat = false;
+        }
+    }
     impl->frameCount++;
     return true;
 }
 
 void Platform::swapBuffers() { SDL_GL_SwapWindow(impl->window); }
 bool Platform::isRunning() const { return running; }
+bool Platform::hasJoystick() const {
+    return impl && impl->joystick && SDL_JoystickConnected(impl->joystick);
+}
 
 int32_t Platform::width() const {
     int w; SDL_GetWindowSize(impl->window, &w, nullptr); return w;

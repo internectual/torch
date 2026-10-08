@@ -428,6 +428,8 @@ void GuiRenderer::init() {
             it = obj->fields.find("sel"); if (it != obj->fields.end()) ctl->checked = it->second.toBool();
             it = obj->fields.find("variable"); if (it != obj->fields.end()) ctl->variable = it->second.toString();
             syncCheckedFromBoundVariable(ctl);
+            it = obj->fields.find("replaceText");
+            if (it != obj->fields.end()) ctl->replaceMenuTextOnSelect = it->second.toBool();
             it = obj->fields.find("active"); if (it != obj->fields.end()) ctl->active = it->second.toBool();
             it = obj->fields.find("vScrollBar"); if (it != obj->fields.end()) ctl->vScrollBarMode = it->second.toString();
             it = obj->fields.find("hScrollBar"); if (it != obj->fields.end()) ctl->hScrollBarMode = it->second.toString();
@@ -519,6 +521,7 @@ void GuiRenderer::refresh() {
             it = obj->fields.find("sel"); if (it != obj->fields.end()) ctl->checked = it->second.toBool();
             it = obj->fields.find("variable"); if (it != obj->fields.end()) ctl->variable = it->second.toString();
             syncCheckedFromBoundVariable(ctl);
+            it = obj->fields.find("replaceText"); if (it != obj->fields.end()) ctl->replaceMenuTextOnSelect = it->second.toBool();
             it = obj->fields.find("vScrollBar"); if (it != obj->fields.end()) ctl->vScrollBarMode = it->second.toString();
             it = obj->fields.find("hScrollBar"); if (it != obj->fields.end()) ctl->hScrollBarMode = it->second.toString();
             if (ctl->className == "GuiCanvas") canvas = ctl;
@@ -1746,7 +1749,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             float fy = y + (ctl->extentY - bh) * 0.5f;
 
             drawTexRegion(r, shTex, (float)cL.x, (float)cL.y, (float)cL.w, (float)cL.h, x, fy, lw, bh);
-            if (midW > 0)
+        if (midW > 0)
                 drawTexRegion(r, shTex, (float)cM.x, (float)cM.y, (float)cM.w, (float)cM.h,
                               x + lw, fy, midW, bh);
             drawTexRegion(r, shTex, (float)cR.x, (float)cR.y, (float)cR.w, (float)cR.h,
@@ -2152,7 +2155,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     (float)cF.x/fieldTex2->width,(float)cF.y/fieldTex2->height,
                     (float)(cF.x+cF.w)/fieldTex2->width,(float)(cF.y+cF.h)/fieldTex2->height);
         } else {
-            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
+            if (fieldTex && fieldTex->loaded)
+                r.drawTexturedRect({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fieldTex->id);
+            else
+                r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
         }
         if (font) {
             std::string display = ctl->text.empty() ? "..." : ctl->text;
@@ -3695,19 +3701,23 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                         up.x /= upLen; up.y /= upLen; up.z /= upLen;
                     }
                 }
-                auto isMarkerClass = [](const std::string& className) {
+                auto isNavMarker = [](const GhostEntry* ghost) {
+                    if (!ghost) return false;
+                    const std::string& className = ghost->className;
                     // Vehicle classes end in "Vehicle"; VehicleBlocker is not one.
-                    // Mission markers (AIObjective, SpawnSphere, WayPoint)
-                    // have no target and are never marked.
-                    return className.find("Player") != std::string::npos ||
-                           ObserverParity::isVehicleClass(className) ||
-                           className.find("Beacon") != std::string::npos ||
-                           className.find("Flag") != std::string::npos;
+                    // Mission markers have no target, but a flag Item is marked
+                    // by TargetInfo and does not have "Flag" in its ghost class.
+                    return HudParity::navHudMarkerEligible(
+                        ghost->isFlag,
+                        className.find("Player") != std::string::npos,
+                        ObserverParity::isVehicleClass(className),
+                        className.find("Beacon") != std::string::npos,
+                        className.find("Flag") != std::string::npos);
                 };
                  auto drawMarker = [&](const GhostEntry* ghost) {
                      if (!ghost) return;
-                     if (!Engine::instance().game().isDemoPlaying() &&
-                         Engine::instance().game().activeConnection()) {
+                      if (!Engine::instance().game().isDemoPlaying() &&
+                          Engine::instance().game().activeConnection() && !ghost->isFlag) {
                          // Only targets visible to the client's sensor group.
                          if (!Engine::instance().game().isClientTargetVisible(ghost->targetId)) return;
                      }
@@ -3795,7 +3805,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                         const int control = Engine::instance().game().getControlGhostIndex();
                         for (int index : parser->getGhostTracker().getAllIndices()) {
                             const auto* ghost = parser->getGhostTracker().getGhost(index);
-                            if (ghost && index != control && isMarkerClass(ghost->className))
+                            if (ghost && index != control && isNavMarker(ghost))
                                 drawMarker(ghost);
                         }
                     }
@@ -3803,7 +3813,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     const int control = Engine::instance().game().getControlGhostIndex();
                     for (int index : Engine::instance().game().getLiveGhostIndices()) {
                         const auto* ghost = Engine::instance().game().getLiveGhost(index);
-                        if (ghost && index != control && isMarkerClass(ghost->className))
+                        if (ghost && index != control && isNavMarker(ghost))
                             drawMarker(ghost);
                     }
                 }
@@ -4496,7 +4506,8 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
         float lineH = 20;
         int idx = (int)((y - popY) / lineH);
         if (idx >= 0 && idx < (int)popupHit->menuItems.size() && !popupHit->menuItems[idx].isSeparator) {
-            popupHit->text = popupHit->menuItems[idx].text;
+            if (popupHit->replaceMenuTextOnSelect)
+                popupHit->text = popupHit->menuItems[idx].text;
             popupHit->selectedRow = idx;
             auto* ts = Engine::instance().script().ts();
             if (ts && ts->hasFunction(popupHit->name + "::onSelect"))
@@ -4721,7 +4732,8 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             if (x >= popX && x < popX + popW && y >= popY && y < popY + lineH * (float)hit->menuItems.size()) {
                 int idx = (int)((y - popY) / lineH);
                 if (idx >= 0 && idx < (int)hit->menuItems.size() && !hit->menuItems[idx].isSeparator) {
-                    hit->text = hit->menuItems[idx].text;
+                    if (hit->replaceMenuTextOnSelect)
+                        hit->text = hit->menuItems[idx].text;
                     auto* ts = Engine::instance().script().ts();
                     if (ts && ts->hasFunction(hit->name + "::onSelect"))
                         ts->callFunction(hit->name + "::onSelect",
@@ -5112,6 +5124,8 @@ void GuiRenderer::handleKeyboard() {
     // (a plain queue-pop missed fast taps in deep dialog stacks).
     static bool prevAnyKey[512]{};
     static bool prevGotKey = false;
+    static float prevJoystickAxes[JoystickInput::MaxAxes]{};
+    static uint8_t prevJoystickHat = 0;
 
     // GuiInputCtrl key capture (e.g. RemapDlg's RemapInputCtrl): while the
     // topmost dialog contains a GuiInputCtrl, every freshly-pressed key is
@@ -5148,9 +5162,58 @@ void GuiRenderer::handleKeyboard() {
             input.consumedSc[hitSc] = true;
             std::fill(std::begin(prevAnyKey), std::end(prevAnyKey), false);
         }
+        if (!gotKey && !capture->name.empty() && input.joystickConnected) {
+            auto* ts = Engine::instance().script().ts();
+            auto sendJoystickCapture = [&](const std::string& action) {
+                if (ts && ts->hasFunction(capture->name + "::onInputEvent"))
+                    ts->callFunction(capture->name + "::onInputEvent",
+                        {VMValue(capture->name), VMValue(std::string("joystick")), VMValue(action)});
+            };
+            if (!input.joystickButtonPressQueue.empty()) {
+                const int button = input.joystickButtonPressQueue.front();
+                if (button >= 0 && button < JoystickInput::MaxButtons) {
+                    sendJoystickCapture("button" + std::to_string(button));
+                    input.consumedJoystickButtons[button] = true;
+                }
+            } else {
+                static constexpr const char* povNames[] = {"upov", "rpov", "dpov", "lpov"};
+                if (!input.consumedJoystickHat) {
+                    for (const char* name : povNames) {
+                        if (JoystickInput::povPressed(input.joystickHat, name) &&
+                            !JoystickInput::povPressed(prevJoystickHat, name)) {
+                            sendJoystickCapture(name);
+                            input.consumedJoystickHat = true;
+                            break;
+                        }
+                    }
+                }
+                if (!input.consumedJoystickHat) {
+                    for (int axis = 0; axis < JoystickInput::MaxAxes; ++axis) {
+                        const float value = input.joystickAxes[axis];
+                        if (input.consumedJoystickAxes[axis] && std::abs(value) < 0.25f)
+                            input.consumedJoystickAxes[axis] = false;
+                        if (input.consumedJoystickAxes[axis] || std::abs(value) < 0.65f ||
+                            std::abs(prevJoystickAxes[axis]) >= 0.65f)
+                            continue;
+                        static constexpr const char* axisNames[] = {
+                            "xaxis", "yaxis", "zaxis", "rxaxis", "ryaxis", "rzaxis",
+                            "slider0", "slider1", "slider2", "slider3"
+                        };
+                        if (axis < (int)(sizeof(axisNames) / sizeof(axisNames[0]))) {
+                            sendJoystickCapture(axisNames[axis]);
+                            input.consumedJoystickAxes[axis] = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         prevGotKey = gotKey;
         // Snapshot this frame's state for edge detection next frame.
         for (int s = 0; s < 512; ++s) prevAnyKey[s] = input.keysDown[s];
+        std::copy(std::begin(input.joystickAxes), std::end(input.joystickAxes),
+                  std::begin(prevJoystickAxes));
+        prevJoystickHat = input.joystickHat;
         prevTab = input.keysDown[SCANCODE_TAB];
         return;
     }
@@ -5159,6 +5222,12 @@ void GuiRenderer::handleKeyboard() {
     if (!prevGotKey)
         for (int s = 0; s < 512; ++s) prevAnyKey[s] = input.keysDown[s];
     prevGotKey = false;
+    for (int axis = 0; axis < JoystickInput::MaxAxes; ++axis)
+        if (std::abs(input.joystickAxes[axis]) < 0.25f)
+            input.consumedJoystickAxes[axis] = false;
+    std::copy(std::begin(input.joystickAxes), std::end(input.joystickAxes),
+              std::begin(prevJoystickAxes));
+    prevJoystickHat = input.joystickHat;
 
     // Stock shell dialogs use Tab to move through edit fields. Traverse only
     // controls owned by the active dialog, never controls hidden behind it.
@@ -5388,6 +5457,8 @@ GuiControl* GuiRenderer::soToGui(const std::string& handle, GuiControl* parent) 
     fi = so->fields.find("active"); if (fi != so->fields.end()) ctl->active = fi->second.toBool();
     fi = so->fields.find("variable"); if (fi != so->fields.end()) ctl->variable = fi->second.toString();
     syncCheckedFromBoundVariable(ctl);
+    fi = so->fields.find("replaceText");
+    if (fi != so->fields.end()) ctl->replaceMenuTextOnSelect = fi->second.toBool();
     for (const auto& [field, value] : so->fields)
         ctl->fields[field] = value.toString();
     fi = so->fields.find("range"); if (fi != so->fields.end()) {

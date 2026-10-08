@@ -2004,6 +2004,9 @@ static void testHudCrosshairVisibility() {
     assert(!HudParity::crosshairVisible(true, false, false));
     assert(!HudParity::crosshairVisible(false, true, false));
     assert(!HudParity::crosshairVisible(false, false, true));
+    assert(HudParity::navHudMarkerEligible(true, false, false, false, false));
+    assert(HudParity::navHudMarkerEligible(false, true, false, false, false));
+    assert(!HudParity::navHudMarkerEligible(false, false, false, false, false));
 }
 
 static void testParticleKeyClamping() {

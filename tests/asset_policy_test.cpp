@@ -25,7 +25,7 @@ int main() {
     linearImpactWriter.writeUnsigned(0x40400000, 32);
     linearImpactWriter.writeUnsigned(16384, 15); // phi = 0, normal points up
     linearImpactWriter.writeUnsigned(8192, 14);  // theta = 0
-    linearImpactWriter.writeFlag(false);
+    linearImpactWriter.writeFlag(true); // endedWithDecal
     V12BitStream linearImpactStream(linearImpactWriter.data().data(),
                                      linearImpactWriter.data().size());
     V12::PlayerGhostState linearState;
@@ -33,7 +33,7 @@ int main() {
     assert(V12::readGhostPayload(linearImpactStream, 19, false, {}, &linearState,
                                  &linearImpacts));
     assert(linearImpacts.size() == 1 && linearImpacts[0].hasDatablock &&
-           linearImpacts[0].datablockId == 7);
+           linearImpacts[0].datablockId == 7 && linearImpacts[0].endedWithDecal);
     assert(std::fabs(linearImpacts[0].position.x - 1.0f) < 0.001f &&
            std::fabs(linearImpacts[0].position.y - 2.0f) < 0.001f &&
            std::fabs(linearImpacts[0].position.z - 3.0f) < 0.001f &&
@@ -933,6 +933,27 @@ int main() {
     V12BitStream baseGhostStream(baseGhostWriter.data().data(), baseGhostWriter.data().size());
     assert(V12::readGhostPayload(baseGhostStream, 12, false, {}));
     assert(baseGhostStream.readUnsigned(5) == 0x15 && !baseGhostStream.failed());
+
+    V12BitWriter targetedBaseGhostWriter;
+    targetedBaseGhostWriter.writeFlag(false); // no datablock update
+    targetedBaseGhostWriter.writeFlag(true);  // ExtendedInfoMask
+    targetedBaseGhostWriter.writeFlag(true);  // targetId is assigned
+    targetedBaseGhostWriter.writeUnsigned(0x12a, 9);
+    V12BitStream targetedBaseGhostStream(targetedBaseGhostWriter.data().data(),
+                                         targetedBaseGhostWriter.data().size());
+    V12::PlayerGhostState targetedBaseGhost;
+    assert(V12::readGhostPayload(targetedBaseGhostStream, 12, false, {}, &targetedBaseGhost));
+    assert(targetedBaseGhost.hasTargetId && targetedBaseGhost.targetId == 0x12a);
+
+    V12BitWriter clearedBaseGhostWriter;
+    clearedBaseGhostWriter.writeFlag(false); // no datablock update
+    clearedBaseGhostWriter.writeFlag(true);  // ExtendedInfoMask
+    clearedBaseGhostWriter.writeFlag(false); // targetId cleared
+    V12BitStream clearedBaseGhostStream(clearedBaseGhostWriter.data().data(),
+                                        clearedBaseGhostWriter.data().size());
+    V12::PlayerGhostState clearedBaseGhost;
+    assert(V12::readGhostPayload(clearedBaseGhostStream, 12, false, {}, &clearedBaseGhost));
+    assert(clearedBaseGhost.hasTargetId && clearedBaseGhost.targetId == -1);
 
     V12BitWriter shapeGhostWriter;
     shapeGhostWriter.writeFlag(false); shapeGhostWriter.writeFlag(false);

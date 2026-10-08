@@ -1,8 +1,14 @@
 #include "script/script_engine.h"
+#include "sim/engine_classes.h"
 
+#include <algorithm>
 #include <cassert>
 
 int main() {
+    const auto popupClasses = EngineClasses::chain("ShellPopupMenu");
+    assert(std::find(popupClasses.begin(), popupClasses.end(), "GuiPopUpMenuCtrl") != popupClasses.end());
+    assert(std::find(popupClasses.begin(), popupClasses.end(), "GuiControl") != popupClasses.end());
+
     ScriptObjectState empty;
     assert(empty.position.x == 0.0f && empty.position.y == 0.0f && empty.position.z == 0.0f);
     assert(empty.rotationW == 1.0f);

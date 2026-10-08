@@ -193,6 +193,7 @@ struct GuiControl {
     struct MenuItem { int id; std::string text; bool isSeparator; };
     std::vector<MenuItem> menuItems;
     bool menuOpen = false;
+    bool replaceMenuTextOnSelect = true;
 
     // Lifecycle flag: true if this dialog was pushed during the content's onWake.
     // ESC should never pop base dialogs (e.g. LaunchToolbarDlg) so the sidebar stays.

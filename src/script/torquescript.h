@@ -73,6 +73,7 @@ public:
     bool isFunction(const std::string& name) const;
     const std::string& dbgFile() const;
     int dbgLine() const;
+    std::string currentFunction() const;
     VMValue callFunction(const std::string& name, const std::vector<VMValue>& args);
     bool activatePackage(const std::string& name);
     bool deactivatePackage(const std::string& name);
