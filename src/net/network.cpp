@@ -401,7 +401,7 @@ bool Connection::seedObserverSnapshot(const ObserverSnapshot& snapshot) {
     }
     if (serverMessageCb) {
         if (snapshot.matchStarted) serverMessageCb({"ServerMessage", "MsgMissionStart"});
-        if (snapshot.matchEnded) serverMessageCb({"ServerMessage", "MsgDebriefResult"});
+        if (snapshot.matchEnded) serverMessageCb({"MissionEnd"});
         if (snapshot.clockRemainingMs > 0)
             serverMessageCb({"ServerMessage", "MsgSystemClock", "", std::to_string(snapshot.clockRemainingMs)});
         if (!snapshot.loadInfoLines.empty()) {
@@ -672,7 +672,9 @@ void Connection::update() {
                                 } else if (type == "MsgClientReady") {
                                     impl->nativeMatchStarted = false;
                                     impl->nativeMatchEnded = false;
-                                } else if (type == "MsgClearDebrief" || type == "MsgDebriefResult") {
+                                } else if (!wrapped && type == "MissionEnd") {
+                                    // GameConnection::endMission; debrief
+                                    // messages can arrive during play.
                                     impl->nativeMatchEnded = true;
                                  } else if (type == "MsgSystemClock" && valueCount >= 3) {
                                      impl->nativeClockRemainingMs = (uint32_t)std::max(0, atoi(value(2).c_str()));

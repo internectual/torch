@@ -7440,14 +7440,14 @@ void Game::update(float dt) {
                                                    static_cast<uint32_t>(ev.audioProfileId), position);
                             continue;
                         }
-                        // MissionEnd or the debrief burst ends the match; the
-                        // next mission's MsgClientReady drops back in.
+                        // MissionEnd (GameConnection::endMission) ends the match;
+                        // the next mission's MsgClientReady drops back in. The
+                        // debrief messages only fill DebriefGui and can arrive
+                        // during play.
                         if (ev.classId == T2Demo::NetEventClassFirst + 9 && !ev.arguments.empty()) {
                             const std::string& command = ev.arguments[0];
                             const std::string type = ev.arguments.size() > 1 ? ev.arguments[1] : "";
-                            if (command == "MissionEnd" ||
-                                (command == "ServerMessage" &&
-                                 (type == "MsgClearDebrief" || type == "MsgDebriefResult")))
+                            if (command == "MissionEnd")
                                 setDemoMatchEnded(true);
                             else if (command == "ServerMessage" && type == "MsgClientReady")
                                 setDemoMatchEnded(false);
@@ -11228,6 +11228,21 @@ void Game::connectToServer(const char* host, uint16_t port) {
                 }
                 return;
             }
+            if (argv[0] == "MissionEnd") {
+                // GameConnection::endMission. The debrief messages that follow
+                // only fill DebriefGui (and can arrive during play); the
+                // stock DebriefGui is a mouse-driven screen even though the
+                // simulation remains Playing while the summary is open.
+                liveMatchEnded_ = true;
+                Engine::instance().platform().setRelativeMouse(false);
+                Engine::instance().platform().showMouse(true);
+                liveClockDurationMs_ = 0;
+                liveClockReceivedAt_ = 0.0;
+                clearProjectileAudio();
+                clearMissionAudio();
+                if (w) w->clearEffects();
+                return;
+            }
             if (argv[0] != "ServerMessage") return;
             if (argv.size() >= 2 && argv[1] == "MsgMissionStart") {
                 liveMatchStarted_ = true;
@@ -11241,20 +11256,6 @@ void Game::connectToServer(const char* host, uint16_t port) {
                 liveMatchEnded_ = false;
                 liveClockDurationMs_ = 0;
                 liveClockReceivedAt_ = 0.0;
-                return;
-            }
-            if (argv.size() >= 2 &&
-                (argv[1] == "MsgClearDebrief" || argv[1] == "MsgDebriefResult")) {
-                liveMatchEnded_ = true;
-                // The stock DebriefGui is a mouse-driven screen even though
-                // the simulation remains Playing while the summary is open.
-                Engine::instance().platform().setRelativeMouse(false);
-                Engine::instance().platform().showMouse(true);
-                liveClockDurationMs_ = 0;
-                liveClockReceivedAt_ = 0.0;
-                clearProjectileAudio();
-                clearMissionAudio();
-                if (w) w->clearEffects();
                 return;
             }
             if (argv.size() >= 5 && argv[1] == "MsgMissionDropInfo") {
