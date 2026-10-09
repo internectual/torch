@@ -7006,8 +7006,6 @@ bool Game::init() {
         "pauseDemo - Pause demo playback");
     con.addCommand("resumeDemo", [this](int32_t, const char* const*) { resumeDemo(); },
         "resumeDemo - Resume demo playback");
-    con.addCommand("toggleDemoPause", [this](int32_t, const char* const*) { toggleDemoPause(); },
-        "toggleDemoPause - Toggle demo playback pause");
     con.addCommand("mapperCamera", [this](int32_t argc, const char* const* argv) {
         if (argc < 2) return;
         selectMapperObserverCamera(atoi(argv[1]));
