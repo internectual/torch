@@ -87,7 +87,9 @@ if ! grep -q "TORCH-RUN-START" "$log_dir/demo-mode.out"; then
 fi
 
 run_client mapper -mapper missions/Katabatic.mis -quit-after-frames 2
-if ! grep -q "Mapper mode:" "$log_dir/mapper.out"; then
+# The mission comes from the stock CreateServer once the shell is up; within
+# a few frames the bootstrap must be on console_start's -nologin path.
+if ! grep -q 'Game::argv\[[0-9]*\] = -nologin' "$log_dir/mapper.out"; then
     printf 'mapper mode did not start\n' >&2
     exit 1
 fi

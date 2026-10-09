@@ -445,8 +445,6 @@ bool Engine::init(int argc, char* argv[]) {
 
     // Parse args
     bool noLogin = false;
-    bool explicitPreviewCamera = false;
-    int mapperCamera = 0;
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-data") == 0) && i + 1 < argc) dataDir = argv[i + 1];
         if ((strcmp(argv[i], "-width") == 0) && i + 1 < argc)
@@ -1461,7 +1459,7 @@ bool Engine::init(int argc, char* argv[]) {
         if (!a.empty()) args.push_back(a);
         // A recording plays from the shell, so the stock bootstrap must run
         // its offline path (console_start's -nologin) to console_end.cs.
-        if (!demoPath.empty() && std::find(args.begin(), args.end(), "-nologin") == args.end())
+        if ((!demoPath.empty() || mapperMode) && std::find(args.begin(), args.end(), "-nologin") == args.end())
             args.push_back("-nologin");
         ts->setGlobal("$Game::argc", VMValue((int32_t)args.size()));
         for (size_t i = 0; i < args.size(); i++)
@@ -1677,44 +1675,17 @@ bool Engine::init(int argc, char* argv[]) {
     if (scr->ts()) {
         // -nologin reaches console_start.cs in $Game::argv; the script owns
         // the offline path (console_end.cs, PlayOffline).
-        if (mapperMode) {
-            // Mapper still needs the normal script bootstrap: datablocks and
-            // their asset references are created by TorqueScript. The mapper
-            // renderer can remain headless with respect to interaction while
-            // using the same script-owned data as the game.
-            Console::instance().setVariable("$SkipLogin", "true");
-            Console::instance().setVariable("$LaunchMode", "Offline");
-        }
         std::string initPath = Console::instance().getStringVariable("initScript", "");
         auto initData = fs.read(initPath.c_str());
-        if (!mapperMode && !initData.empty()) {
+        if (!initData.empty()) {
             // The init script loads and exports prefs itself; modes that skip
             // it (the mapper) never write ClientPrefs.
             allowClientPrefsExport(true);
             std::string src((const char*)initData.data(), initData.size());
             scr->ts()->executeNested(src, initPath);
             Console::instance().printf(LogLevel::Info, "Init script: %s (%zu bytes)", initPath.c_str(), initData.size());
-        } else if (!mapperMode) {
+        } else {
             Console::instance().printf(LogLevel::Warn, "Init script not found: %s", initPath.c_str());
-        }
-        if (mapperMode) {
-            std::vector<std::string> scriptFiles;
-            fs.listFiles(nullptr, scriptFiles);
-            std::sort(scriptFiles.begin(), scriptFiles.end());
-            int executed = 0;
-            for (const auto& path : scriptFiles) {
-                if (!path.starts_with("scripts/") || path.size() < 3 ||
-                    path.compare(path.size() - 3, 3, ".cs") != 0)
-                    continue;
-                auto scriptData = fs.read(path.c_str());
-                if (scriptData.empty()) continue;
-                const std::string source((const char*)scriptData.data(), scriptData.size());
-                if (source.find("datablock") == std::string::npos) continue;
-                scr->ts()->executeNested(source, path);
-                executed++;
-            }
-            Console::instance().printf(LogLevel::Info,
-                "Mapper: executed %d discovered asset scripts", executed);
         }
     }
 
@@ -1727,8 +1698,7 @@ bool Engine::init(int argc, char* argv[]) {
 
     // Initialize GUI renderer from script-created objects
 #ifndef TORCH_DEDICATED
-    if (!mapperMode)
-        gui->init();
+    gui->init();
 #endif
 
     // -exec: execute a file at startup (after gui init so Canvas calls work)
@@ -1822,70 +1792,9 @@ bool Engine::init(int argc, char* argv[]) {
     // -demo: played from the stock Recordings dialog once the shell is up.
     if (!demoPath.empty()) pendingDemo = demoPath;
 
-    // -mapper mode: load a mission for inspection without gameplay
-    if (mapperMode) {
-        Console::instance().setVariable("$SkipLogin", "true");
-        Console::instance().setVariable("$pref::SkipIntro", "true");
-        Console::instance().setVariable("$pref::SkipGGIntro", "true");
-        Console::instance().setVariable("$LaunchMode", "Offline");
-        Console::instance().setVariable("$PlayingOnline", "0");
-        Console::instance().setVariable("Engine::noLogin", "1");
-        Console::instance().printf(LogLevel::Info, "Mapper mode: loading '%s' for inspection", mapperMap.c_str());
-        g->setMapperMode(true);
-            g->setState(Game::Loading);
-        if (g->world().load(mapperMap.c_str())) {
-            g->setState(Game::Playing);
-            if (!explicitPreviewCamera && mapperCamera > 0 &&
-                mapperCamera <= (int)g->world().observerCameras().size()) {
-                const auto& camera = g->world().observerCameras()[mapperCamera - 1];
-                previewCamPos = Math::torquePointToYUp(camera.pos);
-                Point3F forward = Math::torqueCameraForwardToYUp(
-                    camera.axis, Math::DEG2RAD(camera.angleDeg));
-                previewCamTarget = {
-                    previewCamPos.x + forward.x * 100.0f,
-                    previewCamPos.y + forward.y * 100.0f,
-                    previewCamPos.z + forward.z * 100.0f,
-                };
-                Console::instance().printf(LogLevel::Info,
-                    "Mapper: using observer camera %d", mapperCamera);
-            } else if (!explicitPreviewCamera) {
-                if (mapperCamera > 0)
-                    Console::instance().printf(LogLevel::Warn,
-                        "Mapper: authored camera %d is unavailable; using terrain center",
-                        mapperCamera);
-                // Set up camera over terrain center (like preview mode)
-                auto& tb = *g->world().terrain();
-                float half = tb.size * tb.squareSize * 0.5f;
-                float cx = tb.worldOffset.x + half;
-                float cz = tb.worldOffset.z - half;
-                float h = g->world().getHeight(cx, cz);
-                if (h < 0) h = 0;
-                previewCamTarget = {cx, h, cz};
-                // Position camera at a reasonable height above terrain for inspection view
-                float camHeight = h + 80.0f;
-                previewCamPos = {cx, camHeight, cz - half * 0.4f};
-            }
-            usePreviewCam = true;
-            // Initialize free-fly camera from preview camera position
-            g->setFreeCamActive(true);
-            g->setFreeCamPos(previewCamPos);
-            g->setFreeCamTarget(previewCamTarget);
-            plat->setRelativeMouse(true);
-            plat->showMouse(false);
-            Console::instance().printf(LogLevel::Info, "Mapper mode: free-fly camera active (WASD + mouse)");
-        } else {
-            Console::instance().printf(LogLevel::Error, "Mapper mode: failed to load map '%s'", mapperMap.c_str());
-            quit();
-        }
-        // Hide shell dialogs so only the 3D world is visible
-        if (gui) {
-            auto dialogs = gui->dialogStackForDebug();
-            for (auto it = dialogs.rbegin(); it != dialogs.rend(); ++it) {
-                GuiControl* d = *it;
-                if (d) gui->popDialog(d->name);
-            }
-        }
-    }
+    // -mapper: the stock shell boots (console_start's -nologin path), then
+    // CreateServer loads the mission and its datablocks (startPendingMapper).
+    if (mapperMode) mapperStage = 1;
 
     // Load key bindings. ClientPrefs may have reset ActiveConfig to empty, so
     // select the user's named map only after all persisted prefs are loaded.
@@ -1957,6 +1866,101 @@ void Engine::runDedicated() {
 }
 #endif
 
+// -mapper, stage 1: once console_end.cs has the shell up, CreateServer(mission,
+// type) with the mission's first listed MissionTypes. Stage 2: once the server
+// mission is running (its datablocks exist), build the inspection world.
+void Engine::startPendingMapper() {
+    auto* ts = scr ? scr->ts() : nullptr;
+    if (!ts || !g) return;
+    if (mapperStage == 1) {
+        if (!gui || !gui->isDialogActive("LaunchToolbarDlg") || !ts->isFunction("CreateServer")) return;
+        const std::string mission = std::filesystem::path(mapperMap).stem().string();
+        std::string types;
+        for (const std::string& candidate : missionFileCandidates(mapperMap)) {
+            const std::string content = filesys->readText(candidate.c_str());
+            if (content.empty()) continue;
+            types = parseMissionMetadata(candidate, content).types;
+            break;
+        }
+        std::istringstream words(types);
+        std::string type;
+        words >> type;
+        if (type.empty()) {
+            Console::instance().printf(LogLevel::Error, "Mapper mode: mission '%s' lists no MissionTypes",
+                                       mapperMap.c_str());
+            mapperStage = 0;
+            quit();
+            return;
+        }
+        Console::instance().printf(LogLevel::Info, "Mapper mode: CreateServer(%s, %s)", mission.c_str(), type.c_str());
+        ts->callFunction("CreateServer", {VMValue(mission), VMValue(type)});
+        mapperStage = 2;
+        return;
+    }
+    if (mapperStage == 2 && ts->getGlobal("$MissionRunning").toBool()) {
+        mapperStage = 3;
+        loadMapperWorld();
+    }
+}
+
+void Engine::loadMapperWorld() {
+        Console::instance().printf(LogLevel::Info, "Mapper mode: loading '%s' for inspection", mapperMap.c_str());
+        g->setMapperMode(true);
+        g->setState(Game::Loading);
+        if (g->world().load(mapperMap.c_str())) {
+            g->setState(Game::Playing);
+            if (!explicitPreviewCamera && mapperCamera > 0 &&
+                mapperCamera <= (int)g->world().observerCameras().size()) {
+                const auto& camera = g->world().observerCameras()[mapperCamera - 1];
+                previewCamPos = Math::torquePointToYUp(camera.pos);
+                Point3F forward = Math::torqueCameraForwardToYUp(
+                    camera.axis, Math::DEG2RAD(camera.angleDeg));
+                previewCamTarget = {
+                    previewCamPos.x + forward.x * 100.0f,
+                    previewCamPos.y + forward.y * 100.0f,
+                    previewCamPos.z + forward.z * 100.0f,
+                };
+                Console::instance().printf(LogLevel::Info,
+                    "Mapper: using observer camera %d", mapperCamera);
+            } else if (!explicitPreviewCamera) {
+                if (mapperCamera > 0)
+                    Console::instance().printf(LogLevel::Warn,
+                        "Mapper: authored camera %d is unavailable; using terrain center",
+                        mapperCamera);
+                // Set up camera over terrain center (like preview mode)
+                auto& tb = *g->world().terrain();
+                float half = tb.size * tb.squareSize * 0.5f;
+                float cx = tb.worldOffset.x + half;
+                float cz = tb.worldOffset.z - half;
+                float h = g->world().getHeight(cx, cz);
+                if (h < 0) h = 0;
+                previewCamTarget = {cx, h, cz};
+                // Position camera at a reasonable height above terrain for inspection view
+                float camHeight = h + 80.0f;
+                previewCamPos = {cx, camHeight, cz - half * 0.4f};
+            }
+            usePreviewCam = true;
+            // Initialize free-fly camera from preview camera position
+            g->setFreeCamActive(true);
+            g->setFreeCamPos(previewCamPos);
+            g->setFreeCamTarget(previewCamTarget);
+            plat->setRelativeMouse(true);
+            plat->showMouse(false);
+            Console::instance().printf(LogLevel::Info, "Mapper mode: free-fly camera active (WASD + mouse)");
+        } else {
+            Console::instance().printf(LogLevel::Error, "Mapper mode: failed to load map '%s'", mapperMap.c_str());
+            quit();
+        }
+        // Hide shell dialogs so only the 3D world is visible
+        if (gui) {
+            auto dialogs = gui->dialogStackForDebug();
+            for (auto it = dialogs.rbegin(); it != dialogs.rend(); ++it) {
+                GuiControl* d = *it;
+                if (d) gui->popDialog(d->name);
+            }
+        }
+    }
+
 // -demo <file>: the stock flow a player takes. Once console_end.cs has the
 // shell up (its launch toolbar is pushed over the launch screen), open
 // RecordingsDlg (which lists recordings/*.rec), select the recording's row
@@ -2014,6 +2018,7 @@ void Engine::run() {
         }
         loopFrameRan = true;
         if (!pendingDemo.empty()) startPendingDemo();
+        if (mapperStage == 1 || mapperStage == 2) startPendingMapper();
         double now = Timer::now();
         float dt = (float)(now - lastTime);
         lastTime = now;
@@ -2720,7 +2725,7 @@ void Engine::run() {
         }
 
         // Special 3D modes own the full window; the dev panel is disabled there.
-        if (g->isTestShapeLoaded() || g->isShapeViewerActive() || mapperMode) {
+        if (g->isTestShapeLoaded() || g->isShapeViewerActive() || mapperStage == 3) {
             // Auto-screenshot on first frame in mapper mode
             static bool mapperScreenshotTaken = false;
              if (mapperMode && !mapperScreenshotTaken) {

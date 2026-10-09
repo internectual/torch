@@ -68,11 +68,12 @@ done
 # Playback starts from the stock Recordings dialog once the shell is up; the
 # bootstrap must take console_start's offline (-nologin) path to get there.
 grep -q 'Game::argv\[[0-9]*\] = -nologin' "$log_dir/playback.log" || exit 1
+# The mapper's mission comes from the stock CreateServer once the shell is
+# up; the bootstrap takes the same -nologin path.
+grep -q 'Game::argv\[[0-9]*\] = -nologin' "$log_dir/mapper.log" || exit 1
 if [[ -f "$data/base/$mission" ]]; then
-    grep -q 'Mapper mode: free-fly camera active' "$log_dir/mapper.log" || exit 1
     grep -q 'Preview:' "$log_dir/preview.log" || exit 1
 else
-    grep -q "Mapper mode: failed to load\|Mission unavailable" "$log_dir/mapper.log" || exit 1
     grep -q "Mission unavailable" "$log_dir/preview.log" || exit 1
 fi
 

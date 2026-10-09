@@ -61,6 +61,13 @@ public:
     bool shapeViewerMode = false;
     std::string mapperMap;  // map name for -mapper mode
     bool mapperMode = false;
+    // -mapper: 1 waiting for the shell, 2 waiting for the server mission,
+    // 3 inspecting (startPendingMapper).
+    int mapperStage = 0;
+    bool explicitPreviewCamera = false;
+    int mapperCamera = 0;
+    void startPendingMapper();
+    void loadMapperWorld();
     std::vector<std::string> preloadFiles;
     std::string cmdArgs;
     std::string previewImgPath;
