@@ -49,7 +49,7 @@ static void setProjectileMotion(PlayerGhostState* state, const V12Vec3& position
     state->hasVelocity = true;
     const float yaw = std::atan2(direction.x, direction.y);
     const float half = yaw * 0.5f;
-    state->rotation = {0.0f, std::sin(half), 0.0f};
+    state->rotation = {0.0f, 0.0f, std::sin(half)};
     state->rotationW = std::cos(half);
     state->hasRotation = true;
 }
@@ -1120,7 +1120,7 @@ bool readPlayerGhostPayload(V12BitStream& stream, bool initial,
             state->headYaw = headYaw;
             state->hasHeadAngles = true;
             const float half = bodyYaw * 0.5f;
-            state->rotation = {0.0f, (float)std::sin(half), 0.0f};
+            state->rotation = {0.0f, 0.0f, (float)std::sin(half)};
             state->rotationW = (float)std::cos(half);
             state->hasRotation = true;
         }

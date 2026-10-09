@@ -58,11 +58,21 @@ int main() {
     // toward +X about Torque +Z; as a quaternion it stays upright in Y-up.
     {
         const float yaw = 1.0f;
-        const QuatF bodyYaw{0, 0, -std::sin(yaw * 0.5f), std::cos(yaw * 0.5f)};
+        const QuatF bodyYaw{0, 0, std::sin(yaw * 0.5f), std::cos(yaw * 0.5f)};
         const MatrixF yUp = Math::torqueQuaternionToYUp(bodyYaw);
         assertPoint(yUp.transformNormal({0, 1, 0}), {0, 1, 0});
         assertPoint(yUp.transformNormal(Math::torquePointToYUp({0, 1, 0})),
                     Math::torquePointToYUp({std::sin(yaw), std::cos(yaw), 0}));
+    }
+
+    // A networked QuatF (QuatF::set of the object's matrix) turns like the
+    // mission rotation it came from: AngAxisF(+Z, 90) faces Torque +X.
+    {
+        const float half = Math::PI * 0.25f;
+        const QuatF networked{0, 0, std::sin(half), std::cos(half)};
+        assertPoint(Math::torqueQuaternionMatrix(networked).transformNormal({0, 1, 0}), {1, 0, 0});
+        assertPoint(Math::torqueQuaternionToYUp(networked).transformNormal(Math::torquePointToYUp({0, 1, 0})),
+                    Math::torqueRotationToYUp({0, 0, 1}, -Math::PI * 0.5f).transformNormal(Math::torquePointToYUp({0, 1, 0})));
     }
 
     const QuatF source = {0.2f, -0.3f, 0.4f, 0.8f};

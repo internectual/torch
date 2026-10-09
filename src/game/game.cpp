@@ -8902,7 +8902,7 @@ void Game::render(float dt) {
                 mg->velocity = {mg->prediction.velocity.x, mg->prediction.velocity.y, mg->prediction.velocity.z};
                 if (idx != controlGhostIndex) {
                     const float half = PlayerPrediction::renderYaw(mg->prediction, backDelta) * 0.5f;
-                    mg->renderRotation = {0.0f, 0.0f, -std::sin(half), std::cos(half)};
+                    mg->renderRotation = {0.0f, 0.0f, std::sin(half), std::cos(half)};
                 }
             }
             // LinearProjectile::createSegments / interpolateTick: the ghost
@@ -9408,7 +9408,7 @@ void Game::render(float dt) {
                         aim = source->muzzleDir[slot];
                     } else {
                         const QuatF q(source->rotation.x, source->rotation.y, source->rotation.z, source->rotation.w);
-                        aim = Math::torquePointToYUp(q.toMatrix().transformNormal({0, 1, 0}));
+                        aim = Math::torquePointToYUp(Math::torqueQuaternionMatrix(q).transformNormal({0, 1, 0}));
                     }
                     {
                         const float l = std::sqrt(aim.x * aim.x + aim.y * aim.y + aim.z * aim.z);
@@ -9816,7 +9816,7 @@ void Game::render(float dt) {
                                           g->mountObject < 0;
                 if (recorderView) {
                     const float half = demoViewYaw * 0.5f;
-                    mg->renderRotation = {0.0f, 0.0f, -std::sin(half), std::cos(half)};
+                    mg->renderRotation = {0.0f, 0.0f, std::sin(half), std::cos(half)};
                     mg->headPitch = std::clamp(demoViewPitch / (Math::PI * 0.494f), -1.0f, 1.0f);
                 }
                 MatrixF model;
@@ -10452,7 +10452,7 @@ void Game::render(float dt) {
                         }
                         if (data->isFlyingVehicleData && data->vehicleJetEmitters.size() > 3) {
                             const QuatF q(g->rotation.x, g->rotation.y, g->rotation.z, g->rotation.w);
-                            const Point3F forward = q.toMatrix().transformNormal({0, 1, 0});
+                            const Point3F forward = Math::torqueQuaternionMatrix(q).transformNormal({0, 1, 0});
                             const float speed = std::fabs(torqueVelocity.x * forward.x +
                                 torqueVelocity.y * forward.y + torqueVelocity.z * forward.z);
                             const float scale = VehicleJets::contrailScale(speed,

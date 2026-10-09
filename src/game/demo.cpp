@@ -24,12 +24,11 @@ std::vector<DemoParser::PendingExplosion> DemoParser::s_pendingExplosions;
 std::vector<DemoPendingBlowUp> DemoParser::s_pendingBlowUps;
 float DemoParser::s_packetTime = 0.0f;
 
-// Quaternion for a Torque yaw about +Z (MatrixF::set(EulerF(0, 0, yaw)),
-// which turns forward +Y toward +X), in the Torque frame the renderer
-// converts with torqueQuaternionToYUp.
+// The QuatF of a Torque yaw about +Z (MatrixF::set(EulerF(0, 0, yaw)),
+// which turns forward +Y toward +X), as torqueQuaternionToYUp reads it.
 static Vec4 torqueYawQuaternion(float yaw) {
     const float half = yaw * 0.5f;
-    return {0, 0, -sinf(half), cosf(half)};
+    return {0, 0, sinf(half), cosf(half)};
 }
 
 static std::string stripDemoColorCodes(const std::string& value) {

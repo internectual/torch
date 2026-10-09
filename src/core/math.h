@@ -133,9 +133,16 @@ namespace Math {
         return basis * torqueScale * basis.inverse();
     }
 
+    // A Torque QuatF as its MatrixF (QuatF::setMatrix, m_quatF_set_matF):
+    // the transpose of the textbook matrix, so a quaternion of angle a
+    // about +Z turns forward +Y toward +X, as mission rotations do.
+    inline MatrixF torqueQuaternionMatrix(const QuatF& rotation) {
+        return QuatF{-rotation.x, -rotation.y, -rotation.z, rotation.w}.toMatrix();
+    }
+
     inline MatrixF torqueQuaternionToYUp(const QuatF& rotation) {
         MatrixF basis = czUpToYUp();
-        return basis * rotation.toMatrix() * basis.inverse();
+        return basis * torqueQuaternionMatrix(rotation) * basis.inverse();
     }
 
     // Convert a rotation expressed in the Torque Z-up frame into the

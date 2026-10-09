@@ -1288,8 +1288,8 @@ void CommanderMap::renderIcons(float, float) {
         const GhostEntry* ghost = e->ghost >= 0 ? parser->getGhostTracker().getGhost(e->ghost) : nullptr;
         if (!ghost) continue;
         const Vec4& q = ghost->hasRendered && ghost->hasRotation ? ghost->renderRotation : ghost->rotation;
-        // (0, 1, 0) by the rotation.
-        const float fx = 2 * (q.x * q.y - q.w * q.z), fy = 1 - 2 * (q.x * q.x + q.z * q.z);
+        // (0, 1, 0) by the rotation (QuatF::setMatrix's column 1).
+        const float fx = 2 * (q.x * q.y + q.w * q.z), fy = 1 - 2 * (q.x * q.x + q.z * q.z);
         if (fx == 0 && fy == 0) continue;
         float dx = fx, dy = -fy;
         const float dl = std::sqrt(dx * dx + dy * dy);
