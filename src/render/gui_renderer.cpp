@@ -1713,6 +1713,58 @@ static std::pair<float, float> guiControlAbsolutePosition(const GuiControl* ctl,
     return {x, y};
 }
 
+// ShellFancyArray header: each column is a tab cut from the header bitmap
+// array (3 state columns x left cap / middle / right cap rows; the normal
+// tab's art is 16px tall, 6px below its cell top), labelled in the header
+// font -- an icon column's label is a bitmap name. Returns the header height.
+static float drawFancyArrayHeader(Renderer& r, const GuiControl& ctl, const std::string& bitmap,
+                                  float x, float y) {
+    constexpr float headerH = 16.0f, artTop = 6.0f;
+    Texture* tex = t2Bitmap(r, bitmap);
+    Font* headerFont = nullptr;
+    {
+        const std::string type = GuiShared::field(ctl, "headerFontType");
+        const std::string size = GuiShared::field(ctl, "headerFontSize");
+        if (!type.empty()) headerFont = r.getFont(type.c_str(), std::max(1, atoi(size.c_str())));
+        if (!headerFont) headerFont = r.getFont();
+    }
+    ColorF headerColor{8 / 255.f, 19 / 255.f, 6 / 255.f, 1};
+    {
+        int cr = 0, cg = 0, cb = 0, ca = 255;
+        const std::string color = GuiShared::field(ctl, "headerFontColor");
+        if (std::sscanf(color.c_str(), "%d %d %d %d", &cr, &cg, &cb, &ca) >= 3)
+            headerColor = {cr / 255.f, cg / 255.f, cb / 255.f, ca / 255.f};
+    }
+    const float cellW = tex && tex->loaded ? tex->width / 3.0f : 0;
+    const float cellH = tex && tex->loaded ? tex->height / 3.0f : 0;
+    const float cap = cellW * 0.5f;
+    float columnX = x;
+    for (const auto& column : ctl.listColumns) {
+        const float width = column.width > 0 ? column.width : ctl.extentX - (columnX - x);
+        if (columnX >= x + ctl.extentX) break;
+        if (tex && tex->loaded && width > 2 * cap) {
+            const float top = y - artTop;
+            drawTexRegion(r, tex, 0, 0, cellW, cellH, columnX - cap, top, cellW, cellH);
+            drawTexRegion(r, tex, 0, cellH, cellW, cellH, columnX + cap, top, width - 2 * cap, cellH);
+            drawTexRegion(r, tex, 0, 2 * cellH, cellW, cellH, columnX + width - cap, top, cellW, cellH);
+        }
+        if (column.format.find("icon") != std::string::npos) {
+            if (Texture* icon = column.name.empty() ? nullptr : t2Bitmap(r, "gui/" + column.name); icon && icon->loaded)
+                drawTexRegion(r, icon, 0, 0, (float)icon->width, (float)icon->height,
+                              columnX + (width - icon->width) * 0.5f, y + (headerH - icon->height) * 0.5f,
+                              (float)icon->width, (float)icon->height);
+        } else if (headerFont && !column.name.empty()) {
+            const float textW = headerFont->measure(column.name.c_str()).x;
+            float textX = columnX + 6;
+            if (column.format.find("center") != std::string::npos) textX = columnX + (width - textW) * 0.5f;
+            headerFont->render(column.name.c_str(), textX, y + (headerH - headerFont->charHeight) * 0.5f,
+                               headerColor, 1.0f);
+        }
+        columnX += width;
+    }
+    return headerH;
+}
+
 void GuiRenderer::renderControl(GuiControl* ctl) {
     renderControlRec(this, ctl, canvas, 0, 0, nullptr);
 }
@@ -2430,13 +2482,22 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         // Get font height
         float lineH = font ? font->charHeight + 2 : 14;
+        // ShellFancyArray (headerBitmap): a header of column tabs above rows
+        // of the list's rowHeight.
+        const std::string headerBitmap = GuiShared::field(*ctl, "headerBitmap");
+        float headerH = 0;
+        if (!headerBitmap.empty() && !ctl->listColumns.empty()) {
+            const std::string rowHeight = GuiShared::field(*ctl, "rowHeight");
+            if (!rowHeight.empty() && atof(rowHeight.c_str()) > 0) lineH = (float)atof(rowHeight.c_str());
+            headerH = drawFancyArrayHeader(r, *ctl, headerBitmap, x, y);
+        }
         // Get enumerate setting from ScriptObject
         // Draw visible rows
-        float viewH = sp ? sp->extentY : ctl->extentY;
+        float viewH = (sp ? sp->extentY : ctl->extentY) - headerH;
         int visibleRows = (int)(viewH / lineH) + 2;
         int totalRows = (int)ctl->listRows.size();
         int scrollRow = (int)(listScrollY / lineH);
-        float rowY = y - fmodf(listScrollY, lineH);
+        float rowY = y + headerH - fmodf(listScrollY, lineH);
         for (int i = scrollRow; i < totalRows && (i - scrollRow) < visibleRows; i++, rowY += lineH) {
             bool isSel = (i == ctl->selectedRow);
             if (isSel) {
@@ -3356,18 +3417,27 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 {"Players",  availW * 0.15f, true}
             };
         }
-        // Header row
-        float hx = x;
-        for (size_t ci = 0; ci < ctl->sbColumns.size(); ci++) {
-            float cw = ctl->sbColumns[ci].width;
-            if (ci == ctl->sbColumns.size() - 1) cw = availW - (hx - x); // last fills remainder
-            r.drawRectFill({hx, y, 0}, {hx + cw, y + headerH, 0}, headerBg);
-            if (font) {
-                std::string label = ctl->sbColumns[ci].name;
-                if ((int)ci == ctl->sbSortCol) label += ctl->sbSortInc ? " ▲" : " ▼";
-                font->render(label.c_str(), hx + 3, y + 2, headerTc, 1.0f);
+        // Header row: the ShellFancyArray header art when the browser names
+        // its headerBitmap (GameGui.gui's GMJ_Browser does), rows of its
+        // rowHeight below it.
+        const std::string headerBitmap = GuiShared::field(*ctl, "headerBitmap");
+        if (!headerBitmap.empty() && !ctl->listColumns.empty()) {
+            headerH = drawFancyArrayHeader(r, *ctl, headerBitmap, x, y);
+            const std::string rowHeight = GuiShared::field(*ctl, "rowHeight");
+            if (!rowHeight.empty() && atof(rowHeight.c_str()) > 0) rowH = (float)atof(rowHeight.c_str());
+        } else {
+            float hx = x;
+            for (size_t ci = 0; ci < ctl->sbColumns.size(); ci++) {
+                float cw = ctl->sbColumns[ci].width;
+                if (ci == ctl->sbColumns.size() - 1) cw = availW - (hx - x); // last fills remainder
+                r.drawRectFill({hx, y, 0}, {hx + cw, y + headerH, 0}, headerBg);
+                if (font) {
+                    std::string label = ctl->sbColumns[ci].name;
+                    if ((int)ci == ctl->sbSortCol) label += ctl->sbSortInc ? " ▲" : " ▼";
+                    font->render(label.c_str(), hx + 3, y + 2, headerTc, 1.0f);
+                }
+                hx += cw;
             }
-            hx += cw;
         }
         // Data rows
         float ry = y + headerH;
