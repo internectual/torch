@@ -1882,7 +1882,13 @@ VMValue TorqueScript::Impl::parsePostfix() {
             }
             expect(TSTokenType::RBracket);
             if (!savedVar.empty()) {
-                std::string arrayKey = savedVar + "[" + idx.toString() + "]";
+                // An index is appended to the name: %a[0] is %a0, as it is
+                // for globals (normalizeGlobalKey).
+                const std::string idxText = idx.toString();
+                const bool numericIndex = !idxText.empty() &&
+                    std::all_of(idxText.begin(), idxText.end(), [](char c) { return c >= '0' && c <= '9'; });
+                std::string arrayKey = savedVar[0] != '$' && numericIndex
+                    ? savedVar + idxText : savedVar + "[" + idxText + "]";
                 lastVarName = arrayKey;
                 if (!lastFieldName.empty()) {
                     // obj.field[idx] — qualify the field name. The object may
@@ -3137,7 +3143,7 @@ VMValue TorqueScript::callFunction(const std::string& name, const std::vector<VM
     // converts to zero in numeric contexts.
     impl->locals.set("argc", VMValue((int32_t)args.size()));
     for (size_t i = 0; i < args.size(); i++)
-        impl->locals.set("argv[" + std::to_string(i) + "]", args[i]);
+        impl->locals.set("argv" + std::to_string(i), args[i]);
     for (size_t i = 0; i < func.params.size(); i++) {
         VMValue val = (i < args.size()) ? args[i] : VMValue("");
         impl->locals.set(func.params[i], val);

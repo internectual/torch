@@ -706,6 +706,14 @@ VMValue VirtualMachine::callMethod(const char* objName, const char* method, cons
     }
     return {};
 }
+// An array index is appended to a local's name: %a[0] is %a0.
+static std::string dsoArrayKeySuffix(const std::string& varName, const std::string& index) {
+    const bool numeric = !index.empty() &&
+        std::all_of(index.begin(), index.end(), [](char c) { return c >= '0' && c <= '9'; });
+    if (!varName.empty() && varName[0] == '%' && numeric) return index;
+    return "[" + index + "]";
+}
+
 
 VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp,
                                 const std::vector<VMValue>& args, bool methodCall) {
@@ -958,7 +966,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp,
                     std::string varKey = frame->curVarName;
                     // Append array key if set
                     if (!frame->curArrayKey.empty())
-                        varKey += "[" + frame->curArrayKey + "]";
+                        varKey += dsoArrayKeySuffix(frame->curVarName, frame->curArrayKey);
 
                     if (frame->curVarName[0] == '%') {
                         auto it = frame->locals.find(varKey);
@@ -981,7 +989,7 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp,
                     VMValue val = stack.top(); stack.pop();
                     std::string varKey = frame->curVarName;
                     if (!frame->curArrayKey.empty())
-                        varKey += "[" + frame->curArrayKey + "]";
+                        varKey += dsoArrayKeySuffix(frame->curVarName, frame->curArrayKey);
 
                     if (frame->curVarName[0] == '%') {
                         frame->locals[varKey] = val;

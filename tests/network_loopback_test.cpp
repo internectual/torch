@@ -230,6 +230,11 @@ int main() {
                                "$testPrintExtent = TestPrintDlg.extent;");
         assert(utilityScript->getGlobal("$testPrintExtent").toString() == "550 36");
         assert(utilityScript->getGlobal("$testPrintMixed").toString() == "550 36|3|36");
+        // hud.cs setLineHud reads its %a0..%a3 parameters as %a[%i].
+        utilityScript->execute("function testLocalIndex(%a0, %a1) { %a[2] = \"c\"; "
+                               "  $testLocalIndex = %a[0] @ %a[1] @ %a2; }"
+                               "testLocalIndex(\"a\", \"b\");");
+        assert(utilityScript->getGlobal("$testLocalIndex").toString() == "abc");
         assert(providerEngine.deleteScriptObject("TestPrintDlg"));
     }
     {
