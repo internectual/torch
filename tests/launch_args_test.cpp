@@ -27,8 +27,6 @@ int main() {
     assert(shouldSkipLogin(true, false, false));
     assert(shouldSkipLogin(false, true, false));
     assert(shouldSkipLogin(false, false, true));
-    assert(loginCanCompleteOffline(false));
-    assert(!loginCanCompleteOffline(true));
 
     uint16_t port = 0;
     assert(parseConsolePort("28000", port) && port == 28000);

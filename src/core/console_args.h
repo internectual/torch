@@ -101,13 +101,6 @@ inline bool shouldSkipLogin(bool demoMode, bool playback, bool requestedNoLogin)
     return requestedNoLogin || demoMode || playback;
 }
 
-// The stock login dialog is also used for the offline client.  Offline login
-// completes locally; an explicitly online launch must remain in the account
-// flow instead of silently starting a local mission.
-inline bool loginCanCompleteOffline(bool online) {
-    return !online;
-}
-
 // An explicit master URL wins; the demo-only setting must never affect the
 // normal retail path.
 inline std::string selectMasterServerUrl(bool demoMode, std::string_view requested,

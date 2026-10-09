@@ -6618,7 +6618,7 @@ bool ScriptEngine::init() {
         auto& gui = Engine::instance().guiRenderer();
         GuiControl* ctl = gui.findControl(args[0].toString());
         if (!ctl) return VMValue(0);
-        while (ctl->parent) ctl = ctl->parent;
+        while (ctl->parent && ctl->parent->className != "GuiCanvas") ctl = ctl->parent;
         for (size_t i = 0; i < gui.dialogCount(); ++i)
             if (gui.getDialog(i) == ctl) return VMValue(1);
         return VMValue(0);
@@ -7497,9 +7497,12 @@ bool ScriptEngine::init() {
     });
 
     // WON/Login stubs — store login info so login flow can proceed
-    tsInstance->registerNative("WONLoginResult", [](const auto& args) -> VMValue {
-        Console::instance().setVariable("WON::loginResult", args.empty() ? "0" : args[0].toString().c_str());
-        return VMValue(0);
+    // WONLoginResult: "status \t code \t codeText \t error" for the
+    // StartupGui::checkLoginDone poll. There is no WON account service, so an
+    // offline login completes at once and the stock success path
+    // (LoginDone -> CleanUpAndGo -> console_end.cs) takes over.
+    tsInstance->registerNative("WONLoginResult", [](const auto&) -> VMValue {
+        return VMValue(std::string("OK\t0\t\t"));
     });
     tsInstance->registerNative("WONServerLogin", [](const auto& args) -> VMValue {
         if (args.size() >= 2) {

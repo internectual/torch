@@ -1345,38 +1345,6 @@ bool Engine::init(int argc, char* argv[]) {
         for (auto* d : st) { Console::instance().printf(LogLevel::Info, "[STK] --- dlg ---"); walk(d,0); }
     }, "dumpstack - print dialog stack");
 
-    // Login flow commands
-    con->addCommand("TorchLoginDone", [this, noLogin](int32_t, const char* const*) {
-        // Boot scripts schedule LoginDone after their (stubbed) login flow.
-        // In -nologin there is no game to join — starting one from a stale
-        // login callback yanked the shell into an empty mission (black).
-        if (noLogin) {
-            Console::instance().printf(LogLevel::Info, "LoginDone ignored (-nologin)");
-            return;
-        }
-        gui->popDialog("LoginDlg");
-        Console::instance().printf(LogLevel::Info, "Login complete, starting game");
-        g->startLocalGame();
-    }, "TorchLoginDone() - diagnostic transition helper");
-
-    con->addCommand("LoginProcess", [this](int32_t, const char* const*) {
-        const bool online = std::strcmp(
-            Console::instance().getStringVariable("online", "0"), "1") == 0 ||
-            std::strcmp(Console::instance().getStringVariable("$PlayingOnline", "0"), "1") == 0;
-        if (!loginCanCompleteOffline(online)) {
-            Console::instance().printf(LogLevel::Warn,
-                "LoginProcess requires the online account flow");
-            return;
-        }
-        // Offline login has no account service.  Match the stock successful
-        // transition so the login dialog does not strand local players.
-        Console::instance().setVariable("$LaunchMode", "Offline");
-        Console::instance().setVariable("$PlayingOnline", "0");
-        gui->popDialog("LoginDlg");
-        Console::instance().printf(LogLevel::Info, "Offline login complete, starting game");
-        g->startLocalGame();
-    }, "LoginProcess - attempt login");
-
     con->addCommand("CreateAccount", [](int32_t, const char* const*) {
         Console::instance().printf(LogLevel::Info, "CreateAccount called (stub)");
     });
