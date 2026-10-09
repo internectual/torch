@@ -1878,6 +1878,30 @@ static bool s_clientPrefsExportAllowed = false;
 void allowClientPrefsExport(bool allowed) { s_clientPrefsExportAllowed = allowed; }
 bool clientPrefsExportAllowed() { return s_clientPrefsExportAllowed; }
 
+// Video::setScreenMode: the mode in use is recorded in the prefs the video
+// options read back ($pref::Video::resolution "w h bpp" full screen,
+// $pref::Video::windowedRes "w h" windowed).
+static bool applyScreenMode(int width, int height, int bpp, bool fullScreen) {
+    auto& platform = Engine::instance().platform();
+    auto& config = Engine::instance().renderer().config();
+    if (width > 0 && height > 0) {
+        config.width = width;
+        config.height = height;
+        config.fullscreen = fullScreen;
+        if (!platform.setVideoMode(width, height, fullScreen, config.vsync)) return false;
+    }
+    const std::string size = std::to_string(platform.width()) + " " + std::to_string(platform.height());
+    if (TorqueScript* ts = ScriptEngine::instance().ts()) {
+        ts->setGlobal("$pref::Video::fullScreen", VMValue(fullScreen ? 1 : 0));
+        if (fullScreen)
+            ts->setGlobal("$pref::Video::resolution",
+                          VMValue(size + " " + std::to_string(bpp > 0 ? bpp : 32)));
+        else
+            ts->setGlobal("$pref::Video::windowedRes", VMValue(size));
+    }
+    return true;
+}
+
 bool ScriptEngine::init() {
     if (vmInstance || tsInstance || !objects.empty()) shutdown();
     vmInstance = new VirtualMachine(this);
@@ -2836,9 +2860,20 @@ bool ScriptEngine::init() {
         auto* canvas = new ScriptObject;
         canvas->className = "GuiCanvas";
         canvas->name = "Canvas";
-        canvas->fields["extent"] = VMValue("1024 768");
         canvas->fields["position"] = VMValue("0 0");
         ScriptEngine::instance().addObject(canvas);
+        // The canvas opens in the preferred mode: $pref::Video::resolution
+        // full screen, $pref::Video::windowedRes windowed.
+        TorqueScript* ts = ScriptEngine::instance().ts();
+        const bool fullScreen = ts && ts->getGlobal("$pref::Video::fullScreen").toBool();
+        const std::string res = ts ? ts->getGlobal(
+            fullScreen ? "$pref::Video::resolution" : "$pref::Video::windowedRes").toString() : "";
+        int width = 0, height = 0, bpp = 32;
+        sscanf(res.c_str(), "%d %d %d", &width, &height, &bpp);
+        applyScreenMode(width, height, bpp, fullScreen);
+        auto& platform = Engine::instance().platform();
+        canvas->fields["extent"] = VMValue(std::to_string(platform.width()) + " " +
+                                           std::to_string(platform.height()));
         Console::instance().printf(LogLevel::Info, "GUI: created GuiCanvas");
         return VMValue(1);
     });
@@ -8344,12 +8379,10 @@ bool ScriptEngine::init() {
     });
 
     // getResolution — returns "width height"
+    // Video::getResolution: the current screen mode, "width height bpp".
     tsInstance->registerNative("getResolution", [](const auto&) -> VMValue {
-        auto& gui = Engine::instance().guiRenderer();
-        auto* canvas = gui.findControl("GuiCanvas");
-        if (canvas)
-            return VMValue(std::to_string((int)canvas->extentX) + " " + std::to_string((int)canvas->extentY));
-        return VMValue("1024 768");
+        auto& platform = Engine::instance().platform();
+        return VMValue(std::to_string(platform.width()) + " " + std::to_string(platform.height()) + " 32");
     });
 
     // getWord — extract Nth space-delimited word from a string
@@ -8496,19 +8529,20 @@ bool ScriptEngine::init() {
 
     tsInstance->registerNative("setScreenMode", [](const auto& args) -> VMValue {
         if (args.size() < 4) return VMValue(0);
-        auto& config = Engine::instance().renderer().config();
-        config.width = args[0].toInt();
-        config.height = args[1].toInt();
-        config.fullscreen = args[3].toBool();
-        return VMValue(Engine::instance().platform().setVideoMode(
-            config.width, config.height, config.fullscreen, config.vsync) ? 1 : 0);
+        return VMValue(applyScreenMode(args[0].toInt(), args[1].toInt(), args[2].toInt(),
+                                       args[3].toBool()) ? 1 : 0);
     });
 
     tsInstance->registerNative("setDisplayDevice", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         std::string device = args[0].toString();
         for (char& c : device) c = (char)std::tolower((unsigned char)c);
-        return VMValue(device == "opengl" ? 1 : 0);
+        if (device != "opengl") return VMValue(0);
+        // setDisplayDevice(device, width, height, bpp, fullScreen)
+        if (args.size() >= 5)
+            return VMValue(applyScreenMode(args[1].toInt(), args[2].toInt(), args[3].toInt(),
+                                           args[4].toBool()) ? 1 : 0);
+        return VMValue(1);
     });
 
     tsInstance->registerNative("setVerticalSync", [](const auto& args) -> VMValue {
