@@ -359,4 +359,9 @@ void registerSimNatives(TorqueScript& ts) {
     ts.registerNative("purgeResources", [](const std::vector<VMValue>&) -> VMValue {
         return VMValue(1);
     });
+    // TextureManager holds keep a mission's textures resident between
+    // missions; Torch's texture cache keeps none to release.
+    ts.registerNative("clearTextureHolds", [](const std::vector<VMValue>&) -> VMValue {
+        return VMValue(1);
+    });
 }
