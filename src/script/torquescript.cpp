@@ -106,7 +106,6 @@ struct TorqueScript::Impl {
     std::unordered_map<std::string, VMValue> globals;
     // Lowercased name -> key in `globals` (names are case-insensitive).
     std::unordered_map<std::string, std::string> globalIndex;
-    std::unordered_map<std::string, std::vector<std::string>> messageCallbacks;
     ScriptScheduler scheduler;
     TSLocals locals;
     bool initializing = false;
@@ -394,7 +393,6 @@ void TorqueScript::shutdown() {
     impl->parsingPackage.clear();
     impl->globals.clear();
     impl->globalIndex.clear();
-    impl->messageCallbacks.clear();
     impl->locals = TSLocals{};
     impl->guiParentStack.clear();
     impl->tokens.clear();
@@ -3289,39 +3287,6 @@ size_t TorqueScript::processScheduledEvents(double now) {
     });
 }
 void TorqueScript::clearScheduledEvents() { impl->scheduler.clear(); }
-
-void TorqueScript::registerMessageCallback(const std::string& messageType,
-                                           const std::string& functionName) {
-    if (messageType.empty() || functionName.empty()) return;
-    auto& callbacks = impl->messageCallbacks[messageType];
-    if (std::find(callbacks.begin(), callbacks.end(), functionName) == callbacks.end())
-        callbacks.push_back(functionName);
-}
-
-void TorqueScript::dispatchMessageCallback(const std::string& messageType,
-                                           const std::vector<VMValue>& args) {
-    // Stock message.cs owns callback ordering and wildcard handling. Use it
-    // when loaded; the native registry below keeps minimal/headless script
-    // sets functional when that compatibility layer is absent.
-    if (hasFunction("clientCmdServerMessage")) {
-        callFunction("clientCmdServerMessage", args);
-        return;
-    }
-    std::vector<std::string> callbacks;
-    auto append = [&](const std::string& key) {
-        auto it = impl->messageCallbacks.find(key);
-        if (it != impl->messageCallbacks.end())
-            callbacks.insert(callbacks.end(), it->second.begin(), it->second.end());
-    };
-    append("");
-    if (!messageType.empty()) append(messageType);
-    for (const auto& functionName : callbacks) {
-        std::string lower = functionName;
-        for (char& c : lower) c = (char)tolower((unsigned char)c);
-        if (hasFunction(functionName) || impl->natives.find(lower) != impl->natives.end())
-            callFunction(functionName, args);
-    }
-}
 
 bool TorqueScript::dispatchPrefixedFunction(const std::string& prefix,
                                              const std::vector<std::string>& words) {

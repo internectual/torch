@@ -184,26 +184,8 @@ static std::string replaceAll(std::string value, const std::string& from,
     return value;
 }
 
-struct ScriptTarget {
-    std::string objectName;
-    VMValue nameTag;
-    VMValue skinTag;
-    VMValue voiceTag;
-    VMValue typeTag;
-    int sensorGroup = 0;
-    VMValue datablock;
-    double voicePitch = 1.0;
-    uint32_t renderMask = 0;
-    uint32_t alwaysVisMask = 0;
-    VMValue sensorData;
-};
-
-std::unordered_map<int, ScriptTarget> s_scriptTargets;
-int s_nextScriptTarget = 1;
 
 static void clearScriptMissionState() {
-    s_scriptTargets.clear();
-    s_nextScriptTarget = 1;
     if (auto* taskList = ScriptEngine::instance().findObject("TaskList")) {
         taskList->fields["currentTaskClient"] = VMValue("");
         taskList->fields["currentAIObjective"] = VMValue("");
@@ -391,24 +373,6 @@ static VMValue setScriptLightning(const std::vector<VMValue>& args) {
 static VMValue strikeScriptLightning(const std::vector<VMValue>& args) {
     if (!args.empty()) return VMValue(0);
     return VMValue(Engine::instance().game().world().strikeLightning() ? 1 : 0);
-}
-
-// Commands assigned by scripts after a .gui has been parsed must update both
-// the live control and its click closure.  The stock message-box helpers do
-// exactly this when they install their transient button callbacks.
-static bool setGuiCommand(const std::string& name, const std::string& command) {
-    auto* ctl = Engine::instance().guiRenderer().findControl(name);
-    if (!ctl) return false;
-    ctl->command = command;
-    if (auto* obj = ScriptEngine::instance().findObject(name.c_str()))
-        obj->fields["command"] = VMValue(command);
-    ctl->onClick = nullptr;
-    if (!command.empty()) {
-        ctl->onClick = [command]() {
-            Console::instance().execute(command.c_str());
-        };
-    }
-    return true;
 }
 }
 
@@ -2290,24 +2254,6 @@ bool ScriptEngine::init() {
             if (reject.find(v[len]) != std::string::npos) break;
         }
         return VMValue((double)len);
-    });
-    // True when the named skin is one of the Dynamix-provided skins listed
-    // in the \$Skin[*, code] table (drives the Show: Dynamix/Custom popup).
-    tsInstance->registerNative("isDynamixSkin", [](const auto& args) -> VMValue {
-        std::string skin = args.empty() ? "" : args[0].toString();
-        if (skin.empty()) return VMValue(0);
-        auto* tsx = Engine::instance().script().ts();
-        int count = 0;
-        if (tsx) count = (int)tsx->getGlobal("$SkinCount").toDouble();
-        int limit = count + 8; if (limit > 64) limit = 64;
-        for (int i = 0; i < limit; i++) {
-            // NOTE: key has NO space after the comma — the interpreter's
-            // bracket-index assembly concatenates without whitespace.
-            std::string key = "$Skin[" + std::to_string(i) + ",code]";
-            std::string code = tsx ? tsx->getGlobal(key).toString() : "";
-            if (!code.empty() && code == skin) return VMValue(1);
-        }
-        return VMValue(0);
     });
     tsInstance->registerNative("getSubStr", [](const auto& args) -> VMValue {
         if (args.size() < 3) return VMValue("");
@@ -4286,16 +4232,6 @@ bool ScriptEngine::init() {
         ts->executeNested(std::string((const char*)data.data(), data.size()), path);
         return VMValue(1);
     });
-    tsInstance->registerNative("addMessageCallback", [](const auto& args) -> VMValue {
-        if (args.size() >= 2) {
-            std::string msgType = args[0].toString();
-            std::string callback = args[1].toString();
-            if (auto* ts = Engine::instance().script().ts())
-                ts->registerMessageCallback(msgType, callback);
-            Console::instance().printf(LogLevel::Debug, "addMessageCallback: type='%s' callback='%s'", msgType.c_str(), callback.c_str());
-        }
-        return VMValue(1);
-    });
 
 
     // nameToID: the id of a named (or numbered) object, -1 when none.
@@ -5290,191 +5226,6 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("getObjectCount", [](const auto&) -> VMValue {
         return VMValue((int32_t)ScriptEngine::instance().objects.size());
     });
-    tsInstance->registerNative("getTarget", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(-1);
-        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
-            const int id = object->fields["target"].toInt();
-            return s_scriptTargets.count(id) ? VMValue(id) : VMValue(-1);
-        }
-        return VMValue(-1);
-    });
-
-    // TargetManager.cs uses these engine natives for player, flag, waypoint,
-    // and sensor HUD entries. Keep their mutable state separate from script
-    // objects so targets remain valid after their owner changes fields.
-    tsInstance->registerNative("createTarget", [](const auto& args) -> VMValue {
-        if (args.size() < 6 || args[0].toString().empty() || args[5].toInt() < 0 || args[5].toInt() >= 32)
-            return VMValue(-1);
-        ScriptTarget target;
-        target.objectName = args[0].toString();
-        target.nameTag = args[1];
-        target.skinTag = args[2];
-        target.voiceTag = args[3];
-        target.typeTag = args[4];
-        target.sensorGroup = args[5].toInt();
-        const int id = s_nextScriptTarget++;
-        s_scriptTargets.emplace(id, std::move(target));
-        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
-            object->fields["target"] = VMValue(id);
-        return VMValue(id);
-    });
-    tsInstance->registerNative("allocTarget", [](const auto& args) -> VMValue {
-        if (args.size() < 5 || args[4].toInt() < 0 || args[4].toInt() >= 32) return VMValue(-1);
-        ScriptTarget target;
-        target.nameTag = args[0];
-        target.skinTag = args[1];
-        target.voiceTag = args[2];
-        target.typeTag = args[3];
-        target.sensorGroup = args[4].toInt();
-        if (args.size() > 5) target.datablock = args[5];
-        if (args.size() > 6 && args[6].toDouble() != 0.0) target.voicePitch = args[6].toDouble();
-        if (args.size() > 7) target.skinTag = args[7];
-        const int id = s_nextScriptTarget++;
-        s_scriptTargets.emplace(id, std::move(target));
-        return VMValue(id);
-    });
-    tsInstance->registerNative("allocClientTarget", [](const auto& args) -> VMValue {
-        if (args.size() < 5 || args[0].toString().empty() || args[4].toInt() < 0 || args[4].toInt() >= 32)
-            return VMValue(-1);
-        ScriptTarget target;
-        target.objectName = args[0].toString();
-        target.nameTag = args[1];
-        target.skinTag = args[2];
-        target.voiceTag = args[3];
-        target.typeTag = args[4];
-        target.sensorGroup = args.size() > 5 ? args[5].toInt() : 0;
-        if (args.size() > 7) target.voicePitch = args[7].toDouble();
-        const int id = s_nextScriptTarget++;
-        s_scriptTargets.emplace(id, std::move(target));
-        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
-            object->fields["target"] = VMValue(id);
-        return VMValue(id);
-    });
-    tsInstance->registerNative("freeTarget", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        const int id = args[0].toInt();
-        auto it = s_scriptTargets.find(id);
-        if (it == s_scriptTargets.end()) return VMValue(0);
-        if (auto* object = ScriptEngine::instance().findObject(it->second.objectName.c_str())) {
-            if (object->fields["target"].toInt() == id) object->fields["target"] = VMValue(-1);
-        }
-        s_scriptTargets.erase(it);
-        return VMValue(1);
-    });
-    tsInstance->registerNative("clientResetTargets", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        const std::string objectName = args[0].toString();
-        for (auto it = s_scriptTargets.begin(); it != s_scriptTargets.end(); ) {
-            if (it->second.objectName == objectName) it = s_scriptTargets.erase(it);
-            else ++it;
-        }
-        if (auto* object = ScriptEngine::instance().findObject(objectName.c_str()))
-            object->fields["target"] = VMValue(-1);
-        return VMValue(1);
-    });
-    tsInstance->registerNative("setTargetRenderMask", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        auto it = s_scriptTargets.find(args[0].toInt());
-        if (it == s_scriptTargets.end()) return VMValue(0);
-        if (args[1].toInt() < 0) return VMValue(0);
-        it->second.renderMask = (uint32_t)args[1].toInt();
-        return VMValue(1);
-    });
-    tsInstance->registerNative("getTargetRenderMask", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        auto it = s_scriptTargets.find(args[0].toInt());
-        return it == s_scriptTargets.end() ? VMValue(0) : VMValue((int32_t)it->second.renderMask);
-    });
-    tsInstance->registerNative("setTargetSkin", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        auto it = s_scriptTargets.find(args[0].toInt());
-        if (it == s_scriptTargets.end()) return VMValue(0);
-        it->second.skinTag = args[1];
-        return VMValue(1);
-    });
-    tsInstance->registerNative("setTargetName", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        auto it = s_scriptTargets.find(args[0].toInt());
-        if (it == s_scriptTargets.end()) return VMValue(0);
-        it->second.nameTag = args[1];
-        return VMValue(1);
-    });
-    tsInstance->registerNative("setTargetSensorData", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        auto it = s_scriptTargets.find(args[0].toInt());
-        if (it == s_scriptTargets.end()) return VMValue(0);
-        it->second.sensorData = args[1];
-        return VMValue(1);
-    });
-    tsInstance->registerNative("getTargetSensorData", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        auto it = s_scriptTargets.find(args[0].toInt());
-        return it == s_scriptTargets.end() ? VMValue(0) : it->second.sensorData;
-    });
-    tsInstance->registerNative("setTargetSensorGroup", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        auto it = s_scriptTargets.find(args[0].toInt());
-        if (it == s_scriptTargets.end()) return VMValue(0);
-        if (args[1].toInt() < 0 || args[1].toInt() >= 32) return VMValue(0);
-        it->second.sensorGroup = args[1].toInt();
-        return VMValue(1);
-    });
-    tsInstance->registerNative("getTargetSensorGroup", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        auto it = s_scriptTargets.find(args[0].toInt());
-        return it == s_scriptTargets.end() ? VMValue(0) : VMValue(it->second.sensorGroup);
-    });
-    tsInstance->registerNative("setTargetAlwaysVisMask", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        auto it = s_scriptTargets.find(args[0].toInt());
-        if (it == s_scriptTargets.end()) return VMValue(0);
-        if (args[1].toInt() < 0) return VMValue(0);
-        it->second.alwaysVisMask = (uint32_t)args[1].toInt();
-        return VMValue(1);
-    });
-    tsInstance->registerNative("getTargetName", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue("");
-        auto it = s_scriptTargets.find(args[0].toInt());
-        return it == s_scriptTargets.end() ? VMValue("") : it->second.nameTag;
-    });
-    tsInstance->registerNative("getTargetSkin", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue("");
-        auto it = s_scriptTargets.find(args[0].toInt());
-        return it == s_scriptTargets.end() ? VMValue("") : it->second.skinTag;
-    });
-    tsInstance->registerNative("getTargetType", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        auto it = s_scriptTargets.find(args[0].toInt());
-        return it == s_scriptTargets.end() ? VMValue(0) : it->second.typeTag;
-    });
-    tsInstance->registerNative("getTargetAlwaysVisMask", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        auto it = s_scriptTargets.find(args[0].toInt());
-        return it == s_scriptTargets.end() ? VMValue(0) : VMValue((int32_t)it->second.alwaysVisMask);
-    });
-    tsInstance->registerNative("resetTargetManager", [](const auto&) -> VMValue {
-        s_scriptTargets.clear();
-        s_nextScriptTarget = 1;
-        return VMValue(1);
-    });
-    tsInstance->registerNative("setTarget", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
-            if (!s_scriptTargets.count(args[1].toInt())) return VMValue(0);
-            object->fields["target"] = args[1];
-            return VMValue(1);
-        }
-        return VMValue(0);
-    });
-    tsInstance->registerNative("setTargetObject", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str())) {
-            if (!s_scriptTargets.count(object->fields["target"].toInt())) return VMValue(0);
-            object->fields["targetObject"] = args[1];
-            return VMValue(1);
-        }
-        return VMValue(0);
-    });
     tsInstance->registerNative("setSensorGroupColor", [](const auto& args) -> VMValue {
         if (args.size() < 3) {
             Console::instance().printf(LogLevel::Warn,
@@ -5960,12 +5711,6 @@ bool ScriptEngine::init() {
         }
         return VMValue(Engine::instance().game().isSensorGroupTargetVisible(
             listenerGroup, target.sensorGroup) ? 1 : 0);
-    });
-    tsInstance->registerNative("getDamagePercent", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0.0f);
-        if (auto* object = ScriptEngine::instance().findObject(args[0].toString().c_str()))
-            return object->fields["damagePercent"];
-        return VMValue(0.0f);
     });
     tsInstance->registerNative("isAIControlled", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
@@ -6830,46 +6575,8 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // Chat system — store chat messages for HUD rendering
-    static std::vector<std::string> s_chatMessages;
-    tsInstance->registerNative("addChat", [](const auto& args) -> VMValue {
-        if (args.size() >= 2) {
-            std::string msg = args[0].toString() + ": " + args[1].toString();
-            s_chatMessages.push_back(msg);
-            if (s_chatMessages.size() > 100) s_chatMessages.erase(s_chatMessages.begin());
-            Console::instance().setVariable("HUD::lastChat", msg.c_str());
-        }
-        return VMValue(1);
-    });
-    tsInstance->registerNative("installChatItem", [](const auto& args) -> VMValue {
-        if (args.size() >= 2) {
-            Console::instance().printf(LogLevel::Debug, "installChatItem: %s = %s", args[0].toString().c_str(), args[1].toString().c_str());
-            Console::instance().setVariable(("HUD::chatItem::" + args[0].toString()).c_str(), args[1].toString().c_str());
-        }
-        return VMValue(1);
-    });
-    tsInstance->registerNative("startChatMenu", [](const auto&) -> VMValue {
-        Console::instance().setVariable("HUD::chatOpen", "1");
-        return VMValue(1);
-    });
-    tsInstance->registerNative("endChatMenu", [](const auto&) -> VMValue {
-        Console::instance().setVariable("HUD::chatOpen", "0");
-        return VMValue(1);
-    });
-    tsInstance->registerNative("ChatRoomMemberList_refresh", [](const auto& args) -> VMValue {
-        if (!args.empty()) Console::instance().printf(LogLevel::Debug, "ChatRoomMemberList_refresh: %s", args[0].toString().c_str());
-        return VMValue(1);
-    });
-    tsInstance->registerNative("ChannelBannedList_refresh", [](const auto& args) -> VMValue {
-        if (!args.empty()) Console::instance().printf(LogLevel::Debug, "ChannelBannedList_refresh: %s", args[0].toString().c_str());
-        return VMValue(1);
-    });
     tsInstance->registerNative("createFlagTossGauge", [](const auto& args) -> VMValue {
         if (!args.empty()) Console::instance().printf(LogLevel::Debug, "createFlagTossGauge: %s", args[0].toString().c_str());
-        return VMValue(1);
-    });
-    tsInstance->registerNative("cancelChatMenu", [](const auto&) -> VMValue {
-        Console::instance().setVariable("HUD::chatOpen", "0");
         return VMValue(1);
     });
     tsInstance->registerNative("setChatPage", [](const auto& args) -> VMValue {
@@ -7353,13 +7060,6 @@ bool ScriptEngine::init() {
         }
         Engine::instance().game().setSensorGroupColor(args[0].toInt(),
                                                        (uint32_t)args[1].toInt(), value);
-        return VMValue(1);
-    });
-    tsInstance->registerNative("setTargetSensorData", [](const auto& args) -> VMValue {
-        if (args.size() < 2) return VMValue(0);
-        auto it = s_scriptTargets.find(args[0].toInt());
-        if (it == s_scriptTargets.end()) return VMValue(0);
-        it->second.sensorData = args[1];
         return VMValue(1);
     });
     // WON/Login stubs — store login info so login flow can proceed
@@ -7918,12 +7618,6 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
-    tsInstance->registerNative("addCreditsLine", [](const auto& args) -> VMValue {
-        if (!args.empty()) {
-            Console::instance().printf(LogLevel::Debug, "addCreditsLine: %s", args[0].toString().c_str());
-        }
-        return VMValue(1);
-    });
     tsInstance->registerNative("enableImmersion", [](const auto& args) -> VMValue {
         if (!args.empty()) Console::instance().setVariable("pref::immersion", args[0].toInt() ? "1" : "0");
         return VMValue(1);
@@ -8022,18 +7716,6 @@ bool ScriptEngine::init() {
             if (stat(dir.c_str(), &st) == 0 && access(dir.c_str(), W_OK) == 0) return VMValue(1);
         }
         return VMValue(0);
-    });
-    // The stock save routine calls this with the current active config. An
-    // empty active name otherwise becomes prefs/.cs and is recreated on every
-    // save. Existing legacy bind-only files are safe to replace with a proper
-    // ActionMap file.
-    tsInstance->registerNative("isValidMapFileSaveName", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        std::string path = args[0].toString();
-        const auto slash = path.find_last_of("/\\");
-        const std::string name = path.substr(slash == std::string::npos ? 0 : slash + 1);
-        if (name.empty() || name == ".cs") return VMValue(0);
-        return VMValue(1);
     });
     tsInstance->registerNative("videoSetGammaCorrection", [](const auto& args) -> VMValue {
         if (!args.empty()) Console::instance().setVariable("pref::gammaCorrection", args[0].toString().c_str());
@@ -8327,22 +8009,6 @@ bool ScriptEngine::init() {
         const int result = actionMapWrite(objName, path, append);
         return VMValue(result);
     });
-    // The stock saveMapFile() wrapper can be shadowed by partially loaded
-    // shell scripts. Keep the persisted format native, but write the same T2
-    // map file that the wrapper is expected to produce.
-    tsInstance->registerNative("saveMapFile", [actionMapWrite](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        std::string name = args[0].toString();
-        if (name.empty() || name == "." || name.find_first_of("\\/?*\"'<>|") != std::string::npos)
-            return VMValue(0);
-        const std::string path = "prefs/" + name + ".cs";
-        if (!actionMapWrite("moveMap", path, false)) return VMValue(0);
-        if (!actionMapWrite("observerMap", path, true)) return VMValue(0);
-        if (!actionMapWrite("GlobalActionMap", path, true)) return VMValue(0);
-        Console::instance().setVariable("$pref::Input::ActiveConfig", name.c_str());
-        Console::instance().printf(LogLevel::Info, "Saved input config: %s", path.c_str());
-        return VMValue(1);
-    });
 
     // ActionMap::getBinding(action) — return "flags key" for the bound action
     // (see saveMapFile: getField(%bind, 1) yields the key name)
@@ -8439,64 +8105,10 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    tsInstance->registerNative("MessageBoxOK", [](const auto& args) -> VMValue {
-        std::string title = args.size() > 0 ? args[0].toString() : "Message";
-        std::string msg = args.size() > 1 ? args[1].toString() : "";
-        auto& gui = Engine::instance().guiRenderer();
-        if (auto* frame = gui.findControl("MBOKFrame")) frame->text = title;
-        if (auto* text = gui.findControl("MBOKText")) text->text = "<just:center>" + msg;
-        const std::string command = (args.size() > 2 ? args[2].toString() + " " : "")
-            + "Canvas.popDialog(MessageBoxOKDlg);";
-        setGuiCommand("MBOKButton", command);
-        if (!gui.findControl("MessageBoxOKDlg")) return VMValue(0);
-        gui.pushDialog("MessageBoxOKDlg");
-        return VMValue(1);
-    });
 
-    tsInstance->registerNative("MessageBoxOkCancel", [](const auto& args) -> VMValue {
-        std::string title = args.size() > 0 ? args[0].toString() : "Message";
-        std::string msg = args.size() > 1 ? args[1].toString() : "";
-        auto& gui = Engine::instance().guiRenderer();
-        if (auto* frame = gui.findControl("MBOKCancelFrame")) frame->text = title;
-        if (auto* text = gui.findControl("MBOKCancelText")) text->text = "<just:center>" + msg;
-        setGuiCommand("MBOKCancelButtonOK", (args.size() > 2 ? args[2].toString() + " " : "")
-            + "Canvas.popDialog(MessageBoxOKCancelDlg);");
-        setGuiCommand("MBOKCancelButtonCancel", (args.size() > 3 ? args[3].toString() + " " : "")
-            + "Canvas.popDialog(MessageBoxOKCancelDlg);");
-        if (!gui.findControl("MessageBoxOKCancelDlg")) return VMValue(0);
-        gui.pushDialog("MessageBoxOKCancelDlg");
-        return VMValue(1);
-    });
 
-    tsInstance->registerNative("MessageBoxYesNo", [](const auto& args) -> VMValue {
-        std::string title = args.size() > 0 ? args[0].toString() : "Message";
-        std::string msg = args.size() > 1 ? args[1].toString() : "";
-        auto& gui = Engine::instance().guiRenderer();
-        if (auto* frame = gui.findControl("MBYesNoFrame")) frame->text = title;
-        if (auto* text = gui.findControl("MBYesNoText")) text->text = "<just:center>" + msg;
-        setGuiCommand("MBYesNoButtonYes", (args.size() > 2 ? args[2].toString() + " " : "")
-            + "Canvas.popDialog(MessageBoxYesNoDlg);");
-        setGuiCommand("MBYesNoButtonNo", (args.size() > 3 ? args[3].toString() + " " : "")
-            + "Canvas.popDialog(MessageBoxYesNoDlg);");
-        if (!gui.findControl("MessageBoxYesNoDlg")) return VMValue(0);
-        gui.pushDialog("MessageBoxYesNoDlg");
-        return VMValue(1);
-    });
 
-    tsInstance->registerNative("MessagePopup", [](const auto& args) -> VMValue {
-        auto& gui = Engine::instance().guiRenderer();
-        if (auto* frame = gui.findControl("MessagePopFrame"))
-            frame->text = args.size() > 0 ? args[0].toString() : "Message";
-        if (auto* text = gui.findControl("MessagePopText"))
-            text->text = args.size() > 1 ? "<just:center>" + args[1].toString() : "";
-        gui.pushDialog("MessagePopupDlg");
-        return VMValue(1);
-    });
 
-    tsInstance->registerNative("CloseMessagePopup", [](const auto&) -> VMValue {
-        Engine::instance().guiRenderer().popDialog("MessagePopupDlg");
-        return VMValue(1);
-    });
 
     // getDesktopResolution() — return the native window resolution, not the
     // stock logical GUI canvas size.
@@ -8929,10 +8541,6 @@ bool ScriptEngine::init() {
         return VMValue("0.1.0 (Torch)");
     });
 
-    // DatabaseQueryArray() — stub
-    tsInstance->registerNative("DatabaseQueryArray", [](const auto&) -> VMValue {
-        return VMValue(0);
-    });
 
     // alxIsEnabled() — return whether audio is initialized
     tsInstance->registerNative("alxIsEnabled", [](const auto&) -> VMValue {
@@ -8971,21 +8579,11 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // disconnect() — native client connection entry point
-    tsInstance->registerNative("disconnect", [](const auto&) -> VMValue {
-        if (auto* connection = Engine::instance().game().activeConnection())
-            connection->disconnect();
-        return VMValue(1);
-    });
     tsInstance->registerNative("stopDemoPlayback", [](const auto&) -> VMValue {
         Engine::instance().game().stopDemoPlayback();
         return VMValue(1);
     });
 
-    tsInstance->registerNative("disconnectedCleanup", [](const auto&) -> VMValue {
-        Engine::instance().game().disconnectedCleanup();
-        return VMValue(1);
-    });
 
     // These names are also used by GUI-specific helpers registered above.
     // Install the object-aware forms last so ordinary SimObjects never enter
@@ -9150,7 +8748,6 @@ void ScriptEngine::shutdown() {
     if (tsInstance) tsInstance->clearScheduledEvents();
     missionObjects_.clear();
     missionObjectsWorldBacked_ = false;
-    s_scriptTargets.clear();
     delete tsInstance;
     tsInstance = nullptr;
     delete vmInstance;

@@ -93,10 +93,6 @@ public:
     bool isEventPending(int id) const;
     size_t processScheduledEvents(double now);
     void clearScheduledEvents();
-    void registerMessageCallback(const std::string& messageType,
-                                 const std::string& functionName);
-    void dispatchMessageCallback(const std::string& messageType,
-                                 const std::vector<VMValue>& args);
     bool dispatchClientCommand(const std::vector<std::string>& args);
     bool dispatchServerCommand(const std::vector<std::string>& args);
     bool dispatchMissionCallback(const std::string& name,

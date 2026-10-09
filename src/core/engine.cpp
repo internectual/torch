@@ -1351,11 +1351,6 @@ bool Engine::init(int argc, char* argv[]) {
         Console::instance().printf(LogLevel::Info, "PasswordProcess called (stub)");
     });
 
-    con->addCommand("Disconnect", [this](int32_t, const char* const*) {
-        Console::instance().printf(LogLevel::Info, "Disconnect called");
-        game().disconnectedCleanup();
-    });
-
     // Init script path management (value comes from torch.cfg, not hardcoded)
     con->addCommand("log", [](int32_t, const char* const*) {
         std::string logPath = Console::instance().getStringVariable("$ConsoleLogPath", "console.log");

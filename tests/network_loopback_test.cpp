@@ -763,8 +763,7 @@ int main() {
         "function clientCmdPing(%a,%b) { $commandTrace = %a @ \":\" @ %b; }"
         "function serverCmdPing(%value) { $serverTrace = %value; }"
         "function onMissionEnd() { $missionTrace = $missionTrace @ \"end>\"; }"
-        "function onMissionStart(%mission) { $missionTrace = $missionTrace @ \"start:\" @ %mission; }"
-        "function messageCallback(%type,%unused,%value) { $messageTrace = %type @ \":\" @ %value; }");
+        "function onMissionStart(%mission) { $missionTrace = $missionTrace @ \"start:\" @ %mission; }");
     assert(script.ts()->dispatchClientCommand({"Ping", "left", "right"}));
     assert(script.ts()->dispatchServerCommand({"Ping", "server"}));
     assert(script.ts()->getGlobal("$commandTrace").toString() == "left:right");
@@ -787,9 +786,6 @@ int main() {
         assert(log.size() >= 3 && log[log.size() - 3] == "[INFO] one two" &&
                log[log.size() - 2] == "[WARN] TS:<runtime>:1: warning" &&
                log.back() == "[ERROR] TS:<runtime>:1: failure");
-    script.ts()->registerMessageCallback("MsgTest", "messageCallback");
-    script.ts()->dispatchMessageCallback("MsgTest", {VMValue("MsgTest"), VMValue(""), VMValue("payload")});
-    assert(script.ts()->getGlobal("$messageTrace").toString() == "MsgTest:payload");
     script.ts()->execute("new SimGroup(LifecycleGroup) { new Lifecycle(LifecycleChild); };"
                          "new Listener(LifecycleListener);");
     assert(script.ts()->getGlobal("$lifecycleAdd").toInt() == 1);
