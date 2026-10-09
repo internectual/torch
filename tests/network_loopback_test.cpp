@@ -218,6 +218,20 @@ int main() {
         assert(providerEngine.deleteScriptObject("TestTreeRevisionGroup"));
         assert(providerEngine.objectTreeRevision > beforeDeletion);
     }
+    {
+        // CenterPrint.cs: an indexed global after an obj.field read in the
+        // same expression is still the global, not a field of that object.
+        utilityScript->execute("new SimObject(TestPrintDlg) { extent = \"550 56\"; };"
+                               "$TestPrintSizes[3] = 36;"
+                               "function testPrintSize(%lines) {"
+                               "  TestPrintDlg.extent = firstWord(TestPrintDlg.extent) @ \" \" @ $TestPrintSizes[%lines];"
+                               "  $testPrintMixed = TestPrintDlg.extent @ \"|\" @ %lines @ \"|\" @ $TestPrintSizes[3]; }"
+                               "testPrintSize(3);"
+                               "$testPrintExtent = TestPrintDlg.extent;");
+        assert(utilityScript->getGlobal("$testPrintExtent").toString() == "550 36");
+        assert(utilityScript->getGlobal("$testPrintMixed").toString() == "550 36|3|36");
+        assert(providerEngine.deleteScriptObject("TestPrintDlg"));
+    }
     utilityScript->execute("new GuiCanvas(TestExtentCanvas) { extent = \"800 600\"; };"
                            "new GuiButtonCtrl(TestCloseButton) { position = \"758 7\"; extent = \"35 22\"; };"
                            "new ShellRadioButton(TestRadioLight) { extent = \"80 30\"; };"

@@ -2086,6 +2086,10 @@ VMValue TorqueScript::Impl::parsePrimary() {
         case TSTokenType::Dollar: {
             TSToken nameTok = nextToken();
             lastVarName = "$" + nameTok.text;
+            // A new variable is not the target of an earlier obj.field in
+            // the same expression; a stale target made "$a[%i]" read a field.
+            lastFieldObj.clear();
+            lastFieldName.clear();
 
             // Handle namespace::variable syntax ($Host::TimeLimit)
             while (peekToken().type == TSTokenType::Colon && peekToken(1).type == TSTokenType::Colon) {
@@ -2127,6 +2131,8 @@ VMValue TorqueScript::Impl::parsePrimary() {
         case TSTokenType::Percent: {
             TSToken nameTok = nextToken();
             lastVarName = nameTok.text;
+            lastFieldObj.clear();
+            lastFieldName.clear();
             // Function call: %name(args) - treat as function call
             if (peekToken().type == TSTokenType::LParen) {
                 nextToken();
@@ -2303,6 +2309,8 @@ VMValue TorqueScript::Impl::parsePrimary() {
             // Variable reference: check locals then globals
             {
                 lastVarName = name;
+                lastFieldObj.clear();
+                lastFieldName.clear();
                 VMValue lv = locals.get(name);
                 if (lv.type != VMValue::None) return lv;
                 if (auto indexed = globalIndex.find(toLower(name)); indexed != globalIndex.end()) {
