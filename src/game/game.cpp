@@ -12138,6 +12138,12 @@ bool Game::playDemo(const char* path) {
     Console::instance().printf(LogLevel::Info, "  InitBlock: %u bytes", (unsigned)hdr.initialBlockSize);
     Console::instance().printf(LogLevel::Info, "  Mission: %s", ib.missionName.empty() ? "(unknown)" : ib.missionName.c_str());
 
+    // The recording's saved client state (saveDemoSettings' $DemoValue[n])
+    // is available to the scripts as soon as the demo is loaded.
+    if (auto* ts = Engine::instance().script().ts())
+        for (size_t i = 0; i < ib.demoValues.size(); ++i)
+            ts->setGlobal("$DemoValue[" + std::to_string(i) + "]", VMValue(ib.demoValues[i]));
+
     // A recording starts from a mid-match snapshot, so it may contain player
     // score messages without replaying the original ClientJoin events. Seed
     // the stock message.cs roster from that snapshot before playback invokes
