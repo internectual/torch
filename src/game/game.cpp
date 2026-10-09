@@ -10923,10 +10923,13 @@ void Game::startLocalGame(const char* map, std::vector<MisObject>* sceneObjects)
         : w->load(missionPath.c_str());
     w->sceneDataBlocks = nullptr;
     if (worldLoaded) {
-        // Training missions end on death; stock multiplayer missions respawn.
-        // Update this only after a successful load so a rejected replacement
-        // cannot change the active mission's lifecycle rules.
-        missionRespawn = stockMissionRules(missionPath).respawn;
+        // SinglePlayer missions (the training set) end on death; the
+        // mission's own MissionTypes header says which it is. Update this only
+        // after a successful load so a rejected replacement cannot change the
+        // active mission's lifecycle rules.
+        std::string missionText;
+        Engine::instance().fs().readTextFile(missionPath.c_str(), missionText);
+        missionRespawn = !missionIsSinglePlayer(parseMissionMetadata(missionPath, missionText));
         // Assign the local player's mission team before respawn selects a
         // team-specific SpawnSphere. Otherwise a previous online team's
         // replicated value can choose the wrong side during mission start.

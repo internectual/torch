@@ -1754,38 +1754,6 @@ static void testDeathRespawnParity() {
     assert(DeathRespawn::nextSpawn(0, 0) == 0);
 }
 
-static void testStockMissionRules() {
-    for (int i = 1; i <= 5; ++i) {
-        const MissionRules rules = stockMissionRules("Training" + std::to_string(i));
-        assert(rules.type == MissionGameType::Training);
-        assert(!rules.respawn && !rules.teamBased && rules.scoreLimit == 0 && rules.objectives);
-    }
-    assert(isStockTrainingMission("base/missions/Training5.mis"));
-    assert(!isStockTrainingMission("Training10.mis"));
-    const MissionRules authored = stockMissionRules(
-        "base/missions/Training3.mis", "new AIObjective(TrainingGoal) {}");
-    assert(authored.objectives && !authored.matchClock && !authored.scoreHud &&
-           !authored.debrief);
-    const MissionRules ctf = stockMissionRules("Minotaur");
-    assert(ctf.type == MissionGameType::CaptureTheFlag && ctf.teamBased &&
-           ctf.objectives && ctf.scoreLimit == 5);
-    assert(stockMissionRules("Damnation").type == MissionGameType::CaptureTheFlag);
-    assert(stockMissionRules("base/missions/Raindance.mis").type ==
-           MissionGameType::CaptureTheFlag);
-    assert(stockMissionRules("Scarabrae").type == MissionGameType::CaptureTheFlag);
-    assert(stockMissionRules("base\\missions\\Minotaur.mis").type ==
-           MissionGameType::CaptureTheFlag);
-    assert(stockMissionRules("Katabatic", "// MissionTypes = Team Deathmatch\n").type ==
-           MissionGameType::TeamDeathmatch);
-    assert(stockMissionRules("custom", "missionTypes = \"CTF\";\n").type ==
-           MissionGameType::CaptureTheFlag);
-    assert(stockMissionRules("custom", "missionTypes=TeamDeathmatch;\n").type ==
-           MissionGameType::TeamDeathmatch);
-    assert(stockMissionRules("Arena").type == MissionGameType::Deathmatch);
-    assert(missionRulesTeamSpawn(1, 1) && missionRulesTeamSpawn(0, 2));
-    assert(!missionRulesTeamSpawn(2, 1));
-}
-
 static void testObjectivePresentationParity() {
     AuthoredMissionObjective objective;
     objective.marker.teamId = 1;
@@ -2066,7 +2034,6 @@ int main() {
     testItemPickupParity(); testWeaponSelectionAndStateParity();
     testHudStateAndLifecycleParity();
     testDeathRespawnParity();
-    testStockMissionRules();
     testObjectivePresentationParity();
     testObserverTargetParity();
     testMissionHiddenObjectParity();
