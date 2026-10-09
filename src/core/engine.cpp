@@ -2067,7 +2067,11 @@ void Engine::run() {
         if (!gui->isDialogActive("ConsoleDlg")) {
             static bool prevEsc = false;
             bool escDown = plat->input().keysDown[SCANCODE_ESCAPE];
-            if (escDown && !prevEsc && !g->targetFinderOpen()) {
+            // In play, Escape belongs to the ActionMaps (moveMap: escapeFromGame,
+            // the demo's GlobalActionMap: stopDemoPlayback, hudMap: closing a
+            // HUD) and is dispatched with the other bindings below.
+            const bool actionMapsOwnEscape = g->state() == Game::Playing && !g->isMapperMode();
+            if (escDown && !prevEsc && !g->targetFinderOpen() && !actionMapsOwnEscape) {
                 // When a GuiInputCtrl key-capture (e.g. RemapDlg) is active the
                 // key belongs to the capture control: it will be forwarded to
                 // onInputEvent (which cancels on Escape). Don't also pop here or
@@ -2111,21 +2115,6 @@ void Engine::run() {
                         gui->popDialog(dlg->name);
                         break;
                     }
-                } else if (g->state() == Game::Playing && scr && scr->ts() &&
-                           scr->ts()->hasFunction("escapeFromGame")) {
-                    // The stock callback is a GUI-only wrapper around this
-                    // transition. Avoid evaluating its block in the partial
-                    // local TorqueScript runtime; that path can leave the
-                    // parser at the opening brace and crash the client.
-                    if (g->isDemoPlaying() && !g->isLiveClient()) g->stopDemoPlayback();
-                    else {
-                        g->setState(Game::MenuScreen);
-                        g->menu().setActive(false);
-                        if (g->isLiveClient()) g->resetInputState();
-                        gui->clearDialogs();
-                        if (gui->findControl("LobbyGui")) gui->setContent("LobbyGui");
-                        else gui->setContent("LaunchGui");
-                    }
                 } else if (g->isMapperMode()) {
                     // In mapper mode, ESC quits (no pause menu or shell)
                     quit();
@@ -2139,7 +2128,7 @@ void Engine::run() {
                 } // end else (capture not active)
             }
             prevEsc = escDown;
-            if (escDown) plat->input().consumedSc[SCANCODE_ESCAPE] = true;
+            if (escDown && !actionMapsOwnEscape) plat->input().consumedSc[SCANCODE_ESCAPE] = true;
 
             // Shape viewer: left/right arrows to cycle shapes (hold to repeat)
             if (g->isShapeViewerActive()) {
@@ -2448,7 +2437,10 @@ void Engine::run() {
                 if (tsInput && !g->isMapperMode()) {
                     for (const auto& [binding, action] : actionBindingStore()) {
                         const auto& [mapName, device, keyName] = binding;
-                        bool mapActive = mapName == "moveMap" || mapName == "observerMap";
+                        // ActionMap stack: the global map always, others while
+                        // pushed (PlayGui pushes moveMap through updateActionMaps;
+                        // LobbyGui pops it).
+                        bool mapActive = mapName == "GlobalActionMap";
                         if (!mapActive) {
                             if (auto* map = ScriptEngine::instance().findObject(mapName.c_str()))
                                 mapActive = map->internals["__pushed"].toBool();
