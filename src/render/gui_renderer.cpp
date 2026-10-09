@@ -271,6 +271,49 @@ static void syncCheckedFromBoundVariable(GuiControl* ctl) {
         ctl->checked = value.toBool();
 }
 
+// The control's state from its script object's fields (GuiControl's
+// persistent fields); every field is kept for the profile/cursor lookups.
+static void applyScriptFields(GuiControl* ctl, ScriptObject* so) {
+    auto parsePair = [&](const std::string& key, float& a, float& b) {
+        auto fi = so->fields.find(key);
+        if (fi != so->fields.end()) { std::string s = fi->second.toString(); sscanf(s.c_str(), "%f %f", &a, &b); }
+    };
+    parsePair("position", ctl->posX, ctl->posY);
+    parsePair("extent", ctl->extentX, ctl->extentY);
+    auto fi = so->fields.find("text"); if (fi != so->fields.end()) ctl->text = fi->second.toString();
+    fi = so->fields.find("bitmap"); if (fi != so->fields.end()) ctl->bitmap = fi->second.toString();
+    fi = so->fields.find("command"); if (fi != so->fields.end()) ctl->command = fi->second.toString();
+    fi = so->fields.find("altCommand"); if (fi != so->fields.end()) ctl->altCommand = fi->second.toString();
+    fi = so->fields.find("profile"); if (fi != so->fields.end()) ctl->profileName = fi->second.toString();
+    fi = so->fields.find("visible"); if (fi != so->fields.end()) ctl->visible = fi->second.toBool();
+    fi = so->fields.find("groupNum"); if (fi != so->fields.end()) ctl->groupNum = (int)fi->second.toDouble();
+    fi = so->fields.find("id"); if (fi != so->fields.end()) ctl->id = (int)fi->second.toDouble();
+    fi = so->fields.find("sel"); if (fi != so->fields.end()) ctl->checked = fi->second.toBool();
+    fi = so->fields.find("active"); if (fi != so->fields.end()) ctl->active = fi->second.toBool();
+    fi = so->fields.find("variable"); if (fi != so->fields.end()) ctl->variable = fi->second.toString();
+    syncCheckedFromBoundVariable(ctl);
+    fi = so->fields.find("replaceText");
+    if (fi != so->fields.end()) ctl->replaceMenuTextOnSelect = fi->second.toBool();
+    fi = so->fields.find("vScrollBar"); if (fi != so->fields.end()) ctl->vScrollBarMode = fi->second.toString();
+    fi = so->fields.find("hScrollBar"); if (fi != so->fields.end()) ctl->hScrollBarMode = fi->second.toString();
+    for (const auto& [field, value] : so->fields)
+        ctl->fields[field] = value.toString();
+    fi = so->fields.find("range"); if (fi != so->fields.end()) {
+        float lo = 0, hi = 1;
+        sscanf(fi->second.toString().c_str(), "%f %f", &lo, &hi);
+        ctl->sliderMin = lo; ctl->sliderMax = hi;
+    }
+    fi = so->fields.find("ticks"); if (fi != so->fields.end()) ctl->sliderTicks = (int)fi->second.toDouble();
+    fi = so->fields.find("usePlusMinus"); if (fi != so->fields.end()) ctl->usePlusMinus = fi->second.toBool();
+    fi = so->fields.find("noTitleBar"); if (fi != so->fields.end()) ctl->usePlusMinus = !fi->second.toBool(); // repurpose: no titlebar
+    fi = so->fields.find("value"); if (fi != so->fields.end()) {
+        float v = (float)fi->second.toDouble();
+        ctl->hudValue = v;
+        ctl->hudValueSet = true;
+        if (ctl->className.find("Slider") != std::string::npos) ctl->sliderValue = v;
+    }
+}
+
 // Map SDL3 scancodes to the Tribes 2 InputMap key names used by the ActionMap
 // scripts (GuiInputCtrl::onInputEvent, GlobalActionMap.bind etc.).
 static const std::map<int, const char*>& scancodeKeyNameTable() {
@@ -401,39 +444,7 @@ void GuiRenderer::init() {
             }
             ctl->name = obj->name;
             ctl->className = normalizeGuiClassName(obj->className);
-            // Parse "x y" format strings
-            auto parsePair = [&](const std::string& key, float& a, float& b) {
-                auto it = obj->fields.find(key);
-                if (it != obj->fields.end()) {
-                    std::string s = it->second.toString();
-                    sscanf(s.c_str(), "%f %f", &a, &b);
-                }
-            };
-            parsePair("position", ctl->posX, ctl->posY);
-            parsePair("extent", ctl->extentX, ctl->extentY);
-
-            auto it = obj->fields.find("text");
-            if (it != obj->fields.end()) ctl->text = it->second.toString();
-            it = obj->fields.find("bitmap");
-            if (it != obj->fields.end()) ctl->bitmap = it->second.toString();
-            it = obj->fields.find("command");
-            if (it != obj->fields.end()) ctl->command = it->second.toString();
-            it = obj->fields.find("altCommand");
-            if (it != obj->fields.end()) ctl->altCommand = it->second.toString();
-            it = obj->fields.find("profile");
-            if (it != obj->fields.end()) ctl->profileName = it->second.toString();
-            it = obj->fields.find("visible");
-            if (it != obj->fields.end()) ctl->visible = it->second.toBool();
-            it = obj->fields.find("groupNum"); if (it != obj->fields.end()) ctl->groupNum = (int)it->second.toDouble();
-            it = obj->fields.find("id"); if (it != obj->fields.end()) ctl->id = (int)it->second.toDouble();
-            it = obj->fields.find("sel"); if (it != obj->fields.end()) ctl->checked = it->second.toBool();
-            it = obj->fields.find("variable"); if (it != obj->fields.end()) ctl->variable = it->second.toString();
-            syncCheckedFromBoundVariable(ctl);
-            it = obj->fields.find("replaceText");
-            if (it != obj->fields.end()) ctl->replaceMenuTextOnSelect = it->second.toBool();
-            it = obj->fields.find("active"); if (it != obj->fields.end()) ctl->active = it->second.toBool();
-            it = obj->fields.find("vScrollBar"); if (it != obj->fields.end()) ctl->vScrollBarMode = it->second.toString();
-            it = obj->fields.find("hScrollBar"); if (it != obj->fields.end()) ctl->hScrollBarMode = it->second.toString();
+            applyScriptFields(ctl, obj);
 
             controlMap[name] = ctl;
 
@@ -505,26 +516,7 @@ void GuiRenderer::refresh() {
             if (!ctl) { ctl = new GuiControl; slot = ctl; }
             else if (ctl->parent) { continue; }
             ctl->name = obj->name; ctl->className = normalizeGuiClassName(obj->className);
-            auto parsePair = [&](const std::string& key, float& a, float& b) {
-                auto it = obj->fields.find(key);
-                if (it != obj->fields.end()) { std::string s = it->second.toString(); sscanf(s.c_str(), "%f %f", &a, &b); }
-            };
-            parsePair("position", ctl->posX, ctl->posY);
-            parsePair("extent", ctl->extentX, ctl->extentY);
-            auto it = obj->fields.find("text"); if (it != obj->fields.end()) ctl->text = it->second.toString();
-            it = obj->fields.find("bitmap"); if (it != obj->fields.end()) ctl->bitmap = it->second.toString();
-            it = obj->fields.find("command"); if (it != obj->fields.end()) ctl->command = it->second.toString();
-            it = obj->fields.find("altCommand"); if (it != obj->fields.end()) ctl->altCommand = it->second.toString();
-            it = obj->fields.find("profile"); if (it != obj->fields.end()) ctl->profileName = it->second.toString();
-            it = obj->fields.find("visible"); if (it != obj->fields.end()) ctl->visible = it->second.toBool();
-            it = obj->fields.find("id"); if (it != obj->fields.end()) ctl->id = (int)it->second.toDouble();
-            it = obj->fields.find("groupNum"); if (it != obj->fields.end()) ctl->groupNum = (int)it->second.toDouble();
-            it = obj->fields.find("sel"); if (it != obj->fields.end()) ctl->checked = it->second.toBool();
-            it = obj->fields.find("variable"); if (it != obj->fields.end()) ctl->variable = it->second.toString();
-            syncCheckedFromBoundVariable(ctl);
-            it = obj->fields.find("replaceText"); if (it != obj->fields.end()) ctl->replaceMenuTextOnSelect = it->second.toBool();
-            it = obj->fields.find("vScrollBar"); if (it != obj->fields.end()) ctl->vScrollBarMode = it->second.toString();
-            it = obj->fields.find("hScrollBar"); if (it != obj->fields.end()) ctl->hScrollBarMode = it->second.toString();
+            applyScriptFields(ctl, obj);
             if (ctl->className == "GuiCanvas") canvas = ctl;
             bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl";
             if (!ctl->command.empty() && isClickable) { std::string cmd = ctl->command; ctl->onClick = [cmd]() { Console::instance().execute(cmd.c_str()); }; }
@@ -1604,17 +1596,9 @@ static void drawPopupDropdownList(Renderer& r, GuiControl* ctl, float x, float y
 
 static std::pair<float, float> guiControlLocalPosition(const GuiControl* ctl) {
     if (!ctl) return {0.0f, 0.0f};
-    float x = ctl->posX;
-    float y = ctl->posY;
-    if (ctl->parent) {
-        const auto horiz = ctl->fields.find("horizSizing");
-        const auto vert = ctl->fields.find("vertSizing");
-        if (horiz != ctl->fields.end() && horiz->second == "right")
-            x = ctl->parent->extentX - ctl->extentX - ctl->posX;
-        if (vert != ctl->fields.end() && vert->second == "bottom")
-            y = ctl->parent->extentY - ctl->extentY - ctl->posY;
-    }
-    return {x, y};
+    // Positions are parent-relative; horizSizing/vertSizing only change
+    // them when the parent is resized (GuiControl::parentResized).
+    return {ctl->posX, ctl->posY};
 }
 
 static std::pair<float, float> guiControlAbsolutePosition(const GuiControl* ctl,
@@ -5498,46 +5482,7 @@ GuiControl* GuiRenderer::soToGui(const std::string& handle, GuiControl* parent) 
     createdControls()[lowerKey(name)] = ctl;
     ctl->name = so->name;
     ctl->className = normalizeGuiClassName(so->className);
-    auto parsePair = [&](const std::string& key, float& a, float& b) {
-        auto fi = so->fields.find(key);
-        if (fi != so->fields.end()) { std::string s = fi->second.toString(); sscanf(s.c_str(), "%f %f", &a, &b); }
-    };
-    parsePair("position", ctl->posX, ctl->posY);
-    parsePair("extent", ctl->extentX, ctl->extentY);
-    auto fi = so->fields.find("text"); if (fi != so->fields.end()) ctl->text = fi->second.toString();
-    fi = so->fields.find("bitmap"); if (fi != so->fields.end()) ctl->bitmap = fi->second.toString();
-    fi = so->fields.find("command"); if (fi != so->fields.end()) ctl->command = fi->second.toString();
-    fi = so->fields.find("altCommand"); if (fi != so->fields.end()) ctl->altCommand = fi->second.toString();
-    fi = so->fields.find("profile"); if (fi != so->fields.end()) ctl->profileName = fi->second.toString();
-    fi = so->fields.find("visible"); if (fi != so->fields.end()) ctl->visible = fi->second.toBool();
-    fi = so->fields.find("groupNum"); if (fi != so->fields.end()) ctl->groupNum = (int)fi->second.toDouble();
-    fi = so->fields.find("id"); if (fi != so->fields.end()) ctl->id = (int)fi->second.toDouble();
-    fi = so->fields.find("sel"); if (fi != so->fields.end()) ctl->checked = fi->second.toBool();
-    fi = so->fields.find("active"); if (fi != so->fields.end()) ctl->active = fi->second.toBool();
-    fi = so->fields.find("variable"); if (fi != so->fields.end()) ctl->variable = fi->second.toString();
-    syncCheckedFromBoundVariable(ctl);
-    fi = so->fields.find("replaceText");
-    if (fi != so->fields.end()) ctl->replaceMenuTextOnSelect = fi->second.toBool();
-    for (const auto& [field, value] : so->fields)
-        ctl->fields[field] = value.toString();
-    fi = so->fields.find("range"); if (fi != so->fields.end()) {
-        float lo = 0, hi = 1;
-        sscanf(fi->second.toString().c_str(), "%f %f", &lo, &hi);
-        ctl->sliderMin = lo; ctl->sliderMax = hi;
-    }
-    fi = so->fields.find("ticks"); if (fi != so->fields.end()) ctl->sliderTicks = (int)fi->second.toDouble();
-    fi = so->fields.find("usePlusMinus"); if (fi != so->fields.end()) ctl->usePlusMinus = fi->second.toBool();
-    fi = so->fields.find("noTitleBar"); if (fi != so->fields.end()) ctl->usePlusMinus = !fi->second.toBool(); // repurpose: no titlebar
-    fi = so->fields.find("value"); if (fi != so->fields.end()) {
-        float v = (float)fi->second.toDouble();
-        ctl->hudValue = v;
-        ctl->hudValueSet = true;
-        if (ctl->className.find("Slider") != std::string::npos) ctl->sliderValue = v;
-        if (ctl->className == "GuiProgressCtrl" || ctl->className.find("Hud") == 0) {
-            ctl->hudValue = v;
-            ctl->hudValueSet = true;
-        }
-    }
+    applyScriptFields(ctl, so);
     if (ctl->className == "GuiCanvas") canvas = ctl;
     bool isClickable = ctl->className.find("Button") != std::string::npos || ctl->className == "GuiCheckBoxCtrl" || ctl->className == "GuiRadioCtrl" || ctl->className == "ShellTabButton" || ctl->className == "GuiTextEditCtrl";
     if (!ctl->command.empty() && isClickable) {
