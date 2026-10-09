@@ -2136,17 +2136,24 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             lineRanges.push_back({si, sj});
             si = sj;
         }
-        float lineY = y + 2;
-        // GuiMessageVectorCtrl::lineInserted keeps a bottom-scrolled view at
-        // the bottom: an overflowing vector shows its newest lines.
-        if (cn == "GuiMessageVectorCtrl") {
-            // The visible bottom is the enclosing scroll view's when it ends
-            // above the control's.
-            float bottom = y + ctl->extentY;
-            if (clip) bottom = std::min(bottom, clip->y + clip->h);
-            const float total = (float)lineRanges.size() * (float)font->charHeight;
-            if (y + 2 + total > bottom) lineY = bottom - total;
+        // GuiMessageVectorCtrl (autoSizeHeight): the control is as tall as
+        // its wrapped lines, and a view scrolled to the bottom stays there as
+        // lines arrive (lineInserted) -- its position inside the scroll
+        // content is the scroll offset pageUp/DownMessageHud adjust.
+        if (cn == "GuiMessageVectorCtrl" && prof &&
+            VMValue(prof->fields.count("autoSizeHeight") ? prof->fields.at("autoSizeHeight").toString() : "").toBool()) {
+            const int contentH = (int)lineRanges.size() * font->charHeight + 4;
+            const int oldH = (int)ctl->extentY;
+            if (contentH != oldH && ctl->parent) {
+                const int viewH = (int)ctl->parent->extentY;
+                const int oldY = (int)ctl->posY;
+                const bool atBottom = oldY + oldH <= viewH + 1;
+                const int newY = atBottom ? std::min(0, viewH - contentH) : oldY;
+                GuiRenderer::resizeControl(ctl, (int)ctl->posX, newY, (int)ctl->extentX, contentH);
+                y += (float)(newY - oldY);
+            }
         }
+        float lineY = y + 2;
         for (const auto& [si, sj] : lineRanges) {
             if (lineY < y) { lineY += (float)font->charHeight; continue; } // scrolled off the top
             // Determine line width for justification
