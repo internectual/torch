@@ -2375,7 +2375,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             const float top = y + (ctl->extentY - rowH * scale) * 0.5f;
             auto draw = [&](int row, float dx, float dw) {
                 const auto& c = cells[row];
-                drawTexRegion(r, cbTex, (float)c[0], row * rowH + (float)c[1], (float)c[2], (float)c[3],
+                // A stretched tile samples between its edge texel centres so
+                // filtering never blends in the transparent neighbours.
+                const float inset = dw > c[2] * scale + 0.5f ? 0.5f : 0.0f;
+                drawTexRegion(r, cbTex, (float)c[0] + inset, row * rowH + (float)c[1],
+                              (float)c[2] - 2.0f * inset, (float)c[3],
                               dx, top + c[1] * scale, dw, c[3] * scale);
             };
             const auto& box = cells[ctl->checked ? 1 : 0];
