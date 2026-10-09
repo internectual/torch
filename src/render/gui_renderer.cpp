@@ -3488,24 +3488,31 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 }
             }
         } else if (cn == "HudClock") {
-            // Clock: top-center of HUD
-            if (hf) {
-                std::string timeStr = "00:00";
-                auto* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
-                if (sobj) {
-                    auto ti = sobj->fields.find("text");
-                    if (ti != sobj->fields.end()) timeStr = ti->second.toString();
-                }
-                const int liveMs = Engine::instance().game().liveClockRemainingMs();
-                if (liveMs > 0 && Engine::instance().game().isConnected()) {
-                    const int totalSeconds = liveMs / 1000;
-                    char liveTime[32];
-                    snprintf(liveTime, sizeof(liveTime), "%02d:%02d",
-                             totalSeconds / 60, totalSeconds % 60);
-                    timeStr = liveTime;
-                }
-                float tw = hf->measure(timeStr.c_str()).x;
-                hf->render(timeStr.c_str(), x + (ctl->extentX - tw) * 0.5f, y + 2, {0.5f,1,0.5f,0.9f}, 1.5f);
+            // HudClock: its bitmap, then the minutes:seconds left (setTime)
+            // centred in its subRegion in the profile's font and colour.
+            const std::string bitmapName = GuiShared::field(*ctl, "bitmap", ctl->bitmap);
+            if (!bitmapName.empty())
+                if (Texture* tex = GuiShared::bitmap(bitmapName); tex && tex->loaded)
+                    drawTexRegion(r, tex, 0, 0, (float)tex->width, (float)tex->height,
+                                  x, y, ctl->extentX, ctl->extentY);
+            auto* clockProfile = getProfile(ctl->profileName);
+            Font* clockFont = getProfileFont(clockProfile);
+            if (clockFont) {
+                int secondsLeft = 0;
+                auto end = ctl->fields.find("clockEndSeconds");
+                if (end != ctl->fields.end())
+                    secondsLeft = std::max(0, (int)std::ceil(std::atof(end->second.c_str()) -
+                                                             Engine::instance().timer().now()));
+                char timeText[32];
+                snprintf(timeText, sizeof(timeText), "%02d:%02d", secondsLeft / 60, secondsLeft % 60);
+                float rx = 0, ry = 0, rw = ctl->extentX, rh = ctl->extentY;
+                const std::string region = GuiShared::field(*ctl, "subRegion");
+                if (!region.empty()) sscanf(region.c_str(), "%f %f %f %f", &rx, &ry, &rw, &rh);
+                ColorF colors[10];
+                profileFontColors(clockProfile, colors);
+                const float tw = clockFont->measure(timeText).x;
+                drawTextN(clockFont, timeText, x + rx + std::floor((rw - tw) / 2.0f),
+                          y + ry + std::floor((rh - (float)clockFont->charHeight) / 2.0f), colors);
             }
         } else if (cn == "HudZoom") {
             const int width = Engine::instance().platform().width();

@@ -1070,7 +1070,6 @@ public:
     const std::string& getLiveMissionName() const { return liveMissionName; }
     const std::string& liveMissionDisplayName() const { return liveMissionDisplayName_; }
     const std::string& liveMissionType() const { return liveMissionType_; }
-    int liveClockRemainingMs() const;
     const std::vector<std::string>& liveLoadInfoLines() const { return liveLoadInfoLines_; }
     size_t getLiveTargetCount() const { return liveTargets.size(); }
     const V12::ServerEvent::TargetInfo* getLiveTarget(uint16_t id) const {
@@ -1316,8 +1315,6 @@ private:
     bool liveMatchEnded_ = false;
     std::string liveMissionDisplayName_;
     std::string liveMissionType_;
-    int liveClockDurationMs_ = 0;
-    double liveClockReceivedAt_ = 0.0;
     std::vector<std::string> liveLoadInfoLines_;
     // Ghost index assigned by server for this client's player
     uint32_t serverPlayerGhostIndex = 0;

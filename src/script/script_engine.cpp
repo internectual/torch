@@ -6631,18 +6631,26 @@ bool ScriptEngine::init() {
         }
         return VMValue(1);
     });
+    // HudClock::setTime(minutes): the clock counts down from it;
+    // getTime returns the minutes left.
     tsInstance->registerNative("setTime", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() >= 2) {
             auto* ctl = getListCtrl(args[0].toString());
             if (ctl) {
-                const int totalSeconds = std::max(0, args[1].toInt());
-                char timeText[32];
-                snprintf(timeText, sizeof(timeText), "%02d:%02d",
-                         totalSeconds / 60, totalSeconds % 60);
-                ctl->text = timeText;
+                const double minutes = args[1].toDouble();
+                const double endSeconds = Engine::instance().timer().now() + minutes * 60.0;
+                ctl->fields["clockEndSeconds"] = std::to_string(endSeconds);
             }
         }
         return VMValue(1);
+    });
+    tsInstance->registerNative("getTime", [getListCtrl](const auto& args) -> VMValue {
+        auto* ctl = args.empty() ? nullptr : getListCtrl(args[0].toString());
+        if (!ctl) return VMValue(0);
+        auto end = ctl->fields.find("clockEndSeconds");
+        if (end == ctl->fields.end()) return VMValue(0);
+        const double left = std::atof(end->second.c_str()) - Engine::instance().timer().now();
+        return VMValue((float)std::max(0.0, left / 60.0));
     });
     tsInstance->registerNative("setSeparators", [getListCtrl](const auto& args) -> VMValue {
         if (args.size() >= 2) {

@@ -11139,8 +11139,6 @@ void Game::connectToServer(const char* host, uint16_t port) {
             liveMatchEnded_ = false;
             liveMissionDisplayName_.clear();
             liveMissionType_.clear();
-            liveClockDurationMs_ = 0;
-            liveClockReceivedAt_ = 0.0;
             liveLoadInfoLines_.clear();
             liveSpectateInit = false;
             spectateGhostIndex = -1;
@@ -11256,8 +11254,6 @@ void Game::connectToServer(const char* host, uint16_t port) {
                 liveMatchEnded_ = true;
                 Engine::instance().platform().setRelativeMouse(false);
                 Engine::instance().platform().showMouse(true);
-                liveClockDurationMs_ = 0;
-                liveClockReceivedAt_ = 0.0;
                 clearProjectileAudio();
                 clearMissionAudio();
                 if (w) w->clearEffects();
@@ -11267,15 +11263,11 @@ void Game::connectToServer(const char* host, uint16_t port) {
             if (argv.size() >= 2 && argv[1] == "MsgMissionStart") {
                 liveMatchStarted_ = true;
                 liveMatchEnded_ = false;
-                liveClockDurationMs_ = 0;
-                liveClockReceivedAt_ = 0.0;
                 return;
             }
             if (argv.size() >= 2 && argv[1] == "MsgClientReady") {
                 liveMatchStarted_ = false;
                 liveMatchEnded_ = false;
-                liveClockDurationMs_ = 0;
-                liveClockReceivedAt_ = 0.0;
                 return;
             }
             if (argv.size() >= 5 && argv[1] == "MsgMissionDropInfo") {
@@ -11284,11 +11276,6 @@ void Game::connectToServer(const char* host, uint16_t port) {
                     resetLiveMissionState();
                 liveMissionDisplayName_ = argv[2];
                 liveMissionType_ = argv[3];
-                return;
-            }
-            if (argv.size() >= 4 && argv[1] == "MsgSystemClock") {
-                liveClockDurationMs_ = std::max(0, atoi(argv[3].c_str()));
-                liveClockReceivedAt_ = Engine::instance().timer().now();
                 return;
             }
             if (argv.size() >= 2 && argv[1] == "MsgLoadInfo") {
@@ -11805,12 +11792,6 @@ void Game::connectToServer(const char* host, uint16_t port) {
             disconnectedCleanup();
         }
       }
-}
-
-int Game::liveClockRemainingMs() const {
-    if (liveClockDurationMs_ <= 0 || liveClockReceivedAt_ <= 0.0) return 0;
-    const double elapsed = Engine::instance().timer().now() - liveClockReceivedAt_;
-    return std::max(0, liveClockDurationMs_ - (int)(elapsed * 1000.0));
 }
 
 static std::string extractMapName(const std::string& missionPath) {
@@ -13126,8 +13107,6 @@ void Game::disconnectedCleanup() {
     liveMatchEnded_ = false;
     liveMissionDisplayName_.clear();
     liveMissionType_.clear();
-    liveClockDurationMs_ = 0;
-    liveClockReceivedAt_ = 0.0;
     liveLoadInfoLines_.clear();
     liveSpectateInit = false;
     spectateGhostIndex = -1;
@@ -13168,8 +13147,6 @@ void Game::resetLiveMissionState() {
     liveMatchEnded_ = false;
     liveMissionDisplayName_.clear();
     liveMissionType_.clear();
-    liveClockDurationMs_ = 0;
-    liveClockReceivedAt_ = 0.0;
     liveLoadInfoLines_.clear();
     liveSpectateInit = false;
     liveSpectateRespawned = false;
