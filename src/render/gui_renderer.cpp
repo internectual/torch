@@ -2459,7 +2459,10 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
         }
         if (font) {
-            const std::string& display = ctl->text;
+            // GuiTextEditCtrl 'password': one '*' per character.
+            const std::string passwordField = GuiShared::field(*ctl, "password");
+            const bool masked = passwordField == "1" || strcasecmp(passwordField.c_str(), "true") == 0;
+            const std::string display = masked ? std::string(ctl->text.size(), '*') : ctl->text;
             float sc = font->defaultScale;
             float textH = font->charHeight * sc;
             float textY = y + (ctl->extentY - textH) * 0.5f;
@@ -2470,7 +2473,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             ef->render(display.c_str(), x + textOffX, textY, tc, 1.0f);
             // Cursor when focused
             if (ctl == gr->getFocused()) {
-                float preW = ef->measure(ctl->text.substr(0, ctl->cursorPos).c_str(), 1.0f).x;
+                float preW = ef->measure(display.substr(0, ctl->cursorPos).c_str(), 1.0f).x;
                 r.drawRectFill({x + textOffX + preW, textY, 0}, {x + textOffX + preW + 2, textY + textH, 0}, {1,1,1,1});
             }
         }
