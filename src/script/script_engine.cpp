@@ -2555,6 +2555,10 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("isDemoPlaying", [](const auto&) -> VMValue {
         return VMValue(ScriptEngine::instance().isDemoPlaying() ? 1 : 0);
     });
+    // The retail engine's name for the same state (commanderMap.cs).
+    tsInstance->registerNative("isPlayingDemo", [](const auto&) -> VMValue {
+        return VMValue(ScriptEngine::instance().isDemoPlaying() ? 1 : 0);
+    });
     tsInstance->registerNative("isServer", [](const auto&) -> VMValue {
         return VMValue(ScriptEngine::instance().isServer() ? 1 : 0);
     });

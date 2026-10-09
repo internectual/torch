@@ -289,6 +289,12 @@ void registerSimNatives(TorqueScript& ts) {
         if (!args.empty()) NetStrings::remove(NetStrings::tagId(args[0].toString()));
         return VMValue("");
     });
+    // getTag('tag'): the tagged string's id (commanderMap.cs keys its
+    // entry types by it).
+    ts.registerNative("getTag", [](const std::vector<VMValue>& args) -> VMValue {
+        if (args.empty() || !NetStrings::isTag(args[0].toString())) return VMValue(0);
+        return VMValue((int32_t)NetStrings::tagId(args[0].toString()));
+    });
     ts.registerNative("getTaggedString", [](const std::vector<VMValue>& args) -> VMValue {
         const std::string* text = args.empty() ? nullptr : NetStrings::lookup(NetStrings::tagId(args[0].toString()));
         return VMValue(text ? *text : std::string());
