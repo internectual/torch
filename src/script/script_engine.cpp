@@ -4544,6 +4544,21 @@ bool ScriptEngine::init() {
                 // A declared (nested) parent link gives way to real membership.
                 childObject->internals.erase("parent");
                 ScriptEngine::instance().addToSet(group, childObject);
+                // A GuiControl is its own SimGroup: a control added to one
+                // (objectiveHud.add(new GuiTextCtrl() {...})) is its child.
+                if (Engine::instance().hasGuiRenderer() &&
+                    EngineClasses::isA(group->className, "GuiControl") &&
+                    EngineClasses::isA(childObject->className, "GuiControl")) {
+                    GuiControl* parentCtl = getListCtrl(args[0].toString());
+                    GuiControl* childCtl = getListCtrl(args[1].toString());
+                    if (parentCtl && childCtl && childCtl != parentCtl && childCtl->parent != parentCtl) {
+                        if (childCtl->parent) {
+                            auto& siblings = childCtl->parent->children;
+                            siblings.erase(std::remove(siblings.begin(), siblings.end(), childCtl), siblings.end());
+                        }
+                        parentCtl->addChild(childCtl);
+                    }
+                }
                 return VMValue(1);
             }
         }
