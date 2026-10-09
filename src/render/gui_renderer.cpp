@@ -186,6 +186,15 @@ static std::unordered_map<std::string, GuiControl*>& createdControls() {
     return m;
 }
 
+// Controls are registered by their object's id: names need not be unique
+// (inventoryHud.cs makes every row's popup 'INV_Menu'), and a name
+// resolves to the newest object that has it.
+static std::string controlKey(const std::string& handle) {
+    if (ScriptObject* object = ScriptEngine::instance().findObject(handle.c_str()))
+        return ScriptEngine::instance().objectKey(object);
+    return lowerKey(handle);
+}
+
 static void callGuiChildLifecycle(GuiControl* root, const char* suffix) {
     if (!root) return;
     auto* ts = Engine::instance().script().ts();
@@ -318,6 +327,11 @@ static void applyScriptFields(GuiControl* ctl, ScriptObject* so) {
 
 // GuiControl::parentResized: horizSizing/vertSizing move or stretch the
 // control by how much its parent's extent changed.
+ScriptObject* GuiControl::scriptObject() const {
+    const std::string& key = scriptKey.empty() ? name : scriptKey;
+    return key.empty() ? nullptr : ScriptEngine::instance().findObject(key.c_str());
+}
+
 // The engine class of a control (the renderer normalizes some Shell classes).
 static std::string scriptClassOf(const GuiControl* ctl) {
     if (!ctl) return {};
@@ -509,7 +523,7 @@ void GuiRenderer::init() {
         const std::string name = obj->name.empty() ? objKey : obj->name;
         if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
-            GuiControl*& slot = createdControls()[lowerKey(name)];
+            GuiControl*& slot = createdControls()[ScriptEngine::instance().objectKey(obj)];
             GuiControl* ctl = slot;
             if (ctl) {
                 // Adopt an existing (possibly ghost) instance: detach from any
@@ -592,8 +606,8 @@ void GuiRenderer::refresh() {
         const std::string name = obj->name.empty() ? objKey : obj->name;
             if (obj->className.find("Gui") == 0 || obj->className.find("Shell") == 0 || obj->className.find("Hud") == 0 || obj->className == "GameTSCtrl" ||
             obj->className == "VirtualScrollCtrl" || obj->className == "VirtualScrollContentCtrl") {
-            if (findControl(name)) continue;
-            GuiControl*& slot = createdControls()[lowerKey(name)];
+            if (createdControls().count(ScriptEngine::instance().objectKey(obj))) continue;
+            GuiControl*& slot = createdControls()[ScriptEngine::instance().objectKey(obj)];
             GuiControl* ctl = slot;
             if (!ctl) { ctl = new GuiControl; slot = ctl; }
             else if (ctl->parent) { continue; }
@@ -1520,7 +1534,7 @@ void GuiRenderer::launchPopupGeometry(const GuiControl* lm, float x, float y,
 void GuiRenderer::tabLayoutParams(const GuiControl* grp, float& maxTabW, float& tabSpacing) {
     maxTabW = 150.f; tabSpacing = 2.f;
     if (!grp) return;
-    if (ScriptObject* so = ScriptEngine::instance().findObject(grp->name.c_str())) {
+    if (ScriptObject* so = grp->scriptObject()) {
         auto mtw = so->fields.find("maxTabWidth");
         if (mtw != so->fields.end()) maxTabW = (float)mtw->second.toDouble();
         auto tsp = so->fields.find("tabSpacing");
@@ -2290,7 +2304,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         std::string bmpPath;
         auto* prof = getProfile(ctl->profileName);
         // Support useVariable: bitmap path from a console variable
-        auto* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
+        auto* sobj = ctl->scriptObject();
         if (sobj) {
             auto uv = sobj->fields.find("useVariable");
             if (uv != sobj->fields.end() && uv->second.toBool()) {
@@ -4489,7 +4503,7 @@ void GuiRenderer::updateFades(float dt) {
 
         // Parse fadeTime from control (default 2000 ms)
         float fadeTime = 2.0f;
-        auto* obj = ScriptEngine::instance().findObject(dlg->name.c_str());
+        auto* obj = dlg->scriptObject();
         if (obj) {
             auto fi = obj->fields.find("fadeTime");
             if (fi != obj->fields.end())
@@ -4577,7 +4591,7 @@ GuiControl* GuiRenderer::hitTestTop(int mx, int my) {
     // only blocks lower layers when it is modal — modeless shells like
     // LaunchToolbarDlg must let clicks fall through their transparent areas.
     auto modalRoot = [](GuiControl* dlg) {
-        ScriptObject* so = ScriptEngine::instance().findObject(dlg->name.c_str());
+        ScriptObject* so = dlg->scriptObject();
         if (!so) return false;
         auto mi = so->fields.find("modal");
         return mi != so->fields.end() && mi->second.toBool();
@@ -5608,7 +5622,7 @@ void GuiRenderer::handleKeyboard() {
         // button, which leaked keystrokes into unrelated responders.
         if (input.keysDown[SCANCODE_RETURN] && !prevEnter && !dialogStack.empty()) {
             auto accOf = [](GuiControl* c) {
-                ScriptObject* so = ScriptEngine::instance().findObject(c->name.c_str());
+                ScriptObject* so = c->scriptObject();
                 if (!so) return std::string();
                 auto it = so->fields.find("accelerator");
                 return it == so->fields.end() ? std::string() : it->second.toString();
@@ -5656,13 +5670,13 @@ void GuiRenderer::handleKeyboard() {
 
 // Create a GuiControl from a ScriptObject (and recursively create children)
 GuiControl* GuiRenderer::soToGui(const std::string& handle, GuiControl* parent) {
-    const std::string name = ScriptEngine::instance().nameOrId(handle);
-    ScriptObject* so = ScriptEngine::instance().findObject(name.c_str());
+    ScriptObject* so = ScriptEngine::instance().findObject(handle.c_str());
+    const std::string key = so ? ScriptEngine::instance().objectKey(so) : std::string();
     if (!so || !(so->className.find("Gui") == 0 || so->className.find("Shell") == 0 || so->className.find("Hud") == 0 || so->className == "GameTSCtrl"))
         return nullptr;
     // Canonical identity: reuse the registered instance if one exists.
     {
-        GuiControl*& reg = createdControls()[lowerKey(name)];
+        GuiControl*& reg = createdControls()[key];
         if (reg) {
             GuiControl* ctl = reg;
             if (parent && canvas && ctl->parent == canvas) {
@@ -5680,7 +5694,7 @@ GuiControl* GuiRenderer::soToGui(const std::string& handle, GuiControl* parent) 
         }
     }
     GuiControl* ctl = new GuiControl;
-    createdControls()[lowerKey(name)] = ctl;
+    createdControls()[key] = ctl;
     ctl->name = so->name;
     ctl->className = normalizeGuiClassName(so->className);
     applyScriptFields(ctl, so);
@@ -5720,7 +5734,7 @@ void GuiRenderer::pushDialog(const std::string& name) {
                 settingsCloseButtonWasVisible_ = closeButton->visible;
                 settingsCloseButtonCaptured_ = true;
                 closeButton->visible = false;
-                if (auto* script = ScriptEngine::instance().findObject(closeButton->name.c_str()))
+                if (auto* script = closeButton->scriptObject())
                     script->fields["visible"] = VMValue(0);
             }
         }
@@ -5887,7 +5901,7 @@ void GuiRenderer::restoreSettingsCloseButton() {
     if (!settingsCloseButtonCaptured_) return;
     if (GuiControl* closeButton = findControl("LaunchToolbarCloseButton")) {
         closeButton->visible = settingsCloseButtonWasVisible_;
-        if (auto* script = ScriptEngine::instance().findObject(closeButton->name.c_str()))
+        if (auto* script = closeButton->scriptObject())
             script->fields["visible"] = VMValue(settingsCloseButtonWasVisible_ ? 1 : 0);
     }
     settingsCloseButtonCaptured_ = false;
@@ -6069,8 +6083,17 @@ GuiControl* GuiRenderer::findControl(const std::string& handle) {
     const std::string name = ScriptEngine::instance().nameOrId(handle);
     {
         auto& reg = createdControls();
-        auto it = reg.find(lowerKey(name));
+        auto it = reg.find(controlKey(handle));
         if (it != reg.end()) return it->second;
+        // A script object's control is registered under its id; another
+        // object's control that shares its name is not it.
+        if (ScriptObject* object = ScriptEngine::instance().findObject(handle.c_str());
+            object && !object->name.empty()) {
+            const std::string objectKey = ScriptEngine::instance().objectKey(object);
+            for (const auto& [key, ctl] : reg)
+                if (ctl && key != objectKey && strcasecmp(ctl->name.c_str(), object->name.c_str()) == 0)
+                    return nullptr;
+        }
     }
     // Pushed dialogs are roots of the dialog stack, NOT children of the
     // canvas — search them first, otherwise every TS method call
@@ -6096,7 +6119,11 @@ bool GuiRenderer::removeControl(const std::string& name) {
         if (!current) return;
         const auto children = current->children;
         for (auto* child : children) destroy(child);
-        createdControls().erase(lowerKey(current->name));
+        {
+            auto& reg = createdControls();
+            for (auto it = reg.begin(); it != reg.end();)
+                it = it->second == current ? reg.erase(it) : std::next(it);
+        }
         lastPushed.erase(current->name);
         onAddCalled.erase(current->name);
         if (s_behaviorsAwake.erase(current) && current->behavior && current->behavior->awake) {

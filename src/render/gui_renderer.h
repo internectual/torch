@@ -108,6 +108,7 @@ inline HorizontalSlice horizontalSlice(int width, int states, int state) {
 struct GuiControl {
     std::string name;
     std::string scriptKey; // the script object this control mirrors
+    struct ScriptObject* scriptObject() const; // by scriptKey, else name
     std::string className;
     float posX = 0, posY = 0;
     float extentX = 100, extentY = 30;

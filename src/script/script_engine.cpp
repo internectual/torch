@@ -3907,7 +3907,7 @@ bool ScriptEngine::init() {
         if (!args.empty())
             if (auto* ctl = Engine::instance().guiRenderer().findControl(args[0].toString())) {
                 ctl->visible = true;
-                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                if (auto* obj = ctl->scriptObject())
                     obj->fields["visible"] = VMValue("1");
             }
         return VMValue(1);
@@ -3918,7 +3918,7 @@ bool ScriptEngine::init() {
                 ctl->visible = false;
                 if (Engine::instance().guiRenderer().getFocused() == ctl)
                     Engine::instance().guiRenderer().makeFirstResponder(ctl->name, false);
-                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                if (auto* obj = ctl->scriptObject())
                     obj->fields["visible"] = VMValue("0");
             }
         return VMValue(1);
@@ -4640,7 +4640,7 @@ bool ScriptEngine::init() {
         bool makeInactive = args.size() > 3 && args[3].toDouble() != 0;
         int id = (int)ctl->tabs.size();
         ctl->tabs.push_back({txt, !makeInactive});
-        auto* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
+        auto* sobj = ctl->scriptObject();
         if (sobj) {
             std::string gk = "gui[" + std::to_string(id) + "]";
             sobj->fields[gk] = VMValue(gui);
@@ -4659,7 +4659,7 @@ bool ScriptEngine::init() {
         for (int i = 0; i < (int)ctl->tabs.size(); ++i) {
             if (ctl->tabs[i].active) {
                 ctl->selectedTab = i;
-                auto* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
+                auto* sobj = ctl->scriptObject();
                 if (sobj) {
                     std::string gk = "gui[" + std::to_string(i) + "]";
                     auto gi = sobj->fields.find(gk);
@@ -4689,7 +4689,7 @@ bool ScriptEngine::init() {
         std::string gui = args[1].toString();
         std::string key = args[2].toString();
         int idx = -1;
-        auto* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
+        auto* sobj = ctl->scriptObject();
         if (sobj) {
             for (int i = 0; i < (int)ctl->tabs.size(); ++i) {
                 std::string gk = "gui[" + std::to_string(i) + "]";
@@ -4843,7 +4843,7 @@ bool ScriptEngine::init() {
             }
         }
         if (foundIdx < 0 && !guiArg.empty()) {
-            auto* sobj = ScriptEngine::instance().findObject(ctl->name.c_str());
+            auto* sobj = ctl->scriptObject();
             if (sobj) {
                 for (int i = 0; i < (int)ctl->tabs.size(); ++i) {
                     std::string gk = "gui[" + std::to_string(i) + "]";
@@ -5030,7 +5030,7 @@ bool ScriptEngine::init() {
                 ctl->visible = args[1].toBool();
                 if (!ctl->visible && Engine::instance().guiRenderer().getFocused() == ctl)
                     Engine::instance().guiRenderer().makeFirstResponder(ctl->name, false);
-                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                if (auto* obj = ctl->scriptObject())
                     obj->fields["visible"] = VMValue(ctl->visible ? "1" : "0");
                 return VMValue(1);
             }
@@ -5761,7 +5761,7 @@ bool ScriptEngine::init() {
                 ctl->active = args[1].toBool();
                 if (!ctl->active && Engine::instance().guiRenderer().getFocused() == ctl)
                     Engine::instance().guiRenderer().makeFirstResponder(ctl->name, false);
-                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                if (auto* obj = ctl->scriptObject())
                     obj->fields["active"] = VMValue(ctl->active ? "1" : "0");
                 return VMValue(1);
             }
@@ -5843,7 +5843,7 @@ bool ScriptEngine::init() {
                 }
                 else
                     ctl->text = args[1].toString();
-                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                if (auto* obj = ctl->scriptObject())
                     obj->fields["value"] = VMValue(args[1].toString());
             }
         }
@@ -5855,7 +5855,7 @@ bool ScriptEngine::init() {
         if (!ctl) return VMValue(0);
         ctl->replaceMenuTextOnSelect = args[1].toBool();
         ctl->fields["replaceText"] = args[1].toString();
-        if (auto* object = ScriptEngine::instance().findObject(ctl->name.c_str()))
+        if (auto* object = ctl->scriptObject())
             object->fields["replaceText"] = VMValue(args[1].toString());
         return VMValue(1);
     });
@@ -6193,7 +6193,7 @@ bool ScriptEngine::init() {
             auto* ctl = getListCtrl(args[0].toString());
             if (ctl) {
                 ctl->bitmap = args[1].toString();
-                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                if (auto* obj = ctl->scriptObject())
                     obj->fields["bitmap"] = VMValue(ctl->bitmap);
             }
         }
@@ -6324,7 +6324,7 @@ bool ScriptEngine::init() {
             auto* ctl = getListCtrl(args[0].toString());
             if (ctl) {
                 ctl->profileName = args[1].toString();
-                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                if (auto* obj = ctl->scriptObject())
                     obj->fields["profile"] = VMValue(ctl->profileName);
             }
         }
@@ -6561,7 +6561,7 @@ bool ScriptEngine::init() {
             auto* ctl = getListCtrl(args[0].toString());
             if (ctl) {
                 ctl->text = args[1].toString();
-                if (auto* obj = ScriptEngine::instance().findObject(ctl->name.c_str()))
+                if (auto* obj = ctl->scriptObject())
                     obj->fields["text"] = VMValue(ctl->text);
             }
         }
