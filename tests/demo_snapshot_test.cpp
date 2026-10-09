@@ -68,22 +68,46 @@ int main(int argc, char** argv) {
     {
         // collectMove admits at most MaxMoveQueueSize + 1 unacknowledged
         // moves; past that the recorded input history is discarded for good.
+        using PlayerPrediction::Move;
+        auto moves = [](int n) { return std::vector<Move>(n); };
         RecordedMoveQueue q;
-        q.reset(100, 10);
+        q.reset(100, moves(10));
         CHECK(q.available && q.nextMoveId == 110);
-        for (int i = 0; i < 36; ++i) CHECK(q.admit());
+        for (int i = 0; i < 36; ++i) CHECK(q.admit(Move{}));
         CHECK(q.nextMoveId - q.lastMoveAck == RecordedMoveQueue::MaxPending);
         q.acknowledge(120);
-        CHECK(q.admit());
+        CHECK(q.admit(Move{}));
         RecordedMoveQueue full;
-        full.reset(0, 46);
+        full.reset(0, moves(46));
         CHECK(full.available);
-        CHECK(!full.admit());
+        CHECK(!full.admit(Move{}));
         full.acknowledge(40);
-        CHECK(!full.available && !full.admit());
+        CHECK(!full.available && !full.admit(Move{}));
         RecordedMoveQueue overflow;
-        overflow.reset(0, 47);
+        overflow.reset(0, moves(47));
         CHECK(!overflow.available);
+    }
+
+    {
+        // GameConnection's client move list: each tick the control object
+        // processes the moves after the last one it processed; a control
+        // object update rewinds that to the server's ack so the
+        // unacknowledged moves replay from the server's state.
+        using PlayerPrediction::Move;
+        auto move = [](float x) { Move m; m.x = x; return m; };
+        RecordedMoveQueue q;
+        q.reset(10, {move(1), move(2)});
+        CHECK(q.takeClientMoves().empty());
+        CHECK(q.admit(move(3)) && q.admit(move(4)));
+        auto taken = q.takeClientMoves();
+        CHECK(taken.size() == 2 && taken[0].x == 3 && taken[1].x == 4);
+        q.acknowledge(12);
+        CHECK(q.moves.size() == 2 && q.firstMoveIndex == 12);
+        CHECK(q.admit(move(5)));
+        q.controlObjectUpdated();
+        taken = q.takeClientMoves();
+        CHECK(taken.size() == 3 && taken[0].x == 3 && taken[2].x == 5);
+        CHECK(q.takeClientMoves().empty());
     }
 
     {

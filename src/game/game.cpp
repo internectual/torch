@@ -12494,19 +12494,19 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
     // A recording's move queue follows collectMove's admission limit; a live
     // connection's moves are the local client's own (GameConnection queues
     // and acknowledges them).
-    if (moveBlock.size >= 64 && (demoLive || demoParser->moveQueue().admit())) {
+    if (moveBlock.size >= 64) {
         const DemoMove move = demoParser->readRawMove(moveBlock.data.data(), moveBlock.data.size());
         recorderMove.x = move.x; recorderMove.y = move.y; recorderMove.z = move.z;
         recorderMove.yaw = move.yaw; recorderMove.pitch = move.pitch; recorderMove.roll = move.roll;
         recorderMove.freeLook = move.freeLook;
         for (int i = 0; i < 6; ++i) recorderMove.trigger[i] = move.trigger[i];
-        haveRecorderMove = true;
+        haveRecorderMove = demoLive || demoParser->moveQueue().admit(recorderMove);
     }
     const auto& blocks = demoParser->getInitialBlock().dataBlocks;
     auto& tracker = demoParser->getGhostTracker();
     // Static shapes are in the player's collision mask (StaticShapeObjectType
-    // | StaticTSObjectType). Their hulls are rebuilt only when a ghost's shape
-    // or placement changes.
+    // | StaticTSObjectType). Their hulls are rebuilt only when a ghost's shape,
+    // placement or collision meshes' pose changes.
     std::vector<const StaticShapeHull*> hulls;
     for (auto it = staticShapeHulls.begin(); it != staticShapeHulls.end();)
         it = tracker.getGhost(it->first) ? std::next(it) : staticShapeHulls.erase(it);
@@ -12581,9 +12581,13 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
         if (block == blocks.end() || !block->second.decoded.isPlayerData) continue;
         const auto& data = block->second.decoded.playerPhysics;
         auto& state = g->prediction;
+        // A recording's control object takes its packet data as is
+        // (Player::readPacketData) and replays the unacknowledged moves.
+        const bool replaysMoves = index == controlGhostIndex && !demoLive;
         if (g->predictionUpdate != g->playerUpdates) {
-            const auto update = index == controlGhostIndex
-                ? PlayerPrediction::interpolatedAnchor(g->playerUpdate) : g->playerUpdate;
+            auto update = g->playerUpdate;
+            if (replaysMoves) update.allowWarp = false;
+            else if (index == controlGhostIndex) update = PlayerPrediction::interpolatedAnchor(update);
             PlayerPrediction::unpackUpdate(state, data, update, g->predictionUpdate < 0,
                                            update.headInRadians);
             if (g->predictionUpdate < 0 && !g->playerUpdate.hasEnergy)
@@ -12597,6 +12601,13 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
         // the recorder is predicted without its retained move.
         if (recorder && !demoLive && !demoParser->moveQueue().available) state.move = {};
         state.allowFreelook = recorder && ((state.mounted && g->mountNode == 0) || !demoRecordedFirstPerson);
+        if (replaysMoves && demoParser->moveQueue().available) {
+            // ProcessList::advanceObjects: the control object processes each
+            // move from the last one it processed.
+            for (const PlayerPrediction::Move& move : demoParser->moveQueue().takeClientMoves())
+                PlayerPrediction::processTick(state, data, getGravity(), &move, 0.0f, demoPlayerCollision, gather, water);
+            continue;
+        }
         PlayerPrediction::processTick(state, data, getGravity(), recorder && haveRecorderMove ? &recorderMove : nullptr,
                                       0.0f, demoPlayerCollision, gather, water);
     }
@@ -12710,6 +12721,7 @@ void Game::applyDemoPacketView(const PacketData& pd) {
                         pd.gameState.controlPlayer.hasEnergy)) {
             control->playerUpdate = pd.gameState.controlPlayer;
             ++control->playerUpdates;
+            if (pd.gameState.controlPlayer.hasPosition) demoParser->moveQueue().controlObjectUpdated();
             control->prediction.jumpDelay = pd.gameState.controlJumpDelay;
             control->prediction.jumpSurfaceLastContact = pd.gameState.controlJumpSurfaceLastContact;
             control->prediction.disableMove = pd.gameState.controlDisableMove;

@@ -870,7 +870,13 @@ bool DemoParser::readInitialBlock(const uint8_t* data, size_t size, uint32_t pro
     initialBlock.queuedMoves.clear();
     for (uint32_t i = 0; i < moveCount; ++i)
         initialBlock.queuedMoves.push_back(readQueuedMove(bs));
-    moveQueue_.reset(initialBlock.connectionFields[4], initialBlock.queuedMoves.size());
+    {
+        std::vector<PlayerPrediction::Move> queued;
+        for (const QueuedMove& m : initialBlock.queuedMoves)
+            queued.push_back(PlayerPrediction::unclampMove((int)m.px, (int)m.py, (int)m.pz, m.pyaw, m.ppitch,
+                                                            m.proll, m.freeLook, m.trigger));
+        moveQueue_.reset(initialBlock.connectionFields[4], std::move(queued));
+    }
     initialBlock.demoValues = readDemoValues(bs);
     extractMissionInfo();
     readComplexTargetManager(bs);

@@ -1001,27 +1001,51 @@ struct DemoPendingBlowUp {
 // that, and the recorded input history is then unusable.
 struct RecordedMoveQueue {
     static constexpr uint32_t MaxPending = 46; // GameConnection::MaxMoveQueueSize + 1
-    uint32_t lastMoveAck{}, nextMoveId{};
+    // GameConnection's client move list: moves firstMoveIndex..nextMoveId,
+    // the server's ack, and the next move the control object processes.
+    std::vector<PlayerPrediction::Move> moves;
+    uint32_t firstMoveIndex{}, lastMoveAck{}, lastClientMove{}, nextMoveId{};
     bool available{true};
-    void reset(uint32_t firstMoveIndex, size_t queued) {
-        lastMoveAck = firstMoveIndex;
-        nextMoveId = firstMoveIndex + (uint32_t)queued;
+    // The start block's move list, already processed by the client.
+    void reset(uint32_t firstMoveIndexIn, std::vector<PlayerPrediction::Move> queued) {
+        moves = std::move(queued);
+        firstMoveIndex = lastMoveAck = firstMoveIndexIn;
+        nextMoveId = lastClientMove = firstMoveIndexIn + (uint32_t)moves.size();
         available = true;
         validate(0);
     }
+    // GameConnection::readPacket: acknowledged moves leave the list.
     void acknowledge(uint32_t ack) {
         lastMoveAck = std::max(lastMoveAck, ack);
-        nextMoveId = std::max(nextMoveId, ack);
+        if (lastMoveAck < firstMoveIndex) lastMoveAck = firstMoveIndex;
+        if (lastMoveAck > lastClientMove) lastClientMove = lastMoveAck;
+        nextMoveId = std::max(nextMoveId, lastMoveAck);
+        const uint32_t drop = std::min<uint32_t>(lastMoveAck - firstMoveIndex, (uint32_t)moves.size());
+        moves.erase(moves.begin(), moves.begin() + drop);
+        firstMoveIndex = lastMoveAck;
     }
+    // A control object update: the client replays its unacknowledged moves.
+    void controlObjectUpdated() { lastClientMove = lastMoveAck; }
     void validate(uint32_t incoming) {
         if (available && nextMoveId + incoming - lastMoveAck > MaxPending) available = false;
     }
-    // A recorded Move block: true when the move is admitted to the queue.
-    bool admit() {
+    // A recorded Move block (GameConnection::collectMove): true when the
+    // move is admitted to the list.
+    bool admit(const PlayerPrediction::Move& move) {
         validate(1);
         if (!available) return false;
+        if (nextMoveId - firstMoveIndex == moves.size()) moves.push_back(move);
         ++nextMoveId;
         return true;
+    }
+    // GameConnection::getMoveList: the moves the control object processes
+    // this tick (clearMoves then marks them processed).
+    std::vector<PlayerPrediction::Move> takeClientMoves() {
+        std::vector<PlayerPrediction::Move> out;
+        const uint32_t from = std::max(lastClientMove, firstMoveIndex) - firstMoveIndex;
+        if (from < moves.size()) out.assign(moves.begin() + from, moves.end());
+        lastClientMove = nextMoveId;
+        return out;
     }
 };
 
