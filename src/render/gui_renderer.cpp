@@ -2146,10 +2146,12 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                             styleStack.pop_back();
                         }
                     }
-                    else if (tag.rfind("clip:", 0) == 0) {
+                    else if (tag.rfind("clip:", 0) == 0 || tag.rfind("clip%:", 0) == 0) {
                         flushSpan(spans, cur);
+                        const bool pct = tag[4] == '%';
+                        const float v = (float)atof(tag.substr(pct ? 6 : 5).c_str());
                         cur.clipId = nextClip++;
-                        cur.clipW = (float)atof(tag.substr(5).c_str());
+                        cur.clipW = pct ? mlWidth * v / 100.0f : v;
                     }
                     else if (tag == "/clip") { flushSpan(spans, cur); cur.clipId = -1; cur.clipW = 0; }
                     else if (tag.rfind("tab:", 0) == 0) {
@@ -2255,7 +2257,9 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         for (int si = 0; si < (int)spans.size(); ++si) {
             const RichSpan& sp = spans[si];
             if (sp.kind == 1) { finishLine(); pen = sp.lmargin; continue; }
-            if (sp.kind == 3) { if (pen < sp.lmargin) pen = sp.lmargin; continue; }
+            // A margin set before anything is on the line starts the line
+            // there; later on the line it only moves the pen forward.
+            if (sp.kind == 3) { if (mlLine.empty() || pen < sp.lmargin) pen = sp.lmargin; continue; }
             if (sp.kind == 2) {
                 float next = -1;
                 if (sp.tabSet >= 0)
