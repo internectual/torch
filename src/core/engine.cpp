@@ -2435,7 +2435,11 @@ void Engine::run() {
                 static std::map<std::tuple<std::string, int, std::string>, bool>
                     previousActionBindings;
                 if (tsInput && !g->isMapperMode()) {
-                    for (const auto& [binding, action] : actionBindingStore()) {
+                    // A bound command may bind or unbind (demoPlaybackComplete
+                    // unbinds the demo keys from inside the escape binding), so
+                    // walk a copy of the bindings.
+                    const auto bindingsSnapshot = actionBindingStore();
+                    for (const auto& [binding, action] : bindingsSnapshot) {
                         const auto& [mapName, device, keyName] = binding;
                         // ActionMap stack: the global map always, others while
                         // pushed (PlayGui pushes moveMap through updateActionMaps;
@@ -2566,6 +2570,9 @@ void Engine::run() {
                             tsInput->execute(command);
                         else if (tsInput->hasFunction(command))
                             tsInput->callFunction(command, {VMValue(down ? 1 : 0)});
+                        // A command that left play (escape: stopDemoPlayback)
+                        // ends this frame's game input.
+                        if (g->state() == Game::MenuScreen) break;
                     }
                 }
                 const bool scriptInput = false;
