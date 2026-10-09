@@ -919,7 +919,15 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
             result.nodes[i].name = "node" + std::to_string(i);
     }
 
-    // Build detail levels with meshIndices (same as v19+ path)
+    // Build detail levels with meshIndices (same as v19+ path): a detail's
+    // meshes come from its subshape's objects, which run to the next
+    // subshape's first object.
+    auto inSubShape = [&](int32_t subShape, int32_t object) {
+        if (subShape < 0) return true; // a billboard draws its source detail
+        if (subShape >= numSubShapes) return false;
+        const int32_t end = subShape + 1 < numSubShapes ? subFirstObj[subShape + 1] : numObjects;
+        return object >= subFirstObj[subShape] && object < end;
+    };
     for (int i = 0; i < numDetails; i++) {
         if (details[i].sz < 0.0f) {
             DTSLoadResult::UtilityDetail utility;
@@ -927,7 +935,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
                 utility.name = names[details[i].nameIdx];
             const int32_t od = details[i].objDetail;
             for (int j = 0; j < numObjects; j++)
-                if (od >= 0 && od < objs[j].nm && objs[j].sm + od >= 0 &&
+                if (inSubShape(details[i].sub, j) && od >= 0 && od < objs[j].nm && objs[j].sm + od >= 0 &&
                     objs[j].sm + od < (int)result.meshes.size() &&
                     !result.meshes[objs[j].sm + od].vertices.empty())
                     utility.meshIndices.push_back(objs[j].sm + od);
@@ -939,6 +947,7 @@ static DTSLoadResult loadDTSOld(const uint8_t* data, size_t size, const char* na
                 if (dl.size >= 0.0f) {
             int32_t od = details[i].objDetail;
             for (int j = 0; j < numObjects; j++) {
+                if (!inSubShape(details[i].sub, j)) continue;
                 int32_t sm = objs[j].sm;
                 int32_t nm = objs[j].nm;
                 if (od >= 0 && od < nm && sm + od >= 0 && sm + od < (int)result.meshes.size()) {
@@ -1237,13 +1246,20 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
     }
     buf.checkGuard(); // 5
     result.subShapeFirstNode.clear();
+    std::vector<int32_t> subShapeFirstObject(numSubShapes), subShapeNumObjects(numSubShapes);
     for (int i = 0; i < numSubShapes; i++) result.subShapeFirstNode.push_back(capCount(buf.readS32()));
-    for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
+    for (int i = 0; i < numSubShapes; i++) subShapeFirstObject[i] = capCount(buf.readS32());
     for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
     buf.checkGuard(); // 6
     for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
+    for (int i = 0; i < numSubShapes; i++) subShapeNumObjects[i] = capCount(buf.readS32());
     for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
-    for (int i = 0; i < numSubShapes; i++) capCount(buf.readS32());
+    // TSShapeInstance draws and collides a detail with its subshape's
+    // objects only.
+    auto inSubShape = [&](int32_t subShape, int32_t object) {
+        return subShape >= 0 && subShape < numSubShapes && object >= subShapeFirstObject[subShape] &&
+               object < subShapeFirstObject[subShape] + subShapeNumObjects[subShape];
+    };
     buf.checkGuard(); // 7
     std::vector<QuatF> defRot(numNodes);
     std::vector<Point3F> defTrans(numNodes);
@@ -1887,6 +1903,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             DTSLoadResult::UtilityDetail utility;
             if (dl.nameIdx >= 0 && dl.nameIdx < (int)names.size()) utility.name = names[dl.nameIdx];
             for (int i = 0; i < numObjects; i++) {
+                if (!inSubShape(dl.subShape, i)) continue;
                 const int32_t od = dl.objDetail, sm = dtsObjects[i].sm, nm = dtsObjects[i].nm;
                 if (od >= 0 && od < nm && sm + od >= 0 && sm + od < (int)result.meshes.size() &&
                     !result.meshes[sm + od].vertices.empty())
@@ -1909,6 +1926,7 @@ DTSLoadResult loadDTS(const uint8_t* data, size_t size, const char* name) {
             continue;
         }
         for (int i = 0; i < numObjects; i++) {
+            if (!inSubShape(dl.subShape, i)) continue;
             int32_t od = dl.objDetail;
             int32_t sm = dtsObjects[i].sm;
             int32_t nm = dtsObjects[i].nm;
