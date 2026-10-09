@@ -12,6 +12,7 @@
 #include "core/gui_geometry.h"
 #include "game/hud_parity.h"
 #include "script/script_engine.h"
+#include "sim/engine_classes.h"
 #include "script/torquescript.h"
 #include <GL/glew.h>
 #include <algorithm>
@@ -1814,6 +1815,16 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
 
     const std::string& cn = ctl->className;
 
+    // GuiTextCtrl::onPreRender: a control bound to a console variable shows
+    // its value (a text edit being typed in writes it back instead).
+    if (!ctl->variable.empty() && ctl->variable[0] == '$' && ctl != gr->getFocused() &&
+        cn != "GuiCheckBoxCtrl" && cn != "GuiRadioCtrl") {
+        static const std::string textBase = "GuiTextCtrl";
+        if (EngineClasses::isA(scriptClassOf(ctl), textBase))
+            if (auto* ts = Engine::instance().script().ts())
+                ctl->text = ts->getGlobal(ctl->variable).toString();
+    }
+
     // Corrupt-layout guard: orphaned intro/splash dialogs can carry garbage
     // (negative / astronomic) extents from incomplete script parsing; their
     // fills would smear undefined geometry across the whole canvas.
@@ -2448,7 +2459,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                 r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, fc);
         }
         if (font) {
-            std::string display = ctl->text.empty() ? "..." : ctl->text;
+            const std::string& display = ctl->text;
             float sc = font->defaultScale;
             float textH = font->charHeight * sc;
             float textY = y + (ctl->extentY - textH) * 0.5f;
