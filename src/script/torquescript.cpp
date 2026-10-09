@@ -1033,8 +1033,17 @@ void TorqueScript::Impl::skipStatement() {
             skipStatement();
         }
     } else {
-        while (peekToken().type != TSTokenType::Semicolon && peekToken().type != TSTokenType::Eof
-               && peekToken().type != TSTokenType::RBrace && peekToken().type != TSTokenType::Else) {
+        // A simple statement ends at its own ';'. Braces, parentheses and
+        // brackets inside it (an object body in `x = new C() { f = 1; };`,
+        // call arguments) are part of the statement.
+        int depth = 0;
+        while (peekToken().type != TSTokenType::Eof) {
+            const TSTokenType type = peekToken().type;
+            if (depth == 0 && (type == TSTokenType::Semicolon || type == TSTokenType::RBrace ||
+                               type == TSTokenType::Else))
+                break;
+            if (type == TSTokenType::LBrace || type == TSTokenType::LParen || type == TSTokenType::LBracket) depth++;
+            if (type == TSTokenType::RBrace || type == TSTokenType::RParen || type == TSTokenType::RBracket) depth--;
             nextToken();
         }
         if (peekToken().type == TSTokenType::Semicolon) nextToken();
