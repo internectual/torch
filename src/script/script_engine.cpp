@@ -1788,7 +1788,9 @@ bool ScriptEngine::deleteScriptObject(const std::string& name) {
             const std::string block = objectDataBlock(object);
             if (!block.empty() && callsScriptOnAdd(object->className))
                 tsInstance->callObjectMethod(block, "onRemove", {VMValue(object->id)});
-        } else {
+        } else if (!EngineClasses::isA(object->className, "SimDataBlock")) {
+            // A datablock's removal runs no script callback; its namespace
+            // chain would otherwise reach GameBaseData::onRemove(%data, "").
             for (const std::string& space : objectNamespaces(object)) {
                 const std::string callback = space + "::onRemove";
                 if (!tsInstance->hasFunction(callback)) continue;
