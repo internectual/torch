@@ -2440,12 +2440,16 @@ void Engine::run() {
                         // ActionMap stack: the global map always, others while
                         // pushed (PlayGui pushes moveMap through updateActionMaps;
                         // LobbyGui pops it).
+                        // $globalActionMapOnly (set for demo playback): only the
+                        // global map handles input.
                         bool mapActive = mapName == "GlobalActionMap";
-                        if (!mapActive) {
+                        if (!mapActive && !tsInput->getGlobal("$globalActionMapOnly").toBool()) {
                             if (auto* map = ScriptEngine::instance().findObject(mapName.c_str()))
                                 mapActive = map->internals["__pushed"].toBool();
                         }
-                        if (action.cmdOn.empty() || !mapActive) continue;
+                        // bindCmd may have only a break command (the demo's
+                        // escape: "" / "stopDemoPlayback();").
+                        if ((action.cmdOn.empty() && action.cmdOff.empty()) || !mapActive) continue;
                         if (device == 1 && keyName == "zaxis") {
                             const int wheel = plat->input().mouseWheel;
                             if (wheel == 0) continue;
@@ -2539,10 +2543,6 @@ void Engine::run() {
                             ? (down ? action.cmdOn : action.cmdOff)
                             : action.cmdOn;
                         if (command.empty()) continue;
-                        if (command.find("stopDemoPlayback") != std::string::npos) {
-                            if (down && g->isDemoPlaying()) g->stopDemoPlayback();
-                            continue;
-                        }
                         if (command == "nextWeapon" || command == "prevWeapon") {
                             if (down && LiveMovePolicy::shouldMutateLocalWeaponState(
                                     g->isLiveClient())) {
