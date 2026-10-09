@@ -1225,13 +1225,15 @@ VMValue VirtualMachine::execute(DSOFile* dso, uint32_t startIp,
                         }
                         return false;
                     };
-                    if (!findNative(fullName)) {
-                        if (!findNative(name)) { // bare name fallback (e.g. "someField" from "SomeCtrl::someField")
-                            const bool methodCall = op == (uint32_t)DSOOpcode::OP_CALLFUNC;
-                            if (!findDSO(fullName, methodCall) && !findDSO(name, methodCall)) {
-                                Console::instance().printf(LogLevel::Debug, "VM: calling unknown func %s", fullName.c_str());
-                                stack.push(VMValue(0));
-                            }
+                    // A script definition replaces the engine function of
+                    // the same name (Namespace::addFunction), so script
+                    // functions resolve before natives.
+                    const bool methodCall = op == (uint32_t)DSOOpcode::OP_CALLFUNC;
+                    if (!findDSO(fullName, methodCall) && !findNative(fullName)) {
+                        // bare name fallback (e.g. "someField" from "SomeCtrl::someField")
+                        if (!findDSO(name, methodCall) && !findNative(name)) {
+                            Console::instance().printf(LogLevel::Debug, "VM: calling unknown func %s", fullName.c_str());
+                            stack.push(VMValue(0));
                         }
                     }
 
