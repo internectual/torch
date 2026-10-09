@@ -111,7 +111,8 @@ void Camera::setOrbitMode(const std::string& object, const float pos[3], const f
     const auto rotation = parseTransform(text);
     float dir[3];
     column(rotation, 1, dir);
-    setPosition(orbitPosition, dir[0], dir[2]);
+    setPosition(orbitPosition, -std::atan2(dir[2], std::sqrt(dir[0] * dir[0] + dir[1] * dir[1])),
+                -std::atan2(-dir[0], dir[1]));
     minOrbitDist = minDist;
     maxOrbitDist = maxDist;
     curOrbitDist = curDist;
