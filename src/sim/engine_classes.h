@@ -297,6 +297,12 @@ inline const std::unordered_map<std::string, std::string, CaseHash, CaseEqual>& 
         {"ShellTextEditCtrl", "GuiTextEditCtrl"},
         {"ShellTextList", "GuiTextListCtrl"},
         {"ShellToggleButton", "GuiCheckBoxCtrl"},
+        // Parents recovered from the retail binary (tools/retail_rtti_classes.py).
+        {"ShellTabButton", "GuiCheckBoxCtrl"},
+        {"ShellLaunchMenu", "GuiTextCtrl"},
+        {"HudHelpTag", "HudCtrl"},
+        {"GuiPlayerView", "GuiTSCtrl"},
+        {"GuiConsoleVariableCtrl", "GuiControl"},
         {"ShellWindowCtrl", "GuiTextCtrl"},
         {"VirtualScrollCtrl", "GuiScrollCtrl"},
     };
