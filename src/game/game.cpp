@@ -8103,7 +8103,7 @@ void Game::update(float dt) {
                      currentInput.left, currentInput.right,
                      currentInput.jump, currentInput.jet);
                 Point3F fwd = {sinf(yaw)*cosf(pitch), sinf(pitch), cosf(yaw)*cosf(pitch)};
-                Point3F right = {cosf(yaw), 0, -sinf(yaw)};
+                Point3F right = {-cosf(yaw), 0, sinf(yaw)}; // fwd x up: screen right
                 if (currentInput.forward) { freeCamPos.x += fwd.x*camSpeed; freeCamPos.y += fwd.y*camSpeed; freeCamPos.z += fwd.z*camSpeed; }
                 if (currentInput.backward) { freeCamPos.x -= fwd.x*camSpeed; freeCamPos.y -= fwd.y*camSpeed; freeCamPos.z -= fwd.z*camSpeed; }
                 if (currentInput.left) { freeCamPos.x -= right.x*camSpeed; freeCamPos.z -= right.z*camSpeed; }

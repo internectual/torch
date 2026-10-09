@@ -123,9 +123,9 @@ constexpr float clampCameraPitch(float pitch) {
         (pitch > cameraPitchLimit ? cameraPitchLimit : pitch);
 }
 
-// Free-camera yaw uses the same mouse convention as the player camera.
+// Free-camera yaw: mouse right turns toward screen right (fwd x up).
 constexpr float freeCameraYaw(float yaw, float mouseDelta) {
-    return yaw + mouseDelta;
+    return yaw - mouseDelta;
 }
 
 // Free-camera input is a digital 3D direction. Normalize simultaneous

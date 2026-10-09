@@ -1047,7 +1047,7 @@ static void testInputParity() {
     assert(observerCyclePressed(false, true) == true);
     assert(buttonPressed(true, false));
     assert(!buttonPressed(true, true));
-    assert(freeCameraYaw(1.0f, 0.25f) == 1.25f);
+    assert(freeCameraYaw(1.0f, 0.25f) == 0.75f);
     assert(mouseWheelDelta(1.0f) == 1);
     assert(mouseWheelDelta(1.0f, true) == -1);
     assert(mouseWheelDelta(-2.0f, true) == 2);
