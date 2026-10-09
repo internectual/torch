@@ -30,6 +30,7 @@ public:
     static Engine& instance();
     bool hasGame() const { return g != nullptr; }
     bool hasGuiRenderer() const { return gui != nullptr; }
+    bool hasRenderer() const { return ren != nullptr; }
 
     Platform& platform() { return *plat; }
     Console& console() { return *con; }

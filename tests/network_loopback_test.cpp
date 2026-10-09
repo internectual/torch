@@ -293,6 +293,30 @@ int main() {
         assert(radioParent->children[3]->name == "TestRadioHeavy");
         assert(gui.soToGui("TestExtentCanvas", nullptr) == gui.findControl("TestExtentCanvas"));
     }
+    {
+        // A ShellFancyArray list (headerBitmap, rowHeight 19): a click picks
+        // the row drawn under it, below the 16px column header.
+        utilityScript->execute(
+            "new ShellFancyTextList(TestFancyList) { position = \"100 50\"; extent = \"300 200\";"
+            "  headerBitmap = \"gui/server_tabs\"; rowHeight = \"19\"; };"
+            "TestExtentCanvas.add(TestFancyList);");
+        GuiRenderer gui;
+        gui.refresh();
+        GuiControl* list = gui.findControl("TestFancyList");
+        assert(list);
+        list->listColumns.push_back({0, "Name", 300, 300, 300, ""});
+        for (int i = 0; i < 6; ++i) {
+            list->listRows.push_back("row" + std::to_string(i));
+            list->listRowIds.push_back(i);
+        }
+        gui.handleInput(150, 50 + 8, true);                // the header
+        assert(list->selectedRow == -1);
+        gui.handleInput(150, 50 + 16 + 3, true);           // first row
+        assert(list->selectedRow == 0);
+        gui.handleInput(150, 50 + 16 + 19 * 2 + 10, true); // third row
+        assert(list->selectedRow == 2);
+        providerEngine.deleteScriptObject("TestFancyList");
+    }
     for (const char* name : {"TestRadioLight", "TestRadioMedium", "TestRadioHeavy",
                              "TestCloseButton", "TestExtentCanvas"})
         assert(providerEngine.deleteScriptObject(name));

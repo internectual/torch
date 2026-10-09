@@ -1433,6 +1433,23 @@ static bool drawShellNinePatch(Renderer& r, const std::string& base,
 static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canvas,
     float scrollOfsX, float scrollOfsY, const ClipRect* clip);
 
+// A text list's row height and header: a ShellFancyArray (headerBitmap
+// with columns) has a 16px header and rows of its rowHeight; a plain list
+// has font-height rows. Drawing, clicks and the scroll extent share these.
+static float textListRowHeight(const GuiControl& ctl, float* headerH = nullptr) {
+    auto* font = Engine::instance().hasRenderer() ? Engine::instance().renderer().getFont() : nullptr;
+    float lineH = font ? font->charHeight + 2 : 14;
+    float header = 0;
+    if (!GuiShared::field(ctl, "headerBitmap").empty() &&
+        (!ctl.listColumns.empty() || ctl.className == "GuiServerBrowser")) {
+        header = 16.0f;
+        const std::string rowHeight = GuiShared::field(ctl, "rowHeight");
+        if (!rowHeight.empty() && atof(rowHeight.c_str()) > 0) lineH = (float)atof(rowHeight.c_str());
+    }
+    if (headerH) *headerH = header;
+    return lineH;
+}
+
 static void computeContentExtent(GuiControl* ctl) {
     float maxX = 0, maxY = 0;
     auto* font = Engine::instance().renderer().getFont();
@@ -1479,7 +1496,9 @@ static void computeContentExtent(GuiControl* ctl) {
             float srcW = (float)maxLen * 10.0f;
             if (srcW > w) w = srcW;
         } else if (n->className == "GuiListBoxCtrl" || n->className == "GuiTextListCtrl") {
-            float listH = (float)n->listRows.size() * textListLineH;
+            float listHeader = 0;
+            const float listLineH = textListRowHeight(*n, &listHeader);
+            float listH = listHeader + (float)n->listRows.size() * listLineH;
             if (listH > h) h = listH;
         } else if (n->className == "GuiMLTextCtrl") {
             int lines = 1;
@@ -2498,17 +2517,11 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             }
             sp = sp->parent;
         }
-        // Get font height
-        float lineH = font ? font->charHeight + 2 : 14;
         // ShellFancyArray (headerBitmap): a header of column tabs above rows
         // of the list's rowHeight.
-        const std::string headerBitmap = GuiShared::field(*ctl, "headerBitmap");
         float headerH = 0;
-        if (!headerBitmap.empty() && !ctl->listColumns.empty()) {
-            const std::string rowHeight = GuiShared::field(*ctl, "rowHeight");
-            if (!rowHeight.empty() && atof(rowHeight.c_str()) > 0) lineH = (float)atof(rowHeight.c_str());
-            headerH = drawFancyArrayHeader(r, *ctl, headerBitmap, x, y);
-        }
+        float lineH = textListRowHeight(*ctl, &headerH);
+        if (headerH > 0) drawFancyArrayHeader(r, *ctl, GuiShared::field(*ctl, "headerBitmap"), x, y);
         // Get enumerate setting from ScriptObject
         // Draw visible rows
         float viewH = (sp ? sp->extentY : ctl->extentY) - headerH;
@@ -4677,9 +4690,9 @@ GuiControl* GuiRenderer::hitTest(GuiControl* ctl, int mx, int my) {
     float extX = ctl->extentX;
     float extY = ctl->extentY;
     if (ctl->className == "GuiListBoxCtrl" || ctl->className == "GuiTextListCtrl") {
-        auto* font = Engine::instance().renderer().getFont();
-        float lineH = font ? font->charHeight + 2 : 14;
-        extY = std::max(extY, (float)ctl->listRows.size() * lineH);
+        float headerH = 0;
+        const float lineH = textListRowHeight(*ctl, &headerH);
+        extY = std::max(extY, headerH + (float)ctl->listRows.size() * lineH);
     } else if (ctl->className == "GuiConsole") {
         // The console's own extent is unreliable (default 100x30); size its
         // hit area to the enclosing scroll viewport so clicks and the wheel
@@ -4979,20 +4992,24 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             ax += p->posX;
             ay += p->posY;
         }
-        float rowH = 18;
-        int row = (int)((y - ay) / rowH);
+        // The same header and rows as drawn.
+        float headerH = 0;
+        float rowH = textListRowHeight(*hit, &headerH);
+        if (headerH == 0) { headerH = 20; rowH = 18; }
         float hx = ax;
         int col = -1;
         for (size_t ci = 0; ci < hit->sbColumns.size(); ci++) {
             hx += hit->sbColumns[ci].width;
             if (x < hx) { col = ci; break; }
         }
-        if (row == 0 && col >= 0) {
-            if (col == hit->sbSortCol) hit->sbSortInc = !hit->sbSortInc;
-            else { hit->sbSortCol = col; hit->sbSortInc = true; }
-        } else if (row > 0) {
-            int serverIdx = row - 1;
-            if (serverIdx < (int)hit->sbServers.size()) {
+        if (y - ay < headerH) {
+            if (col >= 0) {
+                if (col == hit->sbSortCol) hit->sbSortInc = !hit->sbSortInc;
+                else { hit->sbSortCol = col; hit->sbSortInc = true; }
+            }
+        } else {
+            const int serverIdx = (int)(hit->scrollY / rowH) + (int)((y - ay - headerH) / rowH);
+            if (serverIdx >= 0 && serverIdx < (int)hit->sbServers.size()) {
                 hit->sbSelected = serverIdx;
                 ScriptEngine::instance().executeString(
                     ("GMJ_Browser.onSelect(\"" + hit->sbServers[serverIdx].addr.toString() + "\");").c_str());
@@ -5015,9 +5032,10 @@ bool GuiRenderer::handleInput(int x, int y, bool pressed) {
             }
             sp = sp->parent;
         }
-        auto* font = Engine::instance().renderer().getFont();
-        float lineH = font ? font->charHeight + 2 : 14;
-        int row = (int)((y - ay + scrollY) / lineH);
+        float headerH = 0;
+        const float lineH = textListRowHeight(*hit, &headerH);
+        if (y - ay < headerH) return true; // the column header
+        int row = (int)std::floor((y - ay - headerH + scrollY) / lineH);
         if (row >= 0 && row < (int)hit->listRows.size()) {
             hit->selectedRow = row;
             // Logical id for the row: addRow's id (global mission id) when
