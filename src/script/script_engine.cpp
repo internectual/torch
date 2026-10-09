@@ -4907,12 +4907,23 @@ bool ScriptEngine::init() {
             return VMValue(ctl->listRowIds[ctl->selectedRow]);
         return VMValue(ctl->selectedRow < 0 ? 0 : ctl->selectedRow);
     });
-    tsInstance->registerNative("setSelectedById", [getListCtrl](const auto& args) -> VMValue {
+    // GuiTextListCtrl::setSelectedCell: selecting a row runs the list's
+    // script onSelect(%id, %text), as a click does.
+    auto selectListRow = [](GuiControl* ctl, int row) {
+        ctl->selectedRow = row;
+        if (row < 0 || row >= (int)ctl->listRows.size() || row >= (int)ctl->listRowIds.size()) return;
+        auto* ts = ScriptEngine::instance().ts();
+        const std::string& key = ctl->scriptKey.empty() ? ctl->name : ctl->scriptKey;
+        if (ts && !key.empty())
+            ts->callObjectMethod(key, "onSelect",
+                                 {VMValue(ctl->listRowIds[row]), VMValue(ctl->listRows[row])});
+    };
+    tsInstance->registerNative("setSelectedById", [getListCtrl, selectListRow](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
         if (!ctl || args.size() < 2) return VMValue(0);
         int id = args[1].toInt();
         for (size_t i = 0; i < ctl->listRowIds.size(); i++) {
-            if (ctl->listRowIds[i] == id) { ctl->selectedRow = (int)i; return VMValue(1); }
+            if (ctl->listRowIds[i] == id) { selectListRow(ctl, (int)i); return VMValue(1); }
         }
         return VMValue(0);
     });
@@ -4927,9 +4938,9 @@ bool ScriptEngine::init() {
         }
         return VMValue(std::string(""));
     });
-    tsInstance->registerNative("setSelectedRow", [getListCtrl](const auto& args) -> VMValue {
+    tsInstance->registerNative("setSelectedRow", [getListCtrl, selectListRow](const auto& args) -> VMValue {
         auto* ctl = getListCtrl(args.empty() ? "" : args[0].toString());
-        if (ctl && args.size() >= 2) ctl->selectedRow = args[1].toInt();
+        if (ctl && args.size() >= 2) selectListRow(ctl, args[1].toInt());
         return VMValue(1);
     });
     tsInstance->registerNative("getRowTextById", [getListCtrl](const auto& args) -> VMValue {
