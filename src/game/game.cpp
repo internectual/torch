@@ -11965,15 +11965,11 @@ bool Game::playDemo(const char* path) {
             demoParser = nullptr;
         }
         if (hud) hud->resetState();
+        // playDemo returns false and the caller's script handles it
+        // (StartSelectedDemo: "Playback Failed" over RecordingsDlg); the GUI
+        // is left as it was.
         setState(MenuScreen);
         menu().setActive(false);
-        auto& gui = Engine::instance().guiRenderer();
-        gui.clearDialogs();
-        resetGameplayGui(gui);
-        if (gui.findControl("LobbyGui")) gui.setContentImmediate("LobbyGui");
-        else gui.setContentImmediate("LaunchGui");
-        Engine::instance().platform().setRelativeMouse(false);
-        Engine::instance().platform().showMouse(true);
     };
 
     // Clean up previous parser
