@@ -1145,17 +1145,21 @@ int main() {
     missionGroup->className = "SimGroup";
     missionGroup->name = "MissionGroup";
     script.addObject(missionGroup);
-    assert(natives.at("getfield")({VMValue("TestScriptObject"), VMValue("dynamicValue")}).toString() == "initial");
-    assert(natives.at("getfield")({VMValue("TestScriptObject"), VMValue("DYNAMICVALUE")}).toString() == "initial");
+    assert(natives.at("getfieldvalue")({VMValue("TestScriptObject"), VMValue("dynamicValue")}).toString() == "initial");
+    assert(natives.at("getfieldvalue")({VMValue("TestScriptObject"), VMValue("DYNAMICVALUE")}).toString() == "initial");
     assert(natives.at("getdatafield")({VMValue("TestScriptObject"), VMValue("mass")}).toFloat() == 42.5f);
-    assert(natives.at("setfield")({VMValue("TestScriptObject"), VMValue("dynamicValue"), VMValue("changed")}).toInt() == 1);
+    assert(natives.at("setfieldvalue")({VMValue("TestScriptObject"), VMValue("dynamicValue"), VMValue("changed")}).toInt() == 1);
     assert(testObject->fields["dynamicValue"].toString() == "changed");
     assert(natives.at("getgroup")({VMValue("TestScriptObject")}).toString() == "MissionGroup");
     assert(natives.at("getcount")({VMValue("MissionGroup")}).toInt() == 1);
     assert(natives.at("getname")({VMValue("TestScriptObject")}).toString() == "TestScriptObject");
     assert(natives.at("getfield")({VMValue("a\tb"), VMValue(1)}).toString() == "b");
     assert(natives.at("setfield")({VMValue("a\tb"), VMValue(0), VMValue("x")}).toString() == "x\tb");
-    assert(natives.at("getfield")({VMValue("999"), VMValue("field")}).toString().empty());
+    assert(natives.at("getfield")({VMValue("999"), VMValue("field")}).toString() == "999");
+    // getField is a string function even when the text is an object's id
+    // (inventoryHud.cs: getField(%client.grenadeIndex, %x) with index "5").
+    assert(natives.at("getfield")({VMValue(std::to_string(testObject->id)), VMValue(0)}).toString() ==
+           std::to_string(testObject->id));
     assert(natives.at("getdatafield")({VMValue("42"), VMValue("mass")}).toString().empty());
 
     script.setMissionObjects({

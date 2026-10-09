@@ -2402,17 +2402,15 @@ bool ScriptEngine::init() {
         }
         return VMValue(count);
     };
-    auto getFieldString = [getObjectField](const std::vector<VMValue>& args) -> VMValue {
+    // getField/setField(text, index[, value]) are TAB-field string functions;
+    // a numeric field text ("5") is never an object id.
+    auto getFieldString = [](const std::vector<VMValue>& args) -> VMValue {
         if (args.size() < 2) return VMValue("");
-        int objectId = 0;
-        if (namedScriptObject(args[0].toString()) || providerObjectId(args[0].toString(), objectId))
-            return getObjectField(args);
         const int index = args[1].toInt();
         const auto fields = splitFields(args[0].toString());
         return index >= 0 && index < (int)fields.size() ? VMValue(fields[index]) : VMValue("");
     };
-    auto setFieldValue = [setObjectField](const std::vector<VMValue>& args) -> VMValue {
-        if (args.size() >= 3 && namedScriptObject(args[0].toString())) return setObjectField(args);
+    auto setFieldValue = [](const std::vector<VMValue>& args) -> VMValue {
         if (args.size() < 3) return VMValue("");
         auto fields = splitFields(args[0].toString());
         const int index = args[1].toInt();
