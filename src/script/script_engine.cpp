@@ -4558,7 +4558,13 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
     tsInstance->registerNative("add", [getListCtrl](const auto& args) -> VMValue {
-        if (args.size() >= 2) {
+        // GuiPopUpMenuCtrl::add(text, id) overrides SimSet::add, so a menu
+        // entry whose text is a number ("32" bpp) is never an object id.
+        auto* target = args.empty() ? nullptr : ScriptEngine::instance().findObject(args[0].toString().c_str());
+        const bool menuAdd = target && args.size() >= 3 &&
+            (EngineClasses::isA(target->className, "GuiPopUpMenuCtrl") ||
+             EngineClasses::isA(target->className, "ShellLaunchMenu"));
+        if (args.size() >= 2 && !menuAdd) {
             auto* group = ScriptEngine::instance().findObject(args[0].toString().c_str());
             auto* childObject = ScriptEngine::instance().findObject(args[1].toString().c_str());
             if (group && childObject && ScriptEngine::instance().isSimSet(group)) {
@@ -4568,7 +4574,7 @@ bool ScriptEngine::init() {
                 return VMValue(1);
             }
         }
-        if (args.size() >= 2) {
+        if (args.size() >= 2 && !menuAdd) {
             auto* parent = getListCtrl(args[0].toString());
             auto* child = getListCtrl(args[1].toString());
             if (parent && child && child != parent) parent->addChild(child);
