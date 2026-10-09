@@ -8925,7 +8925,12 @@ void ScriptEngine::registerDataBlock(ScriptObject* object) {
         const VMValue* value = findObjectField(object, "className");
         if (!value || value->toString().empty()) object->fields["className"] = VMValue(object->className);
     }
-    if (object->id < 3 || object->id > 2050) {
+    // A datablock declared with 'datablock' has an id in the datablock
+    // range and joins DataBlockGroup (SimDataBlock::onAdd); one made with
+    // 'new' (commanderMap.cs's CommanderIconData) keeps its dynamic id and
+    // stays out of the group, so deleteDataBlocks leaves it alone.
+    const bool dynamic = object->id > 2050;
+    if (object->id < 3) {
         // The registry key is the id: a registered object moves with it.
         const bool registered = object->id && objects.count(std::to_string(object->id)) &&
                                 objects[std::to_string(object->id)] == object;
@@ -8940,6 +8945,7 @@ void ScriptEngine::registerDataBlock(ScriptObject* object) {
     // bumped it for the static fields the datablock set, so a datablock's
     // key is above a connection's initial 0.
     object->internals["__datablockKey"] = VMValue(++nextDataBlockModifiedKey_);
+    if (dynamic) return;
     ensureEngineGroups();
     if (ScriptObject* group = findObject("DataBlockGroup")) addToSet(group, object);
 }
