@@ -1808,8 +1808,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         } else if (!launchTex && btnTex && btnTex->loaded && btnTex->width > btnTex->height * 2) {
             // Horizontal multi-state strip (e.g. gui/shll_soundbutton 104x27 = 4 states):
             // [normal, hover/rollover, pressed, disabled]
-            const int n = GuiBitmapStatePolicy::horizontalStateCount(
-                btnBitmapPath, btnTex->width, btnTex->height);
+            const int n = GuiBitmapStatePolicy::horizontalStateCount(btnTex->width, (int)ctl->extentX);
             int st = ctl->hovered ? 1 : 0;
             const auto slice = GuiBitmapStatePolicy::horizontalSlice(btnTex->width, n, st);
             drawTexRegion(r, btnTex, slice.x, 0, slice.width, (float)btnTex->height,
