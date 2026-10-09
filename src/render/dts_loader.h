@@ -47,6 +47,7 @@ std::vector<MatrixF> dtsSequencePose(const DTSLoadResult& shape, int sequence, f
 // node's rotation and translation come from the first listed thread whose
 // sequence animates them.
 std::vector<MatrixF> dtsThreadsPose(const DTSLoadResult& shape, const std::vector<std::pair<int, float>>& threads);
+std::vector<MatrixF> dtsThreadsPose(const DTSShape& shape, const std::vector<std::pair<int, float>>& threads);
 // TSShape::importSequences: appends a DSQ's sequences, mapping its nodes to
 // `nodes` by name. A non-empty alias renames the last imported sequence, as
 // TSShapeConstructor does. Returns the number appended, or -1 on failure.

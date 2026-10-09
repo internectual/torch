@@ -2211,7 +2211,8 @@ std::vector<MatrixF> dtsSequencePose(const DTSLoadResult& shape, int sequence, f
     return dtsThreadsPose(shape, {{sequence, position}});
 }
 
-std::vector<MatrixF> dtsThreadsPose(const DTSLoadResult& shape, const std::vector<std::pair<int, float>>& threads) {
+template <class Shape>
+static std::vector<MatrixF> threadsPose(const Shape& shape, const std::vector<std::pair<int, float>>& threads) {
     const int32_t numNodes = (int32_t)shape.nodes.size();
     std::vector<MatrixF> world(numNodes);
     if (numNodes == 0 || shape.defaultLocalTransforms.size() < (size_t)numNodes) return world;
@@ -2267,4 +2268,12 @@ std::vector<MatrixF> dtsThreadsPose(const DTSLoadResult& shape, const std::vecto
         world[i] = parent >= 0 && parent < i ? world[parent] * local : local;
     }
     return world;
+}
+
+std::vector<MatrixF> dtsThreadsPose(const DTSLoadResult& shape, const std::vector<std::pair<int, float>>& threads) {
+    return threadsPose(shape, threads);
+}
+
+std::vector<MatrixF> dtsThreadsPose(const DTSShape& shape, const std::vector<std::pair<int, float>>& threads) {
+    return threadsPose(shape, threads);
 }

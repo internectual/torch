@@ -568,12 +568,11 @@ static float raycastShape(const DTSShape& shape, const MatrixF& renderModel,
 
 // The shape's Collision-1..8 details (ShapeBase::buildConvex uses
 // mShapeInstance's collisionDetails, never LOS-N), in Torque world space with
-// outward face normals. The DTSShape is shared between instances, so its
-// animated pose belongs to whichever instance rendered last; hulls use the
-// default node transforms.
+// outward face normals, posed by the instance's node transforms
+// (ShapeBaseConvex::getPolyList animates the collision detail first).
 static void appendShapeCollisionTriangles(const DTSShape& shape, const MatrixF& renderModel,
+                                          const std::vector<MatrixF>& nodeWorld,
                                           std::vector<PlayerPrediction::Triangle>& out) {
-    const auto& nodeWorld = shape.defaultTransforms;
     auto toTorque = [](const Point3F& p) { return Point3F{p.x, -p.z, p.y}; };
     for (int i = 0; i < 8; ++i) {
         const std::string wanted = "Collision-" + std::to_string(i + 1);
@@ -12516,12 +12515,44 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
         if (!g || !g->shape || !g->hasRenderModel) continue;
         if (!ghostClassIs(g->className, "StaticShape") && !ghostClassIs(g->className, "ScopeAlwaysShape") &&
             !ghostClassIs(g->className, "TSStatic") && !isTurretGhostClass(g->className)) continue;
+        // The ghost's live threads at this time, as rendered.
+        std::vector<std::pair<int, float>> threads;
+        for (int ti = 0; ti < 4; ++ti) {
+            const auto& thread = g->threads[ti];
+            if (!thread.valid || thread.sequence < 0 || thread.sequence >= (int)g->shape->animations.size() ||
+                thread.state == ShapeThreads::Destroy) continue;
+            const auto& clip = g->shape->animations[thread.sequence];
+            if (clip.blend) continue;
+            const float time = ShapeThreads::timeAt(const_cast<GhostEntry*>(g)->threadClocks[ti],
+                {thread.sequence, thread.state, thread.forward, thread.atEnd},
+                demoMatchEnded ? demoMatchEndedAt : demoTime, clip.duration, clip.looping);
+            threads.push_back({thread.sequence, clip.duration > 0.0f ? time / clip.duration : 0.0f});
+        }
         StaticShapeHull& hull = staticShapeHulls[index];
-        if (hull.shape != g->shape || std::memcmp(hull.model.m, g->renderModel.m, sizeof(hull.model.m)) != 0) {
+        const bool placed = hull.shape == g->shape && std::memcmp(hull.model.m, g->renderModel.m, sizeof(hull.model.m)) == 0;
+        if (placed && hull.threads == threads) {
+            if (!hull.tris.empty()) hulls.push_back(&hull);
+            continue;
+        }
+        hull.threads = threads;
+        const std::vector<MatrixF> pose = dtsThreadsPose(*g->shape, threads);
+        std::vector<MatrixF> collisionNodes;
+        for (const auto& detail : g->shape->utilityDetails) {
+            if (strncasecmp(detail.name.c_str(), "Collision-", 10) != 0) continue;
+            for (int32_t mi : detail.meshIndices) {
+                const int node = mi >= 0 && mi < (int)g->shape->meshes.size() ? g->shape->meshes[mi].nodeIndex : -1;
+                collisionNodes.push_back(node >= 0 && node < (int)pose.size() ? pose[node] : MatrixF{});
+            }
+        }
+        const bool moved = collisionNodes.size() != hull.collisionNodes.size() ||
+            !std::equal(collisionNodes.begin(), collisionNodes.end(), hull.collisionNodes.begin(),
+                        [](const MatrixF& a, const MatrixF& b) { return std::memcmp(a.m, b.m, sizeof(a.m)) == 0; });
+        if (!placed || moved) {
             hull.shape = g->shape;
             hull.model = g->renderModel;
+            hull.collisionNodes = std::move(collisionNodes);
             hull.tris.clear();
-            appendShapeCollisionTriangles(*g->shape, g->renderModel, hull.tris);
+            appendShapeCollisionTriangles(*g->shape, g->renderModel, pose, hull.tris);
             hull.lo = {1e30f, 1e30f, 1e30f};
             hull.hi = {-1e30f, -1e30f, -1e30f};
             for (const auto& t : hull.tris)

@@ -1000,6 +1000,10 @@ public:
     struct StaticShapeHull {
         const DTSShape* shape = nullptr;
         MatrixF model;
+        // The live threads (sequence, position) the hull is posed by.
+        std::vector<std::pair<int, float>> threads;
+        // The collision meshes' node transforms in that pose.
+        std::vector<MatrixF> collisionNodes;
         Point3F lo{}, hi{};
         std::vector<PlayerPrediction::Triangle> tris;
     };
