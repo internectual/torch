@@ -2014,7 +2014,13 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         };
         enum class Justify { Left, Center, Right };
         Justify curJust = Justify::Left;
-        struct RichSpan { std::string text; std::string fontName; int fontSize{}; ColorF color{1,1,1,1}; Justify justify{Justify::Left}; bool isLink{}; std::string linkTarget; std::string bitmap; };
+        // kind: 0 text/bitmap, 1 line break, 2 tab, 3 left-margin move.
+        struct RichSpan { std::string text; std::string fontName; int fontSize{}; ColorF color{1,1,1,1}; Justify justify{Justify::Left}; bool isLink{}; std::string linkTarget; std::string bitmap;
+                          int kind = 0; float lmargin = 0; float rmargin = -1; int tabSet = -1;
+                          int clipId = -1; float clipW = 0; };
+        // GuiMLTextCtrl <tab:a,b,...> stop lists, in control pixels.
+        std::vector<std::vector<float>> tabSets;
+        const float mlWidth = std::max(1.0f, ctl->extentX - 4);
         // Flush current span into list
         auto flushSpan = [&](std::vector<RichSpan>& s, RichSpan& c) {
             if (c.text.empty() && c.bitmap.empty()) return;
@@ -2028,6 +2034,8 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         auto parseRich = [&](const std::string& src) -> std::vector<RichSpan> {
             std::vector<RichSpan> spans;
             RichSpan cur;
+            std::vector<RichSpan> styleStack; // <spush>/<spop>: font and color
+            int nextClip = 0;
             cur.fontName = font ? font->fontName : "";
             cur.fontSize = font ? font->fontSize : 12;
             cur.color = curColor;
@@ -2062,16 +2070,61 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                         }
                     }
                     else if (tag == "/a") { flushSpan(spans, cur); cur.isLink = false; cur.linkTarget.clear(); }
+                    else if (tag == "spush") { flushSpan(spans, cur); styleStack.push_back(cur); }
+                    else if (tag == "spop") {
+                        flushSpan(spans, cur);
+                        if (!styleStack.empty()) {
+                            cur.fontName = styleStack.back().fontName;
+                            cur.fontSize = styleStack.back().fontSize;
+                            cur.color = styleStack.back().color;
+                            styleStack.pop_back();
+                        }
+                    }
+                    else if (tag.rfind("clip:", 0) == 0) {
+                        flushSpan(spans, cur);
+                        cur.clipId = nextClip++;
+                        cur.clipW = (float)atof(tag.substr(5).c_str());
+                    }
+                    else if (tag == "/clip") { flushSpan(spans, cur); cur.clipId = -1; cur.clipW = 0; }
+                    else if (tag.rfind("tab:", 0) == 0) {
+                        flushSpan(spans, cur);
+                        std::vector<float> stops;
+                        std::string list = tag.substr(4) + ",";
+                        std::string value;
+                        for (char c : list) {
+                            if (c == ',') { if (!value.empty()) stops.push_back((float)atof(value.c_str())); value.clear(); }
+                            else value += c;
+                        }
+                        tabSets.push_back(std::move(stops));
+                        cur.tabSet = (int)tabSets.size() - 1;
+                    }
+                    else if (tag.rfind("lmargin:", 0) == 0 || tag.rfind("lmargin%:", 0) == 0) {
+                        flushSpan(spans, cur);
+                        const bool pct = tag[7] == '%';
+                        const float v = (float)atof(tag.substr(pct ? 9 : 8).c_str());
+                        cur.lmargin = pct ? mlWidth * v / 100.0f : v;
+                        RichSpan move = cur;
+                        move.text.clear(); move.bitmap.clear(); move.kind = 3;
+                        spans.push_back(move);
+                    }
+                    else if (tag.rfind("rmargin:", 0) == 0 || tag.rfind("rmargin%:", 0) == 0) {
+                        flushSpan(spans, cur);
+                        const bool pct = tag[7] == '%';
+                        const float v = (float)atof(tag.substr(pct ? 9 : 8).c_str());
+                        cur.rmargin = pct ? mlWidth * v / 100.0f : v;
+                    }
                     else if (tag.substr(0, 8) == "BITMAP:") {
                         flushSpan(spans, cur);
                         RichSpan imgSpan;
                         imgSpan.bitmap = tag.substr(8);
                         spans.push_back(imgSpan);
                     }
-                } else if (src[i] == '\n') {
+                } else if (src[i] == '\n' || src[i] == '\t') {
                     flushSpan(spans, cur);
-                    // Add an explicit line break by pushing a zero-width marker
-                    spans.push_back({"\n", "", 0, {0,0,0,0}, Justify::Left, false, "", ""});
+                    RichSpan mark = cur;
+                    mark.text.clear(); mark.bitmap.clear(); mark.isLink = false;
+                    mark.kind = src[i] == '\n' ? 1 : 2;
+                    spans.push_back(mark);
                     i++;
                 } else {
                     // dglDrawTextN colour bytes: 0x2-0x8, 0xb, 0xc, 0xe pick
@@ -2089,8 +2142,7 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     } else if (b == 17) {
                         flushSpan(spans, cur);
                         cur.color = stackColor;
-                    } else if (src[i] == '\t') cur.text += ' ';
-                    else if (b >= 32) cur.text += src[i];
+                    } else if (b >= 32) cur.text += src[i];
                     i++;
                 }
             }
@@ -2098,51 +2150,108 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             return spans;
         };
         auto spans = parseRich(ctl->text);
-        // Render spans
-        float maxW = ctl->extentX - 4;
-        float penX = x + 2;
-        auto breakLine = [&](int si) {
-            float lineW = 0;
-            int sj = si;
-            while (sj < (int)spans.size()) {
-                auto& sp = spans[sj];
-                // Force line break on \n marker
-                if (sp.text == "\n") { sj++; break; }
-                if (!sp.bitmap.empty()) {
-                    Texture* tex = Engine::instance().renderer().loadTexture(sp.bitmap.c_str());
-                    float bw = tex ? (float)tex->width : 0;
-                    if (lineW + bw > maxW) break;
-                    lineW += bw; sj++;
-                    continue;
-                }
-                Font* spf = Engine::instance().renderer().getFont(sp.fontName.c_str(), sp.fontSize);
-                float adv = spf ? spf->measure(sp.text.c_str(), 1.0f).x : (float)sp.text.size() * 8;
-                if (lineW + adv > maxW && lineW > 0) break;
-                // Check for word break
-                auto ws = sp.text.rfind(' ');
-                if (ws != std::string::npos && lineW > 0) {
-                    std::string before = sp.text.substr(0, ws);
-                    float bfW = spf ? spf->measure(before.c_str(), 1.0f).x : (float)before.size() * 8;
-                    if (lineW + bfW > maxW) break;
-                }
-                lineW += adv; sj++;
-            }
-            if (sj == si) sj = si + 1; // at least one span
-            return sj;
+        // GuiMLTextCtrl::reflow: text flows from the left margin and wraps at
+        // the right margin; a tab moves to the next stop; once a line is done
+        // each right/center justified run aligns within its margins.
+        auto spanFont = [&](const RichSpan& sp) -> Font* {
+            Font* f = Engine::instance().renderer().getFont(sp.fontName.c_str(), sp.fontSize);
+            return f ? f : font;
         };
-        std::vector<std::pair<int, int>> lineRanges;
-        for (int si = 0; si < (int)spans.size();) {
-            const int sj = breakLine(si);
-            lineRanges.push_back({si, sj});
-            si = sj;
+        auto textWidth = [&](const RichSpan& sp, const std::string& t) {
+            Font* f = spanFont(sp);
+            return f ? f->measure(t.c_str(), 1.0f).x : (float)t.size() * 8;
+        };
+        struct Placed { int span; float x; float w; std::string text; };
+        std::vector<std::vector<Placed>> mlLines;
+        std::vector<Placed> mlLine;
+        auto rightOf = [&](const RichSpan& sp) { return sp.rmargin >= 0 ? std::min(sp.rmargin, mlWidth) : mlWidth; };
+        auto finishLine = [&]() {
+            for (size_t a = 0; a < mlLine.size();) {
+                const RichSpan& first = spans[mlLine[a].span];
+                size_t b = a + 1;
+                while (b < mlLine.size() && spans[mlLine[b].span].justify == first.justify &&
+                       spans[mlLine[b].span].rmargin == first.rmargin &&
+                       spans[mlLine[b].span].lmargin == first.lmargin)
+                    ++b;
+                const float left = mlLine[a].x, end = mlLine[b - 1].x + mlLine[b - 1].w;
+                float shift = 0;
+                if (first.justify == Justify::Right) shift = rightOf(first) - end;
+                else if (first.justify == Justify::Center)
+                    shift = first.lmargin + (rightOf(first) - first.lmargin - (end - left)) * 0.5f - left;
+                if (shift > 0 || first.justify == Justify::Center)
+                    for (size_t k = a; k < b; ++k) mlLine[k].x += shift;
+                a = b;
+            }
+            mlLines.push_back(std::move(mlLine));
+            mlLine.clear();
+        };
+        float pen = 0;
+        for (int si = 0; si < (int)spans.size(); ++si) {
+            const RichSpan& sp = spans[si];
+            if (sp.kind == 1) { finishLine(); pen = sp.lmargin; continue; }
+            if (sp.kind == 3) { if (pen < sp.lmargin) pen = sp.lmargin; continue; }
+            if (sp.kind == 2) {
+                float next = -1;
+                if (sp.tabSet >= 0)
+                    for (float stop : tabSets[sp.tabSet]) if (stop > pen) { next = stop; break; }
+                pen = next >= 0 ? next : pen + textWidth(sp, " ");
+                continue;
+            }
+            if (!sp.bitmap.empty()) {
+                Texture* tex = Engine::instance().renderer().loadTexture(sp.bitmap.c_str());
+                const float bw = tex ? (float)tex->width : 0;
+                if (pen + bw > rightOf(sp) && !mlLine.empty()) { finishLine(); pen = sp.lmargin; }
+                mlLine.push_back({si, pen, bw, {}});
+                pen += bw;
+                continue;
+            }
+            std::string rest = sp.text;
+            if (sp.clipId >= 0) {
+                // <clip:N>: the clipped run shows only what fits N pixels
+                // past where it started.
+                static thread_local std::map<int, float> clipStart;
+                if (si == 0 || spans[si - 1].clipId != sp.clipId) clipStart[sp.clipId] = pen;
+                const float limit = clipStart[sp.clipId] + sp.clipW - pen;
+                while (!rest.empty() && textWidth(sp, rest) > limit) rest.pop_back();
+                if (!rest.empty()) {
+                    const float w = textWidth(sp, rest);
+                    mlLine.push_back({si, pen, w, rest});
+                    pen += w;
+                }
+                continue;
+            }
+            while (!rest.empty()) {
+                const float room = rightOf(sp) - pen;
+                const float w = textWidth(sp, rest);
+                if (w <= room) { mlLine.push_back({si, pen, w, rest}); pen += w; break; }
+                // Wrap at the last word that fits; a word wider than the
+                // whole line stays on its own line.
+                size_t cut = std::string::npos;
+                for (size_t sp2 = rest.find(' '); sp2 != std::string::npos; sp2 = rest.find(' ', sp2 + 1)) {
+                    if (textWidth(sp, rest.substr(0, sp2)) <= room) cut = sp2;
+                    else break;
+                }
+                if (cut == std::string::npos) {
+                    if (!mlLine.empty()) { finishLine(); pen = sp.lmargin; continue; }
+                    cut = rest.find(' ');
+                    if (cut == std::string::npos) { mlLine.push_back({si, pen, w, rest}); pen += w; break; }
+                }
+                const std::string head = rest.substr(0, cut);
+                mlLine.push_back({si, pen, textWidth(sp, head), head});
+                finishLine();
+                pen = sp.lmargin;
+                rest = rest.substr(cut + 1);
+            }
         }
+        if (!mlLine.empty() || mlLines.empty()) finishLine();
         // GuiMessageVectorCtrl (autoSizeHeight): the control is as tall as
         // its wrapped lines, and a view scrolled to the bottom stays there as
         // lines arrive (lineInserted) -- its position inside the scroll
         // content is the scroll offset pageUp/DownMessageHud adjust.
         if (cn == "GuiMessageVectorCtrl" && prof &&
             VMValue(prof->fields.count("autoSizeHeight") ? prof->fields.at("autoSizeHeight").toString() : "").toBool()) {
-            const int contentH = (int)lineRanges.size() * font->charHeight + 4;
+            const int lineCount = ctl->text.empty() ? 0 : (int)mlLines.size();
+            const int contentH = lineCount * font->charHeight + 4;
             const int oldH = (int)ctl->extentY;
             if (contentH != oldH && ctl->parent) {
                 const int viewH = (int)ctl->parent->extentY;
@@ -2154,47 +2263,26 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
             }
         }
         float lineY = y + 2;
-        for (const auto& [si, sj] : lineRanges) {
-            if (lineY < y) { lineY += (float)font->charHeight; continue; } // scrolled off the top
-            // Determine line width for justification
-            float actualW = 0;
-            for (int k = si; k < sj; k++) {
-                auto& sp = spans[k];
-                if (!sp.bitmap.empty()) {
-                    Texture* tex = Engine::instance().renderer().loadTexture(sp.bitmap.c_str());
-                    actualW += tex ? (float)tex->width : 0;
-                } else {
-                    Font* spf = Engine::instance().renderer().getFont(sp.fontName.c_str(), sp.fontSize);
-                    actualW += spf ? spf->measure(sp.text.c_str(), 1.0f).x : (float)sp.text.size() * 8;
-                }
-            }
-            float lineStartX = x + 2;
-            if (spans[si].justify == Justify::Center) lineStartX = x + (maxW - actualW) * 0.5f;
-            else if (spans[si].justify == Justify::Right) lineStartX = x + maxW - actualW;
-            // Render spans on this line
-            penX = lineStartX;
-            float lineH = (float)font->charHeight;
-            for (int k = si; k < sj; k++) {
-                auto& sp = spans[k];
+        const float lineH = (float)font->charHeight;
+        for (const auto& placedLine : mlLines) {
+            if (lineY < y) { lineY += lineH; continue; } // scrolled off the top
+            for (const Placed& placed : placedLine) {
+                const RichSpan& sp = spans[placed.span];
+                const float px = x + 2 + placed.x;
                 if (!sp.bitmap.empty()) {
                     Texture* tex = Engine::instance().renderer().loadTexture(sp.bitmap.c_str());
                     if (tex && tex->loaded) {
                         float bw = (float)tex->width, bh = (float)tex->height;
-                        Engine::instance().renderer().drawTexturedRectUV({penX, lineY, 0}, {penX+bw, lineY+bh, 0}, tex->id, 0, 0, 1, 1);
-                        penX += bw;
+                        Engine::instance().renderer().drawTexturedRectUV({px, lineY, 0}, {px + bw, lineY + bh, 0}, tex->id, 0, 0, 1, 1);
                     }
                     continue;
                 }
-                Font* spf = Engine::instance().renderer().getFont(sp.fontName.c_str(), sp.fontSize);
-                if (!spf) spf = font;
-                if (spf) {
-                    float lyOff = 0;
-                    if (spf->charHeight < lineH) lyOff = (lineH - spf->charHeight) * 0.5f;
-                    ColorF col = sp.color;
-                    if (sp.isLink) { col = {0.3f, 0.7f, 1, 1}; }
-                    spf->render(sp.text.c_str(), penX, lineY + lyOff, col, 1.0f);
-                    penX += spf->measure(sp.text.c_str(), 1.0f).x;
-                }
+                Font* spf = spanFont(sp);
+                if (!spf) continue;
+                const float lyOff = spf->charHeight < lineH ? (lineH - spf->charHeight) * 0.5f : 0.0f;
+                ColorF col = sp.color;
+                if (sp.isLink) col = {0.3f, 0.7f, 1, 1};
+                spf->render(placed.text.c_str(), px, lineY + lyOff, col, 1.0f);
             }
             lineY += lineH;
         }
