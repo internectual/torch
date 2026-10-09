@@ -111,15 +111,20 @@ static const char* liveFlagStatus(const std::string& status) {
     return "home";
 }
 
+// GameBase::onTargetInfoChanged: the ghost shows its target's current info;
+// a slot with none (freed, or not sent yet) leaves it blank.
 static void applyLiveTargetInfoToGhost(GhostEntry& ghost,
-                                       const V12::ServerEvent::TargetInfo& info,
-                                       bool isClientTarget) {
-    if (info.hasName && !info.name.empty()) ghost.playerName = info.name;
-    if (info.hasSkin && !info.skin.empty()) ghost.skinName = info.skin;
-    if (info.hasSensorGroup) ghost.sensorGroup = info.sensorGroup;
-    if (info.hasType) ghost.targetType = info.type;
-    if (info.hasRenderFlags) ghost.targetRenderFlags = info.renderFlags;
-    ghost.isFlag = (ghost.targetRenderFlags & 0x2) != 0 && !isClientTarget;
+                                       const V12::ServerEvent::TargetInfo* target) {
+    ghost.playerName = target && target->hasName ? target->name : std::string();
+    ghost.skinName = target && target->hasSkin ? target->skin : std::string();
+    ghost.targetType = target && target->hasType ? target->type : std::string();
+    if (target && target->hasSensorGroup) ghost.sensorGroup = target->sensorGroup;
+    ghost.targetRenderFlags = target && target->hasRenderFlags ? target->renderFlags : 0;
+    // Render bit 0x2 marks a CTF flag's target; on a client target it marks
+    // the flag's carrier instead (CTFGame.cs).
+    ghost.isFlag = (ghost.targetRenderFlags & 0x2) != 0 &&
+                   !TargetNames::isClientType(ghost.targetType) &&
+                   !ObserverParity::isPlayerClass(ghost.className);
     ghost.flagTeamId = ghost.isFlag ? ghost.sensorGroup : 0;
     if (ghost.isFlag) ghost.teamId = ghost.sensorGroup;
 }
@@ -11129,10 +11134,6 @@ void Game::connectToServer(const char* host, uint16_t port) {
             liveTargets.clear();
             liveMissionCrc = 0;
             liveTeamScores.clear();
-            livePlayerScores.clear();
-            liveClientTargetIds.clear();
-            liveClientNames.clear();
-            liveClientTeams.clear();
             liveMatchStarted_ = false;
             liveMatchEnded_ = false;
             liveMissionDisplayName_.clear();
@@ -11184,22 +11185,11 @@ void Game::connectToServer(const char* host, uint16_t port) {
              [this](const V12::ServerEvent::TargetInfo* info, uint16_t targetId) {
                   if (!info) {
                    liveTargets.erase(targetId);
-                       for (int ghostIndex : liveGhosts.getAllIndices()) {
-                           GhostEntry* ghost = liveGhosts.getMutableGhost(ghostIndex);
-                           if (!ghost || ghost->targetId != (int)targetId) continue;
-                           ghost->targetId = -1;
-                           ghost->playerName.clear();
-                           ghost->skinName.clear();
-                           ghost->targetType.clear();
-                           ghost->targetRenderFlags = 0;
-                           ghost->isFlag = false;
-                           ghost->flagTeamId = 0;
-                       }
-                     if (spectateGhostIndex == (int)targetId) {
-                         spectateGhostIndex = -1;
-                         liveFollowGhostIndex = -1;
-                         liveFollowCenterInit = false;
-                     }
+                   for (int ghostIndex : liveGhosts.getAllIndices()) {
+                       GhostEntry* ghost = liveGhosts.getMutableGhost(ghostIndex);
+                       if (ghost && ghost->targetId == (int)targetId)
+                           applyLiveTargetInfoToGhost(*ghost, nullptr);
+                   }
                      return;
                  }
                  auto& target = liveTargets[targetId];
@@ -11216,10 +11206,7 @@ void Game::connectToServer(const char* host, uint16_t port) {
                   for (int ghostIndex : liveGhosts.getAllIndices()) {
                       GhostEntry* ghost = liveGhosts.getMutableGhost(ghostIndex);
                       if (!ghost || ghost->targetId != (int)targetId) continue;
-                      const bool isClientTarget = std::any_of(
-                          liveClientTargetIds.begin(), liveClientTargetIds.end(),
-                          [ghostIndex](const auto& entry) { return entry.second == ghostIndex; });
-                      applyLiveTargetInfoToGhost(*ghost, target, isClientTarget);
+                      applyLiveTargetInfoToGhost(*ghost, &target);
                   }
              });
         activeConn->setMissionCallback([this](uint32_t crc) {
@@ -11321,107 +11308,6 @@ void Game::connectToServer(const char* host, uint16_t port) {
                  team.flagCarrier = team.flagStatus == "held" && argv[2] != "0" ? argv[2] : "";
                 return;
             }
-            if (argv.size() >= 4 && argv[1] == "MsgPlayerScore") {
-                const int clientId = atoi(argv[2].c_str());
-                if (clientId >= 0 && clientId < 1024) {
-                    livePlayerScores[clientId] = atoi(argv[3].c_str());
-                    auto target = liveClientTargetIds.find(clientId);
-                    if (target != liveClientTargetIds.end()) {
-                        if (GhostEntry* ghost = liveGhosts.getMutableGhost(target->second))
-                            ghost->score = livePlayerScores[clientId];
-                    }
-                }
-            } else if (argv.size() >= 8 && argv[1] == "SetLineHud") {
-                auto applyScore = [this](const std::string& name, int score) {
-                    for (const auto& [clientId, clientName] : liveClientNames) {
-                        if (clientName != name) continue;
-                        livePlayerScores[clientId] = score;
-                        auto target = liveClientTargetIds.find(clientId);
-                        if (target != liveClientTargetIds.end()) {
-                            if (GhostEntry* ghost = liveGhosts.getMutableGhost(target->second))
-                                ghost->score = score;
-                        }
-                        break;
-                    }
-                };
-                const int firstScore = atoi(argv[7].c_str());
-                if (argv[6].size() > 0) applyScore(argv[6], firstScore);
-                if (argv.size() >= 10) {
-                    char* end = nullptr;
-                    std::strtol(argv[8].c_str(), &end, 10);
-                    if (end && *end != '\0')
-                        applyScore(argv[8], atoi(argv[9].c_str()));
-                }
-            } else if (argv.size() >= 6 && argv[1] == "MsgDebriefAddLine") {
-                const std::string& name = argv[4];
-                char* end = nullptr;
-                std::strtol(argv[5].c_str(), &end, 10);
-                const bool singleTeam = end && *end == '\0';
-                const int scoreIndex = singleTeam ? 5 : 6;
-                if ((size_t)scoreIndex < argv.size()) {
-                    const int score = atoi(argv[scoreIndex].c_str());
-                    for (const auto& [clientId, clientName] : liveClientNames) {
-                        if (clientName != name) continue;
-                        livePlayerScores[clientId] = score;
-                        auto target = liveClientTargetIds.find(clientId);
-                        if (target != liveClientTargetIds.end()) {
-                            if (GhostEntry* ghost = liveGhosts.getMutableGhost(target->second))
-                                ghost->score = score;
-                        }
-                        break;
-                    }
-                }
-             } else if (argv.size() >= 5 && argv[1] == "MsgClientJoin") {
-                 int clientId = 0, targetId = 0;
-                 if (parseLiveIndex(argv[3], clientId) && parseLiveIndex(argv[4], targetId)) {
-                    liveClientTargetIds[clientId] = targetId;
-                     liveClientNames[clientId] = argv[2];
-                     if (GhostEntry* ghost = liveGhosts.getMutableGhost(targetId)) {
-                         ghost->playerName = argv[2];
-                         ghost->isFlag = false;
-                         ghost->flagTeamId = 0;
-                     }
-                    auto score = livePlayerScores.find(clientId);
-                    if (score != livePlayerScores.end()) {
-                        if (GhostEntry* ghost = liveGhosts.getMutableGhost(targetId))
-                            ghost->score = score->second;
-                    }
-                }
-             } else if (argv.size() >= 4 && argv[1] == "MsgClientDrop") {
-                 int clientId = 0;
-                 if (!parseLiveIndex(argv[3], clientId)) return;
-                 const auto target = liveClientTargetIds.find(clientId);
-                 if (target != liveClientTargetIds.end() && spectateGhostIndex == target->second) {
-                     spectateGhostIndex = -1;
-                     liveFollowGhostIndex = -1;
-                     liveFollowCenterInit = false;
-                 }
-                liveClientTargetIds.erase(clientId);
-                 liveClientNames.erase(clientId);
-                  liveClientTeams.erase(clientId);
-                  livePlayerScores.erase(clientId);
-            } else if (argv.size() >= 5 && argv[1] == "MsgClientNameChanged") {
-                const int clientId = atoi(argv[4].c_str());
-                if (clientId >= 0 && clientId < 1024) {
-                    liveClientNames[clientId] = argv[3];
-                    auto target = liveClientTargetIds.find(clientId);
-                    if (target != liveClientTargetIds.end()) {
-                        if (GhostEntry* ghost = liveGhosts.getMutableGhost(target->second))
-                            ghost->playerName = argv[3];
-                    }
-                }
-            } else if (argv.size() >= 6 && argv[1] == "MsgClientJoinTeam") {
-                const int clientId = atoi(argv[4].c_str());
-                const int teamId = atoi(argv[5].c_str());
-                if (clientId >= 0 && clientId < 1024 && teamId >= 0 && teamId < 64) {
-                    liveClientTeams[clientId] = teamId;
-                    auto target = liveClientTargetIds.find(clientId);
-                    if (target != liveClientTargetIds.end()) {
-                        if (GhostEntry* ghost = liveGhosts.getMutableGhost(target->second))
-                            ghost->teamId = teamId;
-                    }
-                }
-            }
         });
          activeConn->setGhostCallback([this](const V12::GhostUpdate& update,
                                              const V12::PlayerGhostState* state) {
@@ -11495,17 +11381,7 @@ void Game::connectToServer(const char* host, uint16_t port) {
               GhostEntry* ghost = liveGhosts.getMutableGhost((int)update.index);
               if (!ghost) return;
               if (state->hasInteriorAlarm) ghost->interiorAlarm = state->interiorAlarm;
-              if (state->hasTargetId) {
-                  ghost->targetId = state->targetId;
-                  if (ghost->targetId < 0) {
-                      ghost->playerName.clear();
-                      ghost->skinName.clear();
-                      ghost->targetType.clear();
-                      ghost->targetRenderFlags = 0;
-                      ghost->isFlag = false;
-                      ghost->flagTeamId = 0;
-                  }
-              }
+              if (state->hasTargetId) ghost->targetId = state->targetId;
              if (state->hasDamageState && state->damageState >= 2) {
                  auto& audio = Engine::instance().audio();
                  for (int slot = 0; slot < 4; ++slot) {
@@ -11518,25 +11394,11 @@ void Game::connectToServer(const char* host, uint16_t port) {
                      }
                  }
              }
-             for (const auto& [clientId, targetId] : liveClientTargetIds) {
-                 if (targetId == (int)update.index) {
-                     auto name = liveClientNames.find(clientId);
-                     if (name != liveClientNames.end()) ghost->playerName = name->second;
-                     auto team = liveClientTeams.find(clientId);
-                     if (team != liveClientTeams.end()) ghost->teamId = team->second;
-                    auto score = livePlayerScores.find(clientId);
-                     if (score != livePlayerScores.end()) ghost->score = score->second;
-                     break;
-                 }
-             }
               if (ghost->targetId >= 0) {
                   auto target = liveTargets.find((uint16_t)ghost->targetId);
-                  if (target != liveTargets.end()) {
-                      const bool isClientTarget = std::any_of(
-                          liveClientTargetIds.begin(), liveClientTargetIds.end(),
-                          [index = update.index](const auto& entry) { return entry.second == (int)index; });
-                       applyLiveTargetInfoToGhost(*ghost, target->second, isClientTarget);
-                  }
+                  applyLiveTargetInfoToGhost(*ghost, target != liveTargets.end() ? &target->second : nullptr);
+              } else {
+                  applyLiveTargetInfoToGhost(*ghost, nullptr);
               }
               if (state->hasPosition) {
                   ghost->position = {state->position.x, state->position.y, state->position.z};
@@ -13103,10 +12965,6 @@ void Game::disconnectedCleanup() {
     liveTargetVisible.fill(0);
     liveMissionCrc = 0;
     liveTeamScores.clear();
-    livePlayerScores.clear();
-    liveClientTargetIds.clear();
-    liveClientNames.clear();
-    liveClientTeams.clear();
     liveMatchStarted_ = false;
     liveMatchEnded_ = false;
     liveMissionDisplayName_.clear();
@@ -13143,10 +13001,6 @@ void Game::resetLiveMissionState() {
     liveTargetVisible.fill(0);
     liveMissionCrc = 0;
     liveTeamScores.clear();
-    livePlayerScores.clear();
-    liveClientTargetIds.clear();
-    liveClientNames.clear();
-    liveClientTeams.clear();
     liveMatchStarted_ = false;
     liveMatchEnded_ = false;
     liveMissionDisplayName_.clear();

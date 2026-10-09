@@ -1307,10 +1307,6 @@ private:
      std::array<uint32_t, 16> liveTargetVisible{};
     uint32_t liveMissionCrc = 0;
     std::map<int, LiveTeamScore> liveTeamScores;
-    std::map<int, int> livePlayerScores;
-    std::map<int, int> liveClientTargetIds;
-    std::map<int, std::string> liveClientNames;
-    std::map<int, int> liveClientTeams;
     bool liveMatchStarted_ = false;
     bool liveMatchEnded_ = false;
     std::string liveMissionDisplayName_;

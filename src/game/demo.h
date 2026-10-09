@@ -765,9 +765,6 @@ struct GhostEntry {
     Vec3 damageDir{0, 0, 1};
     uint32_t damageRevision{}; // live: the last DamageMask read applied
     float energy{100.0f};
-    int32_t kills{};
-    int32_t deaths{};
-    int32_t score{};
     std::string playerName;
     int teamId{-1};
     int sensorGroup{-1};
