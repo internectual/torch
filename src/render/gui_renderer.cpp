@@ -1634,6 +1634,31 @@ void GuiRenderer::renderControl(GuiControl* ctl) {
     renderControlRec(this, ctl, canvas, 0, 0, nullptr);
 }
 
+// The opaque bounds (x, y, w, h) of each of a toggle bitmap's five equal
+// rows, read from the texture's alpha once.
+static const std::array<std::array<int, 4>, 5>& toggleBitmapCells(Texture* tex) {
+    static std::unordered_map<uint32_t, std::array<std::array<int, 4>, 5>> cache;
+    auto found = cache.find(tex->id);
+    if (found != cache.end()) return found->second;
+    std::array<std::array<int, 4>, 5> cells{};
+    const int w = tex->width, h = tex->height, rowH = h / 5;
+    std::vector<uint8_t> px((size_t)w * h * 4);
+    glBindTexture(GL_TEXTURE_2D, tex->id);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    for (int row = 0; row < 5; ++row) {
+        int x0 = w, y0 = rowH, x1 = -1, y1 = -1;
+        for (int yy = 0; yy < rowH; ++yy)
+            for (int xx = 0; xx < w; ++xx)
+                if (px[((size_t)(row * rowH + yy) * w + xx) * 4 + 3] > 25) {
+                    x0 = std::min(x0, xx); x1 = std::max(x1, xx);
+                    y0 = std::min(y0, yy); y1 = std::max(y1, yy);
+                }
+        cells[row] = x1 < 0 ? std::array<int, 4>{0, 0, w, rowH}
+                            : std::array<int, 4>{x0, y0, x1 - x0 + 1, y1 - y0 + 1};
+    }
+    return cache.emplace(tex->id, cells).first->second;
+}
+
 static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canvas,
     float scrollOfsX, float scrollOfsY, const ClipRect* clip)
 {
@@ -2337,24 +2362,34 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         }
         float sz = 16;
         bool drewAtlas = false;
-        // T2 ships a radio texture but no textures/gui/shll_checkbox bitmap.
-        // Draw the ordinary checkbox geometry below instead of probing a
-        // nonexistent resource (and logging a warning on every checkbox).
-        Texture* cbTex = cn == "GuiRadioCtrl" ? getShellTex(r, "shll_radio.png") : nullptr;
-        if ((cn == "GuiRadioCtrl" || cn == "GuiCheckBoxCtrl") && cbTex && cbTex->loaded &&
-            cbTex->height % 30 == 0 && cbTex->height >= 60) {
-            // shll_radio atlas (29x150): five 29x30 cells — [0]=unchecked,
-            // [1]=checked (bright green core = the selected indicator),
-            // [4]=white hover ring drawn over the base state.
-            int states = cbTex->height / 30;
-            int st = ctl->checked ? 1 : 0;
-            float scale = ctl->extentY / 30.0f; if (scale > 1) scale = 1;
-            float dw = (float)cbTex->width * scale, dh = 30.0f * scale;
-            float dy = y + (ctl->extentY - dh) * 0.5f;
-            drawTexRegion(r, cbTex, 0, (float)st * 30.0f, (float)cbTex->width, 30.0f, x, dy, dw, dh);
-            if (ctl->hovered && states >= 5)
-                drawTexRegion(r, cbTex, 0, 4.0f * 30.0f, (float)cbTex->width, 30.0f, x, dy, dw, dh);
-            sz = dw;
+        float labelLeft = -1.0f; // the label area starts here when the bar is drawn
+        // ShellToggleButton / ShellRadioButton: the profile bitmap (shll_radio)
+        // is five equal rows: box off, box on, bar tile, bar end cap and the
+        // hover glow. The box sits at the left, the bar runs from it to the
+        // control's right edge and the label is drawn on the bar.
+        Texture* cbTex = radioBmp.empty() ? nullptr : GuiShared::bitmap(radioBmp);
+        if (cbTex && cbTex->loaded && cbTex->height % 5 == 0) {
+            const std::array<std::array<int, 4>, 5>& cells = toggleBitmapCells(cbTex);
+            const float rowH = (float)cbTex->height / 5.0f;
+            const float scale = std::min(1.0f, ctl->extentY / rowH);
+            const float top = y + (ctl->extentY - rowH * scale) * 0.5f;
+            auto draw = [&](int row, float dx, float dw) {
+                const auto& c = cells[row];
+                drawTexRegion(r, cbTex, (float)c[0], row * rowH + (float)c[1], (float)c[2], (float)c[3],
+                              dx, top + c[1] * scale, dw, c[3] * scale);
+            };
+            const auto& box = cells[ctl->checked ? 1 : 0];
+            draw(ctl->checked ? 1 : 0, x + box[0] * scale, box[2] * scale);
+            const float barLeft = x + (box[0] + box[2]) * scale;
+            const float capW = cells[3][2] * scale;
+            const float barRight = x + ctl->extentX - capW;
+            if (barRight > barLeft) {
+                draw(2, barLeft, barRight - barLeft);
+                draw(3, barRight, capW);
+                labelLeft = barLeft;
+            }
+            if (ctl->hovered) draw(4, x + cells[4][0] * scale, cells[4][2] * scale);
+            sz = (box[0] + box[2]) * scale;
             drewAtlas = true;
         }
         if (!drewAtlas) {
@@ -2374,25 +2409,26 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                     r.drawLine({x + sz * 0.43f, boxY + sz - 3, 0},
                                {x + sz - 2, boxY + 3, 0}, mark);
                 }
-                drewAtlas = true;
-            } else if (cbTex && cbTex->loaded) {
-                r.drawTexturedRect({x, y, 0}, {x + sz, y + sz, 0}, cbTex->id);
-                if (ctl->checked)
-                    r.drawRectFill({x + 4, y + 4, 0}, {x + sz - 4, y + sz - 4, 0}, {0.3f,0.5f,0.8f,0.8f});
             } else {
                 ColorF bg = ctl->checked ? ColorF{0.3f,0.5f,0.8f,1} : ColorF{0.5f,0.5f,0.6f,1};
                 r.drawRectFill({x, y, 0}, {x + sz, y + sz, 0}, bg);
             }
         }
+        if (prof) font = getProfileFont(prof);
         if (font && !ctl->text.empty()) {
-            const ColorF& rtc = ctl->checked ? tc : ((ctl->hovered && tcHL.r >= 0) ? tcHL : tc);
-            float tx0 = x + sz + 4;
+            // fontColorNA while inactive, fontColorHL under the mouse.
+            ColorF rtc = (ctl->hovered && tcHL.r >= 0) ? tcHL : tc;
+            if (!ctl->active && prof) {
+                auto na = prof->fields.find("fontColorNA");
+                if (na != prof->fields.end()) parseColor(na->second.toString(), rtc);
+            }
+            float tx0 = labelLeft >= 0.0f ? labelLeft : x + sz + 4;
             float availW = ctl->extentX - (tx0 - x);
             float ttw = font->measure(ctl->text.c_str()).x;
             float tx = tx0;
-            float ty2 = y + (ctl->extentY - (float)font->charHeight) * 0.5f;
-            if (justify == "center")
-                tx = tx0 + std::max((availW - ttw) * 0.5f, 0.f);
+            float ty2 = std::floor(y + (ctl->extentY - (float)font->charHeight) * 0.5f);
+            if (strcasecmp(justify.c_str(), "center") == 0)
+                tx = std::floor(tx0 + std::max((availW - ttw) * 0.5f, 0.f));
             font->render(ctl->text.c_str(), tx, ty2, rtc, 1.0f);
         }
     } else if (cn == "GuiSliderCtrl") {
