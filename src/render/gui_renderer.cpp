@@ -318,6 +318,16 @@ static void applyScriptFields(GuiControl* ctl, ScriptObject* so) {
 
 // GuiControl::parentResized: horizSizing/vertSizing move or stretch the
 // control by how much its parent's extent changed.
+// The engine class of a control (the renderer normalizes some Shell classes).
+static std::string scriptClassOf(const GuiControl* ctl) {
+    if (!ctl) return {};
+    const std::string& key = ctl->scriptKey.empty() ? ctl->name : ctl->scriptKey;
+    if (!key.empty())
+        if (ScriptObject* so = ScriptEngine::instance().findObject(key.c_str()))
+            return so->className;
+    return ctl->className;
+}
+
 static void parentResized(GuiControl* ctl, int oldW, int oldH, int newW, int newH) {
     // HudNavDisplay overlays the GameTSCtrl it projects through, so it
     // always covers its parent (its markers span the whole 3D view).
@@ -331,8 +341,14 @@ static void parentResized(GuiControl* ctl, int oldW, int oldH, int newW, int new
         auto it = ctl->fields.find(key);
         return it == ctl->fields.end() || it->second.empty() ? std::string(fallback) : it->second;
     };
-    const std::string horiz = mode("horizSizing", "right");
-    const std::string vert = mode("vertSizing", "bottom");
+    std::string horiz = mode("horizSizing", "right");
+    std::string vert = mode("vertSizing", "bottom");
+    // ShellFancyArrayScrollCtrl lays out its array and its VirtualScrollCtrl
+    // itself: both keep their offsets and reach the container's far edges.
+    if (scriptClassOf(ctl->parent) == "ShellFancyArrayScrollCtrl") {
+        horiz = "width";
+        vert = "height";
+    }
     const int dx = newW - oldW, dy = newH - oldH;
     if (strcasecmp(horiz.c_str(), "center") == 0) x = (newW - w) >> 1;
     else if (strcasecmp(horiz.c_str(), "width") == 0) w += dx;
