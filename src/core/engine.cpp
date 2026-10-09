@@ -1689,13 +1689,6 @@ bool Engine::init(int argc, char* argv[]) {
         }
     }
 
-    // Host-tab "Mission Name:" list (GMH_MissionList): the native buildMissionList
-    // (script_engine.cpp) overrides the stock script function of the same name.
-    // GameGui.cs calls buildMissionList() at load time (line 909), and
-    // lookupAndCall resolves natives before script functions, so our scan-based
-    // seeder runs there and seeds the $Host* globals the stock onSelect reads.
-    // No explicit call needed here.
-
     // Initialize GUI renderer from script-created objects
 #ifndef TORCH_DEDICATED
     gui->init();
