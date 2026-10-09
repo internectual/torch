@@ -578,21 +578,6 @@ void GuiRenderer::render() {
         glEnable(GL_SCISSOR_TEST);
         glScissor(viewport.x, viewport.y, viewport.width, viewport.height);
     }
-    auto syncPrintControl = [&](const char* name, const char* variable) {
-        GuiControl* ctl = findControl(name);
-        if (!ctl) return;
-        const std::string expiryName = std::string(variable) + "Until";
-        const double expiry = std::atof(
-            Console::instance().getStringVariable(expiryName.c_str(), "0"));
-        const bool expired = expiry > 0.0 && Engine::instance().timer().now() >= expiry;
-        const std::string text = expired ? std::string() :
-            Console::instance().getStringVariable(variable, "");
-        ctl->text = text;
-        ctl->visible = !text.empty();
-        if (expired) Console::instance().setVariable(variable, "");
-    };
-    syncPrintControl("CenterPrintText", "HUD::centerPrint");
-    syncPrintControl("BottomPrintText", "HUD::bottomPrint");
     MatrixF ortho;
     ortho.identity();
     ortho.m[0][0] = 2.0f / viewport.logicalWidth;

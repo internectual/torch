@@ -7253,40 +7253,6 @@ bool ScriptEngine::init() {
         return VMValue(1);
     });
 
-    // Display notifications — store messages in console variables for HUD to render
-    tsInstance->registerNative("bottomPrint", [](const auto& args) -> VMValue {
-        if (!args.empty()) {
-            Console::instance().setVariable("HUD::bottomPrint", args[0].toString().c_str());
-            const double duration = args.size() > 1 ? args[1].toDouble() : 0.0;
-            Console::instance().setVariable("HUD::bottomPrintUntil",
-                duration > 0.0 ? std::to_string(Engine::instance().timer().now() + duration).c_str() : "0");
-        }
-        return VMValue(1);
-    });
-    tsInstance->registerNative("centerPrint", [](const auto& args) -> VMValue {
-        if (!args.empty()) {
-            Console::instance().setVariable("HUD::centerPrint", args[0].toString().c_str());
-            const double duration = args.size() > 1 ? args[1].toDouble() : 0.0;
-            Console::instance().setVariable("HUD::centerPrintUntil",
-                duration > 0.0 ? std::to_string(Engine::instance().timer().now() + duration).c_str() : "0");
-        }
-        return VMValue(1);
-    });
-    tsInstance->registerNative("clearBottomPrint", [](const auto&) -> VMValue {
-        Console::instance().setVariable("HUD::bottomPrint", "");
-        Console::instance().setVariable("HUD::bottomPrintUntil", "0");
-        return VMValue(1);
-    });
-    tsInstance->registerNative("clientCmdclearBottomPrint", [](const auto&) -> VMValue {
-        Console::instance().setVariable("HUD::bottomPrint", "");
-        Console::instance().setVariable("HUD::bottomPrintUntil", "0");
-        return VMValue(1);
-    });
-    tsInstance->registerNative("clearCenterPrint", [](const auto&) -> VMValue {
-        Console::instance().setVariable("HUD::centerPrint", "");
-        Console::instance().setVariable("HUD::centerPrintUntil", "0");
-        return VMValue(1);
-    });
     tsInstance->registerNative("alxEnableForceFeedback", [](const auto&) -> VMValue {
         return VMValue(1);
     });
@@ -7355,15 +7321,6 @@ bool ScriptEngine::init() {
         it->second.sensorData = args[1];
         return VMValue(1);
     });
-    tsInstance->registerNative("bottomPrintAll", [](const auto& args) -> VMValue {
-        if (!args.empty()) Console::instance().setVariable("HUD::bottomPrint", args[0].toString().c_str());
-        return VMValue(1);
-    });
-    tsInstance->registerNative("centerPrintAll", [](const auto& args) -> VMValue {
-        if (!args.empty()) Console::instance().setVariable("HUD::centerPrint", args[0].toString().c_str());
-        return VMValue(1);
-    });
-
     // WON/Login stubs — store login info so login flow can proceed
     // WONLoginResult: "status \t code \t codeText \t error" for the
     // StartupGui::checkLoginDone poll. There is no WON account service, so an
