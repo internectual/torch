@@ -254,35 +254,30 @@ static void testObserverTargetParity() {
     assert(ObserverParity::controlGhostIndex(0) == -1);
     assert(ObserverParity::controlGhostIndex(7) == 7);
     assert(ObserverParity::isPlayerTarget("Player", 0));
-    assert(ObserverParity::isPlayerTarget("MPB", 0));
     assert(ObserverParity::isPlayerTarget("AIPlayer", 0));
-    assert(ObserverParity::isPlayerTarget("CommanderPlayer", 0));
-    assert(ObserverParity::isPlayerTarget("SiegeMPB", 0));
     // Class names are resolved case-insensitively by Torque's object system;
     // custom servers can therefore replicate a differently cased class name.
     assert(ObserverParity::isPlayerTarget("player", 0));
-    assert(ObserverParity::isPlayerTarget("mpb", 1));
+    assert(!ObserverParity::isPlayerTarget("MPB", 0));
     assert(ObserverParity::isPlayerTarget("Player", 1));
     assert(!ObserverParity::isPlayerTarget("Player", 2));
     assert(!ObserverParity::isPlayerTarget("Player", -1));
-    assert(!ObserverParity::isPlayerTarget("MPB", 2));
     assert(!ObserverParity::isPlayerTarget("Turret", 0));
     assert(!ObserverParity::isPlayerTarget("Player", 0, false));
     assert(ObserverParity::isVisiblePlayerTarget("Player", 0, true));
     assert(!ObserverParity::isVisiblePlayerTarget("Player", 0, false));
     assert(ObserverParity::isVehicleClass("FlyingVehicle"));
     assert(ObserverParity::isVehicleClass("hovervehicle"));
-    assert(ObserverParity::isVehicleClass("ScoutVehicle"));
-    assert(ObserverParity::isVehicleClass("CUSTOMVEHICLE"));
+    assert(!ObserverParity::isVehicleClass("ScoutVehicle"));
     assert(!ObserverParity::isVehicleClass("VehicleData"));
     assert(!ObserverParity::isVehicleClass("Turret"));
     assert(ObserverParity::isSpectatableTarget("player", 1, true));
     assert(ObserverParity::isSpectatableTarget("wheeledvehicle", 1, true));
     // Observer target search must expose vehicles, not only player ghosts.
-    assert(ObserverParity::isSpectatableTarget("ScoutVehicle", 0, true));
+    assert(ObserverParity::isSpectatableTarget("FlyingVehicle", 0, true));
     // An unresolved vehicle ghost has no valid damage state and must not be
     // selectable until its initial state arrives.
-    assert(!ObserverParity::isSpectatableTarget("ScoutVehicle", -1, true));
+    assert(!ObserverParity::isSpectatableTarget("FlyingVehicle", -1, true));
     assert(!ObserverParity::isSpectatableTarget("Player", 2, true));
     assert(!ObserverParity::isSpectatableTarget("wheeledvehicle", 2, true));
     assert(!ObserverParity::isSpectatableTarget("Vehicle", 0, false));
@@ -309,13 +304,11 @@ static void testGhostClassParity() {
     assert(isProjectileGhostClass("energybolt"));
     assert(isProjectileGhostClass("customprojectile"));
     assert(isWheeledVehicleGhostClass("WHEELEDVEHICLE"));
-    assert(isWheeledVehicleGhostClass("wildcat"));
-    assert(isWheeledVehicleGhostClass("MPB"));
-    assert(isWheeledVehicleGhostClass("CustomWheeledVehicle"));
+    assert(!isWheeledVehicleGhostClass("MPB"));
     assert(!isWheeledVehicleGhostClass("FlyingVehicle"));
     assert(isVehicleGhostClass("wheeledvehicle"));
-    assert(isVehicleGhostClass("sHrIkE"));
-    assert(isTurretGhostClass("sentry"));
+    assert(!isVehicleGhostClass("Shrike"));
+    assert(!isTurretGhostClass("sentry"));
     assert(!isTurretGhostClass("turretdata"));
 }
 
@@ -1816,14 +1809,6 @@ static void testObjectivePresentationParity() {
     assert(objectiveTaskText("Capture tower", "Eliminate enemies") ==
            "Capture tower\nEliminate enemies");
     assert(objectiveTaskText("", "Second") == "Second");
-    assert(stockTrainingInitialObjective("Training4").first ==
-           "Stay alert for enemy presence.");
-    assert(stockTrainingInitialObjective("Training4").second ==
-           "Repair sensor at waypoint.");
-    assert(stockTrainingInitialObjective("base/missions/training4.mis").first ==
-           "Stay alert for enemy presence.");
-    assert(stockTrainingInitialObjective("Training10").first.empty());
-    assert(stockTrainingInitialObjective("Arena").first.empty());
 }
 
 static void testCtfRuntimeTransitions() {

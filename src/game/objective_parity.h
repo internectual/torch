@@ -52,22 +52,3 @@ inline std::string objectiveTaskText(const std::string& line1, const std::string
     if (line2.empty()) return line1;
     return line1 + "\n" + line2;
 }
-
-inline std::pair<std::string, std::string> stockTrainingInitialObjective(const std::string& missionName) {
-    std::string lowerName = missionName;
-    for (char& c : lowerName) c = (char)std::tolower((unsigned char)c);
-    const size_t marker = lowerName.find("training");
-    if (marker == std::string::npos || marker + 8 >= lowerName.size()) return {};
-    // Do not treat Training10 (or another multi-digit mission name) as
-    // Training1.  The stock objective text only applies to Training1..5.
-    if (marker + 9 < lowerName.size() &&
-        std::isdigit((unsigned char)lowerName[marker + 9])) return {};
-    switch (lowerName[marker + 8]) {
-        case '1': return {"Survey Hanakush Lowlands.", {}};
-        case '2': return {"Capture tower at waypoint.", "Eliminate enemy units."};
-        case '3': return {"Board the Shrike.", {}};
-        case '4': return {"Stay alert for enemy presence.", "Repair sensor at waypoint."};
-        case '5': return {"Capture tower at waypoint.", "Implant digital virus."};
-        default: return {};
-    }
-}

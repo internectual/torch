@@ -3348,15 +3348,15 @@ static bool readGhostClassData(BitStream& bs, int classId, bool isInitial, const
     bool known = true;
     if (ObserverParity::isPlayerClass(cn)) readPlayerData(bs, isInitial, cp, entry);
     else if (cn == "Vehicle") readVehicleData(bs, isInitial, cp, entry);
-    else if (cn == "FlyingVehicle" || cn == "Shrike") readFlyingVehicleData(bs, isInitial, cp, entry);
-    else if (cn == "HoverVehicle" || cn == "Turbograv") readHoverVehicleData(bs, isInitial, cp, entry);
+    else if (cn == "FlyingVehicle") readFlyingVehicleData(bs, isInitial, cp, entry);
+    else if (cn == "HoverVehicle") readHoverVehicleData(bs, isInitial, cp, entry);
     else if (cn == "WheeledVehicle") readWheeledVehicleData(bs, isInitial, cp, entry);
     else if (cn == "StaticShape" || cn == "ScopeAlwaysShape"
         || cn == "Generator" || cn == "Sensor"
         || cn == "Vehicle Pad" || cn == "Teleport Station"
         || cn == "Deployed" || cn == "transfer pad" || cn == "VehicleDrop")
         readStaticShapeData(bs, isInitial, cp, entry);
-    else if (cn == "Turret" || cn == "Sentry") {
+    else if (cn == "Turret") {
         readStaticShapeData(bs, isInitial, cp, entry);
         if (bs.readFlag()) bs.readFloat(8); // CapacitorEnergy
         if (bs.readFlag()) return true; // control shortcut

@@ -1,4 +1,5 @@
 #pragma once
+#include <strings.h>
 
 #include <string>
 #include <cctype>
@@ -25,36 +26,16 @@ inline int controlGhostIndex(uint16_t nativeGhost) {
     return nativeGhost == 0 ? -1 : static_cast<int>(nativeGhost);
 }
 
+// Ghost class names come from the engine's network class table: Player and
+// its AIPlayer subclass; FlyingVehicle, HoverVehicle and WheeledVehicle.
 inline bool isPlayerClass(const std::string& className) {
-    std::string normalized = className;
-    for (char& c : normalized)
-        c = (char)std::tolower((unsigned char)c);
-    // AIPlayer is the stock bot subclass of Player.  It is still a valid
-    // observer target; filtering it out leaves bot-heavy missions with no
-    // targets even though their ghosts are present.
-    if (normalized == "player" || normalized == "aiplayer" || normalized == "mpb")
-        return true;
-    // Mission mods commonly derive their observer-visible actors from Player
-    // without registering every class name in the client. Torque class names
-    // conventionally retain the base suffix, so keep those subclasses in the
-    // same target set as the stock classes.
-    return (normalized.size() > 6 &&
-            normalized.compare(normalized.size() - 6, 6, "player") == 0) ||
-           (normalized.size() > 3 &&
-            normalized.compare(normalized.size() - 3, 3, "mpb") == 0);
+    return strcasecmp(className.c_str(), "Player") == 0 || strcasecmp(className.c_str(), "AIPlayer") == 0;
 }
 
 inline bool isVehicleClass(const std::string& className) {
-    std::string normalized = className;
-    for (char& c : normalized)
-        c = (char)std::tolower((unsigned char)c);
-    if (normalized == "flyingvehicle" || normalized == "hovervehicle" ||
-        normalized == "wheeledvehicle" || normalized == "vehicle")
-        return true;
-    if (normalized.size() > 7 &&
-        normalized.compare(normalized.size() - 7, 7, "vehicle") == 0)
-        return true;
-    return false;
+    return strcasecmp(className.c_str(), "FlyingVehicle") == 0 ||
+           strcasecmp(className.c_str(), "HoverVehicle") == 0 ||
+           strcasecmp(className.c_str(), "WheeledVehicle") == 0;
 }
 
 inline bool isPlayerTarget(const std::string& className, int damageState,
