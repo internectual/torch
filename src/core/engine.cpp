@@ -676,6 +676,9 @@ bool Engine::init(int argc, char* argv[]) {
         std::error_code error;
         std::filesystem::create_directories(std::filesystem::path(outputDir) / modPath, error);
         addDataPath((std::filesystem::path(outputDir) / modPath).string());
+        // The output root stands in for the game directory too: scripts name
+        // some files from there (alxPlayMusic's base/music/<track>.mp3).
+        addDataPath(outputDir);
     }
     if (zipDataPath.empty()) {
         addDataPath(activeRoot.string());
