@@ -2491,13 +2491,37 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                         const auto& column = ctl->listColumns[ci];
                         const std::string value = ci < columns.size() ? columns[ci] : std::string();
                         const float width = column.width > 0 ? column.width : ctl->extentX - (columnX - x);
+                        if (column.format.find("icon") != std::string::npos) {
+                            // An icon column's cell names bitmaps, ':' between
+                            // several (lobby voice: "lobby_icon_speak:lobby_icon_listen").
+                            float iconX = columnX;
+                            size_t from = 0;
+                            while (from <= value.size() && !value.empty()) {
+                                const size_t colon = value.find(':', from);
+                                const std::string icon = value.substr(from, colon == std::string::npos ? std::string::npos : colon - from);
+                                if (Texture* tex = icon.empty() ? nullptr : t2Bitmap(r, "gui/" + icon); tex && tex->loaded) {
+                                    const float iw = std::min((float)tex->width, columnX + width - iconX);
+                                    if (iw > 0)
+                                        drawTexRegion(r, tex, 0, 0, iw, (float)tex->height, iconX,
+                                                      rowY + (lineH - (float)tex->height) * 0.5f, iw, (float)tex->height);
+                                    iconX += (float)tex->width;
+                                }
+                                if (colon == std::string::npos) break;
+                                from = colon + 1;
+                            }
+                            columnX += width;
+                            continue;
+                        }
+                        // A cell shows only what fits its column.
+                        std::string shown = value;
+                        while (!shown.empty() && rowFont->measure(shown.c_str()).x > width - 3.0f) shown.pop_back();
                         float textX = columnX;
-                        const float textWidth = rowFont->measure(value.c_str()).x;
+                        const float textWidth = rowFont->measure(shown.c_str()).x;
                         if (column.format.find("center") != std::string::npos)
                             textX += std::max(0.0f, (width - textWidth) * 0.5f);
                         else if (column.format.find("right") != std::string::npos)
                             textX += std::max(0.0f, width - textWidth - 3.0f);
-                        rowFont->render(value.c_str(), textX, rowY + 1, rowColor, 1.0f);
+                        rowFont->render(shown.c_str(), textX, rowY + 1, rowColor, 1.0f);
                         columnX += width;
                     }
                 } else {
