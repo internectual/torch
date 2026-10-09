@@ -3734,22 +3734,6 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
                                {x + ctl->extentX - 1, lineY + 1, 0},
                                {0.3f, 0.8f, 0.7f, 0.45f});
             }
-            bool hasScriptRows = false;
-            for (auto* child : ctl->children)
-                if (child && !child->text.empty()) { hasScriptRows = true; break; }
-            if (!hasScriptRows && hf) {
-                float rowY = y + 2;
-                for (const auto& [teamId, team] : Engine::instance().game().getLiveTeamScores()) {
-                    if (rowY > y + ctl->extentY - 14) break;
-                    const ColorF color = teamId == 1 ? ColorF{1.0f, 0.85f, 0.35f, 0.95f}
-                                                    : ColorF{0.75f, 0.85f, 1.0f, 0.95f};
-                    char line[192];
-                    snprintf(line, sizeof(line), "%s  %d  %s", team.name.c_str(),
-                             team.score, team.flagStatus.c_str());
-                    hf->render(line, x + 4, rowY, color, 0.9f);
-                    rowY += (float)hf->charHeight + 2.0f;
-                }
-            }
         } else if (cn == "HudNavDisplay") {
             // Project live/demo player ghosts into the HUD's 2D viewport. The
             // stock script owns marker visibility and labels; this renderer

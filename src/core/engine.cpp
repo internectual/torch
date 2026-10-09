@@ -2675,11 +2675,14 @@ void Engine::run() {
                 g->update(dt);
                 double t1 = Timer::now();
                 g->render(dt);  // 3D render with own beginFrame/endFrame
+                const bool cursorOn = gui && gui->isCursorOn();
                 if (LiveMovePolicy::shouldCaptureMouse(
-                        g->state() == Game::Playing, g->targetFinderOpen(),
-                        g->isLiveClient(), g->liveMatchEnded())) {
+                        g->state() == Game::Playing, g->targetFinderOpen(), cursorOn)) {
                     plat->setRelativeMouse(true);
                     plat->showMouse(false);
+                } else if (g->state() == Game::Playing && cursorOn) {
+                    plat->setRelativeMouse(false);
+                    plat->showMouse(true);
                 }
                 // Shape preview: capture the test shape to a PNG (once)
                 {

@@ -81,10 +81,10 @@ int main() {
             .yaw = std::numeric_limits<float>::infinity(),
             .pitch = std::numeric_limits<float>::quiet_NaN()});
         assert(invalidAngles.yaw == 0 && invalidAngles.pitch == 0);
-        assert(LiveMovePolicy::shouldCaptureMouse(true, false, true, false));
-        assert(!LiveMovePolicy::shouldCaptureMouse(true, false, true, true));
-        assert(!LiveMovePolicy::shouldCaptureMouse(true, true, true, false));
-        assert(!LiveMovePolicy::shouldCaptureMouse(false, false, true, false));
+        assert(LiveMovePolicy::shouldCaptureMouse(true, false, false));
+        assert(!LiveMovePolicy::shouldCaptureMouse(true, false, true));
+        assert(!LiveMovePolicy::shouldCaptureMouse(true, true, false));
+        assert(!LiveMovePolicy::shouldCaptureMouse(false, false, false));
         assert(LiveMovePolicy::shouldResumeLiveGameForContent("PlayGui", true, true));
         assert(!LiveMovePolicy::shouldResumeLiveGameForContent("PlayGui", true, false));
         assert(!LiveMovePolicy::shouldResumeLiveGameForContent("LobbyGui", true, true));

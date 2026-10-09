@@ -34,9 +34,11 @@ inline void accumulateLook(float& pitch, float& yaw, float pitchDelta, float yaw
     if (std::isfinite(yawDelta)) yaw += yawDelta;
 }
 
-inline bool shouldCaptureMouse(bool gameplayActive, bool targetFinderOpen,
-                               bool liveClient, bool liveMatchEnded) {
-    return gameplayActive && !targetFinderOpen && !(liveClient && liveMatchEnded);
+// GuiCanvas: the mouse drives the view while the canvas cursor is off (the
+// content's hideCursor, e.g. PlayGui) and the pointer while it is on (e.g.
+// DebriefGui at the end of a match).
+inline bool shouldCaptureMouse(bool gameplayActive, bool targetFinderOpen, bool canvasCursorOn) {
+    return gameplayActive && !targetFinderOpen && !canvasCursorOn;
 }
 
 inline bool shouldResumeLiveGameForContent(const std::string& content,
