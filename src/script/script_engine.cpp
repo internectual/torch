@@ -7219,7 +7219,6 @@ bool ScriptEngine::init() {
         for (size_t i = 1; i < args.size(); i++)
             cmd += " " + args[i].toString();
         Console::instance().printf(LogLevel::Debug, "commandToServer: %s", cmd.c_str());
-        if (func == "getScores") return VMValue(1);
         // Send over wire if connected (client to server)
         auto* conn = Engine::instance().game().activeConnection();
         if (conn && conn->isConnected()) {
@@ -7228,14 +7227,14 @@ bool ScriptEngine::init() {
             // Local commands do not need to be reparsed as TorqueScript source.
             // In particular, `cycleWeapon next` is console command syntax, not
             // a valid TorqueScript function call.
+            // With no server, a command goes nowhere (net.cc returns when
+            // there is no connection to the server).
             if (auto* item = Console::instance().find(func.c_str()); item && item->cmd) {
                 std::vector<std::string> words{func};
                 for (size_t i = 1; i < args.size(); i++) words.push_back(args[i].toString());
                 std::vector<const char*> argv;
                 for (auto& word : words) argv.push_back(word.c_str());
                 item->cmd((int32_t)argv.size(), argv.data());
-            } else {
-                Console::instance().execute(cmd.c_str());
             }
         }
         return VMValue(1);
