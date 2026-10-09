@@ -2977,6 +2977,19 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         if (!isVirtualScroll && opaque)
             r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, sc);
 
+        // GuiScrollCtrl::computeSizes: the content control fills the area
+        // inside the scroll (less a shown scrollbar), so its children follow
+        // the scroll's size by their sizing modes.
+        for (GuiControl* child : ctl->children) {
+            if (!child || child->className != "GuiScrollContentCtrl") continue;
+            const bool vBar = scrollBarShown(ctl->vScrollBarMode, ctl->contentH > ctl->extentY);
+            const bool hBar = scrollBarShown(ctl->hScrollBarMode, ctl->contentW > ctl->extentX);
+            const int innerW = (int)(ctl->extentX - child->posX) - (vBar ? 20 : 0);
+            const int innerH = (int)(ctl->extentY - child->posY) - (hBar ? 20 : 0);
+            if (innerW != (int)child->extentX || innerH != (int)child->extentY)
+                GuiRenderer::resizeControl(child, (int)child->posX, (int)child->posY, innerW, innerH);
+        }
+
         // Save old content height to detect if user was at bottom
         float oldContentH = ctl->contentH;
         computeContentExtent(ctl);
@@ -3265,10 +3278,18 @@ static void renderControlRec(GuiRenderer* gr, GuiControl* ctl, GuiControl* canva
         // Content height for scroll container
         ctl->contentH = headerH + servers.size() * rowH;
     } else if (cn == "GuiScrollContentCtrl") {
-        ColorF scc{0.15f,0.15f,0.2f,0.3f};
+        // GuiControl::onRender: only an opaque profile fills the background.
         auto* prof = getProfile(ctl->profileName);
-        if (prof) { auto fi = prof->fields.find("fillColor"); if (fi != prof->fields.end()) parseColor(fi->second.toString(), scc); }
-        r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, scc);
+        bool opaque = false;
+        ColorF scc{0, 0, 0, 0};
+        if (prof) {
+            auto oi = prof->fields.find("opaque");
+            if (oi != prof->fields.end()) opaque = oi->second.toBool();
+            auto fi = prof->fields.find("fillColor");
+            if (fi != prof->fields.end()) parseColor(fi->second.toString(), scc);
+        }
+        if (opaque)
+            r.drawRectFill({x, y, 0}, {x + ctl->extentX, y + ctl->extentY, 0}, scc);
     } else if (cn == "ShellTabFrame") {
         // ShellTabFrame is an open C-shaped frame. The stock art is supplied
         // as separate horizontal and vertical gradient strips; the right
