@@ -8774,10 +8774,8 @@ bool ScriptEngine::init() {
         std::string objName = args[0].toString();
         auto* ctl = Engine::instance().guiRenderer().findControl(objName);
         if (ctl) {
-            ctl->posX = (float)args[1].toInt();
-            ctl->posY = (float)args[2].toInt();
-            ctl->extentX = (float)args[3].toInt();
-            ctl->extentY = (float)args[4].toInt();
+            GuiRenderer::resizeControl(ctl, args[1].toInt(), args[2].toInt(),
+                                       args[3].toInt(), args[4].toInt());
             if (auto* ts = Engine::instance().script().ts()) {
                 const std::string callback = ctl->name + "::onResize";
                 if (ts->hasFunction(callback))

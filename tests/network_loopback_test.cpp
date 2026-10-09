@@ -232,6 +232,43 @@ int main() {
         assert(utilityScript->getGlobal("$testPrintMixed").toString() == "550 36|3|36");
         assert(providerEngine.deleteScriptObject("TestPrintDlg"));
     }
+    {
+        // GuiControl::resize / parentResized: each sizing mode against a
+        // 640x480 root grown to 1280x960.
+        utilityScript->execute(
+            "new GuiControl(TestSizeRoot) { position = \"0 0\"; extent = \"640 480\"; };"
+            "new GuiControl(TestSizeKeep) { horizSizing = \"right\"; vertSizing = \"bottom\";"
+            "  position = \"10 20\"; extent = \"100 50\"; };"
+            "new GuiControl(TestSizeFar) { horizSizing = \"left\"; vertSizing = \"top\";"
+            "  position = \"500 400\"; extent = \"100 50\"; };"
+            "new GuiControl(TestSizeFill) { horizSizing = \"width\"; vertSizing = \"height\";"
+            "  position = \"8 8\"; extent = \"624 464\"; };"
+            "new GuiControl(TestSizeMid) { horizSizing = \"center\"; vertSizing = \"relative\";"
+            "  position = \"270 100\"; extent = \"100 40\"; };"
+            "new HudNavDisplay(TestSizeNav) { position = \"0 0\"; extent = \"640 480\"; };"
+            "TestSizeRoot.add(TestSizeKeep); TestSizeRoot.add(TestSizeFar); TestSizeRoot.add(TestSizeFill);"
+            "TestSizeRoot.add(TestSizeMid); TestSizeRoot.add(TestSizeNav);");
+        GuiRenderer gui;
+        gui.refresh();
+        GuiControl* root = gui.findControl("TestSizeRoot");
+        assert(root && root->children.size() == 5);
+        GuiRenderer::resizeControl(root, 0, 0, 1280, 960);
+        auto bounds = [&](const char* name) {
+            const GuiControl* c = gui.findControl(name);
+            assert(c);
+            return std::array<int, 4>{(int)c->posX, (int)c->posY, (int)c->extentX, (int)c->extentY};
+        };
+        assert((bounds("TestSizeKeep") == std::array<int, 4>{10, 20, 100, 50}));
+        assert((bounds("TestSizeFar") == std::array<int, 4>{1140, 880, 100, 50}));
+        assert((bounds("TestSizeFill") == std::array<int, 4>{8, 8, 1264, 944}));
+        assert((bounds("TestSizeMid") == std::array<int, 4>{590, 200, 100, 80}));
+        assert((bounds("TestSizeNav") == std::array<int, 4>{0, 0, 1280, 960}));
+        utilityScript->execute("$testSizeFar = TestSizeFar.extent @ \"|\" @ TestSizeFar.position;");
+        assert(utilityScript->getGlobal("$testSizeFar").toString() == "100 50|1140 880");
+        for (const char* name : {"TestSizeKeep", "TestSizeFar", "TestSizeFill", "TestSizeMid",
+                                 "TestSizeNav", "TestSizeRoot"})
+            providerEngine.deleteScriptObject(name);
+    }
     utilityScript->execute("new GuiCanvas(TestExtentCanvas) { extent = \"800 600\"; };"
                            "new GuiButtonCtrl(TestCloseButton) { position = \"758 7\"; extent = \"35 22\"; };"
                            "new ShellRadioButton(TestRadioLight) { extent = \"80 30\"; };"

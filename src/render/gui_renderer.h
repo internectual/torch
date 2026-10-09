@@ -107,6 +107,7 @@ inline HorizontalSlice horizontalSlice(int width, int states, int state) {
 
 struct GuiControl {
     std::string name;
+    std::string scriptKey; // the script object this control mirrors
     std::string className;
     float posX = 0, posY = 0;
     float extentX = 100, extentY = 30;
@@ -280,6 +281,9 @@ public:
 
     void init();
     void refresh();
+    // GuiControl::resize: the new bounds (clamped to minExtent); when the
+    // extent changes each child gets parentResized by its sizing modes.
+    static void resizeControl(GuiControl* ctl, int x, int y, int width, int height);
     void render();
     bool handleInput(int x, int y, bool pressed);
     bool handleSecondaryInput(int x, int y);

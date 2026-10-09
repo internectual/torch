@@ -274,12 +274,14 @@ static void syncCheckedFromBoundVariable(GuiControl* ctl) {
 // The control's state from its script object's fields (GuiControl's
 // persistent fields); every field is kept for the profile/cursor lookups.
 static void applyScriptFields(GuiControl* ctl, ScriptObject* so) {
+    ctl->scriptKey = ScriptEngine::instance().objectKey(so);
     auto parsePair = [&](const std::string& key, float& a, float& b) {
         auto fi = so->fields.find(key);
         if (fi != so->fields.end()) { std::string s = fi->second.toString(); sscanf(s.c_str(), "%f %f", &a, &b); }
     };
     parsePair("position", ctl->posX, ctl->posY);
     parsePair("extent", ctl->extentX, ctl->extentY);
+    parsePair("minExtent", ctl->minExtentX, ctl->minExtentY);
     auto fi = so->fields.find("text"); if (fi != so->fields.end()) ctl->text = fi->second.toString();
     fi = so->fields.find("bitmap"); if (fi != so->fields.end()) ctl->bitmap = fi->second.toString();
     fi = so->fields.find("command"); if (fi != so->fields.end()) ctl->command = fi->second.toString();
@@ -311,6 +313,70 @@ static void applyScriptFields(GuiControl* ctl, ScriptObject* so) {
         ctl->hudValue = v;
         ctl->hudValueSet = true;
         if (ctl->className.find("Slider") != std::string::npos) ctl->sliderValue = v;
+    }
+}
+
+// GuiControl::parentResized: horizSizing/vertSizing move or stretch the
+// control by how much its parent's extent changed.
+static void parentResized(GuiControl* ctl, int oldW, int oldH, int newW, int newH) {
+    // HudNavDisplay overlays the GameTSCtrl it projects through, so it
+    // always covers its parent (its markers span the whole 3D view).
+    if (ctl->className == "HudNavDisplay") {
+        GuiRenderer::resizeControl(ctl, 0, 0, newW, newH);
+        return;
+    }
+    int x = (int)ctl->posX, y = (int)ctl->posY;
+    int w = (int)ctl->extentX, h = (int)ctl->extentY;
+    auto mode = [&](const char* key, const char* fallback) {
+        auto it = ctl->fields.find(key);
+        return it == ctl->fields.end() || it->second.empty() ? std::string(fallback) : it->second;
+    };
+    const std::string horiz = mode("horizSizing", "right");
+    const std::string vert = mode("vertSizing", "bottom");
+    const int dx = newW - oldW, dy = newH - oldH;
+    if (strcasecmp(horiz.c_str(), "center") == 0) x = (newW - w) >> 1;
+    else if (strcasecmp(horiz.c_str(), "width") == 0) w += dx;
+    else if (strcasecmp(horiz.c_str(), "left") == 0) x += dx;
+    else if (strcasecmp(horiz.c_str(), "relative") == 0 && oldW != 0) {
+        const int left = x * newW / oldW;
+        const int right = (x + w) * newW / oldW;
+        x = left;
+        w = right - left;
+    }
+    if (strcasecmp(vert.c_str(), "center") == 0) y = (newH - h) >> 1;
+    else if (strcasecmp(vert.c_str(), "height") == 0) h += dy;
+    else if (strcasecmp(vert.c_str(), "top") == 0) y += dy;
+    else if (strcasecmp(vert.c_str(), "relative") == 0 && oldH != 0) {
+        const int top = y * newH / oldH;
+        const int bottom = (y + h) * newH / oldH;
+        y = top;
+        h = bottom - top;
+    }
+    GuiRenderer::resizeControl(ctl, x, y, w, h);
+}
+
+void GuiRenderer::resizeControl(GuiControl* ctl, int x, int y, int width, int height) {
+    if (!ctl) return;
+    width = std::max((int)ctl->minExtentX, width);
+    height = std::max((int)ctl->minExtentY, height);
+    const int oldW = (int)ctl->extentX, oldH = (int)ctl->extentY;
+    ctl->posX = (float)x;
+    ctl->posY = (float)y;
+    if (width != oldW || height != oldH) {
+        ctl->extentX = (float)width;
+        ctl->extentY = (float)height;
+        for (GuiControl* child : ctl->children)
+            if (child) parentResized(child, oldW, oldH, width, height);
+    }
+    // position/extent are the control's bounds as scripts read them.
+    const std::string& key = ctl->scriptKey.empty() ? ctl->name : ctl->scriptKey;
+    if (ScriptObject* so = key.empty() ? nullptr : ScriptEngine::instance().findObject(key.c_str())) {
+        const std::string position = std::to_string(x) + " " + std::to_string(y);
+        const std::string extent = std::to_string((int)ctl->extentX) + " " + std::to_string((int)ctl->extentY);
+        so->fields["position"] = VMValue(position);
+        so->fields["extent"] = VMValue(extent);
+        ctl->fields["position"] = position;
+        ctl->fields["extent"] = extent;
     }
 }
 
@@ -564,9 +630,28 @@ void GuiRenderer::render() {
     auto& plat = Engine::instance().platform();
     const int w = plat.drawableWidth(), h = plat.drawableHeight();
     const bool gameCanvas = Engine::instance().game().state() == Game::Playing;
-    const GuiViewport viewport = guiViewport(w, h, gameCanvas ? 640.0f : (float)plat.width(),
-                                             gameCanvas ? 480.0f : (float)plat.height());
+    const GuiViewport viewport = guiViewport(w, h, (float)plat.width(), (float)plat.height());
     s_renderViewport = viewport;
+    // GuiCanvas: its extent is the window's; the content and each dialog
+    // are sized to it (setContentControl / pushDialogControl, and the
+    // canvas resize when the window changes).
+    {
+        const int canvasW = (int)viewport.logicalWidth, canvasH = (int)viewport.logicalHeight;
+        if ((int)canvas->extentX != canvasW || (int)canvas->extentY != canvasH ||
+            canvas->posX != 0 || canvas->posY != 0) {
+            canvas->posX = canvas->posY = 0;
+            canvas->extentX = (float)canvasW;
+            canvas->extentY = (float)canvasH;
+            if (ScriptObject* so = ScriptEngine::instance().findObject(
+                    (canvas->scriptKey.empty() ? canvas->name : canvas->scriptKey).c_str()))
+                so->fields["extent"] = VMValue(std::to_string(canvasW) + " " + std::to_string(canvasH));
+        }
+        for (GuiControl* root : dialogStack)
+            if (root && root != canvas &&
+                (root->posX != 0 || root->posY != 0 ||
+                 (int)root->extentX != canvasW || (int)root->extentY != canvasH))
+                resizeControl(root, 0, 0, canvasW, canvasH);
+    }
     s_renderDrawableHeight = h;
     GLint oldViewport[4];
     glGetIntegerv(GL_VIEWPORT, oldViewport);
@@ -659,9 +744,8 @@ void GuiRenderer::render() {
 
 void GuiRenderer::mapMouse(int physicalX, int physicalY, int& logicalX, int& logicalY) const {
     auto& platform = Engine::instance().platform();
-    const bool gameCanvas = Engine::instance().game().state() == Game::Playing;
     const GuiViewport viewport = guiViewport(platform.drawableWidth(), platform.drawableHeight(),
-        gameCanvas ? 640.0f : (float)platform.width(), gameCanvas ? 480.0f : (float)platform.height());
+        (float)platform.width(), (float)platform.height());
     // SDL reports mouse positions in window coordinates. On a high-DPI
     // display the drawable viewport is larger, so convert before undoing the
     // letterbox/scale used by GL.

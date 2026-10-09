@@ -13,8 +13,8 @@ struct GuiViewport {
     float logicalHeight = 1.0f;
 };
 
-// GUI coordinates are authored in logical units. Gameplay uses the stock
-// 640x480 canvas; shell screens use the current window's logical size.
+// GUI coordinates are logical units: the canvas is the window's logical
+// size, scaled to the drawable on high-DPI displays.
 inline GuiViewport guiViewport(int drawableWidth, int drawableHeight,
                                float logicalWidth, float logicalHeight) {
     const int dw = std::max(1, drawableWidth);
