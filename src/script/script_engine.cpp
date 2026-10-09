@@ -6129,9 +6129,18 @@ bool ScriptEngine::init() {
                     ctl->checked = args[1].toBool();
                 else if (ctl->className == "ShellTabButton" || ctl->className == "GuiTabButton")
                     ctl->selected = args[1].toBool();  // T2 tabs: setValue(1/0) = select/deselect
-                else if (ctl->className.find("Slider") != std::string::npos)
-                    // GuiSliderCtrl::setValue: a float clamped to the range.
+                else if (ctl->className.find("Slider") != std::string::npos) {
+                    // GuiSliderCtrl::setValue: a float clamped to the range
+                    // (its 'range' field, which onWake may set before the
+                    // control is laid out).
+                    const std::string range = GuiShared::field(*ctl, "range");
+                    float lo = ctl->sliderMin, hi = ctl->sliderMax;
+                    if (!range.empty() && sscanf(range.c_str(), "%f %f", &lo, &hi) == 2) {
+                        ctl->sliderMin = lo;
+                        ctl->sliderMax = hi;
+                    }
                     ctl->sliderValue = std::clamp((float)args[1].toDouble(), ctl->sliderMin, ctl->sliderMax);
+                }
                 else if (ctl->className == "GuiProgressCtrl" || ctl->className.find("Hud") == 0) {
                     ctl->hudValue = (float)args[1].toDouble();
                     ctl->hudValueSet = true;
