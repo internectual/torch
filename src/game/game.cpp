@@ -8348,8 +8348,30 @@ void Game::render(float dt) {
                         // The animated eye node (as last drawn), else the
                         // default eye height.
                         camPos = {position.x, position.y, position.z + 2.1f};
-                        if (auto eyeIt = demoEyePositions.find(fpIdx); eyeIt != demoEyePositions.end())
+                        if (auto eyeIt = demoEyePositions.find(fpIdx); eyeIt != demoEyePositions.end()) {
                             camPos = {eyeIt->second.x, -eyeIt->second.z, eyeIt->second.y};
+                            // Player::getRenderEyeTransform reads this frame's
+                            // render transform. The eye was posed with the body
+                            // as last drawn, so carry it onto the body as it is
+                            // drawn this frame (Player::interpolateTick).
+                            const auto frame = demoShapeFrames.find(fpIdx);
+                            if (fpIdx == controlGhostIndex && spectateGhostIndex < 0 && demoHasOrientation &&
+                                g->mountObject < 0 && g->prediction.initialized && g->shape &&
+                                frame != demoShapeFrames.end()) {
+                                const float now = demoMatchEnded ? demoMatchEndedAt : demoTime;
+                                const float backDelta =
+                                    std::clamp(1.0f - (now - demoLastPlayerTick) / 0.032f, 0.0f, 1.0f);
+                                const Point3F body = PlayerPrediction::renderPosition(g->prediction, backDelta);
+                                const float half = demoViewYaw * 0.5f;
+                                MatrixF model = Math::torqueQuaternionToYUp(
+                                    QuatF(0.0f, 0.0f, std::sin(half), std::cos(half)));
+                                if (g->shape->nativeDTS) model = model * Math::nativeDtsFrame();
+                                model.setTranslation(Math::torquePointToYUp(body));
+                                const Point3F eye = (model * g->shape->upOrientation())
+                                    .transform(frame->second.inverse().transform(eyeIt->second));
+                                camPos = {eye.x, -eye.z, eye.y};
+                            }
+                        }
                         camTarget = {camPos.x + aim.x * 10.0f, camPos.y + aim.y * 10.0f, camPos.z + aim.z * 10.0f};
                         cameraGhostUsed = true;
                         // ShapeBase::getCameraTransform at camera position 1
