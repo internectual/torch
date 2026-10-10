@@ -7471,6 +7471,9 @@ void Game::update(float dt) {
                     // Collect chat/server events for the event pane
                     for (size_t eventIndex = 0; eventIndex < pd.events.size(); ++eventIndex) {
                         const auto& ev = pd.events[eventIndex];
+                        // GravityEvent::process: the server connection's
+                        // gravity becomes the client's.
+                        if (ev.hasGravity) setGravity(ev.gravity);
                         // Handle audio events
                         if (ev.directAudioProfile && ev.audioProfileId >= 0) {
                             auto& audio = Engine::instance().audio();
@@ -12486,6 +12489,9 @@ void Game::restoreDemoView(const DemoViewSnapshot& view) {
     demoHeadZ = view.headZ;
     demoPiloting = view.piloting;
 }
+
+void Game::setGravity(float value) { SimState::server().gravity = value; }
+float Game::getGravity() const { return SimState::server().gravity; }
 
 void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
     if (!demoParser || !w || demoMatchEnded) return;

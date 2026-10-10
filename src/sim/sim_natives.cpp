@@ -352,8 +352,25 @@ void registerSimNatives(TorqueScript& ts) {
     ts.registerNative("getGravity", [](const std::vector<VMValue>&) -> VMValue {
         return VMValue(SimState::server().gravity);
     });
+    // setGravity(gravityAmt): the global gravity, and a GravityEvent to every
+    // client connection.
     ts.registerNative("setGravity", [](const std::vector<VMValue>& args) -> VMValue {
-        if (!args.empty()) SimState::server().gravity = args[0].toFloat();
+        if (args.empty()) return VMValue(1);
+        const float gravity = args[0].toFloat();
+        SimState::server().gravity = gravity;
+        auto& engine = ScriptEngine::instance();
+        if (ScriptObject* group = engine.findObject("ClientGroup")) {
+            const int count = group->internals["__childCount"].toInt();
+            for (int i = 0; i < count; ++i) {
+                auto* connection = EngineObjects::get<GameConnection>(
+                    group->internals["__child" + std::to_string(i)].toString());
+                if (!connection) continue;
+                auto event = std::make_shared<NetEventOut>();
+                event->classIndex = 5; // GravityEvent
+                event->pack = [gravity](TorqueBitWriter& w) { w.writeF32(gravity); };
+                connection->postEvent(event);
+            }
+        }
         return VMValue(1);
     });
     // ResManager::purge frees unreferenced cached resources; Torch's

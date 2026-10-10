@@ -2047,7 +2047,8 @@ bool DemoParser::readEventPayload(BitStream& bs, NetEventInfo& ev,
     } else if (ev.classId == T2Demo::NetEventClassFirst + 2) { // FogChallengeEvent
         // No payload.
     } else if (ev.classId == T2Demo::NetEventClassFirst + 5) { // GravityEvent
-        bs.readF32();
+        ev.gravity = bs.readF32();
+        ev.hasGravity = true;
     } else if (ev.classId == T2Demo::NetEventClassFirst + 6) { // LightningStrikeEvent
         if (bs.readFlag()) {
             bs.readInt(11);   // source ghost

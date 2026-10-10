@@ -7042,11 +7042,6 @@ bool ScriptEngine::init() {
     tsInstance->registerNative("alxEnableForceFeedback", [](const auto&) -> VMValue {
         return VMValue(1);
     });
-    tsInstance->registerNative("setGravity", [](const auto& args) -> VMValue {
-        if (args.empty()) return VMValue(0);
-        Engine::instance().game().setGravity(args[0].toFloat());
-        return VMValue(1);
-    });
     tsInstance->registerNative("setTimeScale", [](const auto& args) -> VMValue {
         if (args.empty()) return VMValue(0);
         Engine::instance().game().setTimeScale(args[0].toFloat());

@@ -944,8 +944,9 @@ public:
 
     void applyInput(const InputMove& input);
     void resetInputState();
-    void setGravity(float value) { gravity = value; }
-    float getGravity() const { return gravity; }
+    // The one Player/Item gravity (setGravity, GravityEvent).
+    void setGravity(float value);
+    float getGravity() const;
     void setTimeScale(float value);
     float getTimeScale() const { return timeScale; }
 
@@ -1154,7 +1155,6 @@ private:
     HUD* hud{};
     State gameState = MenuScreen;
     float time = 0;
-    float gravity = -20.0f;
     float timeScale = 1.0f;
     float deathTimer = 0.0f;
     bool missionRespawn = true;

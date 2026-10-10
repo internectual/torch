@@ -574,6 +574,9 @@ struct NetEventInfo {
     bool hasTargetRenderFlags = false;
     float targetVoicePitch = 1.0f;
     uint32_t missionCrc = 0;
+    // GravityEvent: the server's Player/Item gravity.
+    bool hasGravity = false;
+    float gravity = 0.0f;
     // GhostingMessageEvent: message (-1 when not one), sequence, ghost count.
     int ghostMessage = -1;
     uint32_t ghostSequence = 0;
