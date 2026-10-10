@@ -12542,6 +12542,46 @@ void Game::restoreDemoView(const DemoViewSnapshot& view) {
     demoPiloting = view.piloting;
 }
 
+// A PhysicalZone ghost's faces in Torque world space, outward: each plane's
+// polyhedron corners, ordered around the face and fanned.
+static void physicalZoneFaces(const GhostEntry::PhysicalZoneState& zone,
+                              std::vector<PlayerPrediction::Triangle>& out) {
+    auto toWorld = [&](const Vec3& p) {
+        const float s[3] = {p.x * zone.scale.x, p.y * zone.scale.y, p.z * zone.scale.z};
+        const float* m = zone.transform;
+        return Point3F{m[0] * s[0] + m[1] * s[1] + m[2] * s[2] + m[3],
+                       m[4] * s[0] + m[5] * s[1] + m[6] * s[2] + m[7],
+                       m[8] * s[0] + m[9] * s[1] + m[10] * s[2] + m[11]};
+    };
+    if (zone.points.size() < 4) return;
+    Point3F centre{0, 0, 0};
+    for (const Vec3& p : zone.points) centre = PlayerPrediction::add(centre, toWorld(p));
+    centre = PlayerPrediction::mul(centre, 1.0f / (float)zone.points.size());
+    for (const auto& plane : zone.planes) {
+        std::vector<Point3F> face;
+        for (const Vec3& p : zone.points)
+            if (std::fabs(plane[0] * p.x + plane[1] * p.y + plane[2] * p.z + plane[3]) < 1e-3f)
+                face.push_back(toWorld(p));
+        if (face.size() < 3) continue;
+        Point3F mid{0, 0, 0};
+        for (const Point3F& p : face) mid = PlayerPrediction::add(mid, p);
+        mid = PlayerPrediction::mul(mid, 1.0f / (float)face.size());
+        Point3F n = PlayerPrediction::cross(PlayerPrediction::sub(face[1], face[0]), PlayerPrediction::sub(face[2], face[0]));
+        if (PlayerPrediction::dot(n, PlayerPrediction::sub(mid, centre)) < 0) n = PlayerPrediction::mul(n, -1.0f);
+        const float len = PlayerPrediction::length(n);
+        if (len < 1e-12f) continue;
+        n = PlayerPrediction::mul(n, 1.0f / len);
+        const Point3F u = PlayerPrediction::normalize(PlayerPrediction::sub(face[0], mid));
+        const Point3F v = PlayerPrediction::cross(n, u);
+        std::sort(face.begin(), face.end(), [&](const Point3F& a, const Point3F& b) {
+            const Point3F da = PlayerPrediction::sub(a, mid), db = PlayerPrediction::sub(b, mid);
+            return std::atan2(PlayerPrediction::dot(da, v), PlayerPrediction::dot(da, u)) <
+                   std::atan2(PlayerPrediction::dot(db, v), PlayerPrediction::dot(db, u));
+        });
+        for (size_t i = 1; i + 1 < face.size(); ++i) out.push_back({face[0], face[i], face[i + 1], n});
+    }
+}
+
 void Game::setGravity(float value) { SimState::server().gravity = value; }
 float Game::getGravity() const { return SimState::server().gravity; }
 
@@ -12621,9 +12661,26 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
         }
         if (!hull.tris.empty()) hulls.push_back(&hull);
     }
+    // ForceFieldBare::isPermiableTo: a closed field lets a player through
+    // when its datablock is permeable to the player's team (sensor group).
+    const auto& targets = demoParser->getTargets();
+    auto sensorGroupOf = [&](const GhostEntry& ghost) {
+        auto target = targets.find(ghost.targetId);
+        return target != targets.end() ? target->second.sensorGroup : -1;
+    };
+    const GhostEntry* mover = nullptr;
+    const std::function<bool(const World::WorldObject&)> fieldPasses = [&](const World::WorldObject& field) {
+        const GhostEntry* f = field.ghostIndex >= 0 ? tracker.getGhost(field.ghostIndex) : nullptr;
+        if (!mover || !f || !f->hasDatablock) return false;
+        auto data = blocks.find((uint32_t)f->datablockId);
+        if (data == blocks.end()) return false;
+        const bool sameTeam = sensorGroupOf(*f) == sensorGroupOf(*mover);
+        return (data->second.decoded.forceFieldOtherPermiable && !sameTeam) ||
+               (data->second.decoded.forceFieldTeamPermiable && sameTeam);
+    };
     const PlayerPrediction::GatherTriangles gather = [&](const Point3F& lo, const Point3F& hi,
                                                          std::vector<PlayerPrediction::Triangle>& out) {
-        w->playerTrianglesInBox(lo, hi, out);
+        w->playerTrianglesInBox(lo, hi, out, fieldPasses);
         for (const StaticShapeHull* h : hulls) {
             const StaticShapeHull& hull = *h;
             if (hull.hi.x < lo.x || hull.lo.x > hi.x || hull.hi.y < lo.y || hull.lo.y > hi.y ||
@@ -12632,6 +12689,26 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
         }
     };
     const PlayerPrediction::WaterLevel water = [&](float x, float y) { return w->waterSurfaceAt(x, y); };
+    // Active PhysicalZones: the faces whose velocity modifier a player meets.
+    demoPlayerCollision.gatherZones = [&](const Point3F& lo, const Point3F& hi,
+                                          std::vector<PlayerPrediction::Zone>& out) {
+        for (int index : tracker.getAllIndices()) {
+            const GhostEntry* z = tracker.getGhost(index);
+            if (!z || !z->physicalZone.valid || !z->physicalZone.active) continue;
+            PlayerPrediction::Zone zone;
+            physicalZoneFaces(z->physicalZone, zone.triangles);
+            Point3F zlo{1e30f, 1e30f, 1e30f}, zhi{-1e30f, -1e30f, -1e30f};
+            for (const auto& t : zone.triangles)
+                for (const Point3F& p : {t.a, t.b, t.c}) {
+                    zlo = {std::min(zlo.x, p.x), std::min(zlo.y, p.y), std::min(zlo.z, p.z)};
+                    zhi = {std::max(zhi.x, p.x), std::max(zhi.y, p.y), std::max(zhi.z, p.z)};
+                }
+            if (zone.triangles.empty() || zhi.x < lo.x || zlo.x > hi.x || zhi.y < lo.y || zlo.y > hi.y ||
+                zhi.z < lo.z || zlo.z > hi.z) continue;
+            zone.velocityMod = z->physicalZone.velocityMod;
+            out.push_back(std::move(zone));
+        }
+    };
     for (int index : tracker.getAllIndices()) {
         GhostEntry* g = const_cast<GhostEntry*>(tracker.getGhost(index));
         if (!g || !ObserverParity::isPlayerClass(g->className) || !g->hasDatablock) continue;
@@ -12678,6 +12755,7 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
         PlayerPrediction::processTick(state, data, getGravity(), recorder && haveRecorderMove ? &recorderMove : nullptr,
                                       g->rechargeRate, demoPlayerCollision, gather, water);
     }
+    demoPlayerCollision.gatherZones = nullptr;
     demoLastPlayerTick = T2Demo::playbackBlockTime(demoParser->getBlockCursor(), demoParser->getMoveTicksBefore());
 }
 

@@ -3145,28 +3145,36 @@ static void readMissionAreaData(BitStream& bs, GhostEntry* entry) {
     }
 }
 
-static void readPhysicalZoneData(BitStream& bs, bool, const Vec3&, GhostEntry*) {
+static void readPhysicalZoneData(BitStream& bs, bool, const Vec3&, GhostEntry* entry) {
     if (!bs.readFlag()) {
-        bs.readFlag(); // active
+        const bool active = bs.readFlag();
+        if (entry) entry->physicalZone.active = active;
         return;
     }
-    bs.readMatrixF();
-    bs.readPoint3F(); // scale
+    GhostEntry::PhysicalZoneState zone;
+    const float* matrix = (const float*)bs.readMatrixF();
+    std::copy(matrix, matrix + 16, zone.transform);
+    zone.scale = bs.readPoint3F();
     const uint32_t pointCount = bs.readU32();
     if (pointCount > 4096) { bs.readFlag(); return; }
-    for (uint32_t i = 0; i < pointCount; ++i) bs.readPoint3F();
+    for (uint32_t i = 0; i < pointCount; ++i) zone.points.push_back(bs.readPoint3F());
     const uint32_t planeCount = bs.readU32();
     if (planeCount > 4096) { bs.readFlag(); return; }
-    for (uint32_t i = 0; i < planeCount; ++i)
-        for (int j = 0; j < 4; ++j) bs.readF32();
+    for (uint32_t i = 0; i < planeCount; ++i) {
+        std::array<float, 4> plane{};
+        for (float& v : plane) v = bs.readF32();
+        zone.planes.push_back(plane);
+    }
     const uint32_t edgeCount = bs.readU32();
     if (edgeCount > 4096) { bs.readFlag(); return; }
     for (uint32_t i = 0; i < edgeCount; ++i)
         for (int j = 0; j < 4; ++j) bs.readU32();
-    bs.readF32(); // velocity modifier
-    bs.readF32(); // gravity modifier
-    bs.readPoint3F(); // applied force
-    bs.readFlag(); // active
+    zone.velocityMod = bs.readF32();
+    zone.gravityMod = bs.readF32();
+    zone.appliedForce = bs.readPoint3F();
+    zone.active = bs.readFlag();
+    zone.valid = true;
+    if (entry) entry->physicalZone = std::move(zone);
 }
 
 static void readForceFieldBareData(BitStream& bs, bool isInitial, const Vec3&, GhostEntry* entry) {

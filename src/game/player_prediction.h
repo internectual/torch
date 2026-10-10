@@ -223,6 +223,42 @@ struct Collision {
         return hitTime < 1.0f;
     }
 
+    // The physical-zone poly list (ExtrudedPolyList over a zone's faces):
+    // a face facing against the travel that the swept box meets anywhere
+    // along it, overlapping it at the start included.
+    bool meets(const Point3F& position, const Point3F& size, const Point3F& travel) const {
+        const Box box = playerBox(position, size);
+        const Point3F center = mul(add(box.min, box.max), 0.5f);
+        const Point3F extent = mul(size, 0.5f);
+        for (const auto& t : triangles) {
+            if (-dot(t.n, travel) <= 1e-10f) continue;
+            const Point3F a = sub(t.a, center), b = sub(t.b, center), c = sub(t.c, center);
+            float enter = -std::numeric_limits<float>::infinity(), leave = std::numeric_limits<float>::infinity();
+            auto axis = [&](float x, float y, float z) {
+                const float p = a.x * x + a.y * y + a.z * z, q = b.x * x + b.y * y + b.z * z,
+                            r = c.x * x + c.y * y + c.z * z;
+                const float radius = std::fabs(x) * extent.x + std::fabs(y) * extent.y + std::fabs(z) * extent.z;
+                const float lo = std::min({p, q, r}) - radius, hi = std::max({p, q, r}) + radius;
+                const float speed = x * travel.x + y * travel.y + z * travel.z;
+                if (std::fabs(speed) < 1e-12f) return lo <= 1e-9f && hi >= -1e-9f;
+                const float t0 = lo / speed, t1 = hi / speed;
+                enter = std::max(enter, std::min(t0, t1));
+                leave = std::min(leave, std::max(t0, t1));
+                return enter <= leave + 1e-9f;
+            };
+            if (!axis(1, 0, 0) || !axis(0, 1, 0) || !axis(0, 0, 1) || !axis(t.n.x, t.n.y, t.n.z)) continue;
+            bool separated = false;
+            const Point3F verts[3] = {a, b, c};
+            for (int j = 0; j < 3 && !separated; ++j) {
+                const Point3F edge = sub(verts[(j + 1) % 3], verts[j]);
+                if (!axis(0, edge.z, -edge.y) || !axis(-edge.z, 0, edge.x) || !axis(edge.y, -edge.x, 0))
+                    separated = true;
+            }
+            if (!separated && enter <= 1.0f && leave >= 0.0f) return true;
+        }
+        return false;
+    }
+
     // Player::step: clip the polygons against the box at the destination.
     float stepHeight(const Point3F& position, const Point3F& size, const Point3F& travel, float maxStep) const {
         Box box = playerBox(add(position, travel), size);
@@ -501,7 +537,7 @@ inline bool updatePos(State& s, const Data& d, Collision& collision, const Point
         for (const auto& zone : collision.zones) {
             Collision faces;
             faces.triangles = zone.triangles;
-            if (faces.sweep(s.position, d.boxSize, travel)) s.velocity = mul(s.velocity, zone.velocityMod);
+            if (faces.meets(s.position, d.boxSize, travel)) s.velocity = mul(s.velocity, zone.velocityMod);
         }
         if (!collision.sweep(s.position, d.boxSize, travel)) {
             s.position = add(s.position, travel);

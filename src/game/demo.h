@@ -771,6 +771,18 @@ struct GhostEntry {
     // ShapeBase::mRechargeRate as the control object's packet data sets it
     // (zero for other ghosts: the datablock's rate is not networked).
     float rechargeRate = 0.0f;
+    // PhysicalZone::unpackUpdate: the polyhedron (object space), its
+    // transform and scale, and the velocity modifier players meet at its
+    // faces.
+    struct PhysicalZoneState {
+        bool valid = false, active = true;
+        float transform[16]{};
+        Vec3 scale{1, 1, 1};
+        std::vector<Vec3> points;
+        std::vector<std::array<float, 4>> planes;
+        float velocityMod = 1.0f, gravityMod = 1.0f;
+        Vec3 appliedForce{};
+    } physicalZone;
     std::string playerName;
     int teamId{-1};
     int sensorGroup{-1};
