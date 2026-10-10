@@ -1669,6 +1669,7 @@ void World::cleanupMission() {
         }
     }
     worldObjects.clear();
+    tsStaticHullObjects = SIZE_MAX;
     // Pickups are mission-owned too. Leaving them behind makes a subsequent
     // mission retain stale items even though its scene graph was replaced.
     items.clear();
@@ -1779,6 +1780,7 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
     debrisShapes.clear();
     debrisShapeIndex.clear();
     worldObjects.clear();
+    tsStaticHullObjects = SIZE_MAX;
     missionObjectives.clear();
     navGraph = {};
     interiorCollision = {};
@@ -2433,6 +2435,7 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
 
              WorldObject wo;
              wo.objectName = obj.objName;
+             wo.tsStatic = missionClassIs(obj.className, "TSStatic");
              wo.pos = parsePos(getProp(obj.props, "position"));
              wo.visible = authoredVisible(obj);
             {
@@ -3900,6 +3903,32 @@ void World::playerTrianglesInBox(const Point3F& min, const Point3F& max,
                     push(a, b, c, toTorque(t.normal));
                 }
     }
+    // TSStatic shapes (StaticTSObjectType): their Collision-N meshes.
+    if (tsStaticHullObjects != worldObjects.size()) {
+        tsStaticHullObjects = worldObjects.size();
+        tsStaticHulls.clear();
+        for (const auto& object : worldObjects) {
+            if (!object.tsStatic || !object.collidable || !object.shape || !object.shape->loaded) continue;
+            StaticObjectHull hull;
+            hull.shape = object.shape;
+            appendShapeCollisionTriangles(*object.shape, objectRenderModel(object), object.shape->defaultTransforms,
+                                          hull.tris);
+            if (hull.tris.empty()) continue;
+            hull.lo = {1e30f, 1e30f, 1e30f};
+            hull.hi = {-1e30f, -1e30f, -1e30f};
+            for (const auto& t : hull.tris)
+                for (const Point3F& p : {t.a, t.b, t.c}) {
+                    hull.lo = {std::min(hull.lo.x, p.x), std::min(hull.lo.y, p.y), std::min(hull.lo.z, p.z)};
+                    hull.hi = {std::max(hull.hi.x, p.x), std::max(hull.hi.y, p.y), std::max(hull.hi.z, p.z)};
+                }
+            tsStaticHulls.push_back(std::move(hull));
+        }
+    }
+    for (const auto& hull : tsStaticHulls) {
+        if (hull.hi.x < min.x || hull.lo.x > max.x || hull.hi.y < min.y || hull.lo.y > max.y ||
+            hull.hi.z < min.z || hull.lo.z > max.z) continue;
+        out.insert(out.end(), hull.tris.begin(), hull.tris.end());
+    }
     // Closed force fields: their box, faces outward.
     for (const auto& object : worldObjects) {
         if (!object.forceField || object.forceFieldOpen) continue;
@@ -3935,6 +3964,23 @@ void World::playerTrianglesInBox(const Point3F& min, const Point3F& max,
             push(a, b, c, n);
         }
     }
+}
+
+MatrixF World::objectRenderModel(const WorldObject& object) const {
+    MatrixF model;
+    if (object.rotAngleDeg != 0 && (object.rot.x != 0 || object.rot.y != 0 || object.rot.z != 0)) {
+        Point3F axis = object.rot;
+        const float len = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+        if (len > 0.0001f) {
+            axis = {axis.x / len, axis.y / len, axis.z / len};
+            model = Math::torqueRotationToYUp(axis, -Math::DEG2RAD(object.rotAngleDeg));
+        }
+    }
+    model.setTranslation({object.pos.x, object.pos.z, -object.pos.y});
+    if (object.scale.x != 1.0f || object.scale.y != 1.0f || object.scale.z != 1.0f)
+        model = model * Math::torqueScaleToYUp(object.scale);
+    if (object.shape && object.shape->nativeDTS) model = model * Math::nativeDtsFrame();
+    return object.shape ? model * object.shape->upOrientation() : model;
 }
 
 float World::waterSurfaceAt(float x, float y) const {

@@ -330,6 +330,7 @@ public:
         DTSShape* mountedShape{};
         std::array<std::string, 8> mountedImages{};
         bool collidable = true;
+        bool tsStatic = false; // a TSStatic (StaticTSObjectType)
         bool forceField = false;
         std::vector<uint32_t> forceFieldFrames;
         std::vector<float> forceFieldFrameDurations;
@@ -474,9 +475,12 @@ public:
     // InteriorInstance alarm state from a demo ghost's AlarmMask.
     void syncInteriorAlarmGhost(int ghostIndex, bool alarm);
     // Player::updateWorkingCollisionSet's world polygons in a Torque-space
-    // box: terrain, interiors and closed force fields, facing free space.
+    // box: terrain, interiors, TSStatic shapes and closed force fields,
+    // facing free space.
     void playerTrianglesInBox(const Point3F& min, const Point3F& max,
                               std::vector<PlayerPrediction::Triangle>& out) const;
+    // A world object's model matrix as drawn (Y-up, shape frame included).
+    MatrixF objectRenderModel(const WorldObject& object) const;
     // The highest liquid surface (Torque z) over a Torque XY, or NaN.
     float waterSurfaceAt(float x, float y) const;
     void setScenePrecipitation(const std::function<std::string(const char*)>& get,
@@ -528,6 +532,14 @@ public:
                             const MatrixF& renderModel, float dtMs);
 private:
     std::vector<WorldObject> worldObjects;
+    // TSStatic Collision-N hulls (Torque space), built on first use.
+    struct StaticObjectHull {
+        const DTSShape* shape = nullptr;
+        Point3F lo{}, hi{};
+        std::vector<PlayerPrediction::Triangle> tris;
+    };
+    mutable std::vector<StaticObjectHull> tsStaticHulls;
+    mutable size_t tsStaticHullObjects = SIZE_MAX;
     // SpawnSphere rotation is per team. A respawn by the opposing team must
     // not change which authored start this team receives next.
     mutable std::unordered_map<int, size_t> spawnCursors;
