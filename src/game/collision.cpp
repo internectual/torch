@@ -369,9 +369,11 @@ bool CollisionGrid::sphereCollide(const std::vector<CollisionTri>& tris, const P
     return collided;
 }
 
-void CollisionMesh::addMesh(const float* verts, int vertCount, const uint32_t* indices, int indexCount) {
+void CollisionMesh::addMesh(const float* verts, int vertCount, const uint32_t* indices, int indexCount,
+                            bool forceField) {
     for (int i = 0; i + 2 < indexCount; i += 3) {
         CollisionTri tri;
+        tri.forceField = forceField;
         uint32_t i0 = indices[i], i1 = indices[i + 1], i2 = indices[i + 2];
         if (i0 >= (uint32_t)vertCount / 3 || i1 >= (uint32_t)vertCount / 3 || i2 >= (uint32_t)vertCount / 3) continue;
         tri.v0 = {verts[i0 * 3], verts[i0 * 3 + 1], verts[i0 * 3 + 2]};

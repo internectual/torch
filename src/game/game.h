@@ -477,8 +477,10 @@ public:
     // Player::updateWorkingCollisionSet's world polygons in a Torque-space
     // box: terrain, interiors, TSStatic shapes and closed force fields,
     // facing free space.
+    // `passes` tells which closed force fields let the mover through.
     void playerTrianglesInBox(const Point3F& min, const Point3F& max,
-                              std::vector<PlayerPrediction::Triangle>& out) const;
+                              std::vector<PlayerPrediction::Triangle>& out,
+                              const std::function<bool(const WorldObject&)>& passes = {}) const;
     // A world object's model matrix as drawn (Y-up, shape frame included).
     MatrixF objectRenderModel(const WorldObject& object) const;
     // The highest liquid surface (Torque z) over a Torque XY, or NaN.

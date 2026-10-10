@@ -822,7 +822,7 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
     } case 17: { // ForceFieldBareData::packData
         const int32_t fadeMS = s.readSigned(32);
         const float baseTranslucency = s.readF32(), powerOffTranslucency = s.readF32();
-        s.readFlag(); s.readFlag(); // team / other permeable
+        const bool teamPermiable = s.readFlag(), otherPermiable = s.readFlag();
         auto color = [&]() { // Stream::write(ColorF) sends a ColorI
             const uint32_t c = s.readUnsigned(32);
             return std::array<float, 4>{(c & 0xff) / 255.0f, ((c >> 8) & 0xff) / 255.0f,
@@ -835,6 +835,8 @@ bool readDataBlockPayload(V12BitStream& s, size_t classId,
         for (int i = 0; i < 5; ++i) textures.push_back(s.readString());
         if (activeDecoded) {
             activeDecoded->hasForceField = true;
+            activeDecoded->forceFieldTeamPermiable = teamPermiable;
+            activeDecoded->forceFieldOtherPermiable = otherPermiable;
             activeDecoded->forceFieldFadeMS = fadeMS;
             activeDecoded->forceFieldBaseTranslucency = baseTranslucency;
             activeDecoded->forceFieldPowerOffTranslucency = powerOffTranslucency;

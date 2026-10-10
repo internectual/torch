@@ -2802,6 +2802,8 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
             std::vector<float> allVerts;
             std::vector<uint32_t> allIndices;
             uint32_t vertBase = 0;
+            std::vector<float> fieldVerts;
+            std::vector<uint32_t> fieldIndices;
 
             for (auto& wo : worldObjects) {
                 if (!wo.collidable) continue;
@@ -2826,14 +2828,13 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                         0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7,
                         0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2
                     };
-                    const uint32_t base = vertBase;
+                    const uint32_t base = (uint32_t)fieldVerts.size() / 3;
                     for (const auto& corner : corners) {
                         // The unit box is in Torque object space.
                         const Point3F v = xform.transform(Math::torquePointToYUp(corner));
-                        allVerts.insert(allVerts.end(), {v.x, v.y, v.z});
+                        fieldVerts.insert(fieldVerts.end(), {v.x, v.y, v.z});
                     }
-                    for (const auto index : faces) allIndices.push_back(base + index);
-                    vertBase += 8;
+                    for (const auto index : faces) fieldIndices.push_back(base + index);
                     continue;
                 }
                 if (!wo.shape || !wo.shape->loaded || !wo.shape->isInterior) continue;
@@ -2959,8 +2960,10 @@ bool World::loadObjects(const char* mapName, const std::string& misPath,
                 }
                 terrainBlock.bakeLightmap(occluder);
             }
-            if (!allIndices.empty()) {
+            if (!allIndices.empty() || !fieldIndices.empty()) {
                 interiorCollision.addMesh(allVerts.data(), (int)allVerts.size(), allIndices.data(), (int)allIndices.size());
+                interiorCollision.addMesh(fieldVerts.data(), (int)fieldVerts.size(), fieldIndices.data(),
+                                          (int)fieldIndices.size(), true);
                 interiorCollision.build();
                 Console::instance().printf(LogLevel::Info, "Collision mesh built: %zu triangles", interiorCollision.triangles.size());
             }
@@ -3859,7 +3862,8 @@ void World::syncInteriorAlarmGhost(int ghostIndex, bool alarm) {
 }
 
 void World::playerTrianglesInBox(const Point3F& min, const Point3F& max,
-                                 std::vector<PlayerPrediction::Triangle>& out) const {
+                                 std::vector<PlayerPrediction::Triangle>& out,
+                                 const std::function<bool(const WorldObject&)>& passes) const {
     auto toTorque = [](const Point3F& p) { return Point3F{p.x, -p.z, p.y}; };
     auto push = [&](const Point3F& a, const Point3F& b, const Point3F& c, Point3F n) {
         const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
@@ -3896,6 +3900,8 @@ void World::playerTrianglesInBox(const Point3F& min, const Point3F& max,
                     if (std::find(seen.begin(), seen.end(), ti) != seen.end()) continue;
                     seen.push_back(ti);
                     const auto& t = mesh.triangles[ti];
+                    // Force fields come from the live objects below.
+                    if (t.forceField) continue;
                     const Point3F a = toTorque(t.v0), b = toTorque(t.v1), c = toTorque(t.v2);
                     if (std::max({a.x, b.x, c.x}) < min.x || std::min({a.x, b.x, c.x}) > max.x ||
                         std::max({a.y, b.y, c.y}) < min.y || std::min({a.y, b.y, c.y}) > max.y ||
@@ -3931,7 +3937,7 @@ void World::playerTrianglesInBox(const Point3F& min, const Point3F& max,
     }
     // Closed force fields: their box, faces outward.
     for (const auto& object : worldObjects) {
-        if (!object.forceField || object.forceFieldOpen) continue;
+        if (!object.forceField || object.forceFieldOpen || (passes && passes(object))) continue;
         MatrixF rotation;
         if (object.rotAngleDeg != 0 && (object.rot.x != 0 || object.rot.y != 0 || object.rot.z != 0)) {
             Point3F axis = object.rot;
@@ -12640,6 +12646,7 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
             if (imageBlock != blocks.end()) data.mass += imageBlock->second.decoded.imageMass;
         }
         auto& state = g->prediction;
+        mover = g;
         // A recording's control object takes its packet data as is
         // (Player::readPacketData) and replays the unacknowledged moves.
         const bool replaysMoves = index == controlGhostIndex && !demoLive;

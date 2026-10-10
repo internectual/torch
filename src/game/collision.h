@@ -19,6 +19,9 @@ inline Point3F terrainNormalFromHeights(float left, float right,
 struct CollisionTri {
     Point3F v0, v1, v2;
     Point3F normal;
+    // A force field's box baked into the mesh (the player's own collision
+    // takes fields from the live objects instead).
+    bool forceField = false;
 };
 
 struct CollisionGrid {
@@ -36,7 +39,7 @@ struct CollisionMesh {
     CollisionGrid grid;
     bool loaded = false;
 
-    void addMesh(const float* verts, int vertCount, const uint32_t* indices, int indexCount);
+    void addMesh(const float* verts, int vertCount, const uint32_t* indices, int indexCount, bool forceField = false);
     void build();
     float getHeight(float x, float z) const;
     // Select the highest walkable surface below the actor, rather than a

@@ -253,6 +253,7 @@ struct DecodedDataBlock {
     // type 0 none, 1 constant, 2 pulsing, 3 weapon fire (images only).
     // ForceFieldBareData.
     bool hasForceField{};
+    bool forceFieldTeamPermiable = false, forceFieldOtherPermiable = false;
     int32_t forceFieldFadeMS = 1000;
     float forceFieldBaseTranslucency = 1.0f, forceFieldPowerOffTranslucency = 0.0f;
     std::array<float, 4> forceFieldColor{1, 1, 1, 1}, forceFieldPowerOffColor{0, 0, 0, 1};
