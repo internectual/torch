@@ -1782,7 +1782,8 @@ GameState DemoParser::readGameState(BitStream& bs) {
                 cu.energy = gs.energy;
                 cu.energyNormalized = false;
                 cu.actionState = bs.readInt(3);
-                cu.recoverTicks = bs.readFlag() ? bs.readInt(7) : 0;
+                cu.hasRecoverTicks = bs.readFlag();
+                cu.recoverTicks = cu.hasRecoverTicks ? bs.readInt(7) : 0;
                 gs.controlJumpDelay = bs.readFlag() ? bs.readInt(7) : 0;
                 if (bs.readFlag()) {
                     gs.compressionPoint = {bs.readF32(), bs.readF32(), bs.readF32()};
@@ -2382,7 +2383,8 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
     if (bs.readFlag()) { // MoveMask
         const int actionState = bs.readInt(3);
         if (entry) entry->isMoving = (actionState > 0);
-        const int recoverTicks = bs.readFlag() ? bs.readInt(7) : 0;
+        const bool hasRecoverTicks = bs.readFlag();
+        const int recoverTicks = hasRecoverTicks ? bs.readInt(7) : 0;
         const bool falling = bs.readFlag();
         const bool jetting = bs.readFlag();
         if (entry) entry->position = bs.readCompressedPoint(cp);
@@ -2420,6 +2422,7 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
             u.move = move;
             u.actionState = actionState;
             u.recoverTicks = recoverTicks;
+            u.hasRecoverTicks = hasRecoverTicks;
             u.headX = headX;
             u.headZ = headZ;
             u.rotZ = bodyYaw;

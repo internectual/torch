@@ -17,6 +17,8 @@ constexpr float TickSec = 1.0f / 32.0f;
 constexpr int MaxPredictionTicks = 30;
 constexpr float MinWarpTicks = 0.5f;
 constexpr int MaxWarpTicks = 3;
+constexpr float LandReverseScale = 0.25f;      // Player sLandReverseScale
+constexpr float SlowStandThreshSquared = 1.69f; // Player sSlowStandThreshSquared
 constexpr int ControlAnchorWarpTicks = 8;
 constexpr int MoveState = 1, RecoverState = 2;
 constexpr int JumpSkipContactsMax = 8;
@@ -268,6 +270,9 @@ struct State {
     int damageState = 0;
     int predictionCount = 0, warpTicks = 0;
     int actionState = MoveState, recoverTicks = 0, jumpDelay = 0, jumpSurfaceLastContact = 0, contactTimer = 0;
+    // Player::mReversePending: the land animation's reversal still to come
+    // (recover ticks / sLandReverseScale when recovery begins).
+    int reversePending = 0;
     Point3F warpOffset{};
     float rotOffset = 0;
     Point3F jumpSurfaceNormal{0, 0, 1};
@@ -284,6 +289,7 @@ struct Update {
     float energy = 0.0f;
     bool energyNormalized = false;
     int actionState = MoveState, recoverTicks = 0;
+    bool hasRecoverTicks = false; // the update carries recoverTicks
     float headX = 0, headZ = 0; // ghost: [-1, 1] of maxLookAngle; packet: radians
     float rotZ = 0;
     bool falling = false, jetting = false;
@@ -318,8 +324,14 @@ inline void unpackUpdate(State& s, const Data& d, const Update& u, bool initial,
     s.velocity = u.velocity;
     s.simulateDuringWarp = u.simulateDuringWarp;
     if (u.hasMove) s.move = u.move;
+    // An update entering RecoverState starts it as setState(RecoverState,
+    // recoverTicks) does; otherwise only the networked ticks change.
+    if (u.hasRecoverTicks) s.recoverTicks = u.recoverTicks;
+    if (u.actionState != s.actionState && u.actionState == RecoverState) {
+        if (!u.hasRecoverTicks) s.recoverTicks = 0;
+        s.reversePending = (int)(s.recoverTicks / LandReverseScale);
+    }
     s.actionState = u.actionState;
-    s.recoverTicks = u.recoverTicks;
     s.headPitch = headInRadians ? u.headX : u.headX * d.maxLookAngle;
     s.headYaw = headInRadians ? u.headZ : u.headZ * d.maxLookAngle;
     s.falling = u.falling;
@@ -518,6 +530,7 @@ inline bool updatePos(State& s, const Data& d, Collision& collision, const Point
             const float value = into - d.minImpactSpeed, range = d.minImpactSpeed * 0.9f;
             const int delay = (int)d.recoverDelay;
             s.recoverTicks = value < range ? 1 + (int)std::floor(delay * value / range) : delay;
+            s.reversePending = (int)(s.recoverTicks / LandReverseScale);
         }
         const Point3F push = mul(normal, into + 0.01f);
         s.velocity = add(s.velocity, push);
@@ -578,8 +591,21 @@ inline void processTick(State& s, const Data& d, float gravity, const Move* move
         }
         return;
     }
-    if (s.actionState == RecoverState && (s.recoverTicks-- == 0 || dot(s.velocity, s.velocity) > 1.69f))
-        s.actionState = MoveState;
+    // Player::updateState: recovery ends when its ticks run out, after the
+    // land animation's reversal; once that has played, moving faster than
+    // sSlowStandThreshold stands up early.
+    if (s.actionState == RecoverState) {
+        if (s.recoverTicks-- == 0) {
+            if (s.reversePending) {
+                s.recoverTicks = s.reversePending;
+                s.reversePending = 0;
+            } else {
+                s.actionState = MoveState;
+            }
+        } else if (!s.reversePending && dot(s.velocity, s.velocity) > SlowStandThreshSquared) {
+            s.actionState = MoveState;
+        }
+    }
     const Point3F initial = s.position;
     collision.prepare(gather, s.position, d.boxSize, mul(s.velocity, TickSec), d.maxStepHeight);
     updateMove(s, d, gravity, collision, water, gravityMod, appliedForce);
