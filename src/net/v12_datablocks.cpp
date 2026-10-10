@@ -572,7 +572,10 @@ void shapeImage(Stream& s) {
         s.readF32();
         s.readFlag();
     }
-    s.readFlag(); s.readF32(); s.readFlag(); s.readF32(); s.readFlag(); refs(s, 2);
+    s.readFlag(); // firstPerson
+    const float imageMass = s.readF32();
+    if (activeDecoded) activeDecoded->imageMass = imageMass;
+    s.readFlag(); s.readF32(); s.readFlag(); refs(s, 2);
     if (s.readFlag()) { f32s(s, 4); s.readFlag(); s.readF32(); }
     const bool cloakable = s.readFlag();
     if (activeDecoded) activeDecoded->imageCloakable = cloakable;

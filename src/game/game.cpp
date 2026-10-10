@@ -12585,7 +12585,14 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
         if (!g || !ObserverParity::isPlayerClass(g->className) || !g->hasDatablock) continue;
         auto block = blocks.find((uint32_t)g->datablockId);
         if (block == blocks.end() || !block->second.decoded.isPlayerData) continue;
-        const auto& data = block->second.decoded.playerPhysics;
+        // ShapeBase::updateMass: the datablock's mass plus each mounted
+        // image's.
+        PlayerPrediction::Data data = block->second.decoded.playerPhysics;
+        for (const auto& image : g->mountedImages) {
+            if (image.datablockId < 0) continue;
+            auto imageBlock = blocks.find((uint32_t)image.datablockId);
+            if (imageBlock != blocks.end()) data.mass += imageBlock->second.decoded.imageMass;
+        }
         auto& state = g->prediction;
         // A recording's control object takes its packet data as is
         // (Player::readPacketData) and replays the unacknowledged moves.

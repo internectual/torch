@@ -164,6 +164,7 @@ struct DecodedDataBlock {
     std::vector<uint32_t> playerSounds; // PlayerData::Sounds AudioProfile refs
     float shapeMass = 1.0f;             // ShapeBaseData::mass
     bool imageCloakable = false;        // ShapeBaseImageData::cloakable
+    float imageMass = 0.0f;             // ShapeBaseImageData::mass
     // SniperProjectileData beam (SniperProjectile::renderObject).
     struct SniperBeam {
         bool valid = false;
