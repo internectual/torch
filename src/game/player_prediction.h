@@ -544,6 +544,9 @@ inline void processTick(State& s, const Data& d, float gravity, const Move* move
     s.posVec = {0, 0, 0};
     s.rotVec = 0;
     if (!s.initialized) return;
+    // ShapeBase::processTick (Player::processTick's first call): an enabled
+    // shape recharges every tick, warping, mounted or not.
+    if (!s.damageState) s.energy = std::clamp(s.energy + rechargeRate, 0.0f, std::max(0.0f, d.maxEnergy));
     const Point3F tickStart = s.position;
     const float tickStartYaw = s.yaw;
     bool warped = false;
@@ -575,7 +578,6 @@ inline void processTick(State& s, const Data& d, float gravity, const Move* move
         }
         return;
     }
-    s.energy = std::min(d.maxEnergy, s.energy + rechargeRate);
     if (s.actionState == RecoverState && (s.recoverTicks-- == 0 || dot(s.velocity, s.velocity) > 1.69f))
         s.actionState = MoveState;
     const Point3F initial = s.position;

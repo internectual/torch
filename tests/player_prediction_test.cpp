@@ -81,6 +81,25 @@ int main() {
     assert(anchorState.velocity.z < 0.0f); // prediction continues during warp
     assert(anchorState.warpTicks == ControlAnchorWarpTicks - 1);
 
+    // ShapeBase::processTick recharges an enabled shape every tick, mounted
+    // or not; a disabled one does not.
+    {
+        State charged;
+        charged.initialized = true;
+        charged.energy = 10.0f;
+        charged.mounted = true;
+        Collision none;
+        processTick(charged, d, -20.0f, &idle, 0.5f, none, nullptr, nullptr);
+        assert(near(charged.energy, 10.5f, 1e-5f));
+        charged.damageState = 1;
+        processTick(charged, d, -20.0f, &idle, 0.5f, none, nullptr, nullptr);
+        assert(near(charged.energy, 10.5f, 1e-5f));
+        charged.damageState = 0;
+        charged.energy = d.maxEnergy;
+        processTick(charged, d, -20.0f, &idle, 0.5f, none, nullptr, nullptr);
+        assert(charged.energy == d.maxEnergy);
+    }
+
     // Without moves a ghost predicts for at most 30 ticks.
     s.predictionCount = 2;
     const Point3F still = s.position;

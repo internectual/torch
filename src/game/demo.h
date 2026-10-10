@@ -768,6 +768,9 @@ struct GhostEntry {
     Vec3 damageDir{0, 0, 1};
     uint32_t damageRevision{}; // live: the last DamageMask read applied
     float energy{100.0f};
+    // ShapeBase::mRechargeRate as the control object's packet data sets it
+    // (zero for other ghosts: the datablock's rate is not networked).
+    float rechargeRate = 0.0f;
     std::string playerName;
     int teamId{-1};
     int sensorGroup{-1};

@@ -12611,11 +12611,12 @@ void Game::tickDemoPlayers(const DemoBlock& moveBlock) {
             // ProcessList::advanceObjects: the control object processes each
             // move from the last one it processed.
             for (const PlayerPrediction::Move& move : demoParser->moveQueue().takeClientMoves())
-                PlayerPrediction::processTick(state, data, getGravity(), &move, 0.0f, demoPlayerCollision, gather, water);
+                PlayerPrediction::processTick(state, data, getGravity(), &move, g->rechargeRate, demoPlayerCollision,
+                                              gather, water);
             continue;
         }
         PlayerPrediction::processTick(state, data, getGravity(), recorder && haveRecorderMove ? &recorderMove : nullptr,
-                                      0.0f, demoPlayerCollision, gather, water);
+                                      g->rechargeRate, demoPlayerCollision, gather, water);
     }
     demoLastPlayerTick = T2Demo::playbackBlockTime(demoParser->getBlockCursor(), demoParser->getMoveTicksBefore());
 }
@@ -12727,6 +12728,7 @@ void Game::applyDemoPacketView(const PacketData& pd) {
                         pd.gameState.controlPlayer.hasEnergy)) {
             control->playerUpdate = pd.gameState.controlPlayer;
             ++control->playerUpdates;
+            if (pd.gameState.controlObjectDirty) control->rechargeRate = pd.gameState.rechargeRate;
             if (pd.gameState.controlPlayer.hasPosition) demoParser->moveQueue().controlObjectUpdated();
             control->prediction.jumpDelay = pd.gameState.controlJumpDelay;
             control->prediction.jumpSurfaceLastContact = pd.gameState.controlJumpSurfaceLastContact;
