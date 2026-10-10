@@ -2500,6 +2500,16 @@ void DTSShape::renderAnimationIndex(int animationIndex, float time,
         }
     }
 
+    if (!objectAnim->blend) {
+        for (int node : maskedNodes) {
+            if (node < 0 || node >= numNodes) continue;
+            nodeRot[node] = QuatF::fromMatrix(defaultLocalTransforms[node]);
+            nodeTrans[node] = {defaultLocalTransforms[node].m[0][3], defaultLocalTransforms[node].m[1][3],
+                               defaultLocalTransforms[node].m[2][3]};
+            rotSet[node] = transSet[node] = false;
+        }
+    }
+
     // ── Step 3: Build local matrices and compose world transforms ──
     // T2: setMatrix(rot, trans, &local) then world[i] = world[parent] * local
     std::vector<MatrixF> nodeLocal(numNodes);

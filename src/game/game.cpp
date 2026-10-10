@@ -10377,12 +10377,29 @@ void Game::render(float dt) {
                         const float weight = std::clamp((now - mg->animChangedAt) / 0.25f, 0.0f, 1.0f);
                         if (mg->animPrevIndex >= 0 && weight < 1.0f)
                             shape->transition = {mg->animPrevIndex, mg->animPrevTime, weight};
+                        // Player::updateAnimationTree: the control object in
+                        // first person keeps its spine nodes out of action
+                        // animations unless the action is a first-person one.
+                        if (idx == controlGhostIndex && spectateGhostIndex < 0 &&
+                            demoRecordedFirstPerson && !g->actionFirstPerson) {
+                            static std::unordered_map<const DTSShape*, std::vector<int>> spineNodeCache;
+                            auto spine = spineNodeCache.find(shape);
+                            if (spine == spineNodeCache.end()) {
+                                std::vector<int> found;
+                                for (const char* name : {"Bip01 Pelvis", "Bip01 Spine", "Bip01 Spine1",
+                                                         "Bip01 Spine2", "Bip01 Neck", "Bip01 Head"})
+                                    if (int node = shape->findNode(name); node >= 0) found.push_back(node);
+                                spine = spineNodeCache.emplace(shape, std::move(found)).first;
+                            }
+                            shape->maskedNodes = spine->second;
+                        }
                     }
                     shape->renderAnimationIndex(animationIndexNow, animationTimeNow,
                                                 numOverrides > 0 ? overrides : nullptr,
                                                 numOverrides, blends + primaryBlend,
                                                 numBlends - primaryBlend, DTSShape::SelectDetail);
                     shape->transition = {};
+                    shape->maskedNodes.clear();
                 } else {
                     shape->render(DTSShape::SelectDetail, numOverrides > 0 ? overrides : nullptr,
                                   numOverrides);

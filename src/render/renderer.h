@@ -329,6 +329,10 @@ struct DTSShape {
         float time = 0.0f;
         float weight = 1.0f;
     } transition;
+    // TSShapeInstance::setNodeAnimationState(MaskNodeAllButBlend): the next
+    // animated render keeps these nodes at their default transform under
+    // every non-blend sequence; blend sequences still apply.
+    std::vector<int> maskedNodes;
     // A detail level argument: pick it from the projected size of the shape
     // at the current model matrix and camera (selectDetail).
     static constexpr int32_t SelectDetail = -2;

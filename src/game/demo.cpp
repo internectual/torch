@@ -2364,13 +2364,14 @@ static void readPlayerData(BitStream& bs, bool isInitial, const Vec3& cp, GhostE
         const int action = bs.readInt(8);
         const bool holdAtEnd = bs.readFlag();
         const bool atEnd = bs.readFlag();
-        bs.readFlag(); // first person
+        const bool firstPerson = bs.readFlag();
         float position = 0.0f;
         if (!atEnd && bs.readFlag()) position = bs.readSignedFloat(6);
         if (entry) {
             entry->actionAnim = action;
             entry->actionHoldAtEnd = holdAtEnd;
             entry->actionAtEnd = atEnd;
+            entry->actionFirstPerson = firstPerson;
             entry->actionAnimPos = std::clamp(position, 0.0f, 1.0f);
             entry->actionTime = DemoParser::s_packetTime;
         }

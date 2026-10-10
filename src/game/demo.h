@@ -884,6 +884,7 @@ struct GhostEntry {
     int actionAnim = -1;
     int armAction = -1; // arm thread action index; -1 uses "look"
     bool actionHoldAtEnd = false, actionAtEnd = false;
+    bool actionFirstPerson = false; // the action animates the spine in first person
     float actionAnimPos = 0.0f;
     float actionTime = 0.0f; // demo time the action update arrived
     // Player MoveMask state, in Torque world space.
